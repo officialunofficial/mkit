@@ -85,7 +85,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         &self,
         repo: &RepoId,
         meta: &RequestMeta<'_>,
-    ) -> Result<(), ServerError> {
+    ) -> Result<super::Authenticated, ServerError> {
         if !matches!(self.cfg.auth, AuthMode::AuthV2(_)) {
             return Err(ServerError::unauthenticated("auth v2 required"));
         }
@@ -135,7 +135,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         if auth.facts.caller_view != CallerView::Writer || !(owner || grant) {
             return Err(ServerError::permission_denied("writer authority required"));
         }
-        Ok(())
+        Ok(a)
     }
 
     /// Read at most [`MAX_REPO_STORAGE_BATCH`] counters in input order,

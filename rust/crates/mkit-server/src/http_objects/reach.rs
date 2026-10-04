@@ -284,6 +284,18 @@ pub(crate) async fn walk_many<B: BlobStore, N: NamespaceStore>(
     targets: &BTreeSet<Hash>,
     budget: &mut Budget,
 ) -> Result<(BTreeSet<Hash>, Option<Miss>), Miss> {
+    walk_many_memo(env, takedown, tips, targets, budget, None).await
+}
+
+/// Optional request-local evidence, never the shared published cache.
+pub(crate) async fn walk_many_memo<B: BlobStore, N: NamespaceStore>(
+    env: &Env<'_, B, N>,
+    takedown: &dyn TakedownGate,
+    tips: &[Hash],
+    targets: &BTreeSet<Hash>,
+    budget: &mut Budget,
+    mut memo: Option<&mut crate::pipeline::read_proofs::ReadProofs>,
+) -> Result<(BTreeSet<Hash>, Option<Miss>), Miss> {
     let mut reached = BTreeSet::new();
     let mut frontier = Frontier {
         cap: env.cfg.max_walk_objects,
@@ -344,6 +356,16 @@ pub(crate) async fn walk_many<B: BlobStore, N: NamespaceStore>(
             };
             let object =
                 mkit_core::serialize::deserialize(&bytes).map_err(|_| Miss::Unavailable)?;
+            if let Some(memo) = &mut memo {
+                if crate::takedown::denial::denied(env.meta, &id)
+                    .await
+                    .map_err(|_| Miss::Unavailable)?
+                    || takedown.stops_descent(env.repo, &id)
+                {
+                    continue;
+                }
+                memo.expand(id, located.pack, &object);
+            }
             expand(&object, &mut frontier, |child| {
                 if targets.contains(&child) {
                     reached.insert(child);

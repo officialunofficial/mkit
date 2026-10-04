@@ -2478,3 +2478,6 @@ fn held_serving_stop_overrides_warm_reachability_extracted_bytes_and_proofs() {
 mod takedown_denial;
 
 mod object_reader_tests;
+
+mod reader_proof_cost;
+mod reader_proof_tests;

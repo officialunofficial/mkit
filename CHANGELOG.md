@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- Server reader sessions capture roots once and reuse bounded local graph proofs
+  across canonical and metadata batches. Retain the same reader/session through
+  a request; start a new session to observe new commits before proof expiry.
+  Reachability-lag expiry captures fresh roots without resetting budgets or the
+  request deadline. `ReaderSession::with_deadline` accepts an earlier absolute
+  request deadline. Scope changes discard proofs without refunding budgets;
+  authorization, membership and denial remain live.
+  No persisted cache or writer proofs in the shared published cache.
+
 ### Documentation
 
 - Align the server profile map and invariant enforcement index with implemented

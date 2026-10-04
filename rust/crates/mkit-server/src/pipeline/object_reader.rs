@@ -57,6 +57,7 @@ pub enum ReaderView<'a> {
 /// Repository prefetch for `mkit_core::store::MemorySource` and core builders.
 #[derive(Debug)]
 pub struct ObjectReader<'a, B, N, H> {
+    identity: std::sync::Arc<()>,
     pipe: &'a Pipeline<B, N, H>,
     repo: RepoId,
     view: ReaderView<'a>,
@@ -100,6 +101,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
             return Err(ServerError::new(Code::Unimplemented, "indexed HTTP config"));
         };
         let reader = ObjectReader {
+            identity: std::sync::Arc::new(()),
             pipe: self,
             repo,
             view,
@@ -117,7 +119,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
 impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
     ObjectReader<'_, B, N, H>
 {
-    async fn authorize(&self, budget: &SliceBudget) -> Result<bool, ServerError> {
+    async fn authorize(
+        &self,
+        budget: &SliceBudget,
+    ) -> Result<Option<super::Authenticated>, ServerError> {
         for _ in 0..2 {
             budget.charge().map_err(|_| exhausted())?;
         }
@@ -147,12 +152,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                             http_failure(&e)
                         }
                     })?;
-                Ok(false)
+                Ok(None)
             }
-            ReaderView::Owner(meta) => {
-                self.pipe.authorize_owner(&self.repo, meta).await?;
-                Ok(true)
-            }
+            ReaderView::Owner(meta) => self.pipe.authorize_owner(&self.repo, meta).await.map(Some),
         }
     }
     /// Prefetch canonical bytes; inaccessible IDs are uniformly absent.
@@ -175,7 +177,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         let (bytes, _) = self.batch_limited(ids, false, Some(max_bytes)).await?;
         Ok(ids.iter().map(|id| bytes.get(id).cloned()).collect())
     }
-    /// Prefetch canonical bytes using an aggregate session allowance.
+    /// Prefetch canonical bytes using an aggregate session allowance and
+    /// request-local graph proofs. Keep this reader and session across levels;
+    /// use a new session to observe new commits before proof expiry. See
+    /// [`ReaderSession`] for root capture, fixed expiry and live authorization.
     /// # Errors
     /// As [`Self::read_canonical`]; cap hits use `ResourceExhausted` except
     /// unprovable public IDs, which remain uniformly absent.
@@ -396,6 +401,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 true,
                 None,
                 None,
+                None,
                 capped,
             )
             .await?;
@@ -427,23 +433,30 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         if ids.len() > OBJECT_READER_BATCH {
             return Err(ServerError::invalid_argument("batch exceeds 16 ids"));
         }
+        let started = ms(self.pipe.clock.now_ms());
         let calls = SliceBudget::new(OBJECT_READER_CALLS);
         if let Some(session) = &session {
             session.io.calls.charge_many(2).map_err(|_| exhausted())?;
         }
-        let writer = match self.authorize(&calls).await {
+        let authority = match self.authorize(&calls).await {
             Err(e) if e.code() == Code::NotFound && matches!(self.view, ReaderView::Public) => {
                 return Ok((BTreeMap::new(), BTreeMap::new()));
             }
             other => other?,
         };
+        let writer = authority.is_some();
+        if let Some(session) = &mut session {
+            session
+                .proofs
+                .bind(&self.identity, authority, started, self.cfg)?;
+        }
         let capped = AtomicBool::new(false);
         let allowance = max_bytes
             .unwrap_or(self.cfg.http_decode_budget)
             .min(self.cfg.http_decode_budget);
         let mut decode = Budget(allowance);
         let result = if let Some(session) = session.as_mut() {
-            let (io, mut charge, output) = session.split(allowance);
+            let (io, mut charge, output, proofs) = session.split_with_proofs(allowance);
             self.batch_with_budget(
                 ids,
                 sizes_only,
@@ -458,6 +471,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 !writer,
                 max_bytes,
                 Some((io, output)),
+                Some(proofs),
                 &capped,
             )
             .await
@@ -475,6 +489,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 &mut decode,
                 !writer,
                 max_bytes,
+                None,
                 None,
                 &capped,
             )
@@ -498,6 +513,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             &super::read_limits::IoLedger,
             &mut super::read_limits::OutputBudget,
         )>,
+        mut proofs: Option<&mut super::read_proofs::ReadProofs>,
         capped: &AtomicBool,
     ) -> Result<Prefetched, ServerError> {
         let mut output_left = max_bytes
@@ -558,7 +574,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         };
         let mut reached = BTreeSet::new();
         let mut fresh = BTreeSet::new();
-        if !writer && !pipe.cfg.takedown_denial {
+        if proofs.is_none() && !writer && !pipe.cfg.takedown_denial {
             for id in &targets {
                 if meta.charge().is_err() {
                     if capped_as_absent {
@@ -576,11 +592,33 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 }
             }
         }
+        if let Some(memo) = &mut proofs {
+            match memo
+                .revalidate(&meta, &self.repo, seams.takedown.as_ref(), &targets)
+                .await
+            {
+                Err(_) if capped_as_absent && absorb(capped) => {
+                    return Ok((BTreeMap::new(), BTreeMap::new()));
+                }
+                other => other?,
+            }
+            if !memo.current(ms(pipe.clock.now_ms())) {
+                return if capped_as_absent {
+                    Ok((BTreeMap::new(), BTreeMap::new()))
+                } else {
+                    Err(exhausted())
+                };
+            }
+            reached.extend(targets.iter().filter(|id| memo.contains(id)).copied());
+        }
         targets.retain(|id| !reached.contains(id));
         if !targets.is_empty() {
-            let tips = pipe
-                .reader_tips(&meta, &self.repo, cfg.max_walk_objects, writer)
-                .await;
+            let tips = if let Some(tips) = proofs.as_ref().and_then(|memo| memo.tips.as_ref()) {
+                Ok((tips.clone(), false))
+            } else {
+                pipe.reader_tips(&meta, &self.repo, cfg.max_walk_objects, writer)
+                    .await
+            };
             // A spent call budget is an unprovable proof, not a store fault.
             let (tips, truncated) = match tips {
                 Err(_) if capped_as_absent && absorb(capped) => (Vec::new(), true),
@@ -590,8 +628,20 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 return Err(exhausted());
             }
             if !truncated {
-                let walked =
-                    reach::walk_many(&env, seams.takedown.as_ref(), &tips, &targets, decode).await;
+                if let Some(memo) = &mut proofs
+                    && memo.tips.is_none()
+                {
+                    memo.capture(tips.clone());
+                }
+                let walked = reach::walk_many_memo(
+                    &env,
+                    seams.takedown.as_ref(),
+                    &tips,
+                    &targets,
+                    decode,
+                    proofs.as_deref_mut(),
+                )
+                .await;
                 let (found, incomplete) = match walked {
                     Err(resolve::Miss::Capped) if capped_as_absent => {
                         (BTreeSet::new(), Some(resolve::Miss::Capped))
@@ -645,7 +695,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             ) {
                 continue;
             }
-            if !writer && fresh.contains(&id) {
+            if proofs.is_none() && !writer && fresh.contains(&id) {
                 seams
                     .reachability
                     .record(&self.repo, &id, ms(pipe.clock.now_ms()));
@@ -704,6 +754,20 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                         if canonical.len() as u64 != located.value.decoded_size {
                             return Err(failure(resolve::Miss::Unavailable));
                         }
+                        if let Some(memo) = &mut proofs
+                            && memo.can_decode(&id, &canonical)
+                        {
+                            let object =
+                                mkit_core::serialize::deserialize(&canonical).map_err(failure)?;
+                            // Loading may yield. Recheck the storage stop before
+                            // publishing any children of the decoded object.
+                            if denied(&meta, &id).await.map_err(failure)? {
+                                continue;
+                            }
+                            if !seams.takedown.stops_descent(&self.repo, &id) {
+                                memo.expand(id, located.pack, &object);
+                            }
+                        }
                         output_left -= output;
                         if let Some((_, budget)) = &mut session {
                             budget.used = budget.used.saturating_add(output);
@@ -714,6 +778,16 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     Err(miss) => return Err(resolution_failure(miss)),
                 }
             }
+        }
+        if proofs
+            .as_ref()
+            .is_some_and(|memo| !memo.current(ms(pipe.clock.now_ms())))
+        {
+            return if capped_as_absent && bytes.is_empty() && sizes.is_empty() {
+                Ok((BTreeMap::new(), BTreeMap::new()))
+            } else {
+                Err(exhausted())
+            };
         }
         Ok((bytes, sizes))
     }

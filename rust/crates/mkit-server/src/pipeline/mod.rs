@@ -44,6 +44,8 @@ mod object_reader;
 #[cfg(feature = "http-objects")]
 mod read_limits;
 #[cfg(feature = "http-objects")]
+pub(crate) mod read_proofs;
+#[cfg(feature = "http-objects")]
 pub use object_reader::{
     IssuedUrl, OBJECT_READER_BATCH, OBJECT_READER_CALLS, OBJECT_READER_LIMIT_MESSAGE,
     ObjectMetadata, ObjectReader, ReaderView,
