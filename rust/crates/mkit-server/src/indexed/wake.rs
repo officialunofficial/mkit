@@ -1,6 +1,6 @@
 //! Best-effort relay wakeups using existing guarded timer rows.
 use super::checkpoint::{Phase, decode_job, parse_reference};
-use crate::store::{Batch, NamespaceStore, Precondition, StoreError, keys};
+use crate::store::{Batch, BatchOutcome, NamespaceStore, Precondition, StoreError, keys};
 use crate::timers::{TimerCtx, registry::kinds};
 
 /// Best effort only: polling recovers an unavailable or contended nudge.
@@ -8,12 +8,12 @@ pub(crate) async fn after_relay<S: NamespaceStore>(
     ctx: &TimerCtx<'_, S>,
     allocated: u64,
     metrics: &dyn crate::Metrics,
-) -> Batch {
+) -> bool {
     try_after_relay(ctx, allocated, metrics)
         .await
         .unwrap_or_else(|error| {
             tracing::warn!(%error, "verification relay nudge skipped");
-            Batch::new()
+            false
         })
 }
 
@@ -22,7 +22,7 @@ async fn try_after_relay<S: NamespaceStore>(
     ctx: &TimerCtx<'_, S>,
     allocated: u64,
     metrics: &dyn crate::Metrics,
-) -> Result<Batch, StoreError> {
+) -> Result<bool, StoreError> {
     let (start, end) = keys::class_range(keys::TAG_RELAY);
     let remaining = ctx.store.scan(ctx.partition, &start, &end, None, 1).await?;
     let through = match remaining.entries.first().map(|(key, _)| keys::parse(key)) {
@@ -37,7 +37,15 @@ async fn try_after_relay<S: NamespaceStore>(
     );
     tracing::info!(event = "verification_relay_delivered", now_ms = ctx.now_ms,
         source = ?ctx.partition, delivered_through = through);
-    after_delivery(ctx, through).await
+    let batch = after_delivery(ctx, through).await?;
+    if batch.writes.is_empty() {
+        return Ok(false);
+    }
+    // Optional contention must not fail the relay timer's own bookkeeping.
+    Ok(matches!(
+        ctx.store.apply(ctx.partition, batch).await?,
+        BatchOutcome::Committed
+    ))
 }
 
 /// At most sixteen timer/job reads and eight moves. Anything not observed

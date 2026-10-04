@@ -211,12 +211,11 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
         };
         // Target watermarks are durable and source cleanup has committed.
         // The remaining source head gives a conservative contiguous watermark.
-        let wake = if dispatch.delivered.is_empty() {
-            Batch::new()
-        } else {
-            crate::indexed::wake::after_relay(ctx, os, metrics).await
-        };
-        if has_remaining {
+        let nudged = !dispatch.delivered.is_empty()
+            && crate::indexed::wake::after_relay(ctx, os, metrics).await;
+        // A nudge can insert behind the timer driver's current scan cursor.
+        // Keep a prompt relay continuation so that the next tick discovers it.
+        if has_remaining || nudged {
             let due = ctx
                 .now_ms
                 .saturating_add(if dispatch.delivered.is_empty() {
@@ -228,13 +227,13 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
             Ok(Fired::Reschedule {
                 due_at_ms: due,
                 value: Value::default(),
-                batch: wake,
+                batch: Batch::new(),
             })
         } else {
             // Guard `os` either way: a first-ever relay row committed during
             // this fire moves `os` from absent, so `Done` races and the timer
             // stays.
-            Ok(Fired::Done(wake.require(match sequence_value {
+            Ok(Fired::Done(Batch::new().require(match sequence_value {
                 Some(value) => Precondition::Equals(os_key, value),
                 None => Precondition::Absent(os_key),
             })))

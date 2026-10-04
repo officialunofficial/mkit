@@ -76,7 +76,10 @@ waiting jobs are nudged with guarded timer moves. Only ordinary delivery polls
 qualify; infrastructure backoff is preserved. There is no upper time cutoff:
 work during the tick may have created a poll after its business-time snapshot. There
 is no inline verification. Unobserved jobs, contention and a crash before the
-nudge commits recover via their existing two-second poll.
+nudge commits recover via their existing two-second poll. The nudge commits
+independently, so its contention cannot delay remaining relay delivery. A
+successful nudge keeps a one-millisecond relay continuation to discover timers
+inserted behind the current scan cursor.
 
 `Retry-After` is a polling hint, not an ETA. For the authorized consumed job it
 uses the earliest persisted verification timer found in at most four 64-row

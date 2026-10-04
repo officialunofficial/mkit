@@ -3,7 +3,6 @@ use super::*;
 use crate::BoxFuture;
 use crate::indexed::checkpoint::{Phase, decode_job, timer_reference};
 use crate::timers::{DueTimer, TimerCtx, TimerHandler, registry::kinds};
-use bytes::Bytes;
 
 struct ObservedRelay<'a>(&'a Env);
 impl<S: NamespaceStore> TimerHandler<S> for ObservedRelay<'_> {
@@ -65,7 +64,20 @@ fn relay_delivery_resumes_promptly_and_a_lost_nudge_recovers_by_poll() {
     for missed in [false, true] {
         let events = Events::default();
         let _subscriber = tracing::subscriber::set_default(events.clone());
-        let (env, owner, identity) = environment_with(Sharding::D34, scheduled());
+        let (mut env, owner, identity) = environment_with(Sharding::D34, scheduled());
+        let miss_nudge = Arc::new(AtomicBool::new(false));
+        let armed = miss_nudge.clone();
+        let fail_apply = env.pipe.meta.fail_next_apply.clone();
+        env.pipe.meta.hook = Some(Box::new(move |_, _, batch| {
+            if batch.writes.iter().any(|write| {
+                matches!(write,
+                Write::Delete(key) if matches!(keys::parse(key),
+                    Some(keys::ParsedKey::Timer { kind, .. }) if kind == kinds::VERIFY.get()))
+            }) && armed.swap(false, Ordering::SeqCst)
+            {
+                fail_apply.store(true, Ordering::SeqCst);
+            }
+        }));
         let (bytes, head) = pack();
         let pack_id = hash(&bytes);
         let ticket = begin_and_upload(&env, &owner, &identity, &bytes, 900);
@@ -106,24 +118,14 @@ fn relay_delivery_resumes_promptly_and_a_lost_nudge_recovers_by_poll() {
         assert!(!job().usable());
         assert_hint(&attempt().unwrap_err(), 2);
         let poll_at = ms(env.clock.now_ms()) + 2_000;
-        // Deliver exactly the existing relay work, simulating a crash before
-        // committing its returned nudge batch in the recovery case.
+        // Lose only the optional timer move after durable relay delivery.
+        // Its failure must preserve both the recovery poll and relay progress.
+        miss_nudge.store(missed, Ordering::SeqCst);
         let relay_registry = TimerRegistry::new().register(ObservedRelay(&env));
-        if missed {
-            let timer = DueTimer {
-                due_at_ms: ms(env.clock.now_ms()),
-                kind: kinds::RELAY,
-                reference: Bytes::new(),
-                value: Value::default(),
-            };
-            let ctx = TimerCtx {
-                store: &env.pipe.meta,
-                partition: &source,
-                now_ms: ms(env.clock.now_ms()),
-            };
-            let _lost_batch = block_on(ObservedRelay(&env).fire(&ctx, &timer)).unwrap();
-        } else {
-            tick(&relay_registry);
+        let report = tick(&relay_registry);
+        assert_eq!((report.failed, report.raced), (0, 0));
+        if !missed {
+            assert!(report.next_wake_ms.unwrap() <= ms(env.clock.now_ms()) + 1);
         }
         assert!(
             block_on(crate::relay::relay_delivered_through(
