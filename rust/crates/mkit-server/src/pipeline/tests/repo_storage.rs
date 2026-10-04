@@ -526,3 +526,385 @@ fn only_an_owner_reads_the_counter() {
     };
     block_on(env.pipe.repo_storage(&repo, &meta)).unwrap_err();
 }
+
+fn with_meta<T>(request: &Req, read: impl FnOnce(&RequestMeta<'_>) -> T) -> T {
+    let lookup = |name: &str| {
+        request
+            .headers
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, v)| v.clone())
+    };
+    read(&RequestMeta {
+        procedure: request.procedure,
+        header: &lookup,
+        header_values: None,
+        unary_body: Some(&request.body),
+        transport_principal: request.principal.clone(),
+    })
+}
+
+fn seed_storage(env: &Env<impl HookSet>, repo: &RepoId, bytes: u64, private: bool) {
+    let visibility = codec::RepoVisibilityV1 {
+        visibility: if private {
+            codec::StoredVisibility::Private
+        } else {
+            codec::StoredVisibility::Public
+        },
+        last_created_ms: 0,
+        last_statement_id: None,
+        changed_ms: 0,
+    };
+    assert_eq!(
+        block_on(
+            env.pipe.meta.inner.apply(
+                &env.pipe.shards.coordinator(&repo.namespace),
+                Batch::new()
+                    .put(
+                        keys::repo_record(&repo.name),
+                        codec::encode_repo_record(&codec::RepoRecord { created_at_ms: 0 })
+                    )
+                    .put(
+                        keys::repo_visibility(&repo.name),
+                        codec::encode_repo_visibility(&visibility)
+                    )
+                    .put(
+                        keys::repo_storage(&repo.name),
+                        codec::encode_repo_storage(&RepoStorageV1 {
+                            stored_bytes: bytes,
+                            version: bytes + 1
+                        })
+                    )
+            )
+        )
+        .unwrap(),
+        BatchOutcome::Committed
+    );
+}
+
+#[test]
+fn storage_batch_matches_single_reads_and_uses_one_coordinator_call_at_the_limit() {
+    for sharding in [Sharding::Single, Sharding::D34] {
+        let (env, owner, identity) =
+            environment_with(sharding, crate::indexed::IndexedConfig::default());
+        let selector = repo_of(&env, &owner, &identity);
+        let names: Vec<_> = (0..MAX_REPO_STORAGE_BATCH)
+            .map(|i| RepoName::new(format!("repo-{i}")).unwrap())
+            .collect();
+        let mut expected = Vec::new();
+        for (i, name) in names.iter().enumerate() {
+            let repo = RepoId {
+                namespace: selector.namespace.clone(),
+                name: name.clone(),
+            };
+            seed_storage(&env, &repo, i as u64, i % 2 == 0);
+            let request = signed(
+                &owner,
+                &other_identity(&identity, name.as_str()),
+                Procedure::ListRefs,
+                800 + u32::try_from(i).unwrap(),
+            );
+            expected.push(Some(
+                with_meta(&request, |meta| {
+                    block_on(env.pipe.repo_storage(&repo, meta))
+                })
+                .unwrap(),
+            ));
+        }
+        // The selector does not exist; it supplies only the signed namespace.
+        let request = signed(&owner, &identity, Procedure::ListRefs, 1000);
+        let before = env.pipe.meta.calls();
+        assert_eq!(
+            with_meta(&request, |meta| block_on(env.pipe.repo_storage_many(
+                &selector.namespace,
+                &names,
+                meta
+            )))
+            .unwrap(),
+            expected
+        );
+        assert_eq!(env.pipe.meta.calls() - before, 1);
+        assert_eq!(env.pipe.meta.ops().last(), Some(&"get_many"));
+        let names = vec![
+            names[1].clone(),
+            RepoName::new("missing").unwrap(),
+            names[1].clone(),
+        ];
+        assert_eq!(
+            with_meta(&request, |meta| block_on(env.pipe.repo_storage_many(
+                &selector.namespace,
+                &names,
+                meta
+            )))
+            .unwrap(),
+            vec![expected[1], None, expected[1]]
+        );
+        let before = env.pipe.meta.calls();
+        assert!(
+            with_meta(&request, |meta| block_on(env.pipe.repo_storage_many(
+                &selector.namespace,
+                &[],
+                meta
+            )))
+            .unwrap()
+            .is_empty()
+        );
+        let oversized = vec![selector.name.clone(); MAX_REPO_STORAGE_BATCH + 1];
+        assert_eq!(
+            with_meta(&request, |meta| block_on(env.pipe.repo_storage_many(
+                &selector.namespace,
+                &oversized,
+                meta
+            )))
+            .unwrap_err()
+            .code(),
+            Code::InvalidArgument
+        );
+        let wrong_namespace = NamespaceKey::deployment_default();
+        assert_eq!(
+            with_meta(&request, |meta| block_on(env.pipe.repo_storage_many(
+                &wrong_namespace,
+                &names,
+                meta
+            )))
+            .unwrap_err()
+            .code(),
+            Code::Unauthenticated
+        );
+        assert_eq!(env.pipe.meta.calls(), before);
+    }
+}
+
+struct SelectiveOwnerHook(Mutex<Vec<RepoName>>);
+impl Authorizer for SelectiveOwnerHook {
+    async fn authorize(&self, op: &Operation) -> Result<AuthzFacts, ServerError> {
+        self.0.lock().unwrap().push(op.repo.name.clone());
+        if op.repo.name.as_str() == "denied" {
+            return Err(ServerError::permission_denied("denied"));
+        }
+        if op.repo.name.as_str() == "public" {
+            return Err(ServerError::unavailable("hook unavailable"));
+        }
+        Ok(op.authz.clone())
+    }
+}
+
+#[test]
+fn storage_batch_checks_each_repo_and_hides_denied_and_missing_counters() {
+    let defaults = Hooks::new();
+    let hooks = Hooks {
+        authorizer: SelectiveOwnerHook(Mutex::new(Vec::new())),
+        admission: defaults.admission,
+        pre_receive: defaults.pre_receive,
+        receipts: defaults.receipts,
+        outcomes: defaults.outcomes,
+    };
+    let (env, owner, identity) = environment_with_hooks(
+        Sharding::D34,
+        crate::indexed::IndexedConfig::default(),
+        None,
+        hooks,
+    );
+    let repo = repo_of(&env, &owner, &identity);
+    seed_storage(&env, &repo, 17, true);
+    let denied = RepoId {
+        namespace: repo.namespace.clone(),
+        name: RepoName::new("denied").unwrap(),
+    };
+    seed_storage(&env, &denied, 18, true);
+    block_on(env.pipe.meta.inner.apply(
+        &env.pipe.shards.coordinator(&repo.namespace),
+        Batch::new().put(keys::repo_storage(&denied.name), Value::new(vec![0])),
+    ))
+    .unwrap();
+    let public = RepoId {
+        namespace: repo.namespace.clone(),
+        name: RepoName::new("public").unwrap(),
+    };
+    seed_storage(&env, &public, 19, false);
+    let names = vec![
+        denied.name,
+        repo.name,
+        public.name,
+        RepoName::new("missing").unwrap(),
+    ];
+    let request = signed(&owner, &identity, Procedure::ListRefs, 1100);
+    let before = env.pipe.meta.calls();
+    assert_eq!(
+        with_meta(&request, |meta| block_on(env.pipe.repo_storage_many(
+            &repo.namespace,
+            &names,
+            meta
+        )))
+        .unwrap(),
+        vec![
+            None,
+            Some(RepoStorage {
+                stored_bytes: 17,
+                version: 18
+            }),
+            None,
+            None
+        ]
+    );
+    assert_eq!(env.pipe.meta.calls() - before, 1);
+    assert_eq!(*env.pipe.hooks.authorizer.0.lock().unwrap(), names);
+    // A non-owner sees neither the public nor the private counter.
+    let stranger = signed(&key(8), &identity, Procedure::ListRefs, 1101);
+    assert_eq!(
+        with_meta(&stranger, |meta| block_on(env.pipe.repo_storage_many(
+            &repo.namespace,
+            &names,
+            meta
+        )))
+        .unwrap(),
+        vec![None; 4]
+    );
+}
+
+#[test]
+fn storage_batch_grants_are_scoped_and_epoch_checked_per_repo() {
+    let owner = key(7);
+    let grantee = key(8);
+    let clock = clock();
+    let env = build(
+        super::grants::config(&owner, AuthorizerRole::Check),
+        Spy::new(store(&clock)),
+        Hooks::new(),
+        clock,
+    );
+    let identity = super::grants::repository(&owner);
+    let repo = repo_of(&env, &owner, &identity);
+    let second = RepoId {
+        namespace: repo.namespace.clone(),
+        name: RepoName::new("second").unwrap(),
+    };
+    seed_storage(&env, &repo, 20, true);
+    seed_storage(&env, &second, 30, true);
+    let grant = super::grants::grant(&owner, &grantee, |g| {
+        g.capabilities = mkit_attest::grant::Capabilities::ReadWrite;
+    });
+    let request =
+        signed(&grantee, &identity, Procedure::ListRefs, 1200).header("x-write-grant", &grant);
+    let names = vec![
+        repo.name.clone(),
+        second.name,
+        RepoName::new("missing").unwrap(),
+    ];
+    let single = with_meta(&request, |meta| {
+        block_on(env.pipe.repo_storage(&repo, meta))
+    })
+    .unwrap();
+    let before = env.pipe.meta.calls();
+    assert_eq!(
+        with_meta(&request, |meta| block_on(env.pipe.repo_storage_many(
+            &repo.namespace,
+            &names,
+            meta
+        )))
+        .unwrap(),
+        vec![Some(single), None, None]
+    );
+    assert_eq!(env.pipe.meta.calls() - before, 1);
+    block_on(env.pipe.meta.inner.apply(
+        &env.pipe.shards.coordinator(&repo.namespace),
+        Batch::new().put(keys::grant_epoch(), codec::encode_u64(1)),
+    ))
+    .unwrap();
+    assert_eq!(
+        with_meta(&request, |meta| block_on(env.pipe.repo_storage_many(
+            &repo.namespace,
+            &names,
+            meta
+        )))
+        .unwrap(),
+        vec![None; 3]
+    );
+}
+
+#[test]
+fn storage_batch_rejects_bad_credentials_and_propagates_storage_failure() {
+    let (mut env, owner, identity) =
+        environment_with(Sharding::D34, crate::indexed::IndexedConfig::default());
+    let repo = repo_of(&env, &owner, &identity);
+    let names = vec![repo.name.clone()];
+    seed_storage(&env, &repo, 9, false);
+    let unsigned = Req::unsigned(Procedure::ListRefs).header("x-repository", &identity);
+    let before = env.pipe.meta.calls();
+    assert_eq!(
+        with_meta(&unsigned, |meta| block_on(env.pipe.repo_storage_many(
+            &repo.namespace,
+            &names,
+            meta
+        )))
+        .unwrap_err()
+        .code(),
+        Code::Unauthenticated
+    );
+    let wrong_procedure = signed(&owner, &identity, Procedure::ReadRef, 1300);
+    assert_eq!(
+        with_meta(&wrong_procedure, |meta| block_on(
+            env.pipe.repo_storage_many(&repo.namespace, &names, meta)
+        ))
+        .unwrap_err()
+        .code(),
+        Code::Unauthenticated
+    );
+    assert_eq!(env.pipe.meta.calls(), before);
+    let request = signed(&owner, &identity, Procedure::ListRefs, 1301);
+    env.pipe.meta.fail_read_many = true;
+    assert_eq!(
+        with_meta(&request, |meta| block_on(env.pipe.repo_storage_many(
+            &repo.namespace,
+            &names,
+            meta
+        )))
+        .unwrap_err()
+        .code(),
+        Code::Internal
+    );
+    env.pipe.meta.fail_read_many = false;
+    block_on(env.pipe.meta.inner.apply(
+        &env.pipe.shards.coordinator(&repo.namespace),
+        Batch::new().put(keys::repo_storage(&repo.name), Value::new(vec![0])),
+    ))
+    .unwrap();
+    assert_eq!(
+        with_meta(&request, |meta| block_on(env.pipe.repo_storage_many(
+            &repo.namespace,
+            &names,
+            meta
+        )))
+        .unwrap_err()
+        .code(),
+        Code::Internal
+    );
+    block_on(env.pipe.meta.inner.apply(
+        &env.pipe.shards.coordinator(&repo.namespace),
+        Batch::new().delete(keys::repo_storage(&repo.name)),
+    ))
+    .unwrap();
+    assert_eq!(
+        with_meta(&request, |meta| block_on(env.pipe.repo_storage_many(
+            &repo.namespace,
+            &names,
+            meta
+        )))
+        .unwrap_err()
+        .code(),
+        Code::Internal
+    );
+    env.pipe.cfg.addressing = Addressing::Single { repo: repo.clone() };
+    let before = env.pipe.meta.calls();
+    assert_eq!(
+        with_meta(&request, |meta| block_on(env.pipe.repo_storage_many(
+            &repo.namespace,
+            &names,
+            meta
+        )))
+        .unwrap_err()
+        .code(),
+        Code::Unimplemented
+    );
+    assert_eq!(env.pipe.meta.calls(), before);
+}

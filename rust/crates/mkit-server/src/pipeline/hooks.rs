@@ -306,7 +306,21 @@ use super::durable_outcome::{DeliveryError, Outcome};
 /// Stage 8 receives outcomes at least once (the in-tree default is
 /// [`NoOutcomes`], which acknowledges locally). A duplicate may arrive even
 /// after `Ok`; different reservations can arrive in any order. The sink must
-/// deduplicate by `reservation_id`.
+/// deduplicate by `reservation_id`; for [`super::OutcomeKind::RepoStorageChanged`],
+/// retain the value with the highest per-repository `version`.
+///
+/// Delivery runs from the durable outbox after commit. Sink errors and timeouts
+/// never roll back the commit; the refused row stays queued for a later retry.
+/// Later rows can overtake it: a failed row does not block those behind it.
+///
+/// Persistent failures grow the backlog. With the default
+/// [`super::PipelineConfig::outbox_backlog_cap`], admission is refused once
+/// rows exceed 100,000 or bytes exceed 64 MiB (equality is still admitted).
+/// Reservation-granting writes and admitted HTTP reads then see
+/// `unavailable` / HTTP 503, message `outbox backlog; retry`, and
+/// `Retry-After: 30`. This admission check precedes the operation's commit;
+/// it does not undo earlier commits. Monitor `mkit_server_outbox_backlog`
+/// with its `unit=rows` and `unit=bytes` labels per `shard_kind`.
 pub trait OutcomeSink: MaybeSend + MaybeSync {
     /// Deliver one terminal outcome. Every error leaves it queued for retry.
     fn deliver(

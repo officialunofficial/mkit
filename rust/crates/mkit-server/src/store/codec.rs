@@ -388,6 +388,37 @@ pub enum ReservationV1 {
 }
 
 impl ReservationV1 {
+    /// A successful upload admission awaiting consumption or expiry.
+    #[must_use]
+    pub fn ticketed(ticket_id: Hash) -> Self {
+        Self::Ticketed { ticket_id }
+    }
+
+    /// An unconsumed upload ticket that expired.
+    #[must_use]
+    pub fn expired(repository: String, occurred_at_ms: u64) -> Self {
+        Self::Expired {
+            repository,
+            occurred_at_ms,
+        }
+    }
+
+    /// A procedure-less repository storage counter change.
+    #[must_use]
+    pub fn repo_storage_changed(
+        repository: String,
+        occurred_at_ms: u64,
+        stored_bytes: u64,
+        version: u64,
+    ) -> Self {
+        Self::RepoStorageChanged {
+            repository,
+            occurred_at_ms,
+            stored_bytes,
+            version,
+        }
+    }
+
     /// A complete pending reservation, recording its operation.
     #[must_use]
     pub fn pending(

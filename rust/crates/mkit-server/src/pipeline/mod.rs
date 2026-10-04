@@ -53,7 +53,7 @@ pub use read_limits::{ReadLimits, ReaderSession};
 mod implicit;
 mod info;
 mod repo_storage;
-pub use repo_storage::RepoStorage;
+pub use repo_storage::{MAX_REPO_STORAGE_BATCH, RepoStorage};
 #[cfg(feature = "remote-hooks")]
 pub mod inspection;
 mod lease;
