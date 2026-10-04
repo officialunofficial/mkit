@@ -19,10 +19,11 @@
 //! both stores answer their probe (`SERVING` or `NOT_SERVING`), for load
 //! balancers and kubelet probes.
 //!
-//! A `connect-timeout-ms` header makes connectrpc compute a deadline with
-//! `Instant::now()`, which panics on wasm32. The Workers adapter strips the
-//! header before dispatch (`mkit_worker_common::adapter::is_deadline_header`);
-//! this binding does not.
+//! On wasm32, [`service`] and [`ConnectService`] ignore `connect-timeout-ms`,
+//! `grpc-timeout` and configured deadline policies before connectrpc dispatch.
+//! This explicit no-deadline policy avoids unsupported `std::time::Instant`
+//! and Tokio timers. Native deadline behavior is unchanged. Hosts mounting
+//! [`router`] in another connectrpc service must apply the same protection.
 //!
 //! An upload is read message by message and stops at the `last` chunk.
 //! connectrpc 0.9.1 then drains at most 1 MiB (and, natively, 5 s) more of
@@ -36,7 +37,16 @@ mod service;
 
 use std::sync::Arc;
 
-use connectrpc::{ConnectRpcService, Router};
+use connectrpc::Router;
+
+#[cfg(target_arch = "wasm32")]
+mod dispatch;
+#[cfg(target_arch = "wasm32")]
+pub use dispatch::ConnectService;
+
+/// Native dispatch retains connectrpc's service and deadline behavior exactly.
+#[cfg(not(target_arch = "wasm32"))]
+pub type ConnectService<D = Router> = connectrpc::ConnectRpcService<D>;
 
 pub use error::from_upload_error;
 pub use health::ConnectHealth;
@@ -52,7 +62,8 @@ pub use mkit_rpc::transport as proto;
 /// `TransportService` and `Health` over `pipeline`, without the
 /// interceptor: every authenticated transport RPC then fails
 /// `unauthenticated`; the M1 stub RPCs answer `unimplemented`. Mount
-/// [`service`] unless another layer installs [`AuthInterceptor`].
+/// [`service`] unless another layer installs [`AuthInterceptor`]. On wasm32,
+/// mount this router with [`ConnectService::new`] to apply the no-deadline policy.
 pub fn router<B, N, H>(pipeline: Arc<Pipeline<B, N, H>>) -> Router
 where
     B: MultipartBlobStore + 'static,
@@ -67,15 +78,15 @@ where
 }
 
 /// [`router`] behind [`AuthInterceptor`]: what an adapter mounts. Apply
-/// deployment limits with `ConnectRpcService::with_limits`.
-pub fn service<B, N, H>(pipeline: Arc<Pipeline<B, N, H>>) -> ConnectRpcService
+/// deployment limits with [`ConnectService::with_limits`]. On wasm32 this
+/// service ignores client and configured deadlines before dispatch.
+pub fn service<B, N, H>(pipeline: Arc<Pipeline<B, N, H>>) -> ConnectService
 where
     B: MultipartBlobStore + 'static,
     N: NamespaceStore + 'static,
     H: HookSet + 'static,
 {
-    ConnectRpcService::new(router(pipeline.clone()))
-        .with_interceptor(AuthInterceptor::new(pipeline))
+    ConnectService::new(router(pipeline.clone())).with_interceptor(AuthInterceptor::new(pipeline))
 }
 
 /// The pipeline as connectrpc's `Send + Sync` service objects hold it: an

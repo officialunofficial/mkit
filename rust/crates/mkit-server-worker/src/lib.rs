@@ -50,10 +50,9 @@
 //! host against simulated R2 and Durable Object backends, through the
 //! `mkit-server-conformance` storage suite.
 //!
-//! The fetch adapter strips `connect-timeout-ms` and `grpc-timeout` before
-//! Connect dispatch (`mkit_worker_common::adapter::is_deadline_header`):
-//! connectrpc turns them into a deadline with `Instant::now()`, which
-//! panics on wasm32.
+//! All mkit fetch entry points use the core wasm no-deadline policy: timeout
+//! headers and configured Connect deadline policies are ignored before dispatch.
+//! Admin dispatch uses the Worker clock and timer rather than connectrpc.
 //!
 //! [`BlobStore`]: mkit_server::BlobStore
 //! [`NamespaceStore`]: mkit_server::NamespaceStore

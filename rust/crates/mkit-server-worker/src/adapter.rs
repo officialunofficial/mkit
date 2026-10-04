@@ -28,9 +28,9 @@
 //!   compress it a second time.
 //!
 //! **Deadline headers.** `connect-timeout-ms` and `grpc-timeout` are
-//! dropped before dispatch (`is_deadline_header`): connectrpc turns them
-//! into a deadline with `Instant::now()`, which panics on wasm32. A client's
-//! deadline is therefore not enforced.
+//! ignored by [`mkit_server::connect::service`] before connectrpc dispatch.
+//! Configured Connect deadlines are also ignored on wasm32. Native deadlines
+//! remain enforced; hosts bound Worker work with their platform clock.
 //!
 //! **Pipeline.** Auth v2 with the default write quota, one repository
 //! (`AUTH_REPOSITORY`) in the deployment-default namespace and the Worker clock.
@@ -2254,9 +2254,7 @@ mod glue {
 
     use crate::telemetry::{ConsoleMetrics, install};
     use mkit_server::pipeline::{DeliveryError, HookSet, OutcomeSink, Pipeline};
-    use mkit_worker_common::adapter::{
-        copy_headers_filtered, is_deadline_header, respond_streamed, to_http_method,
-    };
+    use mkit_worker_common::adapter::{copy_headers_filtered, respond_streamed, to_http_method};
     use mkit_worker_common::body_cap::content_length_exceeds;
     use mkit_worker_common::cors::{cors_preflight_response, is_options_preflight};
     use worker::{Env, Request, Response, State};
@@ -2396,7 +2394,7 @@ mod glue {
     }
 
     /// The `http::Request` connectrpc dispatches: `req`'s method, URL and
-    /// headers (without the deadline headers) over its streaming body.
+    /// headers over its streaming body. The core service applies deadline policy.
     fn http_request(
         req: &Request,
         max_body_bytes: usize,
@@ -2411,9 +2409,7 @@ mod glue {
             .uri(req.inner().url())
             .body(LimitedBody::new(body, max_body_bytes, watch.clone()))
             .map_err(|_| worker::Error::RustError("invalid HTTP request URL".into()))?;
-        copy_headers_filtered(req.headers().entries(), http_req.headers_mut(), |k| {
-            !is_deadline_header(k)
-        });
+        copy_headers_filtered(req.headers().entries(), http_req.headers_mut(), |_| true);
         Ok(http_req)
     }
 

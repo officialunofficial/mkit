@@ -2558,3 +2558,69 @@ async fn non_utf8_ref_hint_is_ignored_before_pack_reads() {
     let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_ne!(value["exists"], true);
 }
+
+/// Finite native deadlines must still cancel stalled body receipt before auth.
+#[tokio::test]
+async fn native_deadlines_bound_body_receipt() {
+    use connectrpc::DeadlinePolicy;
+    use http_body_util::StreamBody;
+    use std::convert::Infallible;
+    use std::time::Duration;
+
+    let svc = setup(AuthMode::Bearer {
+        token: Redacted::new(TOKEN),
+    })
+    .serve()
+    .svc;
+    for (content_type, headers, default) in [
+        (JSON, vec![("connect-timeout-ms", "1")], false),
+        (
+            "application/grpc+proto",
+            vec![("grpc-timeout", "1m")],
+            false,
+        ),
+        (
+            JSON,
+            vec![("connect-timeout-ms", "1"), ("grpc-timeout", "1m")],
+            false,
+        ),
+        (JSON, vec![], true),
+        (JSON, vec![("connect-timeout-ms", "malformed")], true),
+    ] {
+        let mut svc = svc.clone();
+        if default {
+            svc = svc.with_deadline_policy(
+                DeadlinePolicy::new().with_default_timeout(Duration::from_millis(1)),
+            );
+        }
+        let mut request = http::Request::builder()
+            .method("POST")
+            .uri("/grpc.health.v1.Health/Check")
+            .header("content-type", content_type)
+            .header("connect-protocol-version", "1");
+        for (name, value) in headers {
+            request = request.header(name, value);
+        }
+        let body = StreamBody::new(futures::stream::pending::<
+            Result<http_body::Frame<Bytes>, Infallible>,
+        >());
+        let response = tokio::time::timeout(
+            Duration::from_secs(2),
+            svc.oneshot(request.body(body).unwrap()),
+        )
+        .await
+        .expect("native deadline must cancel stalled body receipt")
+        .unwrap();
+        if content_type == JSON {
+            assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap()["code"],
+                "deadline_exceeded"
+            );
+        } else {
+            let body = response.into_body().collect().await.unwrap();
+            assert_eq!(body.trailers().unwrap()["grpc-status"], "4");
+        }
+    }
+}

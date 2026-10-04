@@ -66,6 +66,7 @@ subtle = { version = "2", default-features = false }
 connectrpc = { version = "0.9.1", default-features = false, features = ["gzip", "json"], optional = true }
 buffa = { version = "0.9.1", optional = true }
 http = { version = "1", optional = true }
+tower-service = { version = "0.3", optional = true }
 # Unpadded base64: standard for Connect error-detail values, url-safe for
 # URL tokens (`url_token`, on every target, so not optional).
 base64 = { version = "0.22" }
@@ -90,6 +91,7 @@ connect = [
     "dep:connectrpc",
     "dep:buffa",
     "dep:http",
+    "dep:tower-service",
     "mkit-rpc/transport",
 ]
 # In-memory reference backends (`MemoryKv`, `MemoryBlobStore`): the template
@@ -146,6 +148,7 @@ tempfile = "3"
 # tests/connect_dispatch.rs drives `connect::service` over real Connect HTTP
 # requests on the host.
 http-body-util = "0.1"
+http-body = "1"
 # Gzip request bodies for the Content-Encoding test.
 flate2 = "1"
 tokio = { version = "1", features = ["macros", "rt", "time"] }

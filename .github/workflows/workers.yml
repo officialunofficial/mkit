@@ -65,6 +65,7 @@ on:
       - 'rust/crates/mkit-transport-connect/**'
       - 'scripts/vcs-worker-conformance.sh'
       - 'scripts/embedded-worker-conformance.*'
+      - 'scripts/connect-deadline-runtime.py'
       - 'rust/vendor/ruzstd/**'
       - 'rust/crates/mkit-core-wasm-check/**'
       - 'rust/tests/golden/pack-v2/**'
@@ -140,6 +141,7 @@ jobs:
               - 'rust/crates/mkit-server-conformance/**'
               - 'scripts/vcs-worker-conformance.sh'
               - 'scripts/embedded-worker-conformance.*'
+              - 'scripts/connect-deadline-runtime.py'
               - 'rust/vendor/ruzstd/**'
               - 'rust/crates/mkit-core-wasm-check/**'
               - 'rust/tests/golden/pack-v2/**'
@@ -391,6 +393,7 @@ jobs:
           workspaces: |
             rust -> rust/target
             apps/vcs-worker -> apps/vcs-worker/target
+            rust/crates/mkit-server-worker/tests/connect-deadline-probe -> rust/crates/mkit-server-worker/tests/connect-deadline-probe/target
           prefix-key: "rust-ci-vcs-conformance"
           cache-on-failure: false
 
@@ -402,10 +405,20 @@ jobs:
       - name: Install worker-build
         run: cargo install worker-build --locked --version 0.8.6
 
+      - name: Install independent admin signer hash tool
+        run: cargo install b3sum --locked --version 1.8.5
+
       # D34 is the default sharding (WP-1.28c); the explicit single phase
       # keeps the snapshot round-trip and single-sharding growth coverage.
       - name: Create diagnostic log directory
         run: mkdir -p "${RUNNER_TEMP}/wire-logs"
+
+      - name: Connect deadlines on wasm (all dispatch entry points)
+        timeout-minutes: 15
+        env:
+          TMPDIR: ${{ runner.temp }}/wire-logs
+          CARGO_PROFILE_DEV_DEBUG: '0'
+        run: python3 scripts/connect-deadline-runtime.py
 
       - name: Wire suite (release features, D34)
         env:

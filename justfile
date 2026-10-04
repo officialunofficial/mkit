@@ -180,6 +180,9 @@ ci-scripts:
 ci-server-allocator:
     ( cd rust && cargo test --locked -p mkit-server --no-default-features --features memory,pack-ruzstd --test zstd_slice_heap_bounds -- --ignored --test-threads=1 --nocapture )
 
+ci-connect-deadlines:
+    python3 scripts/connect-deadline-runtime.py
+
 ci-server:
     #!/usr/bin/env bash
     set -euo pipefail

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Wasm Connect dispatch ignores both client timeout headers before connectrpc
+  computes a deadline, including direct `connect::service` calls. Configured
+  deadline policies are ignored on wasm; native deadlines are unchanged.
+  Worker adapters share this protection without changing body streaming or auth.
+
 ### Performance
 
 - Borrowed server stores forward batched content-index reads to the backend.
@@ -62,6 +69,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking (toward 0.6)
 
+- On wasm, `connect::service` returns `connect::ConnectService`, a protected
+  Tower service, instead of raw `connectrpc::ConnectRpcService`. Use the new
+  type in explicit annotations and `ConnectService::new(connect::router(...))`
+  for custom mounts. The limit, compression and interceptor builders remain
+  available; deadline policies are explicitly ignored. Native types are unchanged.
 - `StoreError` adds `OperationLimitExceeded` for bounded in-memory operations.
   Migration: handle this variant in exhaustive matches and discard or publish
   partial overlay writes according to host policy.

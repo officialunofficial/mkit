@@ -3479,6 +3479,7 @@ dependencies = [
  "futures-executor",
  "getrandom 0.4.3",
  "http",
+ "http-body",
  "http-body-util",
  "k256",
  "mkit-attest",
@@ -3495,6 +3496,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tower",
+ "tower-service",
  "tracing",
  "zeroize",
 ]
