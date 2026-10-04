@@ -86,6 +86,10 @@ impl Plan {
         if limits.payload_bytes == 0 || limits.max_pack_bytes == 0 || limits.max_parts == 0 {
             return Err(Error::Limit("zero pack limit"));
         }
+        // Reserve a prior pointer and the largest u32 length prefix. The
+        // empty canonical node has a one-byte prefix, which can grow by four.
+        let node_overhead =
+            mkit_core::transfer::encode_packlist(Some([0; 32]), &[])?.len() as u64 + 4;
         let mut writer = PackWriter::new();
         let mut packs = Vec::new();
         let mut staged = 0_u64;
@@ -109,12 +113,19 @@ impl Plan {
             }
             // Bound memory before accepting an input entry, even if it
             // compresses dramatically. The caller owns its input allocation.
-            if staged
-                .saturating_add(writer.total_payload())
-                .saturating_add(size)
-                > limits.max_staged_bytes
+            let pack_count = packs.len().saturating_add(1) as u64;
+            let node_bound = node_overhead.saturating_add(pack_count.saturating_mul(32));
+            if pack_count > u64::from(mkit_core::transfer::PACKLIST_MAX_ENTRIES)
+                || node_bound > limits.max_pack_bytes
+                || staged
+                    .saturating_add(bound(
+                        writer.total_payload().saturating_add(size),
+                        writer.entry_count() + 1,
+                    ))
+                    .saturating_add(node_bound)
+                    > limits.max_staged_bytes
             {
-                return Err(Error::Limit("staged input limit"));
+                return Err(Error::Limit("staged input/packmap limit"));
             }
             match entry {
                 Entry::Raw { id, bytes } => {
@@ -222,5 +233,33 @@ mod tests {
             Plan::prepare([make(1)], limits),
             Err(Error::Limit(_))
         ));
+    }
+    #[test]
+    fn tiny_entries_reject_before_buffering_the_whole_over_budget_plan() {
+        let consumed = std::cell::Cell::new(0);
+        let entries = (0..100).map(|byte| {
+            consumed.set(consumed.get() + 1);
+            let bytes = serialize(&Object::Blob(Blob { data: vec![byte] })).unwrap();
+            Entry::Raw {
+                id: mkit_core::hash::hash(&bytes),
+                bytes,
+            }
+        });
+        // Payload alone fits exactly. Framing and the reserved packlist do not.
+        let payload = serialize(&Object::Blob(Blob { data: vec![0] }))
+            .unwrap()
+            .len() as u64;
+        let limits = Limits {
+            max_staged_bytes: 100 * payload,
+            ..Limits::default()
+        };
+        assert!(matches!(
+            Plan::prepare(entries, limits),
+            Err(Error::Limit(_))
+        ));
+        assert!(
+            consumed.get() < 100,
+            "buffered every entry before rejecting the plan"
+        );
     }
 }

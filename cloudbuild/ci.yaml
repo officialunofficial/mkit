@@ -224,6 +224,7 @@ steps:
         # stay server-free (docs/INVARIANTS.md). The triggers run on main
         # and PRs to main only (cloudbuild/README.md).
         ( cd rust
+          cargo check --locked -p mkit-push --target wasm32-unknown-unknown
           cargo check --locked -p mkit-server --target wasm32-unknown-unknown
           cargo check --locked -p mkit-server --features remote-hooks --target wasm32-unknown-unknown
           cargo check --locked -p mkit-server --features http-objects --target wasm32-unknown-unknown

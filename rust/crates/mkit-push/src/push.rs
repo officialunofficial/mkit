@@ -133,7 +133,7 @@ impl Push {
                 PackmapMode::ResetSelfContained => None,
                 PackmapMode::Append { self_contained } => match prior {
                     None => None,
-                    Some(root) => match walk_chain(&rpc, root).await {
+                    Some(root) => match walk_chain(&rpc, root, &self.head_ref).await {
                         Ok(held) if keys.iter().all(|key| held.contains(key)) => {
                             return commit_head(&rpc, &self.head_ref, self.condition, self.tip)
                                 .await;
@@ -412,6 +412,7 @@ async fn read_ref<T: HttpTransport, S: Signer, C: Clock>(
 async fn walk_chain<T: HttpTransport, S: Signer, C: Clock>(
     rpc: &Rpc<'_, T, S, C>,
     root: Hash,
+    head_ref: &str,
 ) -> Result<HashSet<Hash>, Error> {
     let mut cursor = Some(root);
     let mut seen = HashSet::new();
@@ -420,7 +421,7 @@ async fn walk_chain<T: HttpTransport, S: Signer, C: Clock>(
         if seen.len() >= MAX_CHAIN_DEPTH || !seen.insert(key) {
             return Err(Error::Limit("packmap depth/cycle"));
         }
-        let node = transfer::decode_packlist(&rpc.download(key).await?)?;
+        let node = transfer::decode_packlist(&rpc.download(key, head_ref).await?)?;
         packs.extend(node.packs);
         if packs.len() > MAX_CHAIN_PACKS {
             return Err(Error::Limit("packmap pack count"));

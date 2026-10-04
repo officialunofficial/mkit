@@ -156,7 +156,7 @@ impl<T: HttpTransport, S: Signer, C: Clock> Rpc<'_, T, S, C> {
         R::decode_from_slice(frames[0]).map_err(|_| Error::Invalid("protobuf response"))
     }
 
-    pub(crate) async fn download(&self, key: Hash) -> Result<Vec<u8>, Error> {
+    pub(crate) async fn download(&self, key: Hash, head_ref: &str) -> Result<Vec<u8>, Error> {
         use crate::proto::{
             DownloadPackRequest, DownloadPackResponse, download_pack_response::Body,
         };
@@ -167,7 +167,14 @@ impl<T: HttpTransport, S: Signer, C: Clock> Rpc<'_, T, S, C> {
         let body = request.encode_to_vec();
         let body = framed(&body)?;
         let commitment = format!("body:{}", to_hex(&hash(&body)));
-        let (bytes, _) = self.call("DownloadPack", body, &commitment, true).await?;
+        let (mut request, _) = self
+            .request("DownloadPack", body, &commitment, true)
+            .await?;
+        request.headers_mut().insert(
+            "x-mkit-ref",
+            HeaderValue::from_str(head_ref).map_err(|_| Error::Invalid("ref hint"))?,
+        );
+        let (bytes, _) = self.send(&request).await?;
         let mut out = Vec::new();
         let mut expected = None;
         let mut last = false;
@@ -215,6 +222,8 @@ impl<T: HttpTransport, S: Signer, C: Clock> Rpc<'_, T, S, C> {
             .request("AdvanceRefs", body.clone(), &commitment, false)
             .await?;
         let mut lag_start = None;
+        let mut saw_pending = false;
+        let mut renewed_after_unauthenticated = false;
         loop {
             let now = self.clock.now_ms();
             if now >= self.deadline_ms {
@@ -233,8 +242,22 @@ impl<T: HttpTransport, S: Signer, C: Clock> Rpc<'_, T, S, C> {
                         .map_err(|_| Error::Invalid("advance protobuf"));
                 }
                 Err(Error::Remote(error)) => {
+                    // A post-pending authentication rejection is definitive,
+                    // including expiry in transit or a small server clock lead.
+                    // Recover once; an ambiguous transport error never reaches here.
+                    if saw_pending
+                        && !renewed_after_unauthenticated
+                        && error.code == "unauthenticated"
+                    {
+                        renewed_after_unauthenticated = true;
+                        (request, expires) = self
+                            .request("AdvanceRefs", body.clone(), &commitment, false)
+                            .await?;
+                        continue;
+                    }
                     let delay = if let Some(delay) = pending_delay(&error) {
                         lag_start = None;
+                        renewed_after_unauthenticated = false;
                         delay
                     } else if !message.ticket_ids.is_empty()
                         && error.code == "unavailable"
@@ -248,6 +271,7 @@ impl<T: HttpTransport, S: Signer, C: Clock> Rpc<'_, T, S, C> {
                     } else {
                         return Err(Error::Remote(error));
                     };
+                    saw_pending = true;
                     if now.saturating_add(delay.as_millis() as i64) >= self.deadline_ms {
                         return Err(Error::Deadline);
                     }
@@ -474,73 +498,4 @@ fn decode_stream(bytes: &[u8]) -> Result<Vec<&[u8]>, Error> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn pending(value: Option<u32>, header: Option<&str>) -> RemoteError {
-        let detail = crate::proto::PendingVerification {
-            retry_after_ms: value,
-            ..Default::default()
-        }
-        .encode_to_vec();
-        let mut error = RemoteError {
-            code: "unavailable".into(),
-            message: String::new(),
-            details: vec![Detail {
-                type_url: "type.googleapis.com/mkit.transport.v1.PendingVerification".into(),
-                value: Some(STANDARD_NO_PAD.encode(detail)),
-            }],
-            status: 503,
-            headers: HeaderMap::new(),
-        };
-        if let Some(header) = header {
-            error.headers.insert("retry-after", header.parse().unwrap());
-        }
-        error
-    }
-
-    #[test]
-    fn only_typed_pending_honors_bounded_retry_hints() {
-        for (value, header, milliseconds) in [
-            (None, None, 1000),
-            (Some(0), None, 1000),
-            (Some(2000), Some("5"), 5000),
-            (Some(u32::MAX), Some("999999999999999"), 60_000),
-        ] {
-            assert_eq!(
-                pending_delay(&pending(value, header)),
-                Some(Duration::from_millis(milliseconds))
-            );
-        }
-        let mut error = pending(Some(2000), Some("5"));
-        error.details[0].value = Some("invalid".into());
-        assert_eq!(pending_delay(&error), None);
-        error = pending(Some(2000), Some("5"));
-        error.code = "permission_denied".into();
-        assert_eq!(pending_delay(&error), None);
-        error = pending(Some(2000), Some("5"));
-        error.details.push(error.details[0].clone());
-        assert_eq!(pending_delay(&error), None);
-    }
-
-    #[test]
-    fn streaming_end_errors_and_truncation_fail_closed() {
-        for bytes in [
-            b"\0".as_slice(),
-            b"\0\0\0\0\x05abc",
-            b"\x01\0\0\0\0",
-            b"\0\0\0\0\0",
-        ] {
-            assert!(decode_stream(bytes).is_err());
-        }
-        let mut bytes = Vec::new();
-        frame(&mut bytes, b"protobuf").unwrap();
-        let end = br#"{"error":{"code":"failed_precondition","message":"ticket rejected"}}"#;
-        bytes.push(2);
-        bytes.extend_from_slice(&(end.len() as u32).to_be_bytes());
-        bytes.extend_from_slice(end);
-        assert!(
-            matches!(decode_stream(&bytes), Err(Error::Remote(error)) if error.code == "failed_precondition")
-        );
-    }
-}
+mod tests;

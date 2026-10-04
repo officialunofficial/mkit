@@ -93,6 +93,26 @@ impl HttpTransport for Channel {
         request: Request<Vec<u8>>,
         limit: usize,
     ) -> Result<Response<Vec<u8>>, String> {
+        let mut retry = Request::new(request.body().clone());
+        *retry.method_mut() = request.method().clone();
+        *retry.uri_mut() = request.uri().clone();
+        *retry.headers_mut() = request.headers().clone();
+        let response = self.send_once(request, limit).await?;
+        // Fixture-only loss marker: the original write landed but its reply
+        // disappeared. Retry belongs to the injected host transport.
+        if response.headers().get("x-test-response-lost").is_some() {
+            self.send_once(retry, limit).await
+        } else {
+            Ok(response)
+        }
+    }
+}
+impl Channel {
+    async fn send_once(
+        &self,
+        request: Request<Vec<u8>>,
+        limit: usize,
+    ) -> Result<Response<Vec<u8>>, String> {
         let (parts, body) = request.into_parts();
         let mut response = self
             .0
@@ -121,12 +141,14 @@ enum Fault {
     Pending,
     PackmapRace,
     Indexed,
+    Sharded,
 }
 #[derive(Debug)]
 struct Record {
     method: String,
     body: Vec<u8>,
     nonce: Option<String>,
+    ref_hint: Option<String>,
 }
 #[derive(Debug)]
 struct Recorder {
@@ -154,6 +176,10 @@ impl Recorder {
             .push(Record {
                 method: method.clone(),
                 body: body.to_vec(),
+                ref_hint: parts
+                    .headers
+                    .get("x-mkit-ref")
+                    .map(|h| h.to_str().expect("valid ref hint").to_owned()),
                 nonce: parts
                     .headers
                     .get("idempotency-key")
@@ -199,11 +225,23 @@ impl Recorder {
                     let _ = to_bytes(first.into_body(), 1 << 20)
                         .await
                         .expect("valid parity fixture");
+                    return Response::builder()
+                        .status(503)
+                        .header("content-type", "application/json")
+                        .header("x-test-response-lost", "1")
+                        .body(Body::from(
+                            r#"{"code":"unavailable","message":"response lost"}"#,
+                        ))
+                        .expect("valid loss response");
                 }
-                Fault::None | Fault::Indexed => {}
+                Fault::None | Fault::Indexed | Fault::Sharded => {}
             }
         }
         let response = next.run(Request::from_parts(parts, Body::from(body))).await;
+        self.finish_indexed(&method, response).await
+    }
+
+    async fn finish_indexed(&self, method: &str, response: Response<Body>) -> Response<Body> {
         if matches!(self.fault, Fault::Indexed)
             && method == "AdvanceRefs"
             && response.status() == 503
@@ -240,7 +278,7 @@ async fn host(fault: Fault) -> (TestHost, Arc<Recorder>) {
     let capture = record.clone();
     let mut profile = Profile::new(WireAuth::AuthV2 {
         audience: String::new(),
-        repository: if matches!(fault, Fault::Indexed) {
+        repository: if matches!(fault, Fault::Indexed | Fault::Sharded) {
             format!(
                 "ed25519-{}/parity",
                 to_hex(&KeyPair::from_seed([42; 32]).public.0)
@@ -251,6 +289,7 @@ async fn host(fault: Fault) -> (TestHost, Arc<Recorder>) {
         seed: [42; 32],
     });
     profile.atomic_advance = true;
+    profile.sharding_d34 = matches!(fault, Fault::Sharded);
     profile.max_pack_bytes = 16 << 20;
     profile.features.insert(Feature::Tickets);
     let host = TestHost::start_with_test_layers(
@@ -258,7 +297,7 @@ async fn host(fault: Fault) -> (TestHost, Arc<Recorder>) {
         |_, _| Ok(mkit_server::pipeline::Hooks::new()),
         |config| {
             config.begin_upload_threshold_bytes = 0;
-            if matches!(fault, Fault::Indexed) {
+            if matches!(fault, Fault::Indexed | Fault::Sharded) {
                 let namespace = mkit_core::repo_identity::Namespace::Ed25519(
                     KeyPair::from_seed([42; 32]).public.0,
                 );
@@ -270,7 +309,9 @@ async fn host(fault: Fault) -> (TestHost, Arc<Recorder>) {
                     ),
                 );
                 config.write_policy = mkit_server::policy::WritePolicy::Owner;
-                config.indexed = Some(mkit_server::indexed::IndexedConfig::scheduled(16 << 20));
+                if matches!(fault, Fault::Indexed) {
+                    config.indexed = Some(mkit_server::indexed::IndexedConfig::scheduled(16 << 20));
+                }
             }
         },
         move |app| {
@@ -530,6 +571,8 @@ async fn cli_and_async_push_have_identical_ticketed_mutations() {
         assert_same_mutations(&native_record, &async_record);
         if matches!(fault, Fault::Pending) {
             assert_eq!(waits, vec![Duration::from_secs(2)]);
+        }
+        if matches!(fault, Fault::Pending | Fault::Replay) {
             for record in [&native_record, &async_record] {
                 let calls = record.calls.lock().expect("valid parity fixture");
                 let advances: Vec<_> = calls
@@ -551,37 +594,25 @@ async fn cli_and_async_push_have_identical_ticketed_mutations() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn stale_head_and_append_packmap_match_cli() {
+    for fault in [Fault::None, Fault::Sharded] {
+        stale_head_and_append(fault).await;
+    }
+}
+
+async fn stale_head_and_append(fault: Fault) {
     let temp = tempfile::tempdir().expect("valid parity fixture");
     let store = Arc::new(
         ObjectStore::init(&RepoLayout::single(temp.path())).expect("valid parity fixture"),
     );
     let old = fixture(&store, 512, 1);
     let new = fixture(&store, 1024, 2);
-    let (native_host, native_record) = host(Fault::None).await;
-    let (async_host, async_record) = host(Fault::None).await;
-    assert_eq!(
-        cli(
-            &native_host,
-            store.clone(),
-            old,
-            1 << 20,
-            RefWriteCondition::Missing
-        )
-        .await,
-        Outcome::Committed
-    );
-    assert_eq!(
-        primitive(
-            &async_host,
-            &store,
-            old,
-            1 << 20,
-            RefWriteCondition::Missing
-        )
-        .await
-        .0,
-        Outcome::Committed
-    );
+    let (native_host, native_record) = host(fault).await;
+    let (async_host, async_record) = host(fault).await;
+    seed_pair(&native_host, &async_host, &store, old).await;
+    if matches!(fault, Fault::Sharded) {
+        assert_unrelayed_packmap(&native_host).await;
+        assert_unrelayed_packmap(&async_host).await;
+    }
     clear_record(&native_record);
     clear_record(&async_record);
     assert_eq!(
@@ -608,6 +639,7 @@ async fn stale_head_and_append_packmap_match_cli() {
         Outcome::HeadConflict
     );
     assert_same_mutations(&native_record, &async_record);
+    assert_packmap_downloads(&native_record, &async_record);
     clear_record(&native_record);
     clear_record(&async_record);
     assert_eq!(
@@ -634,8 +666,93 @@ async fn stale_head_and_append_packmap_match_cli() {
         Outcome::Committed
     );
     assert_same_mutations(&native_record, &async_record);
+    assert_packmap_downloads(&native_record, &async_record);
     native_host.shutdown().await;
     async_host.shutdown().await;
+}
+
+async fn seed_pair(
+    native: &TestHost,
+    asynchronous: &TestHost,
+    store: &Arc<ObjectStore>,
+    tip: Hash,
+) {
+    assert_eq!(
+        cli(
+            native,
+            store.clone(),
+            tip,
+            1 << 20,
+            RefWriteCondition::Missing
+        )
+        .await,
+        Outcome::Committed
+    );
+    assert_eq!(
+        primitive(
+            asynchronous,
+            store,
+            tip,
+            1 << 20,
+            RefWriteCondition::Missing
+        )
+        .await
+        .0,
+        Outcome::Committed
+    );
+}
+
+async fn assert_unrelayed_packmap(host: &TestHost) {
+    use mkit_core::protocol::{PackKey, Transport, TransportError};
+    let uri = format!("{}/{}", host.base_url(), repository(host))
+        .parse()
+        .expect("valid parity URI");
+    tokio::task::spawn_blocking(move || {
+        let transport = ConnectTransport::connect_for_test_with_signer(
+            uri,
+            Some(Arc::new(TestSigner(KeyPair::from_seed([42; 32])))),
+        );
+        let root = transport
+            .read_ref("refs/mkit/packmap/main")
+            .expect("packmap ref")
+            .expect("packmap exists");
+        let key = PackKey::from_hash(root);
+        assert!(
+            matches!(
+                transport.download_blob(&key),
+                Err(TransportError::PackNotFound)
+            ),
+            "membership relay has not run; the unhinted download must miss"
+        );
+        let bytes = transport
+            .download_blob_via_ref(&key, "refs/heads/main")
+            .expect("ref shard sees packmap");
+        assert_eq!(mkit_core::pack::pack_key(&bytes), root);
+    })
+    .await
+    .expect("probe completes");
+}
+
+fn assert_packmap_downloads(native: &Recorder, asynchronous: &Recorder) {
+    let downloads = |record: &Recorder| {
+        record
+            .calls
+            .lock()
+            .expect("valid parity fixture")
+            .iter()
+            .filter(|call| call.method == "DownloadPack")
+            .map(|call| (call.body.clone(), call.ref_hint.clone()))
+            .collect::<Vec<_>>()
+    };
+    let native = downloads(native);
+    let asynchronous = downloads(asynchronous);
+    assert!(!native.is_empty(), "existing chain was actually read");
+    assert!(
+        native
+            .iter()
+            .all(|(_, hint)| hint.as_deref() == Some("refs/heads/main"))
+    );
+    assert_eq!(native, asynchronous, "download wire and ref-shard hint");
 }
 
 fn clear_record(record: &Recorder) {

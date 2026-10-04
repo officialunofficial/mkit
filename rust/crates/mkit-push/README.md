@@ -19,7 +19,9 @@ commitments, so the host can delete copied protobuf, envelope and ticket logic.
 The transport owns network retry policy and must replay the exact signed
 request while its credential is valid. It must not replace its nonce after an
 ambiguous response loss. It can journal requests before sending them. The
-primitive refreshes credentials only after a definitive pending answer. Its
+primitive refreshes credentials only after a definitive pending answer. A
+post-pending authentication rejection permits one credential refresh to cover
+expiry in transit or server clock lead; repeated rejection returns to the host. Its
 clock supplies epoch milliseconds, secure nonce entropy and async waiting;
 there is no platform clock or sleep in this crate.
 
