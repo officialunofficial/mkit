@@ -121,7 +121,9 @@ in its own workspace, because Cargo does not inherit dependency patches:
 ruzstd = { git = "https://github.com/officialunofficial/mkit", tag = "v0.5.0" }
 ```
 
-Upstreaming is in progress; drop the patch once a ruzstd release includes it.
+Upstream tracking: [KillingSpark/zstd-rs #124, "Refuse blocks that decode past
+Block_Maximum_Size"](https://github.com/KillingSpark/zstd-rs/pull/124) is open. Keep the patch until a released
+version includes the bound; the tracked PR does not establish released coverage.
 
 This crate stays `publish = false`. Consume it as a git dependency pinned to the
 release tag; breaking 0.x changes are called out in CHANGELOG.

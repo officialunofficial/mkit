@@ -102,6 +102,10 @@ Upstreaming of the patch is in progress; the patch will be dropped once a
 ruzstd release includes it. Without it the feature still builds but decodes
 through the unbounded upstream path.
 
+Upstream tracking: [KillingSpark/zstd-rs #124, "Refuse blocks that decode past
+Block_Maximum_Size"](https://github.com/KillingSpark/zstd-rs/pull/124) is open. Keep the patch until a released
+version includes the bound; the tracked PR does not establish released coverage.
+
 ## Object-reader sessions and entry sizes
 
 With `http-objects`, pass one `pipeline::ReaderSession` to

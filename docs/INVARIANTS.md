@@ -1,9 +1,11 @@
 # Invariants
 
-Properties that must always hold across the mkit monorepo, outside any
-single crate or spec. Each entry states the invariant, why it matters, and
-what breaks when it is violated. A regression test enforces each one; find
-it by the file path listed under "Enforced by".
+This enforcement index summarizes properties across the mkit monorepo. The
+linked specs remain authoritative; these entries add code and regression-test
+pointers, not a separate contract. Apply each entry only within its implemented
+profile; storage-only groundwork is labeled explicitly. The
+[SPEC-SERVER profile map](specs/SPEC-SERVER.md#1-scope-and-relation-to-spec-transport-connect)
+distinguishes current enforcement from future integration.
 
 ## In-process object reads retain id-route authority and bounded proofs
 
@@ -702,7 +704,11 @@ without zero-filling the claim; unpack charges the resident budget first.
 The pure-Rust path reads out at most `claim + 1` bytes and never grows the
 reserved output. Its decode window is capped at 8 MiB independently of the
 claim. Vendored ruzstd checks `min(Window_Size, 128 KiB)` before raw/RLE
-materialization and before executing any compressed sequences. Its separate
+materialization and before executing any compressed sequences. The patch is
+tracked by the open [KillingSpark/zstd-rs #124, "Refuse blocks that decode past
+Block_Maximum_Size"](https://github.com/KillingSpark/zstd-rs/pull/124).
+Embedders must repeat `[patch.crates-io]` until a release includes the fix;
+this is vendored enforcement, not released upstream coverage. Its separate
 ring and block scratch have a fixed 28 MiB working allowance, including
 transient old/new ring allocations during growth, outside the owned-payload
 resident cap and the window reader's carry/output budget. Scheduled verification
@@ -1497,29 +1503,21 @@ failing targets precede it; beyond the cap, the cycle resets. Corruption stops
 delivery after its decodable prefix. Coordinator watermarks follow in WP-1.23c;
 writers in WP-1.9/1.10.
 
-## Object-index visibility follows repository membership (writer gate pending)
+<a id="object-index-visibility-follows-repository-membership-writer-gate-pending"></a>
 
-**Always:** an `i` row is visible only while its pack has an `m` row in the
-same repository. For indexed advances, every index row of a consumed pack
-MUST be delivered before the advance commits membership and refs. Until
-delivery finishes, the advance returns `PendingVerification` without a replay
-result. Identical upserts from several sources may target the same index key.
-An index value MUST be a pure function of (pack bytes, entry), so every
-producer writes identical bytes (R-130). §13 GC removes index rows whose
-membership is absent and whose pack has no live ticket; WP-5.3a owns this
-pass. Until it lands, the per-id row cap bounds orphan damage.
+## Object-index visibility follows repository membership
 
-**Because:** relay lag can exceed the §9.4 window. Early index rows are safe
-only while membership keeps them invisible; committing membership first could
-make a later miss look permanent.
+**Always:** index rows alone never grant repository membership. Indexed writers
+finish index delivery before applying membership and refs; unfinished work
+returns `PendingVerification` without a replay result. Identical pack entries
+produce identical index values. Launch runs no orphan-row collector.
 
-**If violated:** closure, delta-base checks, object serving or takedown can
-miss a member or use an object from another repository.
-
-**Enforced by:** `store::index` repository-scoped lookups and conformance
-cases enforce the read-side membership join and isolation. WP-4.7 and WP-4.8
-must enforce the delivery-before-advance gate in their production writers.
-See R-130.
+**Spec:** [SPEC-SERVER §§9.3–9.4](specs/SPEC-SERVER.md#93-verification-obligations)
+and [§18](specs/SPEC-SERVER.md#18-conformance-scope).
+**Enforced by:** [repository-scoped index lookups](../rust/crates/mkit-server/src/store/index.rs),
+[indexed pipeline tests](../rust/crates/mkit-server/src/pipeline/tests/indexed.rs)
+(`ticketed_good_push_commits_after_index_and_bad_pack_leaves_refs_unmoved`,
+`begin_already_present_depends_on_membership_not_index_rows`).
 
 ## Pack reads consult only the named repository's membership
 
@@ -1527,17 +1525,20 @@ See R-130.
 existence, then consult the repository's membership index before opening a
 blob. An optional X-Mkit-Ref checks only the same repository's ref shard;
 invalid, unserved, unknown or overlong hints never cause a public error.
-The hint is outside the auth v2 canonical string. Single reads treat stored
-packs as members. M1 has no quarantined view; later visibility checks must
-constrain both index and hinted answers to the caller's permitted view.
+The hint is outside the auth v2 canonical string. Single's membership helper
+accepts stored packs; Multi indexed reads and hints enforce the caller's current
+live/published view and global denial.
 
 **Because:** blobs may be shared globally, and index relay can lag a write.
 
 **If violated:** pack reads expose another repository's content or make
 malformed hints an existence oracle.
 
-**Enforced by:** store::read::is_member, pipeline pack reads and bounded hint
-parsing, unit call-count/isolation tests and Multi wire membership cases.
+**Spec:** [SPEC-SERVER §§9.4, 10.3](specs/SPEC-SERVER.md#94-repository-isolated-membership-checks).
+**Enforced by:** [pipeline pack reads](../rust/crates/mkit-server/src/pipeline/mod.rs)
+and [indexed hint tests](../rust/crates/mkit-server/src/pipeline/tests/indexed.rs)
+(`d34_ref_hint_obeys_pending_and_held_views_before_membership_relay`), plus Multi
+wire membership cases.
 
 
 ## Every relay source is covered by an epoch lease
@@ -1671,85 +1672,56 @@ entry decompression or retained delta targets.
 maximum-wire-length regressions; live wasm framing tests in
 `apps/web/src/lib/mkit.test.ts`.
 
-## Inspection clearance bounds every reader surface (specified, implementation pending)
+<a id="inspection-clearance-bounds-every-reader-surface-specified-implementation-pending"></a>
 
-**Always:** readers and anonymous callers see only published ref values and
-published repository membership. Every newly reachable file object and every
-file entry in a pack added by an advance is covered by the configured
-inspection obligations or the explicit unavailable-publish policy. A later
-pass cannot skip an earlier held or pending advance. A reused pack from
-another pending advance cannot satisfy published membership, even through
-`X-Mkit-Ref`. Held content is absent to every caller until release or
-takedown replacement; this includes all added content for a hold without
-flagged ids. Every advance after the published pointer through the live
-value remains a GC root in any clearance state; a hit and its replacement
-packs remain rooted through takedown.
+## Inspection clearance bounds every reader surface
 
-**Because:** whole-pack downloads, HTTP, URL tokens, snapshots and caches must
-not expose uninspected or uncleared content, including surplus pack entries.
+**Always:** readers use published refs and membership. Configured launch
+inspection checks every added-pack file entry, including surplus entries,
+before membership apply. Reject/quarantine cannot publish; unavailable results
+cannot enter replay. Async inspection and durable holds are future integration.
 
-**If violated:** a reader can bypass quarantine through an alternate serving
-surface or another ref that reuses pending content.
+**Spec:** [SPEC-SERVER §§10–11](specs/SPEC-SERVER.md#10-published-view), amended by
+[§18](specs/SPEC-SERVER.md#18-conformance-scope).
+**Enforced by:** [inspection regressions](../rust/crates/mkit-server/src/pipeline/tests/indexed/inspection.rs)
+(`complete_set_deduplicates_and_every_inspector_receives_one_batch`,
+`reject_dominates_unavailability_and_does_not_publish`,
+`unavailable_has_no_replay_and_retry_reuses_inspection_id`), plus
+[publication regressions](../rust/crates/mkit-server/src/store/publication_tests.rs).
 
-**Enforced by:** normative SPEC-SERVER §§10–11.
-Runtime enforcement and behavioral conformance remain for WP-5.4/5.5/5.13;
-the current goldens verify the additive hook wire contract only.
+<a id="takedown-denial-precedes-rewrites-specified-implementation-pending"></a>
 
-## Takedown denial precedes rewrites (specified, implementation pending)
+## Takedown denial precedes rewrites
 
-**Always:** a global blocklist write stops extracted and HTTP serving at
-once. Until a repository's takedown completes, chunks of its blocked
-manifest are also unservable, although chunks are not blocklisted.
-Every pack read proves that the pack contains no blocked id or such
-chunk and is not superseded, or answers absent. HTTP reachability does
-not descend through a blocked or tombstoned manifest. The serving stop
-is immediate, independent of holder discovery; the sweep does not
-impose a deployment-wide pack outage. Every blocklist check gating a
-membership, index, or holder write is at or after its `plan_time`.
-After the cut at takedown time plus `MAX_APPLY_WINDOW + margin`, each
-namespace's relay watermark passes the cut before its sweep reads it.
-No replacement or preserved bytes become a serving or delta-base source until
-that repository's guarded rewrite and ref-value substitution complete. Live,
-published and retained intermediate values, membership and ref-addition records
-all name the same replacement packmap after membership becomes visible
-and then ref values are substituted. A hit resolves on its repository's
-completion; the safety-cut sweep and watermark govern completion.
+**Always:** accepted takedown actions deny independently before success. Launch
+retains denial and acquisition/discovery responsibility after preservation;
+rewrite, ref substitution, tombstones and completion notices are future work.
 
-**Because:** a lagging index or an intermediate advance can otherwise serve
-blocked bytes or resurrect a removed pack after a later publication.
-
-**If violated:** a reader or writer can recover taken-down content, or a
-replacement corrupts an unrelated branch's closure.
-
-**Enforced by:** normative SPEC-SERVER §14 and the redaction wire goldens.
-Runtime enforcement remains for the takedown, rewrite, and serving WPs.
+**Spec:** [SPEC-SERVER §§14.2–14.7](specs/SPEC-SERVER.md#142-blocklist) and the
+[§18 launch subset](specs/SPEC-SERVER.md#18-conformance-scope).
+**Enforced by:** [denial](../rust/crates/mkit-server/src/takedown/denial.rs) and
+[activation regressions](../rust/crates/mkit-server/src/takedown/tests.rs)
+(`interrupted_activation_replays_pending_until_every_denial_is_active`), plus
+[preservation tests](../rust/crates/mkit-server/src/takedown/copy_tests.rs).
 
 ## Admin authority and audit continuity (launch foundations)
 
-**Always:** administrative effects require a valid `mkit-admin:v1` signature
-from a key whose deployment-wide roles permit the procedure. A `RENEWAL` or
-`POLICY` change cannot bring lease-derived suspension or deletion earlier
-than the configured minimum notice through any `SetLease` action, and can
-always extend a lease, even while an override suspends the repository. A nonce cannot authorize
-different request bytes, and a repeated long-running operation id cannot
-start a second action. Every authenticated result and automatic redaction,
-release, waiver or purge appends one gapless hash-chained audit entry.
-Unauthenticated attempts never enter the durable log. Pruning preserves a
-checkpoint through the longest active preservation retention.
+**Always:** configured admin routes verify exact signed requests and roles;
+nonce and operation replay cannot start a second action. Authenticated results
+and automatic purge actions extend a gapless audit chain. Unauthenticated
+attempts do not enter that log. Only the §18 catalog is supported; leases,
+inspection review and audit pruning remain future work.
 
-**Because:** lease-only billing authority must not grant moderation power,
-and operators need verifiable evidence of changes that affect serving or
-preserved bytes.
-
-**If violated:** a replay or wrong-role key changes protected content, or a
-missing audit segment conceals an administrative action.
-
-**Enforced by:** `mkit-server/src/admin` authentication, replay ledger and audit
-export, default-off native/Worker mounts, and the existing source relay/root
-apply extension. Automatic purge intent, kind-11 timer and audit event commit
-with the triggering state change; audit append, dedup receipt and watermark
-commit together after source commit. Purge delivery does not await audit.
-Manual purge, review, leases, takedown and pruning consumers remain later work.
+**Spec:** [SPEC-SERVER §§16.1–16.7](specs/SPEC-SERVER.md#16-admin-api-and-audit-log)
+and [§18](specs/SPEC-SERVER.md#18-conformance-scope).
+**Enforced by:** [admin authentication](../rust/crates/mkit-server/src/admin/auth.rs),
+[ledger](../rust/crates/mkit-server/src/admin/ledger.rs) and
+[admin tests](../rust/crates/mkit-server/src/admin/tests.rs)
+(`manual_purge_acceptance_is_durable_and_operation_replay_cannot_duplicate_work`,
+`authenticated_denials_and_audit_reads_extend_gapless_chain`,
+`forged_and_mixed_credentials_cannot_reserve_nonce_or_audit`), plus
+[restricted catalog tests](../rust/crates/mkit-server/src/takedown/admin_tests.rs)
+(`every_operation_is_signed_role_checked_replayed_and_audited`).
 
 ## BeginUpload decisions and replay share the write batch
 
@@ -1770,8 +1742,10 @@ retries charge admission again, or token results disappear with ticket rows.
 (`golden_ticket_token_v1`), `mkit-server/tests/begin_upload_codec.rs`, native
 `tests/begin_upload.rs` (`lifecycle_*`, `caps_*`, `race_*`, `rejected_*`) over
 memory and SQLite (Single and D34), and the wire `tickets.*` cases.
-Kind-2 ticket expiry closes unconsumed tickets; admission Pending/Aborted
-reconciliation and terminal outcome delivery belong to WP-3.3.
+Kind-2 ticket expiry closes unconsumed tickets; current reconciliation and
+terminal delivery are enforced by the [outcome timer](../rust/crates/mkit-server/src/timers/outcome_delivery.rs)
+and [reservation reconciliation](../rust/crates/mkit-server/src/timers/reservation_reconcile.rs), under
+[SPEC-SERVER §5](specs/SPEC-SERVER.md#5-outcomes-lifecycle-events-and-the-outbox).
 
 ## Ticketed advance publishes only completed uploads
 
@@ -2013,80 +1987,59 @@ unsupported cache validation, or reservations for an unservable read.
 
 ## Published refs and durable dependency work (WP-5.4)
 
-**Always:** branch head and packmap publish as one pair at the greatest contiguous
-cleared-or-resolved prefix. Ref deletion establishes a boundary without resetting
-its sequence; late clearance may publish retained membership but cannot resurrect
-an old ref. **Because:** live commits and completed inspection are different
-facts. **If violated:** readers can observe uncleared or resurrected content.
-Enforced by `store/publication.rs` guarded append/clear/prefix and paired RefShard
-planning; out-of-order and deletion/recreation tests assert the boundary.
+**Always:** head and packmap publish together at the greatest contiguous cleared
+prefix. Deletion preserves sequence boundaries. External delta dependencies,
+including those of surplus entries, retain durable recheck work until satisfied;
+own additions do not establish external-base publication. Reader authorization
+precedes published-view selection.
 
-**Always:** inspection-enabled publication accounts for every external source
-used by every consumed entry, including unreachable surplus entries and every
-intermediate source in a delta chain. Own additions never waive external-base
-publication. Blocked advances retain kind-12 work until all dependencies and
-obligations complete; holds/hits cannot auto-clear. **Because:** an inspector Pass
-and live membership do not establish reader-visible dependencies. **If violated:**
-pending content can become public through cross-ref reuse or an external delta.
-Enforced by native MemberCache exports, Scheduled vc6 exports, server pair
-verification and guarded PublicationRecheck. Native surplus and Scheduled
-fault/restart chain tests pin exports; Single/D34 relay/restart tests prove progress
-without client traffic. Paid Worker activation reserves one bounded fire; Free
-retains unknown timers and inspection is not activated there.
-
-**Always:** private-read authorization precedes view selection. Readers use
-published refs/membership; writers retain live refs and pending membership, but
-held bytes are absent to both. **Because:** view classification cannot grant
-permission or turn quarantine into a distribution channel. **If violated:**
-private or held content leaks. Enforced by read_policy, ViewStore and the trusted
-coherent PublicationPolicy serving-stop seam; HTTP and tokens remain anonymous.
-RPC identity/pending/held tests, private token/proof tests and existing authorization
-matrix cover the paths. The actual inspector/flag scheduler and cache purge remain
-WP-5.5c/5.6a responsibilities; this change does not claim their activation.
+**Spec:** [SPEC-SERVER §§10.1–10.3](specs/SPEC-SERVER.md#10-published-view) and
+[§18](specs/SPEC-SERVER.md#18-conformance-scope).
+**Enforced by:** [publication store](../rust/crates/mkit-server/src/store/publication.rs),
+[publication regressions](../rust/crates/mkit-server/src/store/publication_tests.rs)
+(`out_of_order_membership_does_not_skip_the_pointer`,
+`deletion_and_recreation_preserve_sequence_and_old_membership`,
+`own_additions_never_satisfy_an_external_delta_dependency`,
+`d34_delayed_cross_ref_delta_relays_wake_durable_work_after_restart`), and
+[HTTP publication access tests](../rust/crates/mkit-server/src/pipeline/tests/http_objects/publication_access.rs).
+Async inspector scheduling and durable hold integration remain future work.
 
 ## Independent global denial and pending takedown intent (WP-5.6a-1)
 
-**Always:** current V1 rows and every active V2 action keep denying independently;
-accepted intents bind immutable verified descriptors and return success only after
-all denial actions activate. Manifest chunks stop only in repositories holding the
-blocked manifest. Acceptance remains incomplete with preservation pending.
-**Because:** source loss, overlapping actions and stale caches must not undo denial
-or turn acceptance into completion. **If violated:** blocked bytes become reusable
-or a request loses preservation responsibility. **Enforcement work:** ContentIndex V2
-guards, immutable action/inventory pages, fresh pipeline denial checks and audited
-intent activation, including contextual HTTP manifest checks, ticketless closure
-and bounded namespace purge, with source tests and independent reviews. Gate
-exceptions are recorded in the implementation contract; production takedown
-activation remains gated on WP-5.6a-2/3 and launch gates.
+**Always:** current V1 denial rows and each active V2 action deny independently.
+Acceptance binds immutable verified descriptors and activates every denial before
+returning success. Manifest chunks stop in repositories holding that manifest.
+Purge responsibility commits with acceptance/activation and late-holder discovery;
+failed delivery remains owned by durable timer work.
 
-With purge configured, acceptance and late ownership commit timer-11 purge work
-and its automatic audit relay in the same apply as the owning request. Each
-content action activation commits equivalent source-local responsibility with
-its denial descriptor. Whole-repository selectors cover the denied objects,
-proofs and snapshots; timer-15 holder and namespace discovery atomically add
-new repository responsibility with their existing holder-context checkpoint.
-Immediate local invalidation follows acceptance/activation; failed delivery is
-still owned by timer 11. Stable source/action identities and the existing
-holder-context row prevent duplicate discovery purges after acknowledgment.
-Core regression coverage lives in takedown work/late-owner tests; Worker
-configuration is attached by the separate activation lane.
+**Spec:** [SPEC-SERVER §§14.2, 14.7](specs/SPEC-SERVER.md#142-blocklist),
+[§16.7](specs/SPEC-SERVER.md#167-remote-cache-purge) and
+[§18](specs/SPEC-SERVER.md#18-conformance-scope).
+**Enforced by:** [denial](../rust/crates/mkit-server/src/takedown/denial.rs),
+[intent activation](../rust/crates/mkit-server/src/takedown/intent.rs),
+[late-owner tests](../rust/crates/mkit-server/src/takedown/late_owner_tests.rs) and
+[signed replay regressions](../rust/crates/mkit-server/src/takedown/tests.rs)
+(`interrupted_activation_replays_pending_until_every_denial_is_active`,
+`timer15_restart_finalizes_interrupted_signed_acceptance`).
 
 ## Lean preservation cannot imply completed takedown (WP-5.6a-2 contract)
 
-**Always:** accepted requests retain denial and durable acquisition/discovery
-responsibility. Verified restricted copies do not imply final holders or real
-completion. Launch discovery sweeps finite roots (Single: sole Root) after the
-safety cut and relay watermark. Any supports denial/preservation and sweeps
-provable named/known-holder namespaces, never claiming discovery or takedown
-completion without the post-launch catalog. Admin replay stores no preserved bytes, and
-each read freshly checks authority/retention and verifies emitted pieces.
-Per-action purge cannot delete another action's copy or lift denial.
-**Because:** late holders, stale replay and shared preservation storage can lose
-responsibility or expose unverified bytes. **If violated:** completion is false,
-preserved bytes leak, or another action loses evidence. **Enforcement status:**
-normative SPEC-SERVER §18 and R-190; runtime enforcement and regression evidence
-remain required WP-5.6a-2/3 work. PR2 owns copy/retention/hold arbitration; PR3
-owns the restricted admin catalog. Activation stays fixed false in PR2.
+**Always:** verified restricted copies do not establish final holders or completed
+takedown. Discovery waits for the safety cut and relay watermark. Open namespace
+policy never claims exhaustive discovery. Preserved reads freshly verify role,
+retention and emitted pieces; replay contains no preserved bytes. Per-action
+purge cannot delete another action's copy or lift denial.
+
+**Spec:** [SPEC-SERVER §14.7](specs/SPEC-SERVER.md#147-preservation-store) and
+[§18](specs/SPEC-SERVER.md#18-conformance-scope).
+**Enforced by:** [copy tests](../rust/crates/mkit-server/src/takedown/copy_tests.rs),
+[discovery regressions](../rust/crates/mkit-server/src/takedown/discovery_tests.rs)
+(`finite_two_namespace_sweep_waits_for_undelivered_membership_then_unions_sources`,
+`any_streams_one_namespace_candidate_and_never_claims_discovery_complete`), and
+[admin regressions](../rust/crates/mkit-server/src/takedown/admin_tests.rs)
+(`status_keeps_acquisition_verification_discovery_hold_and_completion_separate`,
+`fresh_retry_roles_retention_and_ownership_never_replay_bytes`,
+`signed_hold_commits_with_audit_and_nonce_and_blocks_actual_purge`).
 
 ## External authority revocation fences final acceptance
 
@@ -2153,15 +2106,17 @@ ownership retry does not bump, and changed ownership refuses.
 GC hold expires. Removing that protection can delete an object before its
 durable holder arrives.
 
-**Enforced by:** `ContentIndex::protect_pending_holder` uses guarded fresh
+**Spec:** [SPEC-SERVER §13.4](specs/SPEC-SERVER.md#134-global-byte-deletion).
+**Enforced by:** [content-index safety](../rust/crates/mkit-server/src/store/content_index.rs)
+and [extraction holds](../rust/crates/mkit-server/src/indexed/extract.rs).
+`ContentIndex::protect_pending_holder` uses guarded fresh
 block/deleting observations and NotAfter. `collectable` checks one pending row
 and its final plan guards `c`; unknown pending state closes collection. The
 content relay hook atomically commits holder/count/c changes, ordinary hold and
 exact pending-row release, and the watermark. A late blocked holder retains a
 durable takedown request for WP-5.6a. No permissive release API is exposed.
 
-WP-4.10b-1 keeps Extract fail-closed. WP-4.10b-2 supplies source verification,
-holder enqueue/renewal and the opt-in driver; takedown exposure requires admin
+Extraction verifies sources and enqueues/renews holders; takedown exposure requires admin
 keys, `LAUNCH_PROFILE=paid-workers`, `TAKEDOWN_ENABLED=true`, indexed Paid mode and
 complete §14.7 preservation configuration, with partial configuration refused
 at startup.
@@ -2231,7 +2186,10 @@ R-193 private retrieval.
 **If violated:** unscanned content can publish, retry can bypass inspection, or
 an accepted request can exhaust its Worker budget.
 
-**Enforced by:** the empty-store activation rule is a documented operator
+**Spec:** [SPEC-SERVER §§11, 18](specs/SPEC-SERVER.md#11-quarantine-and-inspection).
+**Enforced by:** [inspection code](../rust/crates/mkit-server/src/indexed/inspection.rs)
+and [inspection tests](../rust/crates/mkit-server/src/pipeline/tests/indexed/inspection.rs).
+The empty-store activation rule is a documented operator
 precondition of the supported launch profile, not a runtime existing-content
 check; there is no durable mode marker at launch. Inspector configuration,
 input limits and verdicts are enforced by `Pipeline::with_inspectors`, `InspectionSet::preflight`,
@@ -2247,7 +2205,7 @@ fit inside the pair allocation. The added-pack inspection set removes
 the earlier role-reconstruction cost; see
 [SPEC-SERVER §18](specs/SPEC-SERVER.md#18-conformance-scope).
 Full classification, async holds and unrestricted multi-batch inspection remain
-deferred to WP-5.5c; the durable marker belongs to WP-5.5a-0.
+future integration; the durable marker is retained storage-only groundwork.
 
 ## Paid launch opt-ins validate before accepting work (WP-4.18 / R-194)
 
@@ -2257,7 +2215,9 @@ leases and GC off. Each HTTP/token, hook, and inspection/retrieval opt-in
 validates its complete configuration and distinct key roles before requests.
 Inspection is synchronous and fail-closed; native accepts at most four
 inspectors. No inspector means no advertised inspection bound. Discovery
-reports false leases/async inspection and empty storage-receipt keys. Worker
+reports false leases/async inspection. Receipt key fields are empty without a
+configured receipt-and-notice key and populated when takedown requires it
+([SPEC-SERVER §15.5](specs/SPEC-SERVER.md#155-signing-key-publication-and-rotation)). Worker
 proof serving remains unsupported. Takedown still refuses activation until
 verified preservation and its complete configured purge interface are wired.
 
@@ -2432,32 +2392,26 @@ selection and CLI config layering. Browser clients keep browser-managed trust.
 
 ## Durable inspection mode and repository flags
 
-**Status:** unintegrated groundwork for future async inspection; no pipeline or
-adapter path uses these stores yet.
+**Status:** storage-only groundwork retained by owner decision. No pipeline or
+adapter installs the marker or flags; launch's empty-store inspection rule is
+an operator precondition, not activation of this storage API.
 
-**Always:** Inspection mode is default-off and one-way: an empty store may
-record `on`; a non-empty unmarked store cannot enable it, and a marked store
-cannot disable it. Each repository flag install or audited release changes its
-monotonic registry version in the same atomic apply as the corresponding flag
-record. Re-installing an unchanged flag is idempotent and does not bump the
-version. **Because:** later inspection work uses the marker to distinguish
-deployments with durable obligations and the version to detect a concurrent
-registry change. **If violated:** existing deployments could acquire inspection
-semantics silently, or a concurrent flag update could be missed. **Enforced by:**
-the core `InspectionMode` and `InspectionFlags` stores, guarded compare-and-swap
-plans and restore/export validation. No server or Worker path installs the
-inspection marker yet; enabling inspection requires an empty store as an
-operator obligation (see the Workers operator guide).
+**Always (storage API):** mode activation is one-way and requires an empty store;
+flag changes atomically bump the registry version, while identical installs do not.
+**Spec:** [SPEC-SERVER §11](specs/SPEC-SERVER.md#11-quarantine-and-inspection) and the
+[§18 integration boundary](specs/SPEC-SERVER.md#18-conformance-scope).
+**Enforced by:** [inspection mode tests](../rust/crates/mkit-server/src/store/tests/inspection_mode.rs)
+and [flag tests](../rust/crates/mkit-server/src/store/inspection_flags_tests.rs).
 
 ## Repository-wide inspection holds
 
-**Status:** unintegrated groundwork for future async inspection; launch creates
-no inspection holds.
+**Status:** retained storage-only groundwork. Launch creates no inspection holds
+or continuations; timer kind 14 remains reserved, with no runtime handler.
 
-**Always:** Every ref's content holds share the canonical repository registry partition.
-A limit-one prefix probe sees any advance's hold under Single and D34. The separate
-ref-level record remains pending until kind-14 pages finish. Release removes only
-its own content rows; its retained released manifest prevents late pages from
-recreating them. The ref-level record is removed after repository cleanup.
-**Because:** ref routing must not hide another advance's serving stop.
-**Enforced by:** cross-ref hold/release, delayed materialization, and restore tests.
+**Always (storage API):** cross-ref holds share the repository partition; release
+removes only its own rows and fences delayed pages before removing the ref record.
+**Spec:** [SPEC-SERVER §§10–11](specs/SPEC-SERVER.md#10-published-view) and
+[§18](specs/SPEC-SERVER.md#18-conformance-scope).
+**Enforced by:** [hold regressions](../rust/crates/mkit-server/src/store/inspection_holds_tests.rs)
+(`repository_wide_cross_ref_holds_and_own_release_in_single_and_d34`,
+`release_fences_delayed_pages_and_preserves_fallback_until_cleanup_in_single_and_d34`).

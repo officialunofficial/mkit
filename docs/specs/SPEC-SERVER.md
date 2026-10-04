@@ -53,6 +53,24 @@ list is configured; without that list its routes are absent.
 For a branch, its head and packmap share one publication sequence even
 when either is written through `UpdateRef` (§10.2).
 
+**Current implementation profile.** This map describes the shipped core and
+Workers adapter; §18 defines their conformance scope. Future full-profile rules
+remain normative for implementations that adopt them. A future collector does
+not weaken today's holder/hold safety, notice-key or admin contracts.
+
+| Status | Behavior and contract |
+|---|---|
+| Implemented | Pipeline admission/outcomes (§§2–8), indexed verification/extraction (§9), paired publication and published reads (§10), and optional bounded synchronous inspection (§11, amended by §18). Publication verification retains its documented fail-closed limits. |
+| Implemented, opt-in | Immediate takedown denial, verified preservation and durable discovery (§14, launch subset in §18); notice-key publication (§15.5); signed admin/replay, audit and purge (§16, restricted catalog in §18). Acceptance/preservation does not mean completed takedown. |
+| Implemented safety groundwork | Content holders, pending-holder protection, extraction holds and deadlines derived from §13.4. Launch retains bytes permanently and runs no collector. |
+| Retained, unintegrated groundwork | `store::inspection_mode`, `inspection_flags` and `inspection_holds`, plus reserved timer kind 14. Kept by owner decision; neither pipeline nor adapter installs these records or runs their continuations. Storage tests do not establish async-inspection support. |
+| Future integration | Async inspection/holds/review (§§10–11), leases and lifecycle Events (§12), GC (§13), takedown rewrite/substitution/completion/notices (§14), and storage receipt issuance (§15). |
+| Future deployment facilities | Edge caching and the exhaustive namespace catalog. Current purge delivery and known-holder/finite-root discovery remain implemented; discovery under open namespace policy remains incomplete (§18). |
+
+The hosted embedding acceptance selects Paid/indexed/D34, in-process hooks and
+URL tokens, with takedown off and no inspection. Single/Free remains supported;
+optional capabilities require their own configuration and enforcement evidence.
+
 ### Storage adapter boundary
 
 `mkit-server` defines the engine-neutral `NamespaceStore` contract. The
@@ -3961,8 +3979,9 @@ separation at startup. Takedown MUST refuse activation without §14.7's
 preservation store, explicit retention and preservation signing key, and a
 configured purge sink; an embedder MAY provide a custom purge sink and local
 invalidation. A server MUST NOT advertise proof serving it does not implement;
-native proof serving is documented only when its HTTP mount is enabled. No new
-profile/proof wire field is implied. Selecting the profile, its configuration
+the shipped native and Worker HTTP handlers refuse permitted proof queries with
+416 as specified by [SPEC-HTTP-OBJECTS §3](SPEC-HTTP-OBJECTS.md#3-response-precedence).
+No new profile/proof wire field is implied. Selecting the profile, its configuration
 names, platform requirements and deployment procedure belong to the
 deployment's operator documentation; the Cloudflare Workers adapter's are in
 [the Workers operator guide](../operations/workers.md).

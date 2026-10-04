@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- Align the server profile map and invariant enforcement index with implemented
+  publication, synchronous inspection, denial, preservation and admin behavior.
+  Retain async-inspection storage groundwork and distinguish future integration.
+- Track the bounded ruzstd patch in
+  [KillingSpark/zstd-rs #124](https://github.com/KillingSpark/zstd-rs/pull/124),
+  "Refuse blocks that decode past Block_Maximum_Size". Embedders still require
+  their workspace `[patch.crates-io]` until a release includes the fix.
+
 ### CI
 
 - Hosted Linux gates run the isolated pure-Rust scheduled decoder heap bound.
@@ -206,8 +216,9 @@ stored shapes instead of upgrading or downgrading them.
   not implemented; SPEC-WRITE-GRANTS §9.4 requires server-clock visibility
   change times independently of statement anti-replay ordering.
 - The `pack-ruzstd` feature relies on a bounded-decode patch to ruzstd 0.9
-  that crates.io consumers must apply in their own workspace until upstream
-  releases it: `[patch.crates-io] ruzstd = { git =
+  tracked by [KillingSpark/zstd-rs #124](https://github.com/KillingSpark/zstd-rs/pull/124),
+  "Refuse blocks that decode past Block_Maximum_Size", still open.
+  Crates.io consumers must apply it in their own workspace until a release includes it: `[patch.crates-io] ruzstd = { git =
   "https://github.com/officialunofficial/mkit", tag = "v0.5.0" }`. Upstreaming
   is in progress.
 
@@ -815,8 +826,9 @@ published to crates.io for the first time; `mkit-cli` depends on it.
   catalog; the launch build enables R-203’s bounded pure-Rust zstd decoder.
   Worker HTTP mounts retain read settlement in the fetch context; ticket and
   implicit packmap checks use at most six simultaneous backend responses.
-  Added local conformance/evidence skeleton; complete runtime evidence and
-  preservation integration remains pending phase 2.
+  Added local conformance/evidence skeleton. Preservation and the restricted
+  catalog are integrated; deployed CPU and whole-isolate memory evidence remain
+  operator acceptance work.
 
 - Worker embedding (supported, 0.x): combine programmatic configuration,
   published snapshots, custom Outcome and purge sinks in `NsObjectBuilder`;
