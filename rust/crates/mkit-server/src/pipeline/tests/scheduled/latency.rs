@@ -200,6 +200,23 @@ fn assert_timeline(env: &Env, events: &Events, ticket: Hash, pack_id: Hash) {
             && event.get("attempt") == Some(&"0".to_owned())
             && event.get("outcome") == Some(&"committed".to_owned())
     }));
+    let entry = logs
+        .iter()
+        .position(|event| {
+            event
+                .get("event")
+                .is_some_and(|s| s == "verification_timer_entry")
+        })
+        .unwrap();
+    let loaded = logs
+        .iter()
+        .position(|event| {
+            event
+                .get("event")
+                .is_some_and(|s| s == "verification_slice_start")
+        })
+        .unwrap();
+    assert!(entry < loaded, "fire entry precedes the job read");
     let metrics = env.metrics.0.lock().unwrap();
     let stages: Vec<_> = metrics
         .iter()
