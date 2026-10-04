@@ -20,6 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The paid-profile reference fixture uses neutral embedding names throughout
+  code, scripts and CI. Use `apps/embedded-worker/tests/embedding-conformance`,
+  the admin harness flag `--embedded`, cases `embedding.public_fixture` and
+  `embedding.multipart_file_readback`, markers `MKIT_EMBED_*` and the fixture
+  switch `FIXTURE_OUTCOME_FAIL`. Update local example routes to
+  `/_embedding/mkit/` and `/_embedding/operator`. Acceptance coverage and
+  embedder APIs are unchanged.
+
 - Scheduled verification emits correlated upload, job, alarm, phase, delivery,
   readiness and ref-commit telemetry through the Worker console. Relay delivery
   nudges a bounded set of waiting timers while retaining the recovery poll.
@@ -41,7 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### CI
 
 - Hosted Linux gates run the isolated pure-Rust scheduled decoder heap bound.
-  Workers CI builds the locked Uno wasm fixture, checks both patched launch
+  Workers CI builds the locked embedding wasm fixture, checks both patched launch
   graphs, runs wasm decoder regressions, and requires paid indexed publication,
   URL-token reads, supplied hooks, cold outcome retry and injected slice recovery.
 
@@ -209,7 +217,7 @@ stored shapes instead of upgrading or downgrading them.
   are removed. Nothing enabled them by default. `timers::registry::kinds::PUBLISHED_VIEW`
   is removed and timer kind 10 stays reserved. `embedding_pipeline` and
   `purge::LocalCache` no longer carry snapshot parameters.
-- The deprecated `LAUNCH_PROFILE=uno` alias is removed; use
+- The production embedder's deprecated profile alias is removed; use
   `LAUNCH_PROFILE=paid-workers`.
 - The never-set `PipelineConfig::inspection_mode` and
   `WorkerConfig::inspection_mode` fields and the no-op Worker inspection

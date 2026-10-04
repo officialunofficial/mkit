@@ -18,7 +18,10 @@ struct HostAuthorize {
 impl Authorizer for HostAuthorize {
     async fn authorize(&self, op: &Operation) -> core::result::Result<AuthzFacts, ServerError> {
         // Multi owner/grant enforcement already established these facts.
-        worker::console_log!("MKIT_UNO_STAGE authorize {}", op.procedure().connect_path());
+        worker::console_log!(
+            "MKIT_EMBED_STAGE authorize {}",
+            op.procedure().connect_path()
+        );
         let mut facts = op.authz.clone();
         if self.fenced {
             facts.authority_generation = Some(0);
@@ -33,14 +36,14 @@ impl Admission for HostAdmit {
         input: &AdmissionInput<'_>,
     ) -> core::result::Result<AdmissionDecision, ServerError> {
         worker::console_log!(
-            "MKIT_UNO_STAGE admit {}",
+            "MKIT_EMBED_STAGE admit {}",
             input.op.procedure().connect_path()
         );
         // This fixed local pricing example challenges the dedicated 13-byte probe.
         if input.op.procedure() == Procedure::BeginUpload && input.declared_bytes == 13 {
             return Ok(AdmissionDecision::challenge(
                 vec![Challenge {
-                    scheme: "uno-local".into(),
+                    scheme: "embedding-local".into(),
                     value: "fixture".into(),
                 }],
                 "local acceptance payment challenge",
@@ -49,13 +52,13 @@ impl Admission for HostAdmit {
         if matches!(input.op.procedure(), Procedure::HttpGetObject) {
             let paid = input.credential_headers.iter().any(|h| {
                 h.name.eq_ignore_ascii_case("authorization")
-                    && h.value.expose() == "Payment uno-fixture"
+                    && h.value.expose() == "Payment embedding-fixture"
             });
             if !paid {
                 return Ok(AdmissionDecision::challenge(
                     vec![Challenge {
-                        scheme: "uno-local".into(),
-                        value: "uno-fixture".into(),
+                        scheme: "embedding-local".into(),
+                        value: "embedding-fixture".into(),
                     }],
                     "local read payment challenge",
                 ));
@@ -66,7 +69,7 @@ impl Admission for HostAdmit {
                 counter.set(next);
                 next
             });
-            let reservation = format!("uno-read:{serial}");
+            let reservation = format!("embedding-read:{serial}");
             return Ok(AdmissionDecision::allow(Vec::new())
                 .with_reservation(&reservation)
                 .with_response_header("Payment-Receipt", reservation));
@@ -95,7 +98,11 @@ impl OutcomeSink for HostOutcome {
             _ => "other",
         };
         if self.fail_committed && matches!(outcome.kind, OutcomeKind::Committed { .. }) {
-            worker::console_log!("MKIT_UNO_OUTCOME_RETRY {} {}", kind, outcome.reservation_id);
+            worker::console_log!(
+                "MKIT_EMBED_OUTCOME_RETRY {} {}",
+                kind,
+                outcome.reservation_id
+            );
             return Err(DeliveryError::new(
                 "local fixture sink unavailable",
                 Some(std::time::Duration::from_secs(60)),
@@ -106,7 +113,7 @@ impl OutcomeSink for HostOutcome {
             _ => 0,
         };
         worker::console_log!(
-            "MKIT_UNO_OUTCOME {} {} {}",
+            "MKIT_EMBED_OUTCOME {} {} {}",
             kind,
             outcome.reservation_id,
             bytes
@@ -125,7 +132,7 @@ impl PurgeSink for HostPurge {
             // This callback acknowledges only that local work, not deployed CDN purge.
             // It performs no additional physical cache/API calls.
             request.validate()?;
-            worker::console_log!("MKIT_UNO_PURGE delivered");
+            worker::console_log!("MKIT_EMBED_PURGE delivered");
             Ok(())
         })
     }
@@ -133,9 +140,7 @@ impl PurgeSink for HostPurge {
 fn config(env: &Env) -> core::result::Result<WorkerConfig, ConfigError> {
     let purge = PurgeHooks::new(
         Arc::new(HostPurge),
-        Arc::new(LocalCache {
-            cache: WorkerCache,
-        }),
+        Arc::new(LocalCache { cache: WorkerCache }),
     );
     let capabilities = HookCapabilities {
         authorizer: Some(
@@ -171,7 +176,7 @@ fn hooks(env: &Env, cfg: &WorkerConfig) -> core::result::Result<HostHooks, Confi
 fn sink(env: &Env, _: &WorkerConfig) -> core::result::Result<HostOutcome, ConfigError> {
     Ok(HostOutcome {
         fail_committed: env
-            .var("UNO_FIXTURE_OUTCOME_FAIL")
+            .var("FIXTURE_OUTCOME_FAIL")
             .is_ok_and(|v| v.to_string() == "true"),
     })
 }
@@ -180,13 +185,13 @@ mkit_server_worker::durable_objects!(config, sink);
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
     std::panic::set_hook(Box::new(|info| {
-        worker::console_error!("MKIT_UNO_PANIC {info}")
+        worker::console_error!("MKIT_EMBED_PANIC {info}")
     }));
     let mut cfg = config(&env)
-        .map_err(|_| worker::Error::RustError("Uno fixture configuration refused".into()))?;
+        .map_err(|_| worker::Error::RustError("Embedding fixture configuration refused".into()))?;
     cfg.http_mount = cfg.http_mount.take().map(|mount| mount.with_context(ctx));
     let path = req.path();
-    let internal_admin = path.strip_prefix("/_uno/operator");
+    let internal_admin = path.strip_prefix("/_embedding/operator");
     if path.starts_with("/mkit.server.admin.v1/") {
         return Response::error("public admin route absent", 404);
     }
@@ -200,7 +205,7 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
         .query()
         .map_or_else(String::new, |raw| format!("?{raw}"));
     let request = Request::new_with_init(
-        &format!("https://uno.internal.invalid{target}{query}"),
+        &format!("https://embedding.internal.invalid{target}{query}"),
         &init,
     )?;
     if internal_admin.is_some() {

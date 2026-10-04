@@ -1,4 +1,4 @@
-// Run a built Uno fixture directly, without Wrangler's local HTTP proxy.
+// Run a built embedding fixture directly, without Wrangler's local HTTP proxy.
 // MKIT_MINIFLARE_MODULE pins the installed SDK; no automatic download.
 import {readFileSync, writeFileSync, existsSync} from 'node:fs';
 import {createRequire} from 'node:module';

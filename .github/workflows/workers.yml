@@ -466,7 +466,7 @@ jobs:
         with:
           workspaces: |
             rust -> rust/target
-            apps/embedded-worker/tests/uno-launch -> apps/embedded-worker/tests/uno-launch/target
+            apps/embedded-worker/tests/embedding-conformance -> apps/embedded-worker/tests/embedding-conformance/target
           prefix-key: paid-acceptance
           cache-on-failure: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -487,8 +487,8 @@ jobs:
       - name: Bounded decoder on wasm32
         timeout-minutes: 10
         run: time bash scripts/wasm-ruzstd-check.sh
-      - name: Locked wasm release build of Uno fixture
-        working-directory: apps/embedded-worker/tests/uno-launch
+      - name: Locked wasm release build of embedding fixture
+        working-directory: apps/embedded-worker/tests/embedding-conformance
         timeout-minutes: 10
         run: cargo build --locked --release --target wasm32-unknown-unknown
       - name: Release push, published read, URL token and cold outcome retry
