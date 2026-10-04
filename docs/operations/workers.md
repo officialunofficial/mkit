@@ -33,6 +33,18 @@ launch profile without naming a platform. On Workers it means:
   supply a `PurgeSink` and local invalidation instead.
 - Worker HTTP proofs (`?proof=1`) are unsupported and are not advertised.
 
+## Hosted acceptance
+
+Workers CI requires a locked wasm build of the Uno embedding fixture and a local
+paid indexed launch flow with supplied hooks, published object reads, URL tokens
+and cold outcome retry. Takedown is off and inspection is unconfigured in this
+flow. A separate fault-enabled scenario requires an interrupted verification
+slice to resume and commit. Both retain failure diagnostics; the existing Free
+and single-sharding wire suites still run. The launch graph guard verifies that
+both independent workspaces resolve the patched pure-Rust decoder, and the wasm
+decoder harness exercises 32-bit framing. Cloud Build separately runs the ignored
+scheduled verifier heap regression with only `memory,pack-ruzstd` enabled.
+
 ## Build and deploy
 
 Start with [the reference config](../../apps/vcs-worker/wrangler.jsonc) and

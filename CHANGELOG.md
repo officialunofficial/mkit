@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### CI
+
+- Hosted Linux gates run the isolated pure-Rust scheduled decoder heap bound.
+  Workers CI builds the locked Uno wasm fixture, checks both patched launch
+  graphs, runs wasm decoder regressions, and requires paid indexed publication,
+  URL-token reads, supplied hooks, cold outcome retry and injected slice recovery.
+
 ### Breaking (toward 0.6)
 
 - Storage layout modules `store::{keys, codec, index, tickets, outbox,
