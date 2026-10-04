@@ -571,7 +571,7 @@ fn seven_distinct_signers_and_relay_targets_fit_with_twenty_six_shared_operation
                     new: Some([3; 32]),
                     deleted: false,
                 }],
-                procedure: None,
+                procedure: crate::store::codec::StoredProcedure::UpdateRef,
             })
             .unwrap(),
         );

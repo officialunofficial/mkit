@@ -1,11 +1,11 @@
-//! Pure unit tests: value mapping, the migration list, and the statement
+//! Pure unit tests: value mapping, the current bootstrap, and the statement
 //! texts. Engine-backed tests live with the engine's host.
 
 use super::kv::{
     DELETE, GET, PROBE, PUT, SCAN_AFTER, SCAN_FROM, STATS, TIMER_WINDOW_AFTER, TIMER_WINDOW_START,
     get_many_sql,
 };
-use super::schema::{BOOTSTRAP, MIGRATIONS, SCHEMA_VERSION};
+use super::schema::{BOOTSTRAP, SCHEMA_VERSION};
 use super::*;
 
 /// Transaction-control keywords, assembled so this file never contains
@@ -47,14 +47,9 @@ fn statements() -> Vec<String> {
         TIMER_WINDOW_AFTER,
     ]
     .iter()
-    .chain(core::iter::once(&BOOTSTRAP))
+    .chain(BOOTSTRAP.iter())
     .map(|s| (*s).to_owned())
     .collect();
-    all.extend(
-        MIGRATIONS
-            .iter()
-            .flat_map(|m| m.statements.iter().map(|s| (*s).to_owned())),
-    );
     all.extend((1..=GET_MANY_CHUNK).map(get_many_sql));
     all
 }
@@ -103,19 +98,15 @@ fn every_statement_stays_within_bound_parameter_limit() {
 }
 
 #[test]
-fn migrations_are_ascending_unique_and_portable() {
-    let versions: Vec<u32> = MIGRATIONS.iter().map(|m| m.version).collect();
-    assert!(versions.windows(2).all(|w| w[0] < w[1]), "{versions:?}");
-    assert_eq!(versions.first(), Some(&1));
-    assert_eq!(versions.last(), Some(&SCHEMA_VERSION));
-    for m in MIGRATIONS {
-        assert!(!m.statements.is_empty());
-        for sql in m.statements {
-            let upper = sql.to_uppercase();
-            assert!(upper.contains("IF NOT EXISTS"), "not idempotent: {sql}");
-            for banned in ["PRAGMA", "ATTACH"] {
-                assert!(!upper.contains(banned), "{banned} in {sql}");
-            }
+fn bootstrap_has_current_table_timer_index_and_marker() {
+    assert_eq!(BOOTSTRAP.len(), 3);
+    assert!(BOOTSTRAP[0].starts_with("CREATE TABLE mkit_schema"));
+    assert!(BOOTSTRAP[1].starts_with("CREATE TABLE kv"));
+    assert!(BOOTSTRAP[2].starts_with("CREATE INDEX kv_timers"));
+    assert_eq!(SCHEMA_VERSION, 2);
+    for sql in BOOTSTRAP {
+        for banned in ["PRAGMA", "ATTACH"] {
+            assert!(!sql.to_uppercase().contains(banned), "{banned} in {sql}");
         }
     }
 }
@@ -179,7 +170,7 @@ fn reserve_formula() {
 
 #[test]
 fn timer_window_predicate_matches_partial_index() {
-    let index = MIGRATIONS[1].statements[0];
+    let index = BOOTSTRAP[2];
     let predicate = index.split_once("WHERE ").unwrap().1;
     for sql in [TIMER_WINDOW_START, TIMER_WINDOW_AFTER] {
         assert!(sql.contains(predicate));
@@ -207,6 +198,8 @@ impl SqlConn for TimerProbe {
                 .unwrap()
                 .push((sql.to_owned(), params.to_vec()));
             Ok(self.rows.lock().unwrap().clone())
+        } else if sql.contains("name IN") {
+            Ok(vec![vec![SqlValue::Integer(1)]; BOOTSTRAP.len()])
         } else {
             Ok(vec![vec![SqlValue::Integer(i64::from(SCHEMA_VERSION))]])
         }

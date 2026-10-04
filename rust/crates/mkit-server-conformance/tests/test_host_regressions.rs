@@ -104,6 +104,7 @@ async fn pending_outcome_sink_returns_a_bounded_error_and_retains_work() {
         0,
         0,
         Vec::new(),
+        mkit_server::store::StoredProcedure::UpdateRef,
     ))
     .unwrap();
     let mut outbox = outbox::OutboxBuilder::new(None, None).unwrap();

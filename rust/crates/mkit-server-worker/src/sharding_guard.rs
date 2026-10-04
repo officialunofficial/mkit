@@ -51,7 +51,7 @@ pub enum Outcome {
         /// Mode requested by this deployment.
         configured: Sharding,
     },
-    /// The `am` marker (or unmarked single data) names a different addressing.
+    /// The `am` marker names a different addressing.
     AddressingMismatch {
         /// Addressing in storage.
         stored: AddressingMode,
@@ -283,11 +283,11 @@ fn compare_addressing(observed: &Value, configured: AddressingMode) -> Outcome {
 }
 
 /// Run one request's independent addressing-marker check with its own store
-/// handle. An absent `am` marker is legacy only when the root holds committed
-/// data: the layout-version row every first write installs. The housekeeping
-/// rows the object writes before or without one (`sm`, `bk` backup state,
-/// `w` timers) say nothing about addressing and are never data. At most
-/// three calls: get, get, apply. A failed Absent uses its observation.
+/// handle. A root with committed data (the layout-version row) must have an
+/// `am` marker. Housekeeping rows (`sm`, `bk` backup state, `w` timers) may
+/// precede addressing bootstrap and do not establish an addressing mode.
+/// At most two calls: get, apply. Ordered atomic absence checks distinguish a
+/// concurrent marker from committed data without one.
 ///
 /// # Errors
 /// Backend errors are returned separately from definitive marker outcomes.
@@ -305,22 +305,18 @@ pub async fn check_addressing<S: NamespaceStore>(
     if let Some(observed) = store.get(&root, &marker).await? {
         return Ok(compare_addressing(&observed, configured));
     }
-    if multi && store.get(&root, &keys::layout_version()).await?.is_some() {
-        return Ok(Outcome::AddressingMismatch {
-            stored: AddressingMode::Single,
-            configured,
-        });
-    }
     let batch = Batch::new()
         .require(Precondition::Absent(marker.clone()))
+        .require(Precondition::Absent(keys::layout_version()))
         .put(marker, Value::new(configured.name().as_bytes().to_vec()));
     Ok(match store.apply(&root, batch).await? {
         BatchOutcome::Committed => Outcome::Ok,
         BatchOutcome::PreconditionFailed {
+            index: 0,
             observed: Some(value),
-            ..
         } => compare_addressing(&value, configured),
-        BatchOutcome::PreconditionFailed { observed: None, .. }
-        | BatchOutcome::DeadlinePassed { .. } => Outcome::AddressingCorrupt,
+        BatchOutcome::PreconditionFailed { .. } | BatchOutcome::DeadlinePassed { .. } => {
+            Outcome::AddressingCorrupt
+        }
     })
 }

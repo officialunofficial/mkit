@@ -98,7 +98,12 @@ but namespace/repository/global completion cannot be inferred.
 Retain all five SQLite Durable Object classes and their migrations:
 `v1` creates `RefStore`; `v2` creates `NsCoordinator`, `RefShard`,
 `RepoIndexShard` and `ContentIndexShard`. Wrangler migrations provision classes;
-they do not migrate unsupported pre-launch data.
+they do not migrate unsupported pre-launch data. Each fresh SQL store atomically
+creates the current `kv` table, `kv_timers` index and schema marker. Reopen
+requires the current schema; wrong versions and incomplete schemas are refused.
+Reset unsupported stores. A populated root without its addressing marker is
+also refused; backup/timer/sharding housekeeping may precede a fresh marker.
+Purge resumes only four-byte path cursors or an empty initial checkpoint.
 
 | Binding | Class / purpose |
 |---|---|

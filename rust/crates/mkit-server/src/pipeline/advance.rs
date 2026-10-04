@@ -238,7 +238,7 @@ pub(super) fn plan_consumption(
                 // Opaque M1 has no global content index; this is an upper bound (WP-3.3).
                 new_to_store: t.bytes,
                 refs: outcome_refs.clone(),
-                procedure: Some(StoredProcedure::AdvanceRefs),
+                procedure: StoredProcedure::AdvanceRefs,
             })
             .map_err(meta_error)?,
         );
@@ -425,7 +425,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                         occurred_at_ms: now,
                         reason: AbortReason::PackMissing,
                         detail: "ticket pack missing after upload".into(),
-                        procedure: Some(StoredProcedure::AdvanceRefs),
+                        procedure: StoredProcedure::AdvanceRefs,
                     })
                     .map_err(meta_error)?,
                 );

@@ -53,7 +53,7 @@ pub(super) fn shared_chunk_stop() -> (Fx, Hash, Hash, Hash, String) {
                 visibility: codec::StoredVisibility::Public,
                 last_created_ms: 0,
                 last_statement_id: None,
-                changed_ms: None,
+                changed_ms: 0,
             }),
         ),
     ))

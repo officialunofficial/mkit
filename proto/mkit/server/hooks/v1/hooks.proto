@@ -354,8 +354,8 @@ message Outcome {
     RepoStorageChanged repo_storage_changed = 11;
   }
   // Full Connect procedure path of the operation that produced the outcome.
-  // Absent only for an outcome recorded before the server stored it (rows
-  // written by v0.5.0); SPEC-SERVER §6.5.
+  // Request outcomes identify their operation; expired tickets derive BeginUpload.
+  // System RepoStorageChanged outcomes omit it; SPEC-SERVER §6.5.
   string procedure = 9;
   // "public" or "private": the visibility a SetRepoVisibility outcome set or
   // attempted; absent for every other outcome; SPEC-SERVER §6.5.
