@@ -771,9 +771,12 @@ Persistent sink failure grows the outbox backlog. The core's
 `OutboxBacklogCap` defaults to 100,000 rows and 64 MiB per outbox. Its
 admission check refuses reservation-granting writes and admitted HTTP reads
 when `rows > cap.rows || bytes > cap.bytes`; equality is still admitted.
-The error is `unavailable` (HTTP 503), public message `outbox backlog; retry`,
-with `Retry-After: 30`. This check does not undo prior commits. Embedders
-should monitor `mkit_server_outbox_backlog`, with `unit=rows` and `unit=bytes`
+Reservation-granting writes receive `unavailable` (HTTP 503), public message
+`outbox backlog; retry`, with `Retry-After: 30`. Admitted HTTP-object reads
+receive an empty HTTP 503 without that message or retry header. A real
+public-to-private visibility change remains admitted above the cap;
+same-value visibility requests are not exempt. This check does not undo
+prior commits. Embedders should monitor `mkit_server_outbox_backlog`, with `unit=rows` and `unit=bytes`
 labels per `shard_kind`, and restore the sink before the configured cap is
 exceeded.
 

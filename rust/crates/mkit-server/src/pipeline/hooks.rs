@@ -316,10 +316,13 @@ use super::durable_outcome::{DeliveryError, Outcome};
 /// Persistent failures grow the backlog. With the default
 /// [`super::PipelineConfig::outbox_backlog_cap`], admission is refused once
 /// rows exceed 100,000 or bytes exceed 64 MiB (equality is still admitted).
-/// Reservation-granting writes and admitted HTTP reads then see
-/// `unavailable` / HTTP 503, message `outbox backlog; retry`, and
-/// `Retry-After: 30`. This admission check precedes the operation's commit;
-/// it does not undo earlier commits. Monitor `mkit_server_outbox_backlog`
+/// Reservation-granting writes then see `unavailable` / HTTP 503, message
+/// `outbox backlog; retry`, and `Retry-After: 30`. Admitted HTTP-object reads
+/// return an empty HTTP 503 without that message or retry header. A real
+/// public-to-private visibility change remains admitted above the cap;
+/// same-value visibility requests are not exempt. This admission check
+/// precedes the operation's commit; it does not undo earlier commits.
+/// Monitor `mkit_server_outbox_backlog`
 /// with its `unit=rows` and `unit=bytes` labels per `shard_kind`.
 pub trait OutcomeSink: MaybeSend + MaybeSync {
     /// Deliver one terminal outcome. Every error leaves it queued for retry.

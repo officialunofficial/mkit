@@ -347,9 +347,12 @@ Monitor `mkit_server_outbox_backlog` with `unit=rows` and `unit=bytes` per
 `shard_kind`. Persistent failures can trigger `OutboxBacklogCap`, whose core
 default is 100,000 rows / 64 MiB per outbox. Backpressure starts only when
 `rows > cap.rows || bytes > cap.bytes`; equality is still admitted. New
-reservation-granting writes and admitted HTTP reads then return `unavailable`
-(HTTP 503), `outbox backlog; retry`, and `Retry-After: 30`. Restore the receiver
-and drain the queued rows to resume admission; earlier commits remain durable.
+reservation-granting writes then return `unavailable` (HTTP 503),
+`outbox backlog; retry`, and `Retry-After: 30`. Admitted HTTP-object reads return
+an empty HTTP 503 without that message or retry header. A real public-to-private
+visibility change remains admitted above the cap; same-value visibility requests
+are not exempt. Restore the receiver and drain the queued rows to resume
+admission; earlier commits remain durable.
 Reconciliation can use `Pipeline::repo_storage_many` for up to
 100 names in one namespace with one coordinator `get_many` and per-repository
 owner authorization; missing and unauthorized names both yield `None`.
