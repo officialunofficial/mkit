@@ -405,6 +405,9 @@ jobs:
       - name: Install worker-build
         run: cargo install worker-build --locked --version 0.8.6
 
+      - name: Install independent admin signer hash tool
+        run: cargo install b3sum --locked --version 1.8.5
+
       # D34 is the default sharding (WP-1.28c); the explicit single phase
       # keeps the snapshot round-trip and single-sharding growth coverage.
       - name: Create diagnostic log directory

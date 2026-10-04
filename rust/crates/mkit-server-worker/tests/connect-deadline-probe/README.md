@@ -3,7 +3,8 @@
 Run `just ci-connect-deadlines` from the repository root. The probe builds a
 locked wasm release and uses the existing Workers harness's pinned local
 Wrangler/workerd, artifact checks, startup wait and owned-process cleanup. It
-needs Rust with the wasm32 target, worker-build, Node, npx and b3sum. It never
+needs Rust with the wasm32 target, worker-build, Node, npx and b3sum 1.8.5
+(`cargo install b3sum --locked --version 1.8.5`). It never
 contacts a cloud account; fresh R2 and Durable Object state stays in TMPDIR.
 The Workers wire-conformance CI job runs the same regression.
 

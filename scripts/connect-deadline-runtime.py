@@ -5,6 +5,7 @@ import base64
 import importlib.util
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -65,12 +66,14 @@ def main():
     source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     if subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True):
         raise RuntimeError("commit the candidate first; deadline evidence requires a clean worktree")
+    if shutil.which("b3sum", path=env.get("PATH")) is None:
+        raise RuntimeError("independent admin signer requires b3sum; install b3sum 1.8.5")
+    keys = json.loads(subprocess.check_output(["node", str(SIGNER), "keys"], env=env, text=True))
     if not args.no_build:
         with (work / "build.log").open("w") as log:
             subprocess.run(["worker-build", "--release", "--locked"], cwd=APP, env=env,
                            stdout=log, stderr=log, check=True)
     artifacts = harness.artifact_hashes(APP)
-    keys = json.loads(subprocess.check_output(["node", str(SIGNER), "keys"], text=True))
     classes = [("REFSTORE", "RefStore"), ("NS_COORD", "NsCoordinator"), ("REF_SHARD", "RefShard"),
                ("REPO_INDEX", "RepoIndexShard"), ("CONTENT_INDEX", "ContentIndexShard")]
     config = {"name": "mkit-connect-deadline-probe", "main": str(APP / "build/worker/shim.mjs"),

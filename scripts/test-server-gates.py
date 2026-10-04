@@ -69,6 +69,11 @@ class ServerGates(unittest.TestCase):
         conformance = section(yaml, "vcs-worker-conformance:")
         self.assertEqual(conformance.count("if:"), 2, "wire scenarios must not be conditionally skipped")
         self.assertNotIn("continue-on-error", conformance)
+        signer_tool = "cargo install b3sum --locked --version 1.8.5"
+        deadline_test = "python3 scripts/connect-deadline-runtime.py"
+        self.assertIn(signer_tool, conformance)
+        self.assertIn(deadline_test, conformance)
+        self.assertLess(conformance.index(signer_tool), conformance.index(deadline_test))
         self.assertIn("timeout-minutes: 20", section(conformance, "- name: Paid indexed slice failure, resume and commit"))
         self.assertIn("run: scripts/vcs-worker-conformance.sh --indexed-only", conformance)
         self.assertIn("run: scripts/vcs-worker-conformance.sh --test-faults --sharding single", conformance)
