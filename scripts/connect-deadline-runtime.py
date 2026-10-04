@@ -38,6 +38,18 @@ def request(origin, path, headers, body=b"{}", content_type="application/json"):
         return response.status, response.read(), response.headers
 
 
+def check_audit_stream(raw):
+    frames = []
+    while raw:
+        assert len(raw) >= 5, "truncated admin stream frame"
+        flags, size = raw[0], int.from_bytes(raw[1:5], "big")
+        assert flags in (0, 2) and size <= len(raw) - 5, "invalid admin stream frame"
+        frames.append((flags, json.loads(raw[5:5 + size])))
+        raw = raw[5 + size:]
+    assert frames and frames[-1][0] == 2 and "error" not in frames[-1][1]
+    assert all(flags == 0 for flags, _ in frames[:-1])
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--no-build", action="store_true")
@@ -111,12 +123,12 @@ def main():
             for entry in ["admin", "serve", "serve_with", "fetch", "fetch_with", "fetch_with_context"]:
                 for headers in VARIANTS:
                     result = json.loads(subprocess.check_output(["node", "--import", str(inject), str(SIGNER),
-                        "admin", origin, "ReadAuditLog", '{"fromSeq":"1","pageSize":1}', "auditor", "false"],
+                        "admin", origin, "ReadAuditLog", '{"fromSeq":"1","pageSize":1}', "auditor", "true"],
                         env=dict(env, ADMIN_PATH_PREFIX="/" + entry, DEADLINE_HEADERS=json.dumps(headers)), text=True))
                     raw = base64.b64decode(result["body"])
                     assert result["status"] == 200, (entry, headers, result)
                     assert result["headers"]["cache-control"] == "no-store"
-                    json.loads(raw)
+                    check_audit_stream(raw)
                     cases.append({"entry": entry, "headers": headers, "protocol": "signed admin", "status": 200})
                 print(f"PASS {entry}: signed admin with all timeout variants", flush=True)
             assert harness.artifact_hashes(APP) == artifacts, "runtime artifacts changed"
