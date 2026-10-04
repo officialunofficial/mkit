@@ -725,8 +725,8 @@ pub(super) async fn embedding_multipart_file_readback(ctx: Ctx) -> CaseResult {
     let (pack, head) = verification_fixture_pack(Some(&data), 0, false)?;
     ensure!(pack.len() > 8 << 20, "multipart fixture fits one part");
     let (repository, pending) = super::portable_reads::publish(&ctx, &pack, head).await?;
-    check_extracted_http(&ctx, &repository, &id, &data).await?;
     super::portable_reads::file_semantics(&ctx, &repository, &id, "extracted.txt", &data).await?;
+    check_extracted_http(&ctx, &repository, &id, &data).await?;
     ctx.set_note(format!("repository={repository} pack_bytes={} pending_polls={pending} extracted_blob={} extracted_blob_bytes={} chunks=36 sidecar_bytes=304", pack.len(), to_hex(&id), data.len()));
     Ok(())
 }

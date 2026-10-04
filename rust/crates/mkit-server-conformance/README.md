@@ -62,6 +62,11 @@ returns 400 under the specified 1024-byte HTTP limit. Separate boundaries cover
 128/129 authenticated core steps, 255/256-byte components and 1024/1025-byte HTTP
 paths. `embedding.multipart_file_readback` retains the existing binary payload
 and multipart upload, adding GET/HEAD, metadata, conditionals and exact ranges.
+Committed advances can precede published indexes. Fixture setup uses bounded
+HEAD readiness for each positive HTTP selector, then runs immediate exact
+byte/metadata/range assertions. Negative bounds and all takedown denial checks
+remain immediate. Private token setup also waits for published membership before
+minting the token and checking its HTTP selector; an owner live ref is insufficient.
 The Worker observer rejects zero-length R2 ranges; the core HTTP spy also checks
 backend range geometry and absence of an empty payload fetch.
 

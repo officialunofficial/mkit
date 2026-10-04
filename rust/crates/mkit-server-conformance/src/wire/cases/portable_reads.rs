@@ -58,6 +58,26 @@ pub(super) async fn publish_named(
     Err("publication did not finish within the bounded retry window".into())
 }
 
+/// A committed advance can precede published indexes. Only setup waits for the
+/// selector's ordinary absent response; assertions after readiness stay strict.
+pub(super) async fn wait_readable(ctx: &Ctx, url: &str) -> CaseResult {
+    super::eventually_listed(
+        "published HTTP selector",
+        || async {
+            let reply = ctx.client().read("HEAD", url, &[]).await?;
+            ensure!(
+                matches!(reply.status, 200 | 404),
+                "publication readiness: HTTP {}",
+                reply.status
+            );
+            Ok(reply.status)
+        },
+        |status| *status == 200,
+    )
+    .await?;
+    Ok(())
+}
+
 /// Assert payload metadata and GET/HEAD/conditional/range behavior at both
 /// supported file selectors. The caller already published the exact bytes.
 pub(super) async fn file_semantics(
@@ -72,6 +92,7 @@ pub(super) async fn file_semantics(
         format!("/{repository}/-/objects/{}", to_hex(id)),
         format!("/{repository}/-/{}/-/{path}", ctx.head("async")),
     ] {
+        wait_readable(ctx, &url).await?;
         for method in ["GET", "HEAD"] {
             let reply = ctx.client().read(method, &url, &[]).await?;
             ensure!(reply.status == 200, "{method} file: HTTP {}", reply.status);
@@ -330,16 +351,18 @@ async fn roundtrip(ctx: &Ctx, files: &[(Vec<Vec<u8>>, Vec<u8>)], ref_reads: bool
     let pack = fixture.writer.finish().map_err(|e| e.to_string())?;
     let (repository, pending) = publish(ctx, &pack, head).await?;
     for ((path, data), id) in files.iter().zip(&ids) {
-        let object = ctx
-            .client()
-            .get(&format!("/{repository}/-/objects/{}", to_hex(id)))
-            .await?;
+        let object_url = format!("/{repository}/-/objects/{}", to_hex(id));
+        wait_readable(ctx, &object_url).await?;
+        let object = ctx.client().get(&object_url).await?;
         ensure!(
             object.status == 200 && object.body.as_ref() == data,
             "object bytes differ: HTTP {}",
             object.status
         );
         let url = format!("/{repository}/-/{}/-/{}", ctx.head("async"), escaped(path));
+        if ref_reads {
+            wait_readable(ctx, &url).await?;
+        }
         let reply = ctx.client().get(&url).await?;
         if ref_reads {
             ensure!(
@@ -356,10 +379,9 @@ async fn roundtrip(ctx: &Ctx, files: &[(Vec<Vec<u8>>, Vec<u8>)], ref_reads: bool
         }
     }
     if ctx.case == "files.byte_distinct_names" {
-        let reply = ctx
-            .client()
-            .get(&format!("/{repository}/-/objects/{}", to_hex(&root)))
-            .await?;
+        let root_url = format!("/{repository}/-/objects/{}", to_hex(&root));
+        wait_readable(ctx, &root_url).await?;
+        let reply = ctx.client().get(&root_url).await?;
         ensure!(
             reply.status == 200,
             "published byte-name tree: HTTP {}",
@@ -464,10 +486,9 @@ pub(super) async fn path_limits(ctx: Ctx) -> CaseResult {
     let pack = fixture.writer.finish().map_err(|e| e.to_string())?;
     let (repository, _) = publish(&ctx, &pack, head).await?;
     let base = format!("/{repository}/-/{}/-/", ctx.head("async"));
-    let reply = ctx
-        .client()
-        .get(&format!("{base}{}", escaped(&path)))
-        .await?;
+    let accepted = format!("{base}{}", escaped(&path));
+    wait_readable(&ctx, &accepted).await?;
+    let reply = ctx.client().get(&accepted).await?;
     ensure!(
         reply.status == 200 && reply.body.as_ref() == b"boundary",
         "1024-byte path differs"

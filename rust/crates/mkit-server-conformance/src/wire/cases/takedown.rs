@@ -1,6 +1,6 @@
 //! Minimal signed acceptance/denial contract; the runtime driver restarts between
 //! the two phases. Preservation and legal-hold rehearsals remain separate.
-use super::{CaseResult, Ctx, Failure, ensure, want_ok};
+use super::{CaseResult, Ctx, Failure, ensure};
 use crate::wire::client::{Rpc, STREAM_PROTO, UNARY_JSON, decode_stream, frame};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use buffa::Message as _;
@@ -198,6 +198,43 @@ async fn status(ctx: &Ctx, saved: &Saved) -> CaseResult {
     Ok(())
 }
 
+async fn published_token(ctx: &Ctx, repository: &str, object: Hash) -> Result<String, Failure> {
+    let mint = IssueObjectUrlRequest {
+        target: Some(Target::ObjectId(object.to_vec())),
+        ..Default::default()
+    };
+    // A writer's live ReadRef does not establish published private membership.
+    // Each read attempt gets a fresh signature; diagnostics redact the token.
+    let token = super::eventually_listed(
+        "published private token issuance",
+        || async {
+            let signed = super::reads::signed_for(
+                &ctx.v2_signer("repository-a")?,
+                repository,
+                Rpc::IssueObjectUrl,
+                &mint,
+            );
+            match ctx.send::<IssueObjectUrlResponse>(&signed).await? {
+                Ok(response) => Ok(Some(mkit_server::Redacted::new(
+                    response.token.ok_or("missing takedown token")?,
+                ))),
+                Err(error) if error.code == "not_found" => Ok(None),
+                Err(error) => Err(format!("private token publication: {error}").into()),
+            }
+        },
+        Option::is_some,
+    )
+    .await?
+    .ok_or("missing published private token")?;
+    let url = format!(
+        "/{repository}/-/objects/{}?token={}",
+        to_hex(&object),
+        token.expose()
+    );
+    super::portable_reads::wait_readable(ctx, &url).await?;
+    Ok(token.expose().to_owned())
+}
+
 pub(super) async fn contract(ctx: Ctx) -> CaseResult {
     let (pack, head, object) = super::portable_reads::single_file_pack(b"file.txt", DATA)?;
     let pack_id = hash(&pack);
@@ -215,17 +252,11 @@ pub(super) async fn contract(ctx: Ctx) -> CaseResult {
         anonymous.status == 404,
         "takedown fixture requires private-by-default repositories"
     );
-    let mint = IssueObjectUrlRequest {
-        target: Some(Target::ObjectId(object.to_vec())),
-        ..Default::default()
-    };
-    let signed = super::reads::signed_for(
-        &ctx.v2_signer("repository-a")?,
-        &private_repository,
-        Rpc::IssueObjectUrl,
-        &mint,
-    );
-    let minted: IssueObjectUrlResponse = want_ok(ctx.send(&signed).await?, "takedown URL token")?;
+    let public_object = format!("/{repository}/-/objects/{}", to_hex(&object));
+    let public_ref = format!("/{repository}/-/{}/-/file.txt", ctx.head("async"));
+    super::portable_reads::wait_readable(&ctx, &public_object).await?;
+    super::portable_reads::wait_readable(&ctx, &public_ref).await?;
+    let token = published_token(&ctx, &private_repository, object).await?;
     let mut saved = Saved {
         ref_path: format!("/{repository}/-/{}/-/file.txt", ctx.head("async")),
         repository,
@@ -233,7 +264,7 @@ pub(super) async fn contract(ctx: Ctx) -> CaseResult {
         object,
         pack: pack_id,
         takedown_id: String::new(),
-        token: minted.token.ok_or("missing takedown token")?,
+        token,
     };
     reads(&ctx, &saved, false).await?;
     let reply = admin(&ctx, "Takedown", serde_json::json!({"operationId":"portable-contract", "repository":saved.repository,
