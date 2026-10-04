@@ -141,7 +141,10 @@ fn measure(fx: &Fx, levels: &[Vec<Hash>], memo: bool) -> Measurement {
     }
     assert!(answers.iter().all(Option::is_some));
     for (answer, expected) in answers.iter().zip(levels.iter().flatten()) {
-        assert_eq!(&hash(answer.as_ref().unwrap()), expected);
+        assert_eq!(
+            &id(&mkit_core::serialize::deserialize(answer.as_ref().unwrap()).unwrap()),
+            expected
+        );
     }
     Measurement {
         calls: fx.pipe.meta.calls() - before

@@ -242,7 +242,10 @@ mod tests {
         memo.expand([1; 32], [9; 32], &object);
         assert_eq!(memo.proofs.len(), 1);
         assert!(memo.proofs[&[1; 32]].manifest_pack.is_none());
-        assert!(!memo.can_decode(&[1; 32], &vec![0; MAX_EXPANSION_BYTES + 1]));
+        assert!(!memo.can_decode(
+            &[1; 32],
+            &vec![ObjectType::ChunkedBlob as u8; MAX_EXPANSION_BYTES + 1]
+        ));
         let object = Object::ChunkedBlob(ChunkedBlob {
             total_size: 3,
             chunk_size: 1,
@@ -250,7 +253,7 @@ mod tests {
         });
         memo.expand([1; 32], [9; 32], &object);
         assert_eq!(memo.proofs.len(), 4);
-        assert!(!memo.can_decode(&[1; 32], &[0; 1]));
+        assert!(!memo.can_decode(&[1; 32], &[ObjectType::ChunkedBlob as u8; 1]));
     }
 
     #[test]
