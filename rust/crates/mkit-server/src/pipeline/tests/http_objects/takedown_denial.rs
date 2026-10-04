@@ -3,7 +3,7 @@ use super::*;
 use crate::store::{BorrowedStore, ContentIndex};
 use crate::takedown::denial::BlockAction;
 
-pub(super) fn shared_chunk_stop(proofs: Arc<Proofs>) -> (Fx, Hash, Hash, Hash, String) {
+pub(super) fn shared_chunk_stop() -> (Fx, Hash, Hash, Hash, String) {
     let tokens = crate::url_token::UrlTokenConfig::new(
         crate::url_token::UrlTokenKeys::new(zeroize::Zeroizing::new([13; 32]), vec![]).unwrap(),
     );
@@ -58,7 +58,6 @@ pub(super) fn shared_chunk_stop(proofs: Arc<Proofs>) -> (Fx, Hash, Hash, Hash, S
         ),
     ))
     .unwrap();
-    let fx = with_seams(fx, |s| s.proofs = proofs);
     block_on(
         ContentIndex::new(BorrowedStore(&fx.pipe.meta)).install_block_action(
             &id(&blocked),
@@ -78,8 +77,7 @@ pub(super) fn shared_chunk_stop(proofs: Arc<Proofs>) -> (Fx, Hash, Hash, Hash, S
 
 #[test]
 fn shared_chunk_stop_precedes_extracted_http_validators_proofs_and_pack_reads() {
-    let proofs = Arc::new(Proofs(Mutex::default()));
-    let (fx, pack, foreign, visible, token_query) = shared_chunk_stop(proofs.clone());
+    let (fx, pack, foreign, visible, token_query) = shared_chunk_stop();
     let object_url = fx.object_url("room", &visible);
     let ref_url = fx.ref_url("room", "main", "visible.bin");
     for path in [&object_url, &ref_url] {
@@ -100,7 +98,6 @@ fn shared_chunk_stop_precedes_extracted_http_validators_proofs_and_pack_reads() 
         read(fx.request("GET", &ref_url, Some("proof=1"), &[])).status,
         404
     );
-    assert!(proofs.0.lock().unwrap().is_empty());
     fx.make_private("room");
     for method in ["GET", "HEAD"] {
         assert_eq!(

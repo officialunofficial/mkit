@@ -65,7 +65,7 @@ pub(crate) struct AdmitRequest<'a> {
     /// A ref path rather than an object id.
     #[cfg(test)]
     pub ref_path: bool,
-    /// The selected GET body length, after ordinary Range or proof selection.
+    /// The selected GET body length, after ordinary Range selection.
     pub declared_bytes: u64,
     /// Selected payment credentials; never contains Bearer credentials.
     pub credential_headers: &'a [crate::pipeline::CredentialHeader],
@@ -178,66 +178,6 @@ impl TakedownGate for NoTakedown {
     }
 }
 
-/// Canonical repository objects supplied to a proof builder. Reads verify
-/// membership and integrity and share one bounded decode allowance.
-pub trait ProofSource: MaybeSend {
-    /// Read one canonical object; never concatenated extracted file bytes.
-    fn read(&mut self, id: Hash) -> BoxFuture<'_, Result<Vec<u8>, ServerError>>;
-}
-
-/// Selected proof. Preparation constructs no Merkle or Bao proofs.
-#[derive(Debug, Clone)]
-pub struct PreparedProof {
-    /// Published-reachable commit or remix.
-    pub commit: Hash,
-    /// Leaf matched by the exact decoded path.
-    pub leaf: Hash,
-    /// Path below the commit's tree.
-    pub path: Vec<Vec<u8>>,
-    /// Inclusive content range, or canonical Object selector.
-    pub range: Option<(u64, u64)>,
-    /// Exact encoded GET length, checked before Admission.
-    pub encoded_len: u64,
-    /// Cross-chunk range uses MKDS; all other selections use MKDP.
-    pub span: bool,
-}
-
-/// Build only the already selected representation, after common Admission.
-pub trait ProofServer: MaybeSend + MaybeSync {
-    /// Whether the adapter can build proofs. Unsupported selections return
-    /// 416 before admission, rather than reserving an unservable request.
-    fn is_supported(&self) -> bool {
-        true
-    }
-    /// Return encoded bytes; the common path enforces the planned length.
-    fn build<'a>(
-        &'a self,
-        request: &'a PreparedProof,
-        source: &'a mut dyn ProofSource,
-    ) -> BoxFuture<'a, Result<Vec<u8>, ServerError>>;
-}
-
-/// Workers gain canonical-object prefetch in WP-4.14b-2.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct UnsupportedProofs;
-impl ProofServer for UnsupportedProofs {
-    fn is_supported(&self) -> bool {
-        false
-    }
-    fn build<'a>(
-        &'a self,
-        _: &'a PreparedProof,
-        _: &'a mut dyn ProofSource,
-    ) -> BoxFuture<'a, Result<Vec<u8>, ServerError>> {
-        Box::pin(async {
-            Err(ServerError::new(
-                crate::Code::OutOfRange,
-                "proof unsupported",
-            ))
-        })
-    }
-}
-
 /// Every seam of one HTTP-objects deployment.
 #[derive(Clone)]
 #[non_exhaustive]
@@ -250,8 +190,6 @@ pub struct HttpSeams {
     pub(crate) admission: Arc<dyn HttpAdmission>,
     /// §3 steps 7-8 (WP-5.9a).
     pub takedown: Arc<dyn TakedownGate>,
-    /// Proof representations (WP-4.14b).
-    pub proofs: Arc<dyn ProofServer>,
     /// Reachability answers (WP-5.3a).
     pub reachability: Arc<dyn Reachability>,
 }
@@ -265,7 +203,6 @@ impl HttpSeams {
             read_runtime: None,
             admission: Arc::new(NoAdmission),
             takedown: Arc::new(NoTakedown),
-            proofs: Arc::new(UnsupportedProofs),
             reachability: Arc::new(TtlReachability::new(
                 cfg.reachability_lag_ms,
                 cfg.reach_cache_entries,
