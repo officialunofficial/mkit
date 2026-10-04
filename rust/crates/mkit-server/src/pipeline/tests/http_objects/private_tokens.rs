@@ -343,36 +343,6 @@ fn lifetime_epoch_and_key_retirement_are_enforced_by_the_serving_path() {
 }
 
 #[test]
-fn private_proofs_keep_token_bounded_immutable_or_ref_revalidation_policy() {
-    let (fx, d, _, tokens) = setup();
-    let fx = with_seams(fx, |s| s.proofs = Arc::new(Proofs(Mutex::default())));
-    for (path, target, selector, cache) in [
-        (
-            fx.ref_url("room", "main", "small.txt"),
-            UrlTarget::path(HEAD, "small.txt").unwrap(),
-            String::new(),
-            "private, no-cache",
-        ),
-        (
-            fx.object_url("room", &id(&d.small)),
-            UrlTarget::Object(id(&d.small)),
-            format!("&commit={}&path=small.txt", to_hex(&d.head())),
-            "private, max-age=60, immutable",
-        ),
-    ] {
-        let valid = mint(&fx, &tokens, &target, 0);
-        let got = read(fx.request(
-            "GET",
-            &path,
-            Some(&format!("token={valid}&proof=1{selector}")),
-            &[],
-        ));
-        assert_eq!(got.status, 200);
-        assert_eq!(got.header("Cache-Control"), Some(cache));
-    }
-}
-
-#[test]
 fn all_retained_url_token_keys_are_separated_from_every_ticket_secret() {
     let fx = fixture();
     let mut cfg = fx.pipe.cfg.clone();
@@ -490,8 +460,6 @@ fn valid_private_url_tokens_and_proofs_cannot_expose_pending_content() {
         AdvanceOutcome::Committed
     );
     fx.make_private("room");
-    let proofs = Arc::new(Proofs(Mutex::new(Vec::new())));
-    let fx = with_seams(fx, |s| s.proofs = proofs.clone());
     for (path, target) in [
         (
             fx.object_url("room", &id(&d.small)),
@@ -519,7 +487,6 @@ fn valid_private_url_tokens_and_proofs_cannot_expose_pending_content() {
             );
         }
     }
-    assert!(proofs.0.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -650,4 +617,48 @@ fn tokens_on_a_default_private_repository_without_a_row_keep_serving() {
     let token = mint(&fx, &tokens, &UrlTarget::Object(id(&d.small)), 0);
     let path = fx.object_url("room", &id(&d.small));
     assert_eq!(with_token(&fx, "GET", &path, &token, &[]).status, 200);
+}
+
+#[test]
+fn unsupported_get_head_keep_object_and_path_token_authorization() {
+    let (fx, d, az, tokens) = setup();
+    for (path, target, selector) in [
+        (
+            fx.object_url("room", &id(&d.small)),
+            UrlTarget::Object(id(&d.small)),
+            format!("proof=1&commit={}&path=small.txt", to_hex(&d.head())),
+        ),
+        (
+            fx.ref_url("room", "main", "small.txt"),
+            UrlTarget::path(HEAD, "small.txt").unwrap(),
+            "proof=1".to_owned(),
+        ),
+    ] {
+        let valid = mint(&fx, &tokens, &target, 0);
+        let wrong = mint(&fx, &tokens, &UrlTarget::Object([99; 32]), 0);
+        for method in ["GET", "HEAD"] {
+            az.seen.lock().unwrap().clear();
+            for token in ["invalid", wrong.as_str()] {
+                let got = read(fx.request(
+                    method,
+                    &path,
+                    Some(&format!("{selector}&token={token}")),
+                    &[],
+                ));
+                super::unsupported_proofs::assert_missing(&got, method);
+                assert!(az.seen.lock().unwrap().is_empty());
+            }
+            let query = format!("{selector}&token={valid}");
+            let got = read(fx.request(method, &path, Some(&query), &[("if-none-match", "*")]));
+            assert_eq!(got.status, 416);
+            assert_eq!(got.header("Cache-Control"), Some("no-store"));
+            assert_eq!(az.seen.lock().unwrap().len(), 1);
+            *az.verdict.lock().unwrap() = Some(Code::PermissionDenied);
+            super::unsupported_proofs::assert_missing(
+                &read(fx.request(method, &path, Some(&query), &[])),
+                method,
+            );
+            *az.verdict.lock().unwrap() = None;
+        }
+    }
 }

@@ -26,8 +26,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checkpoint), and refuses populated roots without an addressing marker.
   Reset unsupported state; fresh housekeeping-before-marker bootstrap remains
   supported.
-
-
+- Unsupported HTTP `?proof=1` queries now return 416 after normal access,
+  published target resolution and takedown checks, before proof preparation,
+  validators or read Admission. `If-None-Match: *` no longer produces 304.
+  `Pipeline::serve_http_object_with_proofs`, `HttpSeams::proofs`,
+  `http_objects::{ProofServer, PreparedProof, ProofSource, UnsupportedProofs}`
+  and `HttpObjectsConfig::{max_proof_content_bytes, max_proof_bundle_bytes}`
+  are removed. Migrate to ordinary `serve_http_object` or
+  `serve_http_object_with_runtime`; embedders needing disclosure bundles
+  build them with `mkit_core::verify::build_disclosure_from` and `ObjectReader`.
+  Generic proof formats, core builders and client verification are unchanged.
 - Storage layout modules `store::{keys, codec, index, tickets, outbox,
   publication, watermark}` move behind the doc-hidden `store::adapter_spi`.
   Adapter/conformance implementations migrate those imports to the SPI;

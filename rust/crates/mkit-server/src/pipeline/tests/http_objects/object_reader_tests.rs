@@ -181,8 +181,7 @@ fn global_denial_filters_mixed_batches_for_both_views_after_cache_warming() {
 
 #[test]
 fn shared_manifest_chunk_denial_matches_http_and_preserves_unrelated_chunks() {
-    let (fx, _, _, visible, _) =
-        super::takedown_denial::shared_chunk_stop(Arc::new(Proofs(Mutex::default())));
+    let (fx, _, _, visible, _) = super::takedown_denial::shared_chunk_stop();
     let shared = blob(&pattern(4000, 17));
     let extra = blob(&pattern(3000, 18));
     let ids = [id(&shared), id(&extra), [83; 32]];

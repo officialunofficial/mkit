@@ -126,9 +126,25 @@ HEAD follows the same checks as GET but MUST send no body on every status.
 | 7 | Resolve in the published view under §4. Missing ref, non-tree intermediate component, missing entry, unreachable proof commit, leaf/id mismatch, nonmember id without this repository's tombstone, unreachable id, an id blocked but not yet tombstoned, or any chunk of a blocked manifest before this repository's takedown completes: 404. A tombstone is only a candidate for step 8 after published-tree reachability is proven. This 404 precedes 304. |
 | 8 | If the requested id is reachable in the published tree walk and this repository has a tombstone for it, return 451 with the §9 notice body. Otherwise continue. This check follows every preceding 404 check and precedes 304 and Admission. Reachability MUST NOT descend through a blocked or tombstoned manifest; a chunk reachable only through it receives 404. |
 | 9 | Matching `If-None-Match`: 304, no admission or charge. |
-| 10 | Unsatisfiable ordinary byte Range, or out-of-bounds/unsupported/over-cap proof range: 416. Ordinary byte ranges include `Content-Range: bytes */N`, where N is the full representation size. |
+| 10 | Unsatisfiable ordinary byte Range, or out-of-bounds/over-cap proof range in a proof-capable profile: 416. Ordinary byte ranges include `Content-Range: bytes */N`, where N is the full representation size. An unsupported proof profile applies the early-refusal rule below instead of steps 9–12 for proof queries. |
 | 11 | Read Admission, when configured: challenge yields 402 under §7; deny yields 403. |
 | 12 | Serve 200 or ordinary-range 206; proofs always use 200. An enabled eligible redirect uses 302 under §8. |
+
+**Unsupported proof profile.** A deployment without HTTP proof serving MUST
+validate the full query grammar at step 3 and apply repository existence,
+private-token validity, Authorizer, ordinary published target resolution and
+takedown checks at steps 5–8. If those checks permit the read, any `proof=1`
+query MUST then receive the same 416 with `Cache-Control: no-store`, before
+proof-context validation, canonical representation metadata, selector sizing,
+validators, Admission, payment reservations or response-stream setup. HEAD
+MUST send no body. No proof capability may be advertised by this profile.
+`commit`, `path` and query `range` are checked only for syntax; their stored
+context, applicability and bounds do not affect this refusal. Ordinary
+published target resolution and takedown checks still produce their normal
+404/451/503 results. In particular, `If-None-Match: *` MUST NOT turn this
+unsupported 416 into 304. Step 7's proof-context checks and steps 9–12
+for successful proof representations apply only in a proof-capable profile.
+The shipped core and Workers HTTP handlers use the unsupported profile.
 
 All errors MUST carry `no-store` in `Cache-Control`; in a bearer-gated
 deployment they MUST carry `private, no-store`. The missing-repository and
@@ -179,7 +195,7 @@ on cached walks. Informative: external CDN copies of orphaned public
 objects persist until their max-age expires; purges occur on takedown,
 suspension, and visibility change, not every rewind or deletion.
 
-For an object proof URL, `commit` MUST be reachable in the published view,
+In a proof-capable profile, for an object proof URL, `commit` MUST be reachable in the published view,
 and its decoded `path` MUST resolve to the requested object id. Either
 failure is 404. A ref proof uses its resolved commit. Informative: an
 MKDP/MKDS proof authenticates the path through trees to the commit and its
@@ -257,6 +273,11 @@ nonmatching, or unsupported date validator yields the full 200 response.
 representation's ETag, after authorization and resolution and before Range.
 
 ### 5.2 Proof selection
+
+This section defines the proof-capable profile. The shipped HTTP handlers
+use §3's unsupported profile; they validate query syntax and refuse before
+any of the preparation or successful representation behavior below.
+The generic MKDP/MKDS formats and client verification remain supported.
 
 `?proof=1` MUST return an MKDP Object bundle, including canonical manifest
 bytes for a ChunkedBlob and canonical tree bytes for an empty root path.
