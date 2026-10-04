@@ -162,6 +162,16 @@ async fn ranges(ctx: &Ctx, url: &str, data: &[u8]) -> CaseResult {
                     .is_some_and(|h| h == "bytes */0"),
                 "empty range total differs"
             );
+            let head = ctx
+                .client()
+                .read("HEAD", url, &[("range".into(), range.into())])
+                .await?;
+            ensure!(
+                head.status == 416
+                    && head.body.is_empty()
+                    && head.headers.get("content-range") == reply.headers.get("content-range"),
+                "empty ranged HEAD differs"
+            );
         } else {
             let (start, end) = match range {
                 "bytes=0-0" => (0, 0),

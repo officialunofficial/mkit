@@ -109,7 +109,10 @@ async fn reads(ctx: &Ctx, saved: &Saved, denied: bool) -> CaseResult {
                 reply.status
             );
             if denied {
-                ensure!(reply.body.as_ref() != DATA, "denied read leaked file bytes");
+                ensure!(
+                    !reply.body.windows(DATA.len()).any(|bytes| bytes == DATA),
+                    "denied read leaked file bytes"
+                );
             }
             if !denied && method == "GET" {
                 ensure!(reply.body.as_ref() == DATA, "live takedown file differs");
@@ -147,6 +150,10 @@ async fn reads(ctx: &Ctx, saved: &Saved, denied: bool) -> CaseResult {
         ensure!(
             stream.error.as_ref().is_some_and(|e| e.code == "not_found"),
             "owner download escaped takedown"
+        );
+        ensure!(
+            stream.messages.is_empty(),
+            "denied owner download emitted data before its error"
         );
     } else {
         ensure!(
