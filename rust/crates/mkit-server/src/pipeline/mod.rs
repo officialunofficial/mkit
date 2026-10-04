@@ -1446,6 +1446,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     "too many tickets in one advance",
                 ));
             }
+            for ticket in &tickets {
+                crate::telemetry::verification_progress(
+                    self.metrics.as_ref(),
+                    "advance_received",
+                    ms(self.clock.now_ms()),
+                    Some(ticket),
+                    None,
+                );
+            }
             let mut distinct = std::collections::BTreeSet::new();
             if tickets.iter().any(|id| !distinct.insert(id)) {
                 return Err(ServerError::invalid_argument("duplicate ticket id"));
@@ -4153,6 +4162,21 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .await;
             match applied {
                 Ok(BatchOutcome::Committed) => {
+                    if matches!(
+                        on_commit,
+                        StoredResult::AdvanceRefs(AdvanceOutcome::Committed)
+                    ) && let OpKind::AdvanceRefs { tickets, .. } = &op.kind
+                    {
+                        for ticket in tickets {
+                            crate::telemetry::verification_progress(
+                                self.metrics.as_ref(),
+                                "final_cas",
+                                ms(self.clock.now_ms()),
+                                Some(ticket),
+                                None,
+                            );
+                        }
+                    }
                     #[cfg(feature = "__test-faults")]
                     self.schedule_test_ref_timer(op, a, &on_commit, ms(clock.business_now_ms))
                         .await?;

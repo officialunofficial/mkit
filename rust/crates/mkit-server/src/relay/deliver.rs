@@ -206,11 +206,16 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
         {
             true
         } else {
-            let (start, end) = keys::class_range(keys::TAG_RELAY);
             let remaining = ctx.store.scan(ctx.partition, &start, &end, None, 1).await?;
             !remaining.entries.is_empty() || remaining.next.is_some()
         };
-        if has_remaining {
+        // Target watermarks are durable and source cleanup has committed.
+        // The remaining source head gives a conservative contiguous watermark.
+        let nudged = !dispatch.delivered.is_empty()
+            && crate::indexed::wake::after_relay(ctx, os, metrics).await;
+        // A nudge can insert behind the timer driver's current scan cursor.
+        // Keep a prompt relay continuation so that the next tick discovers it.
+        if has_remaining || nudged {
             let due = ctx
                 .now_ms
                 .saturating_add(if dispatch.delivered.is_empty() {

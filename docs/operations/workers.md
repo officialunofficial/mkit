@@ -35,6 +35,59 @@ launch profile without naming a platform. On Workers it means:
   After syntax and normal access checks, they return 416 before proof
   preparation, validators or payment; conditional requests cannot return 304.
 
+## Verification latency traces
+
+The existing Worker console telemetry emits `verification_*` structured events
+at INFO and `mkit_server_verification_progress_total` counters labelled only by
+`stage`. Counters and these events are not sampled by the adapter. Enable Workers
+Logs for the entry Worker and namespace Durable Objects, or capture their live
+tail together. Keep the invocation timestamp/identity when exporting JSON lines.
+No extra binding or telemetry service is required.
+
+Start with the upload's `ticket` and `pack` hex IDs. Join requests by ticket,
+verification checkpoints by pack **and source partition**, and relay delivery by
+source plus `relay_sequence`. IDs are log fields, never metric labels. A repeated
+upload, advance or alarm produces repeated observations; use the earliest
+observation for the particular ticket, not the latest retry.
+
+| Stage/event | What it proves |
+| --- | --- |
+| `upload_durable` | The ticket upload marker's blob commit returned successfully. |
+| `advance_received` | A ticketed advance reached the pipeline; earliest observation measures the pre-verification request gap. |
+| `job_created`, `verification_timer_due` | The guarded job/group creation committed; `due_at_ms` is the initial logical wake, already due immediately. |
+| `verification_physical_alarm` | A physical Worker alarm entered; `verification_alarm_partition` associates dispatched source partitions in that invocation. |
+| `verify_fire`, `verification_timer_entry`, `verification_slice_start` | An actual verification handler started; entry is recorded before the job read, with pack/source correlation. The later slice start adds the ticket and phase. `first_decode` identifies an empty decode cursor, including retries; it does **not** mean ready. |
+| `verification_slice_result` | Proposed old/new phases, generation, slice attempt, relay sequence and next wake; this proposal can still lose its commit guard. |
+| `verify_checkpoint`, `verification_checkpoint` | The guarded timer/job checkpoint committed. Use these old/new phases as durable progress. |
+| `verification_timer_result` | The timer attempt committed, raced or failed; `attempt` counts persisted infrastructure retries and `scheduled_ms` is the physical timer's wake. |
+| `relay_delivered`, `verification_relay_delivered` | Target delivery and source cleanup committed through the conservative contiguous `delivered_through` sequence. |
+| `verification_usable` | A committed job checkpoint became usable with a guarded Verified state. `ready_observed` is the later advance's observation. |
+| `final_cas` | The ref advance batch committed; replaying its nonce does not emit another CAS. |
+
+`now_ms` is injected-clock time; relay and partition-dispatch events use the
+tick's business-time snapshot. For real elapsed I/O time, use the Worker log timestamps
+as well. Compare upload → advance, job due → physical alarm → first fire, each
+committed phase, relay delivery → next fire, and usable → final CAS separately.
+The first fire can precede readiness by several slices. A reported nine-second
+pending interval remains unexplained until this trace identifies its gaps.
+
+After relay delivery, at most sixteen future timer rows are inspected and eight
+waiting jobs are nudged with guarded timer moves. Only ordinary delivery polls
+qualify; infrastructure backoff is preserved. There is no upper time cutoff:
+work during the tick may have created a poll after its business-time snapshot. There
+is no inline verification. Unobserved jobs, contention and a crash before the
+nudge commits recover via their existing two-second poll. The nudge commits
+independently, so its contention cannot delay remaining relay delivery. A
+successful nudge keeps a one-millisecond relay continuation to discover timers
+inserted behind the current scan cursor.
+
+`Retry-After` is a polling hint, not an ETA. For the authorized consumed job it
+uses the earliest persisted verification timer found in at most four 64-row
+pages, including failure backoff, rounded up and bounded to 1–60 seconds. Due,
+missing or unobserved timers use one second. Foreign group ownership also uses
+the uniform one-second floor without revealing another ticket's schedule. The
+typed pending detail carries the same whole-second delay in milliseconds.
+
 ## Hosted acceptance
 
 Workers CI requires a locked wasm build of the Uno embedding fixture and a local

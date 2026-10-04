@@ -185,6 +185,7 @@ struct Instrumented {
     fail_first: Mutex<BTreeSet<Partition>>,
     successful: Mutex<Vec<(Partition, Batch)>>,
     scan_conflict: AtomicBool,
+    nudge_conflict: AtomicBool,
 }
 impl Instrumented {
     fn new() -> Self {
@@ -204,6 +205,7 @@ impl Instrumented {
             fail_first: Mutex::default(),
             successful: Mutex::default(),
             scan_conflict: AtomicBool::new(false),
+            nudge_conflict: AtomicBool::new(false),
         }
     }
 }
@@ -289,6 +291,32 @@ impl NamespaceStore for Instrumented {
         {
             self.scan_conflict.store(false, Ordering::SeqCst);
             return Ok(BatchOutcome::PreconditionFailed { index, observed: None });
+        }
+        if self.nudge_conflict.load(Ordering::SeqCst)
+            && let Some((key, raw)) = b.preconditions.iter().find_map(|guard| match guard {
+                Precondition::Equals(key, raw)
+                    if matches!(
+                        keys::parse(key),
+                        Some(keys::ParsedKey::VerifyCursor {
+                            sub: keys::VC_JOB,
+                            ..
+                        })
+                    ) =>
+                {
+                    Some((key, raw))
+                }
+                _ => None,
+            })
+        {
+            self.nudge_conflict.store(false, Ordering::SeqCst);
+            let mut job = crate::indexed::checkpoint::decode_job(raw)?;
+            job.generation += 1;
+            self.inner
+                .apply(
+                    p,
+                    Batch::new().put(key.clone(), crate::indexed::checkpoint::encode_job(&job)),
+                )
+                .await?;
         }
         let result = self.inner.apply(p, b.clone()).await?;
         if result == BatchOutcome::Committed {
@@ -3487,4 +3515,79 @@ async fn ordinary_invalid_hook_error_is_terminal_without_group_shrinking() {
     assert_eq!(h.hook.0.load(Ordering::SeqCst), 1);
     assert_eq!(queued(&s).await.len(), 2);
     assert!(h.target.get(&target(0), &key()).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn nudge_contention_does_not_backoff_remaining_relay_delivery() {
+    use crate::indexed::checkpoint::{Phase, VerifyJobV1, encode_job, timer_reference};
+    let s = Instrumented::new();
+    let mut h = handler(memory());
+    h.budget.max_targets = 1;
+    for n in 0..2 {
+        append(&s, &target(n), vec![(key(), Value::default())], 100).await;
+    }
+    let repo = RepoName::new("a").unwrap();
+    let pack = [1; 32];
+    let mut job = VerifyJobV1::new(pack, 100, 320, 64);
+    job.phase = Phase::AwaitDelivery;
+    job.last_relay_seq = Some(1);
+    let reference = timer_reference(&repo, &pack);
+    let poll = keys::timer(2_100, kinds::VERIFY.get(), &reference);
+    s.apply(
+        &source(),
+        Batch::new()
+            .put(keys::verify_job(&repo, &pack), encode_job(&job))
+            .put(poll.clone(), Value::default()),
+    )
+    .await
+    .unwrap();
+    s.nudge_conflict.store(true, Ordering::SeqCst);
+    let registry = TimerRegistry::new().register(h);
+    let clock = ManualClock::new(100);
+    let report = run_due(
+        &s,
+        &source(),
+        &registry,
+        &clock,
+        100,
+        &TickBudget::default(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !s.nudge_conflict.load(Ordering::SeqCst),
+        "injected a real job guard race"
+    );
+    assert_eq!((report.fired, report.failed, report.raced), (1, 0, 0));
+    assert_eq!(report.next_wake_ms, Some(101));
+    assert_eq!(queued(&s).await.len(), 1);
+    assert!(s.get(&source(), &poll).await.unwrap().is_some());
+    clock.set(101);
+    let report = run_due(
+        &s,
+        &source(),
+        &registry,
+        &clock,
+        101,
+        &TickBudget::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!((report.fired, report.failed, report.raced), (1, 0, 0));
+    assert!(queued(&s).await.is_empty());
+    assert!(s.get(&source(), &poll).await.unwrap().is_none());
+    assert!(
+        s.get(
+            &source(),
+            &keys::timer(101, kinds::VERIFY.get(), &reference)
+        )
+        .await
+        .unwrap()
+        .is_some()
+    );
+    assert_eq!(
+        report.next_wake_ms,
+        Some(102),
+        "discover a nudge inserted behind the scan cursor"
+    );
 }

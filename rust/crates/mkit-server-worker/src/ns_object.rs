@@ -788,6 +788,7 @@ mod object {
 
         /// Fire due timers and multiplex all partition heads onto one alarm.
         pub async fn alarm(&self) -> worker::Result<Response> {
+            crate::alarm::observe_alarm(self.now_ms());
             self.alarm_dirty.set(false);
             self.alarm_armed.set(false);
             if let Some(budget) = &self.alarm_budget {

@@ -18,6 +18,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   authorization, membership and denial remain live.
   No persisted cache or writer proofs in the shared published cache.
 
+### Changed
+
+- Scheduled verification emits correlated upload, job, alarm, phase, delivery,
+  readiness and ref-commit telemetry through the Worker console. Relay delivery
+  nudges a bounded set of waiting timers while retaining the recovery poll.
+  Pending retry hints reflect observed durable timers, rounded to 1–60 seconds,
+  with matching typed details. Verification semantics and embedder APIs remain
+  unchanged; timer handlers may optionally expose their metrics sink for
+  commit-confirmed checkpoint observations.
+
 ### Documentation
 
 - Align the server profile map and invariant enforcement index with implemented

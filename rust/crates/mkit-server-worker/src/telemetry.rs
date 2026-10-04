@@ -315,6 +315,57 @@ mod tests {
     }
 
     #[test]
+    fn physical_alarm_logs_timestamp_and_dispatched_source() {
+        use mkit_server::store::adapter_spi::keys;
+        use mkit_server::{Batch, ManualClock, NamespaceKey, NamespaceStore, Partition, Value};
+        use std::sync::Arc;
+        let clock = Arc::new(ManualClock::new(1_000));
+        let source = Partition::Namespace(NamespaceKey::deployment_default());
+        let store = crate::ns_object::PressureStore::new(
+            crate::sql::SqlKvStore::open(
+                crate::test_sqlite::RusqliteConn::open_in_memory()
+                    .unwrap()
+                    .with_clock(clock.clone()),
+            )
+            .unwrap(),
+            crate::classes::ShardClass::RefShard,
+            clock.clone(),
+            Arc::new(mkit_server::NoopMetrics),
+        );
+        futures::executor::block_on(store.apply(
+            &source,
+            Batch::new().put(keys::timer(1_000, 240, b"alarm"), Value::default()),
+        ))
+        .unwrap();
+        let sink = Capture::default();
+        tracing::subscriber::with_default(events::subscriber(sink.clone()), || {
+            crate::alarm::observe_alarm(1_000);
+            futures::executor::block_on(crate::alarm::run_physical_alarm(
+                &store,
+                &mkit_server::timers::TimerRegistry::new(),
+                clock.as_ref(),
+                1_000,
+                mkit_server::timers::TickBudget::default(),
+                &mut None,
+            ))
+            .unwrap();
+        });
+        let lines = sink.0.lock().unwrap();
+        let entry = lines
+            .iter()
+            .position(|(_, event)| event["event"] == "verification_physical_alarm")
+            .unwrap();
+        let dispatch = lines
+            .iter()
+            .position(|(_, event)| event["event"] == "verification_alarm_partition")
+            .unwrap();
+        assert!(entry < dispatch);
+        assert_eq!(lines[entry].1["now_ms"], 1_000);
+        assert_eq!(lines[dispatch].1["now_ms"], 1_000);
+        assert_eq!(lines[dispatch].1["source"], format!("{source:?}"));
+    }
+
+    #[test]
     fn pressure_alerts_preserve_console_output_across_module_moves() {
         let sink = Capture::default();
         tracing::subscriber::with_default(events::subscriber(sink.clone()), || {

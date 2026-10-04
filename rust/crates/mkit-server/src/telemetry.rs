@@ -159,6 +159,27 @@ impl Metrics for NoopMetrics {
     fn observe_ms(&self, _name: &'static str, _labels: &[(&'static str, &str)], _ms: f64) {}
 }
 
+/// Counter for commit verification timeline observations. Label: `stage`.
+pub const METRIC_VERIFICATION_PROGRESS: &str = "mkit_server_verification_progress_total";
+
+/// IDs belong in logs, never metric labels. Repeated observations are intentional.
+pub(crate) fn verification_progress(
+    metrics: &dyn Metrics,
+    stage: &'static str,
+    now_ms: u64,
+    ticket: Option<&mkit_core::hash::Hash>,
+    pack: Option<&mkit_core::hash::Hash>,
+) {
+    metrics.incr(METRIC_VERIFICATION_PROGRESS, &[("stage", stage)], 1);
+    tracing::info!(
+        event = "verification_progress",
+        stage,
+        now_ms,
+        ticket = ticket.map(mkit_core::hash::to_hex).as_deref(),
+        pack = pack.map(mkit_core::hash::to_hex).as_deref(),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

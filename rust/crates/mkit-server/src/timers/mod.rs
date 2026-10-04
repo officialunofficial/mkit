@@ -167,6 +167,7 @@ async fn fire_timer<S: NamespaceStore>(
     ctx: &TimerCtx<'_, S>,
     timer: &DueTimer,
     key: Key,
+    clock: &dyn Clock,
 ) -> FireOutcome {
     let batch = match handler.fire(ctx, timer).await {
         Ok(Fired::Done(batch)) => batch
@@ -201,8 +202,44 @@ async fn fire_timer<S: NamespaceStore>(
         }
     };
     let put_due = earliest_timer_put(&batch);
+    let progress = (timer.kind == registry::kinds::VERIFY)
+        .then(|| crate::indexed::wake::committed_progress(&batch))
+        .flatten();
     match ctx.store.apply(ctx.partition, batch).await {
-        Ok(BatchOutcome::Committed) => FireOutcome::Committed(put_due),
+        Ok(BatchOutcome::Committed) => {
+            if let Some((pack, job, old_phase, verified)) = progress {
+                let now_ms = u64::try_from(clock.now_ms()).unwrap_or(ctx.now_ms);
+                let metrics = handler.metrics().unwrap_or(&crate::telemetry::NoopMetrics);
+                crate::telemetry::verification_progress(
+                    metrics,
+                    "verify_checkpoint",
+                    now_ms,
+                    Some(&job.ticket_id),
+                    Some(&pack),
+                );
+                tracing::info!(event = "verification_checkpoint", now_ms, source = ?ctx.partition,
+                    pack = %mkit_core::hash::to_hex(&pack), ticket = %mkit_core::hash::to_hex(&job.ticket_id),
+                    old_phase = ?old_phase, new_phase = ?job.phase, generation = job.generation,
+                    relay_sequence = job.last_relay_seq, due_at_ms = put_due);
+                if verified
+                    && job.usable()
+                    && !matches!(
+                        old_phase,
+                        crate::indexed::checkpoint::Phase::Watch
+                            | crate::indexed::checkpoint::Phase::Recheck
+                    )
+                {
+                    crate::telemetry::verification_progress(
+                        metrics,
+                        "verification_usable",
+                        now_ms,
+                        Some(&job.ticket_id),
+                        Some(&pack),
+                    );
+                }
+            }
+            FireOutcome::Committed(put_due)
+        }
         Ok(BatchOutcome::PreconditionFailed { .. }) => FireOutcome::Raced,
         Ok(BatchOutcome::DeadlinePassed { .. }) => {
             #[cfg(feature = "__test-faults")]
@@ -277,7 +314,7 @@ pub async fn run_due_with_state<S: NamespaceStore>(
                 break 'pages;
             }
             run.report.scanned += 1;
-            process_row(&ctx, registry, key, value, state, &mut run).await;
+            process_row(&ctx, registry, key, value, state, &mut run, clock).await;
         }
         match page.next {
             Some(next) => cursor = Some(next),
@@ -341,6 +378,7 @@ async fn process_row<S: NamespaceStore>(
     value: Value,
     state: &mut TickState,
     run: &mut PartitionRun,
+    clock: &dyn Clock,
 ) {
     let Some(keys::ParsedKey::Timer {
         kind, reference, ..
@@ -393,7 +431,19 @@ async fn process_row<S: NamespaceStore>(
         run.retained_due = true;
         return;
     }
-    match fire_timer(handler, ctx, &timer, key.clone()).await {
+    observe_verify_entry(handler, ctx, &timer, attempt, clock);
+    let outcome = fire_timer(handler, ctx, &timer, key.clone(), clock).await;
+    if timer.kind == registry::kinds::VERIFY {
+        tracing::info!(event = "verification_timer_result", now_ms = u64::try_from(clock.now_ms()).unwrap_or(ctx.now_ms),
+            source = ?ctx.partition, attempt,
+            pack = crate::indexed::checkpoint::parse_reference(&timer.reference)
+                .map(|(_, pack)| mkit_core::hash::to_hex(&pack)).as_deref(),
+            scheduled_ms = keys::parse(&key).and_then(|k| match k {
+                keys::ParsedKey::Timer { due_at_ms, .. } => Some(due_at_ms), _ => None }),
+            outcome = match &outcome { FireOutcome::Committed(_) => "committed",
+                FireOutcome::Raced => "raced", FireOutcome::Failed => "failed" });
+    }
+    match outcome {
         FireOutcome::Committed(put_due) => {
             state.committed();
             run.report.fired += 1;
@@ -429,6 +479,28 @@ async fn process_row<S: NamespaceStore>(
                 FireOutcome::Failed => run.retained_due = true,
             }
         }
+    }
+}
+
+fn observe_verify_entry<S: NamespaceStore>(
+    handler: &dyn TimerHandler<S>,
+    ctx: &TimerCtx<'_, S>,
+    timer: &DueTimer,
+    attempt: u8,
+    clock: &dyn Clock,
+) {
+    if timer.kind == registry::kinds::VERIFY {
+        let pack =
+            crate::indexed::checkpoint::parse_reference(&timer.reference).map(|(_, pack)| pack);
+        crate::telemetry::verification_progress(
+            handler.metrics().unwrap_or(&crate::telemetry::NoopMetrics),
+            "verify_fire",
+            u64::try_from(clock.now_ms()).unwrap_or(ctx.now_ms),
+            None,
+            pack.as_ref(),
+        );
+        tracing::info!(event = "verification_timer_entry", now_ms = u64::try_from(clock.now_ms()).unwrap_or(ctx.now_ms),
+            source = ?ctx.partition, pack = pack.map(|p| mkit_core::hash::to_hex(&p)).as_deref(), attempt);
     }
 }
 

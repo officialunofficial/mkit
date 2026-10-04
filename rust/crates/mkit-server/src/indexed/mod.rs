@@ -17,6 +17,7 @@ pub mod scheduled;
 mod selection;
 pub mod state;
 pub mod verify;
+pub(crate) mod wake;
 
 #[cfg(all(test, feature = "memory"))]
 mod extract_tests;

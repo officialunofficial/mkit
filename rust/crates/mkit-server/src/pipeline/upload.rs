@@ -511,9 +511,15 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
                 self.op.authz.authority_generation,
             )
             .await?;
-            write_upload_marker(&pipe.blobs, &ticket_id, &done.key.0)
-                .await
-                .map_err(|e| store_error(StorageOp::BlobPut, e))?;
+            write_upload_marker(
+                &pipe.blobs,
+                &ticket_id,
+                &done.key.0,
+                pipe.clock.as_ref(),
+                pipe.metrics.as_ref(),
+            )
+            .await
+            .map_err(|e| store_error(StorageOp::BlobPut, e))?;
             pipe.check_ticket_generation(
                 &self.op.repo.namespace,
                 self.op.authz.authority_generation,
