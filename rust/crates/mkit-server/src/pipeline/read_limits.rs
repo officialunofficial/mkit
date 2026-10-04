@@ -45,8 +45,9 @@ impl Default for ReadLimits {
 /// still apply. Create one session per request, and retain the same reader for
 /// its sequential batches. Roots are captured during session initialization
 /// (the first batch needing proof), not at an atomic repository-wide timestamp.
-/// New commits require a new session. Proofs expire after the configured
-/// reachability lag; the next batch captures fresh roots without refunding work.
+/// Start a new session to observe new commits before proof expiry. Proofs expire
+/// after the configured reachability lag; the next batch captures fresh roots
+/// without resetting allowances or the request deadline.
 ///
 /// The request deadline defaults to `HttpObjectsConfig::read_deadline` from the
 /// first batch, or the earlier explicit [`Self::with_deadline`] value. Expiry

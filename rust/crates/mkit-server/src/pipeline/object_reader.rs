@@ -179,8 +179,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
     }
     /// Prefetch canonical bytes using an aggregate session allowance and
     /// request-local graph proofs. Keep this reader and session across levels;
-    /// use a new session for new commits. See [`ReaderSession`] for root capture,
-    /// fixed expiry and live authorization semantics.
+    /// use a new session to observe new commits before proof expiry. See
+    /// [`ReaderSession`] for root capture, fixed expiry and live authorization.
     /// # Errors
     /// As [`Self::read_canonical`]; cap hits use `ResourceExhausted` except
     /// unprovable public IDs, which remain uniformly absent.

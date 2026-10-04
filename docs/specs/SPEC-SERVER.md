@@ -1626,9 +1626,11 @@ A reader session MAY also retain bounded structural reachability proofs. These
 MUST be privately bound to its reader/backend, full repository identity, view
 and verified credential scope. A context change MUST discard proofs without
 resetting allowances. Roots are captured during initialization, not at an atomic
-repository-wide timestamp; new commits require a new session. Root generations
-and derived proofs MUST expire within the configured reachability lag and the
-request deadline. Hits and child expansion MUST NOT extend that expiry.
+repository-wide timestamp. Observing new commits before proof expiry requires a
+new session. Root generations and derived proofs MUST expire within the configured
+reachability lag and the request deadline. Hits and child expansion MUST NOT extend
+that expiry. After reachability-lag expiry, the next batch captures fresh roots
+without resetting allowances or the request deadline.
 
 Only verified canonical decoding through the same repository/view may add local
 history edges: commit/remix trees and parents, tree entries, tag targets and
