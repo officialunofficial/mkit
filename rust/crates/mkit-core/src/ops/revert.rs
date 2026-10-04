@@ -13,7 +13,7 @@
 
 use crate::hash::{self, Hash};
 use crate::object::Object;
-use crate::store::{ObjectStore, StoreError};
+use crate::store::{ObjectSink, ObjectSource, StoreError};
 
 use super::merge::{self, Conflict};
 
@@ -60,12 +60,15 @@ impl RevertResult {
 ///    parent.tree)` — the inverse of cherry-pick.
 /// 4. Return the merged tree, any conflicts, and a `Revert "..."` message.
 ///
+/// The source/sink visibility and resource-budget contract is the same as
+/// [`merge::merge_trees`].
+///
 /// # Errors
 /// * [`RevertError::NotACommit`] / [`RevertError::ParentNotACommit`] for
 ///   bad input objects.
 /// * [`RevertError::Store`] for wrapped store/serialize errors.
-pub fn revert(
-    store: &ObjectStore,
+pub fn revert<S: ObjectSource + ObjectSink + ?Sized>(
+    store: &S,
     target_hash: Hash,
     ours_tree: Hash,
 ) -> Result<RevertResult, RevertError> {
@@ -126,15 +129,20 @@ mod tests {
     use super::*;
     use crate::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
     use crate::ops::merge::ConflictKind;
+    use crate::ops::test_store::CorpusStore;
     use crate::serialize;
     use tempfile::TempDir;
 
-    fn store() -> (TempDir, ObjectStore) {
+    fn revert(s: &CorpusStore, target: Hash, ours: Hash) -> Result<RevertResult, RevertError> {
+        s.compare(|backend| super::revert(backend, target, ours))
+    }
+
+    fn store() -> (TempDir, CorpusStore) {
         let d = TempDir::new().unwrap();
-        let s = ObjectStore::init(&crate::layout::RepoLayout::single(d.path())).unwrap();
+        let s = CorpusStore::new(d.path());
         (d, s)
     }
-    fn put_blob(s: &ObjectStore, data: &[u8]) -> Hash {
+    fn put_blob(s: &CorpusStore, data: &[u8]) -> Hash {
         s.write(
             &serialize::serialize(&Object::Blob(Blob {
                 data: data.to_vec(),
@@ -143,7 +151,7 @@ mod tests {
         )
         .unwrap()
     }
-    fn make_tree(s: &ObjectStore, entries: Vec<TreeEntry>) -> Hash {
+    fn make_tree(s: &CorpusStore, entries: Vec<TreeEntry>) -> Hash {
         s.write(&serialize::serialize(&Object::Tree(Tree { entries })).unwrap())
             .unwrap()
     }
@@ -154,7 +162,7 @@ mod tests {
             object_hash: h,
         }
     }
-    fn make_commit(s: &ObjectStore, tree: Hash, parents: &[Hash], message: &str) -> Hash {
+    fn make_commit(s: &CorpusStore, tree: Hash, parents: &[Hash], message: &str) -> Hash {
         let c = Commit {
             tree_hash: tree,
             parents: parents.to_vec(),
@@ -169,7 +177,7 @@ mod tests {
         s.write(&serialize::serialize(&Object::Commit(c)).unwrap())
             .unwrap()
     }
-    fn tree_names(s: &ObjectStore, h: Hash) -> Vec<Vec<u8>> {
+    fn tree_names(s: &CorpusStore, h: Hash) -> Vec<Vec<u8>> {
         match s.read_object(&h).unwrap() {
             Object::Tree(t) => t.entries.into_iter().map(|e| e.name).collect(),
             other => panic!("expected tree, got {other}"),

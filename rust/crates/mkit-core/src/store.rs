@@ -52,8 +52,10 @@ use crate::object::{MkitError, Object, object_id_from_bytes, verified_id_and_obj
 use crate::serialize;
 
 mod memory;
+mod memory_overlay;
 mod source;
 pub use memory::MemorySource;
+pub use memory_overlay::{MemoryOverlay, MemoryOverlayLimits};
 pub use source::{DisplaySource, EphemeralSink, ObjectSource};
 
 /// Top-level repository directory name.
@@ -109,6 +111,9 @@ pub enum StoreError {
     ObjectTooLarge,
     #[error("tree nesting exceeds {} levels", MAX_TREE_DEPTH)]
     TreeTooDeep,
+    /// A caller-selected in-memory operation budget was exhausted.
+    #[error("object operation exceeded {0} limit")]
+    OperationLimitExceeded(&'static str),
     #[error("on-disk bytes hash to {actual}, expected {expected}")]
     HashMismatch { expected: String, actual: String },
     #[error(transparent)]

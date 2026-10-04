@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Core merge, revert and cherry-pick use `ObjectSource + ObjectSink`; merge-base,
+  ancestry and ancestor-set walks use `ObjectSource`. CLI behavior is unchanged.
+  `MemoryOverlay` provides immediately readable outputs with explicit aggregate
+  read and output budgets, and the wasm gate executes the generic operations.
 - The paid-profile reference fixture uses neutral embedding names throughout
   code, scripts and CI. Use `apps/embedded-worker/tests/embedding-conformance`,
   the admin harness flag `--embedded`, cases `embedding.public_fixture` and
@@ -57,6 +61,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   URL-token reads, supplied hooks, cold outcome retry and injected slice recovery.
 
 ### Breaking (toward 0.6)
+
+- `StoreError` adds `OperationLimitExceeded` for bounded in-memory operations.
+  Migration: handle this variant in exhaustive matches and discard or publish
+  partial overlay writes according to host policy.
+- Merge, revert, cherry-pick, merge-base and ancestry operation signatures now
+  infer source/sink types. Migration: pass `&ObjectStore` directly when using
+  store wrappers (for example, `boxed_store.as_ref()` instead of `&boxed_store`),
+  and qualify function items with `::<ObjectStore>` when no call/expected type
+  provides inference. Direct `&ObjectStore` calls and explicit ancestor-set
+  hasher arguments remain valid.
 
 - Request reservation variants require `StoredProcedure`. Pass the operation
   directly to `ReservationV1::{pending, committed, aborted, read_served}`;

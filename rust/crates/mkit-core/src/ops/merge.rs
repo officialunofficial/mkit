@@ -20,7 +20,7 @@ use std::collections::HashSet;
 use crate::hash::Hash;
 use crate::object::{EntryMode, Object, Tree, TreeEntry};
 use crate::serialize;
-use crate::store::{MAX_TREE_DEPTH, ObjectStore, StoreError};
+use crate::store::{MAX_TREE_DEPTH, ObjectSink, ObjectSource, StoreError};
 
 /// Distinct conflict kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -77,11 +77,17 @@ impl MergeResult {
 /// tree contains "ours" at every conflicting path so a downstream
 /// resolver can see what we picked).
 ///
+/// `store` must make every successful [`ObjectSink::put`] immediately readable
+/// through [`ObjectSource`]. [`crate::store::MemoryOverlay`] supplies this contract
+/// with explicit read/output budgets; custom implementations must bound their
+/// own memory and work. Tree nesting retains the [`MAX_TREE_DEPTH`] cap.
+///
 /// # Errors
 ///
-/// Propagates [`StoreError`] from object reads and the final tree write.
-pub fn merge_trees(
-    store: &ObjectStore,
+/// Propagates [`StoreError`] from reads and writes, including budget exhaustion.
+/// Earlier writes are retained on failure; this operation is not transactional.
+pub fn merge_trees<S: ObjectSource + ObjectSink + ?Sized>(
+    store: &S,
     base_hash: Option<Hash>,
     ours_hash: Option<Hash>,
     theirs_hash: Option<Hash>,
@@ -124,7 +130,11 @@ pub fn merge_trees(
 ///
 /// Propagates [`StoreError`] from any commit-object read other than
 /// `ObjectNotFound`, which is treated as "this branch terminates here".
-pub fn find_merge_base(store: &ObjectStore, a: Hash, b: Hash) -> Result<Option<Hash>, StoreError> {
+pub fn find_merge_base<S: ObjectSource + ?Sized>(
+    store: &S,
+    a: Hash,
+    b: Hash,
+) -> Result<Option<Hash>, StoreError> {
     if a == b {
         return Ok(Some(a));
     }
@@ -172,8 +182,8 @@ pub fn find_merge_base(store: &ObjectStore, a: Hash, b: Hash) -> Result<Option<H
 ///
 /// Propagates [`StoreError`] from commit-object reads (other than
 /// `ObjectNotFound`, which terminates the local walk silently).
-pub fn is_ancestor(
-    store: &ObjectStore,
+pub fn is_ancestor<S: ObjectSource + ?Sized>(
+    store: &S,
     ancestor: Hash,
     descendant: Hash,
 ) -> Result<bool, StoreError> {
@@ -208,7 +218,10 @@ pub fn is_ancestor(
 // Internals
 // ---------------------------------------------------------------------
 
-fn load_entries(store: &ObjectStore, hash: Option<Hash>) -> Result<Vec<TreeEntry>, StoreError> {
+fn load_entries<S: ObjectSource + ?Sized>(
+    store: &S,
+    hash: Option<Hash>,
+) -> Result<Vec<TreeEntry>, StoreError> {
     match hash {
         Some(h) => match store.read_object(&h)? {
             Object::Tree(t) => Ok(t.entries),
@@ -220,9 +233,12 @@ fn load_entries(store: &ObjectStore, hash: Option<Hash>) -> Result<Vec<TreeEntry
     }
 }
 
-fn put_tree(store: &ObjectStore, entries: Vec<TreeEntry>) -> Result<Hash, StoreError> {
+fn put_tree<S: ObjectSink + ?Sized>(
+    store: &S,
+    entries: Vec<TreeEntry>,
+) -> Result<Hash, StoreError> {
     let bytes = serialize::serialize(&Object::Tree(Tree { entries }))?;
-    store.write(&bytes)
+    store.put(&bytes)
 }
 
 /// The raw bytes of a single-object `Blob`, or `None` for a `ChunkedBlob`
@@ -230,7 +246,10 @@ fn put_tree(store: &ObjectStore, entries: Vec<TreeEntry>) -> Result<Hash, StoreE
 /// back to a conflict. Blobs that `add`/`build_tree` produce are single
 /// `Blob` objects below the chunk threshold, so this covers the source
 /// files a 3-way text merge applies to.
-fn single_blob_bytes(store: &ObjectStore, h: Hash) -> Result<Option<Vec<u8>>, StoreError> {
+fn single_blob_bytes<S: ObjectSource + ?Sized>(
+    store: &S,
+    h: Hash,
+) -> Result<Option<Vec<u8>>, StoreError> {
     match store.read_object(&h)? {
         Object::Blob(b) => Ok(Some(b.data)),
         _ => Ok(None),
@@ -242,8 +261,8 @@ fn single_blob_bytes(store: &ObjectStore, h: Hash) -> Result<Option<Vec<u8>>, St
 /// changed disjoint regions of base, or `None` to fall back to a
 /// modify/modify conflict (overlapping changes, a binary side, or a
 /// chunked/large blob). Genuine store I/O errors propagate.
-fn try_text_merge(
-    store: &ObjectStore,
+fn try_text_merge<S: ObjectSource + ObjectSink + ?Sized>(
+    store: &S,
     base_h: Hash,
     ours_h: Hash,
     theirs_h: Hash,
@@ -260,14 +279,14 @@ fn try_text_merge(
             // Store as a single Blob — same shape (and hash) `add` produces
             // for sub-threshold content, so the merged object dedups.
             let bytes = serialize::serialize(&Object::Blob(crate::object::Blob { data: merged }))?;
-            Ok(Some(store.write(&bytes)?))
+            Ok(Some(store.put(&bytes)?))
         }
         None => Ok(None),
     }
 }
 
-fn collect_ancestors_with_depth(
-    store: &ObjectStore,
+fn collect_ancestors_with_depth<S: ObjectSource + ?Sized>(
+    store: &S,
     start: Hash,
 ) -> Result<HashMap<Hash, usize>, StoreError> {
     let mut ancestors: HashMap<Hash, usize> = HashMap::new();
@@ -296,7 +315,11 @@ fn collect_ancestors_with_depth(
     Ok(ancestors)
 }
 
-fn hash_and_mode_eq(store: &ObjectStore, a: &TreeEntry, b: &TreeEntry) -> Result<bool, StoreError> {
+fn hash_and_mode_eq<S: ObjectSource + ?Sized>(
+    store: &S,
+    a: &TreeEntry,
+    b: &TreeEntry,
+) -> Result<bool, StoreError> {
     Ok(a.mode == b.mode
         && (a.object_hash == b.object_hash
             || (a.mode != EntryMode::Tree
@@ -346,8 +369,8 @@ fn add_entry(out: &mut Vec<TreeEntry>, name: &[u8], mode: EntryMode, object_hash
 }
 
 #[allow(clippy::too_many_arguments)]
-fn recurse_subtree_merge(
-    store: &ObjectStore,
+fn recurse_subtree_merge<S: ObjectSource + ObjectSink + ?Sized>(
+    store: &S,
     base_sub: Option<Hash>,
     ours_sub: Option<Hash>,
     theirs_sub: Option<Hash>,
@@ -380,8 +403,8 @@ fn recurse_subtree_merge(
 }
 
 #[allow(clippy::too_many_lines)]
-fn merge_entries_recursive(
-    store: &ObjectStore,
+fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
+    store: &S,
     base_entries: &[TreeEntry],
     ours_entries: &[TreeEntry],
     theirs_entries: &[TreeEntry],
@@ -627,22 +650,38 @@ fn merge_entries_recursive(
 mod tests {
     use super::*;
     use crate::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
+    use crate::ops::test_store::CorpusStore;
     use crate::serialize;
     use tempfile::TempDir;
 
-    fn store() -> (TempDir, ObjectStore) {
+    fn merge_trees(
+        s: &CorpusStore,
+        base: Option<Hash>,
+        ours: Option<Hash>,
+        theirs: Option<Hash>,
+    ) -> Result<MergeResult, StoreError> {
+        s.compare(|backend| super::merge_trees(backend, base, ours, theirs))
+    }
+    fn find_merge_base(s: &CorpusStore, a: Hash, b: Hash) -> Result<Option<Hash>, StoreError> {
+        s.compare(|backend| super::find_merge_base(backend, a, b))
+    }
+    fn is_ancestor(s: &CorpusStore, a: Hash, b: Hash) -> Result<bool, StoreError> {
+        s.compare(|backend| super::is_ancestor(backend, a, b))
+    }
+
+    fn store() -> (TempDir, CorpusStore) {
         let d = TempDir::new().unwrap();
-        let s = ObjectStore::init(&crate::layout::RepoLayout::single(d.path())).unwrap();
+        let s = CorpusStore::new(d.path());
         (d, s)
     }
-    fn put_blob(s: &ObjectStore, data: &[u8]) -> Hash {
+    fn put_blob(s: &CorpusStore, data: &[u8]) -> Hash {
         let bytes = serialize::serialize(&Object::Blob(Blob {
             data: data.to_vec(),
         }))
         .unwrap();
         s.write(&bytes).unwrap()
     }
-    fn make_tree(s: &ObjectStore, entries: Vec<TreeEntry>) -> Hash {
+    fn make_tree(s: &CorpusStore, entries: Vec<TreeEntry>) -> Hash {
         let bytes = serialize::serialize(&Object::Tree(Tree { entries })).unwrap();
         s.write(&bytes).unwrap()
     }
@@ -653,7 +692,7 @@ mod tests {
             object_hash: h,
         }
     }
-    fn make_commit(s: &ObjectStore, tree: Hash, parents: &[Hash], message: &str) -> Hash {
+    fn make_commit(s: &CorpusStore, tree: Hash, parents: &[Hash], message: &str) -> Hash {
         let c = Commit {
             tree_hash: tree,
             parents: parents.to_vec(),
@@ -668,7 +707,7 @@ mod tests {
         let bytes = serialize::serialize(&Object::Commit(c)).unwrap();
         s.write(&bytes).unwrap()
     }
-    fn tree_entries(s: &ObjectStore, h: Hash) -> Vec<TreeEntry> {
+    fn tree_entries(s: &CorpusStore, h: Hash) -> Vec<TreeEntry> {
         match s.read_object(&h).unwrap() {
             Object::Tree(t) => t.entries,
             other => panic!("expected tree, got {other}"),
