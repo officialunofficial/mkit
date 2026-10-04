@@ -43,3 +43,7 @@ ruzstd = { git = "https://github.com/officialunofficial/mkit", tag = "v0.5.0" }
 
 Upstreaming is in progress. Without the patch the feature decodes through
 the unbounded upstream path.
+
+Upstream tracking: [KillingSpark/zstd-rs #124, "Refuse blocks that decode past
+Block_Maximum_Size"](https://github.com/KillingSpark/zstd-rs/pull/124) is open. Keep the patch until a released
+version includes the bound; the tracked PR does not establish released coverage.

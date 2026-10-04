@@ -18,5 +18,8 @@ allowance, including transient old/new ring allocations. Native `pack-zstd`
 continues to use the C decoder. Independent Worker workspaces repeat the patch
 because dependency-workspace patches are not inherited by Cargo.
 
-Upstream this small patch and replace the vendor when a release incorporates it.
-A draft upstream report and reproducer are provided in the R-203 PR body.
+Upstream tracking: [KillingSpark/zstd-rs #124, "Refuse blocks that decode past
+Block_Maximum_Size"](https://github.com/KillingSpark/zstd-rs/pull/124) is open. Keep the patch until a released
+version includes the bound; the tracked PR does not establish released coverage.
+Independent embedder workspaces must retain their own `[patch.crates-io]`;
+this repository's resolution does not verify an external deployment's graph.
