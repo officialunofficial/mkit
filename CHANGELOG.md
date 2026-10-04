@@ -203,6 +203,8 @@ stored shapes instead of upgrading or downgrading them.
   operation, including a reservation the crash reconciler abandons; expired
   tickets derive `BeginUpload`. System `RepoStorageChanged` outcomes omit the
   procedure. Visibility is present only for visibility-change outcomes.
+  Migration: use `Outcome::new` or `Outcome::from_reservation` for construction,
+  and read the optional operation/visibility fields when handling outcomes.
 - [embedder: breaking API] `mkit_server::indexed::publication::{verify, verify_inspected}` are removed.
   They had no callers: the pipeline verifies within the request's publication
   ledger.
@@ -254,20 +256,21 @@ stored shapes instead of upgrading or downgrading them.
 
 ### Removed
 
-- The Workers-only `published-view` optimization (ref snapshots in R2, its
+- [embedder: breaking API] The Workers-only `published-view` optimization (ref snapshots in R2, its
   timer, `PublishedViewConfig`, `fetch_configured`, `ns_object_configured`,
   the `PUBLISHED_SNAPSHOTS` binding) and the `mkit-server` `published-view`
   cargo feature with `pipeline::published` and `Pipeline::with_published_source`
   are removed. Nothing enabled them by default. `timers::registry::kinds::PUBLISHED_VIEW`
   is removed and timer kind 10 stays reserved. `embedding_pipeline` and
   `purge::LocalCache` no longer carry snapshot parameters.
-- The production embedder's deprecated profile alias is removed; use
+- [embedder: breaking API] The production embedder's deprecated profile alias is removed; use
   `LAUNCH_PROFILE=paid-workers`.
-- The never-set `PipelineConfig::inspection_mode` and
+- [embedder: breaking API] The never-set `PipelineConfig::inspection_mode` and
   `WorkerConfig::inspection_mode` fields and the no-op Worker inspection
   marker guard are removed. Enabling inspection still requires an empty store;
   this is now documented as an operator requirement.
-- The namespace-scoped purge no longer walks the namespace's repository
+- [embedder: breaking API] [embedder: stored-format change]
+  [embedder: store reset required] The namespace-scoped purge no longer walks the namespace's repository
   catalog; with no per-repository URL paths that step deleted nothing. A
   namespace purge deletes its own exact paths from the local cache and is
   delivered once to the configured sink, unchanged. `PurgeDelivery::fire_with_local`
@@ -287,7 +290,7 @@ stored shapes instead of upgrading or downgrading them.
   a copy of an existing store) and inspection (empty store). New regression
   tests pin the baseline fail-closed behavior of every selected path. No
   production behavior changes.
-- `ObjectReader::object_metadata` now fails the whole batch with
+- [embedder: breaking API] `ObjectReader::object_metadata` now fails the whole batch with
   `ResourceExhausted` when a proven object's delta depth or external base
   lookup cap is hit, matching `read_canonical` (previously the ID was silently
   absent).
