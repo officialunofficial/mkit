@@ -2215,7 +2215,9 @@ leases and GC off. Each HTTP/token, hook, and inspection/retrieval opt-in
 validates its complete configuration and distinct key roles before requests.
 Inspection is synchronous and fail-closed; native accepts at most four
 inspectors. No inspector means no advertised inspection bound. Discovery
-reports false leases/async inspection and empty storage-receipt keys. Worker
+reports false leases/async inspection. Receipt key fields are empty without a
+configured receipt-and-notice key and populated when takedown requires it
+([SPEC-SERVER §15.5](specs/SPEC-SERVER.md#155-signing-key-publication-and-rotation)). Worker
 proof serving remains unsupported. Takedown still refuses activation until
 verified preservation and its complete configured purge interface are wired.
 
