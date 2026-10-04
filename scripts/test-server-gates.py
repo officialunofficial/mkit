@@ -59,7 +59,7 @@ class ServerGates(unittest.TestCase):
                         "time bash scripts/wasm-ruzstd-check.sh", "python3 scripts/paid-worker-acceptance.py",
                         "cargo build --locked --release --target wasm32-unknown-unknown"):
             self.assertRegex(paid, rf"(?m)^(?:        run: |          ){re.escape(command)}$")
-        self.assertIn("working-directory: apps/embedded-worker/tests/uno-launch", paid)
+        self.assertIn("working-directory: apps/embedded-worker/tests/embedding-conformance", paid)
         self.assertNotIn("__test-faults", paid)
         self.assertNotIn("continue-on-error", paid)
         self.assertEqual(paid.count("if:"), 2, "only path selection and failure artifacts may be conditional")

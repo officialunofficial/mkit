@@ -62,10 +62,10 @@ def get_json(url):
         return json.loads(response.read(1048577))
 
 
-def run_fixture(namespace, port, folder, artifact, runner, env, evidence, observed=False, uno=False):
+def run_fixture(namespace, port, folder, artifact, runner, env, evidence, observed=False, embedded=False):
     folder.mkdir()
-    if uno:
-        env = dict(env, ADMIN_PATH_PREFIX="/_uno/operator")
+    if embedded:
+        env = dict(env, ADMIN_PATH_PREFIX="/_embedding/operator")
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", port))
     origin = f"http://127.0.0.1:{port}"
@@ -108,10 +108,10 @@ def run_fixture(namespace, port, folder, artifact, runner, env, evidence, observ
                 "ADMIN_KEYS": json.dumps(keys["admin"]), "TAKEDOWN_ENABLED": "true",
                 "PRESERVATION_RETENTION_MS": "3600000", "RECEIPT_NOTICE_KEY": "79" * 32,
                 "RECEIPT_KEYS": json.dumps(keys["receipt"])}
-            if uno:
+            if embedded:
                 for key in ("HOOK_ROLES", "HOOK_URL", "MKIT_HOOK_KEY"):
                     variables.pop(key)
-                variables.update(DEFAULT_REPO_VISIBILITY="public", UNO_FIXTURE_OUTCOME_FAIL="true")
+                variables.update(DEFAULT_REPO_VISIBILITY="public", FIXTURE_OUTCOME_FAIL="true")
             if namespace == "any":
                 variables["UNSAFE_OPEN_NAMESPACES"] = "true"
             else:
@@ -125,7 +125,7 @@ def run_fixture(namespace, port, folder, artifact, runner, env, evidence, observ
                                for binding in ("STORAGE", "BACKUPS", "PRESERVATION")],
                 "durable_objects": {"bindings": [{"name": binding, "class_name": cls} for binding, cls in classes]},
                 "migrations": [{"tag": "v1", "new_sqlite_classes": [cls for _, cls in classes]}]}
-            if uno:
+            if embedded:
                 config["limits"] = {"cpu_ms": 60000}
             if observed:
                 config["compatibility_flags"] = ["nodejs_als"]
@@ -142,7 +142,7 @@ def run_fixture(namespace, port, folder, artifact, runner, env, evidence, observ
                 with socket.socket() as listener:
                     listener.bind(("127.0.0.1", int(inspector)))
                 command += ["--inspector-port", inspector]
-            if uno:
+            if embedded:
                 command = ["node", str(ROOT / "apps/vcs-worker/tests/launch-budget/direct.mjs"),
                     str(config_path), str(artifact), str(port), str(folder / "ready.json")]
             evidence["commands"].append({"argv": command, "cwd": str(ROOT / "apps/vcs-worker"),
@@ -175,7 +175,7 @@ def run_fixture(namespace, port, folder, artifact, runner, env, evidence, observ
                 check(info.get("receiptPublicKey") and info.get("indexedMode"), "receipt/indexed discovery absent")
                 check(runtime.request(origin, "/__mkit_test/stats")[0] != 200, "release test-fault route exposed")
                 tap = folder / "producer.tap"
-                fixture_name = "uno.public_fixture" if uno else "launch.admin_fixture"
+                fixture_name = "embedding.public_fixture" if embedded else "launch.admin_fixture"
                 runtime.invoke([str(runner), "wire", "--base-url", origin, *auth, "--atomic-advance", "--fresh-target",
                     "--milestone", "M4", "--sharding", "d34", "--max-pack-bytes", "1073741824", "--features",
                     "indexed-async,indexed-mode,multi-repo,tickets,timers,http-objects", "--filter", fixture_name],
@@ -194,13 +194,13 @@ def run_fixture(namespace, port, folder, artifact, runner, env, evidence, observ
                 canonical = b"\x01MKT1\x01" + len(original).to_bytes(4, "little") + original
                 canonical_hash = subprocess.check_output(["b3sum", "--no-names"], input=canonical).decode().strip()
                 check(canonical_hash == note["extracted_blob"], "independent canonical Blob hash differs")
-                if uno:
+                if embedded:
                     before = (folder / "wrangler.log").read_text()
-                    pending = set(re.findall(r"MKIT_UNO_OUTCOME_RETRY committed ([^\s]+)", before))
+                    pending = set(re.findall(r"MKIT_EMBED_OUTCOME_RETRY committed ([^\s]+)", before))
                     check(pending, "no failed committed Outcome to persist")
                     runtime.stop(worker)
                     # Same persisted stores and signer, new process and recovered host sink.
-                    config["vars"]["UNO_FIXTURE_OUTCOME_FAIL"] = "false"
+                    config["vars"]["FIXTURE_OUTCOME_FAIL"] = "false"
                     config_path.write_text(json.dumps(config, indent=2) + "\n")
                     result["restart_config_sha256"] = runtime.digest(config_path)
                     log_offset = (folder / "wrangler.log").stat().st_size
@@ -214,7 +214,7 @@ def run_fixture(namespace, port, folder, artifact, runner, env, evidence, observ
                         with (folder / "wrangler.log").open("rb") as restarted_log:
                             restarted_log.seek(log_offset)
                             after = restarted_log.read().decode("utf-8", errors="replace")
-                        delivered = set(re.findall(r"MKIT_UNO_OUTCOME committed ([^\s]+)", after))
+                        delivered = set(re.findall(r"MKIT_EMBED_OUTCOME committed ([^\s]+)", after))
                         if pending <= delivered:
                             break
                         time.sleep(.5)
@@ -258,7 +258,7 @@ def run_fixture(namespace, port, folder, artifact, runner, env, evidence, observ
                 end = admin(origin, "ReadPreserved", {"takedownId": takedown_id, "objectId": object_id,
                     "offset": str(offset)}, env, transcript, streamed=True)
                 check(len(end) == 1 and end[0].get("last") and not end[0].get("data"), "empty terminal offset differs")
-                if not uno:
+                if not embedded:
                     purge = admin(origin, "PurgeCache", {"operationId": "launch-purge-1", "repository": note["repository"],
                         "objectIds": [object_id], "reason": "local manual purge"}, env, transcript)
                     deadline = time.monotonic() + 90
@@ -304,24 +304,24 @@ def run_fixture(namespace, port, folder, artifact, runner, env, evidence, observ
                 check(len(entries) == frozen_head and entries and [int(e["seq"]) for e in entries] == list(range(1, len(entries) + 1)), "audit has gaps")
                 methods = {entry["procedure"].rsplit("/", 1)[-1] for entry in entries}
                 expected_methods = {"Takedown", "GetTakedown", "ListTakedowns", "SetLegalHold", "ReadPreserved"}
-                if not uno:
+                if not embedded:
                     expected_methods.add("PurgeCache")
                 check(expected_methods <= methods,
                       "audit omitted accepted operations")
-                if uno:
+                if embedded:
                     deadline = time.monotonic() + 90
-                    while "MKIT_UNO_PURGE delivered" not in (folder / "wrangler.log").read_text():
+                    while "MKIT_EMBED_PURGE delivered" not in (folder / "wrangler.log").read_text():
                         check(time.monotonic() < deadline, "custom paired LocalCache purge not acknowledged")
                         time.sleep(.5)
                 for method in ("Reinstate", "ReleaseHold", "Reinspect"):
-                    admin_prefix = "/_uno/operator" if uno else ""
+                    admin_prefix = "/_embedding/operator" if embedded else ""
                     check(runtime.request(origin, admin_prefix + "/mkit.server.admin.v1.AdminService/" + method, b"{}")[0] == 404,
                           "deferred operation exposed")
                 result["checks"] = ["seven independently signed release operations", "moderation/audit role separation",
                     "global public denial after acceptance", "verified private preservation stream and exact final offsets",
                     "hold set/clear status", "bounded List null/empty/repository scopes and invalid size",
                     "signed HTTPS purge transport mapping and correlated completion audit", "gapless accepted audit", "deferred catalog absent"]
-                if uno:
+                if embedded:
                     result["checks"][0] = "embedded multipart push, AlreadyPresent, Admit 402 and public reads"
                     result["checks"][6] = "custom paired LocalCache purge acknowledgement"
                     result["checks"].append("all failed committed Outcomes delivered by alarms after cold restart")
@@ -390,7 +390,7 @@ def collect_observation(folder, result, sampler):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sha", required=True)
-    parser.add_argument("--uno", action="store_true", help="run the embedded host fixture directly in Miniflare")
+    parser.add_argument("--embedded", action="store_true", help="run the embedded host fixture directly in Miniflare")
     parser.add_argument("--namespace", choices=("both", "allowlist", "any"), default="both")
     parser.add_argument("--observe-resources", action="store_true", help="observe the unchanged local workload")
     parser.add_argument("--artifact-from", type=Path, help="reuse the same owned clean-SHA artifact and runner")
@@ -431,18 +431,18 @@ def main():
         else:
             runtime.invoke(["cargo", "build", "--locked", "-p", "mkit-server-conformance", "--bin", "mkit-server-conformance"],
                            ROOT / "rust", run / "runner-build.log", env, evidence)
-            worker_app = ROOT / ("apps/embedded-worker/tests/uno-launch" if args.uno else "apps/vcs-worker")
-            build_command = ["worker-build", "--release"] + ([] if args.uno else ["--features", "launch"])
+            worker_app = ROOT / ("apps/embedded-worker/tests/embedding-conformance" if args.embedded else "apps/vcs-worker")
+            build_command = ["worker-build", "--release"] + ([] if args.embedded else ["--features", "launch"])
             runtime.invoke(build_command, worker_app, run / "build.log", env, evidence)
             shutil.copytree(worker_app / "build", artifact)
         evidence["artifacts"] = {str(p.relative_to(artifact)): runtime.digest(p) for p in artifact.rglob("*") if p.is_file()}
         evidence["runner_sha256"] = runtime.digest(runner)
         evidence["observation_enabled"] = args.observe_resources
-        evidence["uno"] = args.uno
-        if args.uno:
+        evidence["embedded"] = args.embedded
+        if args.embedded:
             evidence["limitations"][0] = "Local Miniflare HTTP/DO/R2 runtime; no cloud or deployed CDN purge certification"
         for namespace in ("allowlist", "any") if args.namespace == "both" else (args.namespace,):
-            run_fixture(namespace, int(port), run / namespace, artifact, runner, env, evidence, args.observe_resources, args.uno)
+            run_fixture(namespace, int(port), run / namespace, artifact, runner, env, evidence, args.observe_resources, args.embedded)
         check(runtime.git("rev-parse", "HEAD") == args.sha and not runtime.git("status", "--porcelain"), "candidate changed")
         evidence["result"] = "PASS"
     except Exception as error:

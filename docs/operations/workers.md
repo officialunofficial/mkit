@@ -90,7 +90,7 @@ typed pending detail carries the same whole-second delay in milliseconds.
 
 ## Hosted acceptance
 
-Workers CI requires a locked wasm build of the Uno embedding fixture and a local
+Workers CI requires a locked wasm build of the embedding fixture and a local
 paid indexed launch flow with supplied hooks, published object reads, URL tokens
 and cold outcome retry. Takedown is off and inspection is unconfigured in this
 flow. A separate fault-enabled scenario requires an interrupted verification
@@ -150,8 +150,8 @@ The base launch vars are:
 | `BACKUP_MAX_BYTES` | Default `16777216`; maximum `25165824` |
 | `BACKUP_FORCE_REUPLOAD_MS` | Default `2419200000` (28 days); keep below backup lifecycle retention |
 
-`LAUNCH_PROFILE=paid-workers` is the only accepted profile value. The former
-`uno` alias is removed and is refused at startup.
+`LAUNCH_PROFILE=paid-workers` is the only accepted profile value. The production embedder's former
+profile alias is removed and is refused at startup.
 
 Ticketed uploads use threshold zero. `any` requires explicit operator acceptance
 of incomplete holder discovery. Remove the template's `NAMESPACE_ALLOWLIST`
