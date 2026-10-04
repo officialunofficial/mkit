@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
+- Borrowed server stores forward batched content-index reads to the backend.
+  Two-key denial probes use one batch, and member dependency checks use one
+  batch each for the object and its pack. Fail-closed checks remain live.
 - Server reader sessions capture roots once and reuse bounded local graph proofs
   across canonical and metadata batches. Retain the same reader/session through
   a request; start a new session to observe new commits before proof expiry.
