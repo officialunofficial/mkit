@@ -101,8 +101,11 @@ def main():
                         else:
                             assert raw == b"\0\0\0\0\2\x08\x01", (entry, raw)
                         cases.append({"entry": entry, "headers": headers, "protocol": content_type, "status": status})
-                    status, raw, _ = request(origin, f"/{entry}/mkit.transport.v1.TransportService/ReadRef", headers)
+                    repository = "default" if entry in ["direct", "default", "router"] else "ed25519-" + "11" * 32 + "/default"
+                    status, raw, _ = request(origin, f"/{entry}/mkit.transport.v1.TransportService/ReadRef",
+                                             {**headers, "x-repository": repository})
                     assert status == 401 and json.loads(raw)["code"] == "unauthenticated", (entry, status, raw)
+                    cases.append({"entry": entry, "headers": headers, "protocol": "auth rejection", "status": status})
                 print(f"PASS {entry}: all timeout variants, Connect/gRPC health and auth rejection", flush=True)
             for entry in ["admin", "serve", "serve_with", "fetch", "fetch_with", "fetch_with_context"]:
                 for headers in VARIANTS:
