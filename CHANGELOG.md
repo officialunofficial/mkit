@@ -54,9 +54,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `StoreError` adds `OperationLimitExceeded` for bounded in-memory operations.
   Migration: handle this variant in exhaustive matches and discard or publish
-  partial overlay writes according to host policy. Generic operation signatures
-  keep existing `&ObjectStore` calls and explicit ancestor-set hasher arguments
-  valid.
+  partial overlay writes according to host policy.
+- Merge, revert, cherry-pick, merge-base and ancestry operation signatures now
+  infer source/sink types. Migration: pass `&ObjectStore` directly when using
+  store wrappers (for example, `boxed_store.as_ref()` instead of `&boxed_store`),
+  and qualify function items with `::<ObjectStore>` when no call/expected type
+  provides inference. Direct `&ObjectStore` calls and explicit ancestor-set
+  hasher arguments remain valid.
 
 - Request reservation variants require `StoredProcedure`. Pass the operation
   directly to `ReservationV1::{pending, committed, aborted, read_served}`;
