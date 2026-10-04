@@ -1891,3 +1891,24 @@ Connect dispatch, and does not apply configured Connect deadline policies.
 Native bindings retain deadline enforcement. This runtime policy leaves body
 limits, streaming and authentication unchanged; hosts may bound work using their
 platform clock and timer.
+
+
+## Runtime-independent push client (informative)
+
+`mkit-push` implements one bounded ticketed advance from public protocol code.
+It accepts ordered canonical objects or delta streams, uses the shared
+`mkit-rpc/transport-messages` types, plans packlist nodes, and performs
+`BeginUpload`, `UploadPack` or `UploadPart`/`CompleteUpload`, then `AdvanceRefs`.
+It preserves the signed request identity through pending polls while valid,
+honors typed poll hints and `Retry-After`, and reports conflict/replan outcomes.
+
+The HTTP boundary is injectable and carries buffered Connect frames with an
+explicit response limit. Clock/entropy/waiting and signing are also injectable;
+no tokio or native compression library is required on wasm. The host owns
+staged input, closure/delta selection, authorization, persistence, network
+retry policy and scheduling larger histories as independent advances.
+Exact signed requests are the transport's replay unit. No result claims
+eternal replay retention or proves that an earlier ambiguous attempt never
+wrote. The native CLI retains its existing push path during embedder validation.
+See [the client guide](../../rust/crates/mkit-push/README.md) for bounds and the
+API needed to replace a private protocol port. This library adds no wire change.

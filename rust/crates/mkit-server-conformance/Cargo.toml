@@ -101,6 +101,7 @@ reqwest = { version = "0.13", default-features = false, features = [
 tower-http = { version = "0.6", default-features = false, features = ["cors"], optional = true }
 
 [dev-dependencies]
+mkit-push = { path = "../mkit-push" }
 base64 = "0.22"
 mkit-cli = { path = "../mkit-cli" }
 # The `.mkit`-layout stores `mkit serve` uses, for tests/fs_backends.rs.

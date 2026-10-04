@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `mkit-push`: a bounded async ticketed push primitive for native and wasm
+  clients, with injectable HTTP transport, signer and clock. It shares
+  canonical transport messages, uploads parts where necessary, polls pending
+  verification and exposes conflict/replan outcomes. Staging, persistence,
+  scheduling and policy remain host-owned; the CLI push path is unchanged.
+- `mkit-rpc/transport-messages` exposes the same generated messages without
+  Connect bindings or tokio. Existing `transport` consumers keep their APIs.
+
 ### Fixed
 
 - Wasm Connect dispatch ignores both client timeout headers before connectrpc

@@ -32,7 +32,9 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
 
 [features]
 # Shared wasm-clean TransportService and health messages and Connect bindings.
-transport = ["dep:connectrpc", "dep:connectrpc-build", "dep:serde", "buffa/json"]
+transport = ["transport-messages", "dep:connectrpc", "dep:connectrpc-build"]
+# Canonical messages without Connect runtime bindings (no tokio dependency).
+transport-messages = ["dep:serde", "buffa/json"]
 # Runtime-free public hook messages, JSON codec and Ed25519 authentication.
 hooks = ["buffa/json", "dep:ed25519-dalek", "dep:zeroize", "dep:serde", "dep:serde_json"]
 # Opt-in `arbitrary::Arbitrary` derives on all generated wire types,
