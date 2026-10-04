@@ -93,24 +93,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `mkit_server_worker::relay::WORKER_*`. Update imports to the adapter.
 
 `mkit-server` main now accumulates 0.6 changes; the `server-semver` check
-compares against the 0.5.0 baseline as the 0.6 release. Rows written by
-v0.5.0 keep decoding. Rows written once these changes run carry the new field,
-which v0.5.0 rejects (`deny_unknown_fields`), so a downgrade to 0.5.x is not
-supported after new reservation rows are written.
+compares against the 0.5.0 baseline as the 0.6 release. Reset unsupported
+stored shapes instead of upgrading or downgrading them.
 
-- Reservations and outcomes record their operation. `ReservationV1::{Pending,
-  Committed, Aborted, ReadServed}` gain an optional `procedure:
-  Option<StoredProcedure>` (`#[serde(default, skip_serializing_if)]`; rows
-  written by v0.5.0 decode as `None`). These four variants are now
-  `#[non_exhaustive]`: build them with the new constructors
-  `ReservationV1::{pending, committed, aborted, read_served}` (and
-  `.with_procedure(..)`), and match them with `..`. `ReservationV1::Expired`,
-  `Ticketed`, `OutcomeRef` and `AbortReason` are unchanged.
+- Request reservations and outcomes record their operation. `ReservationV1::{Pending,
+  Committed, Aborted, ReadServed}` require `StoredProcedure` and are
+  `#[non_exhaustive]`: use the constructors with the operation argument and
+  match with `..`. `ReservationV1::Expired`, `Ticketed`, `OutcomeRef` and
+  `AbortReason` are unchanged.
 - `Outcome` gains `procedure: Option<Procedure>` and
-  `visibility: Option<RepoVisibility>` for every outcome (ref writes, ticket
-  advances, uploads, visibility changes and reads, including a reservation the
-  crash reconciler abandons). Only outcomes written by v0.5.0 have `None`
-  (an expired ticket is always `BeginUpload`).
+  `visibility: Option<RepoVisibility>`. Request outcomes identify their
+  operation, including a reservation the crash reconciler abandons; expired
+  tickets derive `BeginUpload`. System `RepoStorageChanged` outcomes omit the
+  procedure. Visibility is present only for visibility-change outcomes.
 - `mkit_server::indexed::publication::{verify, verify_inspected}` are removed.
   They had no callers: the pipeline verifies within the request's publication
   ledger.
@@ -167,8 +162,8 @@ supported after new reservation rows are written.
   catalog; with no per-repository URL paths that step deleted nothing. A
   namespace purge deletes its own exact paths from the local cache and is
   delivered once to the configured sink, unchanged. `PurgeDelivery::fire_with_local`
-  and the Worker `NamespaceDelivery` handler are removed. A v0.5.0 checkpoint
-  row for an in-flight namespace purge still decodes and finishes.
+  and the Worker `NamespaceDelivery` handler are removed. Only current
+  checkpoint rows resume; reset unsupported in-flight state.
 
 ### Changed
 
@@ -193,8 +188,8 @@ supported after new reservation rows are written.
   code; SPEC-SERVER §18 is deployment-neutral with the Workers launch rules in
   the Workers operator guide; the `store::inspection_*` modules and the
   deferred inspection, Event and proof work are marked as not integrated or
-  not implemented; SPEC-WRITE-GRANTS §9.4 states the legacy visibility
-  fallback precisely.
+  not implemented; SPEC-WRITE-GRANTS §9.4 requires server-clock visibility
+  change times independently of statement anti-replay ordering.
 - The `pack-ruzstd` feature relies on a bounded-decode patch to ruzstd 0.9
   that crates.io consumers must apply in their own workspace until upstream
   releases it: `[patch.crates-io] ruzstd = { git =

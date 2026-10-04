@@ -286,7 +286,8 @@ fn compare_addressing(observed: &Value, configured: AddressingMode) -> Outcome {
 /// handle. A root with committed data (the layout-version row) must have an
 /// `am` marker. Housekeeping rows (`sm`, `bk` backup state, `w` timers) may
 /// precede addressing bootstrap and do not establish an addressing mode.
-/// At most three calls: get, get, apply. A failed Absent uses its observation.
+/// At most two calls: get, apply. Ordered atomic absence checks distinguish a
+/// concurrent marker from committed data without one.
 ///
 /// # Errors
 /// Backend errors are returned separately from definitive marker outcomes.
@@ -303,9 +304,6 @@ pub async fn check_addressing<S: NamespaceStore>(
     let marker = keys::addressing_marker();
     if let Some(observed) = store.get(&root, &marker).await? {
         return Ok(compare_addressing(&observed, configured));
-    }
-    if store.get(&root, &keys::layout_version()).await?.is_some() {
-        return Ok(Outcome::AddressingCorrupt);
     }
     let batch = Batch::new()
         .require(Precondition::Absent(marker.clone()))
