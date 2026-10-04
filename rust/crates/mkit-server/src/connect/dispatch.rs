@@ -95,11 +95,13 @@ impl<D: Dispatcher> ConnectService<D> {
     }
 
     /// The effective request limits.
+    #[must_use]
     pub fn limits(&self) -> &Limits {
         self.inner.limits()
     }
 
     /// The mounted dispatcher.
+    #[must_use]
     pub fn dispatcher(&self) -> &D {
         self.inner.dispatcher()
     }
