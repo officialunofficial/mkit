@@ -159,6 +159,7 @@ ci-scripts:
       echo "error: wasm32-unknown-unknown target not installed. Run: rustup target add wasm32-unknown-unknown" >&2
       exit 1
     fi
+    ( cd rust && cargo check --locked -p mkit-core --no-default-features --target wasm32-unknown-unknown )
     ( cd rust && cargo check -p mkit-wasm --target wasm32-unknown-unknown )
     ( cd rust && cargo check --locked -p mkit-server --target wasm32-unknown-unknown )
     ( cd rust && cargo check --locked -p mkit-server --features remote-hooks --target wasm32-unknown-unknown )

@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Core merge, revert and cherry-pick use `ObjectSource + ObjectSink`; merge-base,
+  ancestry and ancestor-set walks use `ObjectSource`. CLI behavior is unchanged.
+  `MemoryOverlay` provides immediately readable outputs with explicit aggregate
+  read and output budgets, and the wasm gate executes the generic operations.
+
 - Scheduled verification emits correlated upload, job, alarm, phase, delivery,
   readiness and ref-commit telemetry through the Worker console. Relay delivery
   nudges a bounded set of waiting timers while retaining the recovery poll.
@@ -46,6 +51,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   URL-token reads, supplied hooks, cold outcome retry and injected slice recovery.
 
 ### Breaking (toward 0.6)
+
+- `StoreError` adds `OperationLimitExceeded` for bounded in-memory operations.
+  Migration: handle this variant in exhaustive matches and discard or publish
+  partial overlay writes according to host policy. Generic operation signatures
+  keep existing `&ObjectStore` calls and explicit ancestor-set hasher arguments
+  valid.
 
 - Request reservation variants require `StoredProcedure`. Pass the operation
   directly to `ReservationV1::{pending, committed, aborted, read_served}`;

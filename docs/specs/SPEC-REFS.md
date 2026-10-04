@@ -416,6 +416,24 @@ from listings.
 
 ### 6.1 Operation-state files (merge / cherry-pick / rebase)
 
+Core tree merge, revert and cherry-pick are synchronous algorithms over verified
+object sources and sinks. Successful writes MUST be readable by subsequent
+steps through the same source/sink. They return a tree and conflicts (ours wins
+at conflicted paths); they do not sign commits, mutate refs, acquire worktree
+locks or persist conflict state. Root-commit revert uses an empty parent tree;
+merge-commit revert refuses without mainline support. Cherry-pick retains
+explicit mainline selection for merge commits.
+
+In-memory hosts MUST bound prefetch and operation resources independently.
+`MemoryOverlay` requires aggregate read-call/read-byte and retained-output
+byte/object caps; exhaustion returns `StoreError::OperationLimitExceeded`.
+Tree recursion remains capped at 128 levels (`TreeTooDeep`). Read budgets bound
+history traversal, tree breadth and accumulated conflict work; caller source
+object-size caps also bound transient read/decode/text-merge allocations.
+These are work/retention budgets, not a hard process heap ceiling. Earlier
+writes can survive a later error; the host owns abandonment and publication.
+The filesystem CLI retains its existing budgets and operation-state semantics.
+
 Resumable history operations persist their state under `.mkit/` using
 Git-compatible names plus one documented mkit sidecar. These are not
 refs (they are not listed by `listRefs` and are not part of the ref

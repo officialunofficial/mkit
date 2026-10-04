@@ -45,3 +45,6 @@ pub use restore::{
     restore_tree_to_worktree_with,
 };
 pub use revert::{RevertError, RevertResult, revert};
+
+#[cfg(test)]
+mod test_store;
