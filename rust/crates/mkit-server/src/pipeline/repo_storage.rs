@@ -99,7 +99,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 prefix: "refs/".into(),
             },
         )?;
-        self.authorize_owner_operation(&a, &op, &self.meta).await
+        self.authorize_owner_operation(&a, &op, &self.meta).await?;
+        Ok(a)
     }
 
     async fn authorize_owner_operation<S: NamespaceStore>(
@@ -135,7 +136,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         if auth.facts.caller_view != CallerView::Writer || !(owner || grant) {
             return Err(ServerError::permission_denied("writer authority required"));
         }
-        Ok(a)
+        Ok(())
     }
 
     /// Read at most [`MAX_REPO_STORAGE_BATCH`] counters in input order,
