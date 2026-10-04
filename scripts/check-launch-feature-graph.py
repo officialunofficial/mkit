@@ -14,6 +14,10 @@ def check(manifest, features=()):
     if features:
         command += ["--features", ",".join(features)]
     metadata = json.loads(subprocess.check_output(command))
+    decoder = [p for p in metadata["packages"] if p["name"] == "ruzstd"]
+    expected = (ROOT / "rust/vendor/ruzstd/Cargo.toml").resolve()
+    if len(decoder) != 1 or Path(decoder[0]["manifest_path"]).resolve() != expected or decoder[0]["source"] is not None:
+        raise SystemExit(f"{manifest}: launch must resolve the patched vendored decoder")
     packages = {p["id"]: p["name"] for p in metadata["packages"]}
     resolved = {packages[node["id"]]: set(node["features"])
                 for node in metadata["resolve"]["nodes"]}

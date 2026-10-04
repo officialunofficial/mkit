@@ -29,3 +29,13 @@ changes that fixture flag to false, starts a new process over the same DO/R2
 stores and requires every failed reservation ID to be delivered by a cold
 alarm before issuing another request. The flag and panic hook exist only in
 this test host; no production key, timer or protocol is added.
+
+Hosted Workers CI runs `python3 scripts/paid-worker-acceptance.py` with the locked
+local Miniflare runtime from `apps/workspace-worker`. This smaller gate builds
+with `worker-build --release --locked`, uses the paid indexed sharded launch
+profile with supplied hooks, takedown off and no inspector, and requires
+`uno.public_fixture` to pass without a skip. That case verifies multipart push,
+published reads and a minted URL-token read. The host then restarts over the same
+stores and requires every failed committed outcome to be delivered by cold alarms.
+Failure artifacts retain build/runtime logs and producer TAP. The existing admin
+matrix remains available for takedown activation, denial and preservation.

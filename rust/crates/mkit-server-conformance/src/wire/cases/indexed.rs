@@ -10,8 +10,8 @@ use mkit_transport_connect::generated::__buffa::oneof::begin_upload_response::Re
 use mkit_transport_connect::generated::__buffa::oneof::upload_pack_request::Body as UploadBody;
 use mkit_transport_connect::generated::{
     AdvanceOutcome, AdvanceRefsResponse, BeginUploadRequest, BeginUploadResponse,
-    DownloadPackRequest, DownloadPackResponse, GetServerInfoResponse, ReadRefRequest,
-    ReadRefResponse,
+    DownloadPackRequest, DownloadPackResponse, GetServerInfoResponse, IssueObjectUrlRequest,
+    IssueObjectUrlResponse, ReadRefRequest, ReadRefResponse,
 };
 
 use super::{
@@ -854,6 +854,9 @@ async fn launch_verified_fixture(ctx: Ctx, large: bool, set_visibility: bool) ->
     );
     if ctx.profile().has(Feature::HttpObjects) {
         check_extracted_http(&ctx, &repository, &extracted, &data).await?;
+        if ctx.case == "uno.public_fixture" {
+            check_url_token(&ctx, &repository, &extracted, &data).await?;
+        }
     }
     if !set_visibility {
         uno_already_present(&ctx, &repository, pack_id, pack.len()).await?;
@@ -867,6 +870,34 @@ async fn launch_verified_fixture(ctx: Ctx, large: bool, set_visibility: bool) ->
         data.len(),
         ctx.profile().has(Feature::HttpObjects)
     ));
+    Ok(())
+}
+
+async fn check_url_token(ctx: &Ctx, repository: &str, extracted: &Hash, data: &[u8]) -> CaseResult {
+    use mkit_transport_connect::generated::__buffa::oneof::issue_object_url_request::Target;
+    let request = IssueObjectUrlRequest {
+        target: Some(Target::ObjectId(extracted.to_vec())),
+        ..Default::default()
+    };
+    let signed = super::reads::signed_for(
+        &ctx.v2_signer("repository-a")?,
+        repository,
+        Rpc::IssueObjectUrl,
+        &request,
+    );
+    let minted: IssueObjectUrlResponse = want_ok(ctx.send(&signed).await?, "Uno URL token")?;
+    let token = minted.token.ok_or("Uno URL token absent")?;
+    let reply = ctx
+        .client()
+        .get(&format!(
+            "/{repository}/-/objects/{}?token={token}",
+            to_hex(extracted)
+        ))
+        .await?;
+    ensure!(
+        reply.status == 200 && reply.body.as_ref() == data,
+        "Uno token read differs"
+    );
     Ok(())
 }
 
