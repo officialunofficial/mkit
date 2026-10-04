@@ -684,7 +684,7 @@ async fn http_object_mount_uses_core_cors_and_options_behavior() {
     let host = TestHost::start(profile).await.unwrap();
     let response = send_http(
         &host,
-        "OPTIONS /ns/repo/-/objects/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa HTTP/1.1\r\nHost: localhost\r\nOrigin: https://uno.example\r\nConnection: close\r\n\r\n",
+        "OPTIONS /ns/repo/-/objects/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa HTTP/1.1\r\nHost: localhost\r\nOrigin: https://embedding.example\r\nConnection: close\r\n\r\n",
     )
     .await;
     assert!(response.starts_with("HTTP/1.1 204"), "{response}");

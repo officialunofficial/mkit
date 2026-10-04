@@ -14,7 +14,7 @@ use std::hash::BuildHasher;
 
 use crate::hash::Hash;
 use crate::object::{Object, ObjectType};
-use crate::store::{ObjectStore, StoreError};
+use crate::store::{ObjectSource, ObjectStore, StoreError};
 
 /// Hard cap on commits visited per call.
 pub const MAX_ANCESTORS: usize = 10_000;
@@ -31,12 +31,12 @@ pub const MAX_ANCESTORS: usize = 10_000;
 ///
 /// # Errors
 ///
-/// Only [`StoreError::Io`] / [`StoreError::HashMismatch`] /
-/// [`StoreError::ObjectTooLarge`] / [`StoreError::Decode`] propagate.
+/// All source errors, including resource-budget exhaustion, propagate except
+/// [`StoreError::ObjectNotFound`].
 /// `ObjectNotFound` is *swallowed* — see test
 /// `handles_non_existent_parent_gracefully`.
 pub fn collect_ancestor_set<S: BuildHasher>(
-    store: &ObjectStore,
+    store: &(impl ObjectSource + ?Sized),
     start: Hash,
     set: &mut HashSet<Hash, S>,
 ) -> Result<(), StoreError> {

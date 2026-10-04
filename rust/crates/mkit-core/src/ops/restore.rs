@@ -690,20 +690,8 @@ where
             // reads out across threads — see this function's and
             // `restore_tree_to_worktree_with`'s docs.
             let (tmp_path, final_path, mut tmp) = create_tmp_for_write(dir, name)?;
-            let mut written: u64 = 0;
-            for batch in cb.chunks.chunks(batch_size) {
-                let bufs = read_chunks(store, batch)?;
-                if bufs.len() != batch.len() {
-                    return Err(RestoreError::ChunkBatchLengthMismatch {
-                        expected: batch.len(),
-                        actual: bufs.len(),
-                    });
-                }
-                for buf in &bufs {
-                    tmp.write_all(buf)?;
-                    written += buf.len() as u64;
-                }
-            }
+            let written =
+                write_chunk_batches(store, &cb.chunks, batch_size, read_chunks, &mut tmp)?;
             cb.check_reassembled_size(usize::try_from(written).unwrap_or(usize::MAX))?;
             #[cfg(not(target_arch = "wasm32"))] // wasm File has no destructor
             drop(tmp);
@@ -712,6 +700,88 @@ where
         _ => return Err(RestoreError::NotABlob),
     }
     Ok(())
+}
+
+/// Read `chunks` in batches of `batch_size` via `read_chunks` and append
+/// each batch to `out`, returning the total bytes written.
+///
+/// With more than one batch on a threaded target, the write of batch N
+/// is overlapped with the read of batch N+1: a scoped writer thread
+/// drains a rendezvous channel, so at most two batches are ever in
+/// flight (one being written, one being read) and peak memory stays
+/// bounded at `2 * batch_size` chunks. A single-batch file (or wasm,
+/// which has no threads) takes the plain sequential loop.
+fn write_chunk_batches<F>(
+    store: &ObjectStore,
+    chunks: &[Hash],
+    batch_size: usize,
+    read_chunks: &F,
+    out: &mut fs::File,
+) -> RestoreResult<u64>
+where
+    F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
+{
+    let read_batch = |batch: &[Hash]| -> RestoreResult<Vec<Vec<u8>>> {
+        let bufs = read_chunks(store, batch)?;
+        if bufs.len() != batch.len() {
+            return Err(RestoreError::ChunkBatchLengthMismatch {
+                expected: batch.len(),
+                actual: bufs.len(),
+            });
+        }
+        Ok(bufs)
+    };
+
+    #[cfg(not(target_arch = "wasm32"))]
+    if batch_size > 1 && chunks.len() > batch_size {
+        return std::thread::scope(|scope| {
+            let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<Vec<u8>>>(0);
+            let writer = scope.spawn(move || -> io::Result<u64> {
+                let mut written: u64 = 0;
+                for bufs in rx {
+                    for buf in &bufs {
+                        out.write_all(buf)?;
+                        written += buf.len() as u64;
+                    }
+                }
+                Ok(written)
+            });
+            let mut read_err = None;
+            for batch in chunks.chunks(batch_size) {
+                match read_batch(batch) {
+                    // A failed send means the writer already hit an I/O
+                    // error; stop reading and surface it from the join.
+                    Ok(bufs) => {
+                        if tx.send(bufs).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        read_err = Some(e);
+                        break;
+                    }
+                }
+            }
+            drop(tx);
+            let written = match writer.join() {
+                Ok(r) => r,
+                Err(panic) => std::panic::resume_unwind(panic),
+            };
+            match (read_err, written) {
+                (Some(e), _) => Err(e),
+                (None, w) => Ok(w?),
+            }
+        });
+    }
+
+    let mut written: u64 = 0;
+    for batch in chunks.chunks(batch_size) {
+        for buf in &read_batch(batch)? {
+            out.write_all(buf)?;
+            written += buf.len() as u64;
+        }
+    }
+    Ok(written)
 }
 
 /// Default `read_chunks`: reads and type-checks each chunk hash in

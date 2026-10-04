@@ -11,7 +11,7 @@
 
 use crate::hash::Hash;
 use crate::object::Object;
-use crate::store::{ObjectStore, StoreError};
+use crate::store::{ObjectSink, ObjectSource, StoreError};
 
 use super::merge::{self, Conflict};
 
@@ -70,6 +70,9 @@ impl CherryPickResult {
 /// 4. Return the merged tree hash, any conflicts, and the target
 ///    commit's `message` so the caller can craft a new commit.
 ///
+/// The source/sink visibility and resource-budget contract is the same as
+/// [`merge::merge_trees`].
+///
 /// # Errors
 ///
 /// * [`CherryPickError::NotACommit`] when `target_hash` doesn't point
@@ -77,8 +80,8 @@ impl CherryPickResult {
 /// * [`CherryPickError::ParentNotACommit`] when the parent hash points
 ///   at something other than a commit.
 /// * [`CherryPickError::Store`] for any wrapped store/serialize error.
-pub fn cherry_pick(
-    store: &ObjectStore,
+pub fn cherry_pick<S: ObjectSource + ObjectSink + ?Sized>(
+    store: &S,
     target_hash: Hash,
     ours_tree: Hash,
     mainline: Option<usize>,
@@ -140,22 +143,32 @@ mod tests {
     use super::*;
     use crate::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
     use crate::ops::merge::ConflictKind;
+    use crate::ops::test_store::CorpusStore;
     use crate::serialize;
     use tempfile::TempDir;
 
-    fn store() -> (TempDir, ObjectStore) {
+    fn cherry_pick(
+        s: &CorpusStore,
+        target: Hash,
+        ours: Hash,
+        mainline: Option<usize>,
+    ) -> Result<CherryPickResult, CherryPickError> {
+        s.compare(|backend| super::cherry_pick(backend, target, ours, mainline))
+    }
+
+    fn store() -> (TempDir, CorpusStore) {
         let d = TempDir::new().unwrap();
-        let s = ObjectStore::init(&crate::layout::RepoLayout::single(d.path())).unwrap();
+        let s = CorpusStore::new(d.path());
         (d, s)
     }
-    fn put_blob(s: &ObjectStore, data: &[u8]) -> Hash {
+    fn put_blob(s: &CorpusStore, data: &[u8]) -> Hash {
         let bytes = serialize::serialize(&Object::Blob(Blob {
             data: data.to_vec(),
         }))
         .unwrap();
         s.write(&bytes).unwrap()
     }
-    fn make_tree(s: &ObjectStore, entries: Vec<TreeEntry>) -> Hash {
+    fn make_tree(s: &CorpusStore, entries: Vec<TreeEntry>) -> Hash {
         let bytes = serialize::serialize(&Object::Tree(Tree { entries })).unwrap();
         s.write(&bytes).unwrap()
     }
@@ -166,7 +179,7 @@ mod tests {
             object_hash: h,
         }
     }
-    fn make_commit(s: &ObjectStore, tree: Hash, parents: &[Hash], message: &str) -> Hash {
+    fn make_commit(s: &CorpusStore, tree: Hash, parents: &[Hash], message: &str) -> Hash {
         let c = Commit {
             tree_hash: tree,
             parents: parents.to_vec(),
@@ -181,7 +194,7 @@ mod tests {
         s.write(&serialize::serialize(&Object::Commit(c)).unwrap())
             .unwrap()
     }
-    fn tree_entries(s: &ObjectStore, h: Hash) -> Vec<TreeEntry> {
+    fn tree_entries(s: &CorpusStore, h: Hash) -> Vec<TreeEntry> {
         match s.read_object(&h).unwrap() {
             Object::Tree(t) => t.entries,
             other => panic!("expected tree, got {other}"),
@@ -315,7 +328,7 @@ mod tests {
 
     /// Build a 2-parent merge commit. Parent 1 has `a.txt`, parent 2 has
     /// `b.txt`; the merge tree has both, plus `m.txt` unique to the merge.
-    fn merge_fixture(s: &ObjectStore) -> (Hash, Hash, Hash) {
+    fn merge_fixture(s: &CorpusStore) -> (Hash, Hash, Hash) {
         let a = put_blob(s, b"a");
         let b = put_blob(s, b"b");
         let p1_tree = make_tree(s, vec![entry(b"a.txt", EntryMode::Blob, a)]);

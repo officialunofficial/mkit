@@ -1,11 +1,11 @@
 # Local embedding acceptance fixture
 
 This host embeds the launch adapter, remounts the restricted admin router at
-`/_uno/operator`, supplies local Authorize/Admit/Outcome callbacks and
+`/_embedding/operator`, supplies local Authorize/Admit/Outcome callbacks and
 acknowledges paired LocalCache purge work. It does not certify deployed CDN
 purging. The dedicated 13-byte upload receives the fixture's Admit 402.
 
-From a clean worktree, run the existing admin matrix with `--uno`. Set an owned
+From a clean worktree, run the existing admin matrix with `--embedded`. Set an owned
 non-symlink `TMPDIR` in an owned local scratch directory, a private
 `VCS_CONFORMANCE_PORT`, and `MKIT_MINIFLARE_MODULE` to the installed, pinned
 Miniflare SDK entry point. The final measurement used Miniflare 5.20260917.0-alpha
@@ -13,7 +13,7 @@ from Wrangler 4.134.0; the harness never downloads a runtime automatically.
 
 ```sh
 python3 scripts/vcs-worker-launch-admin-runtime.py \
-  --uno --namespace any --sha "$(git rev-parse HEAD)"
+  --embedded --namespace any --sha "$(git rev-parse HEAD)"
 ```
 
 Add `--observe-resources`, an owned `MKIT_LAUNCH_INSPECTOR_PORT` and
@@ -23,7 +23,7 @@ capacity and observed heap usage; they do not certify full isolate peaks.
 Direct Miniflare serves local HTTP. Native HTTPS push/clone is a separate run
 using `MKIT_SSL_CA_FILE` and the existing fixture CA.
 
-The matrix starts with `UNO_FIXTURE_OUTCOME_FAIL=true`: committed Outcomes
+The matrix starts with `FIXTURE_OUTCOME_FAIL=true`: committed Outcomes
 fail with a retry delay on the existing durable outbox. It stops the process,
 changes that fixture flag to false, starts a new process over the same DO/R2
 stores and requires every failed reservation ID to be delivered by a cold
@@ -34,7 +34,7 @@ Hosted Workers CI runs `python3 scripts/paid-worker-acceptance.py` with the lock
 local Miniflare runtime from `apps/workspace-worker`. This smaller gate builds
 with `worker-build --release --locked`, uses the paid indexed sharded launch
 profile with supplied hooks, takedown off and no inspector, and requires
-`uno.public_fixture` to pass without a skip. That case verifies multipart push,
+`embedding.public_fixture` to pass without a skip. That case verifies multipart push,
 published reads and a minted URL-token read. The host then restarts over the same
 stores and requires every failed committed outcome to be delivered by cold alarms.
 Failure artifacts retain build/runtime logs and producer TAP. The existing admin

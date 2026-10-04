@@ -185,7 +185,7 @@ admin catalog uses the merged WP-5.6a-3 runtime. Global denial must stay enabled
 Reserved prefixes are `/mkit.transport.v1.TransportService/`,
 `/mkit.server.admin.v1.AdminService/`, any mounted HTTP path containing `/-/`,
 `/.well-known/mkit-*`, `/_mkit/`, and `/__mkit_test/` in test builds. A host may
-use another prefix such as `/_uno/`; namespaces and repos cannot start with `_`.
+use another prefix such as `/_embedding/`; namespaces and repos cannot start with `_`.
 The [feature and measured-size table](../../../apps/vcs-worker/README.md#embedding-api-supported-0x)
 records exact release commands and keeps unexecuted measurements explicit.
 
