@@ -36,13 +36,15 @@ def main():
     run = Path(tempfile.mkdtemp(prefix="reference-acceptance-", dir=scratch))
     print(f"Acceptance logs: {run}", flush=True)
     env = dict(os.environ, WRANGLER_SEND_METRICS="false")
-    evidence = {"directory": str(run), "commands": [], "result": "RUNNING"}
+    source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    evidence = {"directory": str(run), "source_sha": source_sha, "commands": [], "result": "RUNNING"}
     worker = None
     try:
         runtime.invoke(["cargo", "build", "--locked", "-p", "mkit-server-conformance", "--bin",
                         "mkit-server-conformance"], ROOT / "rust", run / "runner-build.log", env, evidence)
         runtime.invoke(["worker-build", "--release", "--locked"], APP, run / "build.log", env, evidence)
         artifact = APP / "build"
+        evidence["wasm_sha256"] = runtime.digest(artifact / "index_bg.wasm")
         runner = ROOT / "rust/target/debug/mkit-server-conformance"
         auth = ["--auth", "auth-v2", "--audience", runtime.AUDIENCE, "--repository", "default",
                 "--signer-seed-hex", runtime.SEED, "--run-id", runtime.RUN_ID]
@@ -195,6 +197,8 @@ def main():
             expected = bytes((i * 17 ^ (i >> 9)) & 255 for i in range(1 << 20))
             check(status == 200 and data == expected, "published read differs after cold retry")
             evidence["retried_reservations"] = sorted(pending)
+            check(subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip() == source_sha,
+                "reference source changed during acceptance")
             evidence["result"] = "PASS"
     finally:
         if worker is not None:
