@@ -4,6 +4,9 @@ use worker::{
     DurableObject, Env, Method, Request, Response, Result, State, durable_object, wasm_bindgen,
 };
 
+// Keep the newest accepted reservations; duplicates do not extend retention.
+const DEDUP_RECORDS: usize = 1024;
+
 #[derive(Serialize, Deserialize)]
 pub struct Delivery {
     pub reservation_id: String,
@@ -32,6 +35,9 @@ impl DurableObject for HostEvents {
         // One INSERT commits the dedup key and the projection atomically.
         // Fixed-width decimal TEXT preserves all u64 bits across JS/SQLite and sorts by version.
         sql.exec("CREATE TRIGGER IF NOT EXISTS project_counter AFTER INSERT ON events WHEN NEW.version IS NOT NULL BEGIN INSERT INTO counter VALUES (1, NEW.bytes, NEW.version) ON CONFLICT(singleton) DO UPDATE SET bytes=excluded.bytes, version=excluded.version WHERE excluded.version > counter.version; END", None)?;
+        // This trigger runs in the same statement as deduplication/projection,
+        // including events without counters. The singleton counter is not pruned.
+        sql.exec(&format!("CREATE TRIGGER IF NOT EXISTS prune_events AFTER INSERT ON events BEGIN DELETE FROM events WHERE rowid IN (SELECT rowid FROM events ORDER BY rowid DESC LIMIT -1 OFFSET {DEDUP_RECORDS}); END"), None)?;
         if req.method() == Method::Get {
             let rows: Vec<Counter> = sql
                 .exec("SELECT bytes, version FROM counter", None)?

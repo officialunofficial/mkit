@@ -60,7 +60,9 @@ collect the applicable entries between their old and new immutable pins.
 
 - The generic Workers reference composes in-process hooks, bounded request reader
   sessions, URL tokens and a durable outcome/storage projection. Its separate
-  local harness verifies cold retries, duplicate/out-of-order delivery and purge.
+  local harness verifies cold retries, duplicate/out-of-order delivery, bounded
+  deduplication retention and purge. The receiver keeps the newest 1,024 accepted
+  reservation IDs and preserves its highest-version storage projection.
   The Workers embedder guide documents budgets, continuation and per-pin upgrades.
 
 - Align the server profile map and invariant enforcement index with implemented

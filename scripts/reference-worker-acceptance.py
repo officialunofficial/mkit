@@ -151,6 +151,26 @@ def main():
                 return json.loads(hooks.request(origin, "/__reference_test/events", headers=headers)[2])
             check(projection(probe) == [{"bytes":"18446744073709551615", "version":"00000000000000000002"}],
                 "highest version or reservation dedup lost")
+            retention_probe = {"X-Repository": "retention-probe"}
+            def retention_event(reservation_id, version, counter=True):
+                event = {"reservation_id": reservation_id, "kind": "storage" if counter else "committed",
+                         "counter": [version, version] if counter else None}
+                check(hooks.request(origin, "/__reference_test/events", method="POST", headers=retention_probe,
+                    body=json.dumps(event).encode())[0] == 200, "retention probe refused")
+            retention_event("retention:old", 1)
+            # Counterless outcomes also count toward the receiver's 1,024-record bound.
+            for i in range(1023):
+                retention_event(f"retention:{i}", 0, counter=False)
+            retention_event("retention:old", 3)
+            check(int(projection(retention_probe)[0]["version"]) == 1,
+                "reservation pruned before the retention cap")
+            retention_event("retention:recent", 2)
+            retention_event("retention:recent", 3)
+            check(int(projection(retention_probe)[0]["version"]) == 2,
+                "recent duplicate was accepted after pruning")
+            retention_event("retention:old", 4)
+            check(int(projection(retention_probe)[0]["version"]) == 4,
+                "old reservation was not pruned at the retention bound")
             wait_for(worker, lambda: bool(projection(unsigned)), "RepoStorageChanged not consumed")
             counter = projection(unsigned)[0]
             check(int(counter["bytes"]) >= int(note["pack_bytes"]) and int(counter["version"]) > 0,
@@ -168,7 +188,8 @@ def main():
             check(any(all(int(n) > 0 for n in row) for row in reader_metrics), "session/outer metrics absent")
             evidence["storage_counter"] = counter
             evidence["checks"] = ["routing and deadlines", "in-process hooks", "request session and bounded reads",
-                "owner/public separation", "reader tokens", "highest storage version", "reservation dedup", "purge"]
+                "owner/public separation", "reader tokens", "highest storage version", "reservation dedup",
+                "bounded dedup retention: old pruned, recent duplicate rejected", "purge"]
             before = log_path.read_text()
             check("REFERENCE authorize" in before and "REFERENCE admit" in before, "supplied hooks absent")
             pending = set(re.findall(r"REFERENCE outcome retry (\S+)", before))
@@ -193,6 +214,9 @@ def main():
                 method="POST", headers={**signed("SetRepoVisibility", visibility), "Content-Type":"application/json",
                     "Connect-Protocol-Version":"1"}, body=visibility.encode())[0] == 200, "reopen refused")
             check(projection(probe)[0]["bytes"] == "18446744073709551615", "projection lost on cold restart")
+            retention_event("retention:recent", 5)
+            check(int(projection(retention_probe)[0]["version"]) == 4,
+                "retained duplicate protection lost on cold restart")
             status, _, data = hooks.request(origin, f"/{note['repository']}/-/objects/{note['extracted_blob']}")
             expected = bytes((i * 17 ^ (i >> 9)) & 255 for i in range(1 << 20))
             check(status == 200 and data == expected, "published read differs after cold retry")
@@ -206,7 +230,7 @@ def main():
         if evidence["result"] == "RUNNING":
             evidence["result"] = "FAIL"
         (run / "evidence.json").write_text(json.dumps(evidence, indent=2) + "\n")
-    print("PASS reference: hooks, bounded reader sessions, owner/public isolation, tokens, storage projection, dedup, purge, cold retry")
+    print("PASS reference: hooks, bounded reader sessions, owner/public isolation, tokens, storage projection, dedup retention, purge, cold retry")
 
 
 if __name__ == "__main__":

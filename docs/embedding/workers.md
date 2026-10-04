@@ -129,8 +129,19 @@ never undo committed writes. Atomically deduplicate by `reservation_id` with the
 host's durable effect before acknowledging. A cold alarm rebuilds the same sink
 and retries an unacknowledged row; later rows may overtake it. The reference's
 private `HostEvents` DO inserts the reservation and updates the storage projection
-in one SQLite statement via a trigger. Its demo dedup rows are retained forever;
-a larger host needs a retention policy that preserves retry deduplication.
+in one SQLite statement via triggers, pruning dedup rows to the newest **1,024
+accepted reservations per receiver**. Counterless outcomes count too; duplicates
+do not refresh retention. Pruning leaves the highest-version storage projection
+intact. This bounds deduplication state without an extra alarm.
+
+Dedup records only need to outlive the outcome redelivery window. Size a host's
+retention count or time window to cover delivery volume, outages, and in-flight
+retries. The server retries unacknowledged outcomes until success; it imposes no
+finite redelivery age. Consequently this example's count cap cannot guarantee
+deduplication after 1,024 newer reservations. Replayed storage counters remain
+safe because the projection ignores lower/equal versions. For non-idempotent
+host effects, ensure retention covers every possible redelivery or make the
+effect independently idempotent before acknowledging it.
 See [Outcome](../specs/SPEC-SERVER.md#65-outcome).
 
 Backpressure begins **only above** the configured backlog cap, not at equality

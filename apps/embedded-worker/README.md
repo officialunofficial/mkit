@@ -42,8 +42,11 @@ preservation/admin configuration activates real purge delivery.
 The private `HostEvents` Durable Object atomically deduplicates reservation IDs
 and projects `RepoStorageChanged`, retaining the highest version. Its SQLite
 trigger and fixed-width decimal text preserve unordered delivery and full u64
-precision. The demo retains dedup IDs forever; define a suitable durable retention
-policy for a larger host. The receiver has no public route. Storage uses the five
+precision. It retains the newest 1,024 accepted reservation IDs per receiver,
+pruning older IDs atomically without removing the storage projection. Duplicates
+do not refresh retention. Size host retention to outlive outcome redelivery (see
+the guide); non-idempotent effects need protection beyond this example's cap.
+The receiver has no public route. Storage uses the five
 adapter DO classes plus this one host class; no extra server API is needed.
 
 From the repository root, with the pinned Rust/Node tools, `worker-build`, `b3sum`
