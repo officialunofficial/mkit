@@ -418,8 +418,9 @@ from listings.
 
 Core tree merge, revert and cherry-pick are synchronous algorithms over verified
 object sources and sinks. Successful writes MUST be readable by subsequent
-steps through the same source/sink. They return a tree and conflicts (ours wins
-at conflicted paths); they do not sign commits, mutate refs, acquire worktree
+steps through the same source/sink. They return a tree and conflicts (conflicted
+paths retain ours when present, otherwise the surviving modified entry); they
+do not sign commits, mutate refs, acquire worktree
 locks or persist conflict state. Root-commit revert uses an empty parent tree;
 merge-commit revert refuses without mainline support. Cherry-pick retains
 explicit mainline selection for merge commits.
