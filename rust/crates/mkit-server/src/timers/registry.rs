@@ -89,7 +89,7 @@ pub trait TimerHandler<S: NamespaceStore>: MaybeSend + MaybeSync {
     fn max_per_tick(&self) -> Option<u32> {
         None
     }
-    /// Optional sink for observations after a guarded checkpoint commits.
+    /// Optional sink for timer entry and committed checkpoint observations.
     fn metrics(&self) -> Option<&dyn crate::Metrics> {
         None
     }
