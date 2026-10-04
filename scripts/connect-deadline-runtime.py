@@ -62,6 +62,9 @@ def main():
                WRANGLER_SEND_METRICS="false", WRANGLER_REGISTRY_PATH=str(work / "registry"))
     if env.get("CARGO_TARGET_DIR"):
         raise RuntimeError("CARGO_TARGET_DIR must remain unset")
+    source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    if subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True):
+        raise RuntimeError("commit the candidate first; deadline evidence requires a clean worktree")
     if not args.no_build:
         with (work / "build.log").open("w") as log:
             subprocess.run(["worker-build", "--release", "--locked"], cwd=APP, env=env,
@@ -132,7 +135,9 @@ def main():
                     cases.append({"entry": entry, "headers": headers, "protocol": "signed admin", "status": 200})
                 print(f"PASS {entry}: signed admin with all timeout variants", flush=True)
             assert harness.artifact_hashes(APP) == artifacts, "runtime artifacts changed"
-            evidence = {"source_sha": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+            assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip() == source_sha
+            assert not subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True)
+            evidence = {"source_sha": source_sha,
                         "wrangler": harness.WRANGLER, "artifacts": artifacts, "cases": cases}
             (work / "evidence.json").write_text(json.dumps(evidence, indent=2))
     finally:
