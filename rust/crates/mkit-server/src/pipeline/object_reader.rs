@@ -754,17 +754,23 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                         if canonical.len() as u64 != located.value.decoded_size {
                             return Err(failure(resolve::Miss::Unavailable));
                         }
-                        output_left -= output;
-                        if let Some((_, budget)) = &mut session {
-                            budget.used = budget.used.saturating_add(output);
-                        }
                         if let Some(memo) = &mut proofs
                             && memo.can_decode(&id, &canonical)
-                            && !seams.takedown.stops_descent(&self.repo, &id)
                         {
                             let object =
                                 mkit_core::serialize::deserialize(&canonical).map_err(failure)?;
-                            memo.expand(id, located.pack, &object);
+                            // Loading may yield. Recheck the storage stop before
+                            // publishing any children of the decoded object.
+                            if denied(&meta, &id).await.map_err(failure)? {
+                                continue;
+                            }
+                            if !seams.takedown.stops_descent(&self.repo, &id) {
+                                memo.expand(id, located.pack, &object);
+                            }
+                        }
+                        output_left -= output;
+                        if let Some((_, budget)) = &mut session {
+                            budget.used = budget.used.saturating_add(output);
                         }
                         bytes.insert(id, canonical.to_vec());
                     }

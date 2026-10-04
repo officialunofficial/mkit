@@ -356,9 +356,14 @@ pub(crate) async fn walk_many_memo<B: BlobStore, N: NamespaceStore>(
             };
             let object =
                 mkit_core::serialize::deserialize(&bytes).map_err(|_| Miss::Unavailable)?;
-            if let Some(memo) = &mut memo
-                && !takedown.stops_descent(env.repo, &id)
-            {
+            if let Some(memo) = &mut memo {
+                if crate::takedown::denial::denied(env.meta, &id)
+                    .await
+                    .map_err(|_| Miss::Unavailable)?
+                    || takedown.stops_descent(env.repo, &id)
+                {
+                    continue;
+                }
                 memo.expand(id, located.pack, &object);
             }
             expand(&object, &mut frontier, |child| {

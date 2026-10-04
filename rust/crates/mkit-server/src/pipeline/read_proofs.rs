@@ -3,7 +3,11 @@ use super::Authenticated;
 use crate::http_objects::{HttpObjectsConfig, TakedownGate};
 use crate::store::NamespaceStore;
 use crate::{RepoId, ServerError};
-use mkit_core::{hash::Hash, object::Object, ops::graph};
+use mkit_core::{
+    hash::Hash,
+    object::{Object, ObjectType},
+    ops::graph,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -112,6 +116,16 @@ impl ReadProofs {
     /// a million-chunk manifest merely to populate an optimization.
     pub(crate) fn can_decode(&self, id: &Hash, bytes: &[u8]) -> bool {
         self.contains(id)
+            && matches!(
+                crate::http_objects::resolve::type_of(bytes),
+                Some(
+                    ObjectType::Commit
+                        | ObjectType::Remix
+                        | ObjectType::Tree
+                        | ObjectType::Tag
+                        | ObjectType::ChunkedBlob
+                )
+            )
             && bytes.len()
                 <= MAX_EXPANSION_BYTES.min(
                     self.cap
