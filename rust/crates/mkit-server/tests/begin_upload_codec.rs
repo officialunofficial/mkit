@@ -2,7 +2,7 @@
 //! the store codec's unit tests.
 #![allow(clippy::unwrap_used)] // Failed decoding is an assertion.
 
-use mkit_server::store::{Value, codec};
+use mkit_server::store::{Value, adapter_spi::codec};
 use mkit_server::{BeginUploadResult, ReplayRecord, ReplayState, StoredResult};
 use serde_json::json;
 

@@ -13,8 +13,8 @@ pub const MAX_INSPECTORS: usize = 4;
 /// Indexed verification and pack-count preflight share this allocation.
 pub const VERIFY_CALLS: u32 = 300;
 /// Existing ancestry, resulting-pair walk, hooks, and other-stage allocations.
-pub const ADVANCE_CALLS: u32 = VERIFY_CALLS + 256 + 256 + 4 + 144;
-const _: () = assert!(ADVANCE_CALLS <= 1_000);
+pub use crate::limits::INSPECTION_ADVANCE_CALLS as ADVANCE_CALLS;
+const _: () = assert!(ADVANCE_CALLS <= crate::limits::ALARM_CALLS);
 
 /// Configured inspection phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,7 +206,7 @@ mod tests {
         assert_eq!(super::MAX_INSPECTORS, 4);
         assert_eq!(super::ADVANCE_CALLS, 960);
         const {
-            assert!(super::ADVANCE_CALLS <= 1_000);
+            assert!(super::ADVANCE_CALLS <= crate::limits::ALARM_CALLS);
         }
     }
 }

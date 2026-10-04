@@ -11,11 +11,11 @@ use worker::{Context, Env, Request, Response, Result, event};
 
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
-    #[cfg(feature = "test-faults")]
+    #[cfg(feature = "__test-faults")]
     if req.path() == "/__mkit_test/worker-sleep" {
         return mkit_server_worker::sleep::runtime_probe().await;
     }
-    #[cfg(feature = "test-faults")]
+    #[cfg(feature = "__test-faults")]
     if req.path() == "/__mkit_test/hook-fetch" {
         let mode = req
             .url()?

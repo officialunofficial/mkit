@@ -167,20 +167,18 @@ async fn fixture_delta_encoding(
             mkit_core::repo_identity::Namespace::parse(repo.namespace.as_str()).unwrap(),
         ]))
     };
-    let work = Work {
-        purge: None,
-        metadata,
-        serving,
-        preserved: MemoryBlobStore::default(),
-        root: Partition::Namespace(NamespaceKey::deployment_default()),
-        shards: Arc::new(SinglePartition),
-        addressing: Addressing::Multi(
-            crate::repo::MultiAddressing::new().with_namespace_policy(policy),
-        ),
-        retention_ms: 1_000_000,
-        discovery_margin_ms: 5000,
-        profile: acquisition::Profile::scheduled(),
-        clock: clock.clone(),
+    let work = {
+        let mut config = crate::takedown::work::WorkConfig::new(
+            Partition::Namespace(NamespaceKey::deployment_default()),
+            Arc::new(SinglePartition),
+            Addressing::Multi(crate::repo::MultiAddressing::new().with_namespace_policy(policy)),
+            1_000_000,
+            clock.clone(),
+        );
+        config.purge = None;
+        config.discovery_margin_ms = 5000;
+        config.profile = acquisition::Profile::scheduled();
+        Work::new(metadata, serving, MemoryBlobStore::default(), config)
     };
     Fixture {
         work,
@@ -202,7 +200,7 @@ async fn accept(f: &Fixture, operation: &str, pack: Option<Hash>, objects: &[Has
         f.work.shards.clone(),
     )
     .with_purge(f.work.purge.clone());
-    let budget = SliceBudget::new(9000);
+    let budget = SliceBudget::new(crate::limits::REQUEST_CALLS);
     let prepared = service
         .plan(TAKEDOWN_PATH, &input, operation, 10, &budget)
         .await
@@ -317,18 +315,23 @@ fn fault_work(
     f: &Fixture,
     serving: FaultBlobs,
 ) -> Work<Arc<MemoryKv>, FaultBlobs, MemoryBlobStore> {
-    Work {
-        purge: None,
-        metadata: f.work.metadata.clone(),
-        serving,
-        preserved: f.work.preserved.clone(),
-        root: f.work.root.clone(),
-        shards: f.work.shards.clone(),
-        addressing: f.work.addressing.clone(),
-        retention_ms: f.work.retention_ms,
-        discovery_margin_ms: f.work.discovery_margin_ms,
-        profile: f.work.profile,
-        clock: f.work.clock.clone(),
+    {
+        let mut config = crate::takedown::work::WorkConfig::new(
+            f.work.root.clone(),
+            f.work.shards.clone(),
+            f.work.addressing.clone(),
+            f.work.retention_ms,
+            f.work.clock.clone(),
+        );
+        config.purge = None;
+        config.discovery_margin_ms = f.work.discovery_margin_ms;
+        config.profile = f.work.profile;
+        Work::new(
+            f.work.metadata.clone(),
+            serving,
+            f.work.preserved.clone(),
+            config,
+        )
     }
 }
 async fn fault_advance(
@@ -1319,18 +1322,23 @@ async fn timer15_uses_firing_local_store_for_owner_and_durable_copy_intents() {
     let f = fixture(&[small()], true).await;
     let id = accept(&f, "local-timer", None, &[f.canonical[0].0]).await;
     f.clock.set(20_000);
-    let work = Work {
-        purge: None,
-        metadata: RemoteOnly(f.work.metadata.clone(), f.work.root.clone()),
-        serving: f.work.serving.clone(),
-        preserved: f.work.preserved.clone(),
-        root: f.work.root.clone(),
-        shards: f.work.shards.clone(),
-        addressing: f.work.addressing.clone(),
-        retention_ms: f.work.retention_ms,
-        discovery_margin_ms: f.work.discovery_margin_ms,
-        profile: f.work.profile,
-        clock: f.work.clock.clone(),
+    let work = {
+        let mut config = crate::takedown::work::WorkConfig::new(
+            f.work.root.clone(),
+            f.work.shards.clone(),
+            f.work.addressing.clone(),
+            f.work.retention_ms,
+            f.work.clock.clone(),
+        );
+        config.purge = None;
+        config.discovery_margin_ms = f.work.discovery_margin_ms;
+        config.profile = f.work.profile;
+        Work::new(
+            RemoteOnly(f.work.metadata.clone(), f.work.root.clone()),
+            f.work.serving.clone(),
+            f.work.preserved.clone(),
+            config,
+        )
     };
     let ctx = TimerCtx {
         store: f.work.metadata.as_ref(),
@@ -1740,7 +1748,7 @@ async fn accepting_takedown_owns_automatic_cache_purge() {
             &input,
             "automatic-cache",
             10,
-            &SliceBudget::new(9000),
+            &SliceBudget::new(crate::limits::REQUEST_CALLS),
         )
         .await
         .unwrap();
@@ -1792,7 +1800,7 @@ async fn accepting_takedown_owns_automatic_cache_purge() {
         &input,
         prepared.response.clone(),
         10,
-        &SliceBudget::new(9000),
+        &SliceBudget::new(crate::limits::REQUEST_CALLS),
     )
     .await
     .unwrap();
@@ -1914,7 +1922,7 @@ impl crate::purge::LocalInvalidation for ParentChargedLocal {
             let before = self.parent.used();
             let mut effects = 0;
             for index in cursor..16 {
-                if !budget.charge(2) {
+                if !budget.charge_operations(2) {
                     assert_eq!(self.parent.used() - before, effects * 2);
                     return Ok(Some(index));
                 }
@@ -1974,7 +1982,7 @@ async fn multi_action_activation_shares_one_immediate_allowance_with_parent_call
             &input,
             "shared-cache-budget",
             10,
-            &SliceBudget::new(9000),
+            &SliceBudget::new(crate::limits::REQUEST_CALLS),
         )
         .await
         .unwrap();
@@ -2036,18 +2044,23 @@ async fn fifty_hop_acquisition_preserves_identical_bytes_across_cold_restart() {
     let mut restarted_mid_source = false;
     for _ in 0..150 {
         // Rebuild the runtime on every alarm; all continuation is persisted.
-        f.work = Work {
-            metadata: f.work.metadata.clone(),
-            serving: f.work.serving.clone(),
-            preserved: f.work.preserved.clone(),
-            root: f.work.root.clone(),
-            shards: f.work.shards.clone(),
-            addressing: f.work.addressing.clone(),
-            purge: f.work.purge.clone(),
-            retention_ms: f.work.retention_ms,
-            discovery_margin_ms: f.work.discovery_margin_ms,
-            profile: acquisition::Profile::scheduled(),
-            clock: f.clock.clone(),
+        f.work = {
+            let mut config = crate::takedown::work::WorkConfig::new(
+                f.work.root.clone(),
+                f.work.shards.clone(),
+                f.work.addressing.clone(),
+                f.work.retention_ms,
+                f.clock.clone(),
+            );
+            config.purge.clone_from(&f.work.purge);
+            config.discovery_margin_ms = f.work.discovery_margin_ms;
+            config.profile = acquisition::Profile::scheduled();
+            Work::new(
+                f.work.metadata.clone(),
+                f.work.serving.clone(),
+                f.work.preserved.clone(),
+                config,
+            )
         };
         let (state, used) = advance(&f, id, 20_000).await;
         calls = calls.max(used);

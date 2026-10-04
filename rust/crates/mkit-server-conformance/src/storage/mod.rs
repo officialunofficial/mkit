@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
 use mkit_server::{
     Batch, BatchOutcome, BlobStore, BoxFuture, Clock, Key, KeyClasses, NamespaceStore, Partition,
-    StoreError, Value, Write, store::keys,
+    StoreError, Value, Write, store::adapter_spi::keys,
 };
 
 /// `ensure!(cond, "fmt", args)`: fail the case unless `cond`.

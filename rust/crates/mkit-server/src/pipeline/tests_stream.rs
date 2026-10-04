@@ -1,4 +1,4 @@
-//! `UploadSession`, `DownloadStream` and the `test-faults` seam, over the
+//! `UploadSession`, `DownloadStream` and the `__test-faults` seam, over the
 //! memory stores and a `ManualClock` (WP-M0-05b).
 
 use core::future::poll_fn;
@@ -906,11 +906,7 @@ fn authv2_signed_stream_verified() {
 fn upload_quota_exhaustion_reserves_nothing() {
     let clock = clock();
     let mut c = cfg(authv2());
-    c.write_quota = Some(crate::quota::QuotaLimits {
-        max_ops: 10,
-        max_bytes: 100,
-        window_ms: 10_000,
-    });
+    c.write_quota = Some(crate::quota::QuotaLimits::new(10_000, 10, 100));
     let env = build(c, Spy::new(store(&clock)), Hooks::new(), clock);
     let data = pack(101);
     let req = signed_upload(&key(7), &data, 1);
@@ -1260,7 +1256,7 @@ impl Stream for ShortBody {
 
 // ------------------------------------------------------------ test faults
 
-#[cfg(not(feature = "test-faults"))]
+#[cfg(not(feature = "__test-faults"))]
 #[test]
 fn test_directive_headers_are_ignored_without_the_feature() {
     let env = env(authv2());
@@ -1269,7 +1265,7 @@ fn test_directive_headers_are_ignored_without_the_feature() {
     assert_eq!(env.auth(&req).unwrap().business_skew_ms, 0);
 }
 
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 mod faults {
     use std::sync::mpsc;
 
@@ -1618,7 +1614,7 @@ fn seeded_backlog(clock: &Arc<ManualClock>) -> MemoryKv {
 
 #[test]
 fn backlog_over_cap_refuses_a_fresh_stream_but_not_a_ticketed_one() {
-    let over = Some(OutboxBacklogCap { rows: 0, bytes: 0 });
+    let over = Some(OutboxBacklogCap::new(0, 0));
     let clock_a = clock();
     let mut config = cfg(AuthMode::TransportIdentity);
     config.outbox_backlog_cap = over;

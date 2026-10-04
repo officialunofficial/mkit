@@ -9,7 +9,7 @@ pub mod publication_recheck;
 pub mod quota_rollup;
 pub mod registry;
 pub mod reservation_reconcile;
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 pub mod test_kind;
 #[cfg(test)]
 mod tests;
@@ -188,14 +188,14 @@ async fn fire_timer<S: NamespaceStore>(
                 .put(new_key, value)
         }
         Ok(Fired::Retry) => {
-            #[cfg(feature = "test-faults")]
+            #[cfg(feature = "__test-faults")]
             tracing::warn!(kind = timer.kind.get(), "test timer requested retry");
             return FireOutcome::Failed;
         }
         Err(error) => {
-            #[cfg(feature = "test-faults")]
+            #[cfg(feature = "__test-faults")]
             tracing::warn!(kind = timer.kind.get(), %error, "test timer handler failed");
-            #[cfg(not(feature = "test-faults"))]
+            #[cfg(not(feature = "__test-faults"))]
             let _ = error;
             return FireOutcome::Failed;
         }
@@ -205,14 +205,14 @@ async fn fire_timer<S: NamespaceStore>(
         Ok(BatchOutcome::Committed) => FireOutcome::Committed(put_due),
         Ok(BatchOutcome::PreconditionFailed { .. }) => FireOutcome::Raced,
         Ok(BatchOutcome::DeadlinePassed { .. }) => {
-            #[cfg(feature = "test-faults")]
+            #[cfg(feature = "__test-faults")]
             tracing::warn!(kind = timer.kind.get(), "test timer deadline passed");
             FireOutcome::Failed
         }
         Err(error) => {
-            #[cfg(feature = "test-faults")]
+            #[cfg(feature = "__test-faults")]
             tracing::warn!(kind = timer.kind.get(), %error, "test timer apply failed");
-            #[cfg(not(feature = "test-faults"))]
+            #[cfg(not(feature = "__test-faults"))]
             let _ = error;
             FireOutcome::Failed
         }

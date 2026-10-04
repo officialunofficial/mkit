@@ -4228,3 +4228,15 @@ The storage-receipt fixtures under `rust/tests/golden/receipts/` pin §15:
 | `wrong-predicate.dsse.json`, `subject-mismatch.dsse.json`, `key-outside-window.dsse.json` | Distinct signed verification refusals. |
 | `test-seed.json` | Public, labelled test-only Ed25519 seeds. |
 | `MANIFEST.txt` | BLAKE3 hash of every other receipt fixture. |
+
+## Public Rust API toward 0.6
+
+The supported embedder surface is documented in the `mkit-server` crate docs.
+Deployment configuration structs are non-exhaustive and constructed through
+constructors, parsers or defaults. Storage layouts/codecs are adapter SPI under
+`store::adapter_spi`; public storage traits and reservation/outcome types remain
+the embedder contract. Call-budget defaults live in `limits`, and request and
+purge slices share `budget::SliceBudget` without changing their accounting.
+The Cargo fault-injection feature is internal (`__test-faults`); its wire test
+capability retains the existing `test-faults` spelling. This API boundary does
+not change wire behavior or stored bytes.

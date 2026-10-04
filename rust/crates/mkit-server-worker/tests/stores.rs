@@ -769,8 +769,8 @@ fn index_pressure_labels_and_thresholds_cover_both_partition_kinds() {
 #[test]
 fn backup_seeds_only_after_first_committed_put_and_raises_alarm_hint() {
     use mkit_server::ManualClock;
-    use mkit_server::store::codec::decode_backup_state;
-    use mkit_server::store::keys;
+    use mkit_server::store::adapter_spi::codec::decode_backup_state;
+    use mkit_server::store::adapter_spi::keys;
     use mkit_server::timers::registry::kinds;
     use mkit_server_worker::classes::ShardClass;
     use mkit_server_worker::ns_object::PressureStore;
@@ -828,7 +828,7 @@ fn backup_seeds_only_after_first_committed_put_and_raises_alarm_hint() {
 
 #[test]
 fn timer_reschedule_put_observes_pressure_through_do_shim() {
-    use mkit_server::store::keys;
+    use mkit_server::store::adapter_spi::keys;
     use mkit_server::timers::{
         DueTimer, Fired, TickBudget, TimerCtx, TimerHandler, TimerKind, TimerRegistry, run_due,
     };

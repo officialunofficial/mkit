@@ -9,9 +9,9 @@
 //! modules. The protocol logic lives in public modules, so call sites name
 //! the protocol they apply (`refs::evaluate_cas`, `quota::evaluate_quota`).
 //! The storage contract lives in [`store`]: its contract types are also
-//! re-exported at the root, its key layouts, value codecs and typed
-//! readers stay namespaced (`store::keys`, `store::codec`, `store::read`),
-//! as do the export/import helpers and the `ContentIndex` row types
+//! re-exported at the root. Key layouts and value codecs live in the
+//! doc-hidden `store::adapter_spi`; typed readers remain crate-private.
+//! Portable maintenance and content-index contracts remain in `store`
 //! (`store::export_partition`, `store::Holder`).
 //! The `memory` feature adds the in-memory reference backends; the native
 //! `fs` feature adds the `fs` module, the stores over the `.mkit` on-disk
@@ -26,9 +26,10 @@
 pub mod admin;
 pub mod auth_v2;
 pub mod authority;
+pub mod budget;
 #[cfg(feature = "connect")]
 pub mod connect;
-pub mod download;
+pub(crate) mod download;
 mod error;
 #[cfg(all(feature = "fs", not(target_arch = "wasm32")))]
 pub mod fs;
@@ -37,6 +38,7 @@ pub mod hooks;
 #[cfg(feature = "http-objects")]
 pub mod http_objects;
 pub mod indexed;
+pub mod limits;
 #[cfg(any(test, feature = "memory"))]
 mod memory;
 mod op;

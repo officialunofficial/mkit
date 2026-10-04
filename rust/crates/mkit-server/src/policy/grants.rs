@@ -10,6 +10,7 @@ use crate::op::Operation;
 
 /// Grant verification settings for a Multi/Owner deployment.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct GrantConfig {
     verifier: VerifierConfig,
 }
@@ -156,6 +157,7 @@ pub fn parse_relying_parties(text: &str) -> Result<Vec<RelyingParty>, String> {
 /// [`GrantConfig`] built from them so an adapter's configuration can be
 /// compared and re-built (a `GrantConfig` holds no equality).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct GrantSettings {
     /// The accepted owner schemes.
     pub schemes: AcceptedSchemes,
@@ -163,6 +165,22 @@ pub struct GrantSettings {
     pub relying_parties: Vec<RelyingParty>,
     /// Development only: allow a loopback audience or relying party.
     pub allow_loopback: bool,
+}
+
+impl GrantSettings {
+    /// Construct explicit deployment settings; fields may be adjusted before use.
+    #[must_use]
+    pub fn new(
+        schemes: AcceptedSchemes,
+        relying_parties: Vec<RelyingParty>,
+        allow_loopback: bool,
+    ) -> Self {
+        Self {
+            schemes,
+            relying_parties,
+            allow_loopback,
+        }
+    }
 }
 
 impl GrantSettings {

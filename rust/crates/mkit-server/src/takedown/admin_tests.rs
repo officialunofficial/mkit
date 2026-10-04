@@ -182,22 +182,27 @@ async fn fixture(size: usize) -> Fixture {
     let clock = Arc::new(ManualClock::new(100));
     let metadata = Arc::new(MemoryKv::with_clock(clock.clone()));
     let root = Partition::Namespace(NamespaceKey::deployment_default());
-    let work = Arc::new(Work {
-        purge: None,
-        metadata: metadata.clone(),
-        serving: MemoryBlobStore::default(),
-        preserved: MemoryBlobStore::default(),
-        root: root.clone(),
-        shards: Arc::new(SinglePartition),
-        addressing: Addressing::Multi(crate::repo::MultiAddressing::new().with_namespace_policy(
-            crate::policy::NamespacePolicy::Any {
-                unsafe_without_admission: true,
-            },
-        )),
-        retention_ms: 1000,
-        discovery_margin_ms: 5000,
-        profile: super::super::acquisition::Profile::scheduled(),
-        clock: clock.clone(),
+    let work = Arc::new({
+        let mut config = crate::takedown::work::WorkConfig::new(
+            root.clone(),
+            Arc::new(SinglePartition),
+            Addressing::Multi(crate::repo::MultiAddressing::new().with_namespace_policy(
+                crate::policy::NamespacePolicy::Any {
+                    unsafe_without_admission: true,
+                },
+            )),
+            1000,
+            clock.clone(),
+        );
+        config.purge = None;
+        config.discovery_margin_ms = 5000;
+        config.profile = super::super::acquisition::Profile::scheduled();
+        Work::new(
+            metadata.clone(),
+            MemoryBlobStore::default(),
+            MemoryBlobStore::default(),
+            config,
+        )
     });
     let bytes: Vec<u8> = (0..size).map(|i| u8::try_from(i % 251).unwrap()).collect();
     let object = hash(&bytes);
@@ -1191,18 +1196,23 @@ fn restart_work<N: NamespaceStore + Clone>(
     f: &Fixture,
     metadata: N,
 ) -> Work<N, MemoryBlobStore, MemoryBlobStore> {
-    Work {
-        purge: f.work.purge.clone(),
-        metadata,
-        serving: f.work.serving.clone(),
-        preserved: f.work.preserved.clone(),
-        root: f.work.root.clone(),
-        shards: f.work.shards.clone(),
-        addressing: f.work.addressing.clone(),
-        retention_ms: f.work.retention_ms,
-        discovery_margin_ms: f.work.discovery_margin_ms,
-        profile: f.work.profile,
-        clock: f.clock.clone(),
+    {
+        let mut config = crate::takedown::work::WorkConfig::new(
+            f.work.root.clone(),
+            f.work.shards.clone(),
+            f.work.addressing.clone(),
+            f.work.retention_ms,
+            f.clock.clone(),
+        );
+        config.purge.clone_from(&f.work.purge);
+        config.discovery_margin_ms = f.work.discovery_margin_ms;
+        config.profile = f.work.profile;
+        Work::new(
+            metadata,
+            f.work.serving.clone(),
+            f.work.preserved.clone(),
+            config,
+        )
     }
 }
 #[tokio::test]

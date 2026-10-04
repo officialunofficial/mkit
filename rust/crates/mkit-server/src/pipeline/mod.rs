@@ -10,7 +10,7 @@
 //! The streaming procedures are [`Pipeline::open_upload`]
 //! ([`UploadSession`]) and [`Pipeline::download`] ([`DownloadStream`]).
 //!
-//! With the `test-faults` feature, `Pipeline::with_faults` installs
+//! With the `__test-faults` feature, `Pipeline::with_faults` installs
 //! `FaultHooks` and [`Pipeline::authenticate`] reads per-request
 //! `TestDirectives`; without it none of that exists in the binary.
 //!
@@ -29,7 +29,7 @@ mod coordinator;
 mod download;
 mod durable_outcome;
 mod epoch;
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 pub(crate) mod faults;
 mod gate;
 mod hooks;
@@ -126,7 +126,7 @@ pub(crate) use admission::validate_decision;
 pub use auth::{AuthMode, Authenticated, HeaderValues, RequestMeta};
 pub use download::{DownloadChunk, DownloadStream};
 pub use durable_outcome::{DeliveryError, Outcome, OutcomeKind};
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 pub use faults::{
     BUMP_EPOCH_HEADER, CLOCK_SKEW_HEADER, FAULT_HEADER, FailOnce, FaultHooks, FaultPoint,
     LEASE_RECOVERED_HEADER, RELAY_DELAY_MS_HEADER, RUN_TIMERS_HEADER, TIMER_MS_HEADER,
@@ -174,10 +174,10 @@ impl ResponseMeta {
 }
 
 /// Call the installed fault hooks at a fault point, returning early on
-/// their error. Compiled out without `test-faults`.
+/// their error. Compiled out without `__test-faults`.
 macro_rules! fault {
     ($pipe:expr, $point:ident, $op:expr, $a:expr) => {
-        #[cfg(feature = "test-faults")]
+        #[cfg(feature = "__test-faults")]
         $pipe
             .fault($crate::pipeline::FaultPoint::$point, $op, $a)
             .await?
@@ -343,11 +343,20 @@ pub struct PipelineConfig {
 /// A soft, unguarded backlog threshold; concurrent admissions may overshoot
 /// by at most their in-flight terminal rows and encoded bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct OutboxBacklogCap {
     /// Terminal/event/purge rows.
     pub rows: u64,
     /// Key plus encoded-value bytes.
     pub bytes: u64,
+}
+
+impl OutboxBacklogCap {
+    /// Construct explicit deployment settings; fields may be adjusted before use.
+    #[must_use]
+    pub const fn new(rows: u64, bytes: u64) -> Self {
+        Self { rows, bytes }
+    }
 }
 
 impl PipelineConfig {
@@ -387,10 +396,7 @@ impl PipelineConfig {
             receipt_publication: None,
             purge: None,
             ticket_ttl_ms: 86_400_000,
-            ticket_caps: TicketCaps {
-                per_ref: 1024,
-                per_signer: 64,
-            },
+            ticket_caps: TicketCaps::new(1024, 64),
             download_chunk_max: DOWNLOAD_CHUNK_MAX,
             write_quota,
             list_page_limit: DEFAULT_LIST_PAGE_LIMIT,
@@ -400,10 +406,7 @@ impl PipelineConfig {
             min_lease_budget_ms: 1_000,
             redactor: Redactor::default(),
             admission_credential_headers: Vec::new(),
-            outbox_backlog_cap: Some(OutboxBacklogCap {
-                rows: 100_000,
-                bytes: 64 * 1024 * 1024,
-            }),
+            outbox_backlog_cap: Some(OutboxBacklogCap::new(100_000, 64 * 1024 * 1024)),
             indexed: None,
             takedown_denial: false,
             ref_policy: None,
@@ -429,6 +432,8 @@ impl PipelineConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PipelineCapabilities {
+    /// Storage leases are supported by this pipeline (currently false).
+    pub leases: bool,
     /// `AdvanceRefs` commits head and packmap in one batch.
     pub atomic_advance: bool,
 }
@@ -497,9 +502,9 @@ pub struct Pipeline<B, N, H = Hooks> {
     cfg: PipelineConfig,
     clock: Arc<dyn Clock>,
     metrics: Arc<dyn Metrics>,
-    #[cfg(feature = "test-faults")]
+    #[cfg(feature = "__test-faults")]
     faults: Option<Arc<dyn faults::DynFaultHooks>>,
-    #[cfg(feature = "test-faults")]
+    #[cfg(feature = "__test-faults")]
     test_timer_gate: Option<Arc<tokio::sync::Mutex<()>>>,
     gate: Option<Arc<gate::WriteGate>>,
     #[cfg(feature = "http-objects")]
@@ -898,9 +903,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             cfg,
             clock,
             metrics,
-            #[cfg(feature = "test-faults")]
+            #[cfg(feature = "__test-faults")]
             faults: None,
-            #[cfg(feature = "test-faults")]
+            #[cfg(feature = "__test-faults")]
             test_timer_gate: None,
             gate: None,
             #[cfg(feature = "http-objects")]
@@ -961,8 +966,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         Ok(self)
     }
 
-    /// Install test fault hooks (feature `test-faults` only).
-    #[cfg(feature = "test-faults")]
+    /// Install test fault hooks (feature `__test-faults` only).
+    #[cfg(feature = "__test-faults")]
     #[must_use]
     pub fn with_faults(mut self, hooks: impl FaultHooks + 'static) -> Self {
         self.faults = Some(Arc::new(hooks));
@@ -971,14 +976,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
 
     /// Exclude an adapter's autonomous timer tick while a test directive drains.
     /// The adapter must use this same gate around its own ticks.
-    #[cfg(feature = "test-faults")]
+    #[cfg(feature = "__test-faults")]
     #[must_use]
     pub fn with_test_timer_gate(mut self, gate: Arc<tokio::sync::Mutex<()>>) -> Self {
         self.test_timer_gate = Some(gate);
         self
     }
 
-    #[cfg(feature = "test-faults")]
+    #[cfg(feature = "__test-faults")]
     async fn fault(
         &self,
         point: FaultPoint,
@@ -1047,7 +1052,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             sibling.inspectors.clone_from(&self.inspectors);
             sibling.inspect_limit = self.inspect_limit;
         }
-        #[cfg(feature = "test-faults")]
+        #[cfg(feature = "__test-faults")]
         {
             sibling.faults.clone_from(&self.faults);
             sibling.test_timer_gate.clone_from(&self.test_timer_gate);
@@ -1059,7 +1064,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
 
     /// Stages 0a and 1: verify credentials and map the identity. Pure and
     /// synchronous; writes no state. The result is bound to
-    /// `meta.procedure`. Under `test-faults` it also reads the request's
+    /// `meta.procedure`. Under `__test-faults` it also reads the request's
     /// test directives: the clock skew shifts business time, including the
     /// auth v2 validity window, for this request only.
     ///
@@ -1096,11 +1101,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             _ => &repo.identity,
         }
         .to_owned();
-        #[cfg(feature = "test-faults")]
+        #[cfg(feature = "__test-faults")]
         let directives = TestDirectives::from_headers(meta.header)?;
-        #[cfg(feature = "test-faults")]
+        #[cfg(feature = "__test-faults")]
         let skew = directives.clock_skew_ms;
-        #[cfg(not(feature = "test-faults"))]
+        #[cfg(not(feature = "__test-faults"))]
         let skew = 0;
         let now = self.clock.now_ms().saturating_add(skew);
         let mut a = auth::authenticate(&self.cfg.auth, meta, now, repo, &expected_repository)?;
@@ -1136,7 +1141,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         a.ref_hint =
             (meta.header)("x-mkit-ref").filter(|name| name.len() <= refs::MAX_REF_NAME_BYTES);
         a.business_skew_ms = skew;
-        #[cfg(feature = "test-faults")]
+        #[cfg(feature = "__test-faults")]
         a.set_test_directives(directives);
         Ok(a)
     }
@@ -1200,7 +1205,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                         .ok_or_else(|| ServerError::invalid_argument("invalid page token"))
                 })
                 .transpose()?;
-            #[cfg(feature = "test-faults")]
+            #[cfg(feature = "__test-faults")]
             {
                 if a.test_directives().lease_recovered {
                     self.mark_lease_table_recovered(&op.repo.namespace).await?;
@@ -1209,7 +1214,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     self.test_bump_epoch(&op.repo.namespace, epoch).await?;
                 }
             }
-            #[cfg(feature = "test-faults")]
+            #[cfg(feature = "__test-faults")]
             faults::run_timers(
                 a.test_directives(),
                 &self.meta,
@@ -2261,6 +2266,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// What this pipeline offers.
     pub fn capabilities(&self) -> PipelineCapabilities {
         PipelineCapabilities {
+            leases: false,
             atomic_advance: self.meta.capabilities().atomic_multi_key,
         }
     }
@@ -2415,7 +2421,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 // The wire conformance fixture exercises the pending response
                 // after ticket proof validation, before any verification state
                 // or replay row is written. Release builds omit this seam.
-                #[cfg(feature = "test-faults")]
+                #[cfg(feature = "__test-faults")]
                 if a.test_directives().fault.as_deref() == Some("indexed-pending") {
                     return Err(crate::indexed::pending(5_000));
                 }
@@ -4025,7 +4031,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let denial_budget = if let Some(budget) = budget {
             budget.proof()
         } else {
-            own_budget = crate::indexed::budget::SliceBudget::new(9000);
+            own_budget = crate::indexed::budget::SliceBudget::new(crate::limits::REQUEST_CALLS);
             &own_budget
         };
         // Settlement calls (snapshot, lease, commit) charge the request root, or
@@ -4124,7 +4130,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 prune_from,
             } = plan;
             require_relay_source_lease(self.cfg.sharding, req.lease.is_some(), &batch)?;
-            #[cfg(feature = "test-faults")]
+            #[cfg(feature = "__test-faults")]
             let batch = faults::delay_relay_batch(
                 batch,
                 a.test_directives(),
@@ -4132,7 +4138,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 ms(clock.business_now_ms),
             );
             if req.kind != WriteKind::UploadReserve {
-                #[cfg(feature = "test-faults")]
+                #[cfg(feature = "__test-faults")]
                 {
                     let mut attempt = op.clone();
                     attempt.leased_epoch = req.lease.map(|l| l.value.epoch);
@@ -4145,7 +4151,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .await;
             match applied {
                 Ok(BatchOutcome::Committed) => {
-                    #[cfg(feature = "test-faults")]
+                    #[cfg(feature = "__test-faults")]
                     self.schedule_test_ref_timer(op, a, &on_commit, ms(clock.business_now_ms))
                         .await?;
                     return Ok(on_commit);
@@ -4200,7 +4206,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
     }
 
-    #[cfg(feature = "test-faults")]
+    #[cfg(feature = "__test-faults")]
     async fn schedule_test_ref_timer(
         &self,
         op: &Operation,

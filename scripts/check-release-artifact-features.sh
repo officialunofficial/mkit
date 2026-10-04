@@ -106,7 +106,7 @@ if not features:
     err("no compiler-artifact messages: was the build run with --message-format=json*?")
 
 for name, feats in sorted(features.items()):
-    for seam in ("test-faults", "stubs"):
+    for seam in ("__test-faults", "test-faults", "stubs"):
         if seam in feats:
             err(f"{name} was compiled with the `{seam}` test seam")
 

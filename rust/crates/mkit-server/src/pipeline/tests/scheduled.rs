@@ -379,11 +379,11 @@ fn fast_forward_only_works_over_scheduled_verification() {
     use mkit_core::pack::PackWriter;
     use mkit_core::serialize::serialize;
 
-    let policy = RefPolicy::new(vec![RefRule {
-        pattern: RefPattern::parse(HEAD).unwrap(),
-        allowed_signers: None,
-        fast_forward_only: true,
-    }]);
+    let policy = RefPolicy::new(vec![RefRule::new(
+        RefPattern::parse(HEAD).unwrap(),
+        None,
+        true,
+    )]);
     let (env, owner, identity) =
         environment_with_policy(Sharding::Single, scheduled(), Some(policy));
     let tree = Object::Tree(Tree {

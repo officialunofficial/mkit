@@ -36,7 +36,8 @@ pub fn parse(
         }
         return Ok(None);
     }
-    if !cfg!(feature = "test-faults") && var("LAUNCH_PROFILE").as_deref() != Some("paid-workers") {
+    if !cfg!(feature = "__test-faults") && var("LAUNCH_PROFILE").as_deref() != Some("paid-workers")
+    {
         return Err(ConfigError(
             "scanner retrieval requires LAUNCH_PROFILE=paid-workers".into(),
         ));

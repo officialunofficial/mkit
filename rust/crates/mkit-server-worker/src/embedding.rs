@@ -20,6 +20,7 @@ pub struct HookCapabilities {
 /// The sink acknowledges global invalidation; local work must charge the
 /// supplied budget and persist resumable checkpoints through the existing API.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct PurgeHooks {
     /// Global sink, replacing the environment's signed HTTPS purge hook.
     pub sink: Arc<dyn PurgeSink>,
@@ -158,22 +159,22 @@ mod tests {
         assert!(cfg.admin_on_public_path);
         assert!(cfg.ref_policy.is_none());
         assert!(!cfg.takedown_denial);
-        cfg.ref_policy = Some(RefPolicy::new(vec![RefRule {
-            pattern: mkit_attest::grant::RefPattern::parse("refs/tags/*").unwrap(),
-            allowed_signers: None,
-            fast_forward_only: true,
-        }]));
+        cfg.ref_policy = Some(RefPolicy::new(vec![RefRule::new(
+            mkit_attest::grant::RefPattern::parse("refs/tags/*").unwrap(),
+            None,
+            true,
+        )]));
         assert!(
             cfg.validate()
                 .unwrap_err()
                 .0
                 .contains("require indexed mode")
         );
-        cfg.ref_policy = Some(RefPolicy::new(vec![RefRule {
-            pattern: mkit_attest::grant::RefPattern::Exact("refs/mkit/packmap/main".into()),
-            allowed_signers: None,
-            fast_forward_only: false,
-        }]));
+        cfg.ref_policy = Some(RefPolicy::new(vec![RefRule::new(
+            mkit_attest::grant::RefPattern::Exact("refs/mkit/packmap/main".into()),
+            None,
+            false,
+        )]));
         assert!(
             cfg.validate()
                 .unwrap_err()

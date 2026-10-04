@@ -14,11 +14,20 @@ use crate::{BoxStream, ServerError};
 /// Native adapters use tasks; Worker adapters must use the request's
 /// `wait_until` lifetime. A spawner must run accepted work to completion.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct HttpReadRuntime {
     /// Timer used to stop transmission even while the source is pending.
     pub sleep: Arc<dyn Sleep>,
     /// Retains settlement independently of the response body's lifetime.
     pub spawner: Arc<dyn Spawner>,
+}
+
+impl HttpReadRuntime {
+    /// Retain paid-read settlement on the embedder's timer and executor.
+    #[must_use]
+    pub fn new(sleep: Arc<dyn Sleep>, spawner: Arc<dyn Spawner>) -> Self {
+        Self { sleep, spawner }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]

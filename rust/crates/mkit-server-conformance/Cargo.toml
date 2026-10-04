@@ -25,10 +25,10 @@ authors.workspace = true
 workspace = true
 
 [features]
-# Lets the pipeline baseline serve with mkit-server's `test-faults` seam
+# Lets the pipeline baseline serve with mkit-server's `__test-faults` seam
 # (the clock-skew directive, plus the baseline's `GET /__mkit_test/stats`)
 # so the `TestFaults` wire cases run. The wire suite itself never needs it.
-test-faults = ["mkit-server/test-faults"]
+__test-faults = ["mkit-server/__test-faults"]
 http-objects = ["mkit-server/http-objects"]
 # `stubs`: in-process stand-ins for external services a server talks to.
 # `stubs::hook` is a `mkit.server.hooks.v1` hook service that verifies every
@@ -45,7 +45,7 @@ stubs = [
 # Test-only in-process server for contract consumers. It is deliberately
 # opt-in, and the API refuses to compile in release builds.
 test-host = [
-    "test-faults",
+    "__test-faults",
     "http-objects",
     "stubs",
     "dep:axum",

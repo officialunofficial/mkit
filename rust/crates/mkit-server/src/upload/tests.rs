@@ -5,16 +5,10 @@ use proptest::prelude::*;
 use super::*;
 
 /// `mkit serve`'s caps: `MAX_BYTES_PER_CONN` and `MAX_FRAMES_PER_CONN`.
-const SSH_LIMITS: UploadLimits = UploadLimits {
-    max_total_bytes: 1024 * 1024 * 1024,
-    max_chunks: 10_000,
-};
+const SSH_LIMITS: UploadLimits = UploadLimits::new(1024 * 1024 * 1024, 10_000);
 
 /// The native Connect server's caps: `PACK_BODY_LIMIT`, no chunk cap.
-const CONNECT_LIMITS: UploadLimits = UploadLimits {
-    max_total_bytes: PACK_BODY_LIMIT,
-    max_chunks: u32::MAX,
-};
+const CONNECT_LIMITS: UploadLimits = UploadLimits::new(PACK_BODY_LIMIT, u32::MAX);
 
 fn valid_pack() -> (Vec<u8>, [u8; 32]) {
     let bytes = b"valid pack bytes".to_vec();
@@ -285,10 +279,7 @@ fn absent_ids_and_offsets_are_rejected() {
 #[test]
 fn chunk_cap_counts_every_chunk() {
     let (_, id) = valid_pack();
-    let limits = UploadLimits {
-        max_total_bytes: 10,
-        max_chunks: 2,
-    };
+    let limits = UploadLimits::new(10, 2);
     let mut v = validator(&id, 3, limits);
     v.push(Some(&id), Some(0), 1, false).unwrap();
     v.push(Some(&id), Some(1), 1, false).unwrap();
@@ -330,10 +321,7 @@ fn stream_stays_dead_after_length_mismatch() {
 #[test]
 fn byte_count_overflow_is_caught() {
     let (_, id) = valid_pack();
-    let limits = UploadLimits {
-        max_total_bytes: u64::MAX,
-        max_chunks: u32::MAX,
-    };
+    let limits = UploadLimits::new(u64::MAX, u32::MAX);
     let mut v = validator(&id, u64::MAX, limits);
     assert!(
         !v.push(Some(&id), Some(0), usize::MAX, false)

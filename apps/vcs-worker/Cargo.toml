@@ -47,7 +47,7 @@ launch = ["http-objects", "signed-http-hooks", "pack-ruzstd"]
 pack-ruzstd = ["mkit-server-worker/pack-ruzstd"]
 http-objects = ["mkit-server-worker/http-objects"]
 signed-http-hooks = ["mkit-server-worker/signed-http-hooks"]
-test-faults = ["mkit-server-worker/test-faults"]
+__test-faults = ["mkit-server-worker/__test-faults"]
 
 # Bound pure-Rust decoding in this independent workspace too.
 [patch.crates-io]

@@ -33,7 +33,7 @@ impl<S: NamespaceStore, H: TimerHandler<S>> TimerHandler<S> for Budgeted<H> {
         if self
             .budget
             .as_ref()
-            .is_some_and(|budget| !budget.charge(self.calls))
+            .is_some_and(|budget| !budget.charge_operations(self.calls))
         {
             Box::pin(async { Ok(Fired::Retry) })
         } else {
@@ -94,7 +94,7 @@ impl<C: CacheDelete> LocalInvalidation for LocalCache<C> {
                 .collect::<Vec<_>>();
             for (index, key) in keys.iter().enumerate().skip(cursor as usize) {
                 // Deterministic bounded enumeration and delete share one allowance.
-                if !budget.charge(2) {
+                if !budget.charge_operations(2) {
                     return Ok(Some(u32::try_from(index).unwrap_or(u32::MAX)));
                 }
                 self.cache.delete(key).await?;
@@ -341,7 +341,7 @@ mod tests {
                             self.1.used() >= 64,
                             "outer reservation precedes opaque effects"
                         );
-                        if local.charge(40) {
+                        if local.charge_operations(40) {
                             self.0.fetch_add(1, Ordering::SeqCst);
                         }
                         Ok(None)
@@ -425,10 +425,7 @@ mod tests {
                 let mut cfg = PipelineConfig::new(
                     Addressing::Single { repo: repo.clone() },
                     AuthMode::Open,
-                    mkit_server::upload::UploadLimits {
-                        max_total_bytes: 1024,
-                        max_chunks: 4,
-                    },
+                    mkit_server::upload::UploadLimits::new(1024, 4),
                 );
                 cfg.purge = Some(
                     mkit_server::purge::PurgeConfig::new(
@@ -521,7 +518,7 @@ mod tests {
             let mut batch = plan_enqueue(&request, 10, None, None).unwrap();
             for kind in [1, 3, 7, 8, 10, 4, 13, 15] {
                 batch = batch.put(
-                    mkit_server::store::keys::timer(10, kind, b""),
+                    mkit_server::store::adapter_spi::keys::timer(10, kind, b""),
                     mkit_server::Value::default(),
                 );
             }

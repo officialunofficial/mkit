@@ -318,6 +318,7 @@ impl fmt::Debug for UrlTokenKeys {
 /// The deployment's URL-token configuration: keys and the longest
 /// lifetime it issues (`url_token_ttl`, §1.1).
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct UrlTokenConfig {
     keys: Arc<UrlTokenKeys>,
     ttl_ms: u64,

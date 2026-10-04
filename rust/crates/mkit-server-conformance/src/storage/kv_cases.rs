@@ -6,12 +6,14 @@ use std::collections::BTreeMap;
 
 use mkit_core::upload_parts::MIN_PART_SIZE;
 use mkit_server::pipeline::SinglePartition;
-use mkit_server::store::codec::{AbortReason, Backlog, PendingOp, ReservationV1, TicketV1};
-use mkit_server::store::outbox::{self, OutboxBuilder, Terminal};
-use mkit_server::store::tickets::{
+use mkit_server::store::adapter_spi::codec::{
+    AbortReason, Backlog, PendingOp, ReservationV1, TicketV1,
+};
+use mkit_server::store::adapter_spi::outbox::{self, OutboxBuilder, Terminal};
+use mkit_server::store::adapter_spi::tickets::{
     self, CloseReason, TicketCaps, TicketPlanError, TicketReads, TicketSpec,
 };
-use mkit_server::store::{codec, keys};
+use mkit_server::store::adapter_spi::{codec, keys};
 use mkit_server::{
     Batch, BatchOutcome, Key, NamespaceStore, Partition, Precondition, RepoId, RepoName, Value,
     Write,
@@ -62,10 +64,7 @@ async fn reads<S: NamespaceStore>(
 }
 
 fn caps() -> TicketCaps {
-    TicketCaps {
-        per_ref: 1_024,
-        per_signer: 64,
-    }
+    TicketCaps::new(1_024, 64)
 }
 
 async fn open<S: NamespaceStore>(

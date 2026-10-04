@@ -1,6 +1,6 @@
 //! Both Worker classes that hold tickets register and fire kind 2.
 
-use mkit_server::store::{codec, keys, tickets};
+use mkit_server::store::adapter_spi::{codec, keys, tickets};
 use mkit_server::timers::{TickBudget, registry::kinds, run_due};
 use mkit_server::{
     Batch, BatchOutcome, ManualClock, MemoryBlobStore, MemoryKv, NamespaceKey, NamespaceStore,
@@ -99,8 +99,8 @@ async fn single_and_ref_shard_expiry_timers_fire() {
 /// an abandoned pending row is aborted, delivered and acked.
 #[tokio::test]
 async fn outcome_delivery_and_reconcile_fire_on_every_outcome_class() {
-    use mkit_server::store::codec::{AbortReason, PendingOp, ReservationV1};
-    use mkit_server::store::outbox::{OutboxBuilder, Terminal};
+    use mkit_server::store::adapter_spi::codec::{AbortReason, PendingOp, ReservationV1};
+    use mkit_server::store::adapter_spi::outbox::{OutboxBuilder, Terminal};
     for class in [
         ShardClass::RefStore,
         ShardClass::RefShard,

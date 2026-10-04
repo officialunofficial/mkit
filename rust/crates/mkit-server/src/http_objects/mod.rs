@@ -33,10 +33,12 @@ pub use paid::HttpReadRuntime;
 pub(crate) use paid::ReadFinalizer;
 pub use reach::{Reachability, TtlReachability};
 pub use route::{BadUrl, ParsedUrl, Query, RepoPrefix, Target, is_http_object_path, parse};
+#[cfg(test)]
+pub(crate) use seams::{AdmitDecision, HttpAdmission};
+pub(crate) use seams::{AdmitRequest, Admitted};
 pub use seams::{
-    AdmitDecision, AdmitRequest, Admitted, HttpAdmission, HttpSeams, NoAdmission, NoTakedown,
-    NoTokens, PreparedProof, ProofServer, ProofSource, TakedownGate, TakedownVerdict, TokenGate,
-    UnsupportedProofs,
+    HttpSeams, NoTakedown, NoTokens, PreparedProof, ProofServer, ProofSource, TakedownGate,
+    TakedownVerdict, TokenGate, UnsupportedProofs,
 };
 
 /// Header lookup safe to retain across a native response future.

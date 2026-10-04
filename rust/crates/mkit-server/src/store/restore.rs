@@ -17,21 +17,26 @@
 //! with queued relay rows gets an expired, sweepable `ls` row. The recovery
 //! marker fences watermark reads until R-116 reconciliation completes.
 
+#[cfg(test)]
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::codec::{self, LeaseRecovery};
-use super::keys::{self, ParsedKey};
-use super::{
-    Batch, BatchOutcome, ExportHeader, ExportReader, ExportRecord, ImportMode, Importer,
-    NamespaceStore, Partition, StoreError, export_page,
-};
+#[cfg(test)]
+use super::keys::ParsedKey;
+use super::{Batch, BatchOutcome, NamespaceStore, Partition, StoreError, keys};
+#[cfg(test)]
+use super::{ExportHeader, ExportReader, ExportRecord, ImportMode, Importer, export_page};
+#[cfg(test)]
 use crate::repo::NamespaceKey;
+#[cfg(test)]
 use crate::timers::lease_sweep::lease_reference;
+#[cfg(test)]
 use crate::timers::registry::kinds;
 
 /// Parameters for a restore into empty partitions.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct RestoreOptions {
+#[cfg(test)]
+pub(crate) struct RestoreOptions {
     /// Require at least this epoch in restored namespace coordinators.
     pub epoch_at_least: Option<u64>,
     /// The restore clock reading used for the lease-table recovery marker.
@@ -43,7 +48,8 @@ pub struct RestoreOptions {
 
 /// Counts committed by a successful restore.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RestoreReport {
+#[cfg(test)]
+pub(crate) struct RestoreReport {
     /// Number of distinct imported partitions.
     pub partitions: usize,
     /// Number of imported records, including the rewritten epoch and sequence.
@@ -55,6 +61,7 @@ pub struct RestoreReport {
 }
 
 #[derive(Debug)]
+#[cfg(test)]
 struct SnapshotInfo {
     index: usize,
     partition: Partition,
@@ -71,11 +78,13 @@ struct SnapshotInfo {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(test)]
 enum ShardingMode {
     Single,
     D34,
 }
 
+#[cfg(test)]
 impl ShardingMode {
     fn coordinator(self, partition: &Partition) -> bool {
         match self {
@@ -85,6 +94,7 @@ impl ShardingMode {
     }
 }
 
+#[cfg(test)]
 fn invalid(message: &'static str) -> StoreError {
     StoreError::Invalid(message.into())
 }
@@ -93,6 +103,7 @@ fn corrupt(message: &'static str) -> StoreError {
     StoreError::Corrupt(message.into())
 }
 
+#[cfg(test)]
 fn priority(info: &SnapshotInfo) -> u8 {
     if info.sharding_marker.is_some() {
         return 0;
@@ -106,6 +117,7 @@ fn priority(info: &SnapshotInfo) -> u8 {
     }
 }
 
+#[cfg(test)]
 fn inspect(
     index: usize,
     bytes: &[u8],
@@ -212,6 +224,7 @@ fn inspect(
     })
 }
 
+#[cfg(test)]
 fn validate_sequences(
     max_relay_sequence: u64,
     outbox_sequence: u64,
@@ -229,6 +242,7 @@ fn validate_sequences(
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_inspection_record(record: &ExportRecord) -> Result<(), StoreError> {
     match keys::parse(&record.key) {
         Some(ParsedKey::InspectionMarker) if record.value.as_bytes() != b"on" => {
@@ -267,6 +281,7 @@ fn validate_inspection_record(record: &ExportRecord) -> Result<(), StoreError> {
     }
 }
 
+#[cfg(test)]
 fn inspection_partition(
     partition: &Partition,
     repo: &crate::RepoName,
@@ -284,6 +299,7 @@ fn inspection_partition(
     }
 }
 
+#[cfg(test)]
 fn should_drop(record: &ExportRecord) -> bool {
     record.key == keys::revoke_cursor(false)
         || record.key == keys::revoke_cursor(true)
@@ -300,7 +316,7 @@ fn should_drop(record: &ExportRecord) -> bool {
 /// Write `lr 00` exactly as the pipeline's recovery declaration does.
 ///
 /// This must finish before a restored coordinator serves writes.
-pub async fn mark_lease_table_recovered<S: NamespaceStore>(
+pub(crate) async fn mark_lease_table_recovered<S: NamespaceStore>(
     store: &S,
     partition: &Partition,
     recovered_at_ms: u64,
@@ -349,6 +365,7 @@ pub async fn mark_lease_table_recovered<S: NamespaceStore>(
     }
 }
 
+#[cfg(test)]
 struct RestorePlan {
     infos: Vec<SnapshotInfo>,
     shifts: BTreeMap<Partition, u64>,
@@ -357,8 +374,10 @@ struct RestorePlan {
     missing_coordinators: Vec<Partition>,
 }
 
+#[cfg(test)]
 const EPOCH_RESTORE_JUMP: u64 = 1 << 32;
 
+#[cfg(test)]
 fn namespace(partition: &Partition) -> Option<&NamespaceKey> {
     match partition {
         Partition::Namespace(ns)
@@ -370,12 +389,14 @@ fn namespace(partition: &Partition) -> Option<&NamespaceKey> {
     }
 }
 
+#[cfg(test)]
 struct Completeness {
     sources: BTreeSet<Partition>,
     missing_sources: Vec<(Partition, u64)>,
     missing_coordinators: Vec<Partition>,
 }
 
+#[cfg(test)]
 fn check_completeness(
     infos: &[SnapshotInfo],
     seen: &BTreeSet<Partition>,
@@ -450,6 +471,7 @@ fn check_completeness(
 }
 
 #[allow(clippy::too_many_lines)] // All portable input, fence and arithmetic checks must finish before any import writes.
+#[cfg(test)]
 async fn prepare<S: NamespaceStore>(
     snapshots: &[Vec<u8>],
     target: &S,
@@ -574,6 +596,7 @@ async fn prepare<S: NamespaceStore>(
     })
 }
 
+#[cfg(test)]
 async fn import_one<S: NamespaceStore>(
     bytes: &[u8],
     target: &S,
@@ -676,6 +699,7 @@ async fn import_one<S: NamespaceStore>(
     Ok(records)
 }
 
+#[cfg(test)]
 async fn create_missing_sources<S: NamespaceStore>(
     target: &S,
     sources: &[(Partition, u64)],
@@ -708,6 +732,7 @@ async fn create_missing_sources<S: NamespaceStore>(
     Ok(())
 }
 
+#[cfg(test)]
 async fn seed_relay_leases<S: NamespaceStore>(
     target: &S,
     sources: Vec<Partition>,
@@ -781,7 +806,8 @@ async fn seed_relay_leases<S: NamespaceStore>(
 /// # Errors
 /// Malformed or duplicate snapshots, non-empty supplied target partitions,
 /// epoch or relay sequence overflow, or a store failure.
-pub async fn restore<S: NamespaceStore>(
+#[cfg(test)]
+pub(crate) async fn restore<S: NamespaceStore>(
     snapshots: &[Vec<u8>],
     target: &S,
     opts: RestoreOptions,

@@ -1,6 +1,6 @@
 //! The `test-faults` store faults: each fails once, leaves nothing behind,
 //! and the retry succeeds.
-#![cfg(feature = "test-faults")]
+#![cfg(feature = "__test-faults")]
 
 mod common;
 

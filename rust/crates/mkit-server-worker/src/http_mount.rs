@@ -9,6 +9,7 @@ use crate::adapter::ConfigError;
 
 /// A programmatic indexed deployment with an explicit HTTP mount.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct WorkerHttpMountConfig {
     /// Indexed configuration selected by the mount or Paid launch profile.
     pub indexed: IndexedConfig,
@@ -21,14 +22,31 @@ pub struct WorkerHttpMountConfig {
 }
 
 impl WorkerHttpMountConfig {
+    /// Construct explicit deployment settings; fields may be adjusted before use.
+    #[must_use]
+    pub fn new(
+        indexed: IndexedConfig,
+        http_objects: HttpObjectsConfig,
+        options: HttpMountOptions,
+    ) -> Self {
+        Self {
+            indexed,
+            http_objects,
+            options,
+            read_runtime: None,
+        }
+    }
+}
+
+impl WorkerHttpMountConfig {
     /// Retain read settlement in this fetch event, including body cancellation.
     #[cfg(target_arch = "wasm32")]
     #[must_use]
     pub fn with_context(mut self, context: worker::Context) -> Self {
-        self.read_runtime = Some(mkit_server::http_objects::HttpReadRuntime {
-            sleep: std::sync::Arc::new(crate::sleep::WorkerSleep),
-            spawner: std::sync::Arc::new(ReadSettlement(context)),
-        });
+        self.read_runtime = Some(mkit_server::http_objects::HttpReadRuntime::new(
+            std::sync::Arc::new(crate::sleep::WorkerSleep),
+            std::sync::Arc::new(ReadSettlement(context)),
+        ));
         self
     }
 }

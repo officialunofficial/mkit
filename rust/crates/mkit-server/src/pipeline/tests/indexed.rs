@@ -954,7 +954,13 @@ fn no_inspector_real_advance_reader_and_writer_views_are_identical() {
     let node = encode_packlist(None, &[pack_id]).unwrap();
     let map = hash(&node);
     let tickets = vec![
-        begin_and_upload(&env, &owner, &identity, &bytes, 9000),
+        begin_and_upload(
+            &env,
+            &owner,
+            &identity,
+            &bytes,
+            crate::limits::REQUEST_CALLS,
+        ),
         begin_and_upload(&env, &owner, &identity, &node, 9001),
     ];
     let a = env

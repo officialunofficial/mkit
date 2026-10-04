@@ -9,11 +9,23 @@ pub const PRESERVATION_BINDING: &str = "PRESERVATION";
 pub const RECEIPT_SECRET: &str = "RECEIPT_NOTICE_KEY";
 /// Default-off launch preservation configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TakedownSettings {
     /// Explicit positive preservation lifetime.
     pub retention_ms: u64,
     /// Required receipt-and-notice public key publication.
     pub publication: mkit_server::takedown::PublicationConfig,
+}
+
+impl TakedownSettings {
+    /// Construct explicit deployment settings; fields may be adjusted before use.
+    #[must_use]
+    pub fn new(retention_ms: u64, publication: mkit_server::takedown::PublicationConfig) -> Self {
+        Self {
+            retention_ms,
+            publication,
+        }
+    }
 }
 pub(crate) fn takedown(
     var: &impl Fn(&str) -> Option<String>,
@@ -70,10 +82,7 @@ pub(crate) fn takedown(
     }) {
         return Err(ConfigError("receipt key repeats ticket key".into()));
     }
-    Ok(Some(TakedownSettings {
-        retention_ms,
-        publication,
-    }))
+    Ok(Some(TakedownSettings::new(retention_ms, publication)))
 }
 /// Parse keys and reject reuse of ticket/MAC and URL-token keys.
 /// # Errors
@@ -178,20 +187,21 @@ fn build_work(
     if let Some(budget) = alarm {
         metadata = metadata.with_alarm_budget(budget.clone());
     }
-    Ok(mkit_server::takedown::work::Work {
-        purge: purge_config(cfg, metadata.clone(), request)?,
+    let mut config = mkit_server::takedown::work::WorkConfig::new(
+        cfg.probe_partition(),
+        std::sync::Arc::new(mkit_server::pipeline::D34Shards),
+        cfg.addressing.clone(),
+        settings.retention_ms,
+        std::sync::Arc::new(crate::clock::WorkerClock),
+    );
+    config.purge = purge_config(cfg, metadata.clone(), request)?;
+    config.discovery_margin_ms = indexed.relay_lag_bound_ms;
+    Ok(mkit_server::takedown::work::Work::new(
         metadata,
-        serving: blob(cfg.blob_binding, crate::r2::PACKS_KEYSPACE),
-        preserved: blob(PRESERVATION_BINDING, "preserved"),
-        root: cfg.probe_partition(),
-        // Preservation requires the launch profile, which validation pins to D34.
-        shards: std::sync::Arc::new(mkit_server::pipeline::D34Shards),
-        addressing: cfg.addressing.clone(),
-        retention_ms: settings.retention_ms,
-        discovery_margin_ms: indexed.relay_lag_bound_ms,
-        profile: mkit_server::takedown::acquisition::Profile::scheduled(),
-        clock: std::sync::Arc::new(crate::clock::WorkerClock),
-    })
+        blob(cfg.blob_binding, crate::r2::PACKS_KEYSPACE),
+        blob(PRESERVATION_BINDING, "preserved"),
+        config,
+    ))
 }
 #[cfg(any(target_arch = "wasm32", test))]
 fn supported_path(path: &str, cfg: &crate::adapter::WorkerConfig) -> bool {
@@ -486,7 +496,7 @@ mod tests {
         ] {
             let path = format!("{}{op}", mkit_server::admin::PREFIX);
             assert!(!supported_path(&path, &cfg), "unconfigured {op}");
-            cfg.launch = Some(crate::launch::LaunchConfig { takedown: true });
+            cfg.launch = Some(crate::launch::LaunchConfig::new(true));
             assert!(!supported_path(&path, &cfg), "selection alone {op}");
             cfg.takedown = fixture.settings(true, true).unwrap();
             cfg.takedown_denial = true;
@@ -504,10 +514,10 @@ mod tests {
                 },
                 timeout: crate::hooks::config::DEFAULT_TIMEOUT,
                 authorizer_role: mkit_server::policy::AuthorizerRole::Check,
-                http: Some(crate::hooks::config::HttpVars {
-                    endpoint: crate::hooks::fetch::Endpoint::new("https://hooks.example").unwrap(),
-                    validity: std::time::Duration::from_mins(1),
-                }),
+                http: Some(crate::hooks::config::HttpVars::new(
+                    crate::hooks::fetch::Endpoint::new("https://hooks.example").unwrap(),
+                    std::time::Duration::from_mins(1),
+                )),
                 inspect_batch_max_objects: 1,
             });
             assert!(supported_path(&path, &cfg), "configured {op}");
@@ -522,7 +532,7 @@ mod tests {
         }
         assert!(!supported_path(mkit_server::admin::AUDIT_PATH, &cfg));
         assert!(!supported_path(mkit_server::admin::PURGE_PATH, &cfg));
-        cfg.launch = Some(crate::launch::LaunchConfig { takedown: true });
+        cfg.launch = Some(crate::launch::LaunchConfig::new(true));
         for op in [
             "Reinstate",
             "GetHold",
@@ -567,10 +577,10 @@ mod tests {
             !purge_enabled(&cfg),
             "service binding alone cannot sign global purge"
         );
-        hooks.http = Some(crate::hooks::config::HttpVars {
-            endpoint: crate::hooks::fetch::Endpoint::new("https://hooks.example").unwrap(),
-            validity: std::time::Duration::from_mins(1),
-        });
+        hooks.http = Some(crate::hooks::config::HttpVars::new(
+            crate::hooks::fetch::Endpoint::new("https://hooks.example").unwrap(),
+            std::time::Duration::from_mins(1),
+        ));
         cfg.hooks = Some(hooks);
         assert!(purge_enabled(&cfg));
     }

@@ -289,7 +289,7 @@ mod tests {
     use futures::executor::block_on;
     use mkit_server::hooks::{ChannelError, HookRequest, HookResponse};
     use mkit_server::pipeline::{Admission, Authorizer, Outcome, OutcomeSink};
-    use mkit_server::store::codec::ReservationV1;
+    use mkit_server::store::adapter_spi::codec::ReservationV1;
     use mkit_server::{ManualClock, ManualSleep};
 
     use super::*;

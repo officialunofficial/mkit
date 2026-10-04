@@ -3,7 +3,7 @@
 pub use mkit_server::timers::earliest_timer_put;
 
 use crate::sql::{SqlConn, TimerCursor};
-use mkit_server::store::keys;
+use mkit_server::store::adapter_spi::keys;
 use mkit_server::timers::{TickBudget, TickState, TimerKind, TimerRegistry, run_due_with_state};
 use mkit_server::{Clock, StoreError};
 use std::collections::{HashMap, hash_map::Entry};
@@ -240,7 +240,7 @@ fn alarm_time(time: u64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use mkit_server::{Batch, Value, store::keys};
+    use mkit_server::{Batch, Value, store::adapter_spi::keys};
 
     use super::*;
 

@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use common::{DoConfig, Loopback};
 use futures::executor::block_on;
 use mkit_server::pipeline::Sharding;
-use mkit_server::store::keys;
+use mkit_server::store::adapter_spi::keys;
 use mkit_server::{
     Batch, BatchOutcome, Cursor, Key, NamespaceKey, NamespaceStore, Partition, PartitionStats,
     ScanPage, StoreCapabilities, StoreError, Value,

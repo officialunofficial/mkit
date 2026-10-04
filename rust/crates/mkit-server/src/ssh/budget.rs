@@ -23,10 +23,7 @@ pub const MAX_BYTES_PER_CONN: u64 = 1024 * 1024 * 1024;
 /// binding builds its pipeline's `PipelineConfig` with these.
 #[must_use]
 pub const fn upload_limits() -> UploadLimits {
-    UploadLimits {
-        max_total_bytes: MAX_BYTES_PER_CONN,
-        max_chunks: MAX_FRAMES_PER_CONN,
-    }
+    UploadLimits::new(MAX_BYTES_PER_CONN, MAX_FRAMES_PER_CONN)
 }
 
 /// A frame's cost against [`MAX_BYTES_PER_CONN`], without re-encoding: a

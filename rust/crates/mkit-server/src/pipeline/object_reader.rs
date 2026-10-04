@@ -45,7 +45,7 @@ pub const OBJECT_READER_LIMIT_MESSAGE: &str = super::repo_storage::OWNER_READ_LI
 /// Maximum IDs per call; duplicates preserve input order and share proof work.
 pub const OBJECT_READER_BATCH: usize = 16;
 /// Core call cap inside the Worker invocation allowance.
-pub const OBJECT_READER_CALLS: u32 = 8_500;
+pub const OBJECT_READER_CALLS: u32 = crate::limits::OBJECT_READER_CALLS;
 /// Repository view, with envelope-verified owner authority.
 #[derive(Debug)]
 pub enum ReaderView<'a> {
@@ -212,26 +212,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
     ) -> Result<Vec<Option<ObjectMetadata>>, ServerError> {
         let (_, metadata) = self.batch(ids, true).await?;
         Ok(ids.iter().map(|id| metadata.get(id).copied()).collect())
-    }
-    /// Historical mixed sizes: `Blob` payload, other kinds' canonical length.
-    /// # Errors
-    /// As `object_metadata`; writer caps are typed exhaustion and unprovable public IDs are absent.
-    #[deprecated(note = "use object_metadata for kind, canonical_len and logical_len")]
-    pub async fn object_sizes(&self, ids: &[Hash]) -> Result<Vec<Option<u64>>, ServerError> {
-        Ok(self
-            .object_metadata(ids)
-            .await?
-            .into_iter()
-            .map(|row| {
-                row.map(|m| {
-                    if m.kind == ObjectType::Blob {
-                        m.logical_len.unwrap_or(0)
-                    } else {
-                        m.canonical_len
-                    }
-                })
-            })
-            .collect())
     }
     /// Issue at most 16 URL tokens, preserving order and duplicates.
     /// Requires configured URL-token keys. Inaccessible targets are uniformly
@@ -796,10 +776,7 @@ mod tests {
                 AuthMode::AuthV2(
                     crate::auth_v2::AuthV2Config::new("https://reader.test", "reader").unwrap(),
                 ),
-                crate::upload::UploadLimits {
-                    max_total_bytes: 1 << 20,
-                    max_chunks: 64,
-                },
+                crate::upload::UploadLimits::new(1 << 20, 64),
             );
             cfg.ticket_keys = Some(
                 crate::upload::token::TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap(),

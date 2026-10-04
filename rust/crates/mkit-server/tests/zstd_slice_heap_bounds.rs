@@ -27,7 +27,10 @@ use mkit_server::indexed::checkpoint::{Phase, read_job};
 use mkit_server::indexed::job::{FailClosedExtraction, SliceLimits, VerifyTimer};
 use mkit_server::indexed::{IndexedConfig, scheduled, state};
 use mkit_server::pipeline::{LeaseParams, ShardMap, SinglePartition};
-use mkit_server::store::{Batch, BatchOutcome, NamespaceStore, codec, keys, tickets};
+use mkit_server::store::{
+    Batch, BatchOutcome, NamespaceStore,
+    adapter_spi::{codec, keys, tickets},
+};
 use mkit_server::timers::{TickBudget, TimerRegistry, run_due};
 use mkit_server::{
     BoxFuture, ManualClock, MemoryBlobStore, MemoryKv, NamespaceKey, NoopMetrics, RepoId, RepoName,
@@ -203,10 +206,7 @@ fn scheduled_ruzstd_slice_retains_at_most_48_mib_requested_heap() {
     measure(pack, retained, SliceLimits::default(), PREFIX_OBJECTS, true);
 
     // A smaller read window must not widen the shared canonical admission.
-    let limits = SliceLimits {
-        window_bytes: 64 << 10,
-        ..SliceLimits::default()
-    };
+    let limits = SliceLimits::default().with_window_bytes(64 << 10);
     let admitted = mkit_server::indexed::geometry::CANONICAL_BYTES;
     let canonical = serialize(&Object::Blob(Blob {
         data: vec![7; usize::try_from(admitted).unwrap() - 10],
@@ -487,10 +487,7 @@ fn measure_inner(
 }
 
 fn custom_nested_case() {
-    let limits = SliceLimits {
-        window_bytes: 64 << 10,
-        ..SliceLimits::default()
-    };
+    let limits = SliceLimits::default().with_window_bytes(64 << 10);
     let cap = usize::try_from(mkit_server::indexed::geometry::CANONICAL_BYTES).unwrap();
     let base = serialize(&Object::Blob(Blob {
         data: vec![7; cap - 256],

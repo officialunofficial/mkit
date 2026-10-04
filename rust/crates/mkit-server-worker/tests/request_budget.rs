@@ -187,10 +187,7 @@ fn request_budget_combines_do_r2_range_proofs_and_pipeline_serving() {
         let config = PipelineConfig::new(
             Addressing::Single { repo: repo() },
             AuthMode::Open,
-            mkit_server::upload::UploadLimits {
-                max_total_bytes: 1024,
-                max_chunks: 16,
-            },
+            mkit_server::upload::UploadLimits::new(1024, 16),
         );
         let pipe = Pipeline::new(
             blobs.clone(),

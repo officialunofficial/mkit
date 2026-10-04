@@ -282,7 +282,7 @@ fn timer_window_refuses_corrupt_partition_columns() {
 #[test]
 fn relay_capacity_exception_requires_exact_guarded_empty_timer_move() {
     use super::kv::is_relay_timer_reschedule;
-    use mkit_server::store::{Batch, Precondition, Value, keys};
+    use mkit_server::store::{Batch, Precondition, Value, adapter_spi::keys};
     fn moved(old: mkit_server::Key, new: mkit_server::Key) -> Batch {
         Batch::new()
             .require(Precondition::Equals(old.clone(), Value::default()))
@@ -326,7 +326,7 @@ fn relay_capacity_exception_requires_exact_guarded_empty_timer_move() {
 #[test]
 fn retry_capacity_exception_requires_exact_guarded_payload_move() {
     use super::kv::is_timer_retry_move;
-    use mkit_server::store::{Batch, Precondition, Value, keys};
+    use mkit_server::store::{Batch, Precondition, Value, adapter_spi::keys};
     fn moved(old: mkit_server::Key, new: mkit_server::Key, value: Value) -> Batch {
         Batch::new()
             .require(Precondition::Equals(old.clone(), value.clone()))
@@ -373,7 +373,7 @@ fn retry_capacity_exception_requires_exact_guarded_payload_move() {
 fn timer_payload_boundary_guarantees_max_key_retry_fits_original_batch_cap() {
     use mkit_server::store::{
         Batch, MAX_BATCH_BYTES, MAX_KEY_BYTES, MAX_VALUE_BYTES, Precondition, StoreCapabilities,
-        Value, keys,
+        Value, adapter_spi::keys,
     };
     let header = keys::timer(10, 231, b"").as_bytes().len();
     let reference = vec![0; MAX_KEY_BYTES - header];

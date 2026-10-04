@@ -376,9 +376,21 @@ pub fn member_object_for_preservation<'a, B: BlobStore, S: NamespaceStore>(
 
 /// Independent limits for every encoded frame and decoded chain member.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct MemberSourceLimits {
     pub max_frame_bytes: u64,
     pub max_decoded_bytes: u64,
+}
+
+impl MemberSourceLimits {
+    /// Construct explicit deployment settings; fields may be adjusted before use.
+    #[must_use]
+    pub const fn new(max_frame_bytes: u64, max_decoded_bytes: u64) -> Self {
+        Self {
+            max_frame_bytes,
+            max_decoded_bytes,
+        }
+    }
 }
 
 /// Restricted acquisition with admission-derived limits on every chain source.
@@ -576,10 +588,10 @@ fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
             crate::takedown::denial::require_clear(store, &id).await?;
             crate::takedown::denial::require_clear(store, &located.pack).await?;
         }
-        let source_limits = Some(source_limits.unwrap_or(MemberSourceLimits {
-            max_frame_bytes: super::geometry::FRAME_BYTES,
-            max_decoded_bytes: super::geometry::CANONICAL_BYTES,
-        }));
+        let source_limits = Some(source_limits.unwrap_or(MemberSourceLimits::new(
+            super::geometry::FRAME_BYTES,
+            super::geometry::CANONICAL_BYTES,
+        )));
         if source_limits.is_some_and(|limits| {
             located.value.frame_length > limits.max_frame_bytes
                 || located.value.decoded_size > limits.max_decoded_bytes

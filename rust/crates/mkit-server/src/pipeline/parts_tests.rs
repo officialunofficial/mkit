@@ -87,10 +87,7 @@ fn pipe_with<B: MultipartBlobStore>(
     let mut cfg = PipelineConfig::new(
         Addressing::Single { repo },
         AuthMode::AuthV2(AuthV2Config::new(AUDIENCE, REPO).unwrap()),
-        UploadLimits {
-            max_total_bytes: 64 * MIN_PART_SIZE,
-            max_chunks: 1024,
-        },
+        UploadLimits::new(64 * MIN_PART_SIZE, 1024),
     );
     cfg.ticket_keys = Some(keys);
     Pipeline::new(
@@ -688,10 +685,7 @@ fn configured_part_limit_must_fit_backend_capacity() {
     let mut cfg = PipelineConfig::new(
         Addressing::Single { repo },
         AuthMode::AuthV2(AuthV2Config::new(AUDIENCE, REPO).unwrap()),
-        UploadLimits {
-            max_total_bytes: 2 * MIN_PART_SIZE,
-            max_chunks: 1024,
-        },
+        UploadLimits::new(2 * MIN_PART_SIZE, 1024),
     );
     cfg.max_parts = 2;
     let err = Pipeline::new(

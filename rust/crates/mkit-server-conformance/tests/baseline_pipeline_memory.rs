@@ -22,7 +22,7 @@ use mkit_server::auth_v2::AuthV2Config;
 use mkit_server::pipeline::{AuthMode, Hooks, Pipeline, PipelineConfig};
 use mkit_server::policy::NamespacePolicy;
 use mkit_server::quota::QuotaLimits as ServerQuota;
-use mkit_server::store::keys::ParsedKey;
+use mkit_server::store::adapter_spi::keys::ParsedKey;
 use mkit_server::upload::UploadLimits;
 use mkit_server::{
     Addressing, Batch, BatchOutcome, BlobKey, BlobStore, Cursor, Key, MemoryBlobStore, MemoryKv,
@@ -38,11 +38,7 @@ const REPOSITORY: &str = "default";
 const TOKEN: &str = "conformance-bearer-token";
 const MAX_PACK: u64 = 4 << 20;
 const MULTIPART_MAX_PACK: u64 = 24 << 20;
-const QUOTA: ServerQuota = ServerQuota {
-    window_ms: 3_600_000,
-    max_ops: 6,
-    max_bytes: 2 << 20,
-};
+const QUOTA: ServerQuota = ServerQuota::new(3_600_000, 6, 2 << 20);
 
 /// Cases the pipeline fails today, each with the reason: fixed in flight,
 /// never an accepted behavior. An entry that starts passing fails the
@@ -52,7 +48,7 @@ const PIPELINE_DIVERGENCES: &[(&str, &str)] = &[];
 /// A replay-expiry or quota-window index key.
 fn is_index(key: &Key) -> bool {
     matches!(
-        mkit_server::store::keys::parse(key),
+        mkit_server::store::adapter_spi::keys::parse(key),
         Some(ParsedKey::ReplayExpiry { .. } | ParsedKey::QuotaWindow { .. })
     )
 }
@@ -67,7 +63,7 @@ enum Mutant {
     ReadThenWrite,
     /// Drops every delete: nothing is ever pruned.
     #[cfg_attr(
-        not(feature = "test-faults"),
+        not(feature = "__test-faults"),
         expect(dead_code, reason = "only constructed by test-faults pruning cases")
     )]
     NoPrune,
@@ -75,7 +71,7 @@ enum Mutant {
     /// delete is dropped and the row hidden from scans, so pruning goes on
     /// while the rows pile up.
     #[cfg_attr(
-        not(feature = "test-faults"),
+        not(feature = "__test-faults"),
         expect(dead_code, reason = "only constructed by test-faults pruning cases")
     )]
     LeakIndex,
@@ -230,10 +226,7 @@ async fn serve_observed_sharding(
         namespace: NamespaceKey::deployment_default(),
         name: RepoName::new(REPOSITORY).unwrap(),
     };
-    let limits = UploadLimits {
-        max_total_bytes: max_pack,
-        max_chunks: 64,
-    };
+    let limits = UploadLimits::new(max_pack, 64);
     let addressing = multi.map_or(Addressing::Single { repo }, |profile| {
         Addressing::Multi(
             MultiAddressing::new()
@@ -297,7 +290,7 @@ async fn serve_observed_sharding(
     )
     .unwrap();
     let app = axum::Router::new().fallback_service(mkit_server::connect::service(Arc::new(pipe)));
-    #[cfg(feature = "test-faults")]
+    #[cfg(feature = "__test-faults")]
     let app = app.route(
         mkit_server_conformance::wire::STATS_PATH,
         axum::routing::get({
@@ -319,7 +312,7 @@ async fn plant_membership(
     profile: &Profile,
 ) {
     use mkit_server::pipeline::{D34Shards, ShardMap, Sharding, SinglePartition};
-    use mkit_server::store::keys;
+    use mkit_server::store::adapter_spi::keys;
 
     let WireAuth::AuthV2 {
         audience,
@@ -436,7 +429,7 @@ fn multi_allowlist(profile: &Profile) -> BTreeSet<mkit_core::repo_identity::Name
 }
 
 /// `GET /__mkit_test/stats`: the single partition's stats.
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 async fn stats(meta: Shared) -> axum::Json<serde_json::Value> {
     let p = Partition::Namespace(NamespaceKey::deployment_default());
     let s = meta.stats(&p).await.unwrap();
@@ -467,9 +460,9 @@ fn v2_profile(origin: &str) -> Profile {
         seed: [0x5e; 32],
     });
     p.quota = Some(QuotaLimits {
+        window_ms: QUOTA.window_ms,
         max_ops: QUOTA.max_ops,
         max_bytes: QUOTA.max_bytes,
-        window_ms: QUOTA.window_ms,
     });
     p.derive_features();
     // The pipeline rejects a signature over gzip bytes (fails closed).
@@ -572,7 +565,7 @@ async fn pipeline_d34_quota_per_branch() {
 /// Multi + D34: half the owner's namespace budget goes to one branch, its
 /// shard is rolled up under clock skew, and a fresh shard reads that total,
 /// so the namespace cap refuses a write across branches (WP-1.26b).
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pipeline_d34_multi_namespace_cap_after_rollup() {
     let auth = |origin: &str| AuthMode::AuthV2(AuthV2Config::new(origin, "").unwrap());
@@ -583,9 +576,9 @@ async fn pipeline_d34_multi_namespace_cap_after_rollup() {
     });
     profile.milestone = Milestone::M1;
     profile.quota = Some(QuotaLimits {
+        window_ms: QUOTA.window_ms,
         max_ops: QUOTA.max_ops,
         max_bytes: QUOTA.max_bytes,
-        window_ms: QUOTA.window_ms,
     });
     profile.derive_features();
     profile.features.insert(Feature::MultiRepo);
@@ -811,10 +804,10 @@ async fn pipeline_grants_single_and_d34() {
         profile
             .features
             .extend([Feature::MultiRepo, Feature::Grants]);
-        #[cfg(feature = "test-faults")]
+        #[cfg(feature = "__test-faults")]
         profile.features.insert(Feature::TestFaults);
         profile.sharding_d34 = sharding == mkit_server::pipeline::Sharding::D34;
-        #[cfg(feature = "test-faults")]
+        #[cfg(feature = "__test-faults")]
         if profile.sharding_d34 {
             profile.features.insert(Feature::EpochLeases);
         }
@@ -886,20 +879,20 @@ async fn pipeline_grants_single_and_d34() {
             "epochs.zero_x_secp256k1_statement",
             "epochs.zero_x_webauthn_statement",
             "epochs.old_grant_denied_new_grant_works_after_set",
-            #[cfg(feature = "test-faults")]
+            #[cfg(feature = "__test-faults")]
             "grants.expired",
-            #[cfg(feature = "test-faults")]
+            #[cfg(feature = "__test-faults")]
             "grants.not_yet_valid",
-            #[cfg(feature = "test-faults")]
+            #[cfg(feature = "__test-faults")]
             "grants.epoch_below_stored",
-            #[cfg(feature = "test-faults")]
+            #[cfg(feature = "__test-faults")]
             "grants.new_epoch_grant_works",
         ] {
             let report = run(&target, Some(case)).await;
             common::judge(&report, PIPELINE_DIVERGENCES);
             assert_eq!(report.passes(), [case], "{case} did not run and pass");
         }
-        #[cfg(feature = "test-faults")]
+        #[cfg(feature = "__test-faults")]
         if target.profile.sharding_d34 {
             for case in [
                 "leases.idle_shard_renews_at_new_epoch",
@@ -931,7 +924,7 @@ async fn pipeline_signed_reads_single_and_d34() {
         profile
             .features
             .extend([Feature::MultiRepo, Feature::Grants, Feature::SignedReads]);
-        #[cfg(feature = "test-faults")]
+        #[cfg(feature = "__test-faults")]
         profile.features.insert(Feature::TestFaults);
         profile.sign_reads = true;
         profile.sharding_d34 = d34;
@@ -974,7 +967,7 @@ async fn pipeline_signed_reads_single_and_d34() {
             "visibility.older_created_denied",
             "visibility.bad_mode_invalid_argument",
             "visibility.oversize_statement_permission_denied",
-            #[cfg(feature = "test-faults")]
+            #[cfg(feature = "__test-faults")]
             "reads.private_grant_old_epoch_not_found",
         ] {
             let report = run(&target, Some(case)).await;
@@ -997,19 +990,15 @@ async fn pipeline_signed_reads_single_and_d34() {
 /// The `test-faults` profile: an auth v2 server whose quota window is
 /// short enough for the growth case to wait out (it prunes on the real
 /// clock: about 80 s), with room for the case's probe writes.
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 async fn serve_test_faults(mutant: Mutant) -> WireTarget {
-    let quota = ServerQuota {
-        window_ms: 5_000,
-        max_ops: 1_000,
-        ..QUOTA
-    };
+    let quota = ServerQuota::new(5_000, 1_000, QUOTA.max_bytes);
     let (origin, _) = serve_mutant(authv2, Some(quota), mutant).await;
     let mut profile = v2_profile(&origin);
     profile.quota = Some(QuotaLimits {
+        window_ms: quota.window_ms,
         max_ops: quota.max_ops,
         max_bytes: quota.max_bytes,
-        window_ms: quota.window_ms,
     });
     profile.features.insert(Feature::TestFaults);
     WireTarget {
@@ -1020,7 +1009,7 @@ async fn serve_test_faults(mutant: Mutant) -> WireTarget {
 
 /// The `test-faults` cases: the clock-skew directive and the stats
 /// endpoint. The rest of the suite ran on the auth v2 profile above.
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pipeline_auth_v2_test_faults() {
     let target = serve_test_faults(Mutant::None).await;
@@ -1068,7 +1057,7 @@ async fn mutant_read_then_write_fails_concurrent_cas() {
 }
 
 /// A store that never deletes never prunes: the growth case must catch it.
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn mutant_no_prune_fails_growth() {
     let target = serve_test_faults(Mutant::NoPrune).await;
@@ -1077,7 +1066,7 @@ async fn mutant_no_prune_fails_growth() {
 
 /// A store that prunes records but leaks their index rows: the growth
 /// case's exact key-count bound must catch it.
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn mutant_index_leak_fails_growth() {
     let target = serve_test_faults(Mutant::LeakIndex).await;
@@ -1087,11 +1076,11 @@ async fn mutant_index_leak_fails_growth() {
 /// The epoch-lease case runs through HTTP against real D34 partitions,
 /// with a stored lease check after both writes to prove the bumped epoch
 /// reached the ref shard.
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pipeline_d34_epoch_leases() {
     use mkit_server::pipeline::{D34Shards, ShardMap, Sharding};
-    use mkit_server::store::{codec, keys};
+    use mkit_server::store::adapter_spi::{codec, keys};
 
     let (origin, meta) =
         serve_sharding(authv2, None, Mutant::None, None, Sharding::D34, MAX_PACK).await;
@@ -1148,7 +1137,7 @@ async fn pipeline_d34_epoch_leases() {
 /// The manual timer wire case must physically abort the sessions it opens,
 /// not only delete tickets. The instrumented memory store can observe this
 /// beyond the public RPC's ticket validation (WP-1.27 B1(k)).
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 #[tokio::test]
 async fn wire_expiry_timer_aborts_multipart_sessions() {
     use mkit_server::pipeline::Sharding;

@@ -7,31 +7,42 @@
 //! [`ContentIndex`], the portable logical export and import, and the
 //! optional [`StoreMaintenance`] and [`StateCommitment`] hooks.
 //!
-//! The contract types are also re-exported at the crate root; [`keys`],
-//! [`codec`] and [`read`] stay namespaced.
+//! The contract types are also re-exported at the crate root;
+//! storage layouts and codecs live in the doc-hidden [`adapter_spi`].
 
+/// Storage layout and maintenance hooks for adapters; not the embedder contract.
+#[doc(hidden)]
+pub mod adapter_spi;
 mod blob;
-pub mod codec;
+pub(crate) use adapter_spi::{codec, index, keys, outbox, publication, tickets, watermark};
+pub use codec::{AbortReason, OutcomeRef, PendingOp, ReservationV1, StoredProcedure};
+pub use tickets::TicketCaps;
+
 mod content_index;
 mod pending_holder;
 pub use pending_holder::PendingHolderV1;
 mod error;
-pub mod index;
-pub mod inspection_flags;
-pub mod inspection_holds;
-pub mod inspection_mode;
-pub mod keys;
+
+#[cfg(test)]
+pub(crate) mod inspection_flags;
+#[cfg(test)]
+pub(crate) mod inspection_holds;
+#[cfg(test)]
+pub(crate) mod inspection_mode;
+#[cfg(test)]
+#[path = "tests/inspection_mode.rs"]
+mod inspection_mode_tests;
+
 mod kv;
 mod maintenance;
-pub mod outbox;
+
 mod partition;
-pub mod publication;
-pub mod read;
+
+pub(crate) mod read;
 pub(crate) mod repo_storage;
-pub mod restore;
-pub mod tickets;
-pub mod view;
-pub mod watermark;
+pub(crate) mod restore;
+
+pub(crate) mod view;
 
 pub use blob::{
     BlobBody, BlobKey, BlobMeta, BlobNamespace, BlobStore, ByteRange, CommitOutcome,

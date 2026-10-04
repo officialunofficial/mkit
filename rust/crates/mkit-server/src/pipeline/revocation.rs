@@ -536,7 +536,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// # Errors
     /// The bump/step error, or `unavailable` after ten seconds or 10,000 steps.
     /// The step cap also terminates when an injected clock stays frozen.
-    #[cfg(feature = "test-faults")]
+    #[cfg(feature = "__test-faults")]
     pub async fn test_bump_epoch(
         &self,
         ns: &NamespaceKey,
@@ -568,7 +568,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     }
 }
 
-#[cfg(all(test, feature = "memory", feature = "test-faults"))]
+#[cfg(all(test, feature = "memory", feature = "__test-faults"))]
 mod tests {
     use super::*;
     use crate::pipeline::{AuthMode, Hooks, PipelineConfig, Sharding};
@@ -590,10 +590,7 @@ mod tests {
         let mut cfg = PipelineConfig::new(
             Addressing::Single { repo },
             AuthMode::Open,
-            UploadLimits {
-                max_total_bytes: 64,
-                max_chunks: 16,
-            },
+            UploadLimits::new(64, 16),
         );
         cfg.sharding = Sharding::D34;
         let pipe = Pipeline::new(

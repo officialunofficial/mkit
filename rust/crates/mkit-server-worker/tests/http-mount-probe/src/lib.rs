@@ -46,13 +46,11 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     if path.starts_with("/raw") {
         return Response::from_json(&serde_json::json!({ "path": path, "query": query }));
     }
-    let options = HttpMountOptions {
-        cors_origins: if path.starts_with("/restricted/") {
-            vec!["https://allowed.example".into()]
-        } else {
-            vec![]
-        },
-    };
+    let options = HttpMountOptions::new(if path.starts_with("/restricted/") {
+        vec!["https://allowed.example".into()]
+    } else {
+        vec![]
+    });
     let response = if path.ends_with("/keys") {
         let config = token_config(&|name| {
             (name == "URL_TOKEN_KEYS").then(|| format!("active {}", "11".repeat(32)))

@@ -93,7 +93,7 @@ impl MemoryBlobStore {
         self.shared.read_calls.load(Ordering::SeqCst)
     }
     /// Open multipart sessions, observable only for test-faults conformance.
-    #[cfg(any(test, feature = "test-faults"))]
+    #[cfg(any(test, feature = "__test-faults"))]
     #[doc(hidden)]
     #[must_use]
     pub fn multipart_session_count(&self) -> usize {

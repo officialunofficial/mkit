@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 
 use mkit_server::pipeline::Sharding;
-use mkit_server::store::keys;
+use mkit_server::store::adapter_spi::keys;
 use mkit_server::{
     Batch, BatchOutcome, Key, NamespaceKey, NamespaceStore, Partition, Precondition, StoreError,
     Value,

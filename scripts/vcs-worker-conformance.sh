@@ -8,7 +8,7 @@
 #   scripts/vcs-worker-conformance.sh [--test-faults] [--hooks] [--sharding single|d34] [--multi] [--indexed] [-- <extra runner args>]
 #
 #   (default)      a release-optimized build; the whole suite once.
-#   --test-faults  a `test-faults` build, in two phases, each on a fresh
+#   --test-faults  an `__test-faults` build, with each case/phase on a fresh
 #                  server: (1) the whole suite, with the clock-skew directive
 #                  and the stats hook (`replay.expired_retry_rejected`); (2)
 #                  with a declared per-signer quota (`TEST_QUOTA_*` vars, read
@@ -16,7 +16,8 @@
 #                  (`TEST_TICKET_TTL_MS`): the `growth.` cases first, on the
 #                  still-disposable server (they wait out the quota window and
 #                  the ticket lifetime: about 6 minutes), then the `quota.`
-#                  cases.
+#                  cases. Each growth case has its own empty state directory,
+#                  so earlier records cannot expire during its calibration.
 #                  It then checks that the adapter never held more than 1 MiB
 #                  of an `UploadPack` or `DownloadPack` body at once. The
 #                  bound covers the streaming RPCs only: a unary response is
@@ -377,11 +378,11 @@ build_args=(--release)
 vars=(--var "AUTH_AUDIENCE:${ORIGIN}" --var "AUTH_REPOSITORY:${REPOSITORY}" --var "SHARDING:${sharding}")
 if [ "${test_faults}" -eq 1 ]; then
     features="${features},test-faults,timers"
-    build_args+=(--features test-faults)
+    build_args+=(--features __test-faults)
 fi
 
 if [ "${hooks}" -eq 1 ]; then
-    build_args=(--release --features test-faults,signed-http-hooks)
+    build_args=(--release --features __test-faults,signed-http-hooks)
 fi
 
 echo ">> building the conformance runner"
@@ -419,18 +420,23 @@ fi
 if [ "${test_faults}" -eq 1 ]; then
     quota_args=(--quota-ops "${TEST_QUOTA_OPS}" --quota-bytes "${TEST_QUOTA_BYTES}"
         --quota-window-ms "${TEST_QUOTA_WINDOW_MS}")
-    start_server quota "${vars[@]}" \
-        --var "TEST_QUOTA_OPS:${TEST_QUOTA_OPS}" \
-        --var "TEST_QUOTA_BYTES:${TEST_QUOTA_BYTES}" \
-        --var "TEST_QUOTA_WINDOW_MS:${TEST_QUOTA_WINDOW_MS}" \
-        --var "TEST_TICKET_TTL_MS:${TEST_TICKET_TTL_MS}"
-    # The growth cases first, on the still-disposable server: the stats hook
-    # reads the partition of one ref's shard under D34 (`?ref=`), else the
-    # deployment's single partition.
-    run_suite "${features}" "${quota_args[@]}" --filter growth.
-    if [ -z "${runner_args[*]:-}" ]; then
-        require_pass growth.replay_and_quota_pruned growth.tickets_and_outbox_pruned
-    fi
+    quota_vars=("${vars[@]}"
+        --var "TEST_QUOTA_OPS:${TEST_QUOTA_OPS}"
+        --var "TEST_QUOTA_BYTES:${TEST_QUOTA_BYTES}"
+        --var "TEST_QUOTA_WINDOW_MS:${TEST_QUOTA_WINDOW_MS}"
+        --var "TEST_TICKET_TTL_MS:${TEST_TICKET_TTL_MS}")
+    # Each growth measurement needs an empty partition. The replay case
+    # leaves rows that may expire during ticket calibration under Single
+    # sharding, so a shared server can understate per-write growth.
+    for growth_case in growth.replay_and_quota_pruned growth.tickets_and_outbox_pruned; do
+        start_server "${growth_case}" "${quota_vars[@]}"
+        run_suite "${features}" "${quota_args[@]}" --filter "${growth_case}"
+        if [ -z "${runner_args[*]:-}" ]; then
+            require_pass "${growth_case}"
+        fi
+        stop_server
+    done
+    start_server quota "${quota_vars[@]}"
     run_suite "${features}" "${quota_args[@]}" --filter quota.
     stop_server
 

@@ -76,7 +76,7 @@ fn activation_requires_all_inputs_and_the_release_launch_profile() {
             true
         )
         .is_ok(),
-        cfg!(feature = "test-faults")
+        cfg!(feature = "__test-faults")
     );
 }
 
@@ -152,7 +152,7 @@ fn request_capture_never_retains_more_than_its_fixed_bound() {
     assert_eq!(MAX_RESPONSE_BYTES, 1 << 20);
 }
 
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 #[test]
 fn deployment_constructor_rejects_role_reuse_before_any_route() {
     let owner =

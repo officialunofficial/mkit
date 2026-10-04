@@ -26,7 +26,8 @@ pub const MAX_TIMEOUT_MS: u64 = 30_000;
 /// Which stages call the hook Worker.
 // Protocol roles are independently selectable, including purge-only sinks.
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct HookRoles {
     /// Stage 2 over `Authorize`.
     pub authorize: bool,
@@ -42,6 +43,7 @@ pub struct HookRoles {
 
 /// The parsed hook vars.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct HookVars {
     /// The stages that are remote.
     pub roles: HookRoles,
@@ -115,13 +117,7 @@ impl HookVars {
             }
             return Ok(None);
         };
-        let mut roles = HookRoles {
-            authorize: false,
-            admit: false,
-            outcome: false,
-            cache_purge: false,
-            inspect: false,
-        };
+        let mut roles = HookRoles::default();
         for name in list.split(',').map(str::trim) {
             let slot = match name {
                 "authorize" => &mut roles.authorize,
@@ -307,11 +303,20 @@ mod tests {
 
 /// Validated HTTP channel configuration. Debug redacts the endpoint path.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct HttpVars {
     /// Endpoint, including an optional path prefix.
     pub endpoint: super::fetch::Endpoint,
     /// Signed request lifetime, independently bounded from the call timeout.
     pub validity: Duration,
+}
+
+impl HttpVars {
+    /// Construct explicit deployment settings; fields may be adjusted before use.
+    #[must_use]
+    pub fn new(endpoint: super::fetch::Endpoint, validity: Duration) -> Self {
+        Self { endpoint, validity }
+    }
 }
 
 impl HttpVars {
@@ -400,10 +405,10 @@ mod http_tests {
     use mkit_server::upload::token::TicketKeys;
 
     fn vars() -> HttpVars {
-        HttpVars {
-            endpoint: super::super::fetch::Endpoint::new("https://hooks.example/prefix").unwrap(),
-            validity: Duration::from_mins(1),
-        }
+        HttpVars::new(
+            super::super::fetch::Endpoint::new("https://hooks.example/prefix").unwrap(),
+            Duration::from_mins(1),
+        )
     }
     fn parse(pairs: &[(&str, &str)]) -> Result<Option<HookVars>, ConfigError> {
         HookVars::parse(&|name| {

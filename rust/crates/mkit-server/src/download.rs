@@ -8,11 +8,11 @@
 
 /// Largest `PackChunk.data` a server sends: well below the 1 MiB frame limit
 /// of the ssh/enc framing, and a manageable Connect message size.
-pub const DOWNLOAD_CHUNK_MAX: usize = 800 * 1024;
+pub(crate) const DOWNLOAD_CHUNK_MAX: usize = 800 * 1024;
 
 /// One `PackChunk` of a download: `len` bytes at `offset`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ChunkSpan {
+pub(crate) struct ChunkSpan {
     /// Byte offset of the chunk in the pack.
     pub offset: u64,
     /// Chunk length in bytes.
@@ -25,7 +25,7 @@ pub struct ChunkSpan {
 /// (a `max` of 0 counts as 1). Only the final span is `last`. An empty pack
 /// yields exactly one `{offset: 0, len: 0, last: true}` span, so the client
 /// always sees a terminator.
-pub fn chunk_plan(total: u64, max: usize) -> impl Iterator<Item = ChunkSpan> {
+pub(crate) fn chunk_plan(total: u64, max: usize) -> impl Iterator<Item = ChunkSpan> {
     let step = u64::try_from(max.max(1)).unwrap_or(u64::MAX);
     let mut offset = 0u64;
     let mut done = false;

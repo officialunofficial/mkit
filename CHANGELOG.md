@@ -9,6 +9,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking (toward 0.6)
 
+- Storage layout modules `store::{keys, codec, index, tickets, outbox,
+  publication, watermark}` move behind the doc-hidden `store::adapter_spi`.
+  Adapter/conformance implementations migrate those imports to the SPI;
+  embedders import `ReservationV1`, `OutcomeRef`, `AbortReason`, `PendingOp`,
+  `StoredProcedure` and `TicketCaps` directly from `store`.
+- Core-only `store::{read, view}` and unused inspection/restore planning are
+  removed from the public surface. Use `Pipeline`/`ObjectReader` for verified
+  reads and portable `store::{export_partition, import_stream}` for maintenance;
+  the existing native `fs` constructors remain supported. Inspection planning
+  and old restore tests remain private test support with no runtime callers.
+- Public configuration structs are non-exhaustive, including `UploadLimits`,
+  `QuotaLimits`, `OutboxBacklogCap`, `TicketCaps`, `GrantSettings`, `LeaseParams`,
+  `SliceLimits`, `MemberSourceLimits`, `RefRule`, `RefPolicy`, `HttpMountOptions`,
+  `HttpReadRuntime`, `HttpSeams`, `AuthorityFence` and the Workers adapter's
+  configuration types (including `HookRoles::default`). Replace literals with `new`,
+  a parser or `Default`, then adjust public fields; `LeaseParams` and
+  `SliceLimits` also provide builders for common overrides. Existing
+  `PipelineConfig::new`, `IndexedConfig::default`, `HttpObjectsConfig::default`
+  and `WorkerConfig::from_vars`/`from_env` remain the construction API.
+- `takedown::work::Work` is non-exhaustive. Replace runtime literals with
+  `Work::new(metadata, serving, preserved, WorkConfig::new(..))`; configure
+  purge, discovery margin and acquisition profile on the non-exhaustive
+  `WorkConfig` before assembly. Routing, retention and clock remain explicit.
+- The duplicate HTTP admission seam (`HttpAdmission`, `AdmitRequest`,
+  `AdmitDecision`, `Admitted`, `NoAdmission` and `HttpSeams::admission`) becomes
+  crate-private. Implement `pipeline::Admission` in the `HookSet` and enable
+  `HttpObjectsConfig::admit_reads`; HTTP serving and settlement keep their
+  existing behavior. `HttpSeams` retains its constructor and other public seams.
+- `ObjectReader::object_sizes` is removed. Use `object_metadata`, selecting
+  `logical_len` for Blob payload lengths and `canonical_len` for other kinds
+  to reproduce the old mixed-size result.
+- `admin::{plan_operation, plan_system, OperationReplay}` and takedown denial
+  key/codec helpers become crate-private. Use authenticated `admin::Engine`
+  operations or the pipeline; no adapter or application called these helpers.
+- `download` becomes crate-private and unused `takedown::ACTIVATED` is removed.
+  Bindings use the pipeline download API; activation is determined by the
+  deployment's takedown configuration.
+- Purge and indexed slices now use one `budget::SliceBudget`, re-exported at
+  both existing paths. Purge callers migrate `charge(n)` to
+  `charge_operations(n)`; request callers retain `charge()`/`charge_many(n)`.
+  Local purge reservations still remain charged after parent refusal.
+- The Cargo `test-faults` feature is renamed to internal `__test-faults` in the
+  server, adapter and dependent test hosts. Update Cargo feature lists; the
+  wire capability and conformance script's `--test-faults` flag are unchanged.
+
+
+- The 0.5.0 comparison also includes earlier unreleased API changes:
+  `indexed::publication::Exhaustion::IndexLookup` is a new exhaustion variant
+  (handle it in matches); removed `pipeline::{published, PublishedSource}` and
+  `Pipeline::with_published_source` are replaced by verified stored publication
+  reads (remove the `published-view` feature); removed
+  `PipelineConfig::inspection_mode` is replaced by the synchronous Inspect hook
+  (remove the field); removed `PurgeDelivery::fire_with_local` is replaced by
+  constructing `PurgeDelivery` with the local cache and calling its timer handler.
+  Fault-hook types and test methods remain available only with the renamed
+  internal `__test-faults` feature; enable it explicitly in repository tests.
+
 - `mkit_server::sql` moves to `mkit_server_worker::sql`, and the `sql`
   feature is removed. Import SQL store types from the Workers adapter and
   remove `sql` from `mkit-server` feature lists.
@@ -127,6 +184,9 @@ supported after new reservation rows are written.
 
 ### Fixed
 
+- Worker conformance growth measurements use a fresh local state directory for
+  each case, preventing earlier replay rows from expiring during ticket-growth
+  calibration. Both growth assertions and the quota suite remain required.
 - Retire the stale Workers operations claim that interrupted takedown activation
   can replay HTTP 200 with inactive denials. A regression checks denial rows
   through signed-request and operation-id retries after interruption and restart:

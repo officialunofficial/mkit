@@ -7,8 +7,9 @@ use core::task::{Context, Poll, Waker};
 
 use futures::StreamExt as _;
 use mkit_server::store::{
-    EXPORT_END, ExportHeader, ExportReader, ExportRecord, ImportMode, codec, encode_export_header,
-    encode_export_record, export_partition, import_stream, keys,
+    EXPORT_END, ExportHeader, ExportReader, ExportRecord, ImportMode,
+    adapter_spi::{codec, keys},
+    encode_export_header, encode_export_record, export_partition, import_stream,
 };
 use mkit_server::{
     Batch, BatchOutcome, Key, KeyClasses, NamespaceStore, Partition, Precondition, StoreError,

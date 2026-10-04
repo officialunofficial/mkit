@@ -228,7 +228,7 @@ mod tests {
             &crate::pipeline::D34Shards,
             &repo,
             &std::collections::BTreeSet::from([object]),
-            &crate::indexed::budget::SliceBudget::new(9000),
+            &crate::indexed::budget::SliceBudget::new(crate::limits::REQUEST_CALLS),
         )
         .await
     }

@@ -14,6 +14,7 @@ use crate::timers::registry::kinds;
 
 /// Limits for one fixed quota window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct QuotaLimits {
     /// Window length in milliseconds.
     pub window_ms: i64,
@@ -21,6 +22,18 @@ pub struct QuotaLimits {
     pub max_ops: u32,
     /// Most bytes allowed per window.
     pub max_bytes: u64,
+}
+
+impl QuotaLimits {
+    /// Construct explicit deployment settings; fields may be adjusted before use.
+    #[must_use]
+    pub const fn new(window_ms: i64, max_ops: u32, max_bytes: u64) -> Self {
+        Self {
+            window_ms,
+            max_ops,
+            max_bytes,
+        }
+    }
 }
 
 /// Usage recorded in the current window.
@@ -70,11 +83,7 @@ pub struct QuotaCharge {
 
 /// Today's per-signer write quota (planner decision Q14): 300 writes and
 /// 128 MiB of `UploadPack` bytes per one-hour window.
-pub const DEFAULT_WRITE_QUOTA: QuotaLimits = QuotaLimits {
-    window_ms: 3_600_000,
-    max_ops: 300,
-    max_bytes: 128 * 1024 * 1024,
-};
+pub const DEFAULT_WRITE_QUOTA: QuotaLimits = QuotaLimits::new(3_600_000, 300, 128 * 1024 * 1024);
 
 /// How often an active ref shard reconciles its fixed-window usage.
 pub const QUOTA_ROLLUP_MS: u64 = 60_000;
@@ -600,11 +609,7 @@ mod tests {
     #[test]
     fn namespace_local_exhaustion_is_exact_even_without_a_view() {
         let charge = NamespaceCharge {
-            limits: QuotaLimits {
-                window_ms: 1_000,
-                max_ops: 2,
-                max_bytes: 5,
-            },
+            limits: QuotaLimits::new(1_000, 2, 5),
             window: 0,
             bytes: 2,
             rollup: true,
@@ -632,11 +637,7 @@ mod tests {
 
     #[test]
     fn namespace_fixed_window_rolls_over_without_reusing_the_old_counter() {
-        let limits = QuotaLimits {
-            window_ms: 600_000,
-            max_ops: 1,
-            max_bytes: 0,
-        };
+        let limits = QuotaLimits::new(600_000, 1, 0);
         let old = namespace_window(599_999, limits.window_ms);
         let new = namespace_window(600_000, limits.window_ms);
         assert_eq!((old, new), (0, 1));
@@ -656,11 +657,7 @@ mod tests {
     #[test]
     fn namespace_view_subtracts_own_pushed_count_and_expires() {
         let charge = NamespaceCharge {
-            limits: QuotaLimits {
-                window_ms: 1_000_000,
-                max_ops: 5,
-                max_bytes: 10,
-            },
+            limits: QuotaLimits::new(1_000_000, 5, 10),
             window: 0,
             bytes: 0,
             rollup: true,
@@ -709,11 +706,7 @@ mod tests {
         const SHARDS: usize = 5;
         const CAP: u32 = 80;
         let charge = NamespaceCharge {
-            limits: QuotaLimits {
-                window_ms: 1_000_000,
-                max_ops: CAP,
-                max_bytes: 0,
-            },
+            limits: QuotaLimits::new(1_000_000, CAP, 0),
             window: 0,
             bytes: 0,
             rollup: true,
@@ -767,11 +760,7 @@ mod tests {
         let business_now_ms = 180_000;
         let server_now_ms = 1_000;
         let charge = NamespaceCharge {
-            limits: QuotaLimits {
-                window_ms: 60_000,
-                max_ops: 2,
-                max_bytes: 0,
-            },
+            limits: QuotaLimits::new(60_000, 2, 0),
             window: namespace_window(business_now_ms, 60_000),
             bytes: 0,
             rollup: true,
@@ -801,11 +790,7 @@ mod tests {
 
         let store = MemoryKv::default();
         let charge = NamespaceCharge {
-            limits: QuotaLimits {
-                window_ms: 60_000,
-                max_ops: 2,
-                max_bytes: 4,
-            },
+            limits: QuotaLimits::new(60_000, 2, 4),
             window: 0,
             bytes: 2,
             rollup: false,

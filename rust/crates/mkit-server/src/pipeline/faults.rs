@@ -1,8 +1,8 @@
-//! The `test-faults` seam (reconciliation R-11): [`FaultHooks`] called at
+//! The `__test-faults` reconciliation seam: [`FaultHooks`] called at
 //! six points of the pipeline, and per-request [`TestDirectives`] read
 //! from request headers.
 //!
-//! This module exists only with the `test-faults` feature, which no
+//! This module exists only with the `__test-faults` feature, which no
 //! release build enables. Without it the header names, the parsing code
 //! and every fault-point call are compiled out of the binary.
 
@@ -120,7 +120,7 @@ impl<F: FaultHooks> DynFaultHooks for F {
 }
 
 /// Per-request test directives, parsed from headers only under
-/// `test-faults`: [`FAULT_HEADER`] (`vcs-worker` parity: `after-reserve`,
+/// `__test-faults`: [`FAULT_HEADER`] (`vcs-worker` parity: `after-reserve`,
 /// `after-put`) and [`CLOCK_SKEW_HEADER`] (added to the business clock for
 /// this request, so black-box suites on `wrangler dev` exercise expiry
 /// without sleeping; WP-1.14, WP-2.8). The skew never feeds a `NotAfter`

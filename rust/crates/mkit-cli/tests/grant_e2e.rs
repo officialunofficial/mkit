@@ -154,10 +154,7 @@ impl Live {
                         NamespacePolicy::Allowlist(BTreeSet::from([owner])),
                     )),
                     AuthMode::AuthV2(AuthV2Config::new(&origin, "").unwrap()),
-                    UploadLimits {
-                        max_total_bytes: max_pack_bytes,
-                        max_chunks: 64,
-                    },
+                    UploadLimits::new(max_pack_bytes, 64),
                 );
                 cfg.grants = Some(
                     mkit_server::GrantConfig::new_allowing_loopback(

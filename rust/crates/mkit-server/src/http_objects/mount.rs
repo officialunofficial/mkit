@@ -8,9 +8,18 @@ pub const KEY_PATH: &str = "/.well-known/mkit-url-token-keys.json";
 
 /// Explicit adapter opt-in. Indexed and HTTP pipeline configuration are also required.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct HttpMountOptions {
     /// Allowed origins, compared exactly; empty permits every origin with `*`.
     pub cors_origins: Vec<String>,
+}
+
+impl HttpMountOptions {
+    /// Construct explicit deployment settings; fields may be adjusted before use.
+    #[must_use]
+    pub fn new(cors_origins: Vec<String>) -> Self {
+        Self { cors_origins }
+    }
 }
 
 /// Apply SPEC-HTTP-OBJECTS §8 to every response, including adapter failures.

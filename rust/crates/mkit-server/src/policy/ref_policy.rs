@@ -10,6 +10,7 @@ use crate::error::ServerError;
 
 /// One rule: every ref its pattern matches. Overlapping rules all apply.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RefRule {
     /// The refs the rule covers. A packmap ref is covered through its
     /// head, so no pattern names one.
@@ -23,8 +24,25 @@ pub struct RefRule {
     pub fast_forward_only: bool,
 }
 
+impl RefRule {
+    /// Construct explicit deployment settings; fields may be adjusted before use.
+    #[must_use]
+    pub fn new(
+        pattern: RefPattern,
+        allowed_signers: Option<BTreeSet<[u8; 32]>>,
+        fast_forward_only: bool,
+    ) -> Self {
+        Self {
+            pattern,
+            allowed_signers,
+            fast_forward_only,
+        }
+    }
+}
+
 /// The deployment's ref rules ([`crate::pipeline::PipelineConfig::ref_policy`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RefPolicy {
     rules: Vec<RefRule>,
 }
@@ -96,11 +114,11 @@ mod tests {
     use super::*;
 
     fn rule(pattern: &str, signers: Option<&[[u8; 32]]>, ff: bool) -> RefRule {
-        RefRule {
-            pattern: RefPattern::parse(pattern).unwrap(),
-            allowed_signers: signers.map(|keys| keys.iter().copied().collect()),
-            fast_forward_only: ff,
-        }
+        RefRule::new(
+            RefPattern::parse(pattern).unwrap(),
+            signers.map(|keys| keys.iter().copied().collect()),
+            ff,
+        )
     }
 
     #[test]
@@ -128,11 +146,11 @@ mod tests {
 
     #[test]
     fn a_pattern_naming_a_packmap_ref_is_refused_at_startup() {
-        let policy = RefPolicy::new(vec![RefRule {
-            pattern: RefPattern::Exact("refs/mkit/packmap/main".into()),
-            allowed_signers: None,
-            fast_forward_only: true,
-        }]);
+        let policy = RefPolicy::new(vec![RefRule::new(
+            RefPattern::Exact("refs/mkit/packmap/main".into()),
+            None,
+            true,
+        )]);
         assert!(policy.validate().is_err());
     }
 }

@@ -417,10 +417,7 @@ mod concurrency_tests {
             super::super::PipelineConfig::new(
                 Addressing::Single { repo: repo.clone() },
                 super::super::AuthMode::Open,
-                crate::upload::UploadLimits {
-                    max_total_bytes: 1024,
-                    max_chunks: 16,
-                },
+                crate::upload::UploadLimits::new(1024, 16),
             ),
             Arc::new(ManualClock::new(0)),
             Arc::new(NoopMetrics),

@@ -7,9 +7,11 @@ use common::{DoConfig, Loopback, retained_timer_backoff};
 use futures::executor::block_on;
 use mkit_server::pipeline::{D34Shards, ShardMap};
 use mkit_server::store::{
-    codec, keys,
-    outbox::{MAX_RELAY_PUTS, OutboxBuilder},
-    tickets::plan_membership,
+    adapter_spi::tickets::plan_membership,
+    adapter_spi::{
+        codec, keys,
+        outbox::{MAX_RELAY_PUTS, OutboxBuilder},
+    },
 };
 use mkit_server::timers::{TickBudget, registry::kinds, run_due};
 use mkit_server::{

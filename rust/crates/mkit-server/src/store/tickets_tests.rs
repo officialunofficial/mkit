@@ -28,10 +28,7 @@ fn spec() -> TicketSpec {
 }
 
 fn caps() -> TicketCaps {
-    TicketCaps {
-        per_ref: 1024,
-        per_signer: 64,
-    }
+    TicketCaps::new(1024, 64)
 }
 
 fn partition() -> Partition {
@@ -444,10 +441,7 @@ fn duplicate_close_and_second_open_on_same_ref_leave_first_fragment_untouched() 
         plan_ticket_open(
             &second,
             &TicketReads::default(),
-            TicketCaps {
-                per_ref: 1,
-                per_signer: 64
-            },
+            TicketCaps::new(1, 64),
             &mut batch.preconditions,
             &mut batch.writes
         )

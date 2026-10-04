@@ -25,7 +25,7 @@ homepage = "https://github.com/officialunofficial/mkit"
 documentation = "https://docs.rs/mkit-server"
 
 [package.metadata.docs.rs]
-# Document the portable surface; `test-faults` and the pure-Rust zstd opt-in
+# Document the portable surface; `__test-faults` and the pure-Rust zstd opt-in
 # stay off.
 features = ["connect", "memory", "ssh", "fs", "remote-hooks", "http-objects"]
 
@@ -99,7 +99,7 @@ pack-ruzstd = ["mkit-core/pack-ruzstd"]
 # The pipeline's test seam: `FaultHooks` at five points and per-request
 # `TestDirectives` (`x-mkit-test-fault`, `x-mkit-test-clock-skew-ms`).
 # Never enabled by a release build or any binary's default features.
-test-faults = []
+__test-faults = []
 # The `.mkit` on-disk layout stores (`fs::FsBlobStore`, `fs::FsLayoutStore`):
 # std-only, no async runtime, so the server-free `mkit serve` (ssh) can use
 # them. Native only: the module and its dependency are cfg'd out on wasm32.

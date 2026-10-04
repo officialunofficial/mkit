@@ -33,8 +33,8 @@ workspace = true
 [features]
 # Store-level fault injection (a failed final R2 chunk, a Durable Object
 # batch that fails once after its writes), plus the pipeline seam of
-# `mkit-server/test-faults`. Never enabled by a release build.
-test-faults = ["mkit-server/test-faults"]
+# `mkit-server/__test-faults`. Never enabled by a release build.
+__test-faults = ["mkit-server/__test-faults"]
 signed-http-hooks = []
 http-objects = ["mkit-server/http-objects"]
 # The launch profile opts into R-203's bounded pure-Rust decoder.

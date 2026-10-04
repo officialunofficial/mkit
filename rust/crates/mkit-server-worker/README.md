@@ -211,18 +211,11 @@ logical file length (Blob payload or ChunkedBlob total_size; absent for other ki
 `read_canonical_with_limit` applies a caller byte cap to two separate counters:
 cumulative ancestor/base decoding and ordered output, including duplicates.
 It returns ResourceExhausted on exhaustion.
-The deprecated `object_sizes` preserves its historical mixed sizes: Blob payload length
-and other objects' canonical serialized length. It performs **no requested-object
-byte reads**. Authorization may read canonical commit/tree/tag/manifest
-ancestors; one manifest authorizes all requested chunks, without a read per
-chunk. The restriction also covers delta bases used to reconstruct ancestors.
-Sizes check reconstruction base objects and packs through metadata only, using
-the same earlier in-pack frame preference, fallback and bounds as canonical reads.
-If a requested ancestor would need expansion to prove another requested ID,
-request their sizes in separate batches; an incomplete proof is
-`ResourceExhausted` for an Owner reader and absent for a Public reader, and
-never reads the requested ancestor.
-Blocked ancestor packs leave unproven IDs absent and preserve earlier proven IDs.
+Use `object_metadata` to select `canonical_len` or `logical_len` explicitly.
+Reservations and outcome types are imported from `mkit_server::store`;
+storage codecs and key layouts live under its doc-hidden `adapter_spi`.
+Worker configuration uses `WorkerConfig::from_vars` or `from_env`; nested
+settings use constructors or `Default` followed by field assignment.
 
 Prefetch the commit, trees, manifests and selected chunks asynchronously, then
 insert the returned bytes into the wasm-clean synchronous source:

@@ -6,9 +6,9 @@
 use std::sync::{Arc, Mutex};
 
 use mkit_server::pipeline::{DeliveryError, Outcome, OutcomeSink};
-use mkit_server::store::codec::{self, AbortReason, ReservationV1};
-use mkit_server::store::keys;
-use mkit_server::store::outbox::{OutboxBuilder, Terminal};
+use mkit_server::store::adapter_spi::codec::{self, AbortReason, ReservationV1};
+use mkit_server::store::adapter_spi::keys;
+use mkit_server::store::adapter_spi::outbox::{OutboxBuilder, Terminal};
 use mkit_server::timers::{TickBudget, TimerRegistry, run_due};
 use mkit_server::{
     Batch, BatchOutcome, ManualClock, ManualSleep, MemoryKv, NamespaceKey, NamespaceStore,

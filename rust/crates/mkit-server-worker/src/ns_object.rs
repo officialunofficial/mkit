@@ -167,7 +167,10 @@ impl<C: SqlConn> PressureStore<C> {
         }
         match self
             .inner
-            .get(partition, &mkit_server::store::keys::backup_state())
+            .get(
+                partition,
+                &mkit_server::store::adapter_spi::keys::backup_state(),
+            )
             .await
         {
             Ok(Some(_)) => {
@@ -417,11 +420,11 @@ async fn dispatch<S: NamespaceStore>(
             .await?;
             NsReply::page(page)
         }
-        #[cfg(feature = "test-faults")]
+        #[cfg(feature = "__test-faults")]
         NsCall::TestSnapshot => NsReply::Snapshot {
             bytes: Blob(crate::backup::test_snapshot(store, p).await?),
         },
-        #[cfg(feature = "test-faults")]
+        #[cfg(feature = "__test-faults")]
         NsCall::TestImport { bytes } => {
             use mkit_server::store::{ExportReader, ImportMode, Importer};
             let (header, records) = ExportReader::new(&bytes.0)?;
@@ -560,12 +563,12 @@ mod object {
     use crate::do_sql::{DO_CAPACITY, DoSqlConn};
 
     /// The connection a partition's Durable Object runs its store on: the
-    /// fail-once fault wraps it under `test-faults`.
-    #[cfg(feature = "test-faults")]
+    /// fail-once fault wraps it under `__test-faults`.
+    #[cfg(feature = "__test-faults")]
     pub type DoConn = crate::faults::FaultConn<DoSqlConn>;
     /// The connection a partition's Durable Object runs its store on: the
-    /// fail-once fault wraps it under `test-faults`.
-    #[cfg(not(feature = "test-faults"))]
+    /// fail-once fault wraps it under `__test-faults`.
+    #[cfg(not(feature = "__test-faults"))]
     pub type DoConn = DoSqlConn;
 
     /// One partition's Durable Object: its store, opened (and migrated) on
@@ -610,7 +613,7 @@ mod object {
         #[must_use]
         pub fn new(state: State, class: ShardClass) -> (Self, State) {
             let (conn, state) = DoSqlConn::from_state(state);
-            #[cfg(feature = "test-faults")]
+            #[cfg(feature = "__test-faults")]
             let conn = crate::faults::FaultConn::new(conn);
             let object = Self {
                 class,
@@ -698,9 +701,9 @@ mod object {
             }) {
                 Ok((store, (partition, call))) => {
                     // `SqlKvStore` caches stats for a minute; the wire
-                    // suite's stats hook (`test-faults`) measures growth
+                    // suite's stats hook (`__test-faults`) measures growth
                     // write by write, so it reads the table every time.
-                    #[cfg(feature = "test-faults")]
+                    #[cfg(feature = "__test-faults")]
                     if req.path() == "/stats" {
                         store.clear_stats_cache();
                     }
@@ -910,7 +913,7 @@ mod tests {
     #[test]
     fn alarm_hint_is_returned_only_for_committed_timer_puts() {
         let store = MemoryKv::default();
-        let timer = mkit_server::store::keys::timer(500, 1, b"timer");
+        let timer = mkit_server::store::adapter_spi::keys::timer(500, 1, b"timer");
         let apply = |batch| {
             block_on(serve_reply(
                 &store,

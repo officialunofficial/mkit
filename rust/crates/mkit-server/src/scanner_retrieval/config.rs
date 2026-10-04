@@ -19,6 +19,7 @@ pub(super) struct Key {
 
 /// Dedicated active/retained MAC keys and the incoming scanner allowlist.
 #[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RetrievalConfig {
     pub(super) keys: Vec<Key>,
     scanners: Vec<Hash>,
