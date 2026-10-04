@@ -677,6 +677,7 @@ type ReadManyHook = Box<dyn Fn(&MemoryKv, &Partition, &[Key]) + Send + Sync>;
 /// run a hook before each apply, can yield at every call and can fail
 /// every read.
 struct Spy {
+    count_partition_scans: AtomicBool,
     request_budget: Mutex<Option<crate::indexed::budget::SliceBudget>>,
     inner: Arc<MemoryKv>,
     hook: Option<ApplyHook>,
@@ -698,6 +699,7 @@ struct Spy {
 impl Spy {
     fn new(inner: MemoryKv) -> Self {
         Self {
+            count_partition_scans: AtomicBool::new(false),
             inner: Arc::new(inner),
             request_budget: Mutex::new(None),
             hook: None,
@@ -828,6 +830,35 @@ impl NamespaceStore for Spy {
             .scan_page_hook
             .as_ref()
             .map_or_else(|| page.clone(), |hook| hook(start, after, page.clone())))
+    }
+
+    async fn scan_many(
+        &self,
+        p: &Partition,
+        ranges: &[crate::store::RangeScan],
+    ) -> Result<Vec<ScanPage>, StoreError> {
+        if self.count_partition_scans.load(Ordering::SeqCst) {
+            self.pause(if matches!(p, Partition::RepoIndex { .. }) {
+                "scan_many_index"
+            } else {
+                "scan_many_other"
+            })
+            .await;
+            self.maybe_fail_read()?;
+            return self.inner.scan_many(p, ranges).await;
+        }
+        // Preserve the default trait's hook/fault behavior for existing tests.
+        if ranges.len() > crate::store::MAX_SCAN_RANGES {
+            return Err(StoreError::Invalid("too many scan ranges".into()));
+        }
+        let mut pages = Vec::with_capacity(ranges.len());
+        for r in ranges {
+            pages.push(
+                self.scan(p, &r.start, &r.end, r.after.as_ref(), r.limit)
+                    .await?,
+            );
+        }
+        Ok(pages)
     }
 
     async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {

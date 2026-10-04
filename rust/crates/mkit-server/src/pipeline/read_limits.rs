@@ -42,11 +42,22 @@ impl Default for ReadLimits {
 /// A ledger for sequential reader calls, retained even after a failed call.
 /// Metadata calls charge proof work but emit no canonical output bytes.
 /// Existing per-call HTTP allowances and embedder-supplied `SliceBudget`s
-/// still apply. Create a new session to start a new allowance.
+/// still apply. Create one session per request, and retain the same reader for
+/// its sequential batches. Roots are captured during session initialization
+/// (the first batch needing proof), not at an atomic repository-wide timestamp.
+/// New commits require a new session. Proofs expire after the configured
+/// reachability lag; the next batch captures fresh roots without refunding work.
+///
+/// The request deadline defaults to `HttpObjectsConfig::read_deadline` from the
+/// first batch, or the earlier explicit [`Self::with_deadline`] value. Expiry
+/// never slides on hits. Reusing a session with another reader or verified
+/// credential resets only proofs, never budgets or the request deadline.
+/// Authorization, membership and takedown decisions remain live on every batch.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct ReaderSession {
     pub(crate) io: IoLedger,
+    pub(crate) proofs: super::read_proofs::ReadProofs,
     limits: ReadLimits,
     decoded: u64,
     output: OutputBudget,
@@ -60,12 +71,22 @@ impl ReaderSession {
                 calls: SliceBudget::new(limits.storage_calls),
                 encoded: EncodedBudget::new(limits.encoded_bytes),
             },
+            proofs: super::read_proofs::ReadProofs::default(),
             limits,
             decoded: 0,
             output: OutputBudget {
                 used: 0,
                 limit: limits.output_bytes,
             },
+        }
+    }
+    /// Start a session with an absolute deadline in the pipeline clock's Unix
+    /// milliseconds. Proof hits never extend this deadline or reachability lag.
+    #[must_use]
+    pub fn with_deadline(limits: ReadLimits, deadline_ms: u64) -> Self {
+        Self {
+            proofs: super::read_proofs::ReadProofs::with_deadline(deadline_ms),
+            ..Self::new(limits)
         }
     }
     /// Snapshot consumed allowances; encoded reservations include failed I/O.
@@ -78,10 +99,15 @@ impl ReaderSession {
             self.output.used,
         )
     }
-    pub(crate) fn split(
+    pub(crate) fn split_with_proofs(
         &mut self,
         per_call: u64,
-    ) -> (&IoLedger, DecodeCharge<'_>, &mut OutputBudget) {
+    ) -> (
+        &IoLedger,
+        DecodeCharge<'_>,
+        &mut OutputBudget,
+        &mut super::read_proofs::ReadProofs,
+    ) {
         let initial = per_call.min(self.limits.decoded_bytes.saturating_sub(self.decoded));
         (
             &self.io,
@@ -91,7 +117,16 @@ impl ReaderSession {
                 used: &mut self.decoded,
             },
             &mut self.output,
+            &mut self.proofs,
         )
+    }
+    #[cfg(test)]
+    pub(crate) fn split(
+        &mut self,
+        per_call: u64,
+    ) -> (&IoLedger, DecodeCharge<'_>, &mut OutputBudget) {
+        let (io, charge, output, _) = self.split_with_proofs(per_call);
+        (io, charge, output)
     }
 }
 impl Default for ReaderSession {

@@ -1622,6 +1622,29 @@ decode caps MUST remain uniformly absent (SPEC-HTTP-OBJECTS §4). Storage failur
 remain `unavailable`. Existing per-call allowances and invocation call budgets
 remain applicable. This embedding API does not change HTTP error mappings.
 
+A reader session MAY also retain bounded structural reachability proofs. These
+MUST be privately bound to its reader/backend, full repository identity, view
+and verified credential scope. A context change MUST discard proofs without
+resetting allowances. Roots are captured during initialization, not at an atomic
+repository-wide timestamp; new commits require a new session. Root generations
+and derived proofs MUST expire within the configured reachability lag and the
+request deadline. Hits and child expansion MUST NOT extend that expiry.
+
+Only verified canonical decoding through the same repository/view may add local
+history edges: commit/remix trees and parents, tree entries, tag targets and
+manifest chunks. Foreign remix sources and reconstruction bases are not edges.
+Queued objects and metadata MUST NOT establish child proofs. Expansion MUST
+check the current stop predicate and reserve bounded edge/memo space before
+allocation, declining memoization when it cannot fit. Reused proofs MUST retain
+or revalidate stop-sensitive ancestry, including blocked/tombstoned manifests.
+
+Structural evidence does not cache authorization, visibility, grant epochs,
+member availability or takedown clearance. Every batch MUST retain the existing
+live target, pack, dependency and gate checks, including metadata dependency
+checks and uniform absence at proof caps. Writer proofs MUST NOT enter the shared
+published reachability cache. Session proofs MUST NOT survive the request or
+broaden URL-token scope; URL issuance keeps its published-view preflight.
+
 ### 10.2 Per-ref clearance and publication
 
 Each ref MUST have an ordered advance sequence. The branch head
@@ -4126,6 +4149,7 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | Bounded request-local reader graph proofs (§10.1): captured roots, fixed scope/expiry, decoded local edges and live security checks. No persisted cache, stored-row or wire change. |
 | 1 | draft | Exact per-repository stored-bytes accounting (§6.5.1): a per-repository counter and counted-pack markers in the coordinator, counted exactly once per pack under D34 by the coordinator's relay hook; additive `Outcome.repo_storage_changed` (field 11) carrying the absolute total and a monotonic version; admission `new_to_repo_bytes` observes whether the pack is already counted. `Committed.new_to_repo` is documented as an observation. New stored rows `rb` and `rn`, and a new terminal reservation row state; no existing row changes. |
 | 1 | draft | §10.2 binds publication evidence to the publication state it was computed against (generation, sequence and deletion boundary) and requires new evidence or a retryable refusal on any difference; execution-capacity exhaustion is `unavailable` with one request allowance across preparation, dependency visibility and final-apply retries, and unsupported historical capacity is a terminal stop. §9.3 distinguishes per-lookup index caps (permanent) from capacity. No stored-row or wire change. |
 | 1 | draft | §17 no longer promises that rows written by 0.5.x keep decoding: stored formats are not a compatibility contract before 1.0. No behavior change. |
