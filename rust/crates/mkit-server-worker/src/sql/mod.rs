@@ -5,7 +5,7 @@
 //! `rusqlite` and Durable Object `SQLite` can both implement [`SqlConn`], so
 //! a native backend and every
 //! per-partition Durable Object run the same statements and the same
-//! physical [`schema`] migrations. SQL is an internal detail of this
+//! physical [`schema`] bootstrap. SQL is an internal detail of this
 //! backend: nothing above [`NamespaceStore`] sees it.
 //!
 //! Every statement stays within Durable Object limits: at most

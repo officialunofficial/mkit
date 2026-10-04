@@ -241,6 +241,7 @@ async fn ticketed_auth_v2_wire_cases_run_against_the_host() {
             0,
             0,
             Vec::new(),
+            mkit_server::store::StoredProcedure::UpdateRef,
         ),
     )
     .unwrap();

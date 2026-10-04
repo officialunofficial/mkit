@@ -8110,8 +8110,8 @@ pub struct Outcome {
     )]
     pub occurred_unix_ms: ::core::option::Option<i64>,
     /// Full Connect procedure path of the operation that produced the outcome.
-    /// Absent only for an outcome recorded before the server stored it (rows
-    /// written by v0.5.0); SPEC-SERVER §6.5.
+    /// Request outcomes identify their operation; expired tickets derive BeginUpload.
+    /// System RepoStorageChanged outcomes omit it; SPEC-SERVER §6.5.
     ///
     /// Field 9: `procedure`
     #[serde(

@@ -516,10 +516,7 @@ fn every_outcome_names_its_operation_not_only_visibility_changes() {
 }
 
 #[test]
-fn outcomes_from_v050_rows_have_no_recorded_operation() {
-    let row = codec::ReservationV1::committed("a".into(), 7, 0, 0, 0, Vec::new());
-    let outcome = Outcome::from_reservation("rid".into(), AUDIENCE.into(), row).unwrap();
-    assert_eq!((outcome.procedure, outcome.visibility), (None, None));
+fn expired_outcomes_identify_begin_upload() {
     // An expired reservation is always an unconsumed ticket's.
     let row = codec::ReservationV1::Expired {
         repository: "a".into(),

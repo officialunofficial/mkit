@@ -97,7 +97,7 @@ mod tests {
                 created_at_ms: 0,
                 reconcile_at_ms: reconcile_at,
                 op,
-                procedure: Some(PRIVATE_CHANGE),
+                procedure: PRIVATE_CHANGE,
             };
             let prior = codec::encode_reservation(&pending);
             let mut builder = OutboxBuilder::new(None, None).unwrap();
@@ -146,7 +146,7 @@ mod tests {
                 codec::decode_reservation(&value).unwrap(),
                 ReservationV1::Aborted {
                     reason: AbortReason::Abandoned,
-                    procedure: Some(PRIVATE_CHANGE),
+                    procedure: PRIVATE_CHANGE,
                     ..
                 }
             ));

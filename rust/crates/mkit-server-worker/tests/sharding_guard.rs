@@ -14,7 +14,7 @@ use mkit_server::{
 use mkit_server_worker::naming::do_target;
 use mkit_server_worker::ns_client::DoNamespaceStore;
 use mkit_server_worker::sharding_guard::{
-    AddressingMode, GuardError, Outcome, Settled, check_addressing, check_mode,
+    GuardError, Outcome, Settled, check_addressing, check_mode,
 };
 
 // Same cache operations as the adapter; each returned future belongs to its
@@ -585,8 +585,7 @@ fn fresh_roots_record_the_configured_addressing() {
 #[test]
 fn housekeeping_rows_are_not_unmarked_data() {
     // The object writes `bk`, `w` and `sm` before or without a commit;
-    // they are not a legacy single deployment's data (vcs-worker
-    // conformance's `--multi` phase hit exactly this on a fresh state).
+    // they do not establish addressing on a fresh store.
     let dir = tempfile::tempdir().unwrap();
     let store = store(&dir);
     block_on(
@@ -639,43 +638,32 @@ fn stored_addressing_refuses_the_other_mode() {
 }
 
 #[test]
-fn unmarked_root_data_refuses_multi_but_marks_single() {
-    let repo = mkit_server::RepoName::new("default").unwrap();
-    let data = || {
-        Batch::new()
-            .put(
-                keys::ref_key(&repo, "refs/heads/main"),
-                Value::new(vec![1; 32]),
-            )
-            .put(keys::layout_version(), Value::default())
-    };
-    let dir = tempfile::tempdir().unwrap();
-    let store = store(&dir);
-    block_on(store.apply(&root(), data())).unwrap();
-    assert_eq!(
-        block_on(check_addressing(&store, true)).unwrap(),
-        Outcome::AddressingMismatch {
-            stored: AddressingMode::Single,
-            configured: AddressingMode::Multi,
-        }
-    );
-    assert_eq!(
-        block_on(store.get(&root(), &keys::addressing_marker())).unwrap(),
-        None,
-        "a refused multi writes no marker"
-    );
-    let dir = tempfile::tempdir().unwrap();
-    let store = Loopback::store(dir.path().to_path_buf(), DoConfig::default());
-    block_on(store.apply(&root(), data())).unwrap();
-    assert_eq!(
-        block_on(check_addressing(&store, false)).unwrap(),
-        Outcome::Ok
-    );
-    assert_eq!(
-        block_on(store.get(&root(), &keys::addressing_marker())).unwrap(),
-        Some(mode("single")),
-        "unmarked data is a single deployment's"
-    );
+fn populated_root_without_addressing_marker_refuses_both_modes() {
+    for multi in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        let repo = mkit_server::RepoName::new("default").unwrap();
+        block_on(
+            store.apply(
+                &root(),
+                Batch::new()
+                    .put(
+                        keys::ref_key(&repo, "refs/heads/main"),
+                        Value::new(vec![1; 32]),
+                    )
+                    .put(keys::layout_version(), Value::default()),
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            block_on(check_addressing(&store, multi)).unwrap(),
+            Outcome::AddressingCorrupt
+        );
+        assert_eq!(
+            block_on(store.get(&root(), &keys::addressing_marker())).unwrap(),
+            None
+        );
+    }
 }
 
 #[test]
@@ -740,4 +728,120 @@ fn canceled_cold_request_leaves_no_cached_request_state() {
         4,
         "one canceled get and three new request calls"
     );
+}
+
+/// Another opener may install addressing and commit its first root layout
+/// after this request observes the addressing marker absent.
+#[derive(Clone)]
+struct LayoutRace {
+    store: Arc<mkit_server::MemoryKv>,
+    layout: Value,
+    addressing: Option<Value>,
+}
+impl NamespaceStore for LayoutRace {
+    fn capabilities(&self) -> StoreCapabilities {
+        self.store.capabilities()
+    }
+    async fn get(&self, p: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
+        let observed = self.store.get(p, key).await?;
+        if key == &keys::addressing_marker()
+            && observed.is_none()
+            && let Some(addressing) = &self.addressing
+        {
+            self.store
+                .apply(
+                    p,
+                    Batch::new()
+                        .put(keys::addressing_marker(), addressing.clone())
+                        .put(keys::layout_version(), self.layout.clone()),
+                )
+                .await?;
+        }
+        Ok(observed)
+    }
+    async fn scan(
+        &self,
+        p: &Partition,
+        start: &Key,
+        end: &Key,
+        after: Option<&Cursor>,
+        limit: u32,
+    ) -> Result<ScanPage, StoreError> {
+        self.store.scan(p, start, end, after, limit).await
+    }
+    async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+        self.store
+            .apply(
+                p,
+                Batch::new().put(keys::layout_version(), self.layout.clone()),
+            )
+            .await?;
+        self.store.apply(p, batch).await
+    }
+    async fn stats(&self, p: &Partition) -> Result<PartitionStats, StoreError> {
+        self.store.stats(p).await
+    }
+    async fn probe(&self) -> Result<(), StoreError> {
+        self.store.probe().await
+    }
+}
+
+#[test]
+fn addressing_bootstrap_refuses_a_racing_layout_row_even_with_marker_like_bytes() {
+    for multi in [false, true] {
+        for layout in [
+            Value::new(1u32.to_be_bytes().to_vec()),
+            mode("single"),
+            mode("multi"),
+        ] {
+            let store = LayoutRace {
+                store: Arc::default(),
+                layout,
+                addressing: None,
+            };
+            assert_eq!(
+                block_on(check_addressing(&store, multi)).unwrap(),
+                Outcome::AddressingCorrupt
+            );
+            assert_eq!(
+                block_on(store.get(&root(), &keys::addressing_marker())).unwrap(),
+                None
+            );
+        }
+    }
+}
+
+#[test]
+fn addressing_bootstrap_compares_a_concurrent_marker_after_the_first_commit() {
+    for configured in [false, true] {
+        for stored in [false, true] {
+            let addressing = mode(if stored { "multi" } else { "single" });
+            let store = LayoutRace {
+                store: Arc::default(),
+                layout: Value::new(1u32.to_be_bytes().to_vec()),
+                addressing: Some(addressing.clone()),
+            };
+            block_on(store.store.apply(
+                &root(),
+                Batch::new().put(keys::sharding_marker(), mode("single")),
+            ))
+            .unwrap();
+            let guard = DeploymentGuard::default();
+            for _ in 0..2 {
+                let result = block_on(guard.check_all(store.clone(), Sharding::Single, configured));
+                if configured == stored {
+                    result.unwrap();
+                } else {
+                    assert_eq!(
+                        result.unwrap_err().public_message(),
+                        "deployment addressing mismatch"
+                    );
+                }
+            }
+            assert_eq!(
+                block_on(store.store.get(&root(), &keys::addressing_marker())).unwrap(),
+                Some(addressing)
+            );
+        }
+    }
 }

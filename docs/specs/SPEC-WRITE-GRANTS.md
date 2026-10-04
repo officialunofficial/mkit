@@ -990,15 +990,13 @@ came by envelope or by statement (never from a statement's signed
 `created`). A token whose `issued` is at or before that time MUST be
 refused, for object-id and ref-path targets alike; the comparison uses
 only server-side times (the token's `issued` is the issuing server's
-clock). A visibility row stored before this rule has no change time; its last
-accepted creation time (§9.1) is used instead. For a change that came by
-envelope that is the server time of the change; for one that came by statement
-it is the statement's client-signed `created`, which can be earlier than the
-change, so the fallback can leave a token issued between the two unrefused.
-The gap closes when the token expires (at most 86,400 s after issue) and
-never applies to a row written under this rule. A repository with no stored visibility has never
-changed, so its tokens carry no such bound. The time is read in the same strong read as
-the visibility, so it adds no storage round trip. This is a
+clock). Every stored visibility row MUST carry this server-clock change time
+as `changed_ms`; a missing or malformed value is corrupt and MUST be refused.
+`last_created_ms` retains its statement anti-replay ordering meaning (§9.1)
+and MUST NOT substitute for the visibility change time. A repository with no
+stored visibility has never changed, so its tokens carry no such bound. The
+time is read in the same strong read as the visibility, so it adds no storage
+round trip. This is a
 verification rule only: the `mkit-url-token:v1` statement is unchanged.
 
 **Response.** `IssueObjectUrl` returns the token and its expiry. The URL
@@ -1255,9 +1253,9 @@ Landed so far (each pinned by BLAKE3 in the directory's `MANIFEST.txt`):
 
 | Version | Status | Changes |
 |---|---|---|
-| `1` (editorial) | draft | §9.4 states precisely what the legacy change-time fallback is for an envelope and a statement change; no behavior change. |
+| `1` (stored-shape amendment) | draft | §9.4 requires the current server-clock visibility change time for both envelope and statement changes; incomplete stored visibility rows fail closed. |
 | `1` (visibility admission amendment) | draft | `SetRepoVisibility` runs the server's admission and outcome stages in both modes (§9.1; SPEC-SERVER §3). No change to the statement, signature or stored visibility row. |
-| `1` (URL-token visibility amendment) | draft | A URL token issued at or before the repository's last visibility change is refused (§9.4). The stored visibility row gains an optional server-clock change time (older rows fall back to their last accepted creation time); the token statement and signature are unchanged. |
+| `1` (URL-token visibility amendment) | draft | A URL token issued at or before the repository's last visibility change is refused (§9.4). The stored visibility row requires a server-clock change time and refuses incomplete rows; the token statement and signature are unchanged. |
 | `1` (R-205 amendment) | draft | Repository visibility without a stored setting follows the deployment default, public unless configured; explicit visibility always wins. Changing the default also changes existing repositories without explicit visibility. |
 | `1` | draft | Initial grant statement (audiences, ref scopes, capabilities), owner schemes, exact-epoch revocation with bounded epoch statements, epoch leases and the commit deadline, server policy, signed reads, private repositories and URL tokens, and server-side grants for ssh and enc (mkit#1085, mkit#1089). WP-4.11 adds the `token=` URL form and key-set publication, and amends token paths to 0–1024 bytes so an empty path names the root tree. Fix round 1 orders stateless token checks before the stored-epoch read. WP-2.9 pins the `DownloadPack` signed-read body; WP-2.11 lands the URL-token fixtures. Fix round 2 caps `url_token_ttl` at 24 h and excludes control characters from token paths. |
 

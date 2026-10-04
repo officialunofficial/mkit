@@ -209,14 +209,14 @@ fn proof_does_not_extend_fixed_pending_deadline() {
     let pending = PendingGuard {
         rid: "s:proof".into(),
         repository: REPO.into(),
-        procedure: None,
+        procedure: crate::store::codec::StoredProcedure::UpdateRef,
         key: keys::reservation("s:proof").unwrap(),
         value: codec::encode_reservation(&codec::ReservationV1::Pending {
             repository: REPO.into(),
             created_at_ms: ms(T0),
             reconcile_at_ms: ms(T0) + 13_000,
             op: codec::PendingOp::Write,
-            procedure: None,
+            procedure: crate::store::codec::StoredProcedure::UpdateRef,
         }),
         apply_deadline_ms: ms(T0) + 10_000,
     };

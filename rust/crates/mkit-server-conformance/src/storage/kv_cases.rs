@@ -93,7 +93,8 @@ fn terminal(spec: &TicketSpec) -> Result<Terminal, String> {
         spec.bytes,
         spec.bytes,
         spec.bytes,
-        vec![]
+        vec![],
+        mkit_server::store::StoredProcedure::UpdateRef
     ))))
 }
 
@@ -410,7 +411,11 @@ pub async fn kv_pending_terminal_arbitration<H: KvHarness>(h: H) -> Outcome {
     gate!(need_all_classes(&s, &p).await);
     gate!(need_atomic(&s, &p).await);
     for (rid, op) in [("write", PendingOp::Write), ("read", PendingOp::Read)] {
-        let pending = ReservationV1::pending("conformance".into(), 100, 200, op);
+        let procedure = match op {
+            PendingOp::Write => mkit_server::store::StoredProcedure::UpdateRef,
+            PendingOp::Read => mkit_server::store::StoredProcedure::HttpGetObject,
+        };
+        let pending = ReservationV1::pending("conformance".into(), 100, 200, op, procedure);
         let prior = codec::encode_reservation(&pending);
         let mut builder = ok!(OutboxBuilder::new(None, None));
         builder.pending(rid, None, &pending);
@@ -427,16 +432,29 @@ pub async fn kv_pending_terminal_arbitration<H: KvHarness>(h: H) -> Outcome {
         );
 
         let committed = match op {
-            PendingOp::Write => {
-                ReservationV1::committed("conformance".into(), 150, 0, 0, 0, vec![])
-            }
-            PendingOp::Read => ReservationV1::read_served("conformance".into(), 150, [9; 32], 7),
+            PendingOp::Write => ReservationV1::committed(
+                "conformance".into(),
+                150,
+                0,
+                0,
+                0,
+                vec![],
+                mkit_server::store::StoredProcedure::UpdateRef,
+            ),
+            PendingOp::Read => ReservationV1::read_served(
+                "conformance".into(),
+                150,
+                [9; 32],
+                7,
+                mkit_server::store::StoredProcedure::HttpGetObject,
+            ),
         };
         let abandoned = ReservationV1::aborted(
             "conformance".into(),
             201,
             AbortReason::Abandoned,
             String::new(),
+            procedure,
         );
         let os = ok!(s.get(&p, &keys::outbox_sequence()).await);
         let oc = ok!(s.get(&p, &keys::outcome_backlog()).await);

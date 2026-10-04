@@ -905,3 +905,139 @@ fn timer_reschedule_put_observes_pressure_through_do_shim() {
 fn r2_refuses_a_keyspace_that_aliases_a_sibling_namespace() {
     let _ = R2BlobStore::new(SimBucket::default(), "Objects");
 }
+
+/// Count bootstrap writes and inject a failure inside the real SQL transaction.
+#[derive(Clone)]
+struct BootstrapConn {
+    inner: RusqliteConn,
+    writes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    fail_at: Option<usize>,
+}
+impl BootstrapConn {
+    fn new(fail_at: Option<usize>) -> Self {
+        Self {
+            inner: RusqliteConn::open_in_memory().expect("bootstrap test database"),
+            writes: std::sync::Arc::default(),
+            fail_at,
+        }
+    }
+}
+impl SqlConn for BootstrapConn {
+    fn exec(&self, sql: &str, params: &[SqlValue]) -> Result<u64, SqlError> {
+        let write = self
+            .writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        if self.fail_at == Some(write) {
+            return Err(SqlError::Constraint);
+        }
+        self.inner.exec(sql, params)
+    }
+    fn query(&self, sql: &str, params: &[SqlValue]) -> Result<Vec<Row>, SqlError> {
+        self.inner.query(sql, params)
+    }
+    fn transaction<T: 'static>(&self, f: TxFn<Self, T>) -> Result<T, SqlError> {
+        let conn = self.clone();
+        self.inner.transaction(Box::new(move |_| f(conn)))
+    }
+    fn now_ms(&self) -> u64 {
+        self.inner.now_ms()
+    }
+    fn size_bytes(&self) -> Result<u64, SqlError> {
+        self.inner.size_bytes()
+    }
+}
+
+#[test]
+fn sql_bootstrap_is_atomic_and_current_reopen_writes_nothing() {
+    use mkit_server_worker::sql::schema::{SCHEMA_VERSION, initialize, require_current};
+    for fail_at in 1..=4 {
+        let conn = BootstrapConn::new(Some(fail_at));
+        assert!(initialize(&conn).is_err());
+        assert!(
+            conn.query(
+                "SELECT name FROM sqlite_master WHERE name IN ('kv', 'kv_timers', 'mkit_schema')",
+                &[]
+            )
+            .unwrap()
+            .is_empty()
+        );
+        let retry = BootstrapConn {
+            fail_at: None,
+            ..conn
+        };
+        assert_eq!(initialize(&retry).unwrap(), SCHEMA_VERSION);
+        assert_eq!(require_current(&retry).unwrap(), SCHEMA_VERSION);
+    }
+    let conn = BootstrapConn::new(None);
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let conn = conn.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                initialize(&conn).unwrap()
+            })
+        })
+        .collect();
+    for handle in handles {
+        assert_eq!(handle.join().unwrap(), SCHEMA_VERSION);
+    }
+    assert_eq!(conn.writes.load(std::sync::atomic::Ordering::SeqCst), 4);
+    assert_eq!(initialize(&conn).unwrap(), SCHEMA_VERSION);
+    assert_eq!(require_current(&conn).unwrap(), SCHEMA_VERSION);
+    assert_eq!(conn.writes.load(std::sync::atomic::Ordering::SeqCst), 4);
+}
+
+#[test]
+fn sql_reopen_refuses_wrong_versions_and_incomplete_schema_without_repair() {
+    use mkit_server_worker::sql::schema::{SCHEMA_VERSION, initialize};
+    for version in [0, 1, SCHEMA_VERSION + 1] {
+        let conn = BootstrapConn::new(None);
+        initialize(&conn).unwrap();
+        conn.inner
+            .exec(
+                "UPDATE mkit_schema SET version = ?1",
+                &[SqlValue::Integer(version.into())],
+            )
+            .unwrap();
+        assert!(matches!(initialize(&conn), Err(StoreError::Unsupported(_))));
+        assert_eq!(
+            conn.inner
+                .query("SELECT version FROM mkit_schema", &[])
+                .unwrap(),
+            vec![vec![SqlValue::Integer(version.into())]]
+        );
+        assert_eq!(conn.writes.load(std::sync::atomic::Ordering::SeqCst), 4);
+    }
+    for damage in [
+        "DELETE FROM mkit_schema",
+        "DROP TABLE mkit_schema",
+        "DROP INDEX kv_timers",
+        "DROP TABLE kv",
+    ] {
+        let conn = BootstrapConn::new(None);
+        initialize(&conn).unwrap();
+        conn.inner.exec(damage, &[]).unwrap();
+        assert!(initialize(&conn).is_err(), "{damage}");
+        assert_eq!(
+            conn.writes.load(std::sync::atomic::Ordering::SeqCst),
+            4,
+            "{damage}"
+        );
+    }
+    let conn = BootstrapConn::new(None);
+    conn.inner
+        .exec("CREATE TABLE kv (key BLOB, value BLOB)", &[])
+        .unwrap();
+    conn.inner
+        .exec("INSERT INTO kv VALUES (x'01', x'02')", &[])
+        .unwrap();
+    assert!(initialize(&conn).is_err());
+    assert_eq!(conn.writes.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(
+        conn.inner.query("SELECT key, value FROM kv", &[]).unwrap(),
+        vec![vec![SqlValue::Blob(vec![1]), SqlValue::Blob(vec![2])]]
+    );
+}
