@@ -676,3 +676,5 @@ fn lower_pack_cap_stops_scheduled_decode_before_blob_work() {
         if code == "invalid_argument" && message == "pack exceeds indexed max_pack_bytes"));
     assert_advance_unmoved(&env, &repo, &[pack_id]);
 }
+
+mod latency;

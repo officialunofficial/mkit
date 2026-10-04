@@ -58,6 +58,7 @@ pub async fn run_physical_alarm<C: SqlConn>(
     budget: TickBudget,
     cursor: &mut Option<TimerCursor>,
 ) -> Result<PhysicalRunReport, StoreError> {
+    observe_alarm(now_ms);
     let mut state = TickState::new(clock, budget);
     if !state.charge_scan(1) {
         return Err(StoreError::Invalid(
@@ -101,6 +102,8 @@ pub async fn run_physical_alarm<C: SqlConn>(
                 if state.exhausted(clock) {
                     break 'windows;
                 }
+                tracing::info!(event = "verification_alarm_partition", now_ms,
+                    source = ?row.partition);
                 head.insert(row.key.clone());
                 let report =
                     run_due_with_state(store, &row.partition, registry, clock, now_ms, &mut state)
@@ -149,6 +152,16 @@ pub async fn run_physical_alarm<C: SqlConn>(
             state.attempted_for(TimerKind::new(u8::try_from(kind).unwrap_or(0)))
         }),
     })
+}
+
+fn observe_alarm(now_ms: u64) {
+    mkit_server::Metrics::incr(
+        &crate::telemetry::ConsoleMetrics::default(),
+        mkit_server::telemetry::METRIC_VERIFICATION_PROGRESS,
+        &[("stage", "physical_alarm")],
+        1,
+    );
+    tracing::info!(event = "verification_physical_alarm", now_ms);
 }
 
 /// Move the alarm earlier after a committed timer Put, clamping to now.

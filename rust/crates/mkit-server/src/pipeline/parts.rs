@@ -457,9 +457,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
         self.check_ticket_generation(namespace, claims.authority_generation)
             .await?;
-        write_upload_marker(&self.blobs, &claims.ticket_id, &claims.pack_id)
-            .await
-            .map_err(|e| store_error(StorageOp::BlobPut, e))?;
+        write_upload_marker(
+            &self.blobs,
+            &claims.ticket_id,
+            &claims.pack_id,
+            self.clock.as_ref(),
+            self.metrics.as_ref(),
+        )
+        .await
+        .map_err(|e| store_error(StorageOp::BlobPut, e))?;
         // The marker is a shared proof, not repository membership. A revoked
         // ticket cannot consume it, and this call must not report acceptance.
         self.check_ticket_generation(namespace, claims.authority_generation)

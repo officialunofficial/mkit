@@ -23,11 +23,20 @@ pub(crate) async fn write_upload_marker<B: BlobStore>(
     blobs: &B,
     ticket_id: &[u8; 32],
     pack_id: &Hash,
+    clock: &dyn crate::Clock,
+    metrics: &dyn crate::Metrics,
 ) -> Result<(), StoreError> {
     let (key, content) = upload_marker(ticket_id, pack_id);
     let mut sink = blobs.begin(key, content.len() as u64).await?;
     sink.write(Bytes::from(content)).await?;
     sink.commit().await?;
+    crate::telemetry::verification_progress(
+        metrics,
+        "upload_durable",
+        u64::try_from(clock.now_ms()).unwrap_or(0),
+        Some(ticket_id),
+        Some(pack_id),
+    );
     Ok(())
 }
 

@@ -89,6 +89,10 @@ pub trait TimerHandler<S: NamespaceStore>: MaybeSend + MaybeSync {
     fn max_per_tick(&self) -> Option<u32> {
         None
     }
+    /// Optional sink for observations after a guarded checkpoint commits.
+    fn metrics(&self) -> Option<&dyn crate::Metrics> {
+        None
+    }
     /// Prepare effects; the core atomically guards and removes the timer.
     fn fire<'a>(
         &'a self,

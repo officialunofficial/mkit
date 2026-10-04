@@ -255,6 +255,10 @@ where
         kinds::VERIFY
     }
 
+    fn metrics(&self) -> Option<&dyn Metrics> {
+        Some(self.metrics.as_ref())
+    }
+
     /// One slice per alarm: a slice spends most of an alarm's budget.
     fn max_per_tick(&self) -> Option<u32> {
         Some(1)
@@ -447,6 +451,19 @@ where
         let Some((mut job, mut raw)) = job else {
             return self.cleanup(timer, None, None).await;
         };
+        crate::telemetry::verification_progress(
+            self.h.metrics.as_ref(),
+            "verify_fire",
+            self.now,
+            Some(&job.ticket_id),
+            Some(&self.pack),
+        );
+        tracing::info!(event = "verification_slice_start", now_ms = self.now,
+            source = ?self.source, ticket = %mkit_core::hash::to_hex(&job.ticket_id),
+            pack = %mkit_core::hash::to_hex(&self.pack), old_phase = ?job.phase,
+            generation = job.generation, attempt = job.attempts,
+            first_decode = job.phase == Phase::Decode && job.cursor.is_empty(),
+            due_at_ms = timer.due_at_ms);
         if job.gone {
             return self.cleanup(timer, Some(raw), None).await;
         }
@@ -489,6 +506,7 @@ where
         };
         let mut held = None;
         let start = job.clone();
+        let old_phase = job.phase;
         let mut ran = job.phase;
         let mut result = self
             .step(&mut st, &mut job, state.as_ref(), &mut held)
@@ -542,6 +560,11 @@ where
                 0
             }
         };
+        tracing::info!(event = "verification_slice_result", now_ms = now_ms(self.h.clock.as_ref()),
+            source = ?self.source, ticket = %mkit_core::hash::to_hex(&job.ticket_id),
+            pack = %mkit_core::hash::to_hex(&self.pack), old_phase = ?old_phase,
+            new_phase = ?job.phase, attempt = job.attempts, generation = job.generation,
+            relay_sequence = job.last_relay_seq, due_at_ms = self.due(timer, delay));
         // A slice that ended by itself is not a killed one.
         job.attempts = 0;
         self.flush(&mut st).await?;

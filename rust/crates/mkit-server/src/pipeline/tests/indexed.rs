@@ -172,9 +172,15 @@ pub(super) fn upload<H: HookSet>(env: &Env<H>, pack: &[u8], ticket_id: Hash) {
             .unwrap();
         sink.write(Bytes::copy_from_slice(pack)).await.unwrap();
         sink.commit().await.unwrap();
-        write_upload_marker(&env.pipe.blobs, &ticket_id, &pack_id)
-            .await
-            .unwrap();
+        write_upload_marker(
+            &env.pipe.blobs,
+            &ticket_id,
+            &pack_id,
+            env.pipe.clock.as_ref(),
+            env.pipe.metrics.as_ref(),
+        )
+        .await
+        .unwrap();
     });
 }
 

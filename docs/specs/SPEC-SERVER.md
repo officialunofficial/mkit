@@ -1417,6 +1417,15 @@ yet. The membership message applies to the closure, head and packlist
 misses found when the advance checks the consumed set, and a base that is
 still absent after the window is the permanent §9.4 answer, as inline.
 
+Informative. Scheduled verification polling hints use the consumed job's
+persisted timer, including retry backoff, rounded up to whole seconds and
+bounded to 1–60 seconds. A missing job or a wake not found within bounded
+inspection uses the one-second floor. The header and typed pending detail
+agree; neither promises completion at that time. Relay delivery may move an
+awaiting job's existing guarded timer earlier, retaining the delivery poll as
+recovery. This does not perform verification in the advance or make a pack
+Verified before its required index delivery.
+
 Verification state is per `(repository, pack)`. A pack verified for
 one repository is not thereby verified for another. Global byte
 reuse does not carry repository membership or verification authority

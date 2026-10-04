@@ -442,9 +442,15 @@ fn valid_private_url_tokens_and_proofs_cannot_expose_pending_content() {
                 .unwrap();
             sink.write(Bytes::copy_from_slice(bytes)).await.unwrap();
             sink.commit().await.unwrap();
-            write_upload_marker(&fx.pipe.blobs, &ticket, &hash(bytes))
-                .await
-                .unwrap();
+            write_upload_marker(
+                &fx.pipe.blobs,
+                &ticket,
+                &hash(bytes),
+                fx.pipe.clock.as_ref(),
+                fx.pipe.metrics.as_ref(),
+            )
+            .await
+            .unwrap();
         });
         tickets.push(ticket);
     }

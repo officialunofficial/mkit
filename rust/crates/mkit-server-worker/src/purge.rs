@@ -22,6 +22,9 @@ impl<S: NamespaceStore, H: TimerHandler<S>> TimerHandler<S> for Budgeted<H> {
     fn kind(&self) -> TimerKind {
         self.handler.kind()
     }
+    fn metrics(&self) -> Option<&dyn mkit_server::Metrics> {
+        self.handler.metrics()
+    }
     fn max_per_tick(&self) -> Option<u32> {
         self.handler.max_per_tick()
     }

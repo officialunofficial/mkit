@@ -376,9 +376,15 @@ impl<H: HookSet> Fx<H> {
                         .unwrap();
                     sink.write(Bytes::copy_from_slice(bytes)).await.unwrap();
                     sink.commit().await.unwrap();
-                    write_upload_marker(&self.pipe.blobs, &ticket, &id)
-                        .await
-                        .unwrap();
+                    write_upload_marker(
+                        &self.pipe.blobs,
+                        &ticket,
+                        &id,
+                        self.pipe.clock.as_ref(),
+                        self.pipe.metrics.as_ref(),
+                    )
+                    .await
+                    .unwrap();
                 });
                 ticket
             };

@@ -200,13 +200,19 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
             // front of the next scan and is never bypassed.
             return Ok(Fired::Retry);
         }
+        // Target watermarks are durable and source cleanup has committed.
+        // The remaining source head gives a conservative contiguous watermark.
+        let wake = if dispatch.delivered.is_empty() {
+            Batch::new()
+        } else {
+            crate::indexed::wake::after_relay(ctx, os, metrics).await
+        };
         let has_remaining = if !scan.blocked.is_empty()
             || scan.cursor < scan.cycle_end
             || window.rows.len() > dispatch.delivered.len()
         {
             true
         } else {
-            let (start, end) = keys::class_range(keys::TAG_RELAY);
             let remaining = ctx.store.scan(ctx.partition, &start, &end, None, 1).await?;
             !remaining.entries.is_empty() || remaining.next.is_some()
         };
@@ -222,13 +228,13 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
             Ok(Fired::Reschedule {
                 due_at_ms: due,
                 value: Value::default(),
-                batch: Batch::new(),
+                batch: wake,
             })
         } else {
             // Guard `os` either way: a first-ever relay row committed during
             // this fire moves `os` from absent, so `Done` races and the timer
             // stays.
-            Ok(Fired::Done(Batch::new().require(match sequence_value {
+            Ok(Fired::Done(wake.require(match sequence_value {
                 Some(value) => Precondition::Equals(os_key, value),
                 None => Precondition::Absent(os_key),
             })))

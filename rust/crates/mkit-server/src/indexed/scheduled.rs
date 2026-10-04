@@ -15,8 +15,8 @@
 use super::{
     IndexedConfig,
     checkpoint::{
-        ExtractionGroupMember, Kind, Outcome, Phase, VerifyJobV1, WINDOW_BYTES, decode_frame,
-        hydrate_job, timer_reference, write_job,
+        ExtractionGroupMember, Kind, Outcome, VerifyJobV1, decode_frame, hydrate_job,
+        timer_reference, write_job,
     },
     resolve,
     state::VerificationV1,
@@ -50,20 +50,41 @@ fn storage_failed() -> ServerError {
     ServerError::unavailable("object storage request failed")
 }
 
-/// The retry hint of a pending answer: the windows a job still has to read,
-/// from the job's own progress only, clamped to one to sixty seconds.
-fn retry_after(job: Option<&VerifyJobV1>) -> u64 {
-    let Some(job) = job else {
-        return 1_000;
-    };
-    let total = job.pack_len.div_ceil(WINDOW_BYTES);
-    let left = match job.phase {
-        Phase::Decode => total.saturating_sub(u64::from(job.windows_done) / 2),
-        _ => 1,
-    };
-    left.saturating_mul(1_000)
-        .saturating_add(1_000)
-        .clamp(1_000, 60_000)
+/// A polling hint from this consumed job's persisted timer, not a completion ETA.
+/// Bound inspection to four pages; an unobserved wake has the one-second floor.
+async fn retry_after<N: NamespaceStore>(
+    store: &N,
+    source: &Partition,
+    repo: &RepoId,
+    pack: &Hash,
+    now: u64,
+) -> Result<u64, ServerError> {
+    let reference = timer_reference(&repo.name, pack);
+    let (start, end) = keys::class_range(keys::TAG_TIMER);
+    let mut cursor = None;
+    for _ in 0..4 {
+        let page = store
+            .scan(source, &start, &end, cursor.as_ref(), 64)
+            .await
+            .map_err(|_| storage_failed())?;
+        for (key, _) in page.entries {
+            if let Some(keys::ParsedKey::Timer {
+                due_at_ms,
+                kind,
+                reference: found,
+            }) = keys::parse(&key)
+                && kind == kinds::VERIFY.get()
+                && found.as_ref() == reference.as_slice()
+            {
+                return Ok(due_at_ms.saturating_sub(now).div_ceil(1_000).clamp(1, 60) * 1_000);
+            }
+        }
+        match page.next {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    Ok(1_000)
 }
 
 fn stored_error(code: &str, message: &str) -> ServerError {
@@ -220,7 +241,7 @@ async fn finished_peers<N: NamespaceStore>(
         if let Some(raw) = raw {
             let peer = super::checkpoint::decode_job(&raw).map_err(|_| storage_failed())?;
             if !peer.gone && !peer.usable() && peer.outcome.is_none() {
-                return Err(super::pending(retry_after(Some(&peer))));
+                return Err(super::pending(1_000));
             }
             guards.push(Precondition::Equals(key, raw));
         } else {
@@ -243,6 +264,7 @@ async fn claim_extraction_group<N: NamespaceStore>(
     clock: &dyn Clock,
     bound: u64,
     head: Hash,
+    metrics: &dyn Metrics,
 ) -> Result<bool, ServerError> {
     let now = u64::try_from(clock.now_ms()).unwrap_or(0);
     let jobs = tickets
@@ -329,7 +351,7 @@ async fn claim_extraction_group<N: NamespaceStore>(
         } else if new[i] && !job.usable() && !(before_effects && job.outcome.is_some()) {
             // The ticket index includes the signer, so another signer can
             // legitimately hold a distinct ticket for this same pack.
-            return Err(super::pending(retry_after(Some(job))));
+            return Err(super::pending(1_000));
         }
         if new[i] && job.usable() {
             release.extend(finished_peers(store, source, repo, job).await?);
@@ -358,7 +380,7 @@ async fn claim_extraction_group<N: NamespaceStore>(
             // A coherent group was committed atomically. Finding an unfinished
             // existing member alongside an unclaimed one means a foreign group
             // owns it.
-            return Err(super::pending(retry_after(Some(job))));
+            return Err(super::pending(1_000));
         }
         group.push(ExtractionGroupMember {
             pack: ticket.pack_id,
@@ -445,7 +467,23 @@ async fn claim_extraction_group<N: NamespaceStore>(
         .await
         .map_err(|_| storage_failed())?
     {
-        BatchOutcome::Committed => Ok(true),
+        BatchOutcome::Committed => {
+            for (i, (ticket, id)) in tickets.iter().zip(ticket_ids).enumerate() {
+                if new[i] {
+                    crate::telemetry::verification_progress(
+                        metrics,
+                        "job_created",
+                        u64::try_from(clock.now_ms()).unwrap_or(0),
+                        Some(id),
+                        Some(&ticket.pack_id),
+                    );
+                    tracing::info!(event = "verification_timer_due", now_ms = now, due_at_ms = now,
+                        source = ?source, ticket = %mkit_core::hash::to_hex(id),
+                        pack = %mkit_core::hash::to_hex(&ticket.pack_id));
+                }
+            }
+            Ok(true)
+        }
         BatchOutcome::PreconditionFailed { .. } | BatchOutcome::DeadlinePassed { .. } => {
             Err(super::pending(1_000))
         }
@@ -745,7 +783,7 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
         return Err(storage_failed());
     }
     if claim_extraction_group(
-        store, source, repo, tickets, ticket_ids, &rows, clock, bound, head,
+        store, source, repo, tickets, ticket_ids, &rows, clock, bound, head, metrics,
     )
     .await?
     {
@@ -786,16 +824,27 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
             && !(job.usable() && job.pack_len == ticket.bytes && verified && same_request_owner)
         {
             create_job(store, source, repo, ticket, *id, clock, rows[2 * i].clone()).await?;
-            pending = Some(pending.unwrap_or(0).max(retry_after(None)));
+            pending = Some(pending.unwrap_or(0).max(1_000));
             continue;
         }
         if let Some(outcome) = job.outcome {
             return Err(outcome_error(outcome, now, ticket, bound));
         }
         if !(job.usable() && verified) {
-            pending = Some(pending.unwrap_or(0).max(retry_after(Some(&job))));
+            pending = Some(
+                pending
+                    .unwrap_or(0)
+                    .max(retry_after(store, source, repo, &ticket.pack_id, now).await?),
+            );
             continue;
         }
+        crate::telemetry::verification_progress(
+            metrics,
+            "ready_observed",
+            now,
+            Some(id),
+            Some(&ticket.pack_id),
+        );
         // Pack facts and decode charges belong to the consumed pack union.
         // Every ticket is still validated and consumed by the advance planner.
         if ready_packs.insert(ticket.pack_id) {

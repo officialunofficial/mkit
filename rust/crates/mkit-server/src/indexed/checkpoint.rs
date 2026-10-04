@@ -176,7 +176,7 @@ pub struct VerifyJobV1 {
     pub in_pack_bytes: u64,
     /// Sum of distinct external base and chain-intermediate sizes.
     pub external_bytes: u64,
-    /// Windows read so far, for `Retry-After`.
+    /// Windows read so far, retained across decode slices.
     pub windows_done: u32,
     /// Slices started on the current cursor.
     pub attempts: u32,
