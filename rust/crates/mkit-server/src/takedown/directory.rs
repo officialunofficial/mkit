@@ -109,6 +109,8 @@ impl Walk {
         for first in (0..DIRECTORY_SHARDS).step_by(concurrency.clamp(1, 6)) {
             let last =
                 (usize::from(first) + concurrency.clamp(1, 6)).min(usize::from(DIRECTORY_SHARDS));
+            let _reservation = store
+                .reserve_read_calls(u32::try_from(last - usize::from(first)).unwrap_or(u32::MAX))?;
             let replies = futures::future::join_all((usize::from(first)..last).map(|shard| {
                 let (start, end) = (&start, &end);
                 async move {

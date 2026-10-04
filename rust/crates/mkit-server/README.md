@@ -108,7 +108,10 @@ version includes the bound; the tracked PR does not establish released coverage.
 
 ## Object-reader sessions and entry sizes
 
-With `http-objects`, pass one `pipeline::ReaderSession` to
+With `http-objects`, opt into 45-id canonical/metadata calls with
+`pipeline.object_reader(repo, view).await?.with_batch_limit(45)?`; the default
+remains 16 and URL issuance still accepts at most 16 targets. This changes no
+call, row, byte, decode or output allowance. Pass one `pipeline::ReaderSession` to
 `ObjectReader::read_canonical_in` and `object_metadata_in` to share an allowance
 across calls (and readers). `ReadLimits::new(calls, decoded, encoded, output)`
 sets the four dimensions; `ReaderSession::used()` reports consumption.
@@ -125,7 +128,37 @@ row bytes are excluded. Decode work counts canonical objects, proof ancestors
 and delta bases each time they are decoded. Canonical outputs count duplicates
 individually; metadata outputs have no canonical byte charge. Failed calls keep
 charges already incurred. Cancellation settles completed decode work and keeps
-I/O reservations. Existing per-invocation `SliceBudget` decorators still work.
+I/O reservations, including decoded reservations for parallel raw-member waves. Existing per-invocation `SliceBudget` decorators still work.
+
+Keep one reader and one session per logical operation. Read canonical parents
+before their children: a commit proves its tree and parents, and a returned tree
+proves its entries. Use metadata only when lengths are needed; metadata does not
+create decoded child proofs. Do not fetch unchanged file bodies merely to keep
+their hashes when loading a base tree.
+
+For a path-directed read, use `reader.read_path(reference, path)`, returning
+`Option<(Hash, Vec<u8>)>`, or `read_path_in(&mut session, reference, path)` to charge
+an existing context. The empty path selects the root tree. The helper peels at
+most 16 tags and visits only the selected path, checking canonical types at each
+step. Symlinks are returned as ordinary entries and never followed. Its grammar
+matches `UrlTarget::path`; URL tokens still bind the exact unresolved target
+through the published view. A fresh context captures the selected authorized
+ref; an existing context retains its captured roots and expiry. Intermediate
+canonical bytes count against the context's output allowance too.
+
+Each batch shares verified locations and sealed inventory, and coalesces denial
+reads only within the operation. With `takedown_denial` enabled, the descriptor
+directory is read strongly for every batch. Disabling that option skips the
+descriptor proofs, but direct object/pack blocklist guards remain mandatory
+(SPEC-SERVER §14.2), including fail-closed reads and blocked reconstruction bases.
+A fresh denial phase and a final gate precede output; external delta
+bases still follow repository/view membership, denial and reconstruction limits.
+Index scans, membership reads and independent raw member loads share one
+six-call I/O admission envelope. Scan waves retain the existing 1,000 transient
+row allowance across all concurrent replies, and results are processed in
+partition/input order. Encoded ranges, calls and decoded raw members are reserved
+before dispatch. Failed or cancelled waves keep their reservations. Delta chains
+use the bounded sequential resolver.
 
 The old reader methods retain their signatures and per-call allowances. Cap
 hits return `ResourceExhausted` with `OBJECT_READER_LIMIT_MESSAGE` (`object reader

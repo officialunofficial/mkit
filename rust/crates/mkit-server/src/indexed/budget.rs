@@ -55,6 +55,7 @@ pub struct Budgeted<'a, S> {
     session: Option<&'a SliceBudget>,
     encoded: Option<&'a EncodedBudget>,
     hit: Option<&'a AtomicBool>,
+    io: Option<&'a crate::store::read_io::ReadIo>,
 }
 
 impl<'a, S> Budgeted<'a, S> {
@@ -67,6 +68,7 @@ impl<'a, S> Budgeted<'a, S> {
             session: None,
             encoded: None,
             hit: None,
+            io: None,
         }
     }
 
@@ -78,6 +80,7 @@ impl<'a, S> Budgeted<'a, S> {
             session: None,
             encoded: None,
             hit: Some(hit),
+            io: None,
         }
     }
 
@@ -102,6 +105,21 @@ impl<'a, S> Budgeted<'a, S> {
         self
     }
 
+    #[cfg_attr(not(feature = "http-objects"), allow(dead_code))]
+    pub(crate) fn with_io(mut self, io: &'a crate::store::read_io::ReadIo) -> Self {
+        self.io = Some(io);
+        self
+    }
+    async fn admit(
+        &self,
+        rows: usize,
+        bytes: u64,
+    ) -> Result<Option<crate::store::read_io::ReadLease>, StoreError> {
+        match self.io {
+            Some(io) => io.acquire(rows, bytes).await.map(Some),
+            None => Ok(None),
+        }
+    }
     fn note<T>(&self, result: Result<T, StoreError>) -> Result<T, StoreError> {
         if let Some(hit) = self.hit
             && result.as_ref().is_err_and(is_exhausted)
@@ -112,6 +130,9 @@ impl<'a, S> Budgeted<'a, S> {
     }
 
     pub(crate) fn charge(&self) -> Result<(), StoreError> {
+        if self.io.is_some_and(crate::store::read_io::ReadIo::paid) {
+            return Ok(());
+        }
         let result = self
             .budget
             .map_or(Ok(()), SliceBudget::charge)
@@ -124,12 +145,36 @@ impl<S: NamespaceStore> NamespaceStore for Budgeted<'_, S> {
     fn capabilities(&self) -> StoreCapabilities {
         self.inner.capabilities()
     }
+    fn reserve_read_calls(
+        &self,
+        count: u32,
+    ) -> Result<Option<crate::store::ReadReservation>, StoreError> {
+        let Some(io) = self.io else { return Ok(None) };
+        self.note(
+            self.budget
+                .map_or(Ok(()), |b| b.charge_many(count))
+                .and_then(|()| self.session.map_or(Ok(()), |b| b.charge_many(count))),
+        )?;
+        Ok(Some(io.prepay(count)))
+    }
     async fn get(&self, p: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
         self.charge()?;
+        let _lease = self
+            .admit(
+                1,
+                (crate::store::MAX_KEY_BYTES + crate::store::MAX_VALUE_BYTES) as u64,
+            )
+            .await?;
         self.note(self.inner.get(p, key).await)
     }
     async fn has(&self, p: &Partition, key: &Key) -> Result<bool, StoreError> {
         self.charge()?;
+        let _lease = self
+            .admit(
+                1,
+                (crate::store::MAX_KEY_BYTES + crate::store::MAX_VALUE_BYTES) as u64,
+            )
+            .await?;
         self.note(self.inner.has(p, key).await)
     }
     async fn get_many(
@@ -138,6 +183,14 @@ impl<S: NamespaceStore> NamespaceStore for Budgeted<'_, S> {
         keys: &[Key],
     ) -> Result<Vec<Option<Value>>, StoreError> {
         self.charge()?;
+        let _lease = self
+            .admit(
+                keys.len(),
+                keys.len()
+                    .saturating_mul(crate::store::MAX_KEY_BYTES + crate::store::MAX_VALUE_BYTES)
+                    as u64,
+            )
+            .await?;
         self.note(self.inner.get_many(p, keys).await)
     }
     async fn scan_many(
@@ -146,6 +199,14 @@ impl<S: NamespaceStore> NamespaceStore for Budgeted<'_, S> {
         ranges: &[RangeScan],
     ) -> Result<Vec<ScanPage>, StoreError> {
         self.charge()?;
+        let rows = ranges.iter().map(|r| r.limit as usize).sum::<usize>();
+        let _lease = self
+            .admit(
+                rows,
+                rows.saturating_mul(crate::store::MAX_KEY_BYTES + crate::store::MAX_VALUE_BYTES)
+                    as u64,
+            )
+            .await?;
         self.note(self.inner.scan_many(p, ranges).await)
     }
     async fn scan(
@@ -157,6 +218,14 @@ impl<S: NamespaceStore> NamespaceStore for Budgeted<'_, S> {
         limit: u32,
     ) -> Result<ScanPage, StoreError> {
         self.charge()?;
+        let _lease = self
+            .admit(
+                limit as usize,
+                (limit as usize)
+                    .saturating_mul(crate::store::MAX_KEY_BYTES + crate::store::MAX_VALUE_BYTES)
+                    as u64,
+            )
+            .await?;
         self.note(self.inner.scan(p, start, end, after, limit).await)
     }
     async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
@@ -177,6 +246,16 @@ impl<S: NamespaceStore> NamespaceStore for Budgeted<'_, S> {
 impl<B: BlobStore> BlobStore for Budgeted<'_, B> {
     type Sink = B::Sink;
 
+    fn reserve_read_bytes(
+        &self,
+        bytes: u64,
+    ) -> Result<Option<crate::store::ReadReservation>, StoreError> {
+        let Some(io) = self.io else { return Ok(None) };
+        if let Some(encoded) = self.encoded {
+            self.note(encoded.charge(bytes))?;
+        }
+        self.note(io.prepay_bytes(bytes)).map(Some)
+    }
     async fn begin(&self, key: BlobKey, len: u64) -> Result<Self::Sink, StoreError> {
         self.inner.begin(key, len).await
     }
@@ -195,7 +274,11 @@ impl<B: BlobStore> BlobStore for Budgeted<'_, B> {
                     .end_inclusive
                     .saturating_sub(range.start)
                     .saturating_add(1);
-                let result = encoded.charge(bytes);
+                let result = if self.io.is_some_and(|io| io.paid_bytes(bytes)) {
+                    Ok(())
+                } else {
+                    encoded.charge(bytes)
+                };
                 if result.is_err()
                     && let Some(hit) = self.hit
                 {
@@ -209,10 +292,19 @@ impl<B: BlobStore> BlobStore for Budgeted<'_, B> {
                 "object reader blob reads must be ranged",
             ));
         }
-        self.note(self.inner.get(key, range).await)
+        let bytes = range.map_or(0, |r| {
+            r.end_inclusive.saturating_sub(r.start).saturating_add(1)
+        });
+        let lease = self.admit(0, bytes).await?;
+        let body = self.note(self.inner.get(key, range).await)?;
+        Ok(match (body, lease) {
+            (Some(body), Some(lease)) => Some(lease.hold(body)),
+            (body, _) => body,
+        })
     }
     async fn head(&self, key: &BlobKey) -> Result<Option<BlobMeta>, StoreError> {
         self.charge()?;
+        let _lease = self.admit(0, 0).await?;
         self.note(self.inner.head(key).await)
     }
     async fn probe(&self) -> Result<(), StoreError> {
@@ -397,5 +489,83 @@ mod tests {
         assert_eq!(budget.used(), 2, "failed dispatches are never refunded");
         let error = futures_executor::block_on(store.get(&p, &key)).unwrap_err();
         assert!(is_exhausted(&error) && budget.refused());
+    }
+}
+
+#[cfg(all(test, feature = "memory"))]
+mod read_stream_tests {
+    use super::*;
+    use futures::FutureExt as _;
+    use std::sync::atomic::AtomicUsize;
+
+    struct Streams {
+        calls: AtomicUsize,
+    }
+    impl BlobStore for Streams {
+        type Sink = crate::MemoryPackSink;
+        async fn begin(&self, _: BlobKey, _: u64) -> Result<Self::Sink, StoreError> {
+            unreachable!()
+        }
+        async fn get(
+            &self,
+            _: &BlobKey,
+            range: Option<ByteRange>,
+        ) -> Result<Option<BlobBody>, StoreError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let range = range.expect("test reads always request a range");
+            Ok(Some(BlobBody::Stream {
+                len: range.end_inclusive - range.start + 1,
+                stream: Box::pin(futures::stream::pending()),
+            }))
+        }
+        async fn head(&self, _: &BlobKey) -> Result<Option<BlobMeta>, StoreError> {
+            unreachable!()
+        }
+        async fn probe(&self) -> Result<(), StoreError> {
+            Ok(())
+        }
+        async fn delete(&self, _: &BlobKey) -> Result<bool, StoreError> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn streaming_bodies_hold_call_permits_and_cancellation_releases_them() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let backend = Streams {
+                calls: AtomicUsize::new(0),
+            };
+            let io = crate::store::read_io::ReadIo::new();
+            let budget = SliceBudget::new(100);
+            let store = Budgeted::new(&backend, &budget).with_io(&io);
+            let key = BlobKey::pack([1; 32]);
+            let range = Some(ByteRange {
+                start: 0,
+                end_inclusive: 7,
+            });
+            let mut bodies = Vec::new();
+            for _ in 0..6 {
+                bodies.push(store.get(&key, range).await.unwrap().unwrap());
+            }
+            assert!(store.get(&key, range).now_or_never().is_none());
+            assert_eq!(backend.calls.load(Ordering::SeqCst), 6);
+            drop(bodies.pop());
+            let body = store
+                .get(&key, range)
+                .now_or_never()
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(backend.calls.load(Ordering::SeqCst), 7);
+            drop(body);
+            drop(bodies);
+            assert_eq!(budget.used(), 16, "cancelled admission stays charged");
+            let body = store.get(&key, range).await.unwrap().unwrap();
+            drop(body);
+        });
     }
 }

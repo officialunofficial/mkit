@@ -55,6 +55,7 @@ enum Reads {
 /// misbehave on extracted-object reads.
 #[derive(Clone)]
 struct SpyBlobs {
+    latency_ms: Arc<std::sync::atomic::AtomicU64>,
     inner: MemoryBlobStore,
     calls: Calls,
     reads: Arc<Mutex<Reads>>,
@@ -73,6 +74,10 @@ impl BlobStore for SpyBlobs {
         key: &BlobKey,
         range: Option<ByteRange>,
     ) -> Result<Option<BlobBody>, StoreError> {
+        let latency = self.latency_ms.load(Ordering::SeqCst);
+        if latency != 0 {
+            crate::store::read_probe::delay(latency, "load_decode").await;
+        }
         self.calls.lock().unwrap().push(("get", *key));
         let mode = *self.reads.lock().unwrap();
         if mode == Reads::Normal || *key != BlobKey::object(*key.hash()) {
@@ -113,6 +118,10 @@ impl BlobStore for SpyBlobs {
     }
 
     async fn head(&self, key: &BlobKey) -> Result<Option<BlobMeta>, StoreError> {
+        let latency = self.latency_ms.load(Ordering::SeqCst);
+        if latency != 0 {
+            crate::store::read_probe::delay(latency, "load_decode").await;
+        }
         self.calls.lock().unwrap().push(("head", *key));
         self.inner.head(key).await
     }
@@ -223,6 +232,7 @@ fn fixture_tweaked<H: HookSet>(
     let calls = Calls::default();
     let pipe = Pipeline::new(
         SpyBlobs {
+            latency_ms: Arc::default(),
             inner: MemoryBlobStore::default(),
             calls: calls.clone(),
             reads: Arc::default(),
@@ -2487,3 +2497,9 @@ mod object_reader_tests;
 
 mod reader_proof_cost;
 mod reader_proof_tests;
+
+mod reader_batch_cost;
+
+mod reader_guard_tests;
+mod reader_path_tests;
+mod reader_real_cost;

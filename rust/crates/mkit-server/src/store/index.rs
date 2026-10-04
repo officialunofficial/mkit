@@ -329,7 +329,7 @@ async fn scan_all<S: NamespaceStore>(
         if groups.is_empty() {
             return Ok(scans);
         }
-        let mut served = false;
+        let mut jobs = Vec::new();
         for (partition, mut ids) in groups {
             if calls == MAX_LOOKUP_PAGES {
                 for id in ids {
@@ -362,50 +362,85 @@ async fn scan_all<S: NamespaceStore>(
                     })
                 })
                 .collect();
-            let pages = store.scan_many(&partition, &ranges).await?;
-            calls += 1;
-            if pages.is_empty() || pages.len() > ranges.len() {
-                return Err(StoreError::Corrupt(
-                    "invalid scan_many served prefix".into(),
-                ));
+            calls += 1; // Reserve page allowance before any scan is dispatched.
+            jobs.push((partition, ids, ranges));
+        }
+        let mut served = false;
+        let mut pending = jobs.into_iter().peekable();
+        while pending.peek().is_some() {
+            let mut wave = Vec::new();
+            let mut rows = 0;
+            while let Some((_, _, ranges)) = pending.peek() {
+                let requested = ranges.iter().map(|r| r.limit).sum::<u32>();
+                if !wave.is_empty()
+                    && (wave.len() == super::read_io::parallelism()
+                        || rows + requested > SCAN_CALL_ROWS)
+                {
+                    break;
+                }
+                rows += requested;
+                wave.push(
+                    pending
+                        .next()
+                        .ok_or_else(|| StoreError::Corrupt("missing scan plan".into()))?,
+                );
             }
-            *rotations.entry(partition).or_default() += pages.len();
-            served = true;
-            for ((id, range), page) in ids.iter().zip(&ranges).zip(pages) {
-                if page.entries.len() > range.limit as usize {
+            // Both page count and the whole transient row/byte allowance are
+            // reserved above; failed waves drain every dispatched reply.
+            let _reservation =
+                store.reserve_read_calls(u32::try_from(wave.len()).unwrap_or(u32::MAX))?;
+            let replies =
+                futures::future::join_all(wave.iter().map(|(p, _, r)| store.scan_many(p, r))).await;
+            for ((partition, ids, ranges), reply) in wave.into_iter().zip(replies) {
+                let pages = reply?;
+                if pages.is_empty() || pages.len() > ranges.len() {
                     return Err(StoreError::Corrupt(
-                        "object index scan exceeded limit".into(),
+                        "invalid scan_many served prefix".into(),
                     ));
                 }
-                let Some(scan) = scans.get_mut(id) else {
-                    return Err(StoreError::Corrupt("missing object index scan".into()));
-                };
-                for (key, value) in page.entries {
-                    match keys::parse(&key) {
-                        Some(ParsedKey::ObjectIndex {
-                            repo: found,
-                            object,
-                            pack_id,
-                        }) if found == repo.name && object == *id => {
-                            let size = CANDIDATE_OVERHEAD.saturating_add(value.as_bytes().len());
-                            if size > CANDIDATE_BYTES - retained_bytes {
-                                // Keep only the proven pack-order prefix. The
-                                // existing page cap asks callers for smaller batches.
-                                for scan in scans.values_mut().filter(|s| !s.done) {
-                                    scan.done = true;
-                                    scan.reason = Some(LookupError::TooManyPages);
-                                }
-                                return Ok(scans);
-                            }
-                            retained_bytes += size;
-                            scan.rows.push((pack_id, value));
-                        }
-                        _ => return Err(StoreError::Corrupt("malformed object index key".into())),
+                *rotations.entry(partition).or_default() += pages.len();
+                served = true;
+                for ((id, range), page) in ids.iter().zip(&ranges).zip(pages) {
+                    if page.entries.len() > range.limit as usize {
+                        return Err(StoreError::Corrupt(
+                            "object index scan exceeded limit".into(),
+                        ));
                     }
-                }
-                match page.next {
-                    Some(cursor) => scan.after = Some(cursor),
-                    None => scan.done = true,
+                    let Some(scan) = scans.get_mut(id) else {
+                        return Err(StoreError::Corrupt("missing object index scan".into()));
+                    };
+                    for (key, value) in page.entries {
+                        match keys::parse(&key) {
+                            Some(ParsedKey::ObjectIndex {
+                                repo: found,
+                                object,
+                                pack_id,
+                            }) if found == repo.name && object == *id => {
+                                let size =
+                                    CANDIDATE_OVERHEAD.saturating_add(value.as_bytes().len());
+                                if size > CANDIDATE_BYTES - retained_bytes {
+                                    // Keep only the proven pack-order prefix. The
+                                    // existing page cap asks callers for smaller batches.
+                                    for scan in scans.values_mut().filter(|s| !s.done) {
+                                        scan.done = true;
+                                        scan.reason = Some(LookupError::TooManyPages);
+                                    }
+                                    return Ok(scans);
+                                }
+                                retained_bytes += size;
+                                scan.rows.push((pack_id, value));
+                            }
+                            _ => {
+                                return Err(StoreError::Corrupt(
+                                    "malformed object index key".into(),
+                                ));
+                            }
+                        }
+                    }
+                    match page.next {
+                        Some(cursor) => scan.after = Some(cursor),
+                        None => scan.done = true,
+                    }
                 }
             }
         }
@@ -469,21 +504,31 @@ pub async fn locate_many<S: NamespaceStore>(
         }
         admitted.insert(id, count);
     }
-    let mut members = BTreeSet::new();
+    let mut jobs = Vec::new();
     for (partition, ids) in packs {
         let ids: Vec<_> = ids.into_iter().collect();
         for chunk in ids.chunks(MEMBERSHIP_CHUNK) {
-            // Key and Worker base64/JSON allocations are bounded before creating
-            // any key; repository names are bounded by RepoName.
             let keys: Vec<_> = chunk
                 .iter()
                 .map(|pack| keys::membership(&repo.name, pack))
                 .collect();
-            let values = store.get_many(&partition, &keys).await?;
-            if values.len() != chunk.len() {
+            jobs.push((partition.clone(), chunk.to_vec(), keys));
+        }
+    }
+    let mut members = BTreeSet::new();
+    for wave in jobs.chunks(super::read_io::parallelism()) {
+        // <=768 keys per wave, within the scanner's shared 1,000-row allowance.
+        let _reservation =
+            store.reserve_read_calls(u32::try_from(wave.len()).unwrap_or(u32::MAX))?;
+        let replies =
+            futures::future::join_all(wave.iter().map(|(p, _, keys)| store.get_many(p, keys)))
+                .await;
+        for ((_, ids, _), reply) in wave.iter().zip(replies) {
+            let values = reply?;
+            if values.len() != ids.len() {
                 return Err(StoreError::Corrupt("short membership get_many".into()));
             }
-            for (pack, value) in chunk.iter().zip(values) {
+            for (pack, value) in ids.iter().zip(values) {
                 if value.is_some() {
                     members.insert(*pack);
                 }
@@ -572,6 +617,7 @@ mod tests {
     struct EmptyPageOnce {
         inner: MemoryKv,
         empty_once: AtomicBool,
+        max_ranges: Option<usize>,
         get_many_calls: AtomicUsize,
         scan_many_calls: AtomicUsize,
     }
@@ -615,7 +661,7 @@ mod tests {
         ) -> Result<Vec<ScanPage>, StoreError> {
             self.scan_many_calls.fetch_add(1, Ordering::SeqCst);
             let mut pages = Vec::with_capacity(ranges.len());
-            for range in ranges {
+            for range in ranges.iter().take(self.max_ranges.unwrap_or(ranges.len())) {
                 pages.push(
                     self.scan(
                         p,
@@ -985,6 +1031,7 @@ mod tests {
         let store = EmptyPageOnce {
             inner: MemoryKv::default(),
             empty_once: AtomicBool::new(false),
+            max_ranges: None,
             get_many_calls: AtomicUsize::new(0),
             scan_many_calls: AtomicUsize::new(0),
         };
@@ -1051,6 +1098,7 @@ mod tests {
         let store = EmptyPageOnce {
             inner: MemoryKv::default(),
             empty_once: AtomicBool::new(false),
+            max_ranges: None,
             get_many_calls: AtomicUsize::new(0),
             scan_many_calls: AtomicUsize::new(0),
         };
@@ -1220,6 +1268,56 @@ mod tests {
                 .unwrap(),
             BatchOutcome::Committed
         );
+    }
+
+    #[tokio::test]
+    async fn capped_scan_prefix_rotates_cursors_and_preserves_first_member_order() {
+        let store = EmptyPageOnce {
+            inner: MemoryKv::default(),
+            empty_once: AtomicBool::new(false),
+            max_ranges: Some(1),
+            get_many_calls: AtomicUsize::new(0),
+            scan_many_calls: AtomicUsize::new(0),
+        };
+        let r = repo("prefix");
+        let hot = [0x12; 32];
+        let mut sibling = hot;
+        sibling[31] += 1;
+        let other = [0x34; 32];
+        let packs: Vec<Hash> = (0..130u16)
+            .map(|n| {
+                let mut pack = [0; 32];
+                pack[30..].copy_from_slice(&n.to_be_bytes());
+                pack
+            })
+            .collect();
+        put_rows(&store.inner, &r, &hot, &packs).await;
+        for id in [sibling, other] {
+            put_rows(&store.inner, &r, &id, &packs[128..]).await;
+        }
+        for pack in &packs[128..] {
+            make_member(&store.inner, &r, pack).await;
+        }
+        let calls = crate::indexed::budget::SliceBudget::new(32);
+        let io = super::super::read_io::ReadIo::new();
+        let bounded = crate::indexed::budget::Budgeted::new(&store, &calls).with_io(&io);
+        let ids = [sibling, hot, other, hot];
+        let answers = locate_many(&bounded, &D34Shards, &r, &ids).await.unwrap();
+        assert_eq!(
+            answers,
+            vec![
+                Ok(Some(LocatedObject {
+                    pack: packs[128],
+                    value: raw(5)
+                }));
+                ids.len()
+            ]
+        );
+        assert!(
+            store.scan_many_calls.load(Ordering::SeqCst) >= 4,
+            "both the served prefix and the hot object's continuation are exercised"
+        );
+        assert!(calls.used() <= 32);
     }
 
     /// Candidate packs spread over more membership partitions than the call

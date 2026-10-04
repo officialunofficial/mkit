@@ -576,7 +576,7 @@ pub async fn require_object_clear<S: NamespaceStore>(
     budget: &SliceBudget,
 ) -> Result<(), ServerError> {
     let remote = Budgeted::new(store, budget);
-    let context = object_context(&remote, shards, repo, id, cfg, Caps::Legacy).await?;
+    let context = object_context(&remote, shards, repo, id, cfg, Caps::Legacy, None).await?;
     prove(&remote, shards, repo, &context.target()).await
 }
 struct ObjectContext {
@@ -608,6 +608,7 @@ async fn object_context<S: NamespaceStore>(
     id: &Hash,
     cfg: &IndexedConfig,
     caps: Caps,
+    initial: Option<(Hash, &super::inventory::Entry)>,
 ) -> Result<ObjectContext, ServerError> {
     // Reader paths report a spent proof allowance as typed exhaustion; writer
     // and admission paths keep the generic unavailable error.
@@ -624,9 +625,15 @@ async fn object_context<S: NamespaceStore>(
         manifests: Vec::new(),
     };
     let mut cursor = Some(*id);
-    for _ in 0..=cfg.max_delta_chain_depth {
+    for depth in 0..=cfg.max_delta_chain_depth {
         let Some(id) = cursor else { break };
-        let (pack, row) = match super::inventory::member_with_caps(store, shards, repo, &id).await {
+        let member = if depth == 0 && initial.is_some() {
+            let (pack, row) = initial.ok_or_else(unavailable)?;
+            Ok((pack, row.clone()))
+        } else {
+            super::inventory::member_with_caps(store, shards, repo, &id).await
+        };
+        let (pack, row) = match member {
             Ok(member) => member,
             Err(super::inventory::MemberFail::Capped) => return Err(capped()),
             Err(super::inventory::MemberFail::Store(_)) => return Err(unavailable()),
@@ -659,13 +666,24 @@ pub(crate) async fn object_denials<S: NamespaceStore>(
     store: &S,
     shards: &dyn ShardMap,
     repo: &RepoId,
-    requested: &BTreeSet<Hash>,
+    requested: &[(Hash, crate::store::index::LocatedObject)],
+    facts: &std::collections::BTreeMap<Hash, super::inventory::Entry>,
     cfg: &IndexedConfig,
 ) -> Result<BTreeSet<Hash>, ServerError> {
     let mut contexts = Vec::new();
     let mut bytes = 0;
-    for id in requested {
-        let context = object_context(store, shards, repo, id, cfg, Caps::Reader).await?;
+    for (id, location) in requested {
+        let row = facts.get(id).ok_or_else(unavailable)?;
+        let context = object_context(
+            store,
+            shards,
+            repo,
+            id,
+            cfg,
+            Caps::Reader,
+            Some((location.pack, row)),
+        )
+        .await?;
         bytes += context.bytes();
         if bytes > MAX_PROOF_CONTEXT_BYTES {
             return Err(reader_exhausted());
@@ -678,7 +696,7 @@ pub(crate) async fn object_denials<S: NamespaceStore>(
     let end = Key::new(end);
     let mut denied = BTreeSet::new();
     let _ = (start, end);
-    let mut directory = super::directory::Walk::start(store, WRITE_PROOF_CONCURRENCY)
+    let mut directory = super::directory::Walk::start(store, crate::store::read_io::parallelism())
         .await
         .map_err(|_| unavailable())?;
     while let Some(object) = directory.next(store).await.map_err(|_| unavailable())? {
