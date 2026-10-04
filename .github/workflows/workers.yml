@@ -413,6 +413,15 @@ jobs:
       - name: Create diagnostic log directory
         run: mkdir -p "${RUNNER_TEMP}/wire-logs"
 
+      - name: Portable contracts on the native test host (show case verdicts)
+        working-directory: rust
+        env:
+          TMPDIR: ${{ runner.temp }}/wire-logs
+          CARGO_PROFILE_DEV_DEBUG: '0'
+        run: |
+          cargo test --locked -p mkit-server-conformance --features test-host --test test_host portable_file_cases_run_against_the_native_host_without_skips -- --exact --nocapture
+          cargo test --locked -p mkit-server-conformance --features test-host --test test_host signed_takedown_contract_survives_native_listener_and_pipeline_restart -- --exact --nocapture
+
       - name: Portable contracts and Connect deadlines on wasm (all dispatch entry points)
         timeout-minutes: 15
         env:
