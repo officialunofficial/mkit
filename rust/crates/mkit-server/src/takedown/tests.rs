@@ -857,6 +857,12 @@ mod accounting {
         assert!(record["activation_cursor"].as_u64().unwrap() > 0);
         assert!(record["activation_cursor"].as_u64().unwrap() < 256);
         assert_eq!(record["preservation_pending"], true);
+        // Interrupt replay after progress, independent of batched read costs.
+        let cursor = usize::try_from(record["activation_cursor"].as_u64().unwrap()).unwrap();
+        let mut objects = fixture.objects.clone();
+        objects.sort_unstable();
+        fixture.store().faults.lock().unwrap().unavailable_action =
+            Some(denial::action_key(&objects[cursor + 1]));
         let (headers, body) = signed(&fixture.input, 5);
         let retry = fixture
             .engine
@@ -880,6 +886,7 @@ mod accounting {
                 .unwrap()
                 > record["activation_cursor"].as_u64().unwrap()
         );
+        fixture.store().faults.lock().unwrap().unavailable_action = None;
         let mut cursor = record["activation_cursor"].as_u64().unwrap();
         for _ in 0..4 {
             let resumed = fixture.resume_activation().await;

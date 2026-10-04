@@ -2846,6 +2846,13 @@ serving, or membership source. Bytes from an `object blocked`
 rejection remain subject to ordinary §13 GC; the rejection does not
 authorize immediate byte deletion.
 
+The implementation reads the block entry and independent actions together with
+`NamespaceStore::get_many`, including through borrowed stores. Each probe is
+one store batch, charged one unit when budgeted; batch-capable backends can
+serve it in one round trip. A member dependency check probes both the object
+and its containing pack. This batching does not cache clearance or change the
+fail-closed requirement.
+
 ### 14.3 Lifecycle and completion
 
 For each content takedown, the server MUST perform the following durable,
