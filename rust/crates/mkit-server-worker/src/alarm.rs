@@ -58,7 +58,6 @@ pub async fn run_physical_alarm<C: SqlConn>(
     budget: TickBudget,
     cursor: &mut Option<TimerCursor>,
 ) -> Result<PhysicalRunReport, StoreError> {
-    observe_alarm(now_ms);
     let mut state = TickState::new(clock, budget);
     if !state.charge_scan(1) {
         return Err(StoreError::Invalid(
@@ -154,7 +153,8 @@ pub async fn run_physical_alarm<C: SqlConn>(
     })
 }
 
-fn observe_alarm(now_ms: u64) {
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn observe_alarm(now_ms: u64) {
     mkit_server::Metrics::incr(
         &crate::telemetry::ConsoleMetrics::default(),
         mkit_server::telemetry::METRIC_VERIFICATION_PROGRESS,

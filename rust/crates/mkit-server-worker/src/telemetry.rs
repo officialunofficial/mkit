@@ -339,6 +339,7 @@ mod tests {
         .unwrap();
         let sink = Capture::default();
         tracing::subscriber::with_default(events::subscriber(sink.clone()), || {
+            crate::alarm::observe_alarm(1_000);
             futures::executor::block_on(crate::alarm::run_physical_alarm(
                 &store,
                 &mkit_server::timers::TimerRegistry::new(),
