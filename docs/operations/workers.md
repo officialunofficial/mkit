@@ -56,7 +56,7 @@ observation for the particular ticket, not the latest retry.
 | `advance_received` | A ticketed advance reached the pipeline; earliest observation measures the pre-verification request gap. |
 | `job_created`, `verification_timer_due` | The guarded job/group creation committed; `due_at_ms` is the initial logical wake, already due immediately. |
 | `verification_physical_alarm` | A physical Worker alarm entered; `verification_alarm_partition` associates dispatched source partitions in that invocation. |
-| `verify_fire`, `verification_slice_start` | An actual verification handler started. `first_decode` identifies an empty decode cursor, including retries; it does **not** mean ready. |
+| `verify_fire`, `verification_timer_entry`, `verification_slice_start` | An actual verification handler started; entry is recorded before the job read, with pack/source correlation. The later slice start adds the ticket and phase. `first_decode` identifies an empty decode cursor, including retries; it does **not** mean ready. |
 | `verification_slice_result` | Proposed old/new phases, generation, slice attempt, relay sequence and next wake; this proposal can still lose its commit guard. |
 | `verify_checkpoint`, `verification_checkpoint` | The guarded timer/job checkpoint committed. Use these old/new phases as durable progress. |
 | `verification_timer_result` | The timer attempt committed, raced or failed; `attempt` counts persisted infrastructure retries and `scheduled_ms` is the physical timer's wake. |
@@ -64,8 +64,8 @@ observation for the particular ticket, not the latest retry.
 | `verification_usable` | A committed job checkpoint became usable with a guarded Verified state. `ready_observed` is the later advance's observation. |
 | `final_cas` | The ref advance batch committed; replaying its nonce does not emit another CAS. |
 
-`now_ms` is injected-clock time; handler entry and relay events use the tick's
-business-time snapshot. For real elapsed I/O time, use the Worker log timestamps
+`now_ms` is injected-clock time; relay and partition-dispatch events use the
+tick's business-time snapshot. For real elapsed I/O time, use the Worker log timestamps
 as well. Compare upload → advance, job due → physical alarm → first fire, each
 committed phase, relay delivery → next fire, and usable → final CAS separately.
 The first fire can precede readiness by several slices. A reported nine-second

@@ -451,14 +451,7 @@ where
         let Some((mut job, mut raw)) = job else {
             return self.cleanup(timer, None, None).await;
         };
-        crate::telemetry::verification_progress(
-            self.h.metrics.as_ref(),
-            "verify_fire",
-            self.now,
-            Some(&job.ticket_id),
-            Some(&self.pack),
-        );
-        tracing::info!(event = "verification_slice_start", now_ms = self.now,
+        tracing::info!(event = "verification_slice_start", now_ms = now_ms(self.h.clock.as_ref()),
             source = ?self.source, ticket = %mkit_core::hash::to_hex(&job.ticket_id),
             pack = %mkit_core::hash::to_hex(&self.pack), old_phase = ?job.phase,
             generation = job.generation, attempt = job.attempts,

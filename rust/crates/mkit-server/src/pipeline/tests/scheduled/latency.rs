@@ -174,7 +174,11 @@ fn assert_timeline(env: &Env, events: &Events, ticket: Hash, pack_id: Hash) {
         assert!(
             logs.iter()
                 .any(|event| event.get("stage").is_some_and(|s| s == stage)
-                    && event.get("ticket") == Some(&ticket_hex)
+                    && if stage == "verify_fire" {
+                        event.get("pack") == Some(&pack_hex)
+                    } else {
+                        event.get("ticket") == Some(&ticket_hex)
+                    }
                     && event
                         .get("now_ms")
                         .is_some_and(|time| time.parse::<u64>().is_ok())),

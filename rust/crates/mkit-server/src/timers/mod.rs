@@ -431,6 +431,19 @@ async fn process_row<S: NamespaceStore>(
         run.retained_due = true;
         return;
     }
+    if timer.kind == registry::kinds::VERIFY {
+        let pack =
+            crate::indexed::checkpoint::parse_reference(&timer.reference).map(|(_, pack)| pack);
+        crate::telemetry::verification_progress(
+            handler.metrics().unwrap_or(&crate::telemetry::NoopMetrics),
+            "verify_fire",
+            u64::try_from(clock.now_ms()).unwrap_or(ctx.now_ms),
+            None,
+            pack.as_ref(),
+        );
+        tracing::info!(event = "verification_timer_entry", now_ms = u64::try_from(clock.now_ms()).unwrap_or(ctx.now_ms),
+            source = ?ctx.partition, pack = pack.map(|p| mkit_core::hash::to_hex(&p)).as_deref(), attempt);
+    }
     let outcome = fire_timer(handler, ctx, &timer, key.clone(), clock).await;
     if timer.kind == registry::kinds::VERIFY {
         tracing::info!(event = "verification_timer_result", now_ms = u64::try_from(clock.now_ms()).unwrap_or(ctx.now_ms),
