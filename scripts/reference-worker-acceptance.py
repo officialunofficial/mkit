@@ -153,7 +153,7 @@ def main():
                 "highest version or reservation dedup lost")
             retention_probe = {"X-Repository": "retention-probe"}
             def retention_event(reservation_id, version, counter=True):
-                event = {"reservation_id": reservation_id, "kind": "storage" if counter else "committed",
+                event = {"reservation_id": reservation_id, "kind": "storage" if counter else "terminal",
                          "counter": [version, version] if counter else None}
                 check(hooks.request(origin, "/__reference_test/events", method="POST", headers=retention_probe,
                     body=json.dumps(event).encode())[0] == 200, "retention probe refused")
