@@ -112,6 +112,23 @@ physical tick budget.
 
 ## Embedding (supported, 0.x)
 
+On wasm32, mkit entry points (`connect::service`, `serve`, `serve_with`,
+`serve_admin_with` and the `fetch*` helpers) are safe with `connect-timeout-ms`
+and `grpc-timeout` present. **Deadlines are ignored on wasm**: the core Connect
+service removes both headers before connectrpc computes an absolute deadline,
+and ignores configured `DeadlinePolicy` settings, including default and
+inter-message timeouts. Native deadlines are unchanged. Body streaming,
+authentication and body limits still apply. Bound host work using the platform
+clock and timer as needed; the admin engine already uses the Worker timer.
+
+To mount `connect::router` yourself, use `connect::ConnectService::new(router)`
+instead of a raw connectrpc service. `ConnectService` aliases
+`ConnectRpcService` natively and wraps it on wasm. Hosts dispatching to **other
+connectrpc services** must apply the same rule before dispatch: remove both
+headers (the public `mkit_worker_common::adapter::is_deadline_header` remains
+available), and leave deadline policies unset. Header stripping alone does not
+neutralize a configured default or inter-message timeout.
+
 The `pack-ruzstd` feature (enabled by the vcs-worker `launch` feature) relies on
 a bounded-decode patch to ruzstd 0.9 that a git-dependency embedder must repeat
 in its own workspace, because Cargo does not inherit dependency patches:

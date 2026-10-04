@@ -1883,3 +1883,11 @@ reference Worker).
 | A stock multi-repository deployment never runs `write_policy = open`. | §7.5 write policy. |
 | An `AdvanceRefs` conflict is a typed response value, never a Connect error. | §4 &mdash; matches `AdvanceOutcome`'s three-variant, no-error-variant shape in `protocol.rs`. |
 | The `DownloadPack` Workers-streaming design is documented as unverified end-to-end until a sibling issue proves real client-visible delivery. | §6.3's "Known risk" paragraph; mkit#699/#702's re-verification requirement. |
+
+## Wasm server deadline policy
+
+The mkit wasm binding ignores `connect-timeout-ms` and `grpc-timeout` before
+Connect dispatch, and does not apply configured Connect deadline policies.
+Native bindings retain deadline enforcement. This runtime policy leaves body
+limits, streaming and authentication unchanged; hosts may bound work using their
+platform clock and timer.

@@ -1,0 +1,25 @@
+[package]
+name = "mkit-connect-deadline-probe"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[workspace]
+
+[dependencies]
+worker = { version = "0.8", features = ["http"] }
+mkit-server-worker = { path = "../..", features = ["http-objects", "signed-http-hooks"] }
+mkit-server = { path = "../../../mkit-server", features = ["memory"] }
+mkit-worker-common = { path = "../../../../../apps/mkit-worker-common" }
+connectrpc = { version = "0.9.1", default-features = false, features = ["json"] }
+bytes = "1"
+getrandom = { version = "0.4", features = ["wasm_js"] }
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+[profile.release]
+opt-level = "s"
+lto = true

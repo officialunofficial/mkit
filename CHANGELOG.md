@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Wasm Connect dispatch ignores both client timeout headers before connectrpc
+  computes a deadline, including direct `connect::service` calls. Configured
+  deadline policies are ignored on wasm; native deadlines are unchanged.
+  Worker adapters share this protection without changing body streaming or auth.
+
 ### Performance
 
 - Server reader sessions capture roots once and reuse bounded local graph proofs
@@ -46,6 +53,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   URL-token reads, supplied hooks, cold outcome retry and injected slice recovery.
 
 ### Breaking (toward 0.6)
+
+- On wasm, `connect::service` returns `connect::ConnectService`, a protected
+  Tower service, instead of raw `connectrpc::ConnectRpcService`. Use the new
+  type in explicit annotations and `ConnectService::new(connect::router(...))`
+  for custom mounts. The limit, compression and interceptor builders remain
+  available; deadline policies are explicitly ignored. Native types are unchanged.
 
 - Request reservation variants require `StoredProcedure`. Pass the operation
   directly to `ReservationV1::{pending, committed, aborted, read_served}`;

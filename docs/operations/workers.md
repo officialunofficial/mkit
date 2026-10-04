@@ -306,6 +306,23 @@ No local workerd result certifies these checks.
 
 ## Embedding
 
+On wasm32, mkit entry points (`connect::service`, `serve`, `serve_with`,
+`serve_admin_with` and the `fetch*` helpers) are safe with `connect-timeout-ms`
+and `grpc-timeout` present. **Deadlines are ignored on wasm**: the core Connect
+service removes both headers before connectrpc computes an absolute deadline,
+and ignores configured `DeadlinePolicy` settings, including default and
+inter-message timeouts. Native deadlines are unchanged. Body streaming,
+authentication and body limits still apply. Bound host work using the platform
+clock and timer as needed; the admin engine already uses the Worker timer.
+
+To mount `connect::router` yourself, use `connect::ConnectService::new(router)`
+instead of a raw connectrpc service. `ConnectService` aliases
+`ConnectRpcService` natively and wraps it on wasm. Hosts dispatching to **other
+connectrpc services** must apply the same rule before dispatch: remove both
+headers (the public `mkit_worker_common::adapter::is_deadline_header` remains
+available), and leave deadline policies unset. Header stripping alone does not
+neutralize a configured default or inter-message timeout.
+
 Use the supported [mkit-server-worker embedding API](../../rust/crates/mkit-server-worker/README.md#embedding-supported-0x)
 and [embedded Worker example](../../apps/embedded-worker/README.md).
 Use the same validated config on fetch and every DO; in-process dispatch shares

@@ -1025,6 +1025,7 @@ dependencies = [
  "subtle",
  "thiserror",
  "tokio",
+ "tower-service",
  "tracing",
  "zeroize",
 ]
