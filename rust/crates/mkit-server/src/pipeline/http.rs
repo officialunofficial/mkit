@@ -44,9 +44,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
         self.cfg.url_tokens.as_ref()
     }
 
-    /// Replace the inert seams of an HTTP-objects pipeline: admission
-    /// (WP-4.13), proofs (WP-4.14b), tokens (WP-4.15), takedown (WP-5.9a) or
-    /// a maintained reachable set (WP-5.3a). A pipeline built without
+    /// Replace the inert seams of an HTTP-objects pipeline: tokens,
+    /// takedown or a maintained reachable set. A pipeline built without
     /// `PipelineConfig::http_objects` is unchanged.
     #[must_use]
     pub fn with_http_seams(mut self, edit: impl FnOnce(HttpSeams) -> HttpSeams) -> Self {
@@ -59,7 +58,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
     /// `anonymous`, whatever credentials the request carries (§7); the
     /// raw path, query and any token are never logged.
     pub async fn serve_http_object(&self, req: &HttpObjectRequest<'_>) -> HttpObjectResponse {
-        self.serve_http_with_runtime(req, None, None).await
+        self.serve_http_with_runtime(req, None).await
     }
 
     /// Adapter-provided retained settlement runtime for this request.
@@ -68,27 +67,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
         req: &HttpObjectRequest<'_>,
         runtime: crate::http_objects::HttpReadRuntime,
     ) -> HttpObjectResponse {
-        self.serve_http_with_runtime(req, Some(runtime), None).await
-    }
-
-    /// Adapter-provided proof builder and retained settlement runtime.
-    pub async fn serve_http_object_with_proofs(
-        &self,
-        req: &HttpObjectRequest<'_>,
-        runtime: crate::http_objects::HttpReadRuntime,
-        proofs: std::sync::Arc<dyn crate::http_objects::ProofServer>,
-    ) -> HttpObjectResponse {
-        self.serve_http_with_runtime(req, Some(runtime), Some(proofs))
-            .await
+        self.serve_http_with_runtime(req, Some(runtime)).await
     }
 
     async fn serve_http_with_runtime(
         &self,
         req: &HttpObjectRequest<'_>,
         runtime: Option<crate::http_objects::HttpReadRuntime>,
-        proofs: Option<std::sync::Arc<dyn crate::http_objects::ProofServer>>,
     ) -> HttpObjectResponse {
-        let mut response = self.serve_http_inner(req, runtime, proofs).await;
+        let mut response = self.serve_http_inner(req, runtime).await;
         if req.method == "HEAD" {
             // Content-Length already describes the GET body.
             response.body = HttpBody::Empty;
@@ -100,15 +87,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
         &self,
         req: &HttpObjectRequest<'_>,
         runtime: Option<crate::http_objects::HttpReadRuntime>,
-        proofs: Option<std::sync::Arc<dyn crate::http_objects::ProofServer>>,
     ) -> HttpObjectResponse {
         let (Some(_), Some(seams)) = (&self.cfg.http_objects, &self.http_seams) else {
             return HttpObjectResponse::not_found();
         };
         let mut seams = seams.clone();
-        if let Some(proofs) = proofs {
-            seams.proofs = proofs;
-        }
         if let Some(runtime) = runtime {
             seams.read_runtime = Some(runtime);
         }
@@ -291,8 +274,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
                 }
             })?;
         }
-        // Keep the leaf verdict until proof context has passed step 7.
-        // An invalid context must not learn this leaf's tombstone at step 8.
         let takedown = seams
             .takedown
             .check(repo, &leaf_id)
@@ -302,83 +283,26 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
             return Err(Fail::NotFound);
         }
 
-        // Proof context validation precedes validators and payment. Explicit
-        // contexts must themselves be published-reachable, even if the leaf is.
-        let context = if parsed.query.proof {
-            let (proof_commit, path) = match &parsed.target {
-                Target::Ref { path, .. } => (commit.ok_or(Fail::NotFound)?, path.as_slice()),
-                Target::Object(_) => (
-                    parsed.query.commit.ok_or(Fail::NotFound)?,
-                    parsed.query.path.as_deref().ok_or(Fail::NotFound)?,
-                ),
-            };
-            if !ref_path_target(&parsed.target) {
-                self.prove_reachable(&env, seams, &proof_commit, &mut budget)
-                    .await?;
-            }
-            Some(
-                crate::http_objects::proof::context(
-                    &env,
-                    seams.takedown.as_ref(),
-                    proof_commit,
-                    path,
-                    leaf_id,
-                    &mut budget,
-                )
-                .await?,
-            )
-        } else {
-            None
-        };
-        // §3 step 8: a reachable leaf in a valid proof context may return 451.
+        // §3 step 8: a reachable leaf may return 451.
         if let TakedownVerdict::Respond(response) = takedown {
             return Ok(response);
         }
-        let metadata = if let Some(context) = &context {
-            Some(context.metadata(&env, &mut budget).await?)
-        } else {
-            None
-        };
+        // Unsupported proof profile: access checks precede the uniform 416,
+        // but proof preparation, validators, admission and body setup do not run.
+        if parsed.query.proof {
+            return Err(Fail::UnsupportedProof);
+        }
         let ref_path = matches!(parsed.target, Target::Ref { .. });
         let mut inline = Budget(cfg.max_inline_object_bytes);
-        // Proofs use canonical manifests, including when no extracted file
-        // representation is available. Ordinary reads retain their holder gate.
-        let leaf = if context.is_none() {
-            Some(resolve::open_leaf(&env, leaf_id, located, &mut inline).await?)
-        } else {
-            None
-        };
-        // Required canonical chunks are authorization dependencies too.
-        // Prepare their metadata before validators, but defer selector/cap
-        // errors so a matching validator still precedes a 416 (§3 step 9).
-        let proof = if let (Some(context), Some(metadata)) = (&context, &metadata) {
-            match context
-                .select(&env, seams.takedown.as_ref(), metadata, parsed.query.range)
-                .await
-            {
-                Ok(proof) => Some(Ok(proof)),
-                Err(Fail::ProofRange) => Some(Err(Fail::ProofRange)),
-                Err(other) => return Err(other),
-            }
-        } else {
-            None
-        };
-        let etag = context.as_ref().map_or_else(
-            || format!("\"{}\"", to_hex(&leaf_id)),
-            |c| c.etag(parsed.query.range),
-        );
-        let ty = metadata
-            .as_ref()
-            .map(|c| c.ty)
-            .or_else(|| leaf.as_ref().map(|l| l.ty))
-            .ok_or(Fail::Unavailable)?;
-        let metadata_commit = context.as_ref().map(|c| c.commit).or(commit);
+        let leaf = resolve::open_leaf(&env, leaf_id, located, &mut inline).await?;
+        let etag = format!("\"{}\"", to_hex(&leaf_id));
+        let ty = leaf.ty;
         let values = |name: &str| (req.headers)(name);
         let mut success = Vec::with_capacity(8);
         success.push(("ETag", etag.clone()));
         success.push(("X-Mkit-Object", to_hex(&leaf_id)));
         success.push(("X-Mkit-Object-Type", ty.name().to_owned()));
-        if let Some(commit) = &metadata_commit {
+        if let Some(commit) = &commit {
             success.push(("X-Mkit-Commit", to_hex(commit)));
         }
 
@@ -397,11 +321,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
         }
 
         // §3 step 10: representation selection and caps, before Admission.
-        let proof = proof.transpose()?;
-        if proof.is_some() && !seams.proofs.is_supported() {
-            return Err(Fail::ProofRange);
-        }
-        let window = if let Some(leaf) = &leaf {
+        let window = {
             let single = |name: &str| {
                 let mut all = values(name);
                 (all.len() == 1).then(|| all.remove(0))
@@ -424,17 +344,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
                         .with_header("Content-Range", format!("bytes */{}", leaf.len)));
                 }
             }
-        } else {
-            None
         };
-        let selected_len = proof
-            .as_ref()
-            .map(|p| p.encoded_len)
-            .or_else(|| {
-                leaf.as_ref()
-                    .map(|l| window.map_or(l.len, |(a, b)| b - a + 1))
-            })
-            .ok_or(Fail::Unavailable)?;
+        let selected_len = window.map_or(leaf.len, |(a, b)| b - a + 1);
 
         // §3 step 11: read Admission, when configured.
         let first = |name: &str| (req.headers)(name).into_iter().next();
@@ -491,12 +402,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
 
         // §8: public ref redirects retain the original repository prefix.
         // All earlier checks, including validators and Range, have already run.
-        if cfg.redirect_public_refs
-            && ref_path
-            && proof.is_none()
-            && expiry.is_none()
-            && !private_policy
-        {
+        if cfg.redirect_public_refs && ref_path && expiry.is_none() && !private_policy {
             let prefix = req
                 .raw_path
                 .split_once("/-/")
@@ -521,36 +427,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
             }
             HttpBody::Empty
         } else {
-            let opened = if let Some(proof) = &proof {
-                let mut source = crate::http_objects::proof::RepositorySource {
-                    env: Env {
-                        no_reads: &std::collections::BTreeSet::new(),
-                        blobs: &proof_blobs,
-                        meta: &view,
-                        shards: self.shards.as_ref(),
-                        repo,
-                        indexed,
-                        cfg,
-                        metrics: self.metrics.as_ref(),
-                        caps: crate::indexed::resolve::Caps::Legacy,
-                    },
-                    budget: Budget(cfg.http_decode_budget),
-                    gate: seams.takedown.as_ref(),
-                };
-                match seams.proofs.build(proof, &mut source).await {
-                    Ok(bytes) if bytes.len() as u64 == selected_len => {
-                        Ok(crate::http_objects::body_with_hook(
-                            HttpBody::Bytes(bytes.into()),
-                            hook.take(),
-                        ))
-                    }
-                    _ => Err(resolve::Miss::Unavailable),
-                }
-            } else if let Some(leaf) = &leaf {
-                resolve::open_body(&proof_blobs, leaf, window, &mut hook).await
-            } else {
-                Err(resolve::Miss::Unavailable)
-            };
+            let opened = resolve::open_body(&proof_blobs, &leaf, window, &mut hook).await;
             match opened {
                 Ok(body) => body,
                 Err(miss) => {
@@ -564,18 +441,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
                 }
             }
         };
-        let filename = match (&parsed.target, ty, proof.is_none()) {
-            (Target::Ref { path, .. }, ObjectType::Blob | ObjectType::ChunkedBlob, true) => {
+        let filename = match (&parsed.target, ty) {
+            (Target::Ref { path, .. }, ObjectType::Blob | ObjectType::ChunkedBlob) => {
                 path.last().map(Vec::as_slice)
             }
             _ => None,
         };
         let file_headers = filename.map(crate::http_objects::content_headers::media_type);
         let mut response = HttpObjectResponse::new(if window.is_some() { 206 } else { 200 })
-            .with_header(
-                "Accept-Ranges",
-                if proof.is_some() { "none" } else { "bytes" },
-            )
+            .with_header("Accept-Ranges", "bytes")
             .with_header(
                 "Cache-Control",
                 super::http_tokens::cache(
@@ -588,18 +462,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
             .with_header("Content-Length", selected_len.to_string())
             .with_header(
                 "Content-Type",
-                match &proof {
-                    Some(p) if p.span => "application/vnd.mkit.disclosure-span",
-                    Some(_) => "application/vnd.mkit.disclosure",
-                    None => match ty {
-                        ObjectType::Blob | ObjectType::ChunkedBlob => {
-                            file_headers.map_or("application/octet-stream", |(media, _)| media)
-                        }
-                        _ => "application/vnd.mkit.object",
-                    },
+                match ty {
+                    ObjectType::Blob | ObjectType::ChunkedBlob => {
+                        file_headers.map_or("application/octet-stream", |(media, _)| media)
+                    }
+                    _ => "application/vnd.mkit.object",
                 },
             );
-        if let (Some((start, end)), Some(leaf)) = (window, &leaf) {
+        if let Some((start, end)) = window {
             response =
                 response.with_header("Content-Range", format!("bytes {start}-{end}/{}", leaf.len));
         }
@@ -727,10 +597,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
             last = Some(super::list::decode_token(repo, &scan, &next).ok_or(Fail::Unavailable)?);
         }
     }
-}
-
-fn ref_path_target(target: &Target) -> bool {
-    matches!(target, Target::Ref { .. })
 }
 
 /// The storage identity of a parsed repository prefix.

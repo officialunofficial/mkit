@@ -32,6 +32,8 @@ launch profile without naming a platform. On Workers it means:
   `MKIT_HOOK_KEY`, explicit `cache-purge` in `HOOK_ROLES`); an embedder can
   supply a `PurgeSink` and local invalidation instead.
 - Worker HTTP proofs (`?proof=1`) are unsupported and are not advertised.
+  After syntax and normal access checks, they return 416 before proof
+  preparation, validators or payment; conditional requests cannot return 304.
 
 ## Build and deploy
 
@@ -436,7 +438,9 @@ Operator rules:
 ### Limits and acceptance boundaries
 
 `ListRepos` is served with the namespace-scoped authorization of SPEC-SERVER §6.2.
-Worker HTTP proofs (`?proof=1`) are unsupported and not advertised. Publication
+Worker HTTP proofs (`?proof=1`) follow SPEC-HTTP-OBJECTS §3's unsupported
+profile: syntax and normal access checks precede 416, and no proof preparation,
+validator, payment reservation or response stream is started. Publication
 Events, async inspection, inspection holds and hold review, the namespace
 catalog, edge caching, storage leases, GC and storage receipts are not
 implemented. The `store::inspection_*` modules (mode marker, flags, holds) are
