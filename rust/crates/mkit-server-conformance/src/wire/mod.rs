@@ -69,6 +69,14 @@
 //! | Case | Requires | Asserts |
 //! |---|---|---|
 //! | `admission.concurrent_duplicate_during_admit` | `admission`, `hook-stub`, `auth-v2` | Concurrent pre-reservation admission cannot double-charge or share another caller's result |
+//! | `health.deadline_headers` | `health` | seven deadline-header variants preserve Connect/gRPC health replies |
+//! | `files.empty_readback` | `indexed-mode`, `multi-repo`, `tickets`, `auth-v2`, `http-objects` | empty payload GET/HEAD, metadata, conditionals and unsatisfiable ranges |
+//! | `files.deep_tree` | `indexed-mode`, `multi-repo`, `tickets`, `auth-v2`, `http-objects` | 100 directory levels: exact core lookup and object/ref readback |
+//! | `files.long_path` | `indexed-mode`, `multi-repo`, `tickets`, `auth-v2`, `http-objects` | 2048-byte core path with legal components; object readback and HTTP path rejection |
+//! | `files.path_limits` | `indexed-mode`, `multi-repo`, `tickets`, `auth-v2`, `http-objects` | 1024-byte HTTP path accepted, 1025-byte path and 256-byte component rejected |
+//! | `files.byte_distinct_names` | `indexed-mode`, `multi-repo`, `tickets`, `auth-v2`, `http-objects` | NFC/NFD and case-only byte names, distinct ids and canonical byte order |
+//! | `takedown.contract` | `takedown`, `admin`, `indexed-mode`, `multi-repo`, `tickets`, `auth-v2`, `http-objects`, `signed-reads` | signed takedown denies previously readable owner/public/ref/token paths |
+//! | `takedown.persisted_denial` | `takedown`, `admin`, `indexed-mode`, `multi-repo`, `tickets`, `auth-v2`, `http-objects`, `signed-reads` | resume producer fixture after driver restart; denial and admin status persist |
 //! | `admission.challenge_402_typed_detail` | `admission`, `hook-stub`, `auth-v2` | Golden challenge detail, no-store, ordered RFC 9110 challenges (native separate lines; Worker may combine) and PAYMENT-REQUIRED |
 //! | `admission.deny_403_no_detail` | `admission`, `hook-stub`, `auth-v2` | Deny without detail or payment header |
 //! | `admission.no_state_on_challenge` | `admission`, `hook-stub`, `auth-v2` | Challenge leaves refs and outcome ledger empty and permits the same nonce retry |
@@ -264,7 +272,7 @@
 //! | `launch.takedown_chunked_publish` | `indexed-async`, `multi-repo`, `tickets`, `auth-v2`; excludes `test-faults` | valid 32-chunk file and canonical MKPL publish both paired refs with takedown on; report pending polls and whole-push wall time |
 //! | `launch.admin_fixture` | `indexed-async`, `multi-repo`, `tickets`, `auth-v2`; excludes `test-faults` | bounded 131072-byte Blob and canonical `PackList` undergo ticketed verification, publish paired public refs and return exact pack bytes; the HTTP opt-in checks the extracted Blob |
 //! | `embedding.public_fixture` | `indexed-async`, `multi-repo`, `tickets`, `auth-v2`; excludes `test-faults` | default-public no-Set, streamed UploadPart/CompleteUpload, 402/AlreadyPresent, exact 1 MiB Blob and canonical `PackList` undergo ticketed verification, publish paired public refs and return exact pack bytes; the HTTP opt-in checks the extracted Blob |
-//! | `embedding.multipart_file_readback` | `indexed-async`, `multi-repo`, `tickets`, `auth-v2`, `multipart`, `http-objects`; excludes `test-faults` | 9 MB file in 36 chunks undergoes a real multipart push, pending verification and exact HTTP object/ref readback using the 304-byte chunk-offset sidecar |
+//! | `embedding.multipart_file_readback` | `indexed-mode`, `multi-repo`, `tickets`, `auth-v2`, `multipart`, `http-objects`; excludes `test-faults` | 9 MB file in 36 chunks undergoes a real multipart push, inline or scheduled verification and exact HTTP object/ref GET/HEAD/range/metadata readback using the 304-byte chunk-offset sidecar |
 //! | `launch.inspection_rejects_advance` | `indexed-async`, `multi-repo`, `tickets`, `auth-v2`, `sync-inspection`; excludes `test-faults` | configured sync inspector rejects or fails closed after real ticketed Blob verification; no success and both public/signed writer refs remain absent |
 //! | `launch.read_fixture_public` | `indexed-async`, `multi-repo`, `tickets`, `auth-v2`, `http-objects`, `launch-read-fixture`; excludes `test-faults` | seeds a raw-only indexed pack, verifies publication/extraction and mints a token to an owned scratch fixture outside TAP |
 //! | `launch.read_fixture_private` | `indexed-async`, `multi-repo`, `tickets`, `auth-v2`, `http-objects`, `launch-read-fixture`; excludes `test-faults` | revisits the public fixture with the same signer, changes real visibility and mints a private token without reseeding |
