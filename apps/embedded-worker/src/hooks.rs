@@ -93,6 +93,16 @@ impl PurgeSink for HostPurge {
     }
 }
 pub fn config(env: &Env) -> Result<WorkerConfig, ConfigError> {
+    // Purge is an opt-in Paid configuration, not part of the Free streaming setup.
+    let purge = env
+        .var("TAKEDOWN_ENABLED")
+        .is_ok_and(|v| v.to_string() == "true")
+        .then(|| {
+            PurgeHooks::new(
+                Arc::new(HostPurge),
+                Arc::new(LocalCache { cache: WorkerCache }),
+            )
+        });
     let mut cfg = WorkerConfig::from_env_with_hooks(
         env,
         HookCapabilities {
@@ -100,10 +110,7 @@ pub fn config(env: &Env) -> Result<WorkerConfig, ConfigError> {
             admission: true,
             outcomes: true,
         },
-        Some(PurgeHooks::new(
-            Arc::new(HostPurge),
-            Arc::new(LocalCache { cache: WorkerCache }),
-        )),
+        purge,
     )?;
     cfg.admin_on_public_path = false;
     cfg.validate()?;

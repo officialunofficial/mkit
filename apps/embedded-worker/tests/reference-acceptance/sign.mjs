@@ -1,4 +1,4 @@
-// Independent local auth-v2 signer; never prints the private key or envelope.
+// Independent local auth-v2 signer; emits request headers only to the local driver.
 import assert from 'node:assert/strict';
 import {createPrivateKey, createPublicKey, randomBytes, sign} from 'node:crypto';
 import {spawnSync} from 'node:child_process';
