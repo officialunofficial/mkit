@@ -100,18 +100,17 @@ impl<C> fmt::Debug for SqlKvStore<C> {
 }
 
 impl<C: SqlConn> SqlKvStore<C> {
-    /// A store over `conn`, after migrating its schema
-    /// ([`schema::migrate`]).
+    /// A store over `conn`, initializing a fresh schema or requiring the current one
+    /// ([`schema::initialize`]).
     ///
     /// # Errors
-    /// [`StoreError::Unsupported`] for a database with a newer schema than
-    /// this binary's; the engine's error otherwise.
+    /// A noncurrent or incomplete database is refused; backend errors are returned.
     pub fn open(conn: C) -> Result<Self, StoreError> {
-        let version = schema::migrate(&conn)?;
+        let version = schema::initialize(&conn)?;
         Ok(Self::from_checked_conn(conn, version))
     }
 
-    /// Open an existing, matching schema without migrating or writing it.
+    /// Open an existing, matching schema without initializing or writing it.
     /// Used by native export so a backup operation cannot mutate its source.
     ///
     /// # Errors
@@ -587,7 +586,7 @@ impl<C: SqlConn> StoreMaintenance for SqlKvStore<C> {
     }
 
     async fn migrate(&self) -> Result<u32, StoreError> {
-        let version = schema::migrate(&self.conn)?;
+        let version = schema::initialize(&self.conn)?;
         self.schema_version.store(version, Ordering::Relaxed);
         Ok(version)
     }

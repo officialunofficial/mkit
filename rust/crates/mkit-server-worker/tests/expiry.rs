@@ -116,13 +116,20 @@ async fn outcome_delivery_and_reconcile_fire_on_every_outcome_class() {
                 100,
                 AbortReason::Unspecified,
                 String::new(),
+                mkit_server::store::StoredProcedure::UpdateRef,
             ))
             .unwrap(),
         );
         builder.pending(
             "stale-rid",
             None,
-            &ReservationV1::pending("repo".into(), 1, 100, PendingOp::Write),
+            &ReservationV1::pending(
+                "repo".into(),
+                1,
+                100,
+                PendingOp::Write,
+                mkit_server::store::StoredProcedure::UpdateRef,
+            ),
         );
         let mut batch = Batch::new();
         builder

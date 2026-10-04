@@ -157,7 +157,7 @@ fn read_result(
             occurred_at_ms,
             object,
             bytes_served: bytes,
-            procedure: Some(procedure),
+            procedure,
         }
     } else {
         ReservationV1::Aborted {
@@ -165,7 +165,7 @@ fn read_result(
             occurred_at_ms,
             reason: AbortReason::Internal,
             detail: String::new(),
-            procedure: Some(procedure),
+            procedure,
         }
     }
 }

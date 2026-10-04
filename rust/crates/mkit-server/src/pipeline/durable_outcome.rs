@@ -24,7 +24,7 @@ pub struct Outcome {
     /// The operation that produced the outcome: `UpdateRef`, `AdvanceRefs`
     /// (including each consumed ticket's outcome), `BeginUpload` (a ticket
     /// that expired), `UploadPack`, `SetRepoVisibility`, or an HTTP read.
-    /// `None` only for an outcome written by v0.5.0, which did not record it.
+    /// `None` for `RepoStorageChanged`, a system event without a request.
     pub procedure: Option<Procedure>,
     /// The visibility a [`Procedure::SetRepoVisibility`] outcome set or
     /// attempted; `None` for every other outcome.

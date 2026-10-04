@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking (toward 0.6)
 
+- Request reservation variants require `StoredProcedure`. Pass the operation
+  directly to `ReservationV1::{pending, committed, aborted, read_served}`;
+  `with_procedure` is removed. Storage-counter events remain procedure-less,
+  and expired upload tickets still report `BeginUpload`.
+- Stored visibility requires the server-clock `changed_ms`; the creation-time
+  fallback and `visibility_changed_ms` accessor are removed. Read `changed_ms`
+  directly and retain `last_created_ms` for statement anti-replay ordering.
+  Reset unsupported stores; no stored-row conversion is provided.
+- Workers SQL installs the current tables, timer index and schema marker in one
+  transaction, and refuses noncurrent or incomplete stores. Replace internal
+  `schema::migrate`/migration-list usage with `schema::initialize`/`BOOTSTRAP`;
+  `StoreMaintenance::migrate` remains an initialize/check adapter. Reset
+  unsupported stores rather than upgrading them.
+- Workers purge resumes only current four-byte checkpoints (or an empty initial
+  checkpoint), and refuses populated roots without an addressing marker.
+  Reset unsupported state; fresh housekeeping-before-marker bootstrap remains
+  supported.
+
+
 - Storage layout modules `store::{keys, codec, index, tickets, outbox,
   publication, watermark}` move behind the doc-hidden `store::adapter_spi`.
   Adapter/conformance implementations migrate those imports to the SPI;

@@ -1966,7 +1966,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     // undo it (§9.1).
                     last_created_ms: row.as_ref().map_or(0, |r| r.last_created_ms).max(now),
                     last_statement_id: row.and_then(|r| r.last_statement_id),
-                    changed_ms: Some(now),
+                    changed_ms: now,
                 }),
             )
             .put(
@@ -2111,7 +2111,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                             visibility: stored_visibility(visibility),
                             last_created_ms: created,
                             last_statement_id: Some(id.clone()),
-                            changed_ms: Some(ms(self.clock.now_ms())),
+                            changed_ms: ms(self.clock.now_ms()),
                         }),
                     );
                 self.plan_listing_visibility(p, repo, &mut batch).await?;

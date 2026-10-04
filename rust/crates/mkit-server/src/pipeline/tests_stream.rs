@@ -1721,7 +1721,7 @@ fn stream_abort_under_shard_counter_contention_still_writes_the_unsupported_row(
                     occurred_at_ms: 1,
                     reason: codec::AbortReason::Unspecified,
                     detail: String::new(),
-                    procedure: None,
+                    procedure: crate::store::codec::StoredProcedure::UpdateRef,
                 })
                 .unwrap(),
             );

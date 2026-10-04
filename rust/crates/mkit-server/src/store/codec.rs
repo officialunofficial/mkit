@@ -59,21 +59,8 @@ pub struct RepoVisibilityV1 {
     pub last_statement_id: Option<String>,
     /// The server clock when the row last changed visibility (envelope or
     /// statement), Unix milliseconds. URL tokens issued at or before it are
-    /// refused (SPEC-WRITE-GRANTS §9.4). Absent in a row stored before the
-    /// field existed; read it through [`Self::visibility_changed_ms`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub changed_ms: Option<u64>,
-}
-
-impl RepoVisibilityV1 {
-    /// The time of the last visibility change. A legacy row has none, so
-    /// its `last_created_ms` stands in: the envelope path stored server
-    /// time there and the statement path the client-signed `created`, which
-    /// can be earlier than the change (SPEC-WRITE-GRANTS §9.4).
-    #[must_use]
-    pub fn visibility_changed_ms(&self) -> u64 {
-        self.changed_ms.unwrap_or(self.last_created_ms)
-    }
+    /// refused (SPEC-WRITE-GRANTS §9.4). Required on every stored row.
+    pub changed_ms: u64,
 }
 
 /// Deserialize an `Option` whose key must be present (serde would default
@@ -109,7 +96,7 @@ pub struct EpochLease {
     pub expires_at_ms: u64,
     /// Namespace configuration version at grant, starting at 1.
     pub config_version: u64,
-    /// Independent authority generation; absent in legacy unfenced codecs.
+    /// Independent authority generation; absent when authority fencing is disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authority_generation: Option<u64>,
 }
@@ -247,9 +234,6 @@ pub enum PendingOp {
 
 /// The operation a reservation or outcome belongs to, recorded on the row so
 /// an outcome names it, including one the crash reconciler abandons.
-///
-/// Rows written by v0.5.0 carry none (`None` on the row): their operation is
-/// unknown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -324,9 +308,8 @@ pub enum ReservationV1 {
         reconcile_at_ms: u64,
         /// Write or read semantics.
         op: PendingOp,
-        /// The operation being admitted; absent on rows written by v0.5.0.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        procedure: Option<StoredProcedure>,
+        /// The operation being admitted.
+        procedure: StoredProcedure,
     },
     /// Successful `BeginUpload`, awaiting ticket consumption or expiry.
     Ticketed {
@@ -350,9 +333,8 @@ pub enum ReservationV1 {
         new_to_store: u64,
         /// Ref changes included in this apply.
         refs: Vec<OutcomeRef>,
-        /// The operation that committed; absent on rows written by v0.5.0.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        procedure: Option<StoredProcedure>,
+        /// The operation that committed.
+        procedure: StoredProcedure,
     },
     /// Failed apply or abandoned pending reservation.
     #[non_exhaustive]
@@ -365,9 +347,8 @@ pub enum ReservationV1 {
         reason: AbortReason,
         /// Safe diagnostic detail, bounded to 512 UTF-8 bytes.
         detail: String,
-        /// The operation that was aborted; absent on rows written by v0.5.0.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        procedure: Option<StoredProcedure>,
+        /// The operation that was aborted.
+        procedure: StoredProcedure,
     },
     /// An unconsumed ticket expired.
     Expired {
@@ -388,9 +369,8 @@ pub enum ReservationV1 {
         object: Hash,
         /// Actual body bytes sent; zero for HEAD.
         bytes_served: u64,
-        /// The read that was served; absent on rows written by v0.5.0.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        procedure: Option<StoredProcedure>,
+        /// The read that was served.
+        procedure: StoredProcedure,
     },
     /// A repository's stored-bytes counter changed. Not tied to a request:
     /// its id is `rs:<repository digest>:<version>`.
@@ -408,24 +388,25 @@ pub enum ReservationV1 {
 }
 
 impl ReservationV1 {
-    /// A pending reservation, with no operation recorded.
+    /// A complete pending reservation, recording its operation.
     #[must_use]
     pub fn pending(
         repository: String,
         created_at_ms: u64,
         reconcile_at_ms: u64,
         op: PendingOp,
+        procedure: StoredProcedure,
     ) -> Self {
         Self::Pending {
             repository,
             created_at_ms,
             reconcile_at_ms,
             op,
-            procedure: None,
+            procedure,
         }
     }
 
-    /// A committed outcome, with no operation recorded.
+    /// A complete committed outcome, recording its operation.
     #[must_use]
     pub fn committed(
         repository: String,
@@ -434,6 +415,7 @@ impl ReservationV1 {
         new_to_repo: u64,
         new_to_store: u64,
         refs: Vec<OutcomeRef>,
+        procedure: StoredProcedure,
     ) -> Self {
         Self::Committed {
             repository,
@@ -442,69 +424,56 @@ impl ReservationV1 {
             new_to_repo,
             new_to_store,
             refs,
-            procedure: None,
+            procedure,
         }
     }
 
-    /// An aborted outcome, with no operation recorded.
+    /// A complete aborted outcome, recording its operation.
     #[must_use]
     pub fn aborted(
         repository: String,
         occurred_at_ms: u64,
         reason: AbortReason,
         detail: String,
+        procedure: StoredProcedure,
     ) -> Self {
         Self::Aborted {
             repository,
             occurred_at_ms,
             reason,
             detail,
-            procedure: None,
+            procedure,
         }
     }
 
-    /// A served-read outcome, with no operation recorded.
+    /// A complete served-read outcome, recording its operation.
     #[must_use]
     pub fn read_served(
         repository: String,
         occurred_at_ms: u64,
         object: Hash,
         bytes_served: u64,
+        procedure: StoredProcedure,
     ) -> Self {
         Self::ReadServed {
             repository,
             occurred_at_ms,
             object,
             bytes_served,
-            procedure: None,
+            procedure,
         }
     }
 
-    /// The operation recorded on the row; `None` when unknown (a row written
-    /// by v0.5.0) or for a row that does not carry one.
+    /// The recorded request operation; ticket state and system events carry none.
     #[must_use]
     pub fn procedure(&self) -> Option<StoredProcedure> {
         match self {
             Self::Pending { procedure, .. }
             | Self::Committed { procedure, .. }
             | Self::Aborted { procedure, .. }
-            | Self::ReadServed { procedure, .. } => *procedure,
+            | Self::ReadServed { procedure, .. } => Some(*procedure),
             Self::Ticketed { .. } | Self::Expired { .. } | Self::RepoStorageChanged { .. } => None,
         }
-    }
-
-    /// This row recording `operation`. `Ticketed` and `Expired` rows carry no
-    /// operation and are returned unchanged.
-    #[must_use]
-    pub fn with_procedure(mut self, operation: Option<StoredProcedure>) -> Self {
-        if let Self::Pending { procedure, .. }
-        | Self::Committed { procedure, .. }
-        | Self::Aborted { procedure, .. }
-        | Self::ReadServed { procedure, .. } = &mut self
-        {
-            *procedure = operation;
-        }
-        self
     }
 }
 
@@ -1583,58 +1552,47 @@ mod tests {
         Value::new(bytes)
     }
 
-    /// v0.5.0 rows have no `procedure` and keep decoding as "unknown"; the
-    /// new form is written only when the operation is known.
     #[test]
-    fn reservation_rows_record_the_operation_additively() {
-        let v050 = Value::new(
-            [
-                &[CODEC_V1][..],
-                br#"{"state":"aborted","repository":"a","occurred_at_ms":7,"reason":"ABANDONED","detail":""}"#,
-            ]
-            .concat(),
-        );
-        let row = decode_reservation(&v050).unwrap();
-        assert_eq!(row.procedure(), None);
-        assert_eq!(encode_reservation(&row), v050);
-        for (row, tail) in [
+    fn reservation_constructors_record_required_operations() {
+        let visibility = StoredProcedure::SetRepoVisibility(StoredVisibility::Private);
+        for (row, operation) in [
             (
-                ReservationV1::pending("a".into(), 1, 300_001, PendingOp::Write)
-                    .with_procedure(Some(StoredProcedure::AdvanceRefs)),
-                r#","op":"write","procedure":"advance_refs"}"#.to_owned(),
+                ReservationV1::pending(
+                    "a".into(),
+                    1,
+                    2,
+                    PendingOp::Write,
+                    StoredProcedure::AdvanceRefs,
+                ),
+                StoredProcedure::AdvanceRefs,
             ),
             (
-                ReservationV1::committed("a".into(), 7, 0, 0, 0, vec![]).with_procedure(Some(
-                    StoredProcedure::SetRepoVisibility(StoredVisibility::Private),
-                )),
-                r#","refs":[],"procedure":{"set_repo_visibility":"private"}}"#.to_owned(),
+                ReservationV1::committed("a".into(), 7, 0, 0, 0, vec![], visibility),
+                visibility,
             ),
             (
-                ReservationV1::aborted("a".into(), 7, AbortReason::Internal, String::new())
-                    .with_procedure(Some(StoredProcedure::UpdateRef)),
-                r#","detail":"","procedure":"update_ref"}"#.to_owned(),
+                ReservationV1::aborted(
+                    "a".into(),
+                    7,
+                    AbortReason::Internal,
+                    String::new(),
+                    StoredProcedure::UpdateRef,
+                ),
+                StoredProcedure::UpdateRef,
             ),
             (
-                ReservationV1::read_served("a".into(), 7, [0x33; 32], 9)
-                    .with_procedure(Some(StoredProcedure::HttpGetRefPath)),
-                r#","bytes_served":9,"procedure":"http_get_ref_path"}"#.to_owned(),
+                ReservationV1::read_served(
+                    "a".into(),
+                    7,
+                    [0x33; 32],
+                    9,
+                    StoredProcedure::HttpGetRefPath,
+                ),
+                StoredProcedure::HttpGetRefPath,
             ),
         ] {
-            let value = encode_reservation(&row);
-            let text = std::str::from_utf8(&value.as_bytes()[1..]).unwrap();
-            assert!(text.ends_with(&tail), "{text}");
-            assert_eq!(decode_reservation(&value).unwrap(), row);
-        }
-        // An unknown operation fails closed, like an unknown state.
-        for body in [
-            r#"{"state":"aborted","repository":"a","occurred_at_ms":7,"reason":"ABANDONED","detail":"","procedure":"x"}"#,
-            r#"{"state":"committed","repository":"a","occurred_at_ms":7,"bytes_stored":0,"new_to_repo":0,"new_to_store":0,"refs":[],"procedure":{"set_repo_visibility":"x"}}"#,
-        ] {
-            assert!(
-                decode_reservation(&Value::new([&[CODEC_V1][..], body.as_bytes()].concat()))
-                    .is_err(),
-                "{body}"
-            );
+            assert_eq!(row.procedure(), Some(operation));
+            assert_eq!(decode_reservation(&encode_reservation(&row)).unwrap(), row);
         }
     }
 
@@ -1710,13 +1668,13 @@ mod tests {
     #[test]
     fn reservation_codec_all_variants_golden_and_roundtrip() {
         let cases = vec![
-            (ReservationV1::Pending { repository: "a".into(), created_at_ms: 1, reconcile_at_ms: 300_001, op: PendingOp::Write, procedure: None }, r#"{"state":"pending","repository":"a","created_at_ms":1,"reconcile_at_ms":300001,"op":"write"}"#.into()),
-            (ReservationV1::Pending { repository: "a".into(), created_at_ms: 1, reconcile_at_ms: 60_001, op: PendingOp::Read, procedure: None }, r#"{"state":"pending","repository":"a","created_at_ms":1,"reconcile_at_ms":60001,"op":"read"}"#.into()),
+            (ReservationV1::Pending { repository: "a".into(), created_at_ms: 1, reconcile_at_ms: 300_001, op: PendingOp::Write, procedure: StoredProcedure::UpdateRef }, r#"{"state":"pending","repository":"a","created_at_ms":1,"reconcile_at_ms":300001,"op":"write","procedure":"update_ref"}"#.into()),
+            (ReservationV1::Pending { repository: "a".into(), created_at_ms: 1, reconcile_at_ms: 60_001, op: PendingOp::Read, procedure: StoredProcedure::HttpGetObject }, r#"{"state":"pending","repository":"a","created_at_ms":1,"reconcile_at_ms":60001,"op":"read","procedure":"http_get_object"}"#.into()),
             (ReservationV1::Ticketed { ticket_id: [0x11; 32] }, format!(r#"{{"state":"ticketed","ticket_id":"{}"}}"#, "11".repeat(32))),
-            (ReservationV1::Committed { repository: "a".into(), occurred_at_ms: 7, bytes_stored: 9, new_to_repo: 8, new_to_store: 6, refs: vec![OutcomeRef { name: "refs/heads/main".into(), new: Some([0x22; 32]), deleted: false }, OutcomeRef { name: "refs/tags/v1".into(), new: None, deleted: true }], procedure: None }, format!(r#"{{"state":"committed","repository":"a","occurred_at_ms":7,"bytes_stored":9,"new_to_repo":8,"new_to_store":6,"refs":[{{"name":"refs/heads/main","new":"{}","deleted":false}},{{"name":"refs/tags/v1","new":null,"deleted":true}}]}}"#, "22".repeat(32))),
-            (ReservationV1::Aborted { repository: "a".into(), occurred_at_ms: 7, reason: AbortReason::Abandoned, detail: "gone".into(), procedure: None }, r#"{"state":"aborted","repository":"a","occurred_at_ms":7,"reason":"ABANDONED","detail":"gone"}"#.into()),
+            (ReservationV1::Committed { repository: "a".into(), occurred_at_ms: 7, bytes_stored: 9, new_to_repo: 8, new_to_store: 6, refs: vec![OutcomeRef { name: "refs/heads/main".into(), new: Some([0x22; 32]), deleted: false }, OutcomeRef { name: "refs/tags/v1".into(), new: None, deleted: true }], procedure: StoredProcedure::UpdateRef }, format!(r#"{{"state":"committed","repository":"a","occurred_at_ms":7,"bytes_stored":9,"new_to_repo":8,"new_to_store":6,"refs":[{{"name":"refs/heads/main","new":"{}","deleted":false}},{{"name":"refs/tags/v1","new":null,"deleted":true}}],"procedure":"update_ref"}}"#, "22".repeat(32))),
+            (ReservationV1::Aborted { repository: "a".into(), occurred_at_ms: 7, reason: AbortReason::Abandoned, detail: "gone".into(), procedure: StoredProcedure::UpdateRef }, r#"{"state":"aborted","repository":"a","occurred_at_ms":7,"reason":"ABANDONED","detail":"gone","procedure":"update_ref"}"#.into()),
             (ReservationV1::Expired { repository: "a".into(), occurred_at_ms: 7 }, r#"{"state":"expired","repository":"a","occurred_at_ms":7}"#.into()),
-            (ReservationV1::ReadServed { repository: "a".into(), occurred_at_ms: 7, object: [0x33; 32], bytes_served: 9, procedure: None }, format!(r#"{{"state":"read_served","repository":"a","occurred_at_ms":7,"object":"{}","bytes_served":9}}"#, "33".repeat(32))),
+            (ReservationV1::ReadServed { repository: "a".into(), occurred_at_ms: 7, object: [0x33; 32], bytes_served: 9, procedure: StoredProcedure::HttpGetObject }, format!(r#"{{"state":"read_served","repository":"a","occurred_at_ms":7,"object":"{}","bytes_served":9,"procedure":"http_get_object"}}"#, "33".repeat(32))),
         ];
         for (row, golden) in cases {
             let value = encode_reservation(&row);
@@ -1725,6 +1683,26 @@ mod tests {
                 [&[CODEC_V1][..], golden.as_bytes()].concat()
             );
             assert_eq!(decode_reservation(&value).unwrap(), row);
+            if row.procedure().is_some() {
+                let json = serde_json::to_value(&row).unwrap();
+                for value in [
+                    None,
+                    Some(serde_json::Value::Null),
+                    Some(serde_json::json!("unknown")),
+                    Some(serde_json::json!({"set_repo_visibility":"unknown"})),
+                ] {
+                    let mut bad = json.clone();
+                    if let Some(value) = value {
+                        bad["procedure"] = value;
+                    } else {
+                        bad.as_object_mut().unwrap().remove("procedure");
+                    }
+                    assert!(matches!(
+                        decode_reservation(&json_value(&bad)),
+                        Err(StoreError::Corrupt(_))
+                    ));
+                }
+            }
             let mut json = serde_json::to_value(&row).unwrap();
             json["extra"] = serde_json::json!(1);
             assert!(decode_reservation(&json_value(&json)).is_err());
@@ -1743,10 +1721,10 @@ mod tests {
                 occurred_at_ms: 7,
                 reason,
                 detail: String::new(),
-                procedure: None,
+                procedure: StoredProcedure::UpdateRef,
             };
             let value = encode_reservation(&row);
-            assert_eq!(value.as_bytes(), format!("\x01{{\"state\":\"aborted\",\"repository\":\"a\",\"occurred_at_ms\":7,\"reason\":\"{name}\",\"detail\":\"\"}}").as_bytes());
+            assert_eq!(value.as_bytes(), format!("\x01{{\"state\":\"aborted\",\"repository\":\"a\",\"occurred_at_ms\":7,\"reason\":\"{name}\",\"detail\":\"\",\"procedure\":\"update_ref\"}}").as_bytes());
             assert_eq!(decode_reservation(&value).unwrap(), row);
         }
         let full_repo = format!(
@@ -1763,7 +1741,7 @@ mod tests {
 
     #[test]
     fn reservation_codec_rejects_malformed_states_and_outcomes() {
-        for json in [
+        for mut json in [
             serde_json::json!({"state":"unknown"}),
             serde_json::json!({"state":"pending"}),
             serde_json::json!({"state":"ticketed","ticket_id":"nope"}),
@@ -1776,6 +1754,9 @@ mod tests {
             serde_json::json!({"state":"committed","repository":"a","occurred_at_ms":7,"bytes_stored":1,"new_to_repo":1,"new_to_store":0,"refs":[{"name":"refs/heads/a","new":"bad","deleted":false}]}),
             serde_json::json!({"state":"committed","repository":"a","occurred_at_ms":7,"bytes_stored":1,"new_to_repo":1,"new_to_store":0,"refs":[{"name":"refs/heads/a","new":null,"deleted":true,"extra":1}]}),
         ] {
+            if matches!(json["state"].as_str(), Some("aborted" | "committed")) {
+                json["procedure"] = serde_json::json!("update_ref");
+            }
             assert!(matches!(
                 decode_reservation(&json_value(&json)),
                 Err(StoreError::Corrupt(_))
@@ -1786,7 +1767,7 @@ mod tests {
             occurred_at_ms: 7,
             reason: AbortReason::Internal,
             detail: "é".repeat(256),
-            procedure: None,
+            procedure: StoredProcedure::UpdateRef,
         };
         assert_eq!(
             decode_reservation(&encode_reservation(&boundary)).unwrap(),
@@ -2154,19 +2135,19 @@ mod tests {
             visibility: StoredVisibility::Public,
             last_created_ms: 0,
             last_statement_id: None,
-            changed_ms: None,
+            changed_ms: 0,
         };
         let private = RepoVisibilityV1 {
             visibility: StoredVisibility::Private,
             last_created_ms: 1_700_000_000_000,
             last_statement_id: Some("ab".repeat(32)),
-            changed_ms: Some(1_700_000_000_001),
+            changed_ms: 1_700_000_000_001,
         };
         let public_value = encode_repo_visibility(&public);
         let private_value = encode_repo_visibility(&private);
         assert_eq!(
             public_value.as_bytes(),
-            b"\x01{\"visibility\":\"public\",\"last_created_ms\":0,\"last_statement_id\":null}"
+            b"\x01{\"visibility\":\"public\",\"last_created_ms\":0,\"last_statement_id\":null,\"changed_ms\":0}"
         );
         assert_eq!(
             private_value.as_bytes(),
@@ -2178,21 +2159,13 @@ mod tests {
         );
         assert_eq!(decode_repo_visibility(&public_value).unwrap(), public);
         assert_eq!(decode_repo_visibility(&private_value).unwrap(), private);
-        // A legacy 3-key row has no change time and falls back to its
-        // last accepted creation time.
-        let legacy = decode_repo_visibility(&Value::new(
-            b"\x01{\"visibility\":\"private\",\"last_created_ms\":7,\"last_statement_id\":null}"
-                .to_vec(),
-        ))
-        .unwrap();
-        assert_eq!(legacy.changed_ms, None);
-        assert_eq!(legacy.visibility_changed_ms(), 7);
-        assert_eq!(private.visibility_changed_ms(), 1_700_000_000_001);
         for bytes in [
             &b""[..],
             b"\x02{\"visibility\":\"public\",\"last_created_ms\":0,\"last_statement_id\":null}",
             b"\x01{\"visibility\":\"internal\",\"last_created_ms\":0,\"last_statement_id\":null}",
             b"\x01{\"visibility\":\"public\"}",
+            b"\x01{\"visibility\":\"private\",\"last_created_ms\":7,\"last_statement_id\":null}",
+            b"\x01{\"visibility\":\"private\",\"last_created_ms\":7,\"last_statement_id\":null,\"changed_ms\":null}",
             b"\x01{\"visibility\":\"public\",\"last_created_ms\":0,\"last_statement_id\":\"AB\",\"changed_ms\":0}",
             b"\x01{\"visibility\":\"public\",\"last_created_ms\":0}",
             b"\x01{\"visibility\":\"public\",\"last_created_ms\":0,\"last_statement_id\":\"ab\",\"changed_ms\":0,\"extra\":1}",

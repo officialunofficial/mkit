@@ -680,7 +680,7 @@ impl<H: HookSet> Fx<H> {
                 visibility: codec::StoredVisibility::Private,
                 last_created_ms: 0,
                 last_statement_id: None,
-                changed_ms: None,
+                changed_ms: 0,
             }),
         );
         let p = self.pipe.shards.coordinator(&repo.namespace);

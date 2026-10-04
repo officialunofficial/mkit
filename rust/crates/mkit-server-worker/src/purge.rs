@@ -109,24 +109,11 @@ impl<C: CacheDelete> LocalInvalidation for LocalCache<C> {
         budget: &'a SliceBudget,
     ) -> BoxFuture<'a, Result<Option<Vec<u8>>, StoreError>> {
         Box::pin(async move {
-            // A restored v0.5.0 namespace position resumes only its path
-            // deletion; the catalog walk it tracked no longer exists.
-            let cursor = if checkpoint.first() == Some(&b'{') {
-                let pos: NamespacePosition = serde_json::from_slice(checkpoint)
-                    .map_err(|_| StoreError::Corrupt("invalid purge cursor".into()))?;
-                if pos.paths {
-                    return Ok(None);
-                }
-                pos.cursor.to_be_bytes().to_vec()
-            } else {
-                checkpoint.to_vec()
-            };
-            let cursor = if cursor.is_empty() {
+            let cursor = if checkpoint.is_empty() {
                 0
             } else {
                 u32::from_be_bytes(
-                    cursor
-                        .as_slice()
+                    checkpoint
                         .try_into()
                         .map_err(|_| StoreError::Corrupt("invalid purge cursor".into()))?,
                 )
@@ -137,19 +124,6 @@ impl<C: CacheDelete> LocalInvalidation for LocalCache<C> {
                 .map(|next| next.to_be_bytes().to_vec()))
         })
     }
-}
-
-/// Checkpoint v0.5.0 wrote for a namespace purge that also walked the
-/// repository catalog. That walk is gone; `paths` and `cursor` still say how
-/// much of the request's own exact-path deletion was done.
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct NamespacePosition {
-    paths: bool,
-    done: bool,
-    after: Option<Vec<u8>>,
-    repository: Option<String>,
-    cursor: u32,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -273,6 +247,31 @@ mod tests {
             .unwrap(),
             None
         );
+        assert!(cache.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn invalid_checkpoints_fail_before_cache_deletion() {
+        let cache = Cache::default();
+        let local = LocalCache {
+            cache: cache.clone(),
+        };
+        for checkpoint in [
+            b"{".as_slice(),
+            br#"{"paths":true,"done":true,"after":null,"repository":null,"cursor":0}"#,
+            &[0],
+            &[0; 3],
+            &[0; 5],
+        ] {
+            assert!(matches!(
+                futures::executor::block_on(local.invalidate_checkpoint(
+                    &request("bad-cursor"),
+                    checkpoint,
+                    &SliceBudget::new(10)
+                )),
+                Err(StoreError::Corrupt(_))
+            ));
+        }
         assert!(cache.0.lock().unwrap().is_empty());
     }
 

@@ -69,6 +69,7 @@ async fn seed(store: &MemoryKv, rows: usize) {
                     100,
                     AbortReason::Unspecified,
                     String::new(),
+                    mkit_server::store::StoredProcedure::UpdateRef,
                 ))
                 .unwrap(),
             );

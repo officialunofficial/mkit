@@ -544,7 +544,7 @@ where
 }
 
 /// Backend-defined maintenance (R-19). Optional: the pipeline never calls
-/// it. `SQLite` implements it with versioned physical migrations and
+/// it. `SQLite` implements it with atomic current-schema initialization and
 /// `VACUUM INTO` (M0-09); another backend may implement it however it
 /// likes, and every backend still has the portable export above.
 pub trait StoreMaintenance: MaybeSend + MaybeSync {
@@ -552,8 +552,8 @@ pub trait StoreMaintenance: MaybeSend + MaybeSync {
     /// `user_version`); independent of [`keys::LAYOUT_VERSION`].
     fn layout_version(&self) -> u32;
 
-    /// Migrate the physical layout to the version this binary expects;
-    /// returns the version reached. Idempotent.
+    /// Initialize or check the physical layout this binary expects;
+    /// returns the current version. Idempotent. Unsupported layouts are refused.
     fn migrate(&self) -> impl Future<Output = Result<u32, StoreError>> + MaybeSend;
 
     /// Write a consistent backend-native backup to `dest`, a location the

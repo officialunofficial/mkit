@@ -1,69 +1,37 @@
-//! The physical schema and its versioned, forward-only migrations.
+//! Atomic current-schema bootstrap and strict reopen checks.
 //!
 //! Every statement runs on `rusqlite` and on Durable Object `SQLite`: no
 //! `ATTACH`, no `PRAGMA`, no transaction control. The version lives in the
 //! one-row `mkit_schema` table (not `PRAGMA user_version`, which Durable
-//! Objects do not allow).
+//! Objects do not allow). Unsupported stores must be reset.
 //!
-//! Logical layout changes (new key classes, new row kinds) need **no**
-//! physical migration: they are key layouts, versioned by the `v` row
-//! (`store::keys::layout_version`). A physical migration changes only the
-//! `kv` table's shape.
-//!
-//! Physical v1: one `kv` table keyed by `(part, key)`. `part` is the
+//! The `kv` table is keyed by `(part, key)`. `part` is the
 //! [`Partition::encode`](mkit_server::Partition::encode) bytes, so one native
-//! file holds every partition (a D34 shard is a `part` value); a Durable
-//! Object holds one partition, and the column is constant there. It is a
-//! `BLOB`, not `TEXT`: the encoding's components end in `0x00`, which
-//! `SQLite` text functions treat as a terminator.
-//!
-//! Physical v2 adds `kv_timers`, a partial index over the timer rows
-//! (`w 00 …`) that lets a backend find each partition's earliest timer.
-//! It is index-only, but a binary built before v2 refuses a v2 database
-//! ("schema is newer than this binary"): roll back only to a v2 binary.
+//! file holds every partition; a Durable Object holds one partition.
+//! The `kv_timers` partial index finds each partition's earliest timer.
 
-use super::{SqlConn, SqlError, SqlValue, TxFn, count};
+use super::{SqlConn, SqlError, SqlValue, count};
 use mkit_server::store::StoreError;
 
-/// One physical migration: its statements run in one transaction, which
-/// then records `version`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Migration {
-    /// The schema version this migration reaches.
-    pub version: u32,
-    /// Its statements, in order. Each is idempotent (`IF NOT EXISTS`).
-    pub statements: &'static [&'static str],
-}
-
-/// The version table, created before anything reads it.
-pub const BOOTSTRAP: &str = "CREATE TABLE IF NOT EXISTS mkit_schema \
-     (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL)";
-
-const READ_VERSION: &str = "SELECT version FROM mkit_schema WHERE id = 1";
-const WRITE_VERSION: &str = "INSERT INTO mkit_schema (id, version) VALUES (1, ?1) \
-     ON CONFLICT (id) DO UPDATE SET version = excluded.version";
-
-/// Every migration, in ascending version order.
-pub const MIGRATIONS: &[Migration] = &[
-    Migration {
-        version: 1,
-        statements: &[
-            "CREATE TABLE IF NOT EXISTS kv (part BLOB NOT NULL, key BLOB NOT NULL, \
-         value BLOB NOT NULL, PRIMARY KEY (part, key)) WITHOUT ROWID",
-        ],
-    },
-    Migration {
-        version: 2,
-        statements: &[
-            "CREATE INDEX IF NOT EXISTS kv_timers ON kv (key, part) WHERE key >= x'7700' AND key < x'7701'",
-        ],
-    },
+/// Current schema statements, installed together with the version row.
+pub const BOOTSTRAP: &[&str] = &[
+    "CREATE TABLE mkit_schema (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL)",
+    "CREATE TABLE kv (part BLOB NOT NULL, key BLOB NOT NULL, \
+     value BLOB NOT NULL, PRIMARY KEY (part, key)) WITHOUT ROWID",
+    "CREATE INDEX kv_timers ON kv (key, part) WHERE key >= x'7700' AND key < x'7701'",
 ];
 
-/// The schema version this binary expects: the last migration's.
+const READ_VERSION: &str = "SELECT version FROM mkit_schema WHERE id = 1";
+const WRITE_VERSION: &str = "INSERT INTO mkit_schema (id, version) VALUES (1, ?1)";
+const SCHEMA_PRESENT: &str =
+    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'mkit_schema'";
+const STORE_OBJECTS: &str = "SELECT 1 FROM sqlite_master WHERE \
+    (type = 'table' AND name IN ('mkit_schema', 'kv')) OR (type = 'index' AND name = 'kv_timers')";
+
+/// The schema version this binary requires.
 pub const SCHEMA_VERSION: u32 = 2;
 
-/// The version recorded in the database: 0 for a new one.
+/// The version recorded in the database: 0 if the marker row is missing.
 fn stored_version<C: SqlConn>(conn: &C) -> Result<u32, SqlError> {
     match conn.query(READ_VERSION, &[])?.first() {
         None => Ok(0),
@@ -71,66 +39,43 @@ fn stored_version<C: SqlConn>(conn: &C) -> Result<u32, SqlError> {
     }
 }
 
-/// Check an existing database without applying migrations or writing schema rows.
+/// Check an existing database without writing schema rows.
 ///
 /// # Errors
-/// The database's version is not exactly this binary's, or it cannot be read.
+/// The database's version is not exactly this binary's, its schema is incomplete,
+/// or it cannot be read.
 pub fn require_current<C: SqlConn>(conn: &C) -> Result<u32, StoreError> {
-    if conn
-        .query(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'mkit_schema'",
-            &[],
-        )?
-        .is_empty()
-    {
-        return Err(StoreError::Unsupported(format!(
-            "database schema version 0 differs from binary version {SCHEMA_VERSION}; export with a matching binary"
-        ).into()));
-    }
-    let version = stored_version(conn)?;
+    let version = if conn.query(SCHEMA_PRESENT, &[])?.is_empty() {
+        0
+    } else {
+        stored_version(conn)?
+    };
     if version != SCHEMA_VERSION {
         return Err(StoreError::Unsupported(format!(
-            "database schema version {version} differs from binary version {SCHEMA_VERSION}; export with a matching binary"
+            "database schema version {version} differs from binary version {SCHEMA_VERSION}; reset the store"
         ).into()));
+    }
+    if conn.query(STORE_OBJECTS, &[])?.len() != BOOTSTRAP.len() {
+        return Err(StoreError::Corrupt("incomplete SQL schema".into()));
     }
     Ok(version)
 }
 
-enum Step {
-    Applied,
-    Done(u32),
-}
-
-/// Bring the database to [`SCHEMA_VERSION`]; returns the version reached.
-/// Each missing migration runs in its own transaction, which re-reads the
-/// version first, so concurrent openers apply it once. Idempotent.
+/// Initialize a fresh store atomically, or reopen only the current schema.
+/// Concurrent openers check under the same transaction as creation.
 ///
 /// # Errors
-/// [`StoreError::Unsupported`] if the database records a newer version than
-/// this binary's (there is no downgrade; nothing is changed); the engine's
-/// error otherwise.
-pub fn migrate<C: SqlConn>(conn: &C) -> Result<u32, StoreError> {
-    loop {
-        let step: TxFn<C, Step> = Box::new(|c: C| {
-            c.exec(BOOTSTRAP, &[])?;
-            let current = stored_version(&c)?;
-            let Some(next) = MIGRATIONS.iter().find(|m| m.version > current) else {
-                return Ok(Step::Done(current));
-            };
-            for statement in next.statements {
-                c.exec(statement, &[])?;
-            }
-            c.exec(WRITE_VERSION, &[SqlValue::Integer(next.version.into())])?;
-            Ok(Step::Applied)
-        });
-        match conn.transaction(step)? {
-            Step::Applied => {}
-            Step::Done(version) if version > SCHEMA_VERSION => {
-                return Err(StoreError::Unsupported(
-                    "database schema is newer than this binary".into(),
-                ));
-            }
-            Step::Done(version) => return Ok(version),
+/// An existing noncurrent or incomplete store is refused without changes;
+/// backend failures roll back all bootstrap statements and the marker.
+pub fn initialize<C: SqlConn>(conn: &C) -> Result<u32, StoreError> {
+    conn.transaction(Box::new(|c: C| {
+        if !c.query(STORE_OBJECTS, &[])?.is_empty() {
+            return Ok(require_current(&c));
         }
-    }
+        for statement in BOOTSTRAP {
+            c.exec(statement, &[])?;
+        }
+        c.exec(WRITE_VERSION, &[SqlValue::Integer(SCHEMA_VERSION.into())])?;
+        Ok(Ok(SCHEMA_VERSION))
+    }))?
 }
