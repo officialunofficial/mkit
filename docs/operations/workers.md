@@ -73,7 +73,8 @@ pending interval remains unexplained until this trace identifies its gaps.
 
 After relay delivery, at most sixteen future timer rows are inspected and eight
 waiting jobs are nudged with guarded timer moves. Only ordinary delivery polls
-within the next two seconds qualify; infrastructure backoff is preserved. There
+qualify; infrastructure backoff is preserved. There is no upper time cutoff:
+work during the tick may have created a poll after its business-time snapshot. There
 is no inline verification. Unobserved jobs, contention and a crash before the
 nudge commits recover via their existing two-second poll.
 

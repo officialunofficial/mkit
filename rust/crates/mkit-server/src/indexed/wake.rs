@@ -47,7 +47,7 @@ pub(crate) async fn after_delivery<S: NamespaceStore>(
     delivered_through: u64,
 ) -> Result<Batch, StoreError> {
     let start = keys::timer(ctx.now_ms.saturating_add(1), 0, b"");
-    let end = keys::timer(ctx.now_ms.saturating_add(2_001), 0, b"");
+    let (_, end) = keys::class_range(keys::TAG_TIMER);
     let page = ctx
         .store
         .scan(ctx.partition, &start, &end, None, 16)
@@ -138,6 +138,49 @@ mod tests {
     use crate::store::BatchOutcome;
     use crate::{ManualClock, MemoryKv, NamespaceKey, Partition, RepoName, Value};
     use std::sync::Arc;
+
+    #[test]
+    fn nudge_accepts_polls_created_after_the_tick_snapshot() {
+        futures_executor::block_on(async {
+            let store = MemoryKv::with_clock(Arc::new(ManualClock::new(500)));
+            let source = Partition::Namespace(NamespaceKey::deployment_default());
+            let repo = RepoName::new("latency").unwrap();
+            let pack = [1; 32];
+            let mut job = VerifyJobV1::new(pack, 100, 320, 64);
+            job.phase = Phase::AwaitDelivery;
+            job.last_relay_seq = Some(7);
+            let reference = timer_reference(&repo, &pack);
+            let poll = keys::timer(2_500, kinds::VERIFY.get(), &reference);
+            store
+                .apply(
+                    &source,
+                    Batch::new()
+                        .put(keys::verify_job(&repo, &pack), encode_job(&job))
+                        .put(poll.clone(), Value::default()),
+                )
+                .await
+                .unwrap();
+            let ctx = TimerCtx {
+                store: &store,
+                partition: &source,
+                now_ms: 100,
+            };
+            let batch = after_delivery(&ctx, 7).await.unwrap();
+            assert_eq!(batch.writes.len(), 2);
+            assert_eq!(
+                store.apply(&source, batch).await.unwrap(),
+                BatchOutcome::Committed
+            );
+            assert!(store.get(&source, &poll).await.unwrap().is_none());
+            assert!(
+                store
+                    .get(&source, &keys::timer(100, kinds::VERIFY.get(), &reference))
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        });
+    }
 
     #[test]
     fn nudge_is_bounded_deduplicated_guarded_and_preserves_failure_backoff() {

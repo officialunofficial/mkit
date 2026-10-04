@@ -57,7 +57,7 @@ async fn retry_after<N: NamespaceStore>(
     source: &Partition,
     repo: &RepoId,
     pack: &Hash,
-    now: u64,
+    clock: &dyn Clock,
 ) -> Result<u64, ServerError> {
     let reference = timer_reference(&repo.name, pack);
     let (start, end) = keys::class_range(keys::TAG_TIMER);
@@ -76,6 +76,7 @@ async fn retry_after<N: NamespaceStore>(
                 && kind == kinds::VERIFY.get()
                 && found.as_ref() == reference.as_slice()
             {
+                let now = u64::try_from(clock.now_ms()).unwrap_or(0);
                 return Ok(due_at_ms.saturating_sub(now).div_ceil(1_000).clamp(1, 60) * 1_000);
             }
         }
@@ -834,7 +835,7 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
             pending = Some(
                 pending
                     .unwrap_or(0)
-                    .max(retry_after(store, source, repo, &ticket.pack_id, now).await?),
+                    .max(retry_after(store, source, repo, &ticket.pack_id, clock).await?),
             );
             continue;
         }
