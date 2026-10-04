@@ -200,13 +200,6 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
             // front of the next scan and is never bypassed.
             return Ok(Fired::Retry);
         }
-        // Target watermarks are durable and source cleanup has committed.
-        // The remaining source head gives a conservative contiguous watermark.
-        let wake = if dispatch.delivered.is_empty() {
-            Batch::new()
-        } else {
-            crate::indexed::wake::after_relay(ctx, os, metrics).await
-        };
         let has_remaining = if !scan.blocked.is_empty()
             || scan.cursor < scan.cycle_end
             || window.rows.len() > dispatch.delivered.len()
@@ -215,6 +208,13 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
         } else {
             let remaining = ctx.store.scan(ctx.partition, &start, &end, None, 1).await?;
             !remaining.entries.is_empty() || remaining.next.is_some()
+        };
+        // Target watermarks are durable and source cleanup has committed.
+        // The remaining source head gives a conservative contiguous watermark.
+        let wake = if dispatch.delivered.is_empty() {
+            Batch::new()
+        } else {
+            crate::indexed::wake::after_relay(ctx, os, metrics).await
         };
         if has_remaining {
             let due = ctx
