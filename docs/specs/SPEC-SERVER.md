@@ -3656,6 +3656,8 @@ returns retryable `unavailable` with the same takedown id while resuming its
 cursor. Its nonce and operation results become completed only after every
 requested denial is active, including recovery through timer 15. Completed
 results retain the stored-response and role-independent replay rule above.
+Completed denial activation still returns `complete = false` for the remaining
+launch takedown lifecycle (§18).
 A nonce reservation that has not durably accepted an action still returns
 `aborted`. All other procedures retain the rule above.
 

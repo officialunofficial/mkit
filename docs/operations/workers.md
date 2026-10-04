@@ -335,13 +335,13 @@ A missing repository storage counter (`rb`) indicates a corrupt store: stored-by
 
 1. With a moderation admin signer, submit a stable `operation_id`, named source
    repository and either 1–256 distinct Blob/manifest ids or one whole pack id.
-   Keep reason private. The intended acceptance contract activates every
-   requested global denial and returns pending `complete=false`; retain the
-   takedown id and audit reference. An open replay defect can return stored HTTP
-   200 after interrupted activation while some requested denials remain inactive.
-   Its correction and regression evidence are required before candidate selection.
-   Until corrected, verify every requested denial and use the emergency WAF
-   isolation procedure when needed; successful replay alone proves no such check.
+   Keep reason private. HTTP 200 confirms every requested global denial is
+   active and returns `complete=false`; retain the takedown id and audit
+   reference. Interrupted activation stores retryable HTTP 503 (`unavailable`)
+   with the same takedown id. Replaying the signed request or its `operation_id`
+   resumes activation; replay results become HTTP 200 only after every denial
+   is active. Timer 15 can also finish activation. `complete=false` describes
+   the remaining preservation and takedown lifecycle, not denial activation.
 2. Check public HTTP/token/pack/reuse denial, then poll GetTakedown and bounded
    ListTakedowns for acquisition, verification, discovery, retention, holds and
    purge status. Under `any`, holder discovery remains incomplete.

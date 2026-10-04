@@ -272,6 +272,7 @@ mod accounting {
         reject_operations: bool,
         header_per_object: usize,
         header_attempts: std::collections::BTreeMap<Key, usize>,
+        unavailable_action: Option<Key>,
     }
     #[derive(Clone)]
     struct Counted {
@@ -346,6 +347,13 @@ mod accounting {
                         }
                     })
                     .collect::<Vec<_>>();
+                if faults
+                    .unavailable_action
+                    .as_ref()
+                    .is_some_and(|key| puts.contains(&key))
+                {
+                    return Err(StoreError::unavailable("injected activation interruption"));
+                }
                 let draft = puts
                     .iter()
                     .any(|k| k.as_bytes().starts_with(b"b\0\xffintent-draft\0"));
@@ -488,6 +496,7 @@ mod accounting {
     }
     struct Fixture {
         engine: Engine<Counted>,
+        config: Config,
         observed: Observed,
         input: serde_json::Value,
         pack: Hash,
@@ -557,8 +566,8 @@ mod accounting {
             };
             let key = SigningKey::from_bytes(&[71; 32]);
             let config = Config::parse("https://server.example", &json!({"version":1,"keys":[{"keyId":"operator","alg":"ed25519","publicKey":to_hex(key.verifying_key().as_bytes()),"roles":["moderation"]}]}).to_string()).unwrap();
-            let engine =
-                Engine::new(store, root(), config).with_operations(Arc::new(observed.clone()));
+            let engine = Engine::new(store, root(), config.clone())
+                .with_operations(Arc::new(observed.clone()));
             let objects = objects.into_iter().map(|(id, _, _)| id).collect::<Vec<_>>();
             let mut input = json!({"repository":"root/repo","operationId":"counted","reason":"private review","reasonToken":"policy"});
             if whole_pack {
@@ -579,6 +588,7 @@ mod accounting {
             }
             Self {
                 engine,
+                config,
                 observed,
                 input,
                 pack,
@@ -698,6 +708,89 @@ mod accounting {
                 .unwrap()
                 .unwrap();
             serde_json::from_slice(raw.as_bytes()).unwrap()
+        }
+    }
+    #[tokio::test]
+    async fn interrupted_activation_replays_pending_until_every_denial_is_active() {
+        let fixture = Fixture::new(3, false).await;
+        let mut objects = fixture.objects.clone();
+        objects.sort_unstable();
+        fixture.store().faults.lock().unwrap().unavailable_action =
+            Some(denial::action_key(&objects[1]));
+        let (headers, body) = signed(&fixture.input, 20);
+        let id = to_hex(&hash(
+            &[b"mkit-takedown:v1\0".as_slice(), b"counted"].concat(),
+        ));
+
+        // Fail the second denial write after acceptance and the first activation
+        // commit. Recreate the engine so replay must rely on durable state.
+        assert_eq!(fixture.dispatch(20).await.0.status, 503);
+        let restarted = Engine::new(fixture.store().clone(), root(), fixture.config.clone())
+            .with_operations(Arc::new(fixture.observed.clone()));
+        for nonce in [20, 21] {
+            let (retry_headers, retry_body) = signed(&fixture.input, nonce);
+            let response = restarted
+                .handle(TAKEDOWN_PATH, &retry_headers, &retry_body, 10)
+                .await;
+            assert_eq!(
+                response.status, 503,
+                "nonce and operation replay stay pending"
+            );
+            let reply: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+            assert_eq!(reply["takedownId"], id);
+            assert_eq!(reply["code"], "unavailable");
+            assert_eq!(fixture.record().await["activation_cursor"], 1);
+            for (index, object) in objects.iter().enumerate() {
+                let raw = fixture
+                    .store()
+                    .inner
+                    .get(&content_shard(object), &denial::action_key(object))
+                    .await
+                    .unwrap();
+                let actions = denial::decode_actions(raw.as_ref()).unwrap();
+                assert_eq!(actions.len(), usize::from(index == 0));
+            }
+            let raw = fixture
+                .store()
+                .inner
+                .get(&root(), &Key::new(b"ao\0counted".to_vec()))
+                .await
+                .unwrap()
+                .unwrap();
+            let operation: serde_json::Value = serde_json::from_slice(raw.as_bytes()).unwrap();
+            let stored: Response = serde_json::from_value(operation["result"].clone()).unwrap();
+            assert_eq!(
+                stored.status, 503,
+                "the durable operation cannot store success"
+            );
+        }
+
+        fixture.store().faults.lock().unwrap().unavailable_action = None;
+        let completed = restarted.handle(TAKEDOWN_PATH, &headers, &body, 10).await;
+        assert_eq!(completed.status, 200);
+        assert_eq!(fixture.record().await["activation_cursor"], 3);
+        for object in &objects {
+            let raw = fixture
+                .store()
+                .inner
+                .get(&content_shard(object), &denial::action_key(object))
+                .await
+                .unwrap()
+                .unwrap();
+            let actions = denial::decode_actions(Some(&raw)).unwrap();
+            assert_eq!(actions.len(), 1);
+            assert_eq!(to_hex(&actions[0].action.takedown_id), id);
+        }
+        assert_eq!(fixture.replay(20).await.0, completed);
+        for nonce in [21, 22] {
+            let (retry_headers, retry_body) = signed(&fixture.input, nonce);
+            assert_eq!(
+                restarted
+                    .handle(TAKEDOWN_PATH, &retry_headers, &retry_body, 10)
+                    .await,
+                completed,
+                "previously pending nonce and fresh operation replay complete"
+            );
         }
     }
     #[tokio::test]
