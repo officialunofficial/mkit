@@ -14,14 +14,13 @@
 //! byte-range rules, `resolve` published resolution and the byte source
 //! (extracted objects held by this repository, else its own pack entry),
 //! [`reach`] the reachability proof, `body` the length-enforcing body, and
-//! [`seams`] the hooks for admission (4.13), proofs (4.14b), tokens (4.15),
+//! [`seams`] the hooks for admission (4.13), tokens (4.15),
 //! mounting (4.16) and takedown (5.9a).
 
 mod body;
 pub(crate) mod content_headers;
 pub mod mount;
 mod paid;
-pub(crate) mod proof;
 pub mod range;
 pub mod reach;
 pub(crate) mod resolve;
@@ -36,10 +35,7 @@ pub use route::{BadUrl, ParsedUrl, Query, RepoPrefix, Target, is_http_object_pat
 #[cfg(test)]
 pub(crate) use seams::{AdmitDecision, HttpAdmission};
 pub(crate) use seams::{AdmitRequest, Admitted};
-pub use seams::{
-    HttpSeams, NoTakedown, NoTokens, PreparedProof, ProofServer, ProofSource, TakedownGate,
-    TakedownVerdict, TokenGate, UnsupportedProofs,
-};
+pub use seams::{HttpSeams, NoTakedown, NoTokens, TakedownGate, TakedownVerdict, TokenGate};
 
 /// Header lookup safe to retain across a native response future.
 #[cfg(not(target_arch = "wasm32"))]
@@ -89,10 +85,6 @@ pub struct HttpObjectsConfig {
     /// walk; at least `max_inline_object_bytes`. The inline byte source has
     /// its own `max_inline_object_bytes` allowance on top.
     pub http_decode_budget: u64,
-    /// Maximum requested proof range content (checked before encoded size).
-    pub max_proof_content_bytes: u64,
-    /// Maximum encoded proof, at most SPEC-DISCLOSURE's 64 MiB cap.
-    pub max_proof_bundle_bytes: u64,
 }
 
 impl Default for HttpObjectsConfig {
@@ -107,8 +99,6 @@ impl Default for HttpObjectsConfig {
             reach_cache_entries: 65_536,
             max_inline_object_bytes: DEFAULT_MAX_INLINE_OBJECT_BYTES,
             http_decode_budget: 256 << 20,
-            max_proof_content_bytes: 8 << 20,
-            max_proof_bundle_bytes: 64 << 20,
         }
     }
 }
@@ -120,10 +110,7 @@ impl HttpObjectsConfig {
     /// `invalid_argument` for a zero limit, an inline cap below
     /// `extract_min_bytes + 10`, or a decode budget below the inline cap.
     pub fn validate(&self, extract_min_bytes: u64) -> Result<(), ServerError> {
-        if self.max_proof_content_bytes == 0
-            || self.max_proof_bundle_bytes == 0
-            || self.max_proof_bundle_bytes > 64 << 20
-            || self.read_deadline.is_zero()
+        if self.read_deadline.is_zero()
             || self.read_reconcile_grace.is_zero()
             || self.max_walk_objects == 0
             || self.reachability_lag_ms == 0
@@ -278,8 +265,8 @@ pub(crate) enum Fail {
     NotFound,
     /// 403.
     Forbidden,
-    /// Unsupported selector, bounds, overflow or proof cap: 416.
-    ProofRange,
+    /// Unsupported HTTP proof representation: 416.
+    UnsupportedProof,
     /// 503: a store, hook or invariant failure. Fails closed.
     Unavailable,
 }
@@ -300,7 +287,7 @@ impl Fail {
     pub(crate) fn code(&self) -> Code {
         match self {
             Self::NotFound => Code::NotFound,
-            Self::ProofRange => Code::OutOfRange,
+            Self::UnsupportedProof => Code::OutOfRange,
             Self::Forbidden => Code::PermissionDenied,
             Self::Unavailable => Code::Unavailable,
         }
@@ -309,7 +296,7 @@ impl Fail {
     pub(crate) fn into_response(self) -> HttpObjectResponse {
         match self {
             Self::NotFound => HttpObjectResponse::not_found(),
-            Self::ProofRange => HttpObjectResponse::error(416),
+            Self::UnsupportedProof => HttpObjectResponse::error(416),
             Self::Forbidden => HttpObjectResponse::error(403),
             Self::Unavailable => HttpObjectResponse::error(503),
         }

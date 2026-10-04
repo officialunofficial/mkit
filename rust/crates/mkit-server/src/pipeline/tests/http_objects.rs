@@ -20,7 +20,7 @@ use super::*;
 use crate::http_objects::{
     AdmitDecision, AdmitRequest, Admitted, HttpAdmission, HttpBody, HttpObjectRequest,
     HttpObjectResponse, HttpObjectsConfig, METRIC_HTTP_INLINE_CAPPED, METRIC_HTTP_REACH_CAPPED,
-    PreparedProof, ProofServer, ProofSource, TakedownGate, TakedownVerdict,
+    TakedownGate, TakedownVerdict,
 };
 use crate::repo::MultiAddressing;
 use crate::store::{
@@ -1721,71 +1721,6 @@ fn an_admission_challenge_is_the_response_and_a_denial_is_a_403() {
     assert_eq!(got.header("Cache-Control"), Some("no-store"));
 }
 
-type ProofCall = (Hash, Hash, Option<(u64, u64)>);
-struct Proofs(Mutex<Vec<ProofCall>>);
-impl ProofServer for Proofs {
-    fn build<'a>(
-        &'a self,
-        request: &'a PreparedProof,
-        _: &'a mut dyn ProofSource,
-    ) -> crate::BoxFuture<'a, Result<Vec<u8>, ServerError>> {
-        self.0
-            .lock()
-            .unwrap()
-            .push((request.leaf, request.commit, request.range));
-        Box::pin(async move { Ok(vec![0; usize::try_from(request.encoded_len).unwrap()]) })
-    }
-}
-
-#[test]
-fn every_proof_request_goes_through_the_proof_seam_after_resolution() {
-    let (fx, d) = published();
-    let commit = to_hex(&d.head());
-    let object = fx.object_url("room", &id(&d.manifest));
-    let context = format!("proof=1&commit={commit}&path=chunked.bin");
-    let range = format!("{context}&range=10-19");
-    // The default answers 416 for every proof representation.
-    for (path, query) in [
-        (object.as_str(), context.as_str()),
-        (object.as_str(), range.as_str()),
-    ] {
-        let got = read(fx.request("GET", path, Some(query), &[]));
-        assert_eq!(got.status, 416, "{query}");
-        assert_eq!(got.header("Cache-Control"), Some("no-store"));
-    }
-    let got = read(fx.request(
-        "GET",
-        &fx.ref_url("room", "main", "chunked.bin"),
-        Some("proof=1"),
-        &[],
-    ));
-    assert_eq!(got.status, 416);
-    // Resolution still comes first: a miss is the uniform 404, never a proof.
-    let missing = fx.object_url("room", &[3; 32]);
-    assert_uniform_404(&read(fx.request("GET", &missing, Some(&context), &[])));
-    // A proof server sees the resolved leaf, its type and the commit.
-    let proofs = Arc::new(Proofs(Mutex::default()));
-    let fx = with_seams(fx, |s| s.proofs = proofs.clone());
-    let got = read(fx.request("GET", &object, Some(&range), &[]));
-    assert_eq!(
-        (got.status, got.header("Accept-Ranges")),
-        (200, Some("none"))
-    );
-    fx.request(
-        "GET",
-        &fx.ref_url("room", "main", "big.bin"),
-        Some("proof=1"),
-        &[],
-    );
-    assert_eq!(
-        *proofs.0.lock().unwrap(),
-        [
-            (id(&d.manifest), d.head(), Some((10, 19))),
-            (id(&d.big), d.head(), None),
-        ]
-    );
-}
-
 struct Maintained;
 
 impl crate::http_objects::Reachability for Maintained {
@@ -2103,8 +2038,8 @@ const RESPONSES: &str =
 const GOLDEN_LEAF: &str = "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f";
 const GOLDEN_COMMIT: &str = "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145";
 
-/// Rows run against the native builder.
-const NATIVE_PROOF_ROWS: &[&str] = &[
+/// Full proof-profile vectors; no shipped HTTP server implements this profile.
+const FULL_PROOF_PROFILE_ROWS: &[&str] = &[
     "not_modified_proof_paid_policy",
     "outside_content",
     "proof_content_cap",
@@ -2179,7 +2114,7 @@ fn the_golden_response_rows_hold() {
     let (mut uniform, mut covered) = (Vec::<Got>::new(), Vec::<String>::new());
     for case in table["cases"].as_array().unwrap() {
         let name = case["name"].as_str().unwrap();
-        if OTHER_WORK_PACKAGES.contains(&name) || NATIVE_PROOF_ROWS.contains(&name) {
+        if OTHER_WORK_PACKAGES.contains(&name) || FULL_PROOF_PROFILE_ROWS.contains(&name) {
             continue;
         }
         let request = &case["request"];
@@ -2330,7 +2265,7 @@ fn the_golden_response_rows_hold() {
         assert!(
             covered.iter().any(|c| c == name)
                 || OTHER_WORK_PACKAGES.contains(&name)
-                || NATIVE_PROOF_ROWS.contains(&name),
+                || FULL_PROOF_PROFILE_ROWS.contains(&name),
             "{name}"
         );
     }
@@ -2485,7 +2420,8 @@ fn a_configured_admission_makes_the_200_and_its_304_private_alike() {
 mod content_headers;
 mod paid_reads;
 mod private_tokens;
-mod publication_proofs;
+mod publication_access;
+mod unsupported_proofs;
 
 struct ServingStop(Arc<AtomicBool>);
 impl clearance::PublicationPolicy for ServingStop {
@@ -2509,8 +2445,6 @@ fn held_serving_stop_overrides_warm_reachability_extracted_bytes_and_proofs() {
         .pipe
         .with_publication_policy(Arc::new(ServingStop(stopped.clone())))
         .unwrap();
-    let proofs = Arc::new(Proofs(Mutex::new(Vec::new())));
-    let fx = with_seams(fx, |s| s.proofs = proofs.clone());
     for object in [&d.small, &d.big, &d.manifest] {
         assert_eq!(fx.get(&fx.object_url("room", &id(object))).status, 200);
     }
@@ -2539,7 +2473,6 @@ fn held_serving_stop_overrides_warm_reachability_extracted_bytes_and_proofs() {
         .status,
         404
     );
-    assert!(proofs.0.lock().unwrap().is_empty());
 }
 
 mod takedown_denial;
