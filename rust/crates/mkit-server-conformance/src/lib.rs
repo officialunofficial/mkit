@@ -131,3 +131,6 @@ pub mod __private {
         }
     }
 }
+
+#[cfg(feature = "test-host")]
+mod test_host_admin;

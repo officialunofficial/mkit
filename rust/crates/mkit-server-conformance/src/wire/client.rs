@@ -449,7 +449,23 @@ impl Client {
     /// # Errors
     /// A transport failure or timeout.
     pub async fn get(&self, path: &str) -> Result<Reply, String> {
-        let req = http::Request::get(format!("{}{path}", self.base))
+        self.read("GET", path, &[]).await
+    }
+
+    /// An HTTP object read with explicit method and conditional/range headers.
+    pub async fn read(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(String, String)],
+    ) -> Result<Reply, String> {
+        let mut builder = http::Request::builder()
+            .method(method)
+            .uri(format!("{}{path}", self.base));
+        for (name, value) in headers {
+            builder = builder.header(name, value);
+        }
+        let req = builder
             .body(Bytes::new())
             .map_err(|e| format!("building the request failed: {e}"))?;
         // HTTP object reads use a fresh connection; only unary RPCs are replayed.

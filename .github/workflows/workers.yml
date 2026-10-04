@@ -413,12 +413,12 @@ jobs:
       - name: Create diagnostic log directory
         run: mkdir -p "${RUNNER_TEMP}/wire-logs"
 
-      - name: Connect deadlines on wasm (all dispatch entry points)
+      - name: Portable contracts and Connect deadlines on wasm (all dispatch entry points)
         timeout-minutes: 15
         env:
           TMPDIR: ${{ runner.temp }}/wire-logs
           CARGO_PROFILE_DEV_DEBUG: '0'
-        run: python3 scripts/connect-deadline-runtime.py
+        run: python3 scripts/connect-deadline-runtime.py --portable
 
       - name: Wire suite (release features, D34)
         env:

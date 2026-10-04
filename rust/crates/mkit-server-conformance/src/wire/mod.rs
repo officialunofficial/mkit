@@ -490,6 +490,13 @@ pub async fn run(target: &WireTarget, filter: Option<&str>) -> Report {
         .filter(|c| filter.is_none_or(|f| c.name.contains(f)))
     {
         let verdict = match case.skip_reason(&profile) {
+            Some(reason)
+                if profile.has(Feature::Takedown) && case.requires.contains(&Feature::Takedown) =>
+            {
+                Verdict::Fail(format!(
+                    "enabled takedown contract is misconfigured: {reason}"
+                ))
+            }
             Some(reason) => Verdict::Skip(reason),
             None => run_case(case, Ctx::new(client.clone(), profile.clone(), case.name)).await,
         };
@@ -696,5 +703,29 @@ mod tests {
         assert!(multi.skip_reason(&profile).unwrap().contains("milestone"));
         profile.milestone = Milestone::M1;
         assert!(multi.skip_reason(&profile).unwrap().contains("multi-repo"));
+    }
+    #[tokio::test]
+    async fn enabled_takedown_contract_cannot_skip_missing_prerequisites() {
+        let mut profile = Profile::new(WireAuth::None);
+        let mut target = WireTarget {
+            base_url: "http://127.0.0.1:1".parse().unwrap(),
+            profile: profile.clone(),
+        };
+        let disabled = run(&target, Some("takedown.contract")).await;
+        assert!(matches!(
+            disabled.verdict("takedown.contract"),
+            Some(Verdict::Skip(_))
+        ));
+        profile.features.insert(Feature::Takedown);
+        for milestone in [Milestone::M4, Milestone::M5] {
+            profile.milestone = milestone;
+            target.profile = profile.clone();
+            let enabled = run(&target, Some("takedown.contract")).await;
+            assert!(
+                matches!(enabled.verdict("takedown.contract"), Some(Verdict::Fail(_))),
+                "{}",
+                enabled.tap()
+            );
+        }
     }
 }

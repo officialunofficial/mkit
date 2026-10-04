@@ -73,6 +73,10 @@ impl BlobStore for SpyBlobs {
         key: &BlobKey,
         range: Option<ByteRange>,
     ) -> Result<Option<BlobBody>, StoreError> {
+        assert!(
+            range.is_none_or(|range| range.start <= range.end_inclusive),
+            "zero-length or reversed backend range"
+        );
         self.calls.lock().unwrap().push(("get", *key));
         let mode = *self.reads.lock().unwrap();
         if mode == Reads::Normal || *key != BlobKey::object(*key.hash()) {
@@ -1380,12 +1384,18 @@ fn ranges_and_conditionals_over_every_byte_source() {
     );
     // Every range of the empty file is unsatisfiable, and it still serves.
     let empty = fx.ref_url("room", "main", "empty");
+    fx.clear_calls();
     assert_eq!(fx.get(&empty).status, 200);
     for range in ["bytes=0-0", "bytes=0-", "bytes=-1", "bytes=-0"] {
         let got = fx.get_with(&empty, &[("range", range)]);
         assert_eq!(got.status, 416, "{range}");
         assert_eq!(got.header("Content-Range"), Some("bytes */0"));
     }
+    assert!(
+        !fx.blob_calls(BlobKey::object(id(&blob(b""))))
+            .contains(&"get"),
+        "empty file requested a backend payload range"
+    );
     // An extracted read asks the store for exactly the selected range.
     fx.clear_calls();
     fx.get_with(&sources[1].0, &[("range", "bytes=100-199")]);

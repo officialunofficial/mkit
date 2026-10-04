@@ -163,6 +163,7 @@ pub struct TestHost {
     profile: Profile,
     kv: Arc<MemoryKv>,
     blobs: MemoryBlobStore,
+    preserved: MemoryBlobStore,
     clock: Arc<ManualClock>,
     listener_task: Option<JoinHandle<()>>,
 }
@@ -239,6 +240,7 @@ impl TestHost {
         profile.derive_features();
         let kv = Arc::new(MemoryKv::with_clock(clock.clone()));
         let blobs = MemoryBlobStore::default();
+        let preserved = MemoryBlobStore::new("preserved");
         if profile.has(Feature::MultiRepo) {
             plant_membership(&blobs, &kv, &config.addressing, config.sharding, &profile).await?;
             profile.planted_membership = true;
@@ -254,26 +256,15 @@ impl TestHost {
             )
             .map_err(|error| error.to_string())?,
         );
-        let app = axum::Router::new()
-            .fallback_service(mkit_server::connect::service(pipeline.clone()))
-            .layer(connect_cors());
-        #[cfg(feature = "http-objects")]
-        let app = app.layer(axum::middleware::from_fn(move |request, next| {
-            let pipeline = pipeline.clone();
-            async move { dispatch_http_objects(request, next, pipeline).await }
-        }));
-        #[cfg(feature = "__test-faults")]
-        let app = if profile.has(Feature::TestFaults) {
-            app.route(
-                crate::wire::STATS_PATH,
-                axum::routing::get({
-                    let kv = kv.clone();
-                    move || stats(kv.clone())
-                }),
-            )
-        } else {
-            app
-        };
+        let app = mount_app(
+            &profile,
+            &base_url,
+            clock.clone(),
+            kv.clone(),
+            blobs.clone(),
+            preserved.clone(),
+            pipeline,
+        )?;
         let listener_task = tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
@@ -286,9 +277,53 @@ impl TestHost {
             profile,
             kv,
             blobs,
+            preserved,
             clock,
             listener_task: Some(listener_task),
         })
+    }
+
+    /// Rebuild the listener and default hooks over the same metadata, blobs,
+    /// origin and clock. Intended for the default-hook persistence scenarios.
+    ///
+    /// # Errors
+    /// Listener rebinding or pipeline construction fails.
+    pub async fn restart_with_default_hooks(&mut self) -> Result<(), String> {
+        if let Some(task) = self.listener_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        let address = self
+            .base_url
+            .strip_prefix("http://")
+            .ok_or("invalid test origin")?;
+        let listener = tokio::net::TcpListener::bind(address)
+            .await
+            .map_err(|e| e.to_string())?;
+        let pipeline = Arc::new(
+            Pipeline::new(
+                self.blobs.clone(),
+                self.kv.clone(),
+                Hooks::new(),
+                profile_config(&self.profile, &self.base_url)?,
+                self.clock.clone(),
+                Arc::new(NoopMetrics),
+            )
+            .map_err(|e| e.to_string())?,
+        );
+        let app = mount_app(
+            &self.profile,
+            &self.base_url,
+            self.clock.clone(),
+            self.kv.clone(),
+            self.blobs.clone(),
+            self.preserved.clone(),
+            pipeline,
+        )?;
+        self.listener_task = Some(tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        }));
+        Ok(())
     }
 
     /// Returns this host's canonical loopback origin as the auth v2 audience
@@ -434,6 +469,75 @@ impl TestHost {
     }
 }
 
+fn mount_app<H: HookSet + 'static>(
+    profile: &Profile,
+    origin: &str,
+    clock: Arc<ManualClock>,
+    kv: Arc<MemoryKv>,
+    blobs: MemoryBlobStore,
+    preserved: MemoryBlobStore,
+    pipeline: Arc<Pipeline<MemoryBlobStore, Arc<MemoryKv>, H>>,
+) -> Result<axum::Router, String> {
+    let app = axum::Router::new()
+        .fallback_service(mkit_server::connect::service(pipeline.clone()))
+        .layer(connect_cors());
+    #[cfg(feature = "http-objects")]
+    let app = app.layer(axum::middleware::from_fn(move |request, next| {
+        let pipeline = pipeline.clone();
+        async move { dispatch_http_objects(request, next, pipeline).await }
+    }));
+    #[cfg(feature = "__test-faults")]
+    let app = if profile.has(Feature::TestFaults) {
+        app.route(
+            crate::wire::STATS_PATH,
+            axum::routing::get({
+                let kv = kv.clone();
+                move || stats(kv.clone())
+            }),
+        )
+    } else {
+        app
+    };
+
+    let app = if profile.has(Feature::Takedown) {
+        let config = crate::test_host_admin::config(origin)?;
+        let routing = profile_config(profile, origin)?;
+        let shards: Arc<dyn mkit_server::pipeline::ShardMap> = if profile.sharding_d34 {
+            Arc::new(mkit_server::pipeline::D34Shards)
+        } else {
+            Arc::new(mkit_server::pipeline::SinglePartition)
+        };
+        let root = Partition::Namespace(NamespaceKey::deployment_default());
+        let work = Arc::new(mkit_server::takedown::work::Work::new(
+            kv.clone(),
+            blobs,
+            preserved,
+            mkit_server::takedown::work::WorkConfig::new(
+                root.clone(),
+                shards,
+                routing.addressing,
+                3_600_000,
+                clock.clone(),
+            ),
+        ));
+        let engine =
+            Arc::new(mkit_server::admin::Engine::new(kv, root, config).with_operations(work));
+        app.route(
+            mkit_server::admin::TAKEDOWN_PATH,
+            axum::routing::post(crate::test_host_admin::dispatch),
+        )
+        .route(
+            mkit_server::admin::GET_TAKEDOWN_PATH,
+            axum::routing::post(crate::test_host_admin::dispatch),
+        )
+        .layer(axum::Extension(engine))
+        .layer(axum::Extension(clock))
+    } else {
+        app
+    };
+    Ok(app)
+}
+
 fn profile_config(profile: &Profile, origin: &str) -> Result<PipelineConfig, String> {
     let auth = match &profile.auth {
         WireAuth::None => AuthMode::Open,
@@ -493,6 +597,16 @@ fn configure_profile_features(
     profile: &Profile,
     config: &mut PipelineConfig,
 ) -> Result<(), String> {
+    if profile.has(Feature::Takedown) {
+        if !profile.has(Feature::Admin)
+            || !profile.has(Feature::HttpObjects)
+            || !profile.has(Feature::SignedReads)
+        {
+            return Err("takedown test host requires admin, HTTP objects and signed reads".into());
+        }
+        config.takedown_denial = true;
+        config.default_repo_visibility = mkit_server::pipeline::RepoVisibility::Private;
+    }
     if profile.has(Feature::Grants) {
         let WireAuth::AuthV2 { audience, .. } = &profile.auth else {
             return Err("grant profiles require auth v2".into());

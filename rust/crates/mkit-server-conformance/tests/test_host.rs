@@ -749,3 +749,72 @@ async fn http_object_mount_uses_core_cors_and_options_behavior() {
     assert_eq!(head.split_once("\r\n\r\n").unwrap().1, "");
     host.shutdown().await;
 }
+
+#[tokio::test]
+async fn portable_file_cases_run_against_the_native_host_without_skips() {
+    let mut profile = auth_v2_profile();
+    profile.milestone = Milestone::M4;
+    profile.atomic_advance = true;
+    profile.max_pack_bytes = 32 << 20;
+    profile.features.extend([
+        Feature::MultiRepo,
+        Feature::Tickets,
+        Feature::HttpObjects,
+        Feature::IndexedMode,
+        Feature::Multipart,
+    ]);
+    profile.derive_features();
+    let host = TestHost::start(profile).await.unwrap();
+    for name in [
+        "files.",
+        "embedding.multipart_file_readback",
+        "health.deadline_headers",
+    ] {
+        let report = run(&target(&host), Some(name)).await;
+        println!("{}", report.tap());
+        assert!(!report.failed(), "{}", report.tap());
+        for case in mkit_server_conformance::wire::CASES
+            .iter()
+            .filter(|case| case.name.starts_with(name))
+        {
+            assert!(
+                matches!(report.verdict(case.name), Some(Verdict::Pass(_))),
+                "{}",
+                report.tap()
+            );
+        }
+    }
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn signed_takedown_contract_survives_native_listener_and_pipeline_restart() {
+    let mut profile = auth_v2_profile();
+    profile.sign_reads = true;
+    profile.milestone = Milestone::M5;
+    profile.atomic_advance = true;
+    profile.features.extend([
+        Feature::Takedown,
+        Feature::Admin,
+        Feature::SignedReads,
+        Feature::MultiRepo,
+        Feature::Tickets,
+        Feature::HttpObjects,
+        Feature::IndexedMode,
+    ]);
+    profile.derive_features();
+    let mut host = TestHost::start(profile).await.unwrap();
+    for name in ["takedown.contract", "takedown.persisted_denial"] {
+        if name == "takedown.persisted_denial" {
+            host.restart_with_default_hooks().await.unwrap();
+        }
+        let report = run(&target(&host), Some(name)).await;
+        println!("{}", report.tap());
+        assert!(
+            matches!(report.verdict(name), Some(Verdict::Pass(_))),
+            "{}",
+            report.tap()
+        );
+    }
+    host.shutdown().await;
+}

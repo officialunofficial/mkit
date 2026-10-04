@@ -7,6 +7,63 @@ use crate::wire::client::{UNARY_JSON, decode_unary};
 
 const CHECK: &str = "/grpc.health.v1.Health/Check";
 
+/// Shared portable complement to the wasm runtime's zero-timeout and native
+/// stalled-body regressions. A generous finite deadline must preserve a valid
+/// call; malformed headers must not trap or reject an otherwise valid call.
+pub(super) async fn deadline_headers(ctx: Ctx) -> CaseResult {
+    let variants: &[&[(&str, &str)]] = &[
+        &[],
+        &[("connect-timeout-ms", "60000")],
+        &[("grpc-timeout", "60S")],
+        &[("connect-timeout-ms", "60000"), ("grpc-timeout", "60S")],
+        &[("connect-timeout-ms", "malformed")],
+        &[("grpc-timeout", "malformed")],
+        &[
+            ("connect-timeout-ms", "malformed"),
+            ("grpc-timeout", "malformed"),
+        ],
+    ];
+    for variant in variants {
+        let headers: Vec<_> = variant
+            .iter()
+            .map(|(name, value)| ((*name).into(), (*value).into()))
+            .collect();
+        for (content_type, body, expected) in [
+            (UNARY_JSON, b"{}".as_slice(), b"\"SERVING\"".as_slice()),
+            (
+                "application/grpc+proto",
+                b"\0\0\0\0\0",
+                b"\0\0\0\0\x02\x08\x01",
+            ),
+        ] {
+            let reply = ctx
+                .client()
+                .post(CHECK, content_type, &headers, body.to_vec())
+                .await?;
+            ensure!(
+                reply.status == 200,
+                "health timeout variant {variant:?}: HTTP {}",
+                reply.status
+            );
+            if content_type == UNARY_JSON {
+                let value: serde_json::Value = serde_json::from_slice(&reply.body)
+                    .map_err(|error| format!("health JSON: {error}"))?;
+                ensure!(
+                    value["status"] == "SERVING",
+                    "health timeout variant {variant:?}: {value}"
+                );
+            } else {
+                ensure!(
+                    reply.body.as_ref() == expected,
+                    "gRPC health bytes differ for {variant:?}"
+                );
+            }
+        }
+    }
+    ctx.set_note("7 header variants, Connect and gRPC health".into());
+    Ok(())
+}
+
 /// `Check(service)`: the status name, or the Connect error code.
 async fn check(ctx: &Ctx, service: &str) -> Result<Result<String, String>, super::Failure> {
     let body = serde_json::to_vec(&serde_json::json!({ "service": service }))

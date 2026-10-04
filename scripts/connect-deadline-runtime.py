@@ -5,6 +5,7 @@ import base64
 import importlib.util
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 import subprocess
@@ -51,9 +52,21 @@ def check_audit_stream(raw):
     assert all(flags == 0 for flags, _ in frames[:-1])
 
 
+def portable_wire(common, prefix, expected, env, work, cases):
+    result = subprocess.run([*common, "--filter", prefix], env=env, text=True, capture_output=True, timeout=900)
+    (work / (prefix.replace(".", "-") + ".tap")).write_text(result.stdout + result.stderr)
+    print(result.stdout, end="", flush=True)
+    assert result.returncode == 0, f"portable case {prefix} failed"
+    found = re.findall(r"^(ok|not ok) \d+ - ([^\n]+)", result.stdout, re.MULTILINE)
+    assert len(found) == expected and "# SKIP" not in result.stdout, f"{prefix}: intended cases absent/skipped"
+    assert all(status == "ok" and name.startswith(prefix) for status, name in found)
+    cases.extend({"case": name.split(" #", 1)[0], "verdict": status} for status, name in found)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--no-build", action="store_true")
+    parser.add_argument("--portable", action="store_true", help="also run portable file and takedown contracts")
     parser.add_argument("--port", type=int, default=8797)
     args = parser.parse_args()
     scratch = Path(os.environ.get("TMPDIR", Path.home() / ".cache/mkit-test-tmp/wasm-deadline"))
@@ -73,6 +86,11 @@ def main():
         with (work / "build.log").open("w") as log:
             subprocess.run(["worker-build", "--release", "--locked"], cwd=APP, env=env,
                            stdout=log, stderr=log, check=True)
+    runner = ROOT / "rust/target/debug/mkit-server-conformance"
+    if args.portable and not args.no_build:
+        with (work / "runner-build.log").open("w") as log:
+            subprocess.run(["cargo", "build", "--locked", "-p", "mkit-server-conformance", "--bin", "mkit-server-conformance"],
+                           cwd=ROOT / "rust", env=env, stdout=log, stderr=log, check=True)
     artifacts = harness.artifact_hashes(APP)
     classes = [("REFSTORE", "RefStore"), ("NS_COORD", "NsCoordinator"), ("REF_SHARD", "RefShard"),
                ("REPO_INDEX", "RepoIndexShard"), ("CONTENT_INDEX", "ContentIndexShard")]
@@ -91,6 +109,14 @@ def main():
                              for name in ["STORAGE", "BACKUPS", "PRESERVATION"]],
               "durable_objects": {"bindings": [{"name": name, "class_name": cls} for name, cls in classes]},
               "migrations": [{"tag": "deadline", "new_sqlite_classes": [cls for _, cls in classes]}]}
+    if args.portable:
+        config["vars"].update(HTTP_OBJECTS="true", URL_TOKEN_KEYS="active " + "22" * 32, DEFAULT_REPO_VISIBILITY="private")
+        wrapper = work / "wrapper.mjs"
+        wrapper.write_text((ROOT / "rust/crates/mkit-server-worker/tests/connect-deadline-probe/range-probe.mjs").read_text()
+                           .replace("__RELEASE_SHIM__", str(APP / "build/worker/shim.mjs")))
+        config["main"] = str(wrapper)
+        # Each invocation owns its sensitive resume fixture; never print its token.
+        env["TMPDIR"] = str(work)
     config_path = work / "wrangler.json"
     config_path.write_text(json.dumps(config))
     origin = f"http://127.0.0.1:{args.port}"
@@ -137,6 +163,25 @@ def main():
                     check_audit_stream(raw)
                     cases.append({"entry": entry, "headers": headers, "protocol": "signed admin", "status": 200})
                 print(f"PASS {entry}: signed admin with all timeout variants", flush=True)
+            if args.portable:
+                common = [str(runner), "wire", "--base-url", origin + "/serve", "--auth", "auth-v2",
+                    "--audience", "https://vcs.launch.invalid", "--repository", "default", "--signer-seed-hex", "5e" * 32,
+                    "--run-id", "portable-contract", "--atomic-advance", "--fresh-target", "--sign-reads", "--milestone", "M5",
+                    "--sharding", "d34", "--max-pack-bytes", "1073741824", "--features",
+                    "health,indexed-async,indexed-mode,multi-repo,tickets,timers,http-objects,multipart,takedown,admin"]
+                for prefix, expected in [("files.", 5), ("health.deadline_headers", 1), ("embedding.multipart_file_readback", 1), ("takedown.contract", 1)]:
+                    portable_wire(common, prefix, expected, env, work, cases)
+                harness.stop(process)
+                process = subprocess.Popen(["npx", "--yes", f"wrangler@{harness.WRANGLER}", "dev", "--local",
+                    "--config", str(config_path), "--ip", "127.0.0.1", "--port", str(args.port),
+                    "--persist-to", str(work / "state"), "--show-interactive-dev-session=false"],
+                    cwd=APP, env=env, stdout=log, stderr=log, start_new_session=True)
+                harness.wait_ready(origin + "/direct/grpc.health.v1.Health/Check", process)
+                portable_wire(common, "takedown.persisted_denial", 1, env, work, cases)
+                observed = (work / "wrangler.log").read_text()
+                assert "MKIT_CONFORMANCE_R2_GET" in observed, "range observer did not run"
+                assert "MKIT_CONFORMANCE_ZERO_RANGE" not in observed, "zero-length backend range requested"
+                print("PASS Worker restart: persisted takedown; zero-length R2 ranges=0", flush=True)
             assert harness.artifact_hashes(APP) == artifacts, "runtime artifacts changed"
             assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip() == source_sha
             assert not subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True)
