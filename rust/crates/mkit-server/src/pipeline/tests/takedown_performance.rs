@@ -56,7 +56,7 @@ fn pack(count: usize, len: usize, chunked: bool) -> (Vec<u8>, Hash) {
         vec![],
         Identity::ed25519(kp.public.0),
         kp.public.0,
-        b"uno".to_vec(),
+        b"ref".to_vec(),
         42,
         [0; 64],
     );

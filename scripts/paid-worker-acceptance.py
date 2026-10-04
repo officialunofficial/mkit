@@ -13,7 +13,7 @@ import time
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
-APP = ROOT / "apps/embedded-worker/tests/uno-launch"
+APP = ROOT / "apps/embedded-worker/tests/embedding-conformance"
 spec = importlib.util.spec_from_file_location("hooks", ROOT / "scripts/embedded-worker-hooks.py")
 hooks = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(hooks)
@@ -51,7 +51,7 @@ def main():
             "RETENTION": "permanent", "STORAGE_LEASES": "false", "GC_ENABLED": "false",
             "TICKET_KEYS": "ticket " + "11" * 32, "URL_TOKEN_KEYS": "active " + "22" * 32,
             "HTTP_OBJECTS": "true", "TAKEDOWN_ENABLED": "false", "DEFAULT_REPO_VISIBILITY": "public",
-            "UNO_FIXTURE_OUTCOME_FAIL": "true"}
+            "FIXTURE_OUTCOME_FAIL": "true"}
         wrapper = run / "wrapper.mjs"
         wrapper.write_text("import Host from '" + str(artifact / "worker/shim.mjs") + "';\n"
             "export * from '" + str(artifact / "worker/shim.mjs") + "';\n"
@@ -89,19 +89,19 @@ def main():
             check(hooks.request(origin, "/__mkit_test/stats")[0] != 200, "release exposes test faults")
             runtime.invoke([str(runner), "wire", "--base-url", origin, *auth, "--atomic-advance", "--fresh-target",
                 "--milestone", "M4", "--sharding", "d34", "--max-pack-bytes", "1073741824", "--features",
-                "indexed-async,indexed-mode,multi-repo,tickets,timers,http-objects", "--filter", "uno.public_fixture"],
+                "indexed-async,indexed-mode,multi-repo,tickets,timers,http-objects", "--filter", "embedding.public_fixture"],
                 ROOT, run / "producer.tap", env, evidence)
             tap = (run / "producer.tap").read_text()
             cases = re.findall(r"^(ok|not ok) \d+ - ([^\n]+)", tap, re.M)
             check(len(cases) == 1 and cases[0][0] == "ok"
-                  and cases[0][1].startswith("uno.public_fixture # repository=")
+                  and cases[0][1].startswith("embedding.public_fixture # repository=")
                   and "# SKIP" not in tap, "producer failed, absent or skipped")
             before = log_path.read_text()
-            check("MKIT_UNO_STAGE authorize" in before and "MKIT_UNO_STAGE admit" in before, "supplied hooks absent")
-            pending = set(re.findall(r"MKIT_UNO_OUTCOME_RETRY committed (\S+)", before))
+            check("MKIT_EMBED_STAGE authorize" in before and "MKIT_EMBED_STAGE admit" in before, "supplied hooks absent")
+            pending = set(re.findall(r"MKIT_EMBED_OUTCOME_RETRY committed (\S+)", before))
             check(pending, "no failed committed outcome to retry")
             runtime.stop(worker)
-            variables["UNO_FIXTURE_OUTCOME_FAIL"] = "false"
+            variables["FIXTURE_OUTCOME_FAIL"] = "false"
             config_path.write_text(json.dumps(config))
             offset = log_path.stat().st_size
             ready.unlink()
@@ -110,7 +110,7 @@ def main():
                 with log_path.open("rb") as restarted:
                     restarted.seek(offset)
                     after = restarted.read().decode(errors="replace")
-                return pending <= set(re.findall(r"MKIT_UNO_OUTCOME committed (\S+)", after))
+                return pending <= set(re.findall(r"MKIT_EMBED_OUTCOME committed (\S+)", after))
             wait_for(worker, delivered, "cold alarm did not deliver every persisted outcome")
             note = dict(re.findall(r"([a-z_]+)=([^\s]+)", tap))
             check(note["http"] == "true", "HTTP and URL-token assertions did not run")

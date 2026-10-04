@@ -16,7 +16,7 @@ import urllib.request
 sys.dont_write_bytecode = True
 
 ROOT = Path(__file__).resolve().parents[1]
-APP = ROOT / "apps/embedded-worker/tests/uno-launch"
+APP = ROOT / "apps/embedded-worker/tests/embedding-conformance"
 spec = importlib.util.spec_from_file_location("runtime", ROOT / "scripts/vcs-worker-launch-runtime.py")
 runtime = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runtime)
@@ -88,14 +88,14 @@ def main():
                 time.sleep(.1)
             producer = [str(runner), "wire", "--base-url", origin, *auth, "--atomic-advance", "--fresh-target",
                         "--milestone", "M4", "--sharding", "d34", "--max-pack-bytes", "1073741824",
-                        "--features", "indexed-async,indexed-mode,multi-repo,tickets,timers", "--filter", "uno.public_fixture"]
+                        "--features", "indexed-async,indexed-mode,multi-repo,tickets,timers", "--filter", "embedding.public_fixture"]
             runtime.invoke(producer, ROOT, run / "producer.tap", env, evidence)
             tap = (run / "producer.tap").read_text()
-            check(re.search(r"^ok \d+ - uno\.public_fixture # repository=", tap, re.M), "producer failed or skipped")
+            check(re.search(r"^ok \d+ - embedding\.public_fixture # repository=", tap, re.M), "producer failed or skipped")
             note = dict(re.findall(r"([a-z_]+)=([^\s]+)", tap))
             path = f"/{note['repository']}/-/objects/{note['extracted_blob']}"
             size = int(note["extracted_blob_bytes"])
-            paid = {"Authorization": "Payment uno-fixture"}
+            paid = {"Authorization": "Payment embedding-fixture"}
             expected = {}
             for method in ("GET", "HEAD"):
                 status, _, _ = request(origin, path, method=method)
@@ -106,7 +106,7 @@ def main():
                 expected[receipt] = ("read", size if method == "GET" else 0)
             deadline = time.monotonic() + 30
             while True:
-                outcomes = re.findall(r"MKIT_UNO_OUTCOME (read|aborted) (uno-read:\d+) (\d+)", (run / "worker.log").read_text())
+                outcomes = re.findall(r"MKIT_EMBED_OUTCOME (read|aborted) (embedding-read:\d+) (\d+)", (run / "worker.log").read_text())
                 recorded = {reservation: (kind, int(count)) for kind, reservation, count in outcomes}
                 if all(recorded.get(reservation) == result for reservation, result in expected.items()):
                     break

@@ -85,7 +85,7 @@ def main():
     if env.get("CARGO_TARGET_DIR"):
         raise RuntimeError("CARGO_TARGET_DIR must remain unset")
     origin = f"http://127.0.0.1:{args.port}"
-    base = f"{origin}/_uno/mkit"
+    base = f"{origin}/_embedding/mkit"
     hook = f"http://127.0.0.1:{args.port + 1}"
     runner = ROOT / "rust/target/debug/mkit-server-conformance"
     sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()

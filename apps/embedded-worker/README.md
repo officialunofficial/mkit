@@ -1,6 +1,6 @@
 # Embedding mkit in a Worker
 
-This local example hosts mkit under `/_uno/mkit/`. Its fetch handler constructs a
+This local example hosts mkit under `/_embedding/mkit/`. Its fetch handler constructs a
 `worker::Request` and calls `mkit_server_worker::adapter::serve_with`, transferring
 the incoming `ReadableStream` directly. `UploadPart` stays streamed through the
 Connect bridge and R2 adapter. No HTTP call to the host's own public origin is

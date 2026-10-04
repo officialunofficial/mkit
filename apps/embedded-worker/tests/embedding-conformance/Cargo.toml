@@ -1,5 +1,5 @@
 [package]
-name = "mkit-uno-launch-fixture"
+name = "mkit-embedding-conformance-fixture"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95.0"

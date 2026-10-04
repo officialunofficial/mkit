@@ -496,7 +496,7 @@ fn configured_launch_cannot_run_with_a_free_runtime_plan() {
 }
 
 #[test]
-fn only_the_paid_workers_profile_name_starts_and_the_retired_alias_is_refused() {
+fn only_the_paid_workers_profile_name_starts_and_unknown_names_are_refused() {
     let mut v = vars();
     v.insert("LAUNCH_PROFILE".into(), "paid-workers".into());
     let cfg = check(&v).unwrap();
@@ -508,7 +508,7 @@ fn only_the_paid_workers_profile_name_starts_and_the_retired_alias_is_refused() 
         bad.insert(name.into(), "true".into());
         assert!(check(&bad).is_err());
     }
-    v.insert("LAUNCH_PROFILE".into(), "uno".into());
+    v.insert("LAUNCH_PROFILE".into(), "unknown-profile".into());
     assert!(
         check(&v)
             .unwrap_err()

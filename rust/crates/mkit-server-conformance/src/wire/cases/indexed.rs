@@ -404,9 +404,11 @@ async fn upload_ticket(
     let Some(BeginResult::Ticket(ticket)) = opened.result else {
         return Err(Failure::Fail("BeginUpload did not issue a ticket".into()));
     };
-    if ctx.case.starts_with("uno.") && pack.len() > 8 * 1024 * 1024 {
-        return super::multipart::complete_uno_ticket(ctx, &signer, repository, &ticket, pack)
-            .await;
+    if ctx.case.starts_with("embedding.") && pack.len() > 8 * 1024 * 1024 {
+        return super::multipart::complete_embedding_ticket(
+            ctx, &signer, repository, &ticket, pack,
+        )
+        .await;
     }
     let id = ticket.id.ok_or("ticket has no id")?;
     let mut messages = upload_msgs(pack, 48);
@@ -703,7 +705,7 @@ fn file_objects(data: &[u8]) -> Result<Vec<Object>, Failure> {
     Ok(objects)
 }
 
-pub(super) async fn uno_multipart_file_readback(ctx: Ctx) -> CaseResult {
+pub(super) async fn embedding_multipart_file_readback(ctx: Ctx) -> CaseResult {
     let data: Vec<_> = (0..9_000_000_u32)
         .map(|i| u8::try_from((i.wrapping_mul(17) ^ (i >> 9)) & 0xff).unwrap_or(0))
         .collect();
@@ -717,12 +719,12 @@ pub(super) async fn uno_multipart_file_readback(ctx: Ctx) -> CaseResult {
     Ok(())
 }
 
-/// Separate Uno gate: public-by-default repositories, retaining the original Set fixture.
-pub(super) async fn uno_public_fixture(ctx: Ctx) -> CaseResult {
+/// Separate embedding gate: public-by-default repositories, retaining the original Set fixture.
+pub(super) async fn embedding_public_fixture(ctx: Ctx) -> CaseResult {
     launch_verified_fixture(ctx, false, false).await
 }
 
-async fn uno_payment_challenge(ctx: &Ctx) -> CaseResult {
+async fn embedding_payment_challenge(ctx: &Ctx) -> CaseResult {
     let (repository, _) = super::repository::identities(ctx, "async-verify", "unused")?;
     let begin = BeginUploadRequest {
         r#ref: Some(ctx.head("payment-probe")),
@@ -739,19 +741,19 @@ async fn uno_payment_challenge(ctx: &Ctx) -> CaseResult {
         },
     );
     let reply = ctx.send::<BeginUploadResponse>(&signed).await?;
-    let error = reply.err().ok_or("Uno admission did not challenge")?;
+    let error = reply.err().ok_or("Embedding admission did not challenge")?;
     ensure!(
         error.http_status == 402 && error.code == "permission_denied",
-        "Uno challenge was {error}"
+        "Embedding challenge was {error}"
     );
     ensure!(
         error.details.len() == 1,
-        "Uno challenge omitted typed detail"
+        "Embedding challenge omitted typed detail"
     );
     Ok(())
 }
 
-async fn uno_already_present(
+async fn embedding_already_present(
     ctx: &Ctx,
     repository: &str,
     pack_id: Hash,
@@ -771,17 +773,18 @@ async fn uno_already_present(
             repository.clone_into(&mut env.repository);
         },
     );
-    let opened: BeginUploadResponse = want_ok(ctx.send(&signed).await?, "Uno AlreadyPresent")?;
+    let opened: BeginUploadResponse =
+        want_ok(ctx.send(&signed).await?, "Embedding AlreadyPresent")?;
     ensure!(
         matches!(opened.result, Some(BeginResult::AlreadyPresent(_))),
-        "verified Uno pack was not AlreadyPresent"
+        "verified Embedding pack was not AlreadyPresent"
     );
     Ok(())
 }
 
 async fn launch_verified_fixture(ctx: Ctx, large: bool, set_visibility: bool) -> CaseResult {
-    // The embedded Uno producer exercises the core/CLI unchunked boundary.
-    let payload_bytes: u32 = if ctx.case == "uno.public_fixture" {
+    // The embedded fixture producer exercises the core/CLI unchunked boundary.
+    let payload_bytes: u32 = if ctx.case == "embedding.public_fixture" {
         1 << 20
     } else {
         131_072
@@ -799,7 +802,7 @@ async fn launch_verified_fixture(ctx: Ctx, large: bool, set_visibility: bool) ->
     };
     let pack_id = hash(&pack);
     if !set_visibility {
-        uno_payment_challenge(&ctx).await?;
+        embedding_payment_challenge(&ctx).await?;
     }
     let published_packmap = if large {
         pack_id
@@ -854,12 +857,12 @@ async fn launch_verified_fixture(ctx: Ctx, large: bool, set_visibility: bool) ->
     );
     if ctx.profile().has(Feature::HttpObjects) {
         check_extracted_http(&ctx, &repository, &extracted, &data).await?;
-        if ctx.case == "uno.public_fixture" {
+        if ctx.case == "embedding.public_fixture" {
             check_url_token(&ctx, &repository, &extracted, &data).await?;
         }
     }
     if !set_visibility {
-        uno_already_present(&ctx, &repository, pack_id, pack.len()).await?;
+        embedding_already_present(&ctx, &repository, pack_id, pack.len()).await?;
     }
     ctx.set_note(format!(
         "repository={repository} head_ref={} packmap_ref={} pack_bytes={} pending_polls={pending} extracted_blob={} extracted_blob_bytes={} http={}",
@@ -885,8 +888,8 @@ async fn check_url_token(ctx: &Ctx, repository: &str, extracted: &Hash, data: &[
         Rpc::IssueObjectUrl,
         &request,
     );
-    let minted: IssueObjectUrlResponse = want_ok(ctx.send(&signed).await?, "Uno URL token")?;
-    let token = minted.token.ok_or("Uno URL token absent")?;
+    let minted: IssueObjectUrlResponse = want_ok(ctx.send(&signed).await?, "Embedding URL token")?;
+    let token = minted.token.ok_or("Embedding URL token absent")?;
     let reply = ctx
         .client()
         .get(&format!(
@@ -896,7 +899,7 @@ async fn check_url_token(ctx: &Ctx, repository: &str, extracted: &Hash, data: &[
         .await?;
     ensure!(
         reply.status == 200 && reply.body.as_ref() == data,
-        "Uno token read differs"
+        "Embedding token read differs"
     );
     Ok(())
 }
@@ -1002,11 +1005,11 @@ async fn check_extracted_http(
 }
 
 #[cfg(test)]
-mod uno_geometry_tests {
+mod embedding_geometry_tests {
     use super::*;
 
     #[test]
-    fn canonical_uno_pack_has_two_parts_and_unchanged_published_head() {
+    fn canonical_embedding_pack_has_two_parts_and_unchanged_published_head() {
         use mkit_core::pack::{DecodeLimits, NoExternalBases, decode_entries_with};
         use mkit_core::upload_parts::{MIN_PART_SIZE, PartPlan};
         let data = vec![9; 131_072];
@@ -1030,7 +1033,7 @@ mod uno_geometry_tests {
         )
         .unwrap();
         println!(
-            "Uno canonical pack bytes={} raw_entries={}",
+            "Embedding canonical pack bytes={} raw_entries={}",
             pack.len(),
             decoded.raw_count
         );

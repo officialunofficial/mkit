@@ -64,7 +64,7 @@ mkit_server_worker::durable_objects!(config, sink);
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let path = req.path();
-    let Some(procedure) = path.strip_prefix("/_uno/mkit/") else {
+    let Some(procedure) = path.strip_prefix("/_embedding/mkit/") else {
         return Response::error("host route not found", 404);
     };
     if procedure.is_empty() {

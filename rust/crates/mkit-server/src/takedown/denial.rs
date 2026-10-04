@@ -767,6 +767,9 @@ async fn require_pack_clear_with_concurrency<S: NamespaceStore>(
 }
 
 #[cfg(test)]
+mod batch_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::pipeline::D34Shards;
@@ -1207,9 +1210,8 @@ mod tests {
             )
             .await
             .unwrap();
-            // 16 directory-shard scans plus two strong per-object reads:
-            // BorrowedStore inherits get_many's sequential-get default.
-            assert_eq!(budget.used(), 18);
+            // 16 directory-shard scans plus one batched per-object denial read.
+            assert_eq!(budget.used(), 17);
         });
     }
     #[test]

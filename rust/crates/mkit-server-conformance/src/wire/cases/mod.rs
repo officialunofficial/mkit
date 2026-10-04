@@ -331,8 +331,8 @@ cases! {
     "launch.takedown_chunked_publish" => indexed::takedown_chunked_publish, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2], [TestFaults];
     "launch.indexed_verification_commits" => indexed::launch_verification_commits, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2], [TestFaults];
     "launch.admin_fixture" => indexed::launch_admin_fixture, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2], [TestFaults];
-    "uno.public_fixture" => indexed::uno_public_fixture, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2], [TestFaults];
-    "uno.multipart_file_readback" => indexed::uno_multipart_file_readback, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2, Multipart, HttpObjects], [TestFaults];
+    "embedding.public_fixture" => indexed::embedding_public_fixture, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2], [TestFaults];
+    "embedding.multipart_file_readback" => indexed::embedding_multipart_file_readback, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2, Multipart, HttpObjects], [TestFaults];
     "launch.inspection_rejects_advance" => indexed::inspection_rejects_advance, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2, SyncInspection], [TestFaults];
     "launch.read_fixture_public" => launch_reads::public, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2, HttpObjects, LaunchReadFixture], [TestFaults];
     "launch.read_fixture_private" => launch_reads::private, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2, HttpObjects, LaunchReadFixture], [TestFaults];

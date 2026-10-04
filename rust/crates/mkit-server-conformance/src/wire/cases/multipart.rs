@@ -184,8 +184,8 @@ async fn complete(
     Ok(ctx.send(&signed_request).await?)
 }
 
-/// Complete the Uno canonical fixture using the existing streamed multipart path.
-pub(super) async fn complete_uno_ticket(
+/// Complete the embedding canonical fixture using the existing streamed multipart path.
+pub(super) async fn complete_embedding_ticket(
     ctx: &Ctx,
     signer: &Signer,
     repository: &str,
@@ -196,7 +196,7 @@ pub(super) async fn complete_uno_ticket(
     let receipts = parts(ctx, signer, Some(repository), ticket, bytes).await?;
     want_ok(
         complete(ctx, signer, Some(repository), ticket, receipts).await?,
-        "Uno CompleteUpload",
+        "Embedding CompleteUpload",
     )?;
     Ok(id)
 }

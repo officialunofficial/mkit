@@ -300,6 +300,13 @@ impl<S: NamespaceStore> NamespaceStore for BorrowedStore<'_, S> {
     async fn get(&self, p: &Partition, k: &Key) -> Result<Option<Value>, StoreError> {
         self.0.get(p, k).await
     }
+    async fn get_many(
+        &self,
+        p: &Partition,
+        keys: &[Key],
+    ) -> Result<Vec<Option<Value>>, StoreError> {
+        self.0.get_many(p, keys).await
+    }
     async fn scan(
         &self,
         p: &Partition,

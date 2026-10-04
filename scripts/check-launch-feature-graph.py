@@ -36,4 +36,4 @@ def check(manifest, features=()):
 
 if __name__ == "__main__":
     check("apps/vcs-worker/Cargo.toml", ("launch",))
-    check("apps/embedded-worker/tests/uno-launch/Cargo.toml")
+    check("apps/embedded-worker/tests/embedding-conformance/Cargo.toml")
