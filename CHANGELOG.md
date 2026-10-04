@@ -137,6 +137,17 @@ stored shapes instead of upgrading or downgrading them.
 
 ### Added
 
+- Public constructors cover every sink-visible `OutcomeKind` and
+  `ReservationV1` result, including repository storage changes; `Outcome::new`
+  constructs delivery payloads without stored rows. Types retain their
+  non-exhaustive annotations.
+- `Pipeline::repo_storage_many` reads up to 100 repositories in one namespace
+  with one coordinator `get_many`, including per-repository owner authorization.
+  Missing and unauthorized repositories both yield `None`. The Worker embedding
+  exposes the method and `MAX_REPO_STORAGE_BATCH`.
+- Embedder documentation explains durable sink retries, unordered at-least-once
+  delivery, and admission backpressure only above the configured backlog cap.
+
 - Exact per-repository stored-bytes accounting for multi-repository
   deployments: the sum of the sizes of the distinct packs that are members of
   a repository (a pack shared by two repositories counts in each). A

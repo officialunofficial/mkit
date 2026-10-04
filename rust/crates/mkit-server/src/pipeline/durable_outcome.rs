@@ -55,7 +55,77 @@ pub enum OutcomeKind {
     RepoStorageChanged { stored_bytes: u64, version: u64 },
 }
 
+impl OutcomeKind {
+    /// A durably committed write and its accounting.
+    #[must_use]
+    pub fn committed(
+        bytes_stored: u64,
+        new_to_repo: u64,
+        new_to_store: u64,
+        refs: Vec<OutcomeRef>,
+    ) -> Self {
+        Self::Committed {
+            bytes_stored,
+            new_to_repo,
+            new_to_store,
+            refs,
+        }
+    }
+
+    /// An aborted operation and its diagnostic detail.
+    #[must_use]
+    pub fn aborted(reason: AbortReason, detail: String) -> Self {
+        Self::Aborted { reason, detail }
+    }
+
+    /// An unused ticket that expired.
+    #[must_use]
+    pub fn expired() -> Self {
+        Self::Expired
+    }
+
+    /// A completed HTTP read, including partial transmission.
+    #[must_use]
+    pub fn read_served(object: [u8; 32], bytes_served: u64) -> Self {
+        Self::ReadServed {
+            object,
+            bytes_served,
+        }
+    }
+
+    /// An absolute repository pack-byte total and its monotonic version.
+    #[must_use]
+    pub fn repo_storage_changed(stored_bytes: u64, version: u64) -> Self {
+        Self::RepoStorageChanged {
+            stored_bytes,
+            version,
+        }
+    }
+}
+
 impl Outcome {
+    /// Construct a delivery payload with no request procedure or visibility.
+    /// Set those public fields for request outcomes, or use
+    /// [`Self::from_reservation`] to derive them from the recorded operation.
+    #[must_use]
+    pub fn new(
+        reservation_id: String,
+        audience: String,
+        repository: String,
+        occurred_unix_ms: i64,
+        kind: OutcomeKind,
+    ) -> Self {
+        Self {
+            reservation_id,
+            audience,
+            repository,
+            occurred_unix_ms,
+            kind,
+            procedure: None,
+            visibility: None,
+        }
+    }
+
     /// Map a terminal stored row to the delivery contract.
     ///
     /// # Errors

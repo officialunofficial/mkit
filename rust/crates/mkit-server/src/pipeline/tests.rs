@@ -2298,6 +2298,107 @@ fn reserved_commit_conflict_backpressure_and_recovery() {
     );
 }
 
+struct RefusingOutcomeSink(AtomicU32);
+impl OutcomeSink for RefusingOutcomeSink {
+    async fn deliver(&self, _: &Outcome) -> Result<(), DeliveryError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Err(DeliveryError::new("receiver down", None))
+    }
+}
+
+#[test]
+fn sink_failure_keeps_commit_and_backpressure_admits_equality_for_rows_and_bytes() {
+    for byte_cap in [false, true] {
+        let clock = clock();
+        let sink = Arc::new(RefusingOutcomeSink(AtomicU32::new(0)));
+        let defaults = with_admission(NumberedReservation(AtomicU32::new(0)));
+        let hooks = Hooks {
+            authorizer: defaults.authorizer,
+            admission: defaults.admission,
+            pre_receive: defaults.pre_receive,
+            receipts: defaults.receipts,
+            outcomes: sink.clone(),
+        };
+        let mut env = build(cfg(authv2()), Spy::new(store(&clock)), hooks, clock.clone());
+        let owner = key(7);
+        let first = upd(HEAD, Missing, A);
+        assert_eq!(
+            env.update(&Req::update(&owner, 1, &first, T0), &first)
+                .unwrap(),
+            UpdateRefResult::Committed
+        );
+        assert_eq!(
+            sink.0.load(Ordering::SeqCst),
+            0,
+            "commit does not call the sink"
+        );
+        let raw = now(env.pipe.meta.get(&ns(), &keys::outcome_backlog()))
+            .unwrap()
+            .unwrap();
+        let backlog = codec::decode_backlog(&raw).unwrap();
+        env.pipe.cfg.outbox_backlog_cap = Some(if byte_cap {
+            OutboxBacklogCap::new(u64::MAX, backlog.bytes)
+        } else {
+            OutboxBacklogCap::new(backlog.rows, u64::MAX)
+        });
+        let registry = crate::timers::TimerRegistry::new().register(
+            crate::timers::outcome_delivery::OutcomeDelivery::new(
+                sink.clone(),
+                AUDIENCE.into(),
+                Arc::new(crate::NoopMetrics),
+                Arc::new(crate::rt::ManualSleep::new()),
+            ),
+        );
+        assert_eq!(
+            now(crate::timers::run_due(
+                &env.pipe.meta,
+                &ns(),
+                &registry,
+                clock.as_ref(),
+                T0 as u64,
+                &crate::timers::TickBudget::default()
+            ))
+            .unwrap()
+            .fired,
+            1
+        );
+        assert_eq!(sink.0.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            env.read(HEAD),
+            Some(A),
+            "sink failure cannot roll back the commit"
+        );
+        assert_eq!(
+            now(env.pipe.meta.get(&ns(), &keys::outcome_backlog())).unwrap(),
+            Some(raw)
+        );
+        let second = upd(HEAD, Any, B);
+        assert_eq!(
+            env.update(&Req::update(&owner, 2, &second, T0), &second)
+                .unwrap(),
+            UpdateRefResult::Committed,
+            "equality with the cap admits another reservation"
+        );
+        let third = upd(HEAD, Any, A);
+        let before = env.pipe.hooks.admission.0.load(Ordering::SeqCst);
+        let error = env
+            .update(&Req::update(&owner, 3, &third, T0), &third)
+            .unwrap_err();
+        assert_eq!(
+            (error.code(), error.public_message()),
+            (Code::Unavailable, "outbox backlog; retry")
+        );
+        assert!(
+            error
+                .headers()
+                .iter()
+                .any(|(name, value)| name == "Retry-After" && value == "30")
+        );
+        assert_eq!(env.pipe.hooks.admission.0.load(Ordering::SeqCst), before);
+        assert_eq!(env.read(HEAD), Some(B));
+    }
+}
+
 #[test]
 fn pending_guard_loss_commits_no_ref_and_does_not_replan() {
     let clock = clock();

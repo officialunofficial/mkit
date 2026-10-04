@@ -337,6 +337,28 @@ by this launch; do not enable the test import route. See the
 | URL tokens | Switch active seed, retain old public key with retirement time through the supported token TTL and public-list cache refresh |
 | Preservation | Publish overlapping public keys including the new signer, switch dedicated `RECEIPT_NOTICE_KEY`, retain historical verification keys; never delete evidence or legal holds as part of rotation |
 
+### Outcome delivery and backlog
+
+`OutcomeSink` delivery runs from the durable outbox after commit. Sink errors
+and timeouts never roll back the commit; the refused row stays queued for a
+later retry. Delivery is at least once and not ordered: a refused row does not
+block later rows, which can overtake it. Deduplicate by `reservation_id` and
+retain the highest per-repository `RepoStorageChanged.version`.
+
+Monitor `mkit_server_outbox_backlog` with `unit=rows` and `unit=bytes` per
+`shard_kind`. Persistent failures can trigger `OutboxBacklogCap`, whose core
+default is 100,000 rows / 64 MiB per outbox. Backpressure starts only when
+`rows > cap.rows || bytes > cap.bytes`; equality is still admitted. New
+reservation-granting writes then return `unavailable` (HTTP 503),
+`outbox backlog; retry`, and `Retry-After: 30`. Admitted HTTP-object reads return
+an empty HTTP 503 without that message or retry header. A real public-to-private
+visibility change remains admitted above the cap; same-value visibility requests
+are not exempt. Restore the receiver and drain the queued rows to resume
+admission; earlier commits remain durable.
+Reconciliation can use `Pipeline::repo_storage_many` for up to
+100 names in one namespace with one coordinator `get_many` and per-repository
+owner authorization; missing and unauthorized names both yield `None`.
+
 ### Failure drills
 
 Run against isolated staging, recording source/artifact/config, input geometry,

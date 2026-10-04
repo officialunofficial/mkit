@@ -2233,9 +2233,9 @@ mod faults {
     }
 }
 
-pub use mkit_server::pipeline::RepoStorage;
 #[cfg(feature = "http-objects")]
 pub use mkit_server::pipeline::{IssuedUrl, ObjectReader, ReaderView};
+pub use mkit_server::pipeline::{MAX_REPO_STORAGE_BATCH, RepoStorage};
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) use glue::build_ns_object;

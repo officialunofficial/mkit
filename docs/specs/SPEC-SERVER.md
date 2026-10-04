@@ -778,6 +778,26 @@ publication transition (§12.4), when the published prefix reaches that send.
 §5. `OutcomeResponse` is empty; its successful Connect response
 acknowledges delivery under §8.
 
+For in-process `OutcomeSink` embedders, delivery runs from the durable outbox
+**after commit**. Sink errors or timeouts never roll back that commit; the
+refused row remains queued for retry. Delivery is at least once and **not
+ordered**: later rows can overtake a refused row, which does not block the
+rows behind it. Receivers deduplicate by `reservation_id` and retain the
+highest per-repository `RepoStorageChanged.version` (§6.5.1).
+
+Persistent sink failure grows the outbox backlog. The core's
+`OutboxBacklogCap` defaults to 100,000 rows and 64 MiB per outbox. Its
+admission check refuses reservation-granting writes and admitted HTTP reads
+when `rows > cap.rows || bytes > cap.bytes`; equality is still admitted.
+Reservation-granting writes receive `unavailable` (HTTP 503), public message
+`outbox backlog; retry`, with `Retry-After: 30`. Admitted HTTP-object reads
+receive an empty HTTP 503 without that message or retry header. A real
+public-to-private visibility change remains admitted above the cap;
+same-value visibility requests are not exempt. This check does not undo
+prior commits. Embedders should monitor `mkit_server_outbox_backlog`, with `unit=rows` and `unit=bytes`
+labels per `shard_kind`, and restore the sink before the configured cap is
+exceeded.
+
 The shared `Outcome` fields are:
 
 | Field | Meaning |
@@ -854,7 +874,15 @@ keeps the value with the highest `version` and ignores the rest. The outcome's
 `Pipeline::repo_storage` returns `{ stored_bytes, version }` for a repository
 in one coordinator read, authorized as an owner read of the repository
 (`Unimplemented` without multi-repository addressing). The Worker embedding
-exposes the pipeline's method.
+exposes the pipeline's method. `Pipeline::repo_storage_many(namespace, repos,
+meta)` accepts at most `MAX_REPO_STORAGE_BATCH` (100) repository names, returns
+optional counters in input order (including duplicates), and fetches counters
+and authorization state with one coordinator `get_many`. Empty batches make
+no storage call. A signed `ListRefs` envelope selects the namespace; its
+repository name need not exist. Each requested repository receives the same
+owner/grant and authorizer checks as the single read. Missing and unauthorized
+repositories both return `None`. Authorized missing or corrupt counters remain
+store errors. The Worker embedding exposes this method and the batch limit.
 
 The `repo_storage_changed` `occurred_unix_ms` is the consuming batch's plan
 time. Its `reservation_id` prefix `rs:` is reserved: an admission reservation
