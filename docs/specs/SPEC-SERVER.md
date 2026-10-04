@@ -3990,6 +3990,13 @@ requirements follow the deployment's declared launch scope.
 | Manual PurgeCache | Optional asynchronous acceptance and audited completion under R-190 below. |
 | Other admin procedures | Supported only by completed launch work; never advertise unimplemented operations. |
 
+The hosted adapter acceptance subset builds the embedding fixture with a locked
+wasm dependency graph and exercises paid indexed publication, published reads,
+URL tokens, supplied hooks and durable outcome retry with takedown off and no
+inspection. A separate fault-enabled case verifies slice recovery. This subset
+does not establish conformance for optional takedown or inspection; their
+retained scenario harnesses and core tests remain necessary when enabled.
+
 **Lean launch takedown (R-190).** A launch CONTENT `Takedown` names
 one repository for canonical source validation and exactly one of 1–256 distinct
 blob/manifest `object_ids` or one whole `pack_id` (admin schema field 9). This

@@ -65,6 +65,18 @@ on:
       - 'rust/crates/mkit-transport-connect/**'
       - 'scripts/vcs-worker-conformance.sh'
       - 'scripts/embedded-worker-conformance.*'
+      - 'rust/vendor/ruzstd/**'
+      - 'rust/crates/mkit-core-wasm-check/**'
+      - 'rust/tests/golden/pack-v2/**'
+      - 'scripts/paid-worker-acceptance.py'
+      - 'scripts/embedded-worker-hooks.py'
+      - 'scripts/vcs-worker-launch-runtime.py'
+      - 'scripts/check-launch-feature-graph.py'
+      - 'scripts/wasm-ruzstd-check.sh'
+      - 'scripts/test-server-gates.py'
+      - 'cloudbuild/ci.yaml'
+      - 'apps/workspace-worker/package-lock.json'
+      - 'apps/workspace-worker/package.json'
       - 'proto/mkit/transport/v1/**'
   # No `paths:` filter on pull_request: the workflow ALWAYS triggers on PRs so
   # its required check (workers-gate) is never absent. The `ci` job is gated
@@ -128,6 +140,18 @@ jobs:
               - 'rust/crates/mkit-server-conformance/**'
               - 'scripts/vcs-worker-conformance.sh'
               - 'scripts/embedded-worker-conformance.*'
+              - 'rust/vendor/ruzstd/**'
+              - 'rust/crates/mkit-core-wasm-check/**'
+              - 'rust/tests/golden/pack-v2/**'
+              - 'scripts/paid-worker-acceptance.py'
+              - 'scripts/embedded-worker-hooks.py'
+              - 'scripts/vcs-worker-launch-runtime.py'
+              - 'scripts/check-launch-feature-graph.py'
+              - 'scripts/wasm-ruzstd-check.sh'
+              - 'scripts/test-server-gates.py'
+              - 'cloudbuild/ci.yaml'
+              - 'apps/workspace-worker/package-lock.json'
+              - 'apps/workspace-worker/package.json'
               - 'proto/mkit/transport/v1/**'
             workspace:
               - '.github/workflows/workers.yml'
@@ -401,24 +425,95 @@ jobs:
           VCS_CONFORMANCE_KEEP: '1'
         run: scripts/vcs-worker-conformance.sh --test-faults --sharding single
 
+      - name: Paid indexed slice failure, resume and commit
+        timeout-minutes: 20
+        env:
+          TMPDIR: ${{ runner.temp }}/wire-logs
+          VCS_CONFORMANCE_KEEP: '1'
+        run: scripts/vcs-worker-conformance.sh --indexed-only
+
       - name: Upload Wrangler and Miniflare diagnostics
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: workers-wire-logs
-          path: ${{ runner.temp }}/wire-logs/**/wrangler.log
+          path: ${{ runner.temp }}/wire-logs/**
           if-no-files-found: warn
+          retention-days: 7
+
+  paid-acceptance:
+    name: Paid embedded release acceptance
+    needs: changes
+    if: >-
+      always() &&
+      (github.event_name == 'push' || needs.changes.outputs.workers == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      WRANGLER_SEND_METRICS: 'false'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Create diagnostic directory
+        run: |
+          mkdir -p "${RUNNER_TEMP}/paid-logs"
+          echo "TMPDIR=${RUNNER_TEMP}/paid-logs" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: '1.95.0'
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          workspaces: |
+            rust -> rust/target
+            apps/embedded-worker/tests/uno-launch -> apps/embedded-worker/tests/uno-launch/target
+          prefix-key: paid-acceptance
+          cache-on-failure: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+      - name: Install pinned build tools
+        run: |
+          cargo install worker-build --locked --version 0.8.6
+          cargo install wasm-pack --locked --version 0.13.1
+      - name: Install locked local runtime
+        working-directory: apps/workspace-worker
+        run: npm ci --ignore-scripts
+      - name: Verify hosted gates and launch decoder graphs
+        timeout-minutes: 5
+        run: |
+          python3 scripts/test-server-gates.py --hosted-only
+          time python3 scripts/check-launch-feature-graph.py
+      - name: Bounded decoder on wasm32
+        timeout-minutes: 10
+        run: time bash scripts/wasm-ruzstd-check.sh
+      - name: Locked wasm release build of Uno fixture
+        working-directory: apps/embedded-worker/tests/uno-launch
+        timeout-minutes: 10
+        run: cargo build --locked --release --target wasm32-unknown-unknown
+      - name: Release push, published read, URL token and cold outcome retry
+        timeout-minutes: 10
+        env:
+          MKIT_MINIFLARE_MODULE: ${{ github.workspace }}/apps/workspace-worker/node_modules/miniflare
+        run: python3 scripts/paid-worker-acceptance.py
+      - name: Retain acceptance diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: paid-acceptance-logs
+          path: ${{ runner.temp }}/paid-logs/**
+          if-no-files-found: error
           retention-days: 7
 
   # Stable required-check name for branch protection. Always runs on PRs
   # (if: always()) so the status is never absent — closing the
-  # "required-but-skipped" trap. Both jobs must succeed or be legitimately
+  # "required-but-skipped" trap. All jobs must succeed or be legitimately
   # skipped because their relevant paths did not change. A failure or
-  # cancellation in either job fails this gate.
+  # cancellation in any job fails this gate.
   workers-gate:
     name: Workers CI gate
     if: always() && github.event_name == 'pull_request'
-    needs: [ci, workspace, vcs-worker-conformance]
+    needs: [ci, workspace, vcs-worker-conformance, paid-acceptance]
     runs-on: ubuntu-latest
     steps:
       - name: Check ci job result
@@ -427,12 +522,13 @@ jobs:
           CI: ${{ needs.ci.result }}
           WORKSPACE: ${{ needs.workspace.result }}
           CONFORMANCE: ${{ needs.vcs-worker-conformance.result }}
+          PAID: ${{ needs.paid-acceptance.result }}
         run: |
-          for result in "${CI}" "${WORKSPACE}" "${CONFORMANCE}"; do
+          for result in "${CI}" "${WORKSPACE}" "${CONFORMANCE}" "${PAID}"; do
             case "${result}" in
               success|skipped) ;;
               *)
-                echo "::error::Workers job did not succeed (Rust=${CI}, workspace=${WORKSPACE}, conformance=${CONFORMANCE})"
+                echo "::error::Workers job did not succeed (Rust=${CI}, workspace=${WORKSPACE}, conformance=${CONFORMANCE}, paid=${PAID})"
                 exit 1
                 ;;
             esac

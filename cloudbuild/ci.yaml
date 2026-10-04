@@ -264,3 +264,26 @@ steps:
         cargo nextest run --locked --workspace --all-features \
           --profile ignored-lane --run-ignored ignored-only
         sccache --show-stats
+
+  # Separate cargo invocation keeps the C decoder out of the allocator probe.
+  - name: ${_CI_IMAGE}
+    id: server-allocator
+    waitFor: [check]
+    timeout: 600s
+    entrypoint: bash
+    env:
+      - "CARGO_PROFILE_DEV_DEBUG=0"
+      - "CARGO_PROFILE_TEST_DEBUG=0"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        cd rust
+        cargo test --locked -p mkit-server --no-default-features --features memory,pack-ruzstd --test zstd_slice_heap_bounds -- --ignored --test-threads=1 --nocapture
+
+  - name: python:3.13.2-slim
+    id: server-gates
+    waitFor: ['-']
+    timeout: 60s
+    entrypoint: python3
+    args: [scripts/test-server-gates.py, --hosted-only]

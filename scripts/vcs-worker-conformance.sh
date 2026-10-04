@@ -56,6 +56,7 @@
 #                  one slice failing mid-pack on purpose, and the same signed
 #                  advance then commits (`indexed.async_verification_commits`).
 #                  The wrangler log must show the injected slice failure.
+#   --indexed-only run only the injected indexed phase, with test faults.
 #   -- ARGS        passed to every `mkit-server-conformance wire` run (e.g.
 #                  `-- --filter refs.`, `-- --list-refs 1000`).
 #
@@ -103,6 +104,7 @@ sharding=d34
 multi=0
 hooks=0
 indexed=0
+indexed_only=0
 runner_args=()
 # Under D34 a ListRefs page scans 16 buckets and each lag poll re-lists, so the
 # 10,000-ref case would take many minutes in miniflare; 1,000 exercises paging
@@ -115,6 +117,7 @@ while [ $# -gt 0 ]; do
         --multi) multi=1 ;;
         --hooks) hooks=1 ;;
         --indexed) indexed=1 ;;
+        --indexed-only) indexed=1; indexed_only=1; test_faults=1 ;;
         --sharding)
             if [ $# -lt 2 ] || { [ "$2" != single ] && [ "$2" != d34 ]; }; then
                 echo "--sharding requires single or d34" >&2; exit 2
@@ -394,6 +397,7 @@ echo ">> building apps/vcs-worker (worker-build ${build_args[*]})"
 (cd apps/vcs-worker && CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true \
     CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true worker-build "${build_args[@]}")
 
+if [ "${indexed_only}" -eq 0 ]; then
 start_server suite "${vars[@]}"
 run_suite "${features}"
 if [ "${test_faults}" -eq 1 ] && [ -z "${runner_args[*]:-}" ]; then
@@ -588,6 +592,7 @@ if [ "${multi}" -eq 1 ]; then
         stop_server
     fi
 fi
+fi
 if [ "${indexed}" -eq 1 ]; then
     # The indexed phase (WP-4.8): the Multi allowlist of the run's fixed seed,
     # INDEXED_MODE enabled in this test-faults profile and a Paid plan, so
@@ -605,7 +610,7 @@ if [ "${indexed}" -eq 1 ]; then
         --var "INDEXED_MODE:true" --var "WORKERS_PLAN:paid"
     echo ">> running the indexed wire case (features: ${indexed_features})"
     status=0
-    "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
+    capture "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
         --repository "${REPOSITORY}" --signer-seed-hex "${indexed_seed}" \
         --run-id "${indexed_run_id}" --atomic-advance --fresh-target --milestone M4 \
         --max-pack-bytes "${MAX_PACK_BYTES}" --features "${indexed_features}" \
@@ -616,6 +621,8 @@ if [ "${indexed}" -eq 1 ]; then
         tail -n 80 "${log}" >&2
         exit "${status}"
     fi
+    require_pass indexed.async_verification_commits
+    cp "${work}/last.tap" "${work}/indexed/producer.tap"
     if ! grep -q "verification slice failed" "${work}/indexed/wrangler.log"; then
         echo "the injected mid-pack slice failure never showed in the wrangler log" >&2
         tail -n 80 "${log}" >&2
