@@ -54,8 +54,9 @@ class WireDiagnostics(unittest.TestCase):
                     "case": "refs.many_refs_one_repository", "connection_loss": True}) + "\n")
             (root / "last.tap").write_text("refs.many_refs_one_repository: retry 1: duplicate\n")
             output, summary, github, keep = [root / name for name in ("report.json", "summary.md", "output", "keep")]
-            subprocess.run([sys.executable, str(SCRIPT), str(root), "--output", str(output),
-                "--summary", str(summary), "--github-output", str(github), "--keep-file", str(keep)], check=True)
+            result = subprocess.run([sys.executable, str(SCRIPT), str(root), "--output", str(output),
+                "--summary", str(summary), "--github-output", str(github), "--keep-file", str(keep)],
+                check=True, text=True, capture_output=True)
             report = json.loads(output.read_text())
             self.assertTrue(report["keep"])
             self.assertTrue(keep.exists())
@@ -64,6 +65,8 @@ class WireDiagnostics(unittest.TestCase):
             self.assertEqual(github.read_text(), "keep=true\n")
             self.assertIn("**Total** | **2**", summary.read_text())
             self.assertIn("refs.many_refs_one_repository", summary.read_text())
+            self.assertIn("::warning title=Workers wire retries::2 retries occurred", result.stdout)
+            self.assertIn("**Warning: 2 wire retries occurred.**", summary.read_text())
 
     def test_terminal_loss_and_failed_case_retry_are_retained_without_pass_note(self):
         with tempfile.TemporaryDirectory() as work:
@@ -84,7 +87,9 @@ class WireDiagnostics(unittest.TestCase):
             root = Path(work)
             path = root / "runner-1.log"
             path.write_text("list.large_response_within_limit: retry 1: aborted\n")
-            self.assertTrue(diagnostics.collect(root)["keep"])
+            report = diagnostics.collect(root)
+            self.assertTrue(report["keep"])
+            self.assertIn("**Warning: 1 wire retries occurred.**", diagnostics.markdown(report))
             path.unlink()
             (root / "wrangler-debug.log").write_text("Network connection lost\n")
             self.assertTrue(diagnostics.collect(root)["keep"])
@@ -99,6 +104,7 @@ class WireDiagnostics(unittest.TestCase):
                 self.assertFalse(report["keep"])
                 self.assertEqual(report["totals"]["retries"], 0)
                 self.assertIn("**Total** | **0**", diagnostics.markdown(report))
+                self.assertNotIn("**Warning:", diagnostics.markdown(report))
 
     def test_truncated_correlation_evidence_fails_collection(self):
         with tempfile.TemporaryDirectory() as work:

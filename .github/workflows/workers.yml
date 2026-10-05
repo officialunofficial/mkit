@@ -36,7 +36,7 @@ name: "CI: Workers"
 # apps/vcs-worker is a thin deployment of rust/crates/mkit-server-worker
 # (WP-M0-17), so changes to mkit-server* also trigger this workflow. The
 # `vcs-worker-conformance` job runs the black-box wire suite
-# (mkit-server-conformance) against it under `wrangler dev`
+# (mkit-server-conformance) against a direct workerd socket
 # (scripts/vcs-worker-conformance.sh). This workflow triggers only on `main`
 # (pushes and PRs into it). The same script can be run locally. All jobs feed
 # the existing stable gate.
@@ -67,6 +67,7 @@ on:
       - 'scripts/workers-wire-diagnostics.py'
       - 'scripts/test-workers-wire-diagnostics.py'
       - 'scripts/workers-runtime-versions.cjs'
+      - 'scripts/workers-wire-runtime.cjs'
       - 'scripts/embedded-worker-conformance.*'
       - 'scripts/reference-worker-acceptance.py'
       - 'scripts/connect-deadline-runtime.py'
@@ -147,6 +148,7 @@ jobs:
               - 'scripts/workers-wire-diagnostics.py'
               - 'scripts/test-workers-wire-diagnostics.py'
               - 'scripts/workers-runtime-versions.cjs'
+              - 'scripts/workers-wire-runtime.cjs'
               - 'scripts/embedded-worker-conformance.*'
               - 'scripts/reference-worker-acceptance.py'
               - 'scripts/connect-deadline-runtime.py'
@@ -374,11 +376,11 @@ jobs:
         run: npm run build
 
   # The M0 wire-conformance check of the vcs-worker port (WP-M0-17): the
-  # black-box wire suite against the Worker under `wrangler dev`, in both
+  # black-box wire suite against the Worker on direct workerd, in both
   # the release feature set and the `test-faults` one (clock skew, stats,
   # quota and growth cases, and the adapter's body-buffer bound).
   vcs-worker-conformance:
-    name: vcs-worker wire conformance (wrangler dev)
+    name: vcs-worker wire conformance (direct workerd)
     needs: changes
     if: >-
       always() &&

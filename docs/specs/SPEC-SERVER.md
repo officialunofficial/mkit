@@ -4231,7 +4231,8 @@ NOT depend on successful audit delivery.
 
 The mapping of profiles to conformance-suite cases is specified with M5.
 Local Workers wire diagnostics retain recovered connection losses and report
-existing retries; see the [operator guide](../operations/workers.md#wire-connection-diagnostics).
+existing retries as CI warnings. The harness connects directly to workerd
+without changing the compiled Worker or suite assertions; see the [operator guide](../operations/workers.md#wire-connection-diagnostics).
 This evidence does not change conformance verdicts, replay policy or the
 client-visible error contract.
 

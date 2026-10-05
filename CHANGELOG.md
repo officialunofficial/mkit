@@ -15,6 +15,11 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Added
 
+- Workers wire CI bypasses the local dev HTTP proxy using a direct workerd
+  socket, with the same pinned runtime, Worker builds, phases and assertions.
+  Existing replay-safe retries remain; any retry emits a CI and summary warning.
+  Recovered-loss diagnostics remain downloadable on successful runs.
+
 - Server readers add `walk_history_in`, `locate_commit_in` and
   `read_commit_path_in` for bounded selected-ref parent discovery and exact
   decoded paths. First-parent and all-parent traversal are explicit; merge

@@ -84,11 +84,20 @@ class ServerGates(unittest.TestCase):
         self.assertIn("run: scripts/vcs-worker-conformance.sh --indexed-only", conformance)
         self.assertIn("run: scripts/vcs-worker-conformance.sh --test-faults --sharding single", conformance)
         self.assertIn("path: ${{ runner.temp }}/wire-logs/**", conformance)
+        runtime = (ROOT / "scripts/workers-wire-runtime.cjs").read_text()
+        self.assertIn("unsafeDirectSockets:", runtime)
+        self.assertIn("unsafeGetDirectURL", runtime)
+        for script in ("vcs-worker-conformance.sh", "connect-deadline-runtime.py"):
+            self.assertIn("scripts/workers-wire-runtime.cjs", (ROOT / "scripts" / script).read_text())
+        for command in ("run: scripts/vcs-worker-conformance.sh", "run: scripts/vcs-worker-conformance.sh --test-faults --multi",
+                        "run: python3 scripts/connect-deadline-runtime.py --portable"):
+            self.assertIn(command + "\n", conformance)
+        self.assertNotIn("--no-build", conformance)
         for path in ("apps/embedded-worker/**", "rust/vendor/ruzstd/**", "scripts/paid-worker-acceptance.py",
                      "scripts/embedded-worker-hooks.py", "scripts/vcs-worker-launch-runtime.py",
                      "scripts/check-launch-feature-graph.py", "scripts/wasm-ruzstd-check.sh",
                      "rust/crates/mkit-core-wasm-check/**", "rust/tests/golden/pack-v2/**",
-                     "apps/workspace-worker/package-lock.json", "cloudbuild/ci.yaml"):
+                     "apps/workspace-worker/package-lock.json", "cloudbuild/ci.yaml", "scripts/workers-wire-runtime.cjs"):
             self.assertEqual(yaml.count(f"- '{path}'"), 2, path)
 
 
