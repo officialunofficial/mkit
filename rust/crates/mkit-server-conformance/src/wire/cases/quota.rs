@@ -248,18 +248,20 @@ pub(super) async fn namespace_cap_after_rollup(ctx: Ctx) -> CaseResult {
                 .to_owned(),
         ));
     }
-    // A rollup near a window edge would read the next window: wait the edge
-    // out (at most 3 skew periods, 195 s) rather than skip, so a run filtered
-    // to this one case never flakes.
-    let now = u64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis()),
-    )
-    .unwrap_or(0);
+    // A rollup near a window edge would read the next window: step past the
+    // edge rather than skip, so a run filtered to this one case never flakes.
+    // An in-process server runs on a manual clock, which is advanced (no
+    // wall-clock wait); a live server's clock is waited out, at most 3 skew
+    // periods (195 s).
+    let now = u64::try_from(ctx.server_now_ms()).unwrap_or(0);
     let to_edge = window - now % window;
     if to_edge < 3 * ROLLUP_SKEW_MS {
-        tokio::time::sleep(std::time::Duration::from_millis(to_edge + EDGE_MARGIN_MS)).await;
+        let step = to_edge + EDGE_MARGIN_MS;
+        if let Some(clock) = ctx.profile().server_clock.as_ref() {
+            clock.advance(i64::try_from(step).unwrap_or(i64::MAX));
+        } else {
+            tokio::time::sleep(std::time::Duration::from_millis(step)).await;
+        }
     }
     let (repo, _) = repository::identities(&ctx, "namespace-cap", "unused")?;
     let first = q.max_ops / 2;

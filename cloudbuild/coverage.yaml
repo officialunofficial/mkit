@@ -35,6 +35,13 @@ steps:
     env:
       - "CARGO_TERM_COLOR=always"
       - "CARGO_INCREMENTAL=0"
+      # Coverage needs only the instrumentation mappings, not DWARF. Without
+      # this the instrumented test crates are built with full debuginfo, which
+      # (as in ci.yaml) dominates rustc memory on the 8 GB machine; the
+      # mkit-server lib-test compile died there with no diagnostic once the
+      # crate's test suite grew.
+      - "CARGO_PROFILE_DEV_DEBUG=0"
+      - "CARGO_PROFILE_TEST_DEBUG=0"
       - "RUSTC_WRAPPER=sccache"
       - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
       - "SCCACHE_GCS_RW_MODE=READ_WRITE"
