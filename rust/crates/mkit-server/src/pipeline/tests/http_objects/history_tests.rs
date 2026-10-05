@@ -481,6 +481,93 @@ fn merge_modes_preserve_parent_order_deduplicate_and_refuse_fanout() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // Independent bounds and completion in the same merge fixture.
+fn merge_visit_bounds_stops_and_redundant_parents() {
+    for denial in [false, true] {
+        let mut fx = fixture();
+        let root = tree(&[]);
+        let left = commit(&root, &[], "left");
+        let right = commit(&root, &[&left], "right");
+        let head = commit(&root, &[&left, &right], "merge");
+        fx.push("room", &[&root, &left, &right, &head], id(&head), None);
+        fx.pipe.cfg.takedown_denial = denial;
+        for writer in [false, true] {
+            in_view(&fx, writer, |reader| {
+                let options = HistoryOptions {
+                    max_nodes: 2,
+                    max_frontier: 2,
+                    ..HistoryOptions::default()
+                };
+                let mut session = ReaderSession::default();
+                let gets = get_count(&fx);
+                let found =
+                    block_on(reader.locate_commit_in(&mut session, HEAD, id(&left), options))
+                        .unwrap()
+                        .unwrap();
+                assert_eq!(found.id, id(&left));
+                assert_eq!(get_count(&fx) - gets, 4, "exactly two visited commits");
+                let mut session = ReaderSession::default();
+                let result =
+                    block_on(reader.locate_commit_in(&mut session, HEAD, id(&right), options));
+                if writer {
+                    assert_eq!(result.unwrap_err().code(), Code::ResourceExhausted);
+                } else {
+                    assert!(result.unwrap().is_none());
+                }
+                assert_eq!(session.used().output_bytes, 0);
+                for limit in [3, 4] {
+                    let page = block_on(reader.walk_history_in(
+                        &mut ReaderSession::default(),
+                        HEAD,
+                        None,
+                        limit,
+                        HistoryOptions::default(),
+                    ))
+                    .unwrap()
+                    .unwrap();
+                    assert_eq!(
+                        page.commits.iter().map(|c| c.id).collect::<Vec<_>>(),
+                        vec![id(&head), id(&left), id(&right)]
+                    );
+                    assert!(page.complete, "all selected parents were consumed");
+                }
+            });
+        }
+        fx.pipe = fx.pipe.with_http_seams(|mut seams| {
+            seams.takedown = Arc::new(StopGate {
+                stop: id(&head),
+                pause: None,
+            });
+            seams
+        });
+        for writer in [false, true] {
+            in_view(&fx, writer, |reader| {
+                let mut session = ReaderSession::default();
+                let gets = get_count(&fx);
+                let page = block_on(reader.walk_history_in(
+                    &mut session,
+                    HEAD,
+                    None,
+                    2,
+                    HistoryOptions {
+                        max_frontier: 1,
+                        ..HistoryOptions::default()
+                    },
+                ))
+                .unwrap()
+                .unwrap();
+                assert_eq!(page.commits.len(), 1);
+                assert_eq!(page.commits[0].id, id(&head));
+                assert!(page.complete);
+                assert_eq!(get_count(&fx) - gets, 2, "stopped parents are never loaded");
+                assert!(!session.proofs.contains(&id(&left)));
+                assert!(!session.proofs.contains(&id(&right)));
+            });
+        }
+    }
+}
+
+#[test]
 #[allow(clippy::too_many_lines)] // One fixture matrix across owner/public and denial modes.
 fn exact_names_modes_roots_symlinks_and_expected_ids() {
     for denial in [false, true] {
@@ -1146,6 +1233,65 @@ fn authority_and_pack_revocation_after_body_io_prevent_output() {
                     assert!(result.unwrap().is_none());
                 }
                 assert_eq!(session.used().output_bytes, 0);
+            });
+        }
+    }
+}
+
+#[test]
+fn retained_singleton_history_rechecks_after_unavailable_parent() {
+    for denial in [false, true] {
+        for writer in [false, true] {
+            let mut fx = fixture();
+            let root = tree(&[]);
+            let parent = commit(&root, &[], "parent");
+            let head = commit(&root, &[&parent], "head");
+            let pack = fx.push("room", &[&root, &parent, &head], id(&head), None);
+            fx.pipe.cfg.takedown_denial = denial;
+            let store = fx.pipe.meta.clone();
+            fx.pipe = fx.pipe.with_http_seams(|mut seams| {
+                seams.takedown = Arc::new(ChangeAfterBody {
+                    target: id(&parent),
+                    change: Box::new(move || {
+                        let store = store.clone();
+                        Box::pin(async move {
+                            crate::store::ContentIndex::new(crate::store::BorrowedStore(&store))
+                                .block(
+                                    &pack,
+                                    &crate::store::BlockEntry::new("revoked", T0 as u64),
+                                    T0 as u64,
+                                )
+                                .await
+                                .unwrap();
+                        })
+                    }),
+                });
+                seams
+            });
+            in_view(&fx, writer, |reader| {
+                let mut session = ReaderSession::default();
+                let gets = get_count(&fx);
+                assert!(
+                    block_on(reader.walk_history_in(
+                        &mut session,
+                        HEAD,
+                        None,
+                        2,
+                        HistoryOptions::default()
+                    ))
+                    .unwrap()
+                    .is_none()
+                );
+                assert_eq!(
+                    get_count(&fx) - gets,
+                    4,
+                    "head retained before parent revocation"
+                );
+                assert_eq!(session.used().output_bytes, 0);
+                assert_eq!(
+                    session.used().decoded_bytes,
+                    (serialize(&head).unwrap().len() + serialize(&parent).unwrap().len()) as u64
+                );
             });
         }
     }

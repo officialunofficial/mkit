@@ -606,7 +606,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             };
             emitting |= start == Some(id);
             let parents = node.parents().ok_or_else(|| failure(()))?;
-            let count = if options.mode == HistoryMode::FirstParent {
+            let count = if self.seams.takedown.stops_descent(&self.repo, &id) {
+                0
+            } else if options.mode == HistoryMode::FirstParent {
                 parents.len().min(1)
             } else {
                 parents.len()
@@ -615,9 +617,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             // at exactly the node cap merely because it has older parents.
             if emitting && output.len() + 1 == limit {
                 let complete = frontier.is_empty()
-                    && (count == 0 || self.seams.takedown.stops_descent(&self.repo, &id));
+                    && parents[..count].iter().all(|parent| seen.contains(parent));
                 output.push(node);
-                self.final_nodes(session, &output, calls).await?;
+                // A singleton here is the node just validated, with no await
+                // afterward. Retained pages must refresh their earlier nodes.
+                if output.len() > 1 {
+                    self.final_nodes(session, &output, calls).await?;
+                }
                 return Ok(Some((output, complete)));
             }
             let additional = parents[..count]
@@ -625,9 +631,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 .filter(|id| !seen.contains(*id))
                 .collect::<BTreeSet<_>>()
                 .len();
-            if frontier.len().saturating_add(additional) > options.max_frontier
-                || seen.len().saturating_add(additional) > options.max_nodes
-            {
+            if frontier.len().saturating_add(additional) > options.max_frontier {
                 return Err(exhausted());
             }
             for parent in &parents[..count] {
@@ -739,7 +743,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         nodes: &[Node],
         calls: &SliceBudget,
     ) -> Result<(), ServerError> {
-        if nodes.len() <= 1 {
+        if nodes.is_empty() {
             return Ok(());
         }
         session.io.calls.charge_many(2).map_err(|_| exhausted())?;
