@@ -1,15 +1,18 @@
 //! Test-only latency and round tracing; no production behavior.
+use std::time::Duration;
+#[cfg(feature = "http-objects")]
 use std::{
     collections::BTreeMap,
     future::Future,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 #[derive(Clone, Debug)]
 pub(crate) struct Config {
     pub concurrency: usize,
+    #[cfg(feature = "http-objects")]
     pub trace: Arc<Mutex<Vec<Event>>>,
 }
+#[cfg(feature = "http-objects")]
 #[derive(Clone, Debug)]
 pub(crate) struct Event {
     pub phase: &'static str,
@@ -17,9 +20,11 @@ pub(crate) struct Event {
     pub end: tokio::time::Instant,
 }
 tokio::task_local! { static ACTIVE: Config; }
+#[cfg(feature = "http-objects")]
 pub(crate) async fn run<T>(config: Config, future: impl Future<Output = T>) -> T {
     ACTIVE.scope(config, future).await
 }
+#[cfg(feature = "http-objects")]
 pub(crate) fn latency_ms() -> u64 {
     std::env::var("MKIT_BENCH_LATENCY_MS")
         .ok()
@@ -45,11 +50,18 @@ pub(crate) async fn delay(milliseconds: u64, phase: &'static str) {
     if milliseconds == 0 {
         return;
     }
+    #[cfg(feature = "http-objects")]
     let start = tokio::time::Instant::now();
     tokio::time::sleep(Duration::from_millis(milliseconds)).await;
-    let end = tokio::time::Instant::now();
-    let _ = ACTIVE.try_with(|c| c.trace.lock().unwrap().push(Event { phase, start, end }));
+    #[cfg(feature = "http-objects")]
+    {
+        let end = tokio::time::Instant::now();
+        let _ = ACTIVE.try_with(|c| c.trace.lock().unwrap().push(Event { phase, start, end }));
+    }
+    #[cfg(not(feature = "http-objects"))]
+    let _ = phase;
 }
+#[cfg(feature = "http-objects")]
 pub(crate) fn summary(events: &[Event]) -> serde_json::Value {
     let mut spans: BTreeMap<&str, Vec<_>> = BTreeMap::new();
     for event in events {
