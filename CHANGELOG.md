@@ -66,6 +66,8 @@ collect the applicable entries between their old and new immutable pins.
   Bounded history and commit/path reads share that admission envelope across the
   complete operation, reuse actual source locations and sealed facts for denial,
   and retain fresh final page/witness guards after callbacks and descriptor I/O.
+  Canonical and metadata batches also refresh final guards after takedown
+  callbacks, so a durable source block installed by a callback remains absent.
 - Opt into canonical/metadata batches of up to 45 ids with
   `ObjectReader::with_batch_limit(45)?`; the 16-id default, URL issuance cap and
   all accounting allowances remain unchanged.

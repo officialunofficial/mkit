@@ -1114,6 +1114,82 @@ struct ChangeAfterBody {
     target: Hash,
     change: Box<dyn Fn() -> crate::BoxFuture<'static, ()> + Send + Sync>,
 }
+#[test]
+fn batch_final_callback_refreshes_target_and_source_pack_guards() {
+    use std::sync::atomic::AtomicUsize;
+    for denial in [false, true] {
+        for writer in [false, true] {
+            for sizes_only in [false, true] {
+                for pack_block in [false, true] {
+                    let mut fx = fixture();
+                    let d = data();
+                    let pack = fx.push("room", &d.refs(), d.head(), None);
+                    fx.pipe.cfg.takedown_denial = denial;
+                    let target = id(&d.small);
+                    let stopped = if pack_block { pack } else { target };
+                    let store = fx.pipe.meta.inner.clone();
+                    let checks = Arc::new(AtomicUsize::new(0));
+                    let observed = checks.clone();
+                    let final_check = if sizes_only { 1 } else { 2 };
+                    fx.pipe = fx.pipe.with_http_seams(|mut seams| {
+                        seams.takedown = Arc::new(ChangeAfterBody {
+                            target,
+                            change: Box::new(move || {
+                                let (store, checks) = (store.clone(), checks.clone());
+                                Box::pin(async move {
+                                    if checks.fetch_add(1, Ordering::SeqCst) + 1 == final_check {
+                                        store
+                                            .apply(
+                                                &crate::store::content_shard(&stopped),
+                                                Batch::new().put(
+                                                    keys::block(&stopped),
+                                                    codec::encode_block_entry(
+                                                        &crate::store::BlockEntry::new(
+                                                            "final callback stop",
+                                                            T0 as u64,
+                                                        ),
+                                                    ),
+                                                ),
+                                            )
+                                            .await
+                                            .unwrap();
+                                    }
+                                })
+                            }),
+                        });
+                        seams
+                    });
+                    in_view(&fx, writer, |reader| {
+                        let mut session = ReaderSession::default();
+                        for parent in [d.head(), id(&d.root)] {
+                            assert!(
+                                block_on(reader.read_canonical_in(&mut session, &[parent]))
+                                    .unwrap()[0]
+                                    .is_some()
+                            );
+                        }
+                        let before = session.used().output_bytes;
+                        if sizes_only {
+                            assert_eq!(
+                                block_on(reader.object_metadata_in(&mut session, &[target]))
+                                    .unwrap(),
+                                [None]
+                            );
+                        } else {
+                            assert_eq!(
+                                block_on(reader.read_canonical_in(&mut session, &[target]))
+                                    .unwrap(),
+                                [None]
+                            );
+                        }
+                        assert_eq!(session.used().output_bytes, before);
+                        assert_eq!(observed.load(Ordering::SeqCst), final_check);
+                    });
+                }
+            }
+        }
+    }
+}
 impl TakedownGate for ChangeAfterBody {
     fn check<'a>(
         &'a self,

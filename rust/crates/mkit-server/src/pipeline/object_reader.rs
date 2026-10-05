@@ -832,25 +832,31 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 }
             }
         }
-        // Loading yielded: targets, packs and reconstruction dependencies must
-        // be checked in a fresh phase before any requested result is exposed.
-        checks.reset();
-        checks.prefetch_locations(&located).await.map_err(failure)?;
-        let (mut bytes, mut sizes) = (BTreeMap::new(), BTreeMap::new());
+        let mut final_locations = Vec::new();
         for (id, located) in located {
             if !reached.contains(&id) || blocked.contains(&id) {
                 continue;
             }
-            if denied(&checks, &id).await.map_err(failure)?
-                || denied(&checks, &located.pack).await.map_err(failure)?
-            {
-                continue;
-            }
             meta.charge().map_err(|_| exhausted())?;
-            if !matches!(
+            if matches!(
                 seams.takedown.check(&self.repo, &id).await?,
                 TakedownVerdict::Clear
             ) {
+                final_locations.push((id, located));
+            }
+        }
+        // Loading and final callbacks may yield or revoke a source. Refresh
+        // target/pack guards afterward, before dependencies and output.
+        checks.reset();
+        checks
+            .prefetch_locations(&final_locations)
+            .await
+            .map_err(failure)?;
+        let (mut bytes, mut sizes) = (BTreeMap::new(), BTreeMap::new());
+        for (id, located) in final_locations {
+            if denied(&checks, &id).await.map_err(failure)?
+                || denied(&checks, &located.pack).await.map_err(failure)?
+            {
                 continue;
             }
             if proofs.is_none() && !writer && fresh.contains(&id) {
