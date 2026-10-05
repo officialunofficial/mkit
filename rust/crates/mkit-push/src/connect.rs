@@ -272,7 +272,9 @@ impl<T: HttpTransport, S: Signer, C: Clock> Rpc<'_, T, S, C> {
                         return Err(Error::Remote(error));
                     };
                     saw_pending = true;
-                    if now.saturating_add(delay.as_millis() as i64) >= self.deadline_ms {
+                    if now.saturating_add(i64::try_from(delay.as_millis()).unwrap_or(i64::MAX))
+                        >= self.deadline_ms
+                    {
                         return Err(Error::Deadline);
                     }
                     self.clock.wait(delay).await;
