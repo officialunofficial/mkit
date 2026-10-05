@@ -15,6 +15,14 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Added
 
+- Server readers add `walk_history_page_in` for single-use, scoped first-parent
+  history continuations. Dedicated MAC keys bind the repository/view, verified
+  credential scope, strict ref/publication fence, live security boundaries and
+  fixed expiry; each page retains fresh permission, source and denial checks.
+  `PipelineConfig.history_tokens` and the optional Worker `HISTORY_TOKEN_KEYS`
+  setting enable it. Existing reader methods keep their behavior. The selected
+  ref shard adds small replay/expiry rows; existing stores need no reset.
+
 - Server readers add `walk_history_in`, `locate_commit_in` and
   `read_commit_path_in` for bounded selected-ref parent discovery and exact
   decoded paths. First-parent and all-parent traversal are explicit; merge

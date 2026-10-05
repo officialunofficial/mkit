@@ -235,6 +235,8 @@ Never substitute another role's key to satisfy a failed startup check.
 | `TICKET_KEYS` | Secret: `<key-id> <64 hex>` per line; first signs upload tickets and multipart receipts, all verify; blank lines and `#` comments allowed |
 | `MKIT_HOOK_KEY` | Secret: `<key-id> <64 hex Ed25519 seed>`; outgoing signed hooks, including purge |
 | `URL_TOKEN_KEYS` | Secret: `active <64 hex seed>` plus `retired <64 hex public key> <retired_at_ms>` lines; HTTP bearer URL tokens |
+| `HISTORY_TOKEN_KEYS` | Optional dedicated MAC secret: one `active <64 hex secret>` line; scoped first-parent history continuations |
+| `HISTORY_TOKEN_TTL` | Fixed maximum lifetime in seconds, 1–900 (default 900); bounded further by proof lag/deadline and credentials |
 | `SCANNER_KEYS` | Secret configuration containing 1–32 distinct non-weak Ed25519 public keys, one 64-hex key per line; incoming scanner signatures |
 | `SCANNER_RETRIEVAL_KEYS` | Secret: exactly one `active <id> <64 hex MAC secret>` plus up to 15 `retained <id> <64 hex MAC secret> <retired_at_ms>` lines; assigned-pack capabilities |
 | `ADMIN_KEYS` | Secret containing §16.3 version-1 key-list JSON: `keyId`, `alg=ed25519`, `publicKey`, optional validity bounds and required `roles` |
@@ -257,6 +259,7 @@ credentials/settings, not server role keys.
 | Facility | Required configuration |
 |---|---|
 | HTTP objects and URL tokens | `http-objects` build, `HTTP_OBJECTS=true`, dedicated `URL_TOKEN_KEYS`; `URL_TOKEN_TTL` is seconds, default 900, range 1–86400 |
+| History continuations | Same explicit HTTP/indexed opt-in, independent `HISTORY_TOKEN_KEYS`; key replacement immediately revokes existing continuations. Backend realm uses the canonical deployment audience; separate backends must use separate audiences or configure distinct realms through the embedder. |
 | Paid HTTP reads | `HTTP_ADMIT_READS=true`, HTTP objects and `admit` hook role; retain the fetch context for response settlement |
 | Binding hooks | `ADMISSION_HOOK` plus `HOOK_ROLES`; hook Worker has no public routes, workers.dev or preview URLs; binding channel is unsigned |
 | Signed HTTPS hooks | `signed-http-hooks` build, `HOOK_URL`, `HOOK_ROLES`, `MKIT_HOOK_KEY`; URL is HTTPS with optional base path, no userinfo/query/fragment; cannot coexist with `ADMISSION_HOOK` |

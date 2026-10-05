@@ -99,6 +99,21 @@ pub(super) struct CapturedCredential {
     values: Vec<Redacted>,
 }
 
+#[cfg(feature = "http-objects")]
+pub(super) fn credential_scope_digest(credentials: &[CapturedCredential]) -> mkit_core::hash::Hash {
+    let mut hash = blake3::Hasher::new();
+    for credential in credentials {
+        hash.update(&(credential.name.len() as u64).to_be_bytes());
+        hash.update(credential.name.as_bytes());
+        hash.update(&(credential.values.len() as u64).to_be_bytes());
+        for value in &credential.values {
+            hash.update(&(value.expose().len() as u64).to_be_bytes());
+            hash.update(value.expose().as_bytes());
+        }
+    }
+    *hash.finalize().as_bytes()
+}
+
 /// Record the credential headers of a signed request. Nothing is judged
 /// here: validation runs only if admission does (SPEC-SERVER §6.6).
 pub(super) fn capture_credentials(

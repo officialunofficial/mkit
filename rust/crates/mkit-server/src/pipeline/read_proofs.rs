@@ -115,6 +115,60 @@ impl ReadProofs {
         now < self.expires
     }
 
+    pub(crate) fn expiry(&self) -> u64 {
+        self.expires
+    }
+
+    /// Export only a bounded commit/tag path, including the proved cursor.
+    pub(crate) fn history_ancestry(&self, cursor: Hash) -> Option<Vec<Hash>> {
+        let mut ancestry = Vec::new();
+        let mut next = Some(cursor);
+        let mut seen = BTreeSet::new();
+        while let Some(id) = next {
+            if ancestry.len() >= crate::history_token::MAX_ANCESTORS || !seen.insert(id) {
+                return None;
+            }
+            let proof = self.proofs.get(&id)?;
+            if proof.manifest_pack.is_some() {
+                return None;
+            }
+            ancestry.push(id);
+            next = proof.parent;
+        }
+        ancestry.reverse();
+        Some(ancestry)
+    }
+
+    /// Only the authenticated history-token path may call this. MAC validation,
+    /// current authority, strict anchor/fence and ancestry stops precede import.
+    pub(crate) fn restore_history(
+        &mut self,
+        ancestry: &[Hash],
+        expiry: u64,
+    ) -> Result<(), ServerError> {
+        if ancestry.is_empty()
+            || ancestry.len() > self.cap
+            || ancestry.len() > crate::history_token::MAX_ANCESTORS
+            || ancestry.iter().collect::<BTreeSet<_>>().len() != ancestry.len()
+        {
+            return Err(super::repo_storage::exhausted());
+        }
+        self.clear();
+        self.expires = self.expires.min(expiry);
+        let mut parent = None;
+        for id in ancestry {
+            self.proofs.insert(
+                *id,
+                Proof {
+                    parent,
+                    manifest_pack: None,
+                },
+            );
+            parent = Some(*id);
+        }
+        Ok(())
+    }
+
     pub(crate) fn contains(&self, id: &Hash) -> bool {
         self.proofs.contains_key(id)
     }

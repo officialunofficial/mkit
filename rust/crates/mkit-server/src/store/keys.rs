@@ -43,6 +43,8 @@
 //! | repository stored-bytes counter (`Coordinator`) | `rb 00 <repo>` | codec `RepoStorageV1` (absolute pack bytes, version) |
 //! | counted pack marker (`Coordinator`) | `rn 00 <repo> 00 <pack:32>` | be64 pack bytes |
 //! | grant epoch | `e 00` | be64; absent means 0, never written as 0 |
+//! | history continuation (selected ref shard) | `hc 00 <chain:32>` | expected token digest; structural replay fence only |
+//! | history continuation expiry | `hx 00 <expiry:be64> <chain:32>` | empty; fixed expiry, bounded lazy cleanup |
 //! | epoch lease (ref shard) | `el 00` | codec `EpochLease` |
 //! | leased shard (`Coordinator`) | `ls 00 <repo> 00 <shard_ref>` | codec `LeasedShard` |
 //! | lease recovery/authority mode (`Coordinator`) | `lr 00` | codec `LeaseRecovery` |
@@ -290,6 +292,10 @@ pub const VC_DEPENDENCY: u8 = 6;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ParsedKey {
+    /// One live history continuation per paging chain (`hc 00 <chain:32>`).
+    HistoryContinuation(Hash),
+    /// Fixed expiry index (`hx 00 <expiry:be64> <chain:32>`).
+    HistoryContinuationExpiry { expiry: u64, chain: Hash },
     /// Pending cache purge id.
     CachePurge(String),
     /// Durable cache scope invalidation time.
@@ -734,6 +740,25 @@ pub fn publication(repo: &RepoName, name: &str) -> Key {
     key(
         TAG_PUBLICATION,
         &[repo.as_str().as_bytes(), b"\0", name.as_bytes()],
+    )
+}
+
+/// Single-use structural paging chain, held in the selected ref's partition.
+#[must_use]
+pub fn history_continuation(chain: &Hash) -> Key {
+    Key::new([b"hc\0".as_slice(), chain].concat())
+}
+/// Lazy fixed-expiry cleanup index for structural paging chains.
+#[must_use]
+pub fn history_continuation_expiry(expiry: u64, chain: &Hash) -> Key {
+    Key::new([b"hx\0".as_slice(), &expiry.to_be_bytes(), chain].concat())
+}
+/// Strictly expired rows, including expiry equality.
+#[must_use]
+pub fn history_continuation_expiry_range(now: u64) -> (Key, Key) {
+    (
+        Key::new(b"hx\0".to_vec()),
+        Key::new([b"hx\0".as_slice(), &now.to_be_bytes(), &[255; 33]].concat()),
     )
 }
 /// Retained value, ordered numerically within one ref sequence.
@@ -1418,6 +1443,14 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
             ParsedKey::RepoStoragePack {
                 repo: RepoName::new(text(&body[..sep])?).ok()?,
                 pack_id: hash(&body[sep + 1..])?,
+            }
+        }
+        b"hc" => ParsedKey::HistoryContinuation(hash(body)?),
+        b"hx" => {
+            let (expiry, rest) = be64(body)?;
+            ParsedKey::HistoryContinuationExpiry {
+                expiry,
+                chain: hash(rest)?,
             }
         }
         b"r" => {

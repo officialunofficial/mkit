@@ -49,9 +49,10 @@ pub(crate) mod read_proofs;
 mod reader_checks;
 #[cfg(feature = "http-objects")]
 pub use object_reader::{
-    CommitPathRead, HistoryCommit, HistoryMode, HistoryOptions, HistoryPage, IssuedUrl,
-    OBJECT_READER_BATCH, OBJECT_READER_CALLS, OBJECT_READER_LIMIT_MESSAGE, ObjectMetadata,
-    ObjectReader, PathOptions, PathTree, PathWitness, ReaderView,
+    CommitPathRead, ContinuedHistoryPage, HistoryCommit, HistoryContinuation, HistoryMode,
+    HistoryOptions, HistoryPage, IssuedUrl, OBJECT_READER_BATCH, OBJECT_READER_CALLS,
+    OBJECT_READER_LIMIT_MESSAGE, ObjectMetadata, ObjectReader, PathOptions, PathTree, PathWitness,
+    ReaderView,
 };
 #[cfg(feature = "http-objects")]
 pub use read_limits::{ReadLimits, ReaderSession};
@@ -297,6 +298,8 @@ pub struct PipelineConfig {
     /// URL-token key set and lifetime for `IssueObjectUrl`
     /// (SPEC-WRITE-GRANTS §9.4); `None` answers `unimplemented`.
     pub url_tokens: Option<crate::url_token::UrlTokenConfig>,
+    /// Dedicated selected-ref structural continuations; disabled by default.
+    pub history_tokens: Option<crate::history_token::HistoryTokenConfig>,
     /// Dedicated role keys, forbidden for client and owner authorization.
     pub admin_keys: Vec<[u8; 32]>,
     /// Receipt role key publication required by enabled takedown, without issuing receipts.
@@ -399,6 +402,7 @@ impl PipelineConfig {
             ticket_keys: None,
             scanner_retrieval: None,
             url_tokens: None,
+            history_tokens: None,
             admin_keys: Vec::new(),
             receipt_publication: None,
             purge: None,
@@ -853,6 +857,17 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 ));
             }
         }
+        if let Some(tokens) = &cfg.history_tokens {
+            if !matches!(cfg.auth, AuthMode::AuthV2(_)) {
+                return Err(ServerError::invalid_argument(
+                    "history tokens require auth v2",
+                ));
+            }
+            tokens.check_roles(&cfg).map_err(|_| {
+                ServerError::invalid_argument("the history continuation key must be dedicated")
+            })?;
+            cfg.admin_keys.push(tokens.public_key());
+        }
         if cfg.authorizer_role == AuthorizerRole::Authority && hooks.authorizer().is_open() {
             return Err(ServerError::invalid_argument(
                 "an authority authorizer must be a real authority source",
@@ -1037,6 +1052,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         cfg.auth = auth;
         // Sibling enc/ssh pipelines do not mint object URL tokens.
         cfg.url_tokens = None;
+        cfg.history_tokens = None;
         // Grants need auth v2 (`Self::new` refuses them otherwise), and a
         // transport-identity write has no header-grant path: `GrantConfig::verify`
         // needs the signed operation. WP-2.12 (registered grants over ssh/enc)

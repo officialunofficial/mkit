@@ -241,3 +241,21 @@ These helpers reduce history/path acquisition work within the unchanged reader
 allowance. They add no persisted state, continuation tokens, URL forms, canonical
 windows or latency guarantee. Existing arbitrary-ID and metadata APIs remain
 available, and can reuse the selected canonical edges in the same session.
+
+For cross-request first-parent paging, configure `PipelineConfig.history_tokens`
+with a dedicated `history_token::HistoryTokenConfig` and call
+`walk_history_page_in(session, reference, None, limit)`. Pass the returned
+`next.token.expose()` to a new request's reader/session. Fresh signed envelopes
+may use a new nonce; the verified signer, audience and credential scope must
+match. The opaque token authenticates structural ancestry, while every served
+object still undergoes fresh authority, membership, source and denial checks.
+All-parent logs retain the separate bounded `walk_history_in` API.
+
+Any ref/publication or security-boundary change, expiry or key replacement
+invalidates the chain uniformly. Successors keep its original expiry. Tokens
+are single-use: response loss requires restarting at the ref. The selected ref
+partition keeps one token digest and expiry index per paging chain and lazily
+prunes at most eight expired chains per new request. Ancestry is bounded to
+1,024 IDs; parsing and token output consume the existing session allowances.
+This removes cursor proof walks without adding a latency guarantee or changing
+the ordinary history/path methods, URL grammar or HTTP object serving.

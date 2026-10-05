@@ -1706,7 +1706,8 @@ Structural evidence does not cache authorization, visibility, grant epochs,
 member availability or takedown clearance. Every batch MUST retain the existing
 live target, pack, dependency and gate checks, including metadata dependency
 checks and uniform absence at proof caps. Writer proofs MUST NOT enter the shared
-published reachability cache. Session proofs MUST NOT survive the request or
+published reachability cache. Except for the authenticated continuation contract
+below, session proofs MUST NOT survive the request or
 broaden URL-token scope; URL issuance keeps its published-view preflight.
 
 Selected-ref reader primitives MAY discover old commits using parent-directed
@@ -1754,6 +1755,69 @@ uniformly absent; owner caps remain typed and storage faults remain unavailable.
 Output allowances MUST be reserved before copying the complete page or path
 result, including any requested witness.
 This additive embedding surface does not alter URL grammar or HTTP serving.
+
+#### Authenticated history continuations
+
+As an explicit exception to request-local structural evidence, a server MAY
+authenticate a selected-ref first-parent cursor across requests. The continuation
+MUST NOT confer permission. `walk_history_page_in` exposes this contract separately
+from the all-parent traversal above; it MUST NOT silently narrow an all-parent log.
+No DAG frontier or duplicate-suppression state is exposed in version 1.
+
+Version 1 is `<base64url(JSON claims)>.<base64url(32-byte MAC)>`, with strict
+unpadded encoding. Claims contain version `1`, purpose
+`mkit-history-continuation:v1`, backend realm, full namespace/repository, selected
+ref, writer/public view, stable verified principal/credential digest, strict
+anchor ID, full authoritative publication record (sequence, published prefix,
+deletion boundary, membership generation and published pair), live security
+digest, issuance time, original absolute expiry, cursor, random paging-chain ID,
+and ordered stop-sensitive ancestry including the cursor. The credential digest
+includes the trusted auth audience, signer, grant and captured credential headers;
+it excludes envelope nonce, fingerprint and verification time so a fresh signed
+request can continue the same credential scope. The security digest binds the
+repository record, visibility row including change time, grant epoch, authority
+generation and deployment default visibility. Digests frame each component's
+length to avoid concatenation ambiguity.
+
+The MAC is keyed BLAKE3 with a key derived using that exact purpose as its domain.
+The source secret MUST be independent of URL, upload, scanner, hook, receipt,
+authority, admin and client/owner keys. Reuse the deployment secret-management
+pattern of URL tokens: dedicated secret binding/key file, zeroized owned source,
+redacted diagnostics, and explicit key replacement. This MAC is symmetric:
+there are no retained public verification keys. Rotation/retirement immediately
+invalidates outstanding tokens. Deployment realms MUST distinguish backends
+even when their repository names and auth audiences coincide.
+
+MAC, format, expiry and stateless scope checks MUST precede sensitive reads.
+Parsing is bounded to 256 KiB decoded claims and 1,024 ancestry IDs. The server
+MUST authenticate current credentials and recheck visibility, epoch, grants and
+authorizer before importing evidence. It MUST strongly read the selected ref
+and authoritative publication fence, and compare them again at the output
+boundary. A final atomic apply guards both the original publication row and
+live ref bytes, detecting torn capture even if a multi-key read is sequential.
+Public anchors use the authoritative published value, not an index projection.
+A missing ledger or partial capture MUST NOT issue or redeem evidence.
+Append, rewind, deletion/recreation, replacement and publication/incarnation
+changes invalidate the continuation even when the ref returns to the same hash.
+Delayed projections MUST NOT reinstate an invalidated continuation.
+
+Successors MUST inherit the original expiry. Initial expiry is bounded by the
+configured token TTL, root-proof lag/deadline and credential/grant expiry.
+Every returned object retains current membership, actual source, reconstruction
+dependencies, denial and authorizer checks. Custom ancestry descent stops MUST
+be rechecked; neither empty denial results nor permission are carried in claims.
+Invalid scope, MAC, anchor, boundary, expiry, retired key and inaccessible state
+MUST return uniform absence for either view, without probing cursor membership.
+Storage faults and owner resource exhaustion retain their existing classifications.
+
+Continuations are single-use: the selected ref partition stores one expected
+token digest per random paging chain (`hc`) and a fixed expiry index (`hx`).
+Atomic compare-and-replace advances to the successor, or deletes a completed
+chain. The apply MUST enforce the fixed expiry on the backend clock. Competing
+copies in the original scope can win at most once; all later replays are absent.
+These records contain no permissions or graph data. Expired chains are pruned
+in batches of at most eight on new paging requests; store capacity limits still
+apply. Response loss after consumption requires restarting from the selected ref.
 
 ### 10.2 Per-ref clearance and publication
 
