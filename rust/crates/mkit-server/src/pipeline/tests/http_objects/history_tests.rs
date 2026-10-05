@@ -127,7 +127,7 @@ fn history(
     (fx, commits, leaf, path)
 }
 
-fn get_count(fx: &Fx) -> usize {
+fn get_count<H: HookSet>(fx: &Fx<H>) -> usize {
     fx.calls
         .lock()
         .unwrap()
@@ -1733,6 +1733,101 @@ fn selected_ref_evidence_does_not_narrow_later_general_id_reads() {
                     .unwrap()
                     .is_none()
                 );
+            });
+        }
+    }
+}
+
+#[derive(Default)]
+struct DelayedAuthorization {
+    next: Mutex<Option<Arc<ManualClock>>>,
+}
+impl Authorizer for Arc<DelayedAuthorization> {
+    async fn authorize(&self, _: &Operation) -> Result<AuthzFacts, ServerError> {
+        let clock = self.next.lock().unwrap().take();
+        if let Some(clock) = clock {
+            // One awaited authorization consumes more than the request bound.
+            clock.advance(11);
+        }
+        Ok(AuthzFacts::default())
+    }
+}
+
+#[test]
+fn initial_authorization_counts_against_the_original_deadline() {
+    for denial in [false, true] {
+        let az = Arc::new(DelayedAuthorization::default());
+        let hooks = Hooks {
+            authorizer: az.clone(),
+            admission: DefaultAdmission,
+            pre_receive: NoPreReceive,
+            receipts: NoReceipts,
+            outcomes: NoOutcomes,
+        };
+        let mut fx = fixture_with(
+            hooks,
+            HttpObjectsConfig {
+                read_deadline: std::time::Duration::from_millis(10),
+                ..http_cfg()
+            },
+        );
+        let d = data();
+        fx.push("room", &d.refs(), d.head(), None);
+        fx.pipe.cfg.takedown_denial = denial;
+        for writer in [false, true] {
+            in_view(&fx, writer, |reader| {
+                for explicit in [false, true] {
+                    for operation in 0..3 {
+                        let mut session = if explicit {
+                            ReaderSession::with_deadline(
+                                ReadLimits::default(),
+                                u64::try_from(fx.clock.now_ms()).unwrap() + 10,
+                            )
+                        } else {
+                            ReaderSession::default()
+                        };
+                        *az.next.lock().unwrap() = Some(fx.clock.clone());
+                        let gets = get_count(&fx);
+                        let result = match operation {
+                            0 => block_on(reader.walk_history_in(
+                                &mut session,
+                                HEAD,
+                                None,
+                                1,
+                                HistoryOptions::default(),
+                            ))
+                            .map(|page| page.is_some()),
+                            1 => block_on(reader.locate_commit_in(
+                                &mut session,
+                                HEAD,
+                                d.head(),
+                                HistoryOptions::default(),
+                            ))
+                            .map(|commit| commit.is_some()),
+                            _ => block_on(reader.read_commit_path_in(
+                                &mut session,
+                                HEAD,
+                                d.head(),
+                                &[b"small.txt".to_vec()],
+                                None,
+                                PathOptions::default(),
+                            ))
+                            .map(|leaf| leaf.is_some()),
+                        };
+                        if writer {
+                            assert_eq!(result.unwrap_err().code(), Code::ResourceExhausted);
+                        } else {
+                            assert!(
+                                !result.unwrap(),
+                                "authorization cannot start a new deadline"
+                            );
+                        }
+                        assert_eq!(get_count(&fx), gets, "expired before canonical I/O");
+                        assert_eq!(session.used().decoded_bytes, 0);
+                        assert_eq!(session.used().output_bytes, 0);
+                        assert!(az.next.lock().unwrap().is_none());
+                    }
+                }
             });
         }
     }

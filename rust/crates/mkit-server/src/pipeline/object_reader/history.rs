@@ -341,15 +341,16 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         reference: &str,
         calls: &SliceBudget,
     ) -> Result<Option<Hash>, ServerError> {
+        let started = ms(self.pipe.clock.now_ms());
         session.io.calls.charge_many(2).map_err(|_| exhausted())?;
         let authority = self.authorize(calls).await?;
         let writer = authority.is_some();
-        session.proofs.bind(
-            &self.identity,
-            authority,
-            ms(self.pipe.clock.now_ms()),
-            self.cfg,
-        )?;
+        session
+            .proofs
+            .bind(&self.identity, authority, started, self.cfg)?;
+        if !session.proofs.current(ms(self.pipe.clock.now_ms())) {
+            return Err(exhausted());
+        }
         let capped = AtomicBool::new(false);
         let meta = Budgeted::new(&self.pipe.meta, calls)
             .with_session(&session.io.calls)
