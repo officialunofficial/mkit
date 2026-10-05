@@ -1124,6 +1124,109 @@ mod tests {
         assert_eq!(store.peak.load(Ordering::SeqCst), ids.len());
     }
 
+    /// Every storage call takes `delay`, as a Durable Object round trip does.
+    struct Latency {
+        inner: MemoryKv,
+        delay: std::time::Duration,
+    }
+
+    impl NamespaceStore for Latency {
+        fn capabilities(&self) -> StoreCapabilities {
+            self.inner.capabilities()
+        }
+        async fn get(&self, p: &Partition, k: &Key) -> Result<Option<Value>, StoreError> {
+            tokio::time::sleep(self.delay).await;
+            self.inner.get(p, k).await
+        }
+        async fn get_many(
+            &self,
+            p: &Partition,
+            keys: &[Key],
+        ) -> Result<Vec<Option<Value>>, StoreError> {
+            tokio::time::sleep(self.delay).await;
+            self.inner.get_many(p, keys).await
+        }
+        async fn scan(
+            &self,
+            p: &Partition,
+            start: &Key,
+            end: &Key,
+            after: Option<&Cursor>,
+            limit: u32,
+        ) -> Result<ScanPage, StoreError> {
+            self.inner.scan(p, start, end, after, limit).await
+        }
+        async fn scan_many(
+            &self,
+            p: &Partition,
+            ranges: &[RangeScan],
+        ) -> Result<Vec<ScanPage>, StoreError> {
+            tokio::time::sleep(self.delay).await;
+            self.inner.scan_many(p, ranges).await
+        }
+        async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+            self.inner.apply(p, batch).await
+        }
+        async fn stats(&self, p: &Partition) -> Result<PartitionStats, StoreError> {
+            self.inner.stats(p).await
+        }
+        async fn probe(&self) -> Result<(), StoreError> {
+            self.inner.probe().await
+        }
+    }
+
+    /// Wall time to locate ids spread over many shards, 15 ms per call.
+    #[tokio::test]
+    #[ignore = "timing benchmark: cargo test -- --ignored --nocapture bench_locate"]
+    async fn bench_locate_many_latency() {
+        let store = Latency {
+            inner: MemoryKv::default(),
+            delay: std::time::Duration::from_millis(15),
+        };
+        let r = repo("a");
+        let pack = [9; 32];
+        store
+            .inner
+            .apply(
+                &D34Shards.membership(&r, &BlobKey::pack(pack)),
+                Batch::new().put(keys::membership(&r.name, &pack), Value::default()),
+            )
+            .await
+            .unwrap();
+        for n in [8_usize, 32, 128] {
+            let ids: Vec<Hash> = (0..n)
+                .map(|i| {
+                    let mut id = [0; 32];
+                    id[..2].copy_from_slice(&((i * 31 + 1) as u16).to_be_bytes());
+                    id[31] = 1;
+                    id
+                })
+                .collect();
+            for id in &ids {
+                store
+                    .inner
+                    .apply(
+                        &D34Shards.object_index(&r, id),
+                        Batch::new().put(
+                            keys::object_index(&r.name, id, &pack),
+                            codec::encode_object_index(id, &raw(1)).unwrap(),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+            }
+            let shards: BTreeSet<_> = ids
+                .iter()
+                .map(|id| D34Shards.object_index(&r, id))
+                .collect();
+            let start = std::time::Instant::now();
+            let found = locate_many(&store, &D34Shards, &r, &ids).await.unwrap();
+            let took = start.elapsed();
+            assert!(found.iter().all(|f| matches!(f, Ok(Some(_)))));
+            println!("BENCH ids={n} shards={} locate_many={took:?}", shards.len());
+        }
+    }
+
     #[tokio::test]
     async fn holds_any_reads_each_distinct_index_partition_once_in_first_round() {
         let store = EmptyPageOnce {
