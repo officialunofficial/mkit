@@ -104,12 +104,48 @@ impl ReadProofs {
         self.tips = Some(tips);
     }
 
+    /// Selected-ref operations prove only their local anchor. Do not make that
+    /// single ref the root set of a later general-ID fallback in this session.
+    pub(crate) fn capture_selected(&mut self, tip: Option<Hash>) {
+        self.capture(tip.into_iter().collect());
+        self.tips = None;
+    }
+
     pub(crate) fn current(&self, now: u64) -> bool {
         now < self.expires
     }
 
     pub(crate) fn contains(&self, id: &Hash) -> bool {
         self.proofs.contains_key(id)
+    }
+
+    /// Admit only the selected, decoded local edge. Wide trees and merge
+    /// siblings need not fill the memo to prove one path or first-parent log.
+    pub(crate) fn link(&mut self, id: Hash, object: &Object, child: Hash) -> bool {
+        let real = match object {
+            Object::Commit(c) => c.tree_hash == child || c.parents.contains(&child),
+            Object::Remix(r) => r.tree_hash == child || r.parents.contains(&child),
+            Object::Tree(t) => t.entries.iter().any(|entry| entry.object_hash == child),
+            Object::Tag(t) => t.target == child,
+            Object::Blob(_) | Object::ChunkedBlob(_) | Object::Delta(_) => false,
+        };
+        if !real || !self.contains(&id) {
+            return false;
+        }
+        if self.contains(&child) {
+            return true;
+        }
+        if self.proofs.len() >= self.cap {
+            return false;
+        }
+        self.proofs.insert(
+            child,
+            Proof {
+                parent: Some(id),
+                manifest_pack: None,
+            },
+        );
+        true
     }
 
     /// Decline optional decoding before allocation. In particular, never clone

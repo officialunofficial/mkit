@@ -20,6 +20,11 @@ pub type IssuedUrl = crate::url_token::MintedToken;
 use mkit_core::{hash::Hash, object::ObjectType};
 use std::collections::{BTreeMap, BTreeSet};
 type Prefetched = (BTreeMap<Hash, Vec<u8>>, BTreeMap<Hash, ObjectMetadata>);
+mod history;
+pub use history::{
+    CommitPathRead, HistoryCommit, HistoryMode, HistoryOptions, HistoryPage, PathOptions, PathTree,
+    PathWitness,
+};
 /// Verified lengths describe canonical objects separately from logical files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ObjectMetadata {

@@ -175,3 +175,33 @@ connectrpc services** must apply the same rule before dispatch: remove both
 headers (the public `mkit_worker_common::adapter::is_deadline_header` remains
 available), and leave deadline policies unset. Header stripping alone does not
 neutralize a configured default or inter-message timeout.
+
+### Bounded history and commit paths
+
+Retain one `ObjectReader` and `ReaderSession` per request. Use
+`walk_history_in(session, reference, start, limit, HistoryOptions::default())`
+for a parent-only log, or `locate_commit_in` for an old commit's canonical bytes.
+The inclusive start is proved from the selected ref on every call. All-parent
+BFS and first-parent traversal are explicit options; node, merge-frontier and
+tag bounds fail safely. Only local canonical parent edges are followed.
+
+`read_commit_path_in` locates the commit and walks exact decoded byte components
+through its trees. An empty path reads the root; directory intermediates must
+decode as trees. It preserves leaf modes, returns symlink blob bytes without
+following them, and leaves chunked files as canonical manifests. Supply an
+expected leaf ID to bind a requested target before its body is loaded. Set
+`PathOptions.include_witness` to acquire the canonical commit and path trees
+for local inclusion proof construction without repeating those reads. The
+witness is output-budgeted data, with fresh source checks, and grants no
+permission on a later request.
+
+Each helper strongly captures the selected ref in the current view, replacing
+structural evidence while retaining budgets/deadline. Authority, membership,
+source dependencies, denial and ancestry stops remain live. Public unprovable
+starts/paths are absent; owner caps use the existing typed exhaustion message.
+The complete helper shares the existing per-call decode allowance across all
+nodes/bases, in addition to its session ledger. These helpers reduce
+history/path acquisition work within the unchanged reader
+allowance. They add no persisted state, continuation tokens, URL forms, canonical
+windows or latency guarantee. Existing arbitrary-ID and metadata APIs remain
+available, and can reuse the selected canonical edges in the same session.

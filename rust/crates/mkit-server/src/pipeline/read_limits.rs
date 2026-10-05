@@ -45,7 +45,10 @@ impl Default for ReadLimits {
 /// still apply. Create one session per request, and retain the same reader for
 /// its sequential batches. Roots are captured during session initialization
 /// (the first batch needing proof), not at an atomic repository-wide timestamp.
-/// Start a new session to observe new commits before proof expiry. Proofs expire
+/// For general-ID reads, start a new session to observe commits before proof
+/// expiry. Selected-ref history/path helpers instead capture a fresh selected
+/// ref on every operation, replacing proofs without refunding allowances or
+/// extending the request deadline. Proofs expire
 /// after the configured reachability lag; the next batch captures fresh roots
 /// without resetting allowances or the request deadline.
 ///
