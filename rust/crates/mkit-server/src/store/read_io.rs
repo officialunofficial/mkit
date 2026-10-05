@@ -1,5 +1,6 @@
 //! One operation's admission envelope, shared by metadata and blob readers.
 use super::{MAX_KEY_BYTES, MAX_VALUE_BYTES, StoreError};
+use std::cell::RefCell;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -22,7 +23,28 @@ pub(crate) const ROWS: usize = 1_000;
 const BYTE_UNIT: usize = 1024;
 const BYTE_UNITS: usize = ROWS * (MAX_KEY_BYTES + MAX_VALUE_BYTES) / BYTE_UNIT;
 
-tokio::task_local! { static ACTIVE_CREDITS: Vec<Arc<Credit>>; }
+thread_local! {
+    static ACTIVE_CREDITS: RefCell<Vec<Arc<Credit>>> = const { RefCell::new(Vec::new()) };
+}
+
+// Install credits only for one poll, restoring the previous scope on return or
+// unwind. Nothing thread-local survives a yield or follows a task to a new thread.
+struct CreditScope<'a> {
+    previous: Vec<Arc<Credit>>,
+    scoped: &'a mut Vec<Arc<Credit>>,
+}
+impl<'a> CreditScope<'a> {
+    fn enter(scoped: &'a mut Vec<Arc<Credit>>) -> Self {
+        let previous = ACTIVE_CREDITS.with(|active| active.replace(std::mem::take(scoped)));
+        Self { previous, scoped }
+    }
+}
+impl Drop for CreditScope<'_> {
+    fn drop(&mut self) {
+        *self.scoped =
+            ACTIVE_CREDITS.with(|active| active.replace(std::mem::take(&mut self.previous)));
+    }
+}
 
 #[derive(Debug)]
 struct Credit {
@@ -52,7 +74,12 @@ impl ReadReservation {
                 current = reservation.inherited.as_deref();
             }
         }
-        ACTIVE_CREDITS.scope(credits, future).await
+        let mut future = std::pin::pin!(future);
+        futures::future::poll_fn(|cx| {
+            let _scope = CreditScope::enter(&mut credits);
+            future.as_mut().poll(cx)
+        })
+        .await
     }
     /// Keep every underlying ledger reservation alive for the same wave.
     #[doc(hidden)]
@@ -96,15 +123,11 @@ impl ReadCredits {
         })
     }
     fn consume(&self, debit: impl Fn(&Credit) -> bool) -> bool {
-        ACTIVE_CREDITS
-            .try_with(|credits| {
-                credits.iter().any(|c| {
-                    Arc::ptr_eq(&self.identity, &c.owner)
-                        && c.active.load(Ordering::SeqCst)
-                        && debit(c)
-                })
+        ACTIVE_CREDITS.with(|credits| {
+            credits.borrow().iter().any(|c| {
+                Arc::ptr_eq(&self.identity, &c.owner) && c.active.load(Ordering::SeqCst) && debit(c)
             })
-            .unwrap_or(false)
+        })
     }
 }
 #[derive(Debug)]
@@ -221,7 +244,7 @@ mod tests {
         assert!(io.prepay_bytes(maximum + 1).is_err());
         assert!(!io.paid_bytes(1));
         let reservation = io.prepay_bytes(maximum).unwrap();
-        futures::executor::block_on(ReadReservation::scope(&[Some(reservation)], async {
+        futures_executor::block_on(ReadReservation::scope(&[Some(reservation)], async {
             assert!(io.paid_bytes(maximum));
             assert!(!io.paid_bytes(1));
         }));
@@ -239,7 +262,26 @@ mod tests {
         });
         assert!(cancelled.now_or_never().is_none());
         drop(b);
-        futures::executor::block_on(ReadReservation::scope(&a, async {
+        futures_executor::block_on(ReadReservation::scope(&a, async {
+            assert!(io.paid_bytes(100));
+            assert!(!io.paid_bytes(1));
+        }));
+        assert!(!io.paid_bytes(1));
+    }
+
+    #[test]
+    fn nested_scope_restores_owning_credit_after_unwind() {
+        let io = ReadIo::new();
+        let a = [Some(io.prepay_bytes(100).unwrap())];
+        futures_executor::block_on(ReadReservation::scope(&a, async {
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = ReadReservation::scope(&[], async {
+                    assert!(!io.paid_bytes(1));
+                    panic!("interrupt nested scope");
+                })
+                .now_or_never();
+            }));
+            assert!(panic.is_err());
             assert!(io.paid_bytes(100));
             assert!(!io.paid_bytes(1));
         }));
