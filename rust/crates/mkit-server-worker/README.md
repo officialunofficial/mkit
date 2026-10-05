@@ -112,6 +112,9 @@ physical tick budget.
 
 ## Embedding (supported, 0.x)
 
+Start with the [Workers embedder guide](../../../docs/embedding/workers.md) and
+[generic reference](../../../apps/embedded-worker/README.md).
+
 On wasm32, mkit entry points (`connect::service`, `serve`, `serve_with`,
 `serve_admin_with` and the `fetch*` helpers) are safe with `connect-timeout-ms`
 and `grpc-timeout` present. **Deadlines are ignored on wasm**: the core Connect
@@ -173,8 +176,8 @@ The shared config factory’s signed audience
 is `WorkerConfig::audience`, the exact public origin, regardless of the URL of a
 constructed request. Dispatch shares the caller isolate's CPU, memory and
 subrequest limits. The [embedded example](../../../apps/embedded-worker/README.md)
-transfers streamed `UploadPart` through an in-process request and isolated
-service-binding hooks; its local conformance remains a distinct runtime gate.
+transfers streamed `UploadPart` through an in-process request and custom
+in-process hooks; its local conformance remains a distinct runtime gate.
 
 Set `admin_on_public_path=false` and route canonical admin requests through
 `serve_admin_with` to keep the public mount off. Operator authentication and

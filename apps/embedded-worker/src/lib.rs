@@ -3,7 +3,14 @@
 #![allow(clippy::result_large_err)]
 
 #[cfg(target_arch = "wasm32")]
+mod hooks;
+#[cfg(target_arch = "wasm32")]
+mod receiver;
+#[cfg(target_arch = "wasm32")]
 mod worker_impl;
+
+#[cfg(target_arch = "wasm32")]
+pub use receiver::HostEvents;
 
 #[cfg(target_arch = "wasm32")]
 pub use worker_impl::{ContentIndexShard, NsCoordinator, RefShard, RefStore, RepoIndexShard};

@@ -37,7 +37,15 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
     init.with_method(req.method())
         .with_headers(req.headers().clone())
         .with_body(req.inner().body().map(Into::into));
-    let request = Request::new_with_init(&format!("https://deadline.invalid/{procedure}"), &init)?;
+    let query = req
+        .url()?
+        .query()
+        .map(|query| format!("?{query}"))
+        .unwrap_or_default();
+    let request = Request::new_with_init(
+        &format!("https://deadline.invalid/{procedure}{query}"),
+        &init,
+    )?;
     if entry == "direct" || entry == "default" || entry == "router" {
         let http_req =
             http_request_from_worker(&request, bytes::Bytes::from(req.bytes().await?), |_| true)?;

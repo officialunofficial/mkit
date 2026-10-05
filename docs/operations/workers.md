@@ -306,6 +306,9 @@ No local workerd result certifies these checks.
 
 ## Embedding
 
+The [Workers embedder guide](../embedding/workers.md) covers request sessions,
+physical budgets, durable continuation, host projections and per-pin upgrades.
+
 On wasm32, mkit entry points (`connect::service`, `serve`, `serve_with`,
 `serve_admin_with` and the `fetch*` helpers) are safe with `connect-timeout-ms`
 and `grpc-timeout` present. **Deadlines are ignored on wasm**: the core Connect

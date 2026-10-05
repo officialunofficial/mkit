@@ -4328,6 +4328,12 @@ The storage-receipt fixtures under `rust/tests/golden/receipts/` pin §15:
 ## Public Rust API toward 0.6
 
 The supported embedder surface is documented in the `mkit-server` crate docs.
+The [Workers guide](../embedding/workers.md) and
+[public reference](../../apps/embedded-worker/README.md) demonstrate composition;
+they do not add protocol requirements. Hosts retain one reader and one
+`ReaderSession` across sequential bounded request batches, report `used()` even
+on failure, deduplicate outcomes durably and retain the highest storage version
+under §6.5.1. Host pagination and continuation state remain outside the protocol.
 Deployment configuration structs are non-exhaustive and constructed through
 constructors, parsers or defaults. Storage layouts/codecs are adapter SPI under
 `store::adapter_spi`; public storage traits and reservation/outcome types remain

@@ -429,14 +429,25 @@ async fn upload_ticket(
     Ok(id)
 }
 
-async fn ticketed_pair(
+pub(super) async fn ticketed_pair(
     ctx: &Ctx,
     pack: &[u8],
     head: Hash,
     leaf: &str,
     canonical: bool,
 ) -> Result<(String, Signed), Failure> {
-    let (repository, _) = super::repository::identities(ctx, "async-verify", "unused")?;
+    ticketed_pair_in(ctx, pack, head, leaf, canonical, "async-verify").await
+}
+
+pub(super) async fn ticketed_pair_in(
+    ctx: &Ctx,
+    pack: &[u8],
+    head: Hash,
+    leaf: &str,
+    canonical: bool,
+    name: &str,
+) -> Result<(String, Signed), Failure> {
+    let (repository, _) = super::repository::identities(ctx, name, "unused")?;
     let signer = ctx.v2_signer("repository-a")?;
     let pack_id = hash(pack);
     let branch = ctx.head(leaf);
@@ -670,12 +681,12 @@ pub(super) async fn takedown_chunked_publish(ctx: Ctx) -> CaseResult {
 }
 
 pub(super) async fn launch_verification_commits(ctx: Ctx) -> CaseResult {
-    launch_verified_fixture(ctx, true, true).await
+    launch_verified_fixture(ctx, true, true, false).await
 }
 
 /// Bounded setup for preservation/admin checks; the large-pack case stays separate.
 pub(super) async fn launch_admin_fixture(ctx: Ctx) -> CaseResult {
-    launch_verified_fixture(ctx, false, true).await
+    launch_verified_fixture(ctx, false, true, false).await
 }
 
 fn file_objects(data: &[u8]) -> Result<Vec<Object>, Failure> {
@@ -713,7 +724,8 @@ pub(super) async fn embedding_multipart_file_readback(ctx: Ctx) -> CaseResult {
     let id = file.id().map_err(|e| format!("file id: {e}"))?;
     let (pack, head) = verification_fixture_pack(Some(&data), 0, false)?;
     ensure!(pack.len() > 8 << 20, "multipart fixture fits one part");
-    let (repository, pending) = commit_pack(&ctx, &pack, head, true).await?;
+    let (repository, pending) = super::portable_reads::publish(&ctx, &pack, head).await?;
+    super::portable_reads::file_semantics(&ctx, &repository, &id, "extracted.txt", &data).await?;
     check_extracted_http(&ctx, &repository, &id, &data).await?;
     ctx.set_note(format!("repository={repository} pack_bytes={} pending_polls={pending} extracted_blob={} extracted_blob_bytes={} chunks=36 sidecar_bytes=304", pack.len(), to_hex(&id), data.len()));
     Ok(())
@@ -721,7 +733,12 @@ pub(super) async fn embedding_multipart_file_readback(ctx: Ctx) -> CaseResult {
 
 /// Separate embedding gate: public-by-default repositories, retaining the original Set fixture.
 pub(super) async fn embedding_public_fixture(ctx: Ctx) -> CaseResult {
-    launch_verified_fixture(ctx, false, false).await
+    launch_verified_fixture(ctx, false, false, true).await
+}
+
+/// Generic producer without the separate fixture's payment challenge.
+pub(super) async fn embedding_reference_fixture(ctx: Ctx) -> CaseResult {
+    launch_verified_fixture(ctx, false, false, false).await
 }
 
 async fn embedding_payment_challenge(ctx: &Ctx) -> CaseResult {
@@ -782,9 +799,17 @@ async fn embedding_already_present(
     Ok(())
 }
 
-async fn launch_verified_fixture(ctx: Ctx, large: bool, set_visibility: bool) -> CaseResult {
+async fn launch_verified_fixture(
+    ctx: Ctx,
+    large: bool,
+    set_visibility: bool,
+    challenge: bool,
+) -> CaseResult {
     // The embedded fixture producer exercises the core/CLI unchunked boundary.
-    let payload_bytes: u32 = if ctx.case == "embedding.public_fixture" {
+    let payload_bytes: u32 = if matches!(
+        ctx.case,
+        "embedding.public_fixture" | "embedding.reference_fixture"
+    ) {
         1 << 20
     } else {
         131_072
@@ -801,7 +826,7 @@ async fn launch_verified_fixture(ctx: Ctx, large: bool, set_visibility: bool) ->
         verification_fixture_pack(Some(&data), 0, !set_visibility)?
     };
     let pack_id = hash(&pack);
-    if !set_visibility {
+    if challenge {
         embedding_payment_challenge(&ctx).await?;
     }
     let published_packmap = if large {
@@ -857,7 +882,10 @@ async fn launch_verified_fixture(ctx: Ctx, large: bool, set_visibility: bool) ->
     );
     if ctx.profile().has(Feature::HttpObjects) {
         check_extracted_http(&ctx, &repository, &extracted, &data).await?;
-        if ctx.case == "embedding.public_fixture" {
+        if matches!(
+            ctx.case,
+            "embedding.public_fixture" | "embedding.reference_fixture"
+        ) {
             check_url_token(&ctx, &repository, &extracted, &data).await?;
         }
     }
