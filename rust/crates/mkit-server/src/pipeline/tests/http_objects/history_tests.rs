@@ -1842,16 +1842,11 @@ impl Authorizer for Arc<BlockingAuthorization> {
                     .await
                     .unwrap();
             } else {
-                store
-                    .apply(
-                        &crate::store::content_shard(&target),
-                        Batch::new().put(
-                            keys::block(&target),
-                            codec::encode_block_entry(&crate::store::BlockEntry::new(
-                                "authorization stop",
-                                T0 as u64,
-                            )),
-                        ),
+                crate::store::ContentIndex::new(crate::store::BorrowedStore(store.as_ref()))
+                    .block(
+                        &target,
+                        &crate::store::BlockEntry::new("authorization stop", T0 as u64),
+                        T0 as u64,
                     )
                     .await
                     .unwrap();
