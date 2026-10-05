@@ -36,6 +36,7 @@ mod inspection_mode_tests;
 mod kv;
 mod maintenance;
 
+pub(crate) mod overlap;
 mod partition;
 
 pub(crate) mod read;

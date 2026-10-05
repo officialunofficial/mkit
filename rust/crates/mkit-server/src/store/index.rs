@@ -4,14 +4,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use futures::future::join_all;
-
 use mkit_core::hash::Hash;
 use mkit_core::store::MAX_RAW_OBJECT_SIZE;
 
 use super::codec::{self, RelayV1};
 use super::keys::{self, ParsedKey};
 use super::outbox::MAX_RELAY_PUTS;
+use super::overlap::try_overlap;
 use super::{
     BlobKey, Key, MAX_BATCH_BYTES, MAX_KEY_BYTES, MAX_VALUE_BYTES, NamespaceStore, Partition,
     RangeScan, StoreError, Value,
@@ -370,14 +369,14 @@ async fn scan_all<S: NamespaceStore>(
             calls += 1;
             requests.push((partition, ids, ranges));
         }
-        let replies = join_all(
+        let replies = try_overlap(
             requests
                 .iter()
-                .map(|(partition, _, ranges)| store.scan_many(partition, ranges)),
+                .map(|(partition, _, ranges)| store.scan_many(partition, ranges))
+                .collect(),
         )
-        .await;
+        .await?;
         for ((partition, ids, ranges), pages) in requests.into_iter().zip(replies) {
-            let pages = pages?;
             if pages.is_empty() || pages.len() > ranges.len() {
                 return Err(StoreError::Corrupt(
                     "invalid scan_many served prefix".into(),
@@ -497,15 +496,15 @@ pub async fn locate_many<S: NamespaceStore>(
         }
     }
     // The chunks are independent: issue them together.
-    let replies = join_all(
+    let replies = try_overlap(
         reads
             .iter()
-            .map(|(partition, _, keys)| store.get_many(partition, keys)),
+            .map(|(partition, _, keys)| store.get_many(partition, keys))
+            .collect(),
     )
-    .await;
+    .await?;
     let mut members = BTreeSet::new();
     for ((_, chunk, _), values) in reads.iter().zip(replies) {
-        let values = values?;
         if values.len() != chunk.len() {
             return Err(StoreError::Corrupt("short membership get_many".into()));
         }
@@ -1173,6 +1172,37 @@ mod tests {
         async fn probe(&self) -> Result<(), StoreError> {
             self.inner.probe().await
         }
+    }
+
+    /// A wide batch is overlapped in bounded waves, never all at once.
+    #[tokio::test]
+    async fn locate_many_caps_calls_in_flight() {
+        let store = Overlap::default();
+        let r = repo("a");
+        let ids: Vec<Hash> = (0..40_u8).map(|i| [i * 6; 32]).collect();
+        for id in &ids {
+            store
+                .inner
+                .apply(
+                    &D34Shards.object_index(&r, id),
+                    Batch::new().put(
+                        keys::object_index(&r.name, id, &[9; 32]),
+                        codec::encode_object_index(id, &raw(1)).unwrap(),
+                    ),
+                )
+                .await
+                .unwrap();
+        }
+        let shards: BTreeSet<_> = ids
+            .iter()
+            .map(|id| D34Shards.object_index(&r, id))
+            .collect();
+        assert_eq!(shards.len(), 40);
+        locate_many(&store, &D34Shards, &r, &ids).await.unwrap();
+        assert_eq!(
+            store.peak.load(Ordering::SeqCst),
+            crate::store::overlap::MAX_IN_FLIGHT
+        );
     }
 
     /// Wall time to locate ids spread over many shards, 15 ms per call.

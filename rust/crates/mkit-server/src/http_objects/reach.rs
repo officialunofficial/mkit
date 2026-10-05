@@ -328,14 +328,16 @@ pub(crate) async fn walk_many_memo<B: BlobStore, N: NamespaceStore>(
             frontier.incomplete = Some(Miss::Capped);
         }
         // One denial read per member, issued together rather than one by one.
-        let blocked = futures::future::join_all(
+        let blocked = crate::store::overlap::try_overlap(
             members
                 .iter()
-                .map(|(id, _)| crate::takedown::denial::denied(env.meta, id)),
+                .map(|(id, _)| crate::takedown::denial::denied(env.meta, id))
+                .collect(),
         )
-        .await;
+        .await
+        .map_err(|_| Miss::Unavailable)?;
         for ((id, located), blocked) in members.into_iter().zip(blocked) {
-            if blocked.map_err(|_| Miss::Unavailable)? || takedown.stops_descent(env.repo, &id) {
+            if blocked || takedown.stops_descent(env.repo, &id) {
                 continue;
             }
             if kinds[&id] == Kind::File && !manifest_sized(located.value.decoded_size) {

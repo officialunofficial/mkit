@@ -79,10 +79,7 @@ async fn denials<'a, S: NamespaceStore>(
     store: &S,
     ids: impl Iterator<Item = &'a Hash>,
 ) -> Result<Vec<bool>, ServerError> {
-    futures::future::join_all(ids.map(|id| denied(store, id)))
-        .await
-        .into_iter()
-        .collect()
+    crate::store::overlap::try_overlap(ids.map(|id| denied(store, id)).collect()).await
 }
 // A cap converted to absence is consumed: a later, unrelated failure must not
 // inherit it.
@@ -699,26 +696,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             BTreeSet::new()
         };
         let (mut bytes, mut sizes) = (BTreeMap::new(), BTreeMap::new());
-        let located: Vec<_> = located
-            .into_iter()
-            .filter(|(id, _)| reached.contains(id) && !blocked.contains(id))
-            .collect();
-        let ids_denied = denials(&meta, located.iter().map(|(id, _)| id)).await?;
-        let clear: Vec<_> = located
-            .iter()
-            .zip(&ids_denied)
-            .filter(|(_, blocked)| !**blocked)
-            .map(|(entry, _)| entry)
-            .collect();
-        let packs_denied = denials(&meta, clear.iter().map(|(_, l)| &l.pack)).await?;
-        let clear: BTreeSet<Hash> = clear
-            .iter()
-            .zip(packs_denied)
-            .filter(|(_, blocked)| !*blocked)
-            .map(|((id, _), _)| *id)
-            .collect();
         for (id, located) in located {
-            if !clear.contains(&id) {
+            if !reached.contains(&id) || blocked.contains(&id) {
+                continue;
+            }
+            // Sequential on purpose: the per-object `charge()` below must keep
+            // its precedence over a later object's denial read failing.
+            if denied(&meta, &id).await.map_err(failure)?
+                || denied(&meta, &located.pack).await.map_err(failure)?
+            {
                 continue;
             }
             meta.charge().map_err(|_| exhausted())?;
