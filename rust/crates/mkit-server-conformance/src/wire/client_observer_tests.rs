@@ -5,8 +5,8 @@ use std::thread;
 use super::*;
 use crate::wire::sign::Signer;
 
-struct RequestCapture {
-    bytes: Vec<u8>,
+pub(crate) struct RequestCapture {
+    pub(crate) bytes: Vec<u8>,
     server: SocketAddr,
     client: SocketAddr,
 }
@@ -43,7 +43,7 @@ fn request(stream: &mut TcpStream) -> Vec<u8> {
     bytes
 }
 
-fn server(
+pub(crate) fn server(
     responses: Vec<Vec<u8>>,
     persistent: bool,
 ) -> (Url, thread::JoinHandle<Vec<RequestCapture>>) {
@@ -72,7 +72,7 @@ fn server(
     (Url::parse(&format!("http://{address}")).unwrap(), handle)
 }
 
-fn fixed(status: u16, body: &[u8], headers: &str) -> Vec<u8> {
+pub(crate) fn fixed(status: u16, body: &[u8], headers: &str) -> Vec<u8> {
     let mut response = format!(
         "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\n{headers}\r\n",
         body.len()

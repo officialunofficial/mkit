@@ -121,6 +121,14 @@ errors both between cases and during parallel writes within one case. Resetting
 pools between cases did not remove the latter. Native wire runs keep pooling;
 the shared production transport is unchanged.
 
+Concurrent `UpdateRef` racers retry Connect `aborted` on the standard
+`BackoffIterator` ladder (SPEC-TRANSPORT-CONNECT §§5, 7.3). Each racer signs once
+and reuses the same body, nonce and validity window. Exhaustion still fails;
+terminal losers must be `failed_precondition`, and exactly one winner and its
+stored value are still required. Lease-grant contention is a transient backend
+answer; it is distinct from SPEC-SERVER §5's pending-reservation apply condition,
+which requires `unavailable`.
+
 The wire job always summarizes existing retry records by phase and case.
 Any retry also produces a CI warning and a prominent warning in the summary,
 including a retry for an error other than connection loss.

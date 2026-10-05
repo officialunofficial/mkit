@@ -621,7 +621,7 @@ pub fn decode_stream<M: Message>(reply: &Reply) -> Result<StreamReply<M>, String
 
 #[cfg(test)]
 #[path = "client_observer_tests.rs"]
-mod observer_tests;
+pub(crate) mod observer_tests;
 
 #[cfg(test)]
 mod tests {

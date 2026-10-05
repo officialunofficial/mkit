@@ -20,7 +20,9 @@ collect the applicable entries between their old and new immutable pins.
   Existing replay-safe retries remain; any retry emits a CI and summary warning.
   Recovered-loss diagnostics remain downloadable on successful runs. Direct
   fixture requests close their HTTP connections to avoid idle socket reuse;
-  signed request bytes and case concurrency are unchanged.
+  signed request bytes and case concurrency are unchanged. Concurrent ref CAS
+  racers follow the documented `aborted` backoff policy with one signed identity;
+  exactly-one-winner and final-value assertions remain unchanged.
 
 - Server readers add `walk_history_in`, `locate_commit_in` and
   `read_commit_path_in` for bounded selected-ref parent discovery and exact

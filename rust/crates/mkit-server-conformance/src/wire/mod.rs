@@ -190,7 +190,7 @@
 //! | `refs.list_prefix_stripped` | | `ListRefs` strips the prefix and sorts (SPEC-REFS §4, §4.1) |
 //! | `refs.list_prefix_component_boundary` | | a prefix matches at `/` boundaries only, with or without the trailing `/` (SPEC-REFS §4) |
 //! | `refs.list_invalid_prefix_invalid_argument` | | SPEC-REFS §4.2 |
-//! | `refs.concurrent_missing_one_winner` | | 3 rounds of 24 racing `MISSING` creates: one wins, the rest `failed_precondition`, the ref holds the winner (SPEC-REFS §7) |
+//! | `refs.concurrent_missing_one_winner` | | 3 rounds of 24 racing `MISSING` creates: retryable `aborted` uses the shared backoff ladder; one wins, terminal losers are `failed_precondition`, the ref holds the winner (SPEC-REFS §7) |
 //! | `refs.concurrent_match_one_winner` | | the same for `MATCH` |
 //! | `refs.many_refs_one_repository` | excludes `multi-repo` | 64 refs of one repository are written at once, read back, listed in order and advanced under `MATCH` |
 //! | `advance.committed` | | both refs move |
