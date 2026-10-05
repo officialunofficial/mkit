@@ -1227,7 +1227,7 @@ mod tests {
             let ids: Vec<Hash> = (0..n)
                 .map(|i| {
                     let mut id = [0; 32];
-                    id[..2].copy_from_slice(&((i * 31 + 1) as u16).to_be_bytes());
+                    id[..2].copy_from_slice(&u16::try_from(i * 31 + 1).unwrap().to_be_bytes());
                     id[31] = 1;
                     id
                 })
