@@ -34,6 +34,11 @@ pub(crate) mod inspection_mode;
 mod inspection_mode_tests;
 
 mod kv;
+pub(crate) mod read_io;
+#[cfg(test)]
+pub(crate) mod read_probe;
+#[doc(hidden)]
+pub use read_io::{ReadCredits, ReadReservation};
 mod maintenance;
 
 mod partition;

@@ -124,6 +124,14 @@ pub enum RangeRead {
 /// (`EnvBucket`, wasm32), a simulation in tests. Errors carry the backend's
 /// detail, which the store logs and never returns.
 pub trait ObjectBucket: MaybeSend + MaybeSync + Clone + 'static {
+    /// Reserve backend calls before a bounded read wave.
+    #[doc(hidden)]
+    fn reserve_read_calls(
+        &self,
+        _calls: u32,
+    ) -> Result<Option<mkit_server::store::ReadReservation>, StoreError> {
+        Ok(None)
+    }
     /// Start, now, a put of `key` that writes only if the key is absent,
     /// with a body of exactly `len` bytes read from `body`. The put must
     /// make progress while the caller is still writing into `body` (it is
@@ -486,6 +494,12 @@ impl<B: ObjectBucket> R2PackSink<B> {
 
 impl<B: ObjectBucket> BlobStore for R2BlobStore<B> {
     type Sink = R2PackSink<B>;
+    fn reserve_read_calls(
+        &self,
+        calls: u32,
+    ) -> Result<Option<mkit_server::store::ReadReservation>, StoreError> {
+        self.bucket.reserve_read_calls(calls)
+    }
 
     async fn begin(&self, key: BlobKey, len: u64) -> Result<R2PackSink<B>, StoreError> {
         if len > self.max_bytes {
@@ -730,6 +744,7 @@ pub struct EnvBucket {
     env: worker::Env,
     binding: &'static str,
     request_budget: Option<mkit_server::indexed::budget::SliceBudget>,
+    read_credits: std::sync::Arc<mkit_server::store::ReadCredits>,
     alarm_budget: Option<mkit_server::purge::SliceBudget>,
 }
 
@@ -742,6 +757,7 @@ impl EnvBucket {
             env,
             binding,
             request_budget: None,
+            read_credits: std::sync::Arc::default(),
             alarm_budget: None,
         }
     }
@@ -750,6 +766,7 @@ impl EnvBucket {
     #[must_use]
     pub fn with_budget(mut self, budget: mkit_server::indexed::budget::SliceBudget) -> Self {
         self.request_budget = Some(budget);
+        self.read_credits = std::sync::Arc::default();
         self
     }
 
@@ -757,13 +774,17 @@ impl EnvBucket {
     #[must_use]
     pub fn with_alarm_budget(mut self, budget: mkit_server::purge::SliceBudget) -> Self {
         self.alarm_budget = Some(budget);
+        self.read_credits = std::sync::Arc::default();
         self
     }
 
     fn bucket(&self) -> Result<worker::Bucket, String> {
-        crate::ns_client::charge_request(self.request_budget.as_ref())
-            .map_err(|e| e.to_string())?;
-        crate::ns_client::charge_alarm(self.alarm_budget.as_ref()).map_err(|e| e.to_string())?;
+        if !self.read_credits.paid() {
+            crate::ns_client::charge_request(self.request_budget.as_ref())
+                .map_err(|e| e.to_string())?;
+            crate::ns_client::charge_alarm(self.alarm_budget.as_ref())
+                .map_err(|e| e.to_string())?;
+        }
         self.env.bucket(self.binding).map_err(|e| e.to_string())
     }
 }
@@ -793,6 +814,17 @@ pub type WorkerBlobStore = R2BlobStore<EnvBucket>;
 
 #[cfg(target_arch = "wasm32")]
 impl ObjectBucket for EnvBucket {
+    fn reserve_read_calls(
+        &self,
+        calls: u32,
+    ) -> Result<Option<mkit_server::store::ReadReservation>, StoreError> {
+        crate::ns_client::reserve_calls(
+            self.request_budget.as_ref(),
+            self.alarm_budget.as_ref(),
+            calls,
+        )?;
+        Ok(Some(self.read_credits.prepay(calls)))
+    }
     fn spawn_put(&self, key: String, len: u64, body: PutBody) -> oneshot::Receiver<PutResult> {
         let (tx, rx) = oneshot::channel();
         let bucket = self.bucket();

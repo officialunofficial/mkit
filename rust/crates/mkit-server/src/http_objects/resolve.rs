@@ -218,6 +218,72 @@ pub(crate) async fn load<B: BlobStore, N: NamespaceStore>(
     }
 }
 
+/// Parallel raw members only: dependencies keep the ordinary serial resolver.
+/// Reserve complete decoded, encoded and call allowances before each wave.
+pub(crate) async fn load_raw_many<B: BlobStore, N: NamespaceStore>(
+    env: &Env<'_, B, N>,
+    members: &[(Hash, LocatedObject)],
+    uncached_guards: &BTreeSet<Hash>,
+    budget: &mut Budget,
+) -> Result<std::collections::BTreeMap<Hash, Arc<[u8]>>, Miss> {
+    let mut loaded = std::collections::BTreeMap::new();
+    for wave in members.chunks(crate::store::read_io::parallelism()) {
+        let decoded = wave
+            .iter()
+            .try_fold(0u64, |sum, (_, loc)| {
+                sum.checked_add(loc.value.decoded_size)
+            })
+            .ok_or(Miss::Capped)?;
+        if decoded > budget.0 {
+            return Err(Miss::Capped);
+        }
+        let encoded = wave
+            .iter()
+            .try_fold(0u64, |sum, (_, loc)| {
+                sum.checked_add(8)?.checked_add(loc.value.frame_length)
+            })
+            .ok_or(Miss::Capped)?;
+        let _bytes = env
+            .blobs
+            .reserve_read_bytes(encoded)
+            .map_err(|_| Miss::Capped)?;
+        let guards = wave
+            .iter()
+            .flat_map(|(id, loc)| [id, &loc.pack])
+            .filter(|id| uncached_guards.contains(*id))
+            .count();
+        let _calls = env
+            .meta
+            .reserve_read_calls(u32::try_from(guards).unwrap_or(u32::MAX))
+            .map_err(|_| Miss::Capped)?;
+        let _blob_calls = env
+            .blobs
+            .reserve_read_calls(u32::try_from(wave.len() * 4).unwrap_or(u32::MAX))
+            .map_err(|_| Miss::Capped)?;
+        // Retain reservations on cancellation or failure. No independently
+        // running resolver can borrow another member's decoded allowance.
+        budget.0 -= decoded;
+        let replies = futures::future::join_all(wave.iter().map(|(id, location)| async move {
+            if location.value.delta_base.is_some() {
+                return Err(Miss::Unavailable);
+            }
+            let mut local = Budget(location.value.decoded_size);
+            load(env, *id, *location, &mut local).await
+        }))
+        .await;
+        for ((id, _), reply) in wave.iter().zip(replies) {
+            match reply {
+                Ok(bytes) => {
+                    loaded.insert(*id, bytes);
+                }
+                Err(Miss::NotFound) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(loaded)
+}
+
 async fn load_object<B: BlobStore, N: NamespaceStore>(
     env: &Env<'_, B, N>,
     id: Hash,

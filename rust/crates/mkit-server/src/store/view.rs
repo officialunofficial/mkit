@@ -97,6 +97,15 @@ impl<S: NamespaceStore> NamespaceStore for ViewStore<'_, S> {
     fn capabilities(&self) -> StoreCapabilities {
         self.store.capabilities()
     }
+    fn reader_admission(&self) -> bool {
+        self.store.reader_admission()
+    }
+    fn reserve_read_calls(
+        &self,
+        calls: u32,
+    ) -> Result<Option<crate::store::ReadReservation>, StoreError> {
+        self.store.reserve_read_calls(calls)
+    }
     async fn get(&self, p: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
         let mut values = self.get_many(p, core::slice::from_ref(key)).await?;
         Ok(values.pop().flatten())

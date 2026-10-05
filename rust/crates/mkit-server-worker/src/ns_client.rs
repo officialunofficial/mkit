@@ -58,6 +58,18 @@ pub fn charge_alarm(budget: Option<&mkit_server::purge::SliceBudget>) -> Result<
     Ok(())
 }
 
+pub(crate) fn reserve_calls(
+    request: Option<&SliceBudget>,
+    alarm: Option<&mkit_server::purge::SliceBudget>,
+    calls: u32,
+) -> Result<(), StoreError> {
+    request.map_or(Ok(()), |b| b.charge_many(calls))?;
+    if alarm.is_some_and(|b| !b.charge_operations(calls)) {
+        return Err(StoreError::unavailable("alarm subrequest budget exhausted"));
+    }
+    Ok(())
+}
+
 /// The key-level store over per-partition Durable Objects.
 #[derive(Debug, Clone)]
 pub struct DoNamespaceStore<T> {
@@ -66,6 +78,7 @@ pub struct DoNamespaceStore<T> {
     reserved_batch_ops: usize,
     request_budget: Option<SliceBudget>,
     alarm_budget: Option<mkit_server::purge::SliceBudget>,
+    read_credits: std::sync::Arc<mkit_server::store::ReadCredits>,
 }
 
 fn op(call: &NsCall) -> &'static str {
@@ -106,6 +119,7 @@ impl<T: NsTransport> DoNamespaceStore<T> {
             reserved_batch_ops: 0,
             request_budget: None,
             alarm_budget: None,
+            read_credits: std::sync::Arc::default(),
         }
     }
 
@@ -113,6 +127,7 @@ impl<T: NsTransport> DoNamespaceStore<T> {
     #[must_use]
     pub fn with_budget(mut self, budget: SliceBudget) -> Self {
         self.request_budget = Some(budget);
+        self.read_credits = std::sync::Arc::default();
         self
     }
 
@@ -120,6 +135,7 @@ impl<T: NsTransport> DoNamespaceStore<T> {
     #[must_use]
     pub fn with_alarm_budget(mut self, budget: mkit_server::purge::SliceBudget) -> Self {
         self.alarm_budget = Some(budget);
+        self.read_credits = std::sync::Arc::default();
         self
     }
 
@@ -141,8 +157,10 @@ impl<T: NsTransport> DoNamespaceStore<T> {
         let op = op(&call);
         let body = serde_json::to_string(&NsRequest::new(p, call)?)
             .map_err(|e| backend_error(StorageOp::RequestSerialize, e))?;
-        charge_request(self.request_budget.as_ref())?;
-        charge_alarm(self.alarm_budget.as_ref())?;
+        if !self.read_credits.paid() {
+            charge_request(self.request_budget.as_ref())?;
+            charge_alarm(self.alarm_budget.as_ref())?;
+        }
         let reply = self.transport.call(&target, op, body).await?;
         match serde_json::from_str::<NsReply>(&reply) {
             Ok(NsReply::Err { kind, message }) => Err(kind.into_error(message)),
@@ -179,6 +197,17 @@ impl<T: NsTransport> DoNamespaceStore<T> {
 }
 
 impl<T: NsTransport> NamespaceStore for DoNamespaceStore<T> {
+    fn reserve_read_calls(
+        &self,
+        calls: u32,
+    ) -> Result<Option<mkit_server::store::ReadReservation>, StoreError> {
+        reserve_calls(
+            self.request_budget.as_ref(),
+            self.alarm_budget.as_ref(),
+            calls,
+        )?;
+        Ok(Some(self.read_credits.prepay(calls)))
+    }
     fn capabilities(&self) -> StoreCapabilities {
         let mut caps = StoreCapabilities::full();
         caps.reserved_batch_ops = self.reserved_batch_ops;

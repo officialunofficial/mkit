@@ -677,8 +677,10 @@ type ReadManyHook = Box<dyn Fn(&MemoryKv, &Partition, &[Key]) + Send + Sync>;
 /// run a hook before each apply, can yield at every call and can fail
 /// every read.
 struct Spy {
+    latency_ms: std::sync::atomic::AtomicU64,
     count_partition_scans: AtomicBool,
     request_budget: Mutex<Option<crate::indexed::budget::SliceBudget>>,
+    read_credits: crate::store::ReadCredits,
     inner: Arc<MemoryKv>,
     hook: Option<ApplyHook>,
     after_hook: Option<AfterApplyHook>,
@@ -699,9 +701,11 @@ struct Spy {
 impl Spy {
     fn new(inner: MemoryKv) -> Self {
         Self {
+            latency_ms: std::sync::atomic::AtomicU64::new(0),
             count_partition_scans: AtomicBool::new(false),
             inner: Arc::new(inner),
             request_budget: Mutex::new(None),
+            read_credits: crate::store::ReadCredits::default(),
             hook: None,
             after_hook: None,
             scan_hook: None,
@@ -748,7 +752,11 @@ impl Spy {
         self.ops.lock().unwrap().clone()
     }
 
-    async fn pause(&self, op: &'static str) {
+    async fn pause_as(&self, phase: &'static str, op: &'static str) {
+        let latency = self.latency_ms.load(Ordering::SeqCst);
+        if latency != 0 {
+            crate::store::read_probe::delay(latency, phase).await;
+        }
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.ops.lock().unwrap().push(op);
         if self.yields {
@@ -756,12 +764,18 @@ impl Spy {
         }
     }
 
+    async fn pause(&self, op: &'static str) {
+        self.pause_as("authorization_other", op).await;
+    }
+
     fn saw(&self, key: &Key) {
         self.seen.lock().unwrap().push(key.clone());
     }
 
     fn maybe_fail_read(&self) -> Result<(), StoreError> {
-        if let Some(budget) = &*self.request_budget.lock().unwrap() {
+        if let Some(budget) = &*self.request_budget.lock().unwrap()
+            && !self.read_credits.paid()
+        {
             budget.charge()?;
         }
         if self.fail_reads {
@@ -772,12 +786,23 @@ impl Spy {
 }
 
 impl NamespaceStore for Spy {
+    fn reserve_read_calls(
+        &self,
+        calls: u32,
+    ) -> Result<Option<crate::store::ReadReservation>, StoreError> {
+        if let Some(budget) = &*self.request_budget.lock().unwrap() {
+            budget.charge_many(calls)?;
+            return Ok(Some(self.read_credits.prepay(calls)));
+        }
+        Ok(None)
+    }
     fn capabilities(&self) -> StoreCapabilities {
         self.inner.capabilities()
     }
 
     async fn get(&self, p: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
-        self.pause("get").await;
+        self.pause_as(crate::store::read_probe::phase(key.as_bytes()), "get")
+            .await;
         self.maybe_fail_read()?;
         self.saw(key);
         self.inner.get(p, key).await
@@ -788,7 +813,13 @@ impl NamespaceStore for Spy {
         p: &Partition,
         keys: &[Key],
     ) -> Result<Vec<Option<Value>>, StoreError> {
-        self.pause("get_many").await;
+        self.pause_as(
+            keys.first().map_or("authorization_other", |key| {
+                crate::store::read_probe::phase(key.as_bytes())
+            }),
+            "get_many",
+        )
+        .await;
         if self.fail_read_many {
             return Err(StoreError::unavailable("injected get_many fault"));
         }
@@ -810,7 +841,8 @@ impl NamespaceStore for Spy {
         after: Option<&crate::store::Cursor>,
         limit: u32,
     ) -> Result<ScanPage, StoreError> {
-        self.pause("scan").await;
+        self.pause_as(crate::store::read_probe::phase(start.as_bytes()), "scan")
+            .await;
         if let Some(hook) = &self.scan_hook {
             hook(&self.inner, p);
         }
@@ -838,11 +870,16 @@ impl NamespaceStore for Spy {
         ranges: &[crate::store::RangeScan],
     ) -> Result<Vec<ScanPage>, StoreError> {
         if self.count_partition_scans.load(Ordering::SeqCst) {
-            self.pause(if matches!(p, Partition::RepoIndex { .. }) {
-                "scan_many_index"
-            } else {
-                "scan_many_other"
-            })
+            self.pause_as(
+                ranges.first().map_or("authorization_other", |range| {
+                    crate::store::read_probe::phase(range.start.as_bytes())
+                }),
+                if matches!(p, Partition::RepoIndex { .. }) {
+                    "scan_many_index"
+                } else {
+                    "scan_many_other"
+                },
+            )
             .await;
             self.maybe_fail_read()?;
             return self.inner.scan_many(p, ranges).await;

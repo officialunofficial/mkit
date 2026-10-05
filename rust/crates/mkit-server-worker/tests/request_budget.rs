@@ -58,17 +58,34 @@ struct CountedBucket {
     budget: SliceBudget,
     alarm: Option<mkit_server::purge::SliceBudget>,
     dispatches: Arc<AtomicU32>,
+    read_credits: Arc<mkit_server::store::ReadCredits>,
 }
 impl CountedBucket {
     fn dispatch(&self) -> Result<(), String> {
-        charge_request(Some(&self.budget)).map_err(|error| error.to_string())?;
-        mkit_server_worker::ns_client::charge_alarm(self.alarm.as_ref())
-            .map_err(|error| error.to_string())?;
+        if !self.read_credits.paid() {
+            charge_request(Some(&self.budget)).map_err(|error| error.to_string())?;
+            mkit_server_worker::ns_client::charge_alarm(self.alarm.as_ref())
+                .map_err(|error| error.to_string())?;
+        }
         self.dispatches.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }
 impl ObjectBucket for CountedBucket {
+    fn reserve_read_calls(
+        &self,
+        calls: u32,
+    ) -> Result<Option<mkit_server::store::ReadReservation>, StoreError> {
+        self.budget.charge_many(calls)?;
+        if self
+            .alarm
+            .as_ref()
+            .is_some_and(|b| !b.charge_operations(calls))
+        {
+            return Err(StoreError::unavailable("alarm allowance exhausted"));
+        }
+        Ok(Some(self.read_credits.prepay(calls)))
+    }
     fn spawn_put(&self, key: String, len: u64, body: PutBody) -> oneshot::Receiver<PutResult> {
         if let Err(error) = self.dispatch() {
             let (tx, rx) = oneshot::channel();
@@ -153,6 +170,7 @@ fn request_budget_combines_do_r2_range_proofs_and_pipeline_serving() {
                 budget: budget.clone(),
                 alarm: None,
                 dispatches: Arc::default(),
+                read_credits: Arc::default(),
             },
             PACKS_KEYSPACE,
         );
@@ -294,6 +312,7 @@ fn alarm_budget_counts_real_range_and_delete_calls_and_survives_clones() {
                 budget: SliceBudget::new(1000),
                 alarm: Some(budget.clone()),
                 dispatches: dispatches.clone(),
+                read_credits: Arc::default(),
             },
             PACKS_KEYSPACE,
         );
@@ -334,5 +353,119 @@ fn alarm_budget_counts_real_range_and_delete_calls_and_survives_clones() {
         meta.clone().get(&partition, &metadata).await.unwrap();
         assert_eq!(budget.used(), 1);
         assert_eq!(transport.0.load(Ordering::SeqCst), 2);
+    });
+}
+
+#[test]
+fn namespace_read_wave_reserves_inherited_allowance_before_transport() {
+    block_on(async {
+        for allowance in [5, 6] {
+            let transport = EmptyTransport::default();
+            let budget = SliceBudget::new(allowance);
+            let store = Arc::new(
+                DoNamespaceStore::new(transport.clone(), Partition::Namespace(repo().namespace))
+                    .with_budget(budget.clone()),
+            );
+            let reservation = store.reserve_read_calls(6);
+            if allowance == 5 {
+                assert!(reservation.is_err());
+                assert_eq!(transport.0.load(Ordering::SeqCst), 0);
+            } else {
+                let reservation = reservation.unwrap();
+                let key = mkit_server::Key::new(b"key".to_vec());
+                let partition = Partition::Namespace(repo().namespace);
+                let replies =
+                    futures::future::join_all((0..6).map(|_| store.get(&partition, &key))).await;
+                assert!(replies.into_iter().all(|reply| reply.is_ok()));
+                assert_eq!(budget.used(), 6);
+                assert_eq!(transport.0.load(Ordering::SeqCst), 6);
+                drop(reservation);
+                assert!(store.get(&partition, &key).await.is_err());
+                assert_eq!(transport.0.load(Ordering::SeqCst), 6);
+            }
+        }
+    });
+}
+
+#[test]
+fn blob_and_namespace_waves_preflight_the_same_invocation_ledger() {
+    block_on(async {
+        for allowance in [9, 10] {
+            let budget = SliceBudget::new(allowance);
+            let transport = EmptyTransport::default();
+            let meta =
+                DoNamespaceStore::new(transport.clone(), Partition::Namespace(repo().namespace))
+                    .with_budget(budget.clone());
+            let dispatches = Arc::<AtomicU32>::default();
+            let bucket = common::SimBucket::default();
+            let blobs = R2BlobStore::new(
+                CountedBucket {
+                    inner: bucket.clone(),
+                    budget: budget.clone(),
+                    alarm: None,
+                    dispatches: dispatches.clone(),
+                    read_credits: Arc::default(),
+                },
+                PACKS_KEYSPACE,
+            );
+            let key = BlobKey::pack([5; 32]);
+            bucket.replace_object(
+                &blobs.object_key(&key).unwrap(),
+                Bytes::from_static(b"test"),
+            );
+            let namespace = meta.reserve_read_calls(6).unwrap();
+            let blob = blobs.reserve_read_calls(4);
+            if allowance == 9 {
+                assert!(blob.is_err());
+                assert_eq!(transport.0.load(Ordering::SeqCst), 0);
+                assert_eq!(dispatches.load(Ordering::SeqCst), 0);
+            } else {
+                let blob = blob.unwrap();
+                let p = Partition::Namespace(repo().namespace);
+                let k = mkit_server::Key::new(b"key".to_vec());
+                for _ in 0..6 {
+                    meta.get(&p, &k).await.unwrap();
+                }
+                for _ in 0..2 {
+                    let body = blobs
+                        .get(
+                            &key,
+                            Some(ByteRange {
+                                start: 0,
+                                end_inclusive: 1,
+                            }),
+                        )
+                        .await
+                        .unwrap();
+                    assert!(body.is_some());
+                }
+                assert_eq!(budget.used(), 10);
+                assert_eq!(dispatches.load(Ordering::SeqCst), 4);
+                drop(blob);
+            }
+            drop(namespace);
+        }
+    });
+}
+
+#[test]
+fn replacing_a_worker_budget_cannot_borrow_another_handles_wave_credit() {
+    block_on(async {
+        let transport = EmptyTransport::default();
+        let store =
+            DoNamespaceStore::new(transport.clone(), Partition::Namespace(repo().namespace))
+                .with_budget(SliceBudget::new(6));
+        let reservation = store.reserve_read_calls(6).unwrap();
+        let other = store.clone().with_budget(SliceBudget::new(0));
+        assert!(metadata_probe(&other).await.is_err());
+        let alarm = store
+            .clone()
+            .with_alarm_budget(mkit_server::purge::SliceBudget::new(0));
+        assert!(metadata_probe(&alarm).await.is_err());
+        assert_eq!(transport.0.load(Ordering::SeqCst), 0);
+        metadata_probe(&store).await.unwrap();
+        assert_eq!(transport.0.load(Ordering::SeqCst), 1);
+        drop(reservation);
+        assert!(metadata_probe(&store).await.is_err());
     });
 }

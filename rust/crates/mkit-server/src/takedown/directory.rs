@@ -104,11 +104,30 @@ impl Walk {
         store: &S,
         concurrency: usize,
     ) -> Result<Self, StoreError> {
+        // Other proof callers retain their per-dispatch accounting contract.
+        Self::start_reserved(store, concurrency, false).await
+    }
+    #[cfg(feature = "http-objects")]
+    pub(super) async fn start_reader<S: NamespaceStore>(store: &S) -> Result<Self, StoreError> {
+        Self::start_reserved(store, crate::store::read_io::parallelism(), true).await
+    }
+    async fn start_reserved<S: NamespaceStore>(
+        store: &S,
+        concurrency: usize,
+        reserve_wave: bool,
+    ) -> Result<Self, StoreError> {
         let (start, end) = range();
         let mut pages = VecDeque::new();
         for first in (0..DIRECTORY_SHARDS).step_by(concurrency.clamp(1, 6)) {
             let last =
                 (usize::from(first) + concurrency.clamp(1, 6)).min(usize::from(DIRECTORY_SHARDS));
+            let _reservation = if reserve_wave {
+                store.reserve_read_calls(
+                    u32::try_from(last - usize::from(first)).unwrap_or(u32::MAX),
+                )?
+            } else {
+                None
+            };
             let replies = futures::future::join_all((usize::from(first)..last).map(|shard| {
                 let (start, end) = (&start, &end);
                 async move {

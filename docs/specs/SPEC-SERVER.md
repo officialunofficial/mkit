@@ -1659,6 +1659,31 @@ decode caps MUST remain uniformly absent (SPEC-HTTP-OBJECTS §4). Storage failur
 remain `unavailable`. Existing per-call allowances and invocation call budgets
 remain applicable. This embedding API does not change HTTP error mappings.
 
+Embedders MAY opt into canonical/metadata batches of up to 45 ids; the default
+is 16. This MUST NOT raise storage, row, byte, decode or output allowances or
+change the 16-target URL issuance cap.
+
+An operation MAY reuse verified locations and sealed inventory across its denial
+and metadata consumers. Inventory batches MUST validate completion, entry digest,
+type/length facts and reconstruction dependencies. Repeated target/pack denial
+reads MAY be coalesced within one operation phase; the final access phase MUST
+start fresh after independently loaded objects complete. A strongly empty denial
+directory MUST NOT be cached across calls. Final access gates and external-base
+membership/denial remain mandatory.
+
+Independent reader I/O MAY run concurrently with one shared concurrency, transient
+row and byte admission envelope across scans, membership groups and object loads.
+Every wave MUST reserve page, row, byte and call allowances before dispatch, drain
+all dispatched replies on failure, and process replies deterministically. Served
+scan-prefix cursors, rotations and first-member pack ordering MUST remain intact.
+Cancellation MUST release in-flight admission while retaining charged reservations.
+
+A bounded owner-capable ref/path helper MAY capture the selected authorized ref
+in a fresh operation context and read canonical parents before the selected child.
+It MUST keep canonical/type checks, bounded tag peeling, exact path grammar and
+symlink-as-entry behavior. It MUST NOT widen URL-token authority or replace the
+published-view URL issuance path. Existing context roots and expiry remain fixed.
+
 A reader session MAY also retain bounded structural reachability proofs. These
 MUST be privately bound to its reader/backend, full repository identity, view
 and verified credential scope. A context change MUST discard proofs without

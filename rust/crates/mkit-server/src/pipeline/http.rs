@@ -533,15 +533,17 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
         let partitions = self.shards.ref_index_partitions(repo);
         let (mut tips, mut last) = (Vec::new(), None::<String>);
         let mut rows_left = cap;
-        let mut pages_left = cap.div_ceil(self.cfg.list_page_limit as usize);
+        let page_limit = self
+            .cfg
+            .list_page_limit
+            .min(u32::try_from(crate::store::read_io::ROWS).unwrap_or(u32::MAX));
+        let mut pages_left = cap.div_ceil(page_limit as usize);
         loop {
             // Reserve every shard's maximum prefetch, including rows discarded
             // by the merge or excluded below. This conservatively bounds actual
             // backend rows even when the emitted page is small.
-            let limit = self
-                .cfg
-                .list_page_limit
-                .min(u32::try_from(rows_left / partitions.len()).unwrap_or(u32::MAX));
+            let limit =
+                page_limit.min(u32::try_from(rows_left / partitions.len()).unwrap_or(u32::MAX));
             if limit == 0 || pages_left == 0 {
                 return Ok((tips, true));
             }
