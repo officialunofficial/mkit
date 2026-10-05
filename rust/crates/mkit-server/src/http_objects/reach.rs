@@ -327,12 +327,15 @@ pub(crate) async fn walk_many_memo<B: BlobStore, N: NamespaceStore>(
         if skipped {
             frontier.incomplete = Some(Miss::Capped);
         }
-        for (id, located) in members {
-            if crate::takedown::denial::denied(env.meta, &id)
-                .await
-                .map_err(|_| Miss::Unavailable)?
-                || takedown.stops_descent(env.repo, &id)
-            {
+        // One denial read per member, issued together rather than one by one.
+        let blocked = futures::future::join_all(
+            members
+                .iter()
+                .map(|(id, _)| crate::takedown::denial::denied(env.meta, id)),
+        )
+        .await;
+        for ((id, located), blocked) in members.into_iter().zip(blocked) {
+            if blocked.map_err(|_| Miss::Unavailable)? || takedown.stops_descent(env.repo, &id) {
                 continue;
             }
             if kinds[&id] == Kind::File && !manifest_sized(located.value.decoded_size) {

@@ -199,7 +199,7 @@ fn row_wire_bound(name: &str) -> usize {
     proto.max(name.len() + 96)
 }
 
-/// Read one bounded page. Every source is scanned once, sequentially.
+/// Read one bounded page. Every source is scanned once, concurrently.
 /// A failed source fails the entire page; no partial merge is exposed.
 pub(super) async fn page<S: BucketSource>(
     sources: &[S],
@@ -215,8 +215,14 @@ pub(super) async fn page<S: BucketSource>(
     let mut rows = Vec::new();
     let mut boundary: Option<String> = None;
     let mut source_more = false;
-    for source in sources {
-        let scan = source.scan(repo, prefix, last, per_source).await?;
+    let scans = futures::future::join_all(
+        sources
+            .iter()
+            .map(|source| source.scan(repo, prefix, last, per_source)),
+    )
+    .await;
+    for scan in scans {
+        let scan = scan?;
         if scan.more {
             let Some((name, _)) = scan.rows.last() else {
                 return Err(StoreError::Corrupt("empty continued ref scan".into()));

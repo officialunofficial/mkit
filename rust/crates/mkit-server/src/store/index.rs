@@ -4,6 +4,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use futures::future::join_all;
+
 use mkit_core::hash::Hash;
 use mkit_core::store::MAX_RAW_OBJECT_SIZE;
 
@@ -330,6 +332,9 @@ async fn scan_all<S: NamespaceStore>(
             return Ok(scans);
         }
         let mut served = false;
+        // Build every partition's request first, then issue them together: a
+        // round costs the slowest round trip, not the sum of all of them.
+        let mut requests = Vec::new();
         for (partition, mut ids) in groups {
             if calls == MAX_LOOKUP_PAGES {
                 for id in ids {
@@ -362,8 +367,17 @@ async fn scan_all<S: NamespaceStore>(
                     })
                 })
                 .collect();
-            let pages = store.scan_many(&partition, &ranges).await?;
             calls += 1;
+            requests.push((partition, ids, ranges));
+        }
+        let replies = join_all(
+            requests
+                .iter()
+                .map(|(partition, _, ranges)| store.scan_many(partition, ranges)),
+        )
+        .await;
+        for ((partition, ids, ranges), pages) in requests.into_iter().zip(replies) {
+            let pages = pages?;
             if pages.is_empty() || pages.len() > ranges.len() {
                 return Err(StoreError::Corrupt(
                     "invalid scan_many served prefix".into(),
@@ -469,7 +483,7 @@ pub async fn locate_many<S: NamespaceStore>(
         }
         admitted.insert(id, count);
     }
-    let mut members = BTreeSet::new();
+    let mut reads = Vec::new();
     for (partition, ids) in packs {
         let ids: Vec<_> = ids.into_iter().collect();
         for chunk in ids.chunks(MEMBERSHIP_CHUNK) {
@@ -479,14 +493,25 @@ pub async fn locate_many<S: NamespaceStore>(
                 .iter()
                 .map(|pack| keys::membership(&repo.name, pack))
                 .collect();
-            let values = store.get_many(&partition, &keys).await?;
-            if values.len() != chunk.len() {
-                return Err(StoreError::Corrupt("short membership get_many".into()));
-            }
-            for (pack, value) in chunk.iter().zip(values) {
-                if value.is_some() {
-                    members.insert(*pack);
-                }
+            reads.push((partition.clone(), chunk.to_vec(), keys));
+        }
+    }
+    // The chunks are independent: issue them together.
+    let replies = join_all(
+        reads
+            .iter()
+            .map(|(partition, _, keys)| store.get_many(partition, keys)),
+    )
+    .await;
+    let mut members = BTreeSet::new();
+    for ((_, chunk, _), values) in reads.iter().zip(replies) {
+        let values = values?;
+        if values.len() != chunk.len() {
+            return Err(StoreError::Corrupt("short membership get_many".into()));
+        }
+        for (pack, value) in chunk.iter().zip(values) {
+            if value.is_some() {
+                members.insert(*pack);
             }
         }
     }
@@ -978,6 +1003,125 @@ mod tests {
     #[tokio::test]
     async fn membership_gate_d34() {
         membership_gate(&D34Shards).await;
+    }
+
+    /// Counts the most calls in flight at once; every call yields once, as a
+    /// network round trip would, so overlapping calls overlap for real.
+    #[derive(Debug, Default)]
+    struct Overlap {
+        inner: MemoryKv,
+        now: AtomicUsize,
+        peak: AtomicUsize,
+        calls: AtomicUsize,
+    }
+
+    impl Overlap {
+        async fn trip(&self) {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let now = self.now.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            self.now.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    impl NamespaceStore for Overlap {
+        fn capabilities(&self) -> StoreCapabilities {
+            self.inner.capabilities()
+        }
+        async fn get(&self, p: &Partition, k: &Key) -> Result<Option<Value>, StoreError> {
+            self.trip().await;
+            self.inner.get(p, k).await
+        }
+        async fn get_many(
+            &self,
+            p: &Partition,
+            keys: &[Key],
+        ) -> Result<Vec<Option<Value>>, StoreError> {
+            self.trip().await;
+            self.inner.get_many(p, keys).await
+        }
+        async fn scan(
+            &self,
+            p: &Partition,
+            start: &Key,
+            end: &Key,
+            after: Option<&Cursor>,
+            limit: u32,
+        ) -> Result<ScanPage, StoreError> {
+            self.inner.scan(p, start, end, after, limit).await
+        }
+        async fn scan_many(
+            &self,
+            p: &Partition,
+            ranges: &[RangeScan],
+        ) -> Result<Vec<ScanPage>, StoreError> {
+            self.trip().await;
+            self.inner.scan_many(p, ranges).await
+        }
+        async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+            self.inner.apply(p, batch).await
+        }
+        async fn stats(&self, p: &Partition) -> Result<PartitionStats, StoreError> {
+            self.inner.stats(p).await
+        }
+        async fn probe(&self) -> Result<(), StoreError> {
+            self.inner.probe().await
+        }
+    }
+
+    /// UNO-550: ids in distinct shards are located in one overlapped round,
+    /// not one round trip per shard, and the answers are unchanged.
+    #[tokio::test]
+    async fn locate_many_overlaps_one_round_trip_per_shard() {
+        let store = Overlap::default();
+        let r = repo("a");
+        let ids: Vec<Hash> = (0..8_u8).map(|i| [i * 16; 32]).collect();
+        let pack = [9; 32];
+        let membership = D34Shards.membership(&r, &BlobKey::pack(pack));
+        store
+            .inner
+            .apply(
+                &membership,
+                Batch::new().put(keys::membership(&r.name, &pack), Value::default()),
+            )
+            .await
+            .unwrap();
+        for (i, id) in ids.iter().enumerate() {
+            let target = D34Shards.object_index(&r, id);
+            store
+                .inner
+                .apply(
+                    &target,
+                    Batch::new().put(
+                        keys::object_index(&r.name, id, &pack),
+                        codec::encode_object_index(id, &raw(i as u64)).unwrap(),
+                    ),
+                )
+                .await
+                .unwrap();
+        }
+        let shards: BTreeSet<_> = ids
+            .iter()
+            .map(|id| D34Shards.object_index(&r, id))
+            .collect();
+        assert_eq!(shards.len(), ids.len(), "ids must span distinct shards");
+
+        let found = locate_many(&store, &D34Shards, &r, &ids).await.unwrap();
+        for (i, found) in found.into_iter().enumerate() {
+            assert_eq!(
+                found,
+                Ok(Some(LocatedObject {
+                    pack,
+                    value: raw(i as u64)
+                }))
+            );
+        }
+        // One scan_many per shard and one membership read, as before...
+        assert_eq!(store.calls.load(Ordering::SeqCst), ids.len() + 1);
+        // ...but the scans were in flight together: a round costs the slowest
+        // call, not the sum of eight.
+        assert_eq!(store.peak.load(Ordering::SeqCst), ids.len());
     }
 
     #[tokio::test]

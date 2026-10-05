@@ -73,6 +73,17 @@ pub struct ObjectReader<'a, B, N, H> {
 fn failure<E>(_: E) -> ServerError {
     ServerError::unavailable("object reader unavailable")
 }
+
+/// Denial verdicts for `ids`, in order, with every read in flight together.
+async fn denials<'a, S: NamespaceStore>(
+    store: &S,
+    ids: impl Iterator<Item = &'a Hash>,
+) -> Result<Vec<bool>, ServerError> {
+    futures::future::join_all(ids.map(|id| denied(store, id)))
+        .await
+        .into_iter()
+        .collect()
+}
 // A cap converted to absence is consumed: a later, unrelated failure must not
 // inherit it.
 fn absorb(capped: &AtomicBool) -> bool {
@@ -562,15 +573,19 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         };
         // Directly denied members are absent even when their reachability
         // cannot be proved within the caller's byte or walk budget.
-        let mut clear = Vec::with_capacity(located.len());
-        for (id, location) in located {
-            if !denied(&meta, &id).await.map_err(failure)?
-                && !denied(&meta, &location.pack).await.map_err(failure)?
-            {
-                clear.push((id, location));
+        let ids_denied = denials(&meta, located.iter().map(|(id, _)| id)).await?;
+        let mut candidates = Vec::with_capacity(located.len());
+        for ((id, location), blocked) in located.into_iter().zip(ids_denied) {
+            if !blocked {
+                candidates.push((id, location));
             }
         }
-        located = clear;
+        let packs_denied = denials(&meta, candidates.iter().map(|(_, l)| &l.pack)).await?;
+        located = candidates
+            .into_iter()
+            .zip(packs_denied)
+            .filter_map(|(entry, blocked)| (!blocked).then_some(entry))
+            .collect();
         // Issuance proves missing IDs too: proof cost must not expose membership.
         let mut targets = if capped_as_absent {
             ids.iter().copied().collect::<BTreeSet<_>>()
@@ -666,12 +681,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         if capped_as_absent {
             // Do not locate inaccessible targets: membership-dependent work can
             // distinguish a stored orphan from a missing ID near the call cap.
-            let mut accessible = Vec::new();
-            for id in &reached {
-                if !denied(&meta, id).await.map_err(failure)? {
-                    accessible.push(*id);
-                }
-            }
+            let blocked = denials(&meta, reached.iter()).await?;
+            let accessible: Vec<Hash> = reached
+                .iter()
+                .zip(blocked)
+                .filter_map(|(id, blocked)| (!blocked).then_some(*id))
+                .collect();
             located = resolve::locate_ids(&env, &accessible, resolve::OnCap::Skip)
                 .await
                 .map_err(resolution_failure)?
@@ -684,13 +699,26 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             BTreeSet::new()
         };
         let (mut bytes, mut sizes) = (BTreeMap::new(), BTreeMap::new());
+        let located: Vec<_> = located
+            .into_iter()
+            .filter(|(id, _)| reached.contains(id) && !blocked.contains(id))
+            .collect();
+        let ids_denied = denials(&meta, located.iter().map(|(id, _)| id)).await?;
+        let clear: Vec<_> = located
+            .iter()
+            .zip(&ids_denied)
+            .filter(|(_, blocked)| !**blocked)
+            .map(|(entry, _)| entry)
+            .collect();
+        let packs_denied = denials(&meta, clear.iter().map(|(_, l)| &l.pack)).await?;
+        let clear: BTreeSet<Hash> = clear
+            .iter()
+            .zip(packs_denied)
+            .filter(|(_, blocked)| !*blocked)
+            .map(|((id, _), _)| *id)
+            .collect();
         for (id, located) in located {
-            if !reached.contains(&id) || blocked.contains(&id) {
-                continue;
-            }
-            if denied(&meta, &id).await.map_err(failure)?
-                || denied(&meta, &located.pack).await.map_err(failure)?
-            {
+            if !clear.contains(&id) {
                 continue;
             }
             meta.charge().map_err(|_| exhausted())?;
