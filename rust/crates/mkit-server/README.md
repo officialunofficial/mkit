@@ -148,7 +148,10 @@ six-call I/O admission envelope. Scan waves retain the existing 1,000 transient
 row allowance across all concurrent replies, and results are processed in
 partition/input order. Encoded ranges, calls and decoded raw members are reserved
 before dispatch. Failed or cancelled waves keep their reservations. Delta chains
-use the bounded sequential resolver. Store decorators that impose an inherited
+use the bounded sequential resolver. Raw-load waves also bound combined encoded
+buffers and canonical results to the previous single-member transient allowance;
+large frames therefore run in smaller waves. Decoder scratch overlaps only one
+synchronous decode. Store decorators that impose an inherited
 call or byte budget must forward the hidden reader-admission and reservation hooks, so the entire
 wave is admitted before the first backend dispatch. Activate the returned
 reservations only around their owning read future with `ReadReservation::scope`;

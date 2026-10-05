@@ -227,7 +227,11 @@ pub(crate) async fn load_raw_many<B: BlobStore, N: NamespaceStore>(
     budget: &mut Budget,
 ) -> Result<std::collections::BTreeMap<Hash, Arc<[u8]>>, Miss> {
     let mut loaded = std::collections::BTreeMap::new();
-    for wave in members.chunks(crate::store::read_io::parallelism()) {
+    let mut remaining = members;
+    while !remaining.is_empty() {
+        let wave_len = raw_wave_len(remaining)?;
+        let (wave, rest) = remaining.split_at(wave_len);
+        remaining = rest;
         let decoded = wave
             .iter()
             .try_fold(0u64, |sum, (_, loc)| {
@@ -285,6 +289,32 @@ pub(crate) async fn load_raw_many<B: BlobStore, N: NamespaceStore>(
         }
     }
     Ok(loaded)
+}
+
+// Retained results are bounded by the reader's batch/output allowance. New
+// frames and canonical allocations must fit the previous single-member
+// transient envelope, rather than multiplying it by I/O concurrency. Decode
+// does not yield, so only one decoder's scratch can overlap these buffers.
+fn raw_wave_len(members: &[(Hash, LocatedObject)]) -> Result<usize, Miss> {
+    use crate::indexed::geometry::{CANONICAL_BYTES, FRAME_BYTES};
+    let ceiling = 8 + FRAME_BYTES + CANONICAL_BYTES;
+    let mut resident = 0u64;
+    let mut count = 0;
+    for (_, location) in members.iter().take(crate::store::read_io::parallelism()) {
+        let value = location.value;
+        if value.frame_length > FRAME_BYTES || value.decoded_size > CANONICAL_BYTES {
+            return Err(Miss::Capped);
+        }
+        // Pack headers and completed in-wave outputs can overlap every frame.
+        // Decoder scratch and Vec-to-Arc conversion run synchronously once.
+        let next = resident + 8 + value.frame_length + value.decoded_size;
+        if next > ceiling {
+            break;
+        }
+        resident = next;
+        count += 1;
+    }
+    Ok(count)
 }
 
 async fn load_object<B: BlobStore, N: NamespaceStore>(
@@ -619,3 +649,7 @@ mod tests {
 #[cfg(test)]
 #[path = "sidecar_tests.rs"]
 mod sidecar_tests;
+
+#[cfg(test)]
+#[path = "raw_wave_tests.rs"]
+mod raw_wave_tests;

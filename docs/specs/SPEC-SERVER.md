@@ -1679,6 +1679,10 @@ scan-prefix cursors, rotations and first-member pack ordering MUST remain intact
 Prepaid credits MUST belong to the dispatched wave and its inherited ledgers;
 unrelated work or cancellation of another wave MUST NOT consume them.
 Cancellation MUST release in-flight admission while retaining charged reservations.
+Raw-load waves MUST NOT multiply the single-member transient payload allowance:
+their combined encoded frames and canonical results MUST fit that allowance.
+Retained earlier results remain subject to batch/output bounds; synchronous
+decoder scratch and canonical conversion overlap only one member at a time.
 
 A reader session MAY also retain bounded structural reachability proofs. These
 MUST be privately bound to its reader/backend, full repository identity, view

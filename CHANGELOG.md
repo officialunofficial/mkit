@@ -52,6 +52,8 @@ collect the applicable entries between their old and new immutable pins.
   another wave cannot spend them. Multipart and root-pinning mutations isolate
   their internal probes from active read credits. Public views preserve backend
   served prefixes so continuation is admitted by the reader.
+  Raw-load waves shrink for large encoded frames to retain the previous
+  single-member transient memory allowance alongside earlier canonical results.
 - Opt into canonical/metadata batches of up to 45 ids with
   `ObjectReader::with_batch_limit(45)?`; the 16-id default, URL issuance cap and
   all accounting allowances remain unchanged.
