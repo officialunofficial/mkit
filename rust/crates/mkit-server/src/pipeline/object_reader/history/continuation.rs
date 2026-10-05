@@ -28,6 +28,25 @@ pub struct ContinuedHistoryPage {
     pub next: Option<HistoryContinuation>,
 }
 
+// Imported evidence never escapes this operation, including cancellation.
+struct HistoryProofScope<'a> {
+    session: &'a mut ReaderSession,
+    saved: crate::pipeline::read_proofs::ReadProofs,
+}
+impl<'a> HistoryProofScope<'a> {
+    fn new(session: &'a mut ReaderSession) -> Self {
+        let isolated = session.proofs.isolated();
+        let saved = std::mem::replace(&mut session.proofs, isolated);
+        Self { session, saved }
+    }
+}
+impl Drop for HistoryProofScope<'_> {
+    fn drop(&mut self) {
+        self.saved.inherit_deadline(&self.session.proofs);
+        std::mem::swap(&mut self.session.proofs, &mut self.saved);
+    }
+}
+
 struct Anchor {
     tip: Hash,
     publication: Publication,
@@ -97,9 +116,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         }
         let calls = SliceBudget::new(OBJECT_READER_CALLS);
         let capped = AtomicBool::new(false);
+        let scope = HistoryProofScope::new(session);
+        let mut token_expiry = None;
         let result = self
             .continued_page(
-                session,
+                scope.session,
                 reference,
                 continuation,
                 limit,
@@ -107,8 +128,19 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 config,
                 &calls,
                 &capped,
+                &mut token_expiry,
             )
             .await;
+        let result = match result {
+            Err(e)
+                if e.code() == Code::ResourceExhausted
+                    && token_expiry
+                        .is_some_and(|expiry| ms(self.pipe.clock.now_ms()) >= expiry) =>
+            {
+                Err(absent())
+            }
+            other => other,
+        };
         match settle(result, &capped) {
             Err(e)
                 if matches!(
@@ -133,6 +165,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         config: &crate::history_token::HistoryTokenConfig,
         calls: &SliceBudget,
         capped: &AtomicBool,
+        token_expiry: &mut Option<u64>,
     ) -> Result<Option<ContinuedHistoryPage>, ServerError> {
         let claims = if let Some(token) = token {
             // Reserve parsing bytes before base64/JSON allocations. MAC and
@@ -153,6 +186,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             {
                 return Err(absent());
             }
+            *token_expiry = Some(claims.expires);
             Some(claims)
         } else {
             None
@@ -177,7 +211,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             let meta = Budgeted::new(&self.pipe.meta, calls)
                 .with_session(&session.io.calls)
                 .flagging(capped);
-            self.history_security(&meta).await?
+            self.history_security(&meta, claims.is_none()).await?
         };
         if let Some(c) = &claims {
             if c.anchor != anchor.tip
@@ -314,7 +348,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             let meta = Budgeted::new(&self.pipe.meta, calls)
                 .with_session(&session.io.calls)
                 .flagging(capped);
-            if self.history_security(&meta).await? != security {
+            if self.history_security(&meta, false).await? != security {
                 return Err(absent());
             }
             self.continuation_anchor(&meta, reference).await?
@@ -383,13 +417,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         if ms(self.pipe.clock.now_ms()) >= expires {
             return Err(absent());
         }
-        // Consumption may yield too. Every serving check follows that I/O;
-        // losing the response at this point consumes the single-use token.
-        self.final_nodes(session, &nodes, calls).await?;
+        // Guarded apply is the ref/replay linearization cut. Closing reads
+        // reject subsequently observed changes before the last serving phase.
         let meta = Budgeted::new(&self.pipe.meta, calls)
             .with_session(&session.io.calls)
             .flagging(capped);
-        if self.history_security(&meta).await? != security {
+        if self.history_security(&meta, false).await? != security {
             return Err(absent());
         }
         let final_anchor = self.continuation_anchor(&meta, reference).await?;
@@ -398,6 +431,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             || final_anchor.tip != anchor.tip
             || ms(self.pipe.clock.now_ms()) >= expires
         {
+            return Err(absent());
+        }
+        // No bookkeeping I/O follows live object serving validation. Ref
+        // changes after the accepted cut invalidate the successor.
+        self.final_nodes(session, &nodes, calls).await?;
+        if ms(self.pipe.clock.now_ms()) >= expires {
             return Err(absent());
         }
         for node in &nodes {
@@ -462,8 +501,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             raw: values,
         })
     }
-    async fn history_security(&self, meta: &impl NamespaceStore) -> Result<Hash, ServerError> {
-        let values = meta
+    async fn history_security(
+        &self,
+        meta: &impl NamespaceStore,
+        activate: bool,
+    ) -> Result<Hash, ServerError> {
+        let mut values = meta
             .get_many(
                 &self.pipe.shards.coordinator(&self.repo.namespace),
                 &[
@@ -471,11 +514,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     keys::repo_visibility(&self.repo.name),
                     keys::grant_epoch(),
                     keys::authority_generation(),
+                    keys::repo_visibility_revision(&self.repo.name),
                 ],
             )
             .await
             .map_err(failure)?;
-        if values.len() != 4 {
+        if values.len() != 5 {
             return Err(failure(()));
         }
         codec::decode_repo_record(values[0].as_ref().ok_or_else(absent)?).map_err(failure)?;
@@ -494,6 +538,27 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             .map(codec::decode_u64)
             .transpose()
             .map_err(failure)?;
+        values[4]
+            .as_ref()
+            .map(codec::decode_u64)
+            .transpose()
+            .map_err(failure)?;
+        if activate && values[4].is_none() {
+            let key = keys::repo_visibility_revision(&self.repo.name);
+            let value = codec::encode_u64(0);
+            let batch = Batch::new()
+                .require(Precondition::Absent(key.clone()))
+                .put(key, value.clone());
+            if meta
+                .apply(&self.pipe.shards.coordinator(&self.repo.namespace), batch)
+                .await
+                .map_err(failure)?
+                != BatchOutcome::Committed
+            {
+                return Err(absent());
+            }
+            values[4] = Some(value);
+        }
         let mut parts = values
             .iter()
             .map(|v| match v {

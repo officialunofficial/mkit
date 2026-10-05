@@ -41,6 +41,20 @@ impl ReadProofs {
         }
     }
 
+    /// Keep the original request deadline while isolating temporary evidence.
+    pub(crate) fn isolated(&self) -> Self {
+        Self {
+            deadline: self.deadline,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn inherit_deadline(&mut self, other: &Self) {
+        if let Some(deadline) = other.deadline {
+            self.deadline = Some(self.deadline.map_or(deadline, |old| old.min(deadline)));
+        }
+    }
+
     /// Identity is a fresh allocation owned by the immutable reader. Keeping it
     /// alive prevents pointer reuse across backends, repositories and views.
     /// Compare the *verified* authority too: header callbacks can change.

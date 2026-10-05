@@ -21,7 +21,9 @@ collect the applicable entries between their old and new immutable pins.
   fixed expiry; each page retains fresh permission, source and denial checks.
   `PipelineConfig.history_tokens` and the optional Worker `HISTORY_TOKEN_KEYS`
   setting enable it. Existing reader methods keep their behavior. The selected
-  ref shard adds small replay/expiry rows; existing stores need no reset.
+  ref shard adds small replay/expiry rows and visibility writes increment a
+  retained coordinator revision to fence same-clock visibility changes; existing
+  stores need no reset. Temporary paging proofs are discarded even on cancellation.
 
 - Server readers add `walk_history_in`, `locate_commit_in` and
   `read_commit_path_in` for bounded selected-ref parent discovery and exact

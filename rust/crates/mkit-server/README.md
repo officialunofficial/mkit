@@ -253,7 +253,10 @@ All-parent logs retain the separate bounded `walk_history_in` API.
 
 Any ref/publication or security-boundary change, expiry or key replacement
 invalidates the chain uniformly. Successors keep its original expiry. Tokens
-are single-use: response loss requires restarting at the ref. The selected ref
+are single-use: response loss requires restarting at the ref. Imported proofs
+are isolated from later operations in the same session, including on cancellation.
+The atomic guarded replay write defines the ref equality cut; later ref changes
+are concurrent with the accepted page and invalidate its successor. The selected ref
 partition keeps one token digest and expiry index per paging chain and lazily
 prunes at most eight expired chains per new request. Ancestry is bounded to
 1,024 IDs; parsing and token output consume the existing session allowances.

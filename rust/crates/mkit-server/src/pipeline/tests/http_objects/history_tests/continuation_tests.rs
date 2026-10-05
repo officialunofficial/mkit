@@ -515,3 +515,412 @@ fn continuation_rechecks_custom_ancestry_stops_and_current_cursor_denial() {
         }
     }
 }
+
+#[test]
+fn continuation_closing_reads_precede_live_authorizer_and_source_checks() {
+    for denial in [false, true] {
+        for writer in [false, true] {
+            for block_source in [false, true] {
+                let az = Arc::new(Scripted::default());
+                let mut fx = fixture_tweaked(scripted(&az), http_cfg(), |cfg| {
+                    cfg.takedown_denial = denial;
+                });
+                let root = tree(&[]);
+                let base = commit(&root, &[], "base");
+                let middle = commit(&root, &[&base], "middle");
+                let head = commit(&root, &[&middle], "head");
+                let pack = fx.push("room", &[&root, &base, &middle, &head], id(&head), None);
+                enable(&mut fx);
+                let token = first(&fx, writer, 1);
+                let repo = fx.repo_id("room");
+                let publication = keys::publication(&repo.name, HEAD);
+                let reads = Arc::new(AtomicU32::new(0));
+                let seen = reads.clone();
+                let az = az.clone();
+                Arc::get_mut(&mut fx.pipe.meta).unwrap().read_many_hook =
+                    Some(Box::new(move |store, _, keys| {
+                        if keys.contains(&publication) && seen.fetch_add(1, Ordering::SeqCst) == 2 {
+                            if block_source {
+                                now(crate::store::ContentIndex::new(crate::store::BorrowedStore(
+                                    store,
+                                ))
+                                .block(
+                                    &pack,
+                                    &crate::store::BlockEntry::new("closed", T0 as u64),
+                                    T0 as u64,
+                                ))
+                                .unwrap();
+                            } else {
+                                *az.verdict.lock().unwrap() = Some(Code::PermissionDenied);
+                            }
+                        }
+                    }));
+                in_view(&fx, writer, |reader| {
+                    assert!(
+                        block_on(reader.walk_history_page_in(
+                            &mut ReaderSession::default(),
+                            HEAD,
+                            Some(token.token.expose()),
+                            1
+                        ))
+                        .unwrap()
+                        .is_none()
+                    );
+                });
+                assert_eq!(reads.load(Ordering::SeqCst), 3);
+            }
+        }
+    }
+}
+
+#[test]
+fn continuation_expiry_during_redemption_is_uniform() {
+    for denial in [false, true] {
+        for writer in [false, true] {
+            let (mut fx, commits, _, _) = history(3, 1, 2, denial);
+            enable(&mut fx);
+            let token = first(&fx, writer, 1);
+            let clock = fx.clock.clone();
+            let expiry = token.expires_at_ms;
+            let fx = with_seams(fx, |seams| {
+                seams.takedown = Arc::new(ChangeAfterBody {
+                    target: id(&commits[1]),
+                    change: Box::new(move || {
+                        let clock = clock.clone();
+                        Box::pin(async move {
+                            clock.set(i64::try_from(expiry).unwrap());
+                        })
+                    }),
+                });
+            });
+            in_view(&fx, writer, |reader| {
+                assert!(
+                    block_on(reader.walk_history_page_in(
+                        &mut ReaderSession::default(),
+                        HEAD,
+                        Some(token.token.expose()),
+                        1,
+                    ))
+                    .unwrap()
+                    .is_none()
+                );
+            });
+        }
+    }
+}
+
+#[test]
+fn continuation_failed_anchor_does_not_leave_same_session_proofs() {
+    for denial in [false, true] {
+        for writer in [false, true] {
+            let (mut fx, commits, _, _) = history(3, 1, 2, denial);
+            enable(&mut fx);
+            let token = first(&fx, writer, 1);
+            let repo = fx.repo_id("room");
+            let shard = fx.pipe.shards.ref_shard(&repo, HEAD);
+            let store = fx.pipe.meta.clone();
+            let old_tip = id(&commits[0]);
+            let cursor = id(&commits[1]);
+            let fx = with_seams(fx, |seams| {
+                seams.takedown = Arc::new(ChangeAfterBody {
+                    target: cursor,
+                    change: Box::new(move || {
+                        let (store, repo, shard) = (store.clone(), repo.clone(), shard.clone());
+                        Box::pin(async move {
+                            let key = keys::publication(&repo.name, HEAD);
+                            let raw = store.inner.get(&shard, &key).await.unwrap();
+                            let mut publication = Publication::decode(raw.as_ref()).unwrap();
+                            publication.sequence += 1;
+                            publication.value.head = Some(old_tip);
+                            store
+                                .inner
+                                .apply(
+                                    &shard,
+                                    Batch::new().put(key, publication.encode().unwrap()).put(
+                                        keys::ref_key(&repo.name, HEAD),
+                                        codec::encode_ref_id(&old_tip),
+                                    ),
+                                )
+                                .await
+                                .unwrap();
+                        })
+                    }),
+                });
+            });
+            in_view(&fx, writer, |reader| {
+                let mut session = ReaderSession::default();
+                assert!(
+                    block_on(reader.walk_history_page_in(
+                        &mut session,
+                        HEAD,
+                        Some(token.token.expose()),
+                        1
+                    ))
+                    .unwrap()
+                    .is_none()
+                );
+                assert!(!session.proofs.contains(&cursor));
+                assert!(session.used().storage_calls > 0);
+                // Drop lagging listing roots as well, so a fresh ordinary read
+                // cannot legally rediscover the old cursor through projections.
+                let repo = fx.repo_id("room");
+                for partition in fx.pipe.shards.ref_index_partitions(&repo) {
+                    now(fx.pipe.meta.inner.apply(
+                        &partition,
+                        Batch::new()
+                            .delete(keys::ref_key(&repo.name, HEAD))
+                            .delete(keys::ref_index_key(&repo.name, HEAD))
+                            .delete(keys::published_ref(&repo.name, HEAD))
+                            .delete(keys::published_index(&repo.name, HEAD)),
+                    ))
+                    .unwrap();
+                }
+                assert!(
+                    block_on(reader.read_canonical_in(&mut session, &[cursor])).unwrap()[0]
+                        .is_none()
+                );
+            });
+        }
+    }
+}
+
+struct PauseCursor {
+    cursor: Hash,
+    paused: Arc<AtomicBool>,
+}
+impl TakedownGate for PauseCursor {
+    fn check<'a>(
+        &'a self,
+        _: &'a RepoId,
+        id: &'a Hash,
+    ) -> crate::BoxFuture<'a, Result<TakedownVerdict, ServerError>> {
+        Box::pin(async move {
+            if *id == self.cursor && self.paused.load(Ordering::SeqCst) {
+                std::future::pending::<()>().await;
+            }
+            Ok(TakedownVerdict::Clear)
+        })
+    }
+}
+
+#[test]
+fn continuation_cancel_and_replay_loss_discard_imported_proofs() {
+    for writer in [false, true] {
+        let (mut fx, commits, _, _) = history(3, 1, 2, false);
+        enable(&mut fx);
+        let token = first(&fx, writer, 1);
+        let cursor = id(&commits[1]);
+        let paused = Arc::new(AtomicBool::new(true));
+        let fx = with_seams(fx, |seams| {
+            seams.takedown = Arc::new(PauseCursor {
+                cursor,
+                paused: paused.clone(),
+            });
+        });
+        in_view(&fx, writer, |reader| {
+            let mut session = ReaderSession::default();
+            {
+                let mut future = Box::pin(reader.walk_history_page_in(
+                    &mut session,
+                    HEAD,
+                    Some(token.token.expose()),
+                    1,
+                ));
+                let waker = std::task::Waker::noop();
+                let mut context = std::task::Context::from_waker(waker);
+                assert!(std::future::Future::poll(future.as_mut(), &mut context).is_pending());
+            }
+            assert!(!session.proofs.contains(&cursor));
+            let spent = session.used().storage_calls;
+            assert!(spent > 0);
+            paused.store(false, Ordering::SeqCst);
+            assert!(
+                block_on(reader.read_canonical_in(&mut session, &[cursor])).unwrap()[0].is_some()
+            );
+            assert!(session.used().storage_calls > spent);
+        });
+        let (mut fx, commits, _, _) = history(3, 1, 2, false);
+        enable(&mut fx);
+        let token = first(&fx, writer, 1);
+        let claims = fx
+            .pipe
+            .cfg
+            .history_tokens
+            .as_ref()
+            .unwrap()
+            .verify(token.token.expose())
+            .unwrap();
+        let row = keys::history_continuation(&claims.chain);
+        Arc::get_mut(&mut fx.pipe.meta).unwrap().hook =
+            Some(Box::new(move |store, shard, batch| {
+                if batch
+                    .writes
+                    .iter()
+                    .any(|w| matches!(w, Write::Put(k, _) if *k == row))
+                {
+                    now(store.apply(shard, Batch::new().delete(row.clone()))).unwrap();
+                }
+            }));
+        in_view(&fx, writer, |reader| {
+            let mut session = ReaderSession::default();
+            assert!(
+                block_on(reader.walk_history_page_in(
+                    &mut session,
+                    HEAD,
+                    Some(token.token.expose()),
+                    1
+                ))
+                .unwrap()
+                .is_none()
+            );
+            assert!(!session.proofs.contains(&id(&commits[1])));
+            assert!(session.used().storage_calls > 0);
+        });
+    }
+}
+
+#[test]
+fn continuation_visibility_revision_fences_same_clock_aba() {
+    for writer in [false, true] {
+        let (mut fx, _, _, _) = history(3, 1, 2, false);
+        enable(&mut fx);
+        let repo = fx.repo_id("room");
+        let coordinator = fx.pipe.shards.coordinator(&repo.namespace);
+        set_visibility(&fx, mkit_attest::grant::Visibility::Public);
+        let raw = block_on(
+            fx.pipe
+                .meta
+                .get(&coordinator, &keys::repo_visibility(&repo.name)),
+        )
+        .unwrap();
+        let token = first(&fx, writer, 1);
+        let config = fx.pipe.cfg.history_tokens.take();
+        set_visibility(&fx, mkit_attest::grant::Visibility::Private);
+        set_visibility(&fx, mkit_attest::grant::Visibility::Public);
+        assert_eq!(
+            raw,
+            block_on(
+                fx.pipe
+                    .meta
+                    .get(&coordinator, &keys::repo_visibility(&repo.name))
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            block_on(
+                fx.pipe
+                    .meta
+                    .get(&coordinator, &keys::repo_visibility_revision(&repo.name))
+            )
+            .unwrap(),
+            Some(codec::encode_u64(3))
+        );
+        fx.pipe.cfg.history_tokens = config;
+        reject(&fx, writer, token.token.expose());
+    }
+}
+
+fn set_visibility<H: HookSet>(fx: &Fx<H>, visibility: mkit_attest::grant::Visibility) {
+    let req = signed(
+        &fx.owner,
+        &fx.identity("room"),
+        Procedure::SetRepoVisibility,
+        fx.number(),
+    );
+    block_on(fx.pipe.set_repo_visibility(
+        &fx.auth(&req),
+        crate::pipeline::VisibilityRequest::Envelope(visibility),
+    ))
+    .unwrap();
+}
+
+#[test]
+fn continuation_ref_change_after_acceptance_cut_invalidates_successor() {
+    for writer in [false, true] {
+        let (mut fx, commits, _, _) = history(4, 1, 2, false);
+        enable(&mut fx);
+        let token = first(&fx, writer, 1);
+        let repo = fx.repo_id("room");
+        let shard = fx.pipe.shards.ref_shard(&repo, HEAD);
+        let store = fx.pipe.meta.clone();
+        let checks = Arc::new(AtomicU32::new(0));
+        let count = checks.clone();
+        let fx = with_seams(fx, |seams| {
+            seams.takedown = Arc::new(ChangeAfterBody {
+                target: id(&commits[2]),
+                change: Box::new(move || {
+                    let (store, repo, shard, count) =
+                        (store.clone(), repo.clone(), shard.clone(), count.clone());
+                    Box::pin(async move {
+                        // Body validation is first; final serving validation is
+                        // second, after atomic acceptance and closing reads.
+                        if count.fetch_add(1, Ordering::SeqCst) == 1 {
+                            let key = keys::publication(&repo.name, HEAD);
+                            let raw = store.inner.get(&shard, &key).await.unwrap();
+                            let mut publication = Publication::decode(raw.as_ref()).unwrap();
+                            publication.sequence += 1;
+                            store
+                                .inner
+                                .apply(&shard, Batch::new().put(key, publication.encode().unwrap()))
+                                .await
+                                .unwrap();
+                        }
+                    })
+                }),
+            });
+        });
+        let mut next = None;
+        in_view(&fx, writer, |reader| {
+            next = block_on(reader.walk_history_page_in(
+                &mut ReaderSession::default(),
+                HEAD,
+                Some(token.token.expose()),
+                1,
+            ))
+            .unwrap()
+            .unwrap()
+            .next;
+        });
+        assert_eq!(checks.load(Ordering::SeqCst), 2);
+        reject(&fx, writer, next.unwrap().token.expose());
+    }
+}
+
+#[test]
+fn continuation_visibility_activation_rejects_a_preplanned_unfenced_write() {
+    let (mut fx, _, _, _) = history(3, 1, 2, false);
+    let repo = fx.repo_id("room");
+    let coordinator = fx.pipe.shards.coordinator(&repo.namespace);
+    let mut stale = Batch::new().put(
+        keys::repo_visibility(&repo.name),
+        codec::encode_repo_visibility(&codec::RepoVisibilityV1 {
+            visibility: codec::StoredVisibility::Private,
+            changed_ms: T0 as u64,
+            last_created_ms: T0 as u64,
+            last_statement_id: None,
+        }),
+    );
+    block_on(
+        fx.pipe
+            .plan_listing_visibility(&coordinator, &repo, &mut stale),
+    )
+    .unwrap();
+    enable(&mut fx);
+    let token = first(&fx, false, 1);
+    assert!(matches!(
+        block_on(fx.pipe.meta.apply(&coordinator, stale)).unwrap(),
+        BatchOutcome::PreconditionFailed { .. }
+    ));
+    in_view(&fx, false, |reader| {
+        assert!(
+            block_on(reader.walk_history_page_in(
+                &mut ReaderSession::default(),
+                HEAD,
+                Some(token.token.expose()),
+                1
+            ))
+            .unwrap()
+            .is_some()
+        );
+    });
+}

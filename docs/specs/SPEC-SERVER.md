@@ -1775,8 +1775,13 @@ and ordered stop-sensitive ancestry including the cursor. The credential digest
 includes the trusted auth audience, signer, grant and captured credential headers;
 it excludes envelope nonce, fingerprint and verification time so a fresh signed
 request can continue the same credential scope. The security digest binds the
-repository record, visibility row including change time, grant epoch, authority
-generation and deployment default visibility. Digests frame each component's
+repository record, visibility row including change time, monotonic visibility
+revision, grant epoch, authority generation and deployment default visibility.
+A first paging request activates the retained revision before capturing security
+evidence. Once activated, every committed visibility write MUST increment it
+atomically under its observed-value guard, even for a writer that does not issue
+continuations; it MUST NOT reset on deletion/recreation. This
+fences a public/private/public return even within one clock millisecond. Digests frame each component's
 length to avoid concatenation ambiguity.
 
 The MAC is keyed BLAKE3 with a key derived using that exact purpose as its domain.
@@ -1792,9 +1797,14 @@ MAC, format, expiry and stateless scope checks MUST precede sensitive reads.
 Parsing is bounded to 256 KiB decoded claims and 1,024 ancestry IDs. The server
 MUST authenticate current credentials and recheck visibility, epoch, grants and
 authorizer before importing evidence. It MUST strongly read the selected ref
-and authoritative publication fence, and compare them again at the output
-boundary. A final atomic apply guards both the original publication row and
-live ref bytes, detecting torn capture even if a multi-key read is sequential.
+and authoritative publication fence, and compare them again at the closing
+boundary. The guarded replay apply is the strict-ref and single-use linearization
+cut: it guards both the original publication row and live ref bytes, detecting
+torn capture even if a multi-key read is sequential. Closing security/anchor
+reads MAY reject subsequently observed changes, then live object validation
+MUST be the last asynchronous phase before output. Independent stores and hooks
+do not provide a simultaneous snapshot. Ref changes after the accepted cut are
+concurrent with that redemption and invalidate its successor.
 Public anchors use the authoritative published value, not an index projection.
 A missing ledger or partial capture MUST NOT issue or redeem evidence.
 Append, rewind, deletion/recreation, replacement and publication/incarnation
@@ -1803,6 +1813,10 @@ Delayed projections MUST NOT reinstate an invalidated continuation.
 
 Successors MUST inherit the original expiry. Initial expiry is bounded by the
 configured token TTL, root-proof lag/deadline and credential/grant expiry.
+Imported proofs MUST be confined to the paging operation and discarded on
+success, failure or cancellation, preserving spent allowances and the original
+request deadline; they MUST NOT authorize a later shared-session operation.
+Expiry reached during redemption MUST also return uniform absence.
 Every returned object retains current membership, actual source, reconstruction
 dependencies, denial and authorizer checks. Custom ancestry descent stops MUST
 be rechecked; neither empty denial results nor permission are carried in claims.

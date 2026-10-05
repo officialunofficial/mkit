@@ -23,7 +23,10 @@ its separate authorization allowance is outside the session ledger. The
 201-commit fixture has one real indexed pack per commit and distinct nested
 snapshots. The 302-commit fixture packs two commits per upload, with distinct
 files and trees, to remain within the existing fixture write quota. No reader
-or production write allowance is increased.
+or production write allowance is increased. The first paging request in a
+repository may perform one coordinator apply to activate its retained visibility
+revision; following visibility writes maintain that fence even without token
+issuance configured.
 
 Physical calls are KV dispatches plus twice the ranged GET count, modeling the
 adapter's HEAD then GET. Rounds subtract 12 for each completed strong denial
@@ -37,7 +40,7 @@ promise. Canonical windows and permission/denial caches are absent.
 
 | History | Page size | Page | View | Denial | Units | KV | Range GETs | Physical calls | Rounds | Wait at 30 ms (s) | Wait at 130 ms (s) |
 |---:|---:|---:|---|---|---:|---:|---:|---:|---:|---:|---:|
-| 201 | 30 | 1 | public | OFF | 674 | 431 | 60 | 551 | 551 | 16.53 | 71.63 |
+| 201 | 30 | 1 | public | OFF | 675 | 432 | 60 | 552 | 552 | 16.56 | 71.76 |
 | 201 | 30 | 2 | public | OFF | 674 | 431 | 60 | 551 | 551 | 16.53 | 71.63 |
 | 201 | 30 | 3 | public | OFF | 674 | 431 | 60 | 551 | 551 | 16.53 | 71.63 |
 | 201 | 30 | 4 | public | OFF | 674 | 431 | 60 | 551 | 551 | 16.53 | 71.63 |
@@ -77,7 +80,7 @@ promise. Canonical windows and permission/denial caches are absent.
 | 201 | 100 | 1 | owner | ON | 5030 | 4228 | 200 | 4628 | 3416 | 102.48 | 444.08 |
 | 201 | 100 | 2 | owner | ON | 5030 | 4228 | 200 | 4628 | 3416 | 102.48 | 444.08 |
 | 201 | 100 | 3 | owner | ON | 80 | 70 | 2 | 74 | 50 | 1.50 | 6.50 |
-| 302 | 30 | 1 | public | OFF | 674 | 431 | 60 | 551 | 551 | 16.53 | 71.63 |
+| 302 | 30 | 1 | public | OFF | 675 | 432 | 60 | 552 | 552 | 16.56 | 71.76 |
 | 302 | 30 | 2 | public | OFF | 674 | 431 | 60 | 551 | 551 | 16.53 | 71.63 |
 | 302 | 30 | 3 | public | OFF | 674 | 431 | 60 | 551 | 551 | 16.53 | 71.63 |
 | 302 | 30 | 4 | public | OFF | 674 | 431 | 60 | 551 | 551 | 16.53 | 71.63 |
