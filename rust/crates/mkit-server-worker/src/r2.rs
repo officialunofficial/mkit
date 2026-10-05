@@ -555,15 +555,19 @@ impl<B: ObjectBucket> BlobStore for R2BlobStore<B> {
     }
 
     async fn delete(&self, key: &BlobKey) -> Result<bool, StoreError> {
-        let object = self.object_key(key)?;
-        if self.head_len(&object).await?.is_none() {
-            return Ok(false);
-        }
-        self.bucket
-            .delete(&object)
-            .await
-            .map_err(|e| backend_error(StorageOp::BlobPut, e))?;
-        Ok(true)
+        // The existence probe belongs to mutation, not an admitted read wave.
+        mkit_server::store::ReadReservation::scope(&[], async {
+            let object = self.object_key(key)?;
+            if self.head_len(&object).await?.is_none() {
+                return Ok(false);
+            }
+            self.bucket
+                .delete(&object)
+                .await
+                .map_err(|e| backend_error(StorageOp::BlobPut, e))?;
+            Ok(true)
+        })
+        .await
     }
 }
 
@@ -669,7 +673,7 @@ impl<B: ObjectBucket> R2PackSink<B> {
             Err(detail) => {
                 // A key holds only verified bytes: if it is present now (a
                 // concurrent writer, R2's per-key write rate), ours are too.
-                if matches!(self.bucket.head(&self.object).await, Ok(Some(n)) if n == self.core.len)
+                if matches!(mkit_server::store::ReadReservation::scope(&[], self.bucket.head(&self.object)).await, Ok(Some(n)) if n == self.core.len)
                 {
                     return Ok(CommitOutcome::AlreadyPresent);
                 }
@@ -778,8 +782,8 @@ impl EnvBucket {
         self
     }
 
-    fn bucket(&self) -> Result<worker::Bucket, String> {
-        if !self.read_credits.paid() {
+    fn bucket(&self, prepaid_read: bool) -> Result<worker::Bucket, String> {
+        if !prepaid_read || !self.read_credits.paid() {
             crate::ns_client::charge_request(self.request_budget.as_ref())
                 .map_err(|e| e.to_string())?;
             crate::ns_client::charge_alarm(self.alarm_budget.as_ref())
@@ -794,7 +798,7 @@ impl crate::backup::BackupBucket for EnvBucket {
     async fn put(&self, key: &str, bytes: Vec<u8>, partition_hex: &str) -> Result<(), String> {
         let metadata =
             std::collections::HashMap::from([("partition".to_owned(), partition_hex.to_owned())]);
-        self.bucket()?
+        self.bucket(false)?
             .put(key, bytes)
             .custom_metadata(metadata)
             .only_if(worker::Conditional {
@@ -827,7 +831,7 @@ impl ObjectBucket for EnvBucket {
     }
     fn spawn_put(&self, key: String, len: u64, body: PutBody) -> oneshot::Receiver<PutResult> {
         let (tx, rx) = oneshot::channel();
-        let bucket = self.bucket();
+        let bucket = self.bucket(false);
         worker::wasm_bindgen_futures::spawn_local(async move {
             let result = async move {
                 let body = body.map(|item| {
@@ -853,7 +857,11 @@ impl ObjectBucket for EnvBucket {
     }
 
     async fn head(&self, key: &str) -> Result<Option<u64>, String> {
-        let object = self.bucket()?.head(key).await.map_err(|e| e.to_string())?;
+        let object = self
+            .bucket(true)?
+            .head(key)
+            .await
+            .map_err(|e| e.to_string())?;
         Ok(object.map(|o| o.size()))
     }
 
@@ -862,7 +870,7 @@ impl ObjectBucket for EnvBucket {
         key: &str,
         range: Option<Range<u64>>,
     ) -> Result<Option<(u64, ObjectStream)>, String> {
-        let bucket = self.bucket()?;
+        let bucket = self.bucket(true)?;
         let mut get = bucket.get(key);
         if let Some(r) = range {
             get = get.range(worker::Range::OffsetWithLength {
@@ -885,7 +893,7 @@ impl ObjectBucket for EnvBucket {
         range: Range<u64>,
         etag: Option<&str>,
     ) -> Result<RangeRead, String> {
-        let bucket = self.bucket()?;
+        let bucket = self.bucket(true)?;
         let mut get = bucket.get(key).range(worker::Range::OffsetWithLength {
             offset: range.start,
             length: range.end - range.start,
@@ -910,11 +918,14 @@ impl ObjectBucket for EnvBucket {
     }
 
     async fn delete(&self, key: &str) -> Result<(), String> {
-        self.bucket()?.delete(key).await.map_err(|e| e.to_string())
+        self.bucket(false)?
+            .delete(key)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     async fn list(&self, prefix: &str, cursor: Option<&str>) -> Result<ObjectPage, String> {
-        let bucket = self.bucket()?;
+        let bucket = self.bucket(false)?;
         let mut listing = bucket.list().prefix(prefix).limit(1000);
         if let Some(cursor) = cursor {
             listing = listing.cursor(cursor);
@@ -927,7 +938,7 @@ impl ObjectBucket for EnvBucket {
     }
 
     async fn delete_many(&self, keys: Vec<String>) -> Result<(), String> {
-        self.bucket()?
+        self.bucket(false)?
             .delete_multiple(keys)
             .await
             .map_err(|e| e.to_string())
@@ -935,7 +946,7 @@ impl ObjectBucket for EnvBucket {
 
     async fn create_object_upload(&self, key: &str) -> Result<String, String> {
         let upload = self
-            .bucket()?
+            .bucket(false)?
             .create_multipart_upload(key)
             .execute()
             .await
@@ -952,7 +963,7 @@ impl ObjectBucket for EnvBucket {
         body: PutBody,
     ) -> oneshot::Receiver<Result<String, String>> {
         let (tx, rx) = oneshot::channel();
-        let bucket = self.bucket();
+        let bucket = self.bucket(false);
         worker::wasm_bindgen_futures::spawn_local(async move {
             let result = async move {
                 let body = body.map(|item| {
@@ -980,7 +991,7 @@ impl ObjectBucket for EnvBucket {
         upload: &str,
         parts: Vec<(u16, String)>,
     ) -> Result<(), String> {
-        self.bucket()?
+        self.bucket(false)?
             .resume_multipart_upload(key, upload)
             .map_err(|e| e.to_string())?
             .complete(
@@ -994,7 +1005,7 @@ impl ObjectBucket for EnvBucket {
     }
 
     async fn abort_object_upload(&self, key: &str, upload: &str) -> Result<(), String> {
-        self.bucket()?
+        self.bucket(false)?
             .resume_multipart_upload(key, upload)
             .map_err(|e| e.to_string())?
             .abort()

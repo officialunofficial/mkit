@@ -112,21 +112,24 @@ impl<S: NamespaceStore> Checks<'_, S> {
             })
             .collect();
         for wave in groups.chunks(crate::store::read_io::parallelism()) {
-            let _reservation = self
+            let reservation = self
                 .store
                 .reserve_read_calls(u32::try_from(wave.len()).map_err(|_| guard_failure())?)?;
-            let replies = futures::future::join_all(wave.iter().map(|(partition, ids)| {
-                let keys: Vec<_> = ids
-                    .iter()
-                    .flat_map(|(id, _)| {
-                        [
-                            crate::store::keys::block(id),
-                            crate::takedown::denial::action_key(id),
-                        ]
-                    })
-                    .collect();
-                async move { self.store.get_many(partition, &keys).await }
-            }))
+            let replies = crate::store::ReadReservation::scope(
+                &[reservation],
+                futures::future::join_all(wave.iter().map(|(partition, ids)| {
+                    let keys: Vec<_> = ids
+                        .iter()
+                        .flat_map(|(id, _)| {
+                            [
+                                crate::store::keys::block(id),
+                                crate::takedown::denial::action_key(id),
+                            ]
+                        })
+                        .collect();
+                    async move { self.store.get_many(partition, &keys).await }
+                })),
+            )
             .await;
             // Retain and consume results in partition/id order, independently
             // of completion order. A cancelled wave retains no partial reply.

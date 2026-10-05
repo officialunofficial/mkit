@@ -121,23 +121,26 @@ impl Walk {
         for first in (0..DIRECTORY_SHARDS).step_by(concurrency.clamp(1, 6)) {
             let last =
                 (usize::from(first) + concurrency.clamp(1, 6)).min(usize::from(DIRECTORY_SHARDS));
-            let _reservation = if reserve_wave {
+            let reservation = if reserve_wave {
                 store.reserve_read_calls(
                     u32::try_from(last - usize::from(first)).unwrap_or(u32::MAX),
                 )?
             } else {
                 None
             };
-            let replies = futures::future::join_all((usize::from(first)..last).map(|shard| {
-                let (start, end) = (&start, &end);
-                async move {
-                    let shard = u16::try_from(shard).map_err(|_| corrupt())?;
-                    let page = store
-                        .scan(&Partition::ContentShard(shard), start, end, None, PAGE_ROWS)
-                        .await?;
-                    Ok::<_, StoreError>((shard, page))
-                }
-            }))
+            let replies = crate::store::ReadReservation::scope(
+                &[reservation],
+                futures::future::join_all((usize::from(first)..last).map(|shard| {
+                    let (start, end) = (&start, &end);
+                    async move {
+                        let shard = u16::try_from(shard).map_err(|_| corrupt())?;
+                        let page = store
+                            .scan(&Partition::ContentShard(shard), start, end, None, PAGE_ROWS)
+                            .await?;
+                        Ok::<_, StoreError>((shard, page))
+                    }
+                })),
+            )
             .await;
             for reply in replies {
                 let (shard, page) = reply?;

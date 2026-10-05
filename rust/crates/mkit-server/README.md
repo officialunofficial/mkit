@@ -150,7 +150,9 @@ partition/input order. Encoded ranges, calls and decoded raw members are reserve
 before dispatch. Failed or cancelled waves keep their reservations. Delta chains
 use the bounded sequential resolver. Store decorators that impose an inherited
 call or byte budget must forward the hidden reader-admission and reservation hooks, so the entire
-wave is admitted before the first backend dispatch.
+wave is admitted before the first backend dispatch. Activate the returned
+reservations only around their owning read future with `ReadReservation::scope`;
+unrelated tasks and mutations cannot consume that wave’s prepaid credit.
 
 The old reader methods retain their signatures and per-call allowances. Cap
 hits return `ResourceExhausted` with `OBJECT_READER_LIMIT_MESSAGE` (`object reader

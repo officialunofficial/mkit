@@ -161,15 +161,13 @@ impl<S: NamespaceStore> NamespaceStore for ViewStore<'_, S> {
                 limit: range.limit,
             })
             .collect::<Vec<_>>();
-        let mut captured = Vec::with_capacity(selected.len());
-        while captured.len() < selected.len() {
-            let pages = self.store.scan_many(p, &selected[captured.len()..]).await?;
-            if pages.is_empty() || pages.len() > selected.len() - captured.len() {
-                return Err(StoreError::Corrupt("short view scan".into()));
-            }
-            captured.extend(pages);
+        let pages = self.store.scan_many(p, &selected).await?;
+        if pages.is_empty() || pages.len() > selected.len() {
+            return Err(StoreError::Corrupt("short view scan".into()));
         }
-        Ok(captured.into_iter().map(|page| self.page(page)).collect())
+        // Return the backend's served prefix. The caller admits continuation
+        // rounds; a view must not hide extra dispatches inside one paid call.
+        Ok(pages.into_iter().map(|page| self.page(page)).collect())
     }
     async fn apply(&self, _: &Partition, _: Batch) -> Result<BatchOutcome, StoreError> {
         Err(StoreError::Invalid(

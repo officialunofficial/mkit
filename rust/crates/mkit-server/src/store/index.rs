@@ -412,13 +412,16 @@ async fn scan_all<S: NamespaceStore>(
             }
             // Both page count and the whole transient row/byte allowance are
             // reserved above; failed waves drain every dispatched reply.
-            let _reservation = if store.reader_admission() {
+            let reservation = if store.reader_admission() {
                 store.reserve_read_calls(u32::try_from(wave.len()).unwrap_or(u32::MAX))?
             } else {
                 None
             };
-            let replies =
-                futures::future::join_all(wave.iter().map(|(p, _, r)| store.scan_many(p, r))).await;
+            let replies = super::ReadReservation::scope(
+                &[reservation],
+                futures::future::join_all(wave.iter().map(|(p, _, r)| store.scan_many(p, r))),
+            )
+            .await;
             // All dispatched errors belong to this call, even when an earlier
             // reply exhausts candidate retention during deterministic processing.
             let replies = replies.into_iter().collect::<Result<Vec<_>, _>>()?;
@@ -541,14 +544,16 @@ pub async fn locate_many<S: NamespaceStore>(
     let mut members = BTreeSet::new();
     for wave in jobs.chunks(super::read_io::parallelism()) {
         // <=768 keys per wave, within the scanner's shared 1,000-row allowance.
-        let _reservation = if store.reader_admission() {
+        let reservation = if store.reader_admission() {
             store.reserve_read_calls(u32::try_from(wave.len()).unwrap_or(u32::MAX))?
         } else {
             None
         };
-        let replies =
-            futures::future::join_all(wave.iter().map(|(p, _, keys)| store.get_many(p, keys)))
-                .await;
+        let replies = super::ReadReservation::scope(
+            &[reservation],
+            futures::future::join_all(wave.iter().map(|(p, _, keys)| store.get_many(p, keys))),
+        )
+        .await;
         for ((_, ids, _), reply) in wave.iter().zip(replies) {
             let values = reply?;
             if values.len() != ids.len() {
@@ -1351,6 +1356,48 @@ mod tests {
             "both the served prefix and the hot object's continuation are exercised"
         );
         assert!(calls.used() <= 32);
+    }
+
+    #[tokio::test]
+    async fn public_view_returns_one_prepaid_scan_prefix_without_hidden_dispatch() {
+        let store = EmptyPageOnce {
+            inner: MemoryKv::default(),
+            empty_once: AtomicBool::new(false),
+            max_ranges: Some(1),
+            fail_partition: None,
+            get_many_calls: AtomicUsize::new(0),
+            scan_many_calls: AtomicUsize::new(0),
+        };
+        let r = repo("view-prefix");
+        let calls = crate::indexed::budget::SliceBudget::new(1);
+        let io = super::super::read_io::ReadIo::new();
+        let bounded = crate::indexed::budget::Budgeted::new(&store, &calls).with_io(&io);
+        let view = crate::store::view::ViewStore {
+            store: &bounded,
+            repo: &r,
+            writer: false,
+            policy: None,
+        };
+        let p = D34Shards.object_index(&r, &[0x12; 32]);
+        let ranges = vec![
+            RangeScan {
+                start: Key::new(b"a".to_vec()),
+                end: Key::new(b"b".to_vec()),
+                after: None,
+                limit: 1
+            };
+            2
+        ];
+        let reservation = view.reserve_read_calls(1).unwrap();
+        let pages =
+            super::super::ReadReservation::scope(&[reservation], view.scan_many(&p, &ranges))
+                .await
+                .unwrap();
+        assert_eq!(pages.len(), 1);
+        assert_eq!(store.scan_many_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.used(), 1);
+        assert!(view.reserve_read_calls(1).is_err());
+        assert_eq!(store.scan_many_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

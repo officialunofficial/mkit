@@ -1676,6 +1676,8 @@ row and byte admission envelope across scans, membership groups and object loads
 Every wave MUST reserve page, row, byte and call allowances before dispatch, drain
 all dispatched replies on failure, and process replies deterministically. Served
 scan-prefix cursors, rotations and first-member pack ordering MUST remain intact.
+Prepaid credits MUST belong to the dispatched wave and its inherited ledgers;
+unrelated work or cancellation of another wave MUST NOT consume them.
 Cancellation MUST release in-flight admission while retaining charged reservations.
 
 A reader session MAY also retain bounded structural reachability proofs. These

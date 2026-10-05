@@ -39,7 +39,10 @@ collect the applicable entries between their old and new immutable pins.
   pagination and deterministic first-member selection retain their existing caps.
   Strong denial directories and final access phases remain fresh per operation.
   Waves reserve inherited backend budgets before dispatch; fallback graph walks
-  recheck an ancestor's stop after loading before exposing its children.
+  recheck an ancestor's stop after loading before exposing its children. Read
+  credits are scoped to their owning wave; unrelated work and cancellation of
+  another wave cannot spend them. Public views preserve backend served prefixes
+  so continuation is admitted by the reader.
 - Opt into canonical/metadata batches of up to 45 ids with
   `ObjectReader::with_batch_limit(45)?`; the 16-id default, URL issuance cap and
   all accounting allowances remain unchanged.

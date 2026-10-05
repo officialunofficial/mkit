@@ -157,7 +157,7 @@ impl<T: NsTransport> DoNamespaceStore<T> {
         let op = op(&call);
         let body = serde_json::to_string(&NsRequest::new(p, call)?)
             .map_err(|e| backend_error(StorageOp::RequestSerialize, e))?;
-        if !self.read_credits.paid() {
+        if !matches!(op, "get" | "get_many" | "scan" | "scan_many") || !self.read_credits.paid() {
             charge_request(self.request_budget.as_ref())?;
             charge_alarm(self.alarm_budget.as_ref())?;
         }

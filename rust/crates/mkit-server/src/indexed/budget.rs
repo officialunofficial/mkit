@@ -148,10 +148,13 @@ impl<'a, S> Budgeted<'a, S> {
             .map_or_else(|| self.credits.prepay(count), |io| io.prepay(count));
         Ok(Some(local.with_inherited(inherited)))
     }
-    pub(crate) fn charge(&self) -> Result<(), StoreError> {
+    fn charge_read(&self) -> Result<(), StoreError> {
         if self.io.is_some_and(crate::store::read_io::ReadIo::paid) || self.credits.paid() {
             return Ok(());
         }
+        self.charge()
+    }
+    pub(crate) fn charge(&self) -> Result<(), StoreError> {
         let result = self
             .budget
             .map_or(Ok(()), SliceBudget::charge)
@@ -174,7 +177,7 @@ impl<S: NamespaceStore> NamespaceStore for Budgeted<'_, S> {
         self.reserve(count, self.inner.reserve_read_calls(count))
     }
     async fn get(&self, p: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
-        self.charge()?;
+        self.charge_read()?;
         let _lease = self
             .admit(
                 1,
@@ -184,7 +187,7 @@ impl<S: NamespaceStore> NamespaceStore for Budgeted<'_, S> {
         self.note(self.inner.get(p, key).await)
     }
     async fn has(&self, p: &Partition, key: &Key) -> Result<bool, StoreError> {
-        self.charge()?;
+        self.charge_read()?;
         let _lease = self
             .admit(
                 1,
@@ -198,7 +201,7 @@ impl<S: NamespaceStore> NamespaceStore for Budgeted<'_, S> {
         p: &Partition,
         keys: &[Key],
     ) -> Result<Vec<Option<Value>>, StoreError> {
-        self.charge()?;
+        self.charge_read()?;
         let _lease = self
             .admit(
                 keys.len(),
@@ -214,7 +217,7 @@ impl<S: NamespaceStore> NamespaceStore for Budgeted<'_, S> {
         p: &Partition,
         ranges: &[RangeScan],
     ) -> Result<Vec<ScanPage>, StoreError> {
-        self.charge()?;
+        self.charge_read()?;
         let rows = ranges.iter().map(|r| r.limit as usize).sum::<usize>();
         let _lease = self
             .admit(
@@ -233,7 +236,7 @@ impl<S: NamespaceStore> NamespaceStore for Budgeted<'_, S> {
         after: Option<&Cursor>,
         limit: u32,
     ) -> Result<ScanPage, StoreError> {
-        self.charge()?;
+        self.charge_read()?;
         let _lease = self
             .admit(
                 limit as usize,
@@ -246,15 +249,15 @@ impl<S: NamespaceStore> NamespaceStore for Budgeted<'_, S> {
     }
     async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
         self.charge()?;
-        self.note(self.inner.apply(p, batch).await)
+        self.note(crate::store::ReadReservation::scope(&[], self.inner.apply(p, batch)).await)
     }
     async fn stats(&self, p: &Partition) -> Result<PartitionStats, StoreError> {
         self.charge()?;
-        self.note(self.inner.stats(p).await)
+        self.note(crate::store::ReadReservation::scope(&[], self.inner.stats(p)).await)
     }
     async fn probe(&self) -> Result<(), StoreError> {
         self.charge()?;
-        self.note(self.inner.probe().await)
+        self.note(crate::store::ReadReservation::scope(&[], self.inner.probe()).await)
     }
 }
 
@@ -283,18 +286,18 @@ impl<B: BlobStore> BlobStore for Budgeted<'_, B> {
             .map(|local| Some(local.with_inherited(inherited)))
     }
     async fn begin(&self, key: BlobKey, len: u64) -> Result<Self::Sink, StoreError> {
-        self.inner.begin(key, len).await
+        crate::store::ReadReservation::scope(&[], self.inner.begin(key, len)).await
     }
     async fn get(
         &self,
         key: &BlobKey,
         range: Option<ByteRange>,
     ) -> Result<Option<BlobBody>, StoreError> {
-        self.charge()?;
+        self.charge_read()?;
         // R2's ranged BlobStore read checks metadata before fetching bytes.
         // Reserve both backend requests even for stores that need only one.
         if let Some(range) = range {
-            self.charge()?;
+            self.charge_read()?;
             if let Some(encoded) = self.encoded {
                 let bytes = range
                     .end_inclusive
@@ -329,15 +332,15 @@ impl<B: BlobStore> BlobStore for Budgeted<'_, B> {
         })
     }
     async fn head(&self, key: &BlobKey) -> Result<Option<BlobMeta>, StoreError> {
-        self.charge()?;
+        self.charge_read()?;
         let _lease = self.admit(0, 0).await?;
         self.note(self.inner.head(key).await)
     }
     async fn probe(&self) -> Result<(), StoreError> {
-        self.inner.probe().await
+        crate::store::ReadReservation::scope(&[], self.inner.probe()).await
     }
     async fn delete(&self, key: &BlobKey) -> Result<bool, StoreError> {
-        self.inner.delete(key).await
+        crate::store::ReadReservation::scope(&[], self.inner.delete(key)).await
     }
 }
 

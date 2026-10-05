@@ -243,7 +243,7 @@ pub(crate) async fn load_raw_many<B: BlobStore, N: NamespaceStore>(
                 sum.checked_add(8)?.checked_add(loc.value.frame_length)
             })
             .ok_or(Miss::Capped)?;
-        let _bytes = env
+        let bytes = env
             .blobs
             .reserve_read_bytes(encoded)
             .map_err(|_| Miss::Capped)?;
@@ -252,24 +252,27 @@ pub(crate) async fn load_raw_many<B: BlobStore, N: NamespaceStore>(
             .flat_map(|(id, loc)| [id, &loc.pack])
             .filter(|id| uncached_guards.contains(*id))
             .count();
-        let _calls = env
+        let calls = env
             .meta
             .reserve_read_calls(u32::try_from(guards).unwrap_or(u32::MAX))
             .map_err(|_| Miss::Capped)?;
-        let _blob_calls = env
+        let blob_calls = env
             .blobs
             .reserve_read_calls(u32::try_from(wave.len() * 4).unwrap_or(u32::MAX))
             .map_err(|_| Miss::Capped)?;
         // Retain reservations on cancellation or failure. No independently
         // running resolver can borrow another member's decoded allowance.
         budget.0 -= decoded;
-        let replies = futures::future::join_all(wave.iter().map(|(id, location)| async move {
-            if location.value.delta_base.is_some() {
-                return Err(Miss::Unavailable);
-            }
-            let mut local = Budget(location.value.decoded_size);
-            load(env, *id, *location, &mut local).await
-        }))
+        let replies = crate::store::ReadReservation::scope(
+            &[calls, blob_calls, bytes],
+            futures::future::join_all(wave.iter().map(|(id, location)| async move {
+                if location.value.delta_base.is_some() {
+                    return Err(Miss::Unavailable);
+                }
+                let mut local = Budget(location.value.decoded_size);
+                load(env, *id, *location, &mut local).await
+            })),
+        )
         .await;
         for ((id, _), reply) in wave.iter().zip(replies) {
             match reply {
