@@ -235,84 +235,130 @@ fn reject<H: HookSet>(fx: &Fx<H>, writer: bool, token: &str) {
 #[test]
 fn continuation_pages_complete_long_changing_histories_without_cursor_walk() {
     for length in [201, 302] {
-        // Distinct files and nested trees in every snapshot, real indexed packs.
         let (mut fx, commits) = changing_history(length);
         enable(&mut fx);
         for denial in [false, true] {
             fx.pipe.cfg.takedown_denial = denial;
             for writer in [false, true] {
                 for size in [30, 100] {
-                    let mut continuation: Option<HistoryContinuation> = None;
-                    let mut output = Vec::new();
-                    let mut page_number = 0;
-                    let mut expiry = None;
-                    loop {
-                        page_number += 1;
-                        let measured_before = (fx.pipe.meta.calls(), get_count(&fx));
-                        in_view(&fx, writer, |reader| {
-                            let (kv, gets) = measured_before;
-                            let mut session = ReaderSession::default();
-                            let page = block_on(reader.walk_history_page_in(
-                                &mut session,
-                                HEAD,
-                                continuation.as_ref().map(|c| c.token.expose()),
-                                size,
-                            ))
-                            .unwrap()
-                            .unwrap();
-                            assert_eq!(
-                                get_count(&fx) - gets,
-                                page.commits.len() * 2,
-                                "only requested commits are loaded; no history/tree walk"
-                            );
-                            assert!(session.used().storage_calls <= OBJECT_READER_CALLS);
-                            let canonical_bytes = page
-                                .commits
-                                .iter()
-                                .map(|c| c.canonical.len() as u64)
-                                .sum::<u64>();
-                            let token_bytes = continuation
-                                .as_ref()
-                                .map_or(0, |c| c.token.expose().len() as u64);
-                            assert_eq!(session.used().decoded_bytes, canonical_bytes + token_bytes);
-                            for returned in &page.commits {
-                                let expected = &commits[length - 1 - output.len()];
-                                assert_eq!(returned.id, id(expected));
-                                assert_eq!(returned.canonical, serialize(expected).unwrap());
-                                output.push(returned.id);
-                            }
-                            report(
-                                &fx,
-                                &format!(
-                                    "continuation length={length} size={size} page={page_number} owner={writer} denial={denial}"
-                                ),
-                                session.used().storage_calls,
-                                kv,
-                                gets,
-                                if denial {
-                                    u32::try_from(page.commits.len() + 1).unwrap()
-                                } else {
-                                    0
-                                },
-                            );
-                            if let Some(next) = &page.next {
-                                assert_eq!(
-                                    *expiry.get_or_insert(next.expires_at_ms),
-                                    next.expires_at_ms
-                                );
-                            }
-                            continuation = page.next;
-                        });
-                        if continuation.is_none() {
-                            break;
-                        }
+                    for latency in [30, 130] {
+                        measured_pages(&fx, &commits, size, writer, latency);
                     }
-                    assert_eq!(output, commits.iter().rev().map(id).collect::<Vec<_>>());
-                    assert_eq!(page_number, length.div_ceil(size));
                 }
             }
         }
     }
+}
+
+#[allow(clippy::too_many_lines)] // Real pages with virtual RPC latency, canonical and accounting checks.
+fn measured_pages(fx: &Fx, commits: &[Object], size: usize, writer: bool, latency: u32) {
+    use crate::store::read_probe::{self, Config};
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .start_paused(true)
+        .build()
+        .unwrap();
+    let mut continuation: Option<HistoryContinuation> = None;
+    let mut output = Vec::new();
+    let mut page_number = 0;
+    let mut expiry = None;
+    loop {
+        page_number += 1;
+        let (kv, gets) = (fx.pipe.meta.calls(), get_count(fx));
+        in_view(fx, writer, |reader| {
+            let trace = Arc::new(Mutex::new(Vec::new()));
+            fx.pipe
+                .meta
+                .latency_ms
+                .store(u64::from(latency), Ordering::SeqCst);
+            // The adapter performs sequential HEAD and GET for each range.
+            let blob_latency = if std::env::var_os("MKIT_BENCH_RANGED_HEAD").is_some() {
+                latency
+            } else {
+                latency * 2
+            };
+            fx.pipe
+                .blobs
+                .latency_ms
+                .store(u64::from(blob_latency), Ordering::SeqCst);
+            let mut session = ReaderSession::default();
+            let start = runtime.block_on(async { tokio::time::Instant::now() });
+            let page = runtime
+                .block_on(read_probe::run(
+                    Config {
+                        concurrency: crate::store::read_io::PARALLELISM,
+                        trace: trace.clone(),
+                    },
+                    reader.walk_history_page_in(
+                        &mut session,
+                        HEAD,
+                        continuation.as_ref().map(|c| c.token.expose()),
+                        size,
+                    ),
+                ))
+                .unwrap()
+                .unwrap();
+            let elapsed = runtime.block_on(async { tokio::time::Instant::now() - start });
+            fx.pipe.meta.latency_ms.store(0, Ordering::SeqCst);
+            fx.pipe.blobs.latency_ms.store(0, Ordering::SeqCst);
+            let range_gets = u32::try_from(get_count(fx) - gets).unwrap();
+            assert_eq!(
+                usize::try_from(range_gets).unwrap(),
+                page.commits.len() * 2,
+                "only requested commits are loaded; no history/tree walk"
+            );
+            assert!(session.used().storage_calls <= OBJECT_READER_CALLS);
+            let canonical_bytes = page
+                .commits
+                .iter()
+                .map(|c| c.canonical.len() as u64)
+                .sum::<u64>();
+            let token_bytes = continuation
+                .as_ref()
+                .map_or(0, |c| c.token.expose().len() as u64);
+            assert_eq!(session.used().decoded_bytes, canonical_bytes + token_bytes);
+            for returned in &page.commits {
+                let expected = &commits[commits.len() - 1 - output.len()];
+                assert_eq!(returned.id, id(expected));
+                assert_eq!(returned.canonical, serialize(expected).unwrap());
+                output.push(returned.id);
+            }
+            let kv_calls = fx.pipe.meta.calls() - kv;
+            let physical = kv_calls + 2 * range_gets;
+            // Construction runs before the probe and guarded applies are
+            // immediate in this fixture. Both are serial physical calls.
+            let traced_rpcs = trace
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|event| {
+                    u32::try_from((event.end - event.start).as_millis() / u128::from(latency))
+                        .unwrap()
+                })
+                .sum::<u32>();
+            let untraced = physical.checked_sub(traced_rpcs).unwrap();
+            let wait = elapsed.as_secs_f64() + f64::from(untraced) * f64::from(latency) / 1000.0;
+            let rounds = wait * 1000.0 / f64::from(latency);
+            println!(
+                "continuation length={} size={size} page={page_number} owner={writer} denial={} latency_ms={latency}: units={}, KV={kv_calls}, ranged_GET={range_gets}, physical_calls={physical}, modeled_rounds={rounds:.2}, virtual_wait={wait:.3}s",
+                commits.len(),
+                fx.pipe.cfg.takedown_denial,
+                session.used().storage_calls
+            );
+            if let Some(next) = &page.next {
+                assert_eq!(
+                    *expiry.get_or_insert(next.expires_at_ms),
+                    next.expires_at_ms
+                );
+            }
+            continuation = page.next;
+        });
+        if continuation.is_none() {
+            break;
+        }
+    }
+    assert_eq!(output, commits.iter().rev().map(id).collect::<Vec<_>>());
+    assert_eq!(page_number, commits.len().div_ceil(size));
 }
 
 #[test]
@@ -623,7 +669,7 @@ fn continuation_closing_reads_precede_live_authorizer_and_source_checks() {
                 let az = az.clone();
                 Arc::get_mut(&mut fx.pipe.meta).unwrap().read_many_hook =
                     Some(Box::new(move |store, _, keys| {
-                        if keys.contains(&publication) && seen.fetch_add(1, Ordering::SeqCst) == 2 {
+                        if keys.contains(&publication) && seen.fetch_add(1, Ordering::SeqCst) == 1 {
                             if block_source {
                                 now(crate::store::ContentIndex::new(crate::store::BorrowedStore(
                                     store,
@@ -651,7 +697,7 @@ fn continuation_closing_reads_precede_live_authorizer_and_source_checks() {
                         .is_none()
                     );
                 });
-                assert_eq!(reads.load(Ordering::SeqCst), 3);
+                assert_eq!(reads.load(Ordering::SeqCst), 2);
             }
         }
     }
@@ -991,7 +1037,7 @@ fn continuation_expiry_with_a_settled_metadata_cap_is_uniform() {
                 Some(Box::new(move |_, _, keys| {
                     if keys.contains(&visibility)
                         && keys.contains(&keys::repo_visibility_revision(&repo.name))
-                        && seen.fetch_add(1, Ordering::SeqCst) == 2
+                        && seen.fetch_add(1, Ordering::SeqCst) == 1
                     {
                         // The last security read returns normally; the next anchor
                         // read fails its shared ledger before backend dispatch.
@@ -1013,7 +1059,7 @@ fn continuation_expiry_with_a_settled_metadata_cap_is_uniform() {
                     .is_none()
                 );
             });
-            assert_eq!(reads.load(Ordering::SeqCst), 3);
+            assert_eq!(reads.load(Ordering::SeqCst), 2);
             assert_eq!(session.used().storage_calls, OBJECT_READER_CALLS);
             assert!(!session.proofs.contains(&token_cursor(&fx, &token)));
         }

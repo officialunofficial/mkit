@@ -115,6 +115,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             return Ok(None);
         }
         let calls = SliceBudget::new(OBJECT_READER_CALLS);
+        let admission = crate::store::read_io::ReadIo::new();
         let capped = AtomicBool::new(false);
         let scope = HistoryProofScope::new(session);
         let mut token_expiry = None;
@@ -127,6 +128,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 options,
                 config,
                 &calls,
+                &admission,
                 &capped,
                 &mut token_expiry,
             )
@@ -165,6 +167,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         options: HistoryOptions,
         config: &crate::history_token::HistoryTokenConfig,
         calls: &SliceBudget,
+        admission: &crate::store::read_io::ReadIo,
         capped: &AtomicBool,
         token_expiry: &mut Option<u64>,
     ) -> Result<Option<ContinuedHistoryPage>, ServerError> {
@@ -205,13 +208,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         let anchor = {
             let meta = Budgeted::new(&self.pipe.meta, calls)
                 .with_session(&session.io.calls)
-                .flagging(capped);
+                .flagging(capped)
+                .with_io(admission);
             self.continuation_anchor(&meta, reference).await?
         };
         let security = {
             let meta = Budgeted::new(&self.pipe.meta, calls)
                 .with_session(&session.io.calls)
-                .flagging(capped);
+                .flagging(capped)
+                .with_io(admission);
             self.history_security(&meta, claims.is_none()).await?
         };
         if let Some(c) = &claims {
@@ -232,8 +237,16 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         }
         let mut decode = Budget(self.cfg.http_decode_budget);
         let (nodes, complete) = if let Some(c) = &claims {
-            self.resume_linear(session, c.cursor, limit, None, calls, &mut decode)
-                .await?
+            self.resume_linear(
+                session,
+                c.cursor,
+                limit,
+                None,
+                calls,
+                admission,
+                &mut decode,
+            )
+            .await?
         } else {
             session.proofs.capture_selected(Some(anchor.tip));
             let mut tip = anchor.tip;
@@ -241,7 +254,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             let mut tags = BTreeSet::new();
             let first = loop {
                 let node = self
-                    .proved_node(session, tip, role, calls, &mut decode)
+                    .proved_node(session, tip, role, calls, admission, &mut decode)
                     .await?
                     .ok_or_else(absent)?;
                 if let Object::Tag(tag) = &node.object {
@@ -261,8 +274,16 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     break node;
                 }
             };
-            self.resume_linear(session, tip, limit, Some(first), calls, &mut decode)
-                .await?
+            self.resume_linear(
+                session,
+                tip,
+                limit,
+                Some(first),
+                calls,
+                admission,
+                &mut decode,
+            )
+            .await?
         };
         // Canonical edges from the last validated commit prove the next cursor.
         let successor = if complete {
@@ -323,28 +344,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             )
             .ok_or_else(exhausted)?;
         reserve_output(session, bytes)?;
-        // No proof or output survives a moved/torn anchor or security boundary.
-        let final_anchor = {
-            let meta = Budgeted::new(&self.pipe.meta, calls)
-                .with_session(&session.io.calls)
-                .flagging(capped);
-            if self.history_security(&meta, false).await? != security {
-                return Err(absent());
-            }
-            self.continuation_anchor(&meta, reference).await?
-        };
-        if anchor.raw != final_anchor.raw
-            || anchor.publication != final_anchor.publication
-            || anchor.tip != final_anchor.tip
-            || ms(self.pipe.clock.now_ms()) >= expires
-        {
-            return Err(absent());
-        }
         // Validate a coherent anchor without allocating or consuming paging
         // state. Batched reads alone need not be atomic.
         let meta = Budgeted::new(&self.pipe.meta, calls)
             .with_session(&session.io.calls)
-            .flagging(capped);
+            .flagging(capped)
+            .with_io(admission);
         let batch = Batch::new()
             .require(Precondition::NotAfter(expires.saturating_sub(1)))
             .require(guard(
@@ -378,7 +383,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         }
         // Live serving validation is the last asynchronous phase. A later ref
         // change invalidates both the original token and its successor.
-        self.final_nodes(session, &nodes, calls).await?;
+        self.final_nodes(session, &nodes, calls, admission).await?;
         if ms(self.pipe.clock.now_ms()) >= expires {
             return Err(absent());
         }
@@ -555,6 +560,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         limit: usize,
         mut first: Option<Node>,
         calls: &SliceBudget,
+        admission: &crate::store::read_io::ReadIo,
         decode: &mut Budget,
     ) -> Result<(Vec<Node>, bool), ServerError> {
         let mut output = Vec::new();
@@ -564,7 +570,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             let node = if let Some(node) = first.take() {
                 node
             } else {
-                self.proved_node(session, current, Role::Commit, calls, decode)
+                self.proved_node(session, current, Role::Commit, calls, admission, decode)
                     .await?
                     .ok_or_else(absent)?
             };
