@@ -1678,12 +1678,6 @@ all dispatched replies on failure, and process replies deterministically. Served
 scan-prefix cursors, rotations and first-member pack ordering MUST remain intact.
 Cancellation MUST release in-flight admission while retaining charged reservations.
 
-A bounded owner-capable ref/path helper MAY capture the selected authorized ref
-in a fresh operation context and read canonical parents before the selected child.
-It MUST keep canonical/type checks, bounded tag peeling, exact path grammar and
-symlink-as-entry behavior. It MUST NOT widen URL-token authority or replace the
-published-view URL issuance path. Existing context roots and expiry remain fixed.
-
 A reader session MAY also retain bounded structural reachability proofs. These
 MUST be privately bound to its reader/backend, full repository identity, view
 and verified credential scope. A context change MUST discard proofs without

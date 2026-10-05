@@ -362,11 +362,15 @@ async fn timed_deep_cat(
         .unwrap();
     let mut session = ReaderSession::default();
     let path = format!("{}f000.txt", "sub/".repeat(10));
-    let (id, bytes) = reader
-        .read_path_in(&mut session, HEAD, &path)
-        .await
-        .unwrap()
-        .unwrap();
+    let (id, bytes) = read_selected_path(
+        &reader,
+        &mut session,
+        snapshots.last().unwrap()[0][0],
+        &path,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(id, snapshots.last().unwrap().last().unwrap()[0]);
     assert_eq!(bytes, expected[&id]);
     let scans = fx.pipe.meta.ops()[before..]
@@ -378,7 +382,7 @@ async fn timed_deep_cat(
     start.elapsed()
 }
 #[test]
-fn cold_owner_path_uses_only_the_selected_ten_level_path() {
+fn cold_owner_canonical_driver_reads_only_the_selected_ten_level_path() {
     let (fx, snapshots, _, expected) = build(3, 10, 27, true);
     let req = signed(
         &fx.owner,
@@ -407,9 +411,14 @@ fn cold_owner_path_uses_only_the_selected_ten_level_path() {
     let mut session = ReaderSession::default();
     let before = fx.pipe.meta.ops().len();
     let path = format!("{}f000.txt", "sub/".repeat(10));
-    let (id, bytes) = block_on(reader.read_path_in(&mut session, HEAD, &path))
-        .unwrap()
-        .unwrap();
+    let (id, bytes) = block_on(read_selected_path(
+        &reader,
+        &mut session,
+        snapshots.last().unwrap()[0][0],
+        &path,
+    ))
+    .unwrap()
+    .unwrap();
     assert_eq!(id, snapshots.last().unwrap().last().unwrap()[0]);
     assert_eq!(bytes, expected[&id]);
     let scans = fx.pipe.meta.ops()[before..]
@@ -418,10 +427,56 @@ fn cold_owner_path_uses_only_the_selected_ten_level_path() {
         .count();
     println!("deep cat: {scans} scans, {:?}", session.used());
     assert!(scans <= 16 && session.used().storage_calls <= 550);
-    assert!(block_on(reader.read_path(HEAD, "../f000.txt")).is_err());
-    assert!(
-        block_on(reader.read_path(HEAD, "sub/missing"))
-            .unwrap()
-            .is_none()
-    );
+}
+
+// The embedder owns path traversal; this fixture uses only the existing canonical API.
+pub(super) async fn read_selected_path(
+    reader: &crate::pipeline::ObjectReader<'_, SpyBlobs, Arc<Spy>, Hooks>,
+    session: &mut ReaderSession,
+    tip: Hash,
+    path: &str,
+) -> Result<Option<(Hash, Vec<u8>)>, crate::ServerError> {
+    let Some(bytes) = reader
+        .read_canonical_in(session, &[tip])
+        .await?
+        .pop()
+        .flatten()
+    else {
+        return Ok(None);
+    };
+    let Object::Commit(commit) = mkit_core::serialize::deserialize(&bytes).unwrap() else {
+        return Ok(None);
+    };
+    let mut current = commit.tree_hash;
+    let mut names = path.split('/').peekable();
+    while let Some(name) = names.next() {
+        let Some(bytes) = reader
+            .read_canonical_in(session, &[current])
+            .await?
+            .pop()
+            .flatten()
+        else {
+            return Ok(None);
+        };
+        let Object::Tree(tree) = mkit_core::serialize::deserialize(&bytes).unwrap() else {
+            return Ok(None);
+        };
+        let Some(entry) = tree
+            .entries
+            .iter()
+            .find(|entry| entry.name == name.as_bytes())
+        else {
+            return Ok(None);
+        };
+        if names.peek().is_some() && entry.mode != EntryMode::Tree {
+            return Ok(None);
+        }
+        current = entry.object_hash;
+    }
+    Ok(reader
+        .read_canonical_in(session, &[current])
+        .await?
+        .pop()
+        .flatten()
+        .map(|bytes| (current, bytes)))
 }

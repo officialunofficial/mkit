@@ -136,16 +136,6 @@ proves its entries. Use metadata only when lengths are needed; metadata does not
 create decoded child proofs. Do not fetch unchanged file bodies merely to keep
 their hashes when loading a base tree.
 
-For a path-directed read, use `reader.read_path(reference, path)`, returning
-`Option<(Hash, Vec<u8>)>`, or `read_path_in(&mut session, reference, path)` to charge
-an existing context. The empty path selects the root tree. The helper peels at
-most 16 tags and visits only the selected path, checking canonical types at each
-step. Symlinks are returned as ordinary entries and never followed. Its grammar
-matches `UrlTarget::path`; URL tokens still bind the exact unresolved target
-through the published view. A fresh context captures the selected authorized
-ref; an existing context retains its captured roots and expiry. Intermediate
-canonical bytes count against the context's output allowance too.
-
 Each batch shares verified locations and sealed inventory, and coalesces denial
 reads only within the operation. With `takedown_denial` enabled, the descriptor
 directory is read strongly for every batch. Disabling that option skips the

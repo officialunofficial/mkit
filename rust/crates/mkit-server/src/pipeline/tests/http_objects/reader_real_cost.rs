@@ -181,10 +181,14 @@ async fn cat_driver(
     session: &mut ReaderSession,
 ) -> Result<(), crate::ServerError> {
     let path = format!("b00/{}f000.txt", "sub/".repeat(9));
-    let (hash, bytes) = reader
-        .read_path_in(session, HEAD, &path)
-        .await?
-        .ok_or_else(|| crate::ServerError::unavailable("expected path absent"))?;
+    let (hash, bytes) = super::reader_batch_cost::read_selected_path(
+        reader,
+        session,
+        f.snapshots.last().unwrap().head,
+        &path,
+    )
+    .await?
+    .ok_or_else(|| crate::ServerError::unavailable("expected path absent"))?;
     assert_eq!(hash, f.snapshots.last().unwrap().leaf);
     assert_eq!(bytes, f.expected[&hash]);
     Ok(())

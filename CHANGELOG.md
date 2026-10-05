@@ -43,10 +43,9 @@ collect the applicable entries between their old and new immutable pins.
 - Opt into canonical/metadata batches of up to 45 ids with
   `ObjectReader::with_batch_limit(45)?`; the 16-id default, URL issuance cap and
   all accounting allowances remain unchanged.
-- Add `ObjectReader::{read_path, read_path_in}` for bounded owner/public ref/path
-  reads. Keep one reader/session per operation, supply canonical parents before
-  children, and request metadata only when lengths are needed. Intermediate path
-  bytes and parallel raw-member reservations count against session allowances.
+- Keep one reader/session per operation, supply canonical parents before children,
+  and request metadata only when lengths are needed. Parallel raw-member
+  reservations count against session allowances.
 
 - Server reader sessions capture roots once and reuse bounded local graph proofs
   across canonical and metadata batches. Retain the same reader/session through
