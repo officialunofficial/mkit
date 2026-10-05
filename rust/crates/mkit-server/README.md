@@ -233,8 +233,9 @@ The complete helper shares the existing per-call decode allowance across all
 nodes/bases, in addition to its session ledger. Ref capture, node loads and
 retained page/witness checks use one shared I/O admission envelope. Denial proofs
 reuse the actual source locations and sealed inventory in bounded groups;
-final target/pack guards start fresh after body I/O, final authorization and proof
-revalidation, live callbacks and descriptor checks. The inventory supplies
+final authorization and proof revalidation precede the live inventory/descriptor
+checks. Target/pack guards then start fresh after that work and all callbacks.
+The inventory supplies
 clearance facts, never new history edges.
 These helpers reduce history/path acquisition work within the unchanged reader
 allowance. They add no persisted state, continuation tokens, URL forms, canonical

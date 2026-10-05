@@ -1818,6 +1818,7 @@ struct DelayedAuthorization {
 
 #[derive(Default)]
 struct BlockingAuthorization {
+    shared_chunk: Option<Hash>,
     next: Mutex<Option<(Arc<MemoryKv>, Hash)>>,
     applied: std::sync::atomic::AtomicUsize,
 }
@@ -1825,19 +1826,36 @@ impl Authorizer for Arc<BlockingAuthorization> {
     async fn authorize(&self, _: &Operation) -> Result<AuthzFacts, ServerError> {
         let next = self.next.lock().unwrap().take();
         if let Some((store, target)) = next {
-            store
-                .apply(
-                    &crate::store::content_shard(&target),
-                    Batch::new().put(
-                        keys::block(&target),
-                        codec::encode_block_entry(&crate::store::BlockEntry::new(
-                            "authorization stop",
-                            T0 as u64,
-                        )),
-                    ),
-                )
-                .await
-                .unwrap();
+            if let Some(chunk) = self.shared_chunk {
+                crate::store::ContentIndex::new(crate::store::BorrowedStore(store.as_ref()))
+                    .install_block_action(
+                        &target,
+                        &crate::takedown::denial::BlockAction {
+                            id: [19; 32],
+                            takedown_id: [20; 32],
+                            reason: "authorization stop".into(),
+                            blocked_at_ms: T0 as u64,
+                            chunk_ids: vec![chunk],
+                        },
+                        T0 as u64,
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                store
+                    .apply(
+                        &crate::store::content_shard(&target),
+                        Batch::new().put(
+                            keys::block(&target),
+                            codec::encode_block_entry(&crate::store::BlockEntry::new(
+                                "authorization stop",
+                                T0 as u64,
+                            )),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+            }
             self.applied.fetch_add(1, Ordering::SeqCst);
         }
         Ok(AuthzFacts::default())
@@ -1930,6 +1948,93 @@ fn final_authorization_blocks_history_and_path_sources_before_output() {
         }
     }
 }
+#[test]
+#[allow(clippy::too_many_lines)] // Indirect chunk stops at both final path boundaries and across both views/modes.
+fn final_authorization_refreshes_indirect_chunk_denials() {
+    use std::sync::atomic::AtomicUsize;
+    for denial in [false, true] {
+        for writer in [false, true] {
+            for witness in [false, true] {
+                for shared_action in [false, true] {
+                    let d = data();
+                    let chunk = id(&d.chunks[0]);
+                    let leaf = if shared_action {
+                        &d.chunks[0]
+                    } else {
+                        &d.manifest
+                    };
+                    let az = Arc::new(BlockingAuthorization {
+                        shared_chunk: shared_action.then_some(chunk),
+                        ..BlockingAuthorization::default()
+                    });
+                    let hooks = Hooks {
+                        authorizer: az.clone(),
+                        admission: DefaultAdmission,
+                        pre_receive: NoPreReceive,
+                        receipts: NoReceipts,
+                        outcomes: NoOutcomes,
+                    };
+                    let mut fx = fixture_with(hooks, http_cfg());
+                    fx.pipe.cfg.takedown_denial = false;
+                    let root = tree(&[("leaf", EntryMode::Blob, leaf)]);
+                    let tip = commit(&root, &[], "indirect authorization boundary");
+                    let mut objects = d.refs();
+                    objects.extend([&root, &tip]);
+                    fx.push("room", &objects, id(&tip), None);
+                    fx.pipe.cfg.takedown_denial = denial;
+                    let target = id(leaf);
+                    let stopped = if shared_action {
+                        id(&d.manifest)
+                    } else {
+                        chunk
+                    };
+                    let boundary = if witness { 2 } else { 1 };
+                    let checks = Arc::new(AtomicUsize::new(0));
+                    let store = fx.pipe.meta.inner.clone();
+                    let armed = az.clone();
+                    fx.pipe = fx.pipe.with_http_seams(|mut seams| {
+                        seams.takedown = Arc::new(ChangeAfterBody {
+                            target,
+                            change: Box::new(move || {
+                                let (checks, store, armed) =
+                                    (checks.clone(), store.clone(), armed.clone());
+                                Box::pin(async move {
+                                    if checks.fetch_add(1, Ordering::SeqCst) + 1 == boundary {
+                                        *armed.next.lock().unwrap() = Some((store, stopped));
+                                    }
+                                })
+                            }),
+                        });
+                        seams
+                    });
+                    in_view(&fx, writer, |reader| {
+                        let mut session = ReaderSession::default();
+                        let found = block_on(reader.read_commit_path_in(
+                            &mut session,
+                            HEAD,
+                            id(&tip),
+                            &[b"leaf".to_vec()],
+                            None,
+                            PathOptions {
+                                include_witness: witness,
+                                ..PathOptions::default()
+                            },
+                        ))
+                        .unwrap();
+                        if denial {
+                            assert!(found.is_none());
+                            assert_eq!(session.used().output_bytes, 0);
+                        } else {
+                            assert_eq!(found.unwrap().canonical, serialize(leaf).unwrap());
+                        }
+                        assert_eq!(az.applied.load(Ordering::SeqCst), 1);
+                    });
+                }
+            }
+        }
+    }
+}
+
 impl Authorizer for Arc<DelayedAuthorization> {
     async fn authorize(&self, _: &Operation) -> Result<AuthzFacts, ServerError> {
         let clock = self.next.lock().unwrap().take();

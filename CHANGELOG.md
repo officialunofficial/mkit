@@ -66,8 +66,9 @@ collect the applicable entries between their old and new immutable pins.
   Bounded history and commit/path reads share that admission envelope across the
   complete operation, reuse actual source locations and sealed facts for denial,
   and retain fresh final page/witness guards after callbacks and descriptor I/O.
-  Final authorization and proof revalidation precede those fresh source guards,
-  including singleton history/path results and retained pages or witnesses.
+  Final authorization and proof revalidation precede live descriptor checks and
+  fresh source guards, including singleton history/path results and retained
+  pages or witnesses, so callbacks cannot reuse earlier indirect chunk clearance.
   Canonical and metadata batches also refresh final guards after takedown
   callbacks, so a durable source block installed by a callback remains absent.
 - Opt into canonical/metadata batches of up to 45 ids with

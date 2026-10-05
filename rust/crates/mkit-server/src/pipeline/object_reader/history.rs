@@ -474,6 +474,20 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             ) {
                 return Ok(None);
             }
+            io.calls.charge_many(2).map_err(|_| exhausted())?;
+            let current = self.authorize(calls).await?;
+            proofs.bind(
+                &self.identity,
+                current,
+                ms(self.pipe.clock.now_ms()),
+                self.cfg,
+            )?;
+            proofs
+                .revalidate(&meta, &self.repo, self.seams.takedown.as_ref(), &targets)
+                .await?;
+            if !proofs.contains(&id) {
+                return Ok(None);
+            }
             // Descriptor proofs retain live dependency reads after their
             // strong directory walk, rather than borrowing phase guard replies.
             let live_view = ViewStore {
@@ -501,20 +515,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 .await?
                 .is_empty()
             {
-                return Ok(None);
-            }
-            io.calls.charge_many(2).map_err(|_| exhausted())?;
-            let current = self.authorize(calls).await?;
-            proofs.bind(
-                &self.identity,
-                current,
-                ms(self.pipe.clock.now_ms()),
-                self.cfg,
-            )?;
-            proofs
-                .revalidate(&meta, &self.repo, self.seams.takedown.as_ref(), &targets)
-                .await?;
-            if !proofs.contains(&id) {
                 return Ok(None);
             }
             // Loading, authorization, seam callbacks and descriptor I/O may revoke a source.
@@ -842,6 +842,21 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     return Err(ServerError::not_found("object reader unavailable"));
                 }
             }
+            session.io.calls.charge_many(2).map_err(|_| exhausted())?;
+            let authority = self.authorize(calls).await?;
+            session.proofs.bind(
+                &self.identity,
+                authority,
+                ms(self.pipe.clock.now_ms()),
+                self.cfg,
+            )?;
+            session
+                .proofs
+                .revalidate(&meta, &self.repo, self.seams.takedown.as_ref(), &ids)
+                .await?;
+            if ids.iter().any(|id| !session.proofs.contains(id)) {
+                return Err(ServerError::not_found("object reader unavailable"));
+            }
             // Descriptor proofs retain live dependency reads after their
             // strong directory walk, rather than borrowing phase guard replies.
             let live_view = ViewStore {
@@ -869,21 +884,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 .await?
                 .is_empty()
             {
-                return Err(ServerError::not_found("object reader unavailable"));
-            }
-            session.io.calls.charge_many(2).map_err(|_| exhausted())?;
-            let authority = self.authorize(calls).await?;
-            session.proofs.bind(
-                &self.identity,
-                authority,
-                ms(self.pipe.clock.now_ms()),
-                self.cfg,
-            )?;
-            session
-                .proofs
-                .revalidate(&meta, &self.repo, self.seams.takedown.as_ref(), &ids)
-                .await?;
-            if ids.iter().any(|id| !session.proofs.contains(id)) {
                 return Err(ServerError::not_found("object reader unavailable"));
             }
             checks.reset();
