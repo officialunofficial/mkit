@@ -103,8 +103,8 @@ fn records(file: &tempfile::NamedTempFile) -> Vec<serde_json::Value> {
 #[tokio::test]
 async fn direct_fixture_closes_connections_without_changing_signed_requests() {
     let payload = b"signed bytes";
-    let signer = Signer::new([0x32; 32], "https://vcs.launch.invalid", "fixture");
-    let signed = signer.sign_body(Rpc::UpdateRef.procedure(), payload);
+    let signed = Signer::new([0x32; 32], "https://vcs.launch.invalid", "fixture")
+        .sign_body(Rpc::UpdateRef.procedure(), payload);
     let (base, server) = server(vec![fixed(200, b"", ""); 2], false);
     let mut client = client(&base, None);
     client.close_connections = true;
