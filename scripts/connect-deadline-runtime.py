@@ -53,8 +53,10 @@ def check_audit_stream(raw):
 
 
 def portable_wire(common, prefix, expected, env, work, cases):
-    result = subprocess.run([*common, "--filter", prefix], env=env, text=True, capture_output=True, timeout=900)
-    (work / (prefix.replace(".", "-") + ".tap")).write_text(result.stdout + result.stderr)
+    name = prefix.replace(".", "-")
+    traced_env = dict(env, MKIT_CONFORMANCE_HTTP_TRACE=str(work / f"http-{name}.jsonl"))
+    result = subprocess.run([*common, "--filter", prefix], env=traced_env, text=True, capture_output=True, timeout=900)
+    (work / f"runner-{name}.log").write_text(result.stdout + result.stderr)
     print(result.stdout, end="", flush=True)
     assert result.returncode == 0, f"portable case {prefix} failed"
     found = re.findall(r"^(ok|not ok) \d+ - ([^\n]+)", result.stdout, re.MULTILINE)
@@ -71,9 +73,11 @@ def main():
     args = parser.parse_args()
     scratch = Path(os.environ.get("TMPDIR", Path.home() / ".cache/mkit-test-tmp/wasm-deadline"))
     scratch.mkdir(parents=True, exist_ok=True)
+    scratch = scratch.resolve()
     work = Path(tempfile.mkdtemp(prefix="deadline-", dir=scratch))
     env = dict(os.environ, CARGO_PROFILE_DEV_DEBUG="0", TMPDIR=str(scratch),
-               WRANGLER_SEND_METRICS="false", WRANGLER_REGISTRY_PATH=str(work / "registry"))
+               WRANGLER_SEND_METRICS="false", WRANGLER_REGISTRY_PATH=str(work / "registry"),
+               WRANGLER_LOG_PATH=str(work / "wrangler-debug.log"))
     if env.get("CARGO_TARGET_DIR"):
         raise RuntimeError("CARGO_TARGET_DIR must remain unset")
     source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()

@@ -100,6 +100,34 @@ both independent workspaces resolve the patched pure-Rust decoder, and the wasm
 decoder harness exercises 32-bit framing. Cloud Build separately runs the ignored
 scheduled verifier heap regression with only `memory,pack-ruzstd` enabled.
 
+## Wire connection diagnostics
+
+The wire job always summarizes existing retry records by phase and case.
+It uploads `workers-wire-logs` on failure or when any connection-loss or retry
+counter is nonzero, including a successful recovered run. Artifacts expire after
+seven days. Runtime/runner loss counters count literal log lines, which can
+repeat the same event; traced losses count HTTP exchanges. Neither is a
+per-request failure probability.
+
+Each harness invocation retains its commit, resolved Wrangler/Miniflare/workerd
+versions and compatibility date. Each server phase keeps Wrangler console and
+debug logs (including server/alarm telemetry), all runner stdout/stderr, and
+HTTP JSON lines. Join by phase and wall-clock timestamp; case, procedure,
+body hash, signer hash and idempotency-key hash identify the request and its
+same-envelope replay without saving signatures or request bodies. Existing
+server/alarm identifiers refine the join where available. HTTP tracing is
+opt-in outside this local harness via `MKIT_CONFORMANCE_HTTP_TRACE`, with a
+canonical absolute output path beneath `TMPDIR`.
+
+The [focused comparison](workers-wire-investigation.md) reproduced recovered
+losses through the proxy and none through a direct workerd socket; the exact
+cause remains unresolved.
+
+A loss does not establish which component caused it. The response can surface
+at Wrangler's proxy after a runtime or server exception. Keep the existing
+replay-safe retry limits and final-state assertions; unretried operations must
+still fail. A successful replay does not exonerate the runtime or server.
+
 ## Build and deploy
 
 Start with [the reference config](../../apps/vcs-worker/wrangler.jsonc) and
