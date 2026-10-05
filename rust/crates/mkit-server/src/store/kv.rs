@@ -425,6 +425,22 @@ pub trait NamespaceStore: MaybeSend + MaybeSync {
     /// What this store supports.
     fn capabilities(&self) -> StoreCapabilities;
 
+    /// Whether this facade is inside an admitted object-reader operation.
+    #[doc(hidden)]
+    fn reader_admission(&self) -> bool {
+        false
+    }
+
+    /// Reserve a wave's calls before dispatch. Ordinary backends need no
+    /// accounting; operation facades propagate their shared reservation.
+    #[doc(hidden)]
+    fn reserve_read_calls(
+        &self,
+        _calls: u32,
+    ) -> Result<Option<super::ReadReservation>, StoreError> {
+        Ok(None)
+    }
+
     /// The value at `key`, if any.
     fn get(
         &self,
@@ -526,6 +542,12 @@ pub trait NamespaceStore: MaybeSend + MaybeSync {
 
 // Share a store handle across response streams and retained finalizers.
 impl<S: NamespaceStore + ?Sized> NamespaceStore for std::sync::Arc<S> {
+    fn reader_admission(&self) -> bool {
+        self.as_ref().reader_admission()
+    }
+    fn reserve_read_calls(&self, calls: u32) -> Result<Option<super::ReadReservation>, StoreError> {
+        self.as_ref().reserve_read_calls(calls)
+    }
     fn capabilities(&self) -> StoreCapabilities {
         (**self).capabilities()
     }

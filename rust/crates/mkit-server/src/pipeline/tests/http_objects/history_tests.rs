@@ -285,12 +285,9 @@ fn history_counts_only_commit_decodes_and_old_path_fits_budget() {
                     .iter()
                     .filter(|&&op| op == "scan_many_index")
                     .count();
-                let primary_scans = scans
-                    - if denial {
-                        33 + if include_witness { 13 } else { 0 }
-                    } else {
-                        0
-                    };
+                // Denial consumes the verified locations, including witnesses;
+                // it adds no repeated index lookup to the path walk.
+                let primary_scans = scans;
                 assert!(
                     primary_scans <= 35,
                     "{primary_scans} primary, {scans} total"
@@ -1117,6 +1114,82 @@ struct ChangeAfterBody {
     target: Hash,
     change: Box<dyn Fn() -> crate::BoxFuture<'static, ()> + Send + Sync>,
 }
+#[test]
+fn batch_final_callback_refreshes_target_and_source_pack_guards() {
+    use std::sync::atomic::AtomicUsize;
+    for denial in [false, true] {
+        for writer in [false, true] {
+            for sizes_only in [false, true] {
+                for pack_block in [false, true] {
+                    let mut fx = fixture();
+                    let d = data();
+                    let pack = fx.push("room", &d.refs(), d.head(), None);
+                    fx.pipe.cfg.takedown_denial = denial;
+                    let target = id(&d.small);
+                    let stopped = if pack_block { pack } else { target };
+                    let store = fx.pipe.meta.inner.clone();
+                    let checks = Arc::new(AtomicUsize::new(0));
+                    let observed = checks.clone();
+                    let final_check = if sizes_only { 1 } else { 2 };
+                    fx.pipe = fx.pipe.with_http_seams(|mut seams| {
+                        seams.takedown = Arc::new(ChangeAfterBody {
+                            target,
+                            change: Box::new(move || {
+                                let (store, checks) = (store.clone(), checks.clone());
+                                Box::pin(async move {
+                                    if checks.fetch_add(1, Ordering::SeqCst) + 1 == final_check {
+                                        store
+                                            .apply(
+                                                &crate::store::content_shard(&stopped),
+                                                Batch::new().put(
+                                                    keys::block(&stopped),
+                                                    codec::encode_block_entry(
+                                                        &crate::store::BlockEntry::new(
+                                                            "final callback stop",
+                                                            T0 as u64,
+                                                        ),
+                                                    ),
+                                                ),
+                                            )
+                                            .await
+                                            .unwrap();
+                                    }
+                                })
+                            }),
+                        });
+                        seams
+                    });
+                    in_view(&fx, writer, |reader| {
+                        let mut session = ReaderSession::default();
+                        for parent in [d.head(), id(&d.root)] {
+                            assert!(
+                                block_on(reader.read_canonical_in(&mut session, &[parent]))
+                                    .unwrap()[0]
+                                    .is_some()
+                            );
+                        }
+                        let before = session.used().output_bytes;
+                        if sizes_only {
+                            assert_eq!(
+                                block_on(reader.object_metadata_in(&mut session, &[target]))
+                                    .unwrap(),
+                                [None]
+                            );
+                        } else {
+                            assert_eq!(
+                                block_on(reader.read_canonical_in(&mut session, &[target]))
+                                    .unwrap(),
+                                [None]
+                            );
+                        }
+                        assert_eq!(session.used().output_bytes, before);
+                        assert_eq!(observed.load(Ordering::SeqCst), final_check);
+                    });
+                }
+            }
+        }
+    }
+}
 impl TakedownGate for ChangeAfterBody {
     fn check<'a>(
         &'a self,
@@ -1742,6 +1815,221 @@ fn selected_ref_evidence_does_not_narrow_later_general_id_reads() {
 struct DelayedAuthorization {
     next: Mutex<Option<Arc<ManualClock>>>,
 }
+
+#[derive(Default)]
+struct BlockingAuthorization {
+    shared_chunk: Option<Hash>,
+    next: Mutex<Option<(Arc<MemoryKv>, Hash)>>,
+    applied: std::sync::atomic::AtomicUsize,
+}
+impl Authorizer for Arc<BlockingAuthorization> {
+    async fn authorize(&self, _: &Operation) -> Result<AuthzFacts, ServerError> {
+        let next = self.next.lock().unwrap().take();
+        if let Some((store, target)) = next {
+            if let Some(chunk) = self.shared_chunk {
+                crate::store::ContentIndex::new(crate::store::BorrowedStore(store.as_ref()))
+                    .install_block_action(
+                        &target,
+                        &crate::takedown::denial::BlockAction {
+                            id: [19; 32],
+                            takedown_id: [20; 32],
+                            reason: "authorization stop".into(),
+                            blocked_at_ms: T0 as u64,
+                            chunk_ids: vec![chunk],
+                        },
+                        T0 as u64,
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                crate::store::ContentIndex::new(crate::store::BorrowedStore(store.as_ref()))
+                    .block(
+                        &target,
+                        &crate::store::BlockEntry::new("authorization stop", T0 as u64),
+                        T0 as u64,
+                    )
+                    .await
+                    .unwrap();
+            }
+            self.applied.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(AuthzFacts::default())
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Singleton and retained response boundaries across both views and denial modes.
+fn final_authorization_blocks_history_and_path_sources_before_output() {
+    use std::sync::atomic::AtomicUsize;
+    for denial in [false, true] {
+        for writer in [false, true] {
+            for pack_block in [false, true] {
+                for shape in 0..4 {
+                    let az = Arc::new(BlockingAuthorization::default());
+                    let hooks = Hooks {
+                        authorizer: az.clone(),
+                        admission: DefaultAdmission,
+                        pre_receive: NoPreReceive,
+                        receipts: NoReceipts,
+                        outcomes: NoOutcomes,
+                    };
+                    let mut fx = fixture_with(hooks, http_cfg());
+                    fx.pipe.cfg.takedown_denial = false;
+                    let leaf = blob(b"authorization boundary");
+                    let root = tree(&[("leaf", EntryMode::Blob, &leaf)]);
+                    let old = commit(&root, &[], "old");
+                    let tip = commit(&root, &[&old], "tip");
+                    let pack = fx.push("room", &[&leaf, &root, &old, &tip], id(&tip), None);
+                    fx.pipe.cfg.takedown_denial = denial;
+                    let target = if shape < 2 { id(&tip) } else { id(&leaf) };
+                    let stopped = if pack_block { pack } else { target };
+                    let boundary = if shape % 2 == 0 { 1 } else { 2 };
+                    let checks = Arc::new(AtomicUsize::new(0));
+                    let store = fx.pipe.meta.inner.clone();
+                    let armed = az.clone();
+                    fx.pipe = fx.pipe.with_http_seams(|mut seams| {
+                        seams.takedown = Arc::new(ChangeAfterBody {
+                            target,
+                            change: Box::new(move || {
+                                let (checks, store, armed) =
+                                    (checks.clone(), store.clone(), armed.clone());
+                                Box::pin(async move {
+                                    if checks.fetch_add(1, Ordering::SeqCst) + 1 == boundary {
+                                        // The next authorization is the node's final check,
+                                        // or the retained page/witness check on the second visit.
+                                        *armed.next.lock().unwrap() = Some((store, stopped));
+                                    }
+                                })
+                            }),
+                        });
+                        seams
+                    });
+                    in_view(&fx, writer, |reader| {
+                        let mut session = ReaderSession::default();
+                        if shape < 2 {
+                            assert!(
+                                block_on(reader.walk_history_in(
+                                    &mut session,
+                                    HEAD,
+                                    None,
+                                    if shape == 0 { 1 } else { 2 },
+                                    HistoryOptions::default(),
+                                ))
+                                .unwrap()
+                                .is_none()
+                            );
+                        } else {
+                            assert!(
+                                block_on(reader.read_commit_path_in(
+                                    &mut session,
+                                    HEAD,
+                                    id(&tip),
+                                    &[b"leaf".to_vec()],
+                                    None,
+                                    PathOptions {
+                                        include_witness: shape == 3,
+                                        ..PathOptions::default()
+                                    },
+                                ))
+                                .unwrap()
+                                .is_none()
+                            );
+                        }
+                        assert_eq!(session.used().output_bytes, 0);
+                        assert_eq!(az.applied.load(Ordering::SeqCst), 1);
+                    });
+                }
+            }
+        }
+    }
+}
+#[test]
+#[allow(clippy::too_many_lines)] // Indirect chunk stops at both final path boundaries and across both views/modes.
+fn final_authorization_refreshes_indirect_chunk_denials() {
+    use std::sync::atomic::AtomicUsize;
+    for denial in [false, true] {
+        for writer in [false, true] {
+            for witness in [false, true] {
+                for shared_action in [false, true] {
+                    let d = data();
+                    let chunk = id(&d.chunks[0]);
+                    let leaf = if shared_action {
+                        &d.chunks[0]
+                    } else {
+                        &d.manifest
+                    };
+                    let az = Arc::new(BlockingAuthorization {
+                        shared_chunk: shared_action.then_some(chunk),
+                        ..BlockingAuthorization::default()
+                    });
+                    let hooks = Hooks {
+                        authorizer: az.clone(),
+                        admission: DefaultAdmission,
+                        pre_receive: NoPreReceive,
+                        receipts: NoReceipts,
+                        outcomes: NoOutcomes,
+                    };
+                    let mut fx = fixture_with(hooks, http_cfg());
+                    fx.pipe.cfg.takedown_denial = false;
+                    let root = tree(&[("leaf", EntryMode::Blob, leaf)]);
+                    let tip = commit(&root, &[], "indirect authorization boundary");
+                    let mut objects = d.refs();
+                    objects.extend([&root, &tip]);
+                    fx.push("room", &objects, id(&tip), None);
+                    fx.pipe.cfg.takedown_denial = denial;
+                    let target = id(leaf);
+                    let stopped = if shared_action {
+                        id(&d.manifest)
+                    } else {
+                        chunk
+                    };
+                    let boundary = if witness { 2 } else { 1 };
+                    let checks = Arc::new(AtomicUsize::new(0));
+                    let store = fx.pipe.meta.inner.clone();
+                    let armed = az.clone();
+                    fx.pipe = fx.pipe.with_http_seams(|mut seams| {
+                        seams.takedown = Arc::new(ChangeAfterBody {
+                            target,
+                            change: Box::new(move || {
+                                let (checks, store, armed) =
+                                    (checks.clone(), store.clone(), armed.clone());
+                                Box::pin(async move {
+                                    if checks.fetch_add(1, Ordering::SeqCst) + 1 == boundary {
+                                        *armed.next.lock().unwrap() = Some((store, stopped));
+                                    }
+                                })
+                            }),
+                        });
+                        seams
+                    });
+                    in_view(&fx, writer, |reader| {
+                        let mut session = ReaderSession::default();
+                        let found = block_on(reader.read_commit_path_in(
+                            &mut session,
+                            HEAD,
+                            id(&tip),
+                            &[b"leaf".to_vec()],
+                            None,
+                            PathOptions {
+                                include_witness: witness,
+                                ..PathOptions::default()
+                            },
+                        ))
+                        .unwrap();
+                        if denial {
+                            assert!(found.is_none());
+                            assert_eq!(session.used().output_bytes, 0);
+                        } else {
+                            assert_eq!(found.unwrap().canonical, serialize(leaf).unwrap());
+                        }
+                        assert_eq!(az.applied.load(Ordering::SeqCst), 1);
+                    });
+                }
+            }
+        }
+    }
+}
+
 impl Authorizer for Arc<DelayedAuthorization> {
     async fn authorize(&self, _: &Operation) -> Result<AuthzFacts, ServerError> {
         let clock = self.next.lock().unwrap().take();
@@ -1829,6 +2117,119 @@ fn initial_authorization_counts_against_the_original_deadline() {
                     }
                 }
             });
+        }
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Real single-pack history across views, proof modes and admission widths.
+fn history_reuses_sealed_facts_and_shares_guard_admission() {
+    use crate::store::read_probe::{self, Config};
+    for denial in [false, true] {
+        let mut fx = fixture_tweaked(Hooks::new(), http_cfg(), |cfg| {
+            cfg.sharding = Sharding::D34;
+            cfg.takedown_denial = false;
+        });
+        let tree = Object::Tree(Tree { entries: vec![] });
+        let mut commits = Vec::new();
+        for n in 0..30 {
+            commits.push(commit(
+                &tree,
+                &commits.last().into_iter().collect::<Vec<_>>(),
+                &format!("history {n}"),
+            ));
+        }
+        let mut objects = vec![&tree];
+        objects.extend(&commits);
+        let pack = fx.push("room", &objects, id(commits.last().unwrap()), None);
+        drain(&fx);
+        fx.pipe.cfg.takedown_denial = denial;
+        fx.pipe
+            .meta
+            .count_partition_scans
+            .store(true, Ordering::SeqCst);
+        let head = Key::new([keys::block(&pack).as_bytes(), b"\0inventory-head"].concat());
+        for writer in [false, true] {
+            for concurrency in [1, 6] {
+                let parent =
+                    crate::indexed::budget::SliceBudget::new(crate::limits::OBJECT_READER_CALLS);
+                *fx.pipe.meta.request_budget.lock().unwrap() = Some(parent.clone());
+                in_view(&fx, writer, |reader| {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_time()
+                        .start_paused(true)
+                        .build()
+                        .unwrap();
+                    let trace = Arc::new(Mutex::new(Vec::new()));
+                    let (kv, charged, seen, gets) = (
+                        fx.pipe.meta.calls(),
+                        parent.used(),
+                        fx.pipe.meta.seen().len(),
+                        get_count(&fx),
+                    );
+                    fx.pipe.meta.latency_ms.store(1, Ordering::SeqCst);
+                    fx.pipe.blobs.latency_ms.store(1, Ordering::SeqCst);
+                    let mut session = ReaderSession::default();
+                    let page = runtime
+                        .block_on(read_probe::run(
+                            Config {
+                                concurrency,
+                                trace: trace.clone(),
+                            },
+                            reader.walk_history_in(
+                                &mut session,
+                                HEAD,
+                                None,
+                                30,
+                                HistoryOptions::default(),
+                            ),
+                        ))
+                        .unwrap()
+                        .unwrap();
+                    fx.pipe.meta.latency_ms.store(0, Ordering::SeqCst);
+                    fx.pipe.blobs.latency_ms.store(0, Ordering::SeqCst);
+                    assert_eq!(
+                        page.commits.iter().map(|c| c.id).collect::<Vec<_>>(),
+                        commits.iter().rev().map(id).collect::<Vec<_>>()
+                    );
+                    assert!(page.complete);
+                    for (result, expected) in page.commits.iter().zip(commits.iter().rev()) {
+                        assert_eq!(result.canonical, serialize(expected).unwrap());
+                    }
+                    assert_eq!(get_count(&fx) - gets, 60, "only commit frames are loaded");
+                    assert_eq!(
+                        parent.used() - charged,
+                        fx.pipe.meta.calls() - kv,
+                        "inherited waves must charge each actual namespace call exactly once"
+                    );
+                    let observed = fx.pipe.meta.seen();
+                    assert_eq!(
+                        observed[seen..].iter().filter(|key| **key == head).count(),
+                        if denial { 32 } else { 0 },
+                        "one seal per node, then two bounded final-page groups; no re-location"
+                    );
+                    let events = trace.lock().unwrap();
+                    let mut edges: Vec<_> = events
+                        .iter()
+                        .flat_map(|event| [(event.start, 1i32), (event.end, -1i32)])
+                        .collect();
+                    edges.sort();
+                    let (mut active, mut peak) = (0, 0);
+                    for (_, delta) in edges {
+                        active += delta;
+                        peak = peak.max(active);
+                    }
+                    assert!(
+                        peak <= i32::try_from(concurrency).unwrap(),
+                        "all metadata, guard, directory and blob RPCs share admission: peak={peak}"
+                    );
+                    if concurrency == 6 {
+                        assert!(peak > 1, "independent guards are batched");
+                    }
+                    assert!(session.used().storage_calls < crate::limits::OBJECT_READER_CALLS);
+                });
+                *fx.pipe.meta.request_budget.lock().unwrap() = None;
+            }
         }
     }
 }

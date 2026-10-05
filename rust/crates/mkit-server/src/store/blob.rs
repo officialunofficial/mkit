@@ -262,6 +262,23 @@ pub enum CommitOutcome {
 /// A content-addressed, immutable blob store. Writes are put-if-absent;
 /// rewriting a present key with identical bytes is `AlreadyPresent`.
 pub trait BlobStore: MaybeSend + MaybeSync {
+    /// Reserve a read wave's backend calls before dispatch.
+    #[doc(hidden)]
+    fn reserve_read_calls(
+        &self,
+        _calls: u32,
+    ) -> Result<Option<super::ReadReservation>, StoreError> {
+        Ok(None)
+    }
+    /// Reserve encoded bytes for a bounded read wave before dispatch.
+    #[doc(hidden)]
+    fn reserve_read_bytes(
+        &self,
+        _bytes: u64,
+    ) -> Result<Option<super::ReadReservation>, StoreError> {
+        Ok(None)
+    }
+
     /// The upload handle [`Self::begin`] returns.
     type Sink: PackSink;
 

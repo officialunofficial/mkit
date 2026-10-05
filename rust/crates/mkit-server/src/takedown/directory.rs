@@ -104,21 +104,43 @@ impl Walk {
         store: &S,
         concurrency: usize,
     ) -> Result<Self, StoreError> {
+        // Other proof callers retain their per-dispatch accounting contract.
+        Self::start_reserved(store, concurrency, false).await
+    }
+    #[cfg(feature = "http-objects")]
+    pub(super) async fn start_reader<S: NamespaceStore>(store: &S) -> Result<Self, StoreError> {
+        Self::start_reserved(store, crate::store::read_io::parallelism(), true).await
+    }
+    async fn start_reserved<S: NamespaceStore>(
+        store: &S,
+        concurrency: usize,
+        reserve_wave: bool,
+    ) -> Result<Self, StoreError> {
         let (start, end) = range();
         let mut pages = VecDeque::new();
         for first in (0..DIRECTORY_SHARDS).step_by(concurrency.clamp(1, 6)) {
             let last =
                 (usize::from(first) + concurrency.clamp(1, 6)).min(usize::from(DIRECTORY_SHARDS));
-            let replies = futures::future::join_all((usize::from(first)..last).map(|shard| {
-                let (start, end) = (&start, &end);
-                async move {
-                    let shard = u16::try_from(shard).map_err(|_| corrupt())?;
-                    let page = store
-                        .scan(&Partition::ContentShard(shard), start, end, None, PAGE_ROWS)
-                        .await?;
-                    Ok::<_, StoreError>((shard, page))
-                }
-            }))
+            let reservation = if reserve_wave {
+                store.reserve_read_calls(
+                    u32::try_from(last - usize::from(first)).unwrap_or(u32::MAX),
+                )?
+            } else {
+                None
+            };
+            let replies = crate::store::ReadReservation::scope(
+                &[reservation],
+                futures::future::join_all((usize::from(first)..last).map(|shard| {
+                    let (start, end) = (&start, &end);
+                    async move {
+                        let shard = u16::try_from(shard).map_err(|_| corrupt())?;
+                        let page = store
+                            .scan(&Partition::ContentShard(shard), start, end, None, PAGE_ROWS)
+                            .await?;
+                        Ok::<_, StoreError>((shard, page))
+                    }
+                })),
+            )
             .await;
             for reply in replies {
                 let (shard, page) = reply?;

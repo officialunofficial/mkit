@@ -47,7 +47,8 @@ fn resolution_failure(miss: resolve::Miss) -> ServerError {
 }
 /// Stable public message for exhausted object-reader allowances.
 pub const OBJECT_READER_LIMIT_MESSAGE: &str = super::repo_storage::OWNER_READ_LIMIT_MESSAGE;
-/// Maximum IDs per call; duplicates preserve input order and share proof work.
+/// Default IDs per call; duplicates preserve input order and share proof work.
+/// Canonical/metadata calls can opt into up to 45; URL issuance remains capped here.
 pub const OBJECT_READER_BATCH: usize = 16;
 /// Core call cap inside the Worker invocation allowance.
 pub const OBJECT_READER_CALLS: u32 = crate::limits::OBJECT_READER_CALLS;
@@ -63,6 +64,7 @@ pub enum ReaderView<'a> {
 #[derive(Debug)]
 pub struct ObjectReader<'a, B, N, H> {
     identity: std::sync::Arc<()>,
+    batch_limit: usize,
     pipe: &'a Pipeline<B, N, H>,
     repo: RepoId,
     view: ReaderView<'a>,
@@ -107,6 +109,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
         };
         let reader = ObjectReader {
             identity: std::sync::Arc::new(()),
+            batch_limit: OBJECT_READER_BATCH,
             pipe: self,
             repo,
             view,
@@ -124,6 +127,21 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
 impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
     ObjectReader<'_, B, N, H>
 {
+    /// Opt into canonical/metadata batches of 1–45 ids. The default is 16.
+    /// Storage, row, byte, decode and output allowances are unchanged; URL
+    /// issuance still accepts at most 16 targets.
+    /// # Errors
+    /// `invalid_argument` when `limit` is outside 1–45. This performs no I/O.
+    pub fn with_batch_limit(mut self, limit: usize) -> Result<Self, ServerError> {
+        if !(1..=45).contains(&limit) {
+            return Err(ServerError::invalid_argument(
+                "batch limit must be between 1 and 45",
+            ));
+        }
+        self.batch_limit = limit;
+        Ok(self)
+    }
+
     async fn authorize(
         &self,
         budget: &SliceBudget,
@@ -435,8 +453,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         max_bytes: Option<u64>,
         mut session: Option<&mut ReaderSession>,
     ) -> Result<Prefetched, ServerError> {
-        if ids.len() > OBJECT_READER_BATCH {
-            return Err(ServerError::invalid_argument("batch exceeds 16 ids"));
+        if ids.len() > self.batch_limit {
+            return Err(ServerError::invalid_argument(format!(
+                "batch exceeds {} ids",
+                self.batch_limit
+            )));
         }
         let started = ms(self.pipe.clock.now_ms());
         let calls = SliceBudget::new(OBJECT_READER_CALLS);
@@ -529,14 +550,20 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         }
         let pipe = self.pipe;
         let (cfg, indexed, seams) = (self.cfg, self.indexed, self.seams);
-        let mut meta = Budgeted::new(&pipe.meta, calls).flagging(capped);
-        let mut blobs = Budgeted::new(&pipe.blobs, calls).flagging(capped);
+        let io = crate::store::read_io::ReadIo::new();
+        let mut meta = Budgeted::new(&pipe.meta, calls)
+            .flagging(capped)
+            .with_io(&io);
+        let mut blobs = Budgeted::new(&pipe.blobs, calls)
+            .flagging(capped)
+            .with_io(&io);
         if let Some((io, _)) = &session {
             meta = meta.with_session(&io.calls);
             blobs = blobs.with_session(&io.calls).with_encoded(&io.encoded);
         }
+        let checks = super::reader_checks::Checks::new(&meta);
         let view = ViewStore {
-            store: &meta,
+            store: &checks,
             repo: &self.repo,
             writer,
             policy: pipe.publication_policy.as_deref(),
@@ -562,10 +589,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         };
         // Directly denied members are absent even when their reachability
         // cannot be proved within the caller's byte or walk budget.
+        checks.prefetch_locations(&located).await.map_err(failure)?;
         let mut clear = Vec::with_capacity(located.len());
         for (id, location) in located {
-            if !denied(&meta, &id).await.map_err(failure)?
-                && !denied(&meta, &location.pack).await.map_err(failure)?
+            if !denied(&checks, &id).await.map_err(failure)?
+                && !denied(&checks, &location.pack).await.map_err(failure)?
             {
                 clear.push((id, location));
             }
@@ -638,8 +666,27 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 {
                     memo.capture(tips.clone());
                 }
+                // Fallback ancestry crosses body-load awaits. Its post-load
+                // expansion guard must read live storage, outside phase caches.
+                let walk_view = ViewStore {
+                    store: &meta,
+                    repo: &self.repo,
+                    writer,
+                    policy: pipe.publication_policy.as_deref(),
+                };
+                let walk_env = Env {
+                    no_reads: forbidden,
+                    blobs: &blobs,
+                    meta: &walk_view,
+                    shards: pipe.shards.as_ref(),
+                    repo: &self.repo,
+                    indexed,
+                    cfg,
+                    metrics: pipe.metrics.as_ref(),
+                    caps: Caps::Reader,
+                };
                 let walked = reach::walk_many_memo(
-                    &env,
+                    &walk_env,
                     seams.takedown.as_ref(),
                     &tips,
                     &targets,
@@ -666,9 +713,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         if capped_as_absent {
             // Do not locate inaccessible targets: membership-dependent work can
             // distinguish a stored orphan from a missing ID near the call cap.
+            checks
+                .prefetch(&reached.iter().copied().collect::<Vec<_>>())
+                .await
+                .map_err(failure)?;
             let mut accessible = Vec::new();
             for id in &reached {
-                if !denied(&meta, id).await.map_err(failure)? {
+                if !denied(&checks, id).await.map_err(failure)? {
                     accessible.push(*id);
                 }
             }
@@ -678,26 +729,134 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 .0;
             reached = located.iter().map(|(id, _)| *id).collect();
         }
-        let blocked = if pipe.cfg.takedown_denial && !reached.is_empty() {
-            object_denials(&view, pipe.shards.as_ref(), &self.repo, &reached, indexed).await?
+        located.retain(|(id, _)| reached.contains(id));
+        checks.prefetch_locations(&located).await.map_err(failure)?;
+        let mut clear = Vec::new();
+        for (id, loc) in located {
+            if denied(&checks, &id).await.map_err(failure)?
+                || denied(&checks, &loc.pack).await.map_err(failure)?
+            {
+                continue;
+            }
+            if sizes_only
+                && !pipe.cfg.takedown_denial
+                && !crate::indexed::resolve::member_dependencies_clear(
+                    &view,
+                    pipe.shards.as_ref(),
+                    &self.repo,
+                    id,
+                    loc,
+                    indexed.max_delta_chain_depth,
+                    pipe.metrics.as_ref(),
+                    Caps::Reader,
+                )
+                .await?
+            {
+                continue;
+            }
+            clear.push((id, loc));
+        }
+        located = clear;
+        let facts = if (pipe.cfg.takedown_denial || sizes_only) && !located.is_empty() {
+            inventory::located_entries(&view, &located)
+                .await
+                .map_err(failure)?
+        } else {
+            BTreeMap::new()
+        };
+        let blocked = if pipe.cfg.takedown_denial && !located.is_empty() {
+            object_denials(
+                &view,
+                pipe.shards.as_ref(),
+                &self.repo,
+                &located,
+                &facts,
+                indexed,
+            )
+            .await?
         } else {
             BTreeSet::new()
         };
-        let (mut bytes, mut sizes) = (BTreeMap::new(), BTreeMap::new());
+        let mut loaded = BTreeMap::new();
+        if !sizes_only {
+            let mut permitted = Vec::new();
+            for &(id, loc) in &located {
+                if blocked.contains(&id)
+                    || denied(&checks, &id).await.map_err(failure)?
+                    || denied(&checks, &loc.pack).await.map_err(failure)?
+                {
+                    continue;
+                }
+                meta.charge().map_err(|_| exhausted())?;
+                if matches!(
+                    seams.takedown.check(&self.repo, &id).await?,
+                    TakedownVerdict::Clear
+                ) {
+                    permitted.push((id, loc));
+                }
+            }
+            let output = permitted
+                .iter()
+                .try_fold(0u64, |sum, (id, loc)| {
+                    sum.checked_add(loc.value.decoded_size.checked_mul(
+                        ids.iter().filter(|requested| **requested == *id).count() as u64,
+                    )?)
+                })
+                .filter(|n| *n <= output_left)
+                .ok_or_else(exhausted)?;
+            let _ = output; // Admission precedes every independently allocated canonical result.
+            if permitted
+                .iter()
+                .all(|(_, loc)| loc.value.delta_base.is_none())
+            {
+                loaded = resolve::load_raw_many(
+                    &env,
+                    &permitted,
+                    &checks.uncached_locations(&permitted),
+                    decode,
+                )
+                .await
+                .map_err(resolution_failure)?;
+            } else {
+                // Reconstruction chains remain serial. Retain only the bounded
+                // requested results, then take the same fresh guard boundary as
+                // raw loads; no guard prefetched before I/O is a final decision.
+                for (id, loc) in permitted {
+                    match resolve::load(&env, id, loc, decode).await {
+                        Ok(bytes) => {
+                            loaded.insert(id, bytes);
+                        }
+                        Err(resolve::Miss::NotFound) => {}
+                        Err(miss) => return Err(resolution_failure(miss)),
+                    }
+                }
+            }
+        }
+        let mut final_locations = Vec::new();
         for (id, located) in located {
             if !reached.contains(&id) || blocked.contains(&id) {
                 continue;
             }
-            if denied(&meta, &id).await.map_err(failure)?
-                || denied(&meta, &located.pack).await.map_err(failure)?
-            {
-                continue;
-            }
             meta.charge().map_err(|_| exhausted())?;
-            if !matches!(
+            if matches!(
                 seams.takedown.check(&self.repo, &id).await?,
                 TakedownVerdict::Clear
             ) {
+                final_locations.push((id, located));
+            }
+        }
+        // Loading and final callbacks may yield or revoke a source. Refresh
+        // target/pack guards afterward, before dependencies and output.
+        checks.reset();
+        checks
+            .prefetch_locations(&final_locations)
+            .await
+            .map_err(failure)?;
+        let (mut bytes, mut sizes) = (BTreeMap::new(), BTreeMap::new());
+        for (id, located) in final_locations {
+            if denied(&checks, &id).await.map_err(failure)?
+                || denied(&checks, &located.pack).await.map_err(failure)?
+            {
                 continue;
             }
             if proofs.is_none() && !writer && fresh.contains(&id) {
@@ -705,24 +864,23 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     .reachability
                     .record(&self.repo, &id, ms(pipe.clock.now_ms()));
             }
+            if !crate::indexed::resolve::member_dependencies_clear(
+                &view,
+                pipe.shards.as_ref(),
+                &self.repo,
+                id,
+                located,
+                indexed.max_delta_chain_depth,
+                pipe.metrics.as_ref(),
+                Caps::Reader,
+            )
+            .await?
+            {
+                continue;
+            }
             if sizes_only {
-                if !crate::indexed::resolve::member_dependencies_clear(
-                    &view,
-                    pipe.shards.as_ref(),
-                    &self.repo,
-                    id,
-                    located,
-                    indexed.max_delta_chain_depth,
-                    pipe.metrics.as_ref(),
-                    Caps::Reader,
-                )
-                .await?
-                {
-                    continue;
-                }
-                let row = inventory::entry(&meta, &located.pack, &id)
-                    .await
-                    .map_err(failure)?
+                let row = facts
+                    .get(&id)
                     .ok_or_else(|| failure(resolve::Miss::Unavailable))?;
                 if row.kind == ObjectType::Delta as u8 {
                     continue;
@@ -754,7 +912,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     .checked_mul(ids.iter().filter(|requested| **requested == id).count() as u64)
                     .filter(|n| *n <= output_left)
                     .ok_or_else(exhausted)?;
-                match resolve::load(&env, id, located, decode).await {
+                let canonical = loaded.remove(&id).ok_or(resolve::Miss::NotFound);
+                match canonical {
                     Ok(canonical) if resolve::type_of(&canonical) != Some(ObjectType::Delta) => {
                         if canonical.len() as u64 != located.value.decoded_size {
                             return Err(failure(resolve::Miss::Unavailable));
@@ -766,7 +925,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                                 mkit_core::serialize::deserialize(&canonical).map_err(failure)?;
                             // Loading may yield. Recheck the storage stop before
                             // publishing any children of the decoded object.
-                            if denied(&meta, &id).await.map_err(failure)? {
+                            if denied(&super::reader_checks::Checks::new(&meta), &id)
+                                .await
+                                .map_err(failure)?
+                            {
                                 continue;
                             }
                             if !seams.takedown.stops_descent(&self.repo, &id) {

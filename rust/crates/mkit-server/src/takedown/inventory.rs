@@ -495,6 +495,56 @@ pub async fn entry<S: NamespaceStore>(
     }
     Ok(row)
 }
+/// Read sealed facts for already located members. Each partition group is
+/// bounded before allocating keys; seals and per-entry digests remain required.
+#[cfg(feature = "http-objects")]
+pub(crate) async fn located_entries<S: NamespaceStore>(
+    store: &S,
+    located: &[(Hash, index::LocatedObject)],
+) -> Result<std::collections::BTreeMap<Hash, Entry>, StoreError> {
+    use std::collections::BTreeMap;
+    let mut groups: BTreeMap<crate::Partition, Vec<(Hash, index::LocatedObject)>> = BTreeMap::new();
+    for &(id, location) in located {
+        groups
+            .entry(content_shard(&location.pack))
+            .or_default()
+            .push((id, location));
+    }
+    let mut facts = BTreeMap::new();
+    for (partition, entries) in groups {
+        for chunk in entries.chunks(16) {
+            let packs: BTreeSet<_> = chunk.iter().map(|(_, loc)| loc.pack).collect();
+            let mut keys: Vec<_> = packs.iter().map(head_key).collect();
+            for (id, loc) in chunk {
+                keys.push(entry_key(&loc.pack, id));
+                keys.push(marker_key(&loc.pack, id));
+            }
+            let values = store.get_many(&partition, &keys).await?;
+            if values.len() != keys.len() {
+                return Err(bad());
+            }
+            for raw in &values[..packs.len()] {
+                let head: Head = decode(raw.as_ref().ok_or_else(bad)?)?;
+                if head.version != 1 || !head.complete {
+                    return Err(bad());
+                }
+            }
+            for ((id, loc), pair) in chunk.iter().zip(values[packs.len()..].chunks_exact(2)) {
+                let raw = pair[0].as_ref().ok_or_else(bad)?;
+                if pair[1].as_ref().map(Value::as_bytes) != Some(entry_digest(id, raw).as_slice()) {
+                    return Err(bad());
+                }
+                let row: Entry = decode(raw)?;
+                row.validate()?;
+                if row.canonical_len != loc.value.decoded_size || row.base != loc.value.delta_base {
+                    return Err(bad());
+                }
+                facts.insert(*id, row);
+            }
+        }
+    }
+    Ok(facts)
+}
 pub async fn member<S: NamespaceStore>(
     store: &S,
     shards: &dyn ShardMap,

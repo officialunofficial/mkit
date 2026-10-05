@@ -218,6 +218,105 @@ pub(crate) async fn load<B: BlobStore, N: NamespaceStore>(
     }
 }
 
+/// Parallel raw members only: dependencies keep the ordinary serial resolver.
+/// Reserve complete decoded, encoded and call allowances before each wave.
+pub(crate) async fn load_raw_many<B: BlobStore, N: NamespaceStore>(
+    env: &Env<'_, B, N>,
+    members: &[(Hash, LocatedObject)],
+    uncached_guards: &BTreeSet<Hash>,
+    budget: &mut Budget,
+) -> Result<std::collections::BTreeMap<Hash, Arc<[u8]>>, Miss> {
+    let mut loaded = std::collections::BTreeMap::new();
+    let mut remaining = members;
+    while !remaining.is_empty() {
+        let wave_len = raw_wave_len(remaining)?;
+        let (wave, rest) = remaining.split_at(wave_len);
+        remaining = rest;
+        let decoded = wave
+            .iter()
+            .try_fold(0u64, |sum, (_, loc)| {
+                sum.checked_add(loc.value.decoded_size)
+            })
+            .ok_or(Miss::Capped)?;
+        if decoded > budget.0 {
+            return Err(Miss::Capped);
+        }
+        let encoded = wave
+            .iter()
+            .try_fold(0u64, |sum, (_, loc)| {
+                sum.checked_add(8)?.checked_add(loc.value.frame_length)
+            })
+            .ok_or(Miss::Capped)?;
+        let bytes = env
+            .blobs
+            .reserve_read_bytes(encoded)
+            .map_err(|_| Miss::Capped)?;
+        let guards = wave
+            .iter()
+            .flat_map(|(id, loc)| [id, &loc.pack])
+            .filter(|id| uncached_guards.contains(*id))
+            .count();
+        let calls = env
+            .meta
+            .reserve_read_calls(u32::try_from(guards).unwrap_or(u32::MAX))
+            .map_err(|_| Miss::Capped)?;
+        let blob_calls = env
+            .blobs
+            .reserve_read_calls(u32::try_from(wave.len() * 4).unwrap_or(u32::MAX))
+            .map_err(|_| Miss::Capped)?;
+        // Retain reservations on cancellation or failure. No independently
+        // running resolver can borrow another member's decoded allowance.
+        budget.0 -= decoded;
+        let replies = crate::store::ReadReservation::scope(
+            &[calls, blob_calls, bytes],
+            futures::future::join_all(wave.iter().map(|(id, location)| async move {
+                if location.value.delta_base.is_some() {
+                    return Err(Miss::Unavailable);
+                }
+                let mut local = Budget(location.value.decoded_size);
+                load(env, *id, *location, &mut local).await
+            })),
+        )
+        .await;
+        for ((id, _), reply) in wave.iter().zip(replies) {
+            match reply {
+                Ok(bytes) => {
+                    loaded.insert(*id, bytes);
+                }
+                Err(Miss::NotFound) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(loaded)
+}
+
+// Retained results are bounded by the reader's batch/output allowance. New
+// frames and canonical allocations must fit the previous single-member
+// transient envelope, rather than multiplying it by I/O concurrency. Decode
+// does not yield, so only one decoder's scratch can overlap these buffers.
+fn raw_wave_len(members: &[(Hash, LocatedObject)]) -> Result<usize, Miss> {
+    use crate::indexed::geometry::{CANONICAL_BYTES, FRAME_BYTES};
+    let ceiling = 8 + FRAME_BYTES + CANONICAL_BYTES;
+    let mut resident = 0u64;
+    let mut count = 0;
+    for (_, location) in members.iter().take(crate::store::read_io::parallelism()) {
+        let value = location.value;
+        if value.frame_length > FRAME_BYTES || value.decoded_size > CANONICAL_BYTES {
+            return Err(Miss::Capped);
+        }
+        // Pack headers and completed in-wave outputs can overlap every frame.
+        // Decoder scratch and Vec-to-Arc conversion run synchronously once.
+        let next = resident + 8 + value.frame_length + value.decoded_size;
+        if next > ceiling {
+            break;
+        }
+        resident = next;
+        count += 1;
+    }
+    Ok(count)
+}
+
 async fn load_object<B: BlobStore, N: NamespaceStore>(
     env: &Env<'_, B, N>,
     id: Hash,
@@ -550,3 +649,7 @@ mod tests {
 #[cfg(test)]
 #[path = "sidecar_tests.rs"]
 mod sidecar_tests;
+
+#[cfg(test)]
+#[path = "raw_wave_tests.rs"]
+mod raw_wave_tests;
