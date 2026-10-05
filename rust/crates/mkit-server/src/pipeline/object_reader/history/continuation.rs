@@ -131,6 +131,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 &mut token_expiry,
             )
             .await;
+        let result = settle(result, &capped);
         let result = match result {
             Err(e)
                 if e.code() == Code::ResourceExhausted
@@ -141,7 +142,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             }
             other => other,
         };
-        match settle(result, &capped) {
+        match result {
             Err(e)
                 if matches!(
                     e.code(),

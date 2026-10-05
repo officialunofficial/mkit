@@ -51,7 +51,9 @@ impl ReadProofs {
 
     pub(crate) fn inherit_deadline(&mut self, other: &Self) {
         if let Some(deadline) = other.deadline {
-            self.deadline = Some(self.deadline.map_or(deadline, |old| old.min(deadline)));
+            let deadline = self.deadline.map_or(deadline, |old| old.min(deadline));
+            self.deadline = Some(deadline);
+            self.expires = self.expires.min(deadline);
         }
     }
 

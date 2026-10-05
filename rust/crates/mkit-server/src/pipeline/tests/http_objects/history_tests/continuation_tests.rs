@@ -924,3 +924,86 @@ fn continuation_visibility_activation_rejects_a_preplanned_unfenced_write() {
         );
     });
 }
+
+#[test]
+fn continuation_expiry_with_a_settled_metadata_cap_is_uniform() {
+    for denial in [false, true] {
+        for writer in [false, true] {
+            let (mut fx, _, _, _) = history(3, 1, 2, denial);
+            enable(&mut fx);
+            let token = first(&fx, writer, 1);
+            let repo = fx.repo_id("room");
+            let visibility = keys::repo_visibility(&repo.name);
+            let expiry = token.expires_at_ms;
+            let clock = fx.clock.clone();
+            let mut session = ReaderSession::default();
+            let budget = session.io.calls.clone();
+            let reads = Arc::new(AtomicU32::new(0));
+            let seen = reads.clone();
+            Arc::get_mut(&mut fx.pipe.meta).unwrap().read_many_hook =
+                Some(Box::new(move |_, _, keys| {
+                    if keys.contains(&visibility)
+                        && keys.contains(&keys::repo_visibility_revision(&repo.name))
+                        && seen.fetch_add(1, Ordering::SeqCst) == 2
+                    {
+                        // The last security read returns normally; the next anchor
+                        // read fails its shared ledger before backend dispatch.
+                        clock.set(i64::try_from(expiry).unwrap());
+                        budget
+                            .charge_many(OBJECT_READER_CALLS - budget.used())
+                            .unwrap();
+                    }
+                }));
+            in_view(&fx, writer, |reader| {
+                assert!(
+                    block_on(reader.walk_history_page_in(
+                        &mut session,
+                        HEAD,
+                        Some(token.token.expose()),
+                        1
+                    ))
+                    .unwrap()
+                    .is_none()
+                );
+            });
+            assert_eq!(reads.load(Ordering::SeqCst), 3);
+            assert_eq!(session.used().storage_calls, OBJECT_READER_CALLS);
+            assert!(!session.proofs.contains(&token_cursor(&fx, &token)));
+        }
+    }
+}
+
+fn token_cursor<H: HookSet>(fx: &Fx<H>, token: &HistoryContinuation) -> Hash {
+    fx.pipe
+        .cfg
+        .history_tokens
+        .as_ref()
+        .unwrap()
+        .verify(token.token.expose())
+        .unwrap()
+        .cursor
+}
+
+#[test]
+fn continuation_restored_proofs_respect_a_shorter_inherited_deadline() {
+    let first = Arc::new(());
+    let mut saved = crate::pipeline::read_proofs::ReadProofs::default();
+    let long = HttpObjectsConfig {
+        read_deadline: std::time::Duration::from_secs(10),
+        reachability_lag_ms: 10_000,
+        ..http_cfg()
+    };
+    saved.bind(&first, None, 0, &long).unwrap();
+    saved.capture_selected(Some([1; 32]));
+    let mut temporary = saved.isolated();
+    let mut short = long;
+    short.read_deadline = std::time::Duration::from_secs(1);
+    temporary.bind(&Arc::new(()), None, 100, &short).unwrap();
+    saved.inherit_deadline(&temporary);
+    // Returning to the original context before its shortened deadline keeps
+    // evidence, but an operation ending beyond that deadline must refuse.
+    saved.bind(&first, None, 500, &long).unwrap();
+    assert!(saved.contains(&[1; 32]));
+    assert!(saved.current(1_000));
+    assert!(!saved.current(2_000));
+}
