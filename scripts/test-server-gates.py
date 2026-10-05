@@ -89,6 +89,7 @@ class ServerGates(unittest.TestCase):
         self.assertIn("unsafeGetDirectURL", runtime)
         for script in ("vcs-worker-conformance.sh", "connect-deadline-runtime.py"):
             self.assertIn("scripts/workers-wire-runtime.cjs", (ROOT / "scripts" / script).read_text())
+            self.assertIn("MKIT_CONFORMANCE_HTTP_CONNECTION_CLOSE", (ROOT / "scripts" / script).read_text())
         for command in ("run: scripts/vcs-worker-conformance.sh", "run: scripts/vcs-worker-conformance.sh --test-faults --multi",
                         "run: python3 scripts/connect-deadline-runtime.py --portable"):
             self.assertIn(command + "\n", conformance)

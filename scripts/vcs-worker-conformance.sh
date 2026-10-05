@@ -278,6 +278,7 @@ capture() {
     set +e
     env TMPDIR="$(cd "${TMPDIR:-/tmp}" && pwd -P)" \
         MKIT_CONFORMANCE_HTTP_TRACE="${phase}/http-${suite_run}.jsonl" \
+        MKIT_CONFORMANCE_HTTP_CONNECTION_CLOSE=1 \
         "$@" 2>"${phase}/runner-${suite_run}-stderr.log" | tee "${work}/last.tap" "${phase}/runner-${suite_run}.log"
     statuses=("${PIPESTATUS[@]}")
     status=${statuses[0]}

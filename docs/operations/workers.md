@@ -113,12 +113,13 @@ The portable/deadline fixture keeps its entry points and test-only R2 observer;
 its persisted takedown check restarts workerd against the same state directory.
 No production Worker entry or config changes.
 
-Each wire case owns its HTTP connection pool. A preliminary direct full-suite
-run exposed a Health `SendRequest` error after earlier fixtures; a small HTTP
-fixture reproduced the same failure by closing the pooled connection between
-cases. Case isolation prevents that cross-case dependency. Pooling within a case,
-all signed requests, replay limits and unretried operations remain unchanged.
-The shared production transport is unchanged.
+The direct fixture sets `MKIT_CONFORMANCE_HTTP_CONNECTION_CLOSE=1` for the raw
+wire client. Each HTTP/1.1 request asks the server to close its connection, avoiding
+idle socket reuse without changing signed headers/bodies, case concurrency,
+assertions or replay limits. Preliminary full-suite runs exposed `SendRequest`
+errors both between cases and during parallel writes within one case. Resetting
+pools between cases did not remove the latter. Native wire runs keep pooling;
+the shared production transport is unchanged.
 
 The wire job always summarizes existing retry records by phase and case.
 Any retry also produces a CI warning and a prominent warning in the summary,

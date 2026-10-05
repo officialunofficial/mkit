@@ -507,13 +507,7 @@ pub async fn run(target: &WireTarget, filter: Option<&str>) -> Report {
                 ))
             }
             Some(reason) => Verdict::Skip(reason),
-            // Cases own their fixtures and connection pools. A socket left idle
-            // by an earlier case must not fail an unrelated case's first call.
-            // Requests within a case still share its pool and existing retries.
-            None => match client.reconnect() {
-                Ok(client) => run_case(case, Ctx::new(client, profile.clone(), case.name)).await,
-                Err(error) => Verdict::Fail(format!("cannot build a case client: {error}")),
-            },
+            None => run_case(case, Ctx::new(client.clone(), profile.clone(), case.name)).await,
         };
         report.cases.push(CaseReport {
             name: case.name,

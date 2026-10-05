@@ -76,6 +76,7 @@ def main():
     scratch = scratch.resolve()
     work = Path(tempfile.mkdtemp(prefix="deadline-", dir=scratch))
     env = dict(os.environ, CARGO_PROFILE_DEV_DEBUG="0", TMPDIR=str(scratch),
+               MKIT_CONFORMANCE_HTTP_CONNECTION_CLOSE="1",
                WRANGLER_SEND_METRICS="false", WRANGLER_REGISTRY_PATH=str(work / "registry"),
                WRANGLER_LOG_PATH=str(work / "wrangler-debug.log"))
     if env.get("CARGO_TARGET_DIR"):

@@ -101,85 +101,44 @@ fn records(file: &tempfile::NamedTempFile) -> Vec<serde_json::Value> {
 }
 
 #[tokio::test]
-async fn cases_isolate_idle_connections_but_pool_requests_within_each_case() {
-    use crate::wire::{Feature, Profile, WireAuth, WireTarget, run};
-
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let base_url = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
-    let worker = thread::spawn(move || {
-        let mut counts = Vec::new();
-        // Deadline variants, two serving checks, then unknown-service rejection.
-        for expected in [14, 2, 1] {
-            let mut stream = listener.accept().unwrap().0;
-            for _ in 0..expected {
-                let bytes = request(&mut stream);
-                let end = bytes
-                    .windows(4)
-                    .position(|part| part == b"\r\n\r\n")
-                    .unwrap();
-                let headers = std::str::from_utf8(&bytes[..end])
-                    .unwrap()
-                    .to_ascii_lowercase();
-                let response = if headers.contains("content-type: application/grpc+proto") {
-                    fixed(
-                        200,
-                        b"\0\0\0\0\x02\x08\x01",
-                        "Content-Type: application/grpc+proto\r\n",
-                    )
-                } else {
-                    let body: serde_json::Value =
-                        serde_json::from_slice(&bytes[end + 4..]).unwrap();
-                    if body["service"].as_str().is_some_and(|service| {
-                        !service.is_empty() && service != "mkit.transport.v1.TransportService"
-                    }) {
-                        fixed(
-                            404,
-                            br#"{"code":"not_found"}"#,
-                            "Content-Type: application/json\r\n",
-                        )
-                    } else {
-                        fixed(
-                            200,
-                            br#"{"status":"SERVING"}"#,
-                            "Content-Type: application/json\r\n",
-                        )
-                    }
-                };
-                stream.write_all(&response).unwrap();
-            }
-            // Refuse a request from the next case on this old connection. With
-            // a shared pool this deterministically fails the next Health call.
-            stream
-                .set_read_timeout(Some(std::time::Duration::from_millis(100)))
-                .unwrap();
-            let reused = match stream.peek(&mut [0]) {
-                Ok(count) => count,
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                    ) =>
-                {
-                    0
-                }
-                Err(error) => panic!("cannot inspect idle connection: {error}"),
-            };
-            counts.push(expected + reused);
+async fn direct_fixture_closes_connections_without_changing_signed_requests() {
+    let payload = b"signed bytes";
+    let signer = Signer::new([0x32; 32], "https://vcs.launch.invalid", "fixture");
+    let signed = signer.sign_body(Rpc::UpdateRef.procedure(), payload);
+    let (base, server) = server(vec![fixed(200, b"", ""); 2], false);
+    let mut client = client(&base, None);
+    client.close_connections = true;
+    assert!(client.reconnect().unwrap().close_connections);
+    for _ in 0..2 {
+        let reply = client
+            .post(
+                Rpc::UpdateRef.procedure(),
+                UNARY_PROTO,
+                &signed.headers,
+                payload.to_vec(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply.status, 200);
+    }
+    let requests = server.join().unwrap();
+    assert_ne!(requests[0].client, requests[1].client);
+    for request in requests {
+        let end = request
+            .bytes
+            .windows(4)
+            .position(|p| p == b"\r\n\r\n")
+            .unwrap();
+        let headers = std::str::from_utf8(&request.bytes[..end]).unwrap();
+        assert!(headers.lines().any(|line| line == "connection: close"));
+        assert_eq!(&request.bytes[end + 4..], payload);
+        for (name, value) in &signed.headers {
+            assert!(headers.lines().any(|line| line.split_once(':').is_some_and(
+                |(actual_name, actual_value)| actual_name.eq_ignore_ascii_case(name)
+                    && actual_value.trim() == value
+            )));
         }
-        counts
-    });
-    let mut profile = Profile::new(WireAuth::None);
-    profile.features.insert(Feature::Health);
-    let report = run(&WireTarget { base_url, profile }, Some("health.")).await;
-    assert!(!report.failed(), "{}", report.tap());
-    assert_eq!(report.cases.len(), 3);
-    assert!(
-        report
-            .cases
-            .iter()
-            .all(|case| matches!(case.verdict, crate::wire::Verdict::Pass(_)))
-    );
-    assert_eq!(worker.join().unwrap(), [14, 2, 1]);
+    }
 }
 
 fn header<'a>(record: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
