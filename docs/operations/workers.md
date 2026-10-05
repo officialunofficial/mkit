@@ -113,6 +113,13 @@ The portable/deadline fixture keeps its entry points and test-only R2 observer;
 its persisted takedown check restarts workerd against the same state directory.
 No production Worker entry or config changes.
 
+Each wire case owns its HTTP connection pool. A preliminary direct full-suite
+run exposed a Health `SendRequest` error after earlier fixtures; a small HTTP
+fixture reproduced the same failure by closing the pooled connection between
+cases. Case isolation prevents that cross-case dependency. Pooling within a case,
+all signed requests, replay limits and unretried operations remain unchanged.
+The shared production transport is unchanged.
+
 The wire job always summarizes existing retry records by phase and case.
 Any retry also produces a CI warning and a prominent warning in the summary,
 including a retry for an error other than connection loss.

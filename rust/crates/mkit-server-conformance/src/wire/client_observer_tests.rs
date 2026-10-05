@@ -100,6 +100,74 @@ fn records(file: &tempfile::NamedTempFile) -> Vec<serde_json::Value> {
         .collect()
 }
 
+#[tokio::test]
+async fn cases_isolate_idle_connections_but_pool_requests_within_each_case() {
+    use crate::wire::{Feature, Profile, WireAuth, WireTarget, run};
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+    let worker = thread::spawn(move || {
+        let mut counts = Vec::new();
+        // Deadline variants, two serving checks, then unknown-service rejection.
+        for expected in [14, 2, 1] {
+            let mut stream = listener.accept().unwrap().0;
+            for _ in 0..expected {
+                let bytes = request(&mut stream);
+                let end = bytes
+                    .windows(4)
+                    .position(|part| part == b"\r\n\r\n")
+                    .unwrap();
+                let headers = std::str::from_utf8(&bytes[..end])
+                    .unwrap()
+                    .to_ascii_lowercase();
+                let response = if headers.contains("content-type: application/grpc+proto") {
+                    fixed(
+                        200,
+                        b"\0\0\0\0\x02\x08\x01",
+                        "Content-Type: application/grpc+proto\r\n",
+                    )
+                } else {
+                    let body: serde_json::Value =
+                        serde_json::from_slice(&bytes[end + 4..]).unwrap();
+                    if body["service"].as_str().is_some_and(|service| {
+                        !service.is_empty() && service != "mkit.transport.v1.TransportService"
+                    }) {
+                        fixed(
+                            404,
+                            br#"{"code":"not_found"}"#,
+                            "Content-Type: application/json\r\n",
+                        )
+                    } else {
+                        fixed(
+                            200,
+                            br#"{"status":"SERVING"}"#,
+                            "Content-Type: application/json\r\n",
+                        )
+                    }
+                };
+                stream.write_all(&response).unwrap();
+            }
+            // Refuse a request from the next case on this old connection. With
+            // a shared pool this deterministically fails the next Health call.
+            let reused = stream.peek(&mut [0]).unwrap();
+            counts.push(expected + reused);
+        }
+        counts
+    });
+    let mut profile = Profile::new(WireAuth::None);
+    profile.features.insert(Feature::Health);
+    let report = run(&WireTarget { base_url, profile }, Some("health.")).await;
+    assert!(!report.failed(), "{}", report.tap());
+    assert_eq!(report.cases.len(), 3);
+    assert!(
+        report
+            .cases
+            .iter()
+            .all(|case| matches!(case.verdict, crate::wire::Verdict::Pass(_)))
+    );
+    assert_eq!(worker.join().unwrap(), [14, 2, 1]);
+}
+
 fn header<'a>(record: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
     &record["response"]["headers"]
         .as_array()

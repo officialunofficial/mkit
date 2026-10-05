@@ -18,7 +18,8 @@ collect the applicable entries between their old and new immutable pins.
 - Workers wire CI bypasses the local dev HTTP proxy using a direct workerd
   socket, with the same pinned runtime, Worker builds, phases and assertions.
   Existing replay-safe retries remain; any retry emits a CI and summary warning.
-  Recovered-loss diagnostics remain downloadable on successful runs.
+  Recovered-loss diagnostics remain downloadable on successful runs. Each wire
+  case owns its connection pool; pooling and retries within a case are unchanged.
 
 - Server readers add `walk_history_in`, `locate_commit_in` and
   `read_commit_path_in` for bounded selected-ref parent discovery and exact
