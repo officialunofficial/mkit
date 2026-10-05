@@ -38,12 +38,111 @@ collect the applicable entries between their old and new immutable pins.
   A signed takedown contract checks public, private-token and owner denial before
   and after restart. The existing multipart binary fixture adds HEAD/range checks.
 
+- Public constructors cover every sink-visible `OutcomeKind` and
+  `ReservationV1` result, including repository storage changes; `Outcome::new`
+  constructs delivery payloads without stored rows. Types retain their
+  non-exhaustive annotations.
+- `Pipeline::repo_storage_many` reads up to 100 repositories in one namespace
+  with one coordinator `get_many`, including per-repository owner authorization.
+  Missing and unauthorized repositories both yield `None`. The Worker embedding
+  exposes the method and `MAX_REPO_STORAGE_BATCH`.
+- Embedder documentation explains durable sink retries, unordered at-least-once
+  delivery, and admission backpressure only above the configured backlog cap.
+
+- [embedder: breaking API] [embedder: stored-format change]
+  [embedder: store reset required] Exact per-repository stored-bytes accounting for multi-repository
+  deployments: the sum of the sizes of the distinct packs that are members of
+  a repository (a pack shared by two repositories counts in each). A
+  per-repository counter lives in the coordinator, created with the
+  repository, and a pack is counted exactly once, when its consumption first
+  reaches the coordinator, including consumption on different branches under
+  D34 and consumption by implicit session writes. The counter is eventually
+  consistent and exact. Every change queues a new `OutcomeKind::RepoStorageChanged
+  { stored_bytes, version }` outcome (absolute value, monotonic per-repository
+  version; hooks proto `Outcome.repo_storage_changed`, field 11) through the
+  outcome sink, and `Pipeline::repo_storage` reads `{ stored_bytes, version }`
+  in one coordinator call, authorized as an owner read. Counting is part
+  of relay delivery to a coordinator, so every `RelayHandler` counts.
+  `ReservationV1` gains a `RepoStorageChanged` state, so exhaustive matches
+  must handle it. A store created before this change has repositories without a
+  counter and must be reset.
+- `SetRepoVisibility` now runs the embedder's `Admission` hook and records an
+  outcome for the `OutcomeSink`, in both the owner-signed envelope mode and the
+  statement mode, like every other mutating RPC. A refusal or challenge changes
+  nothing; a granted reservation is settled in the same atomic unit as the
+  visibility row and its listing index. Hooks recognize the change by
+  `input.op.procedure() == Procedure::SetRepoVisibility` (with
+  `OpKind::SetRepoVisibility { visibility }`, `declared_bytes = 0`), and
+  `DefaultAdmission`
+  charges nothing for it. Remote hooks send the procedure and visibility in
+  additive optional `Outcome` fields. `Pipeline::set_repo_visibility_with_meta`
+  also returns the admission's receipt headers, which the Connect service now
+  sets.
+- Server embedders can share `ReadLimits` and `ReaderSession` across canonical
+  and metadata reads to cap aggregate calls, decode work, encoded I/O and output.
+
 ### Fixed
 
 - Wasm Connect dispatch ignores both client timeout headers before connectrpc
   computes a deadline, including direct `connect::service` calls. Configured
   deadline policies are ignored on wasm; native deadlines are unchanged.
   Worker adapters share this protection without changing body streaming or auth.
+
+- Worker conformance growth measurements use a fresh local state directory for
+  each case, preventing earlier replay rows from expiring during ticket-growth
+  calibration. Both growth assertions and the quota suite remain required.
+- Retire the stale Workers operations claim that interrupted takedown activation
+  can replay HTTP 200 with inactive denials. A regression checks denial rows
+  through signed-request and operation-id retries after interruption and restart:
+  both remain HTTP 503 until activation finishes. Runtime behavior is unchanged.
+
+- The public hook golden-request test expects all 18 requests, including
+  visibility and repository-storage outcomes, and checks that every fixture
+  field survives protobuf decoding. The stale 16-request assertion failed
+  both the macOS and Cloud Build main test gates.
+
+- Publication limit-reached telemetry counts only newly committed foreground
+  stops that answer `unavailable`, excluding checkpoint conflicts and input
+  limits. Per-target URL issuance preserves typed authorization errors after
+  a reader cap; only `unavailable` is rewritten as reader exhaustion.
+  Publication ledger documentation states its preparation-onward scope and
+  recovery exceptions, and names both canonical decode-budget messages.
+
+- `AdmissionInput::new_to_repo_bytes` is now the declared pack size or `Some(0)`
+  when the pack is already counted for the repository, for `BeginUpload` and
+  streaming uploads under multi-repository addressing (it was always the
+  declared size, contradicting its doc), and its doc states that it is a
+  pre-admission observation. `Committed.new_to_repo` counted a pack twice when
+  two branches consumed it concurrently; it is documented as an observation and
+  is exact only where the counter is in the writing partition. The
+  `RepoStorageChanged` outcome is the accounting source.
+- Object-reader cap hits consistently return `ResourceExhausted` with a stable
+  public message, including delta-depth and external-base caps hit while
+  checking takedown denial; unprovable public IDs retain their uniform absent
+  result.
+- Owner object-reader authorization preserves `ResourceExhausted` when the
+  caller's storage-call budget runs out during the repository-state lookup.
+- Workers retry transient alarm scheduling failures twice after committed timer
+  writes and return exhausted failures for replay and cold-start repair.
+- The embedded Worker example enables the pure-Rust zstd decoder for default
+  CLI pushes.
+- A prepared publication proof is bound to the publication row it was computed
+  against (membership generation, sequence and deletion boundary). A
+  generation change, a deletion boundary or a same-pair advance between
+  preparation and the final apply now refuses with retryable `unavailable`
+  instead of committing the proof onto the newer row. The binding is
+  request-local; no stored field changes.
+- Publication verification draws preparation, dependency visibility and every
+  optimistic retry of the final denial proof from one request allowance (with
+  headroom reserved for settlement; snapshot, lease, checkpoint and commit calls
+  are counted too), and exhaustion is `unavailable` with the message
+  `publication verification capacity exhausted` whichever call it lands on. It
+  was `invalid_argument` (`object index limit exceeded`) in some phases, which
+  told clients the content was permanently invalid. A resumable job's recorded
+  stop at an unsupported historical limit now answers `unavailable` with
+  `publication verification limit reached` and a counter, instead of
+  `invalid_argument`. Per-lookup index caps and the indexed decode budget keep
+  their specified errors on both paths.
 
 ### Performance
 
@@ -80,6 +179,36 @@ collect the applicable entries between their old and new immutable pins.
   with matching typed details. Verification semantics and embedder APIs remain
   unchanged; timer handlers may optionally expose their metrics sink for
   commit-confirmed checkpoint observations.
+
+- Stored formats are not a compatibility contract before 1.0; the golden
+  fixtures that pinned v0.5.0 row encodings are removed and a store may need
+  a reset across versions (SPEC-SERVER §17).
+- Documentation: SPEC-SERVER §9.3, §10.2 and §18 clarify the integrity frontier
+  that verified members provide, the pair-coverage and denial obligations it
+  does not waive, and the duty to document historical-support limits.
+  The Workers operator guide gains a table of the selected publication verifier
+  paths and their real limits, and the rules for enabling takedown (rehearse on
+  a copy of an existing store) and inspection (empty store). New regression
+  tests pin the baseline fail-closed behavior of every selected path. No
+  production behavior changes.
+- [embedder: breaking API] `ObjectReader::object_metadata` now fails the whole batch with
+  `ResourceExhausted` when a proven object's delta depth or external base
+  lookup cap is hit, matching `read_canonical` (previously the ID was silently
+  absent).
+- Documentation only: stale Workers operator and README claims (reader cache
+  refresh, supplied hooks needing remote configuration, the absent ListRepos,
+  decoder scratch in the launch graph, typed read exhaustion) now match the
+  code; SPEC-SERVER §18 is deployment-neutral with the Workers launch rules in
+  the Workers operator guide; the `store::inspection_*` modules and the
+  deferred inspection, Event and proof work are marked as not integrated or
+  not implemented; SPEC-WRITE-GRANTS §9.4 requires server-clock visibility
+  change times independently of statement anti-replay ordering.
+- The `pack-ruzstd` feature relies on a bounded-decode patch to ruzstd 0.9
+  tracked by [KillingSpark/zstd-rs #124](https://github.com/KillingSpark/zstd-rs/pull/124),
+  "Refuse blocks that decode past Block_Maximum_Size", still open.
+  Crates.io consumers must apply it in their own workspace until a release includes it: `[patch.crates-io] ruzstd = { git =
+  "https://github.com/officialunofficial/mkit", tag = "v0.5.0" }`. Upstreaming
+  is in progress.
 
 ### Documentation
 
@@ -236,51 +365,6 @@ stored shapes instead of upgrading or downgrading them.
   They had no callers: the pipeline verifies within the request's publication
   ledger.
 
-### Added
-
-- Public constructors cover every sink-visible `OutcomeKind` and
-  `ReservationV1` result, including repository storage changes; `Outcome::new`
-  constructs delivery payloads without stored rows. Types retain their
-  non-exhaustive annotations.
-- `Pipeline::repo_storage_many` reads up to 100 repositories in one namespace
-  with one coordinator `get_many`, including per-repository owner authorization.
-  Missing and unauthorized repositories both yield `None`. The Worker embedding
-  exposes the method and `MAX_REPO_STORAGE_BATCH`.
-- Embedder documentation explains durable sink retries, unordered at-least-once
-  delivery, and admission backpressure only above the configured backlog cap.
-
-- [embedder: breaking API] [embedder: stored-format change]
-  [embedder: store reset required] Exact per-repository stored-bytes accounting for multi-repository
-  deployments: the sum of the sizes of the distinct packs that are members of
-  a repository (a pack shared by two repositories counts in each). A
-  per-repository counter lives in the coordinator, created with the
-  repository, and a pack is counted exactly once, when its consumption first
-  reaches the coordinator, including consumption on different branches under
-  D34 and consumption by implicit session writes. The counter is eventually
-  consistent and exact. Every change queues a new `OutcomeKind::RepoStorageChanged
-  { stored_bytes, version }` outcome (absolute value, monotonic per-repository
-  version; hooks proto `Outcome.repo_storage_changed`, field 11) through the
-  outcome sink, and `Pipeline::repo_storage` reads `{ stored_bytes, version }`
-  in one coordinator call, authorized as an owner read. Counting is part
-  of relay delivery to a coordinator, so every `RelayHandler` counts.
-  `ReservationV1` gains a `RepoStorageChanged` state, so exhaustive matches
-  must handle it. A store created before this change has repositories without a
-  counter and must be reset.
-- `SetRepoVisibility` now runs the embedder's `Admission` hook and records an
-  outcome for the `OutcomeSink`, in both the owner-signed envelope mode and the
-  statement mode, like every other mutating RPC. A refusal or challenge changes
-  nothing; a granted reservation is settled in the same atomic unit as the
-  visibility row and its listing index. Hooks recognize the change by
-  `input.op.procedure() == Procedure::SetRepoVisibility` (with
-  `OpKind::SetRepoVisibility { visibility }`, `declared_bytes = 0`), and
-  `DefaultAdmission`
-  charges nothing for it. Remote hooks send the procedure and visibility in
-  additive optional `Outcome` fields. `Pipeline::set_repo_visibility_with_meta`
-  also returns the admission's receipt headers, which the Connect service now
-  sets.
-- Server embedders can share `ReadLimits` and `ReaderSession` across canonical
-  and metadata reads to cap aggregate calls, decode work, encoded I/O and output.
-
 ### Removed
 
 - [embedder: breaking API] The Workers-only `published-view` optimization (ref snapshots in R2, its
@@ -303,96 +387,6 @@ stored shapes instead of upgrading or downgrading them.
   delivered once to the configured sink, unchanged. `PurgeDelivery::fire_with_local`
   and the Worker `NamespaceDelivery` handler are removed. Only current
   checkpoint rows resume; reset unsupported in-flight state.
-
-### Changed
-
-- Stored formats are not a compatibility contract before 1.0; the golden
-  fixtures that pinned v0.5.0 row encodings are removed and a store may need
-  a reset across versions (SPEC-SERVER §17).
-- Documentation: SPEC-SERVER §9.3, §10.2 and §18 clarify the integrity frontier
-  that verified members provide, the pair-coverage and denial obligations it
-  does not waive, and the duty to document historical-support limits.
-  The Workers operator guide gains a table of the selected publication verifier
-  paths and their real limits, and the rules for enabling takedown (rehearse on
-  a copy of an existing store) and inspection (empty store). New regression
-  tests pin the baseline fail-closed behavior of every selected path. No
-  production behavior changes.
-- [embedder: breaking API] `ObjectReader::object_metadata` now fails the whole batch with
-  `ResourceExhausted` when a proven object's delta depth or external base
-  lookup cap is hit, matching `read_canonical` (previously the ID was silently
-  absent).
-- Documentation only: stale Workers operator and README claims (reader cache
-  refresh, supplied hooks needing remote configuration, the absent ListRepos,
-  decoder scratch in the launch graph, typed read exhaustion) now match the
-  code; SPEC-SERVER §18 is deployment-neutral with the Workers launch rules in
-  the Workers operator guide; the `store::inspection_*` modules and the
-  deferred inspection, Event and proof work are marked as not integrated or
-  not implemented; SPEC-WRITE-GRANTS §9.4 requires server-clock visibility
-  change times independently of statement anti-replay ordering.
-- The `pack-ruzstd` feature relies on a bounded-decode patch to ruzstd 0.9
-  tracked by [KillingSpark/zstd-rs #124](https://github.com/KillingSpark/zstd-rs/pull/124),
-  "Refuse blocks that decode past Block_Maximum_Size", still open.
-  Crates.io consumers must apply it in their own workspace until a release includes it: `[patch.crates-io] ruzstd = { git =
-  "https://github.com/officialunofficial/mkit", tag = "v0.5.0" }`. Upstreaming
-  is in progress.
-
-### Fixed
-
-- Worker conformance growth measurements use a fresh local state directory for
-  each case, preventing earlier replay rows from expiring during ticket-growth
-  calibration. Both growth assertions and the quota suite remain required.
-- Retire the stale Workers operations claim that interrupted takedown activation
-  can replay HTTP 200 with inactive denials. A regression checks denial rows
-  through signed-request and operation-id retries after interruption and restart:
-  both remain HTTP 503 until activation finishes. Runtime behavior is unchanged.
-
-- The public hook golden-request test expects all 18 requests, including
-  visibility and repository-storage outcomes, and checks that every fixture
-  field survives protobuf decoding. The stale 16-request assertion failed
-  both the macOS and Cloud Build main test gates.
-
-- Publication limit-reached telemetry counts only newly committed foreground
-  stops that answer `unavailable`, excluding checkpoint conflicts and input
-  limits. Per-target URL issuance preserves typed authorization errors after
-  a reader cap; only `unavailable` is rewritten as reader exhaustion.
-  Publication ledger documentation states its preparation-onward scope and
-  recovery exceptions, and names both canonical decode-budget messages.
-
-- `AdmissionInput::new_to_repo_bytes` is now the declared pack size or `Some(0)`
-  when the pack is already counted for the repository, for `BeginUpload` and
-  streaming uploads under multi-repository addressing (it was always the
-  declared size, contradicting its doc), and its doc states that it is a
-  pre-admission observation. `Committed.new_to_repo` counted a pack twice when
-  two branches consumed it concurrently; it is documented as an observation and
-  is exact only where the counter is in the writing partition. The
-  `RepoStorageChanged` outcome is the accounting source.
-- Object-reader cap hits consistently return `ResourceExhausted` with a stable
-  public message, including delta-depth and external-base caps hit while
-  checking takedown denial; unprovable public IDs retain their uniform absent
-  result.
-- Owner object-reader authorization preserves `ResourceExhausted` when the
-  caller's storage-call budget runs out during the repository-state lookup.
-- Workers retry transient alarm scheduling failures twice after committed timer
-  writes and return exhausted failures for replay and cold-start repair.
-- The embedded Worker example enables the pure-Rust zstd decoder for default
-  CLI pushes.
-- A prepared publication proof is bound to the publication row it was computed
-  against (membership generation, sequence and deletion boundary). A
-  generation change, a deletion boundary or a same-pair advance between
-  preparation and the final apply now refuses with retryable `unavailable`
-  instead of committing the proof onto the newer row. The binding is
-  request-local; no stored field changes.
-- Publication verification draws preparation, dependency visibility and every
-  optimistic retry of the final denial proof from one request allowance (with
-  headroom reserved for settlement; snapshot, lease, checkpoint and commit calls
-  are counted too), and exhaustion is `unavailable` with the message
-  `publication verification capacity exhausted` whichever call it lands on. It
-  was `invalid_argument` (`object index limit exceeded`) in some phases, which
-  told clients the content was permanently invalid. A resumable job's recorded
-  stop at an unsupported historical limit now answers `unavailable` with
-  `publication verification limit reached` and a counter, instead of
-  `invalid_argument`. Per-lookup index caps and the indexed decode budget keep
-  their specified errors on both paths.
 
 ## [0.5.0](https://github.com/officialunofficial/mkit/compare/v0.4.2...v0.5.0) - 2026-10-02
 

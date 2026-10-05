@@ -60,7 +60,7 @@ fn streaming_end_errors_and_truncation_fail_closed() {
     frame(&mut bytes, b"protobuf").unwrap();
     let end = br#"{"error":{"code":"failed_precondition","message":"ticket rejected"}}"#;
     bytes.push(2);
-    bytes.extend_from_slice(&(end.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(&u32::try_from(end.len()).unwrap().to_be_bytes());
     bytes.extend_from_slice(end);
     assert!(
         matches!(decode_stream(&bytes), Err(Error::Remote(error)) if error.code == "failed_precondition")

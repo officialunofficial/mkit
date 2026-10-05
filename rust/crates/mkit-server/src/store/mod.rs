@@ -27,9 +27,9 @@ mod error;
 pub(crate) mod inspection_flags;
 #[cfg(test)]
 pub(crate) mod inspection_holds;
-#[cfg(test)]
+#[cfg(all(test, feature = "memory"))]
 pub(crate) mod inspection_mode;
-#[cfg(test)]
+#[cfg(all(test, feature = "memory"))]
 #[path = "tests/inspection_mode.rs"]
 mod inspection_mode_tests;
 
