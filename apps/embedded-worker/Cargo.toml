@@ -10,8 +10,12 @@ license = "MIT OR Apache-2.0"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures-util = "0.3"
+hex = "0.4"
 worker = { version = "0.8", features = ["http"] }
-mkit-server-worker = { path = "../../rust/crates/mkit-server-worker", features = ["pack-ruzstd"] }
+mkit-server-worker = { path = "../../rust/crates/mkit-server-worker", features = ["pack-ruzstd", "http-objects"] }
 mkit-server = { path = "../../rust/crates/mkit-server", default-features = false }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]

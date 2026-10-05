@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Shared deadline cases complement the wasm entry-point runtime regression.
   A signed takedown contract checks public, private-token and owner denial before
   and after restart. The existing multipart binary fixture adds HEAD/range checks.
+Embedder migration entries use `[embedder: breaking API]`,
+`[embedder: stored-format change]` and `[embedder: store reset required]` tags.
+Combine tags when applicable; every breaking API entry states a replacement and
+every stored-format entry states whether a store reset is required. Embedders
+collect the applicable entries between their old and new immutable pins.
 
 ### Fixed
 
@@ -61,6 +66,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- The generic Workers reference composes in-process hooks, bounded request reader
+  sessions, URL tokens and a durable outcome/storage projection. Its separate
+  local harness verifies cold retries, duplicate/out-of-order delivery, bounded
+  deduplication retention and purge. The receiver keeps the newest 1,024 accepted
+  reservation IDs and preserves its highest-version storage projection.
+  The Workers embedder guide documents budgets, continuation and per-pin upgrades.
+
 - Align the server profile map and invariant enforcement index with implemented
   publication, synchronous inspection, denial, preservation and admin behavior.
   Retain async-inspection storage groundwork and distinguish future integration.
@@ -78,39 +90,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking (toward 0.6)
 
-- On wasm, `connect::service` returns `connect::ConnectService`, a protected
+- [embedder: breaking API] On wasm, `connect::service` returns `connect::ConnectService`, a protected
   Tower service, instead of raw `connectrpc::ConnectRpcService`. Use the new
   type in explicit annotations and `ConnectService::new(connect::router(...))`
   for custom mounts. The limit, compression and interceptor builders remain
   available; deadline policies are explicitly ignored. Native types are unchanged.
-- `StoreError` adds `OperationLimitExceeded` for bounded in-memory operations.
+- [embedder: breaking API] `StoreError` adds `OperationLimitExceeded` for bounded in-memory operations.
   Migration: handle this variant in exhaustive matches and discard or publish
   partial overlay writes according to host policy.
-- Merge, revert, cherry-pick, merge-base and ancestry operation signatures now
+- [embedder: breaking API] Merge, revert, cherry-pick, merge-base and ancestry operation signatures now
   infer source/sink types. Migration: pass `&ObjectStore` directly when using
   store wrappers (for example, `boxed_store.as_ref()` instead of `&boxed_store`),
   and qualify function items with `::<ObjectStore>` when no call/expected type
   provides inference. Direct `&ObjectStore` calls and explicit ancestor-set
   hasher arguments remain valid.
 
-- Request reservation variants require `StoredProcedure`. Pass the operation
+- [embedder: breaking API] Request reservation variants require `StoredProcedure`. Pass the operation
   directly to `ReservationV1::{pending, committed, aborted, read_served}`;
   `with_procedure` is removed. Storage-counter events remain procedure-less,
   and expired upload tickets still report `BeginUpload`.
-- Stored visibility requires the server-clock `changed_ms`; the creation-time
+- [embedder: breaking API] [embedder: stored-format change]
+  [embedder: store reset required] Stored visibility requires the server-clock `changed_ms`; the creation-time
   fallback and `visibility_changed_ms` accessor are removed. Read `changed_ms`
   directly and retain `last_created_ms` for statement anti-replay ordering.
   Reset unsupported stores; no stored-row conversion is provided.
-- Workers SQL installs the current tables, timer index and schema marker in one
+- [embedder: breaking API] [embedder: stored-format change]
+  [embedder: store reset required] Workers SQL installs the current tables, timer index and schema marker in one
   transaction, and refuses noncurrent or incomplete stores. Replace internal
   `schema::migrate`/migration-list usage with `schema::initialize`/`BOOTSTRAP`;
   `StoreMaintenance::migrate` remains an initialize/check adapter. Reset
   unsupported stores rather than upgrading them.
-- Workers purge resumes only current four-byte checkpoints (or an empty initial
+- [embedder: breaking API] [embedder: stored-format change]
+  [embedder: store reset required] Workers purge resumes only current four-byte checkpoints (or an empty initial
   checkpoint), and refuses populated roots without an addressing marker.
   Reset unsupported state; fresh housekeeping-before-marker bootstrap remains
   supported.
-- Unsupported HTTP `?proof=1` queries now return 416 after normal access,
+- [embedder: breaking API] Unsupported HTTP `?proof=1` queries now return 416 after normal access,
   published target resolution and takedown checks, before proof preparation,
   validators or read Admission. `If-None-Match: *` no longer produces 304.
   `Pipeline::serve_http_object_with_proofs`, `HttpSeams::proofs`,
@@ -120,17 +135,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `serve_http_object_with_runtime`; embedders needing disclosure bundles
   build them with `mkit_core::verify::build_disclosure_from` and `ObjectReader`.
   Generic proof formats, core builders and client verification are unchanged.
-- Storage layout modules `store::{keys, codec, index, tickets, outbox,
+- [embedder: breaking API] Storage layout modules `store::{keys, codec, index, tickets, outbox,
   publication, watermark}` move behind the doc-hidden `store::adapter_spi`.
   Adapter/conformance implementations migrate those imports to the SPI;
   embedders import `ReservationV1`, `OutcomeRef`, `AbortReason`, `PendingOp`,
   `StoredProcedure` and `TicketCaps` directly from `store`.
-- Core-only `store::{read, view}` and unused inspection/restore planning are
+- [embedder: breaking API] Core-only `store::{read, view}` and unused inspection/restore planning are
   removed from the public surface. Use `Pipeline`/`ObjectReader` for verified
   reads and portable `store::{export_partition, import_stream}` for maintenance;
   the existing native `fs` constructors remain supported. Inspection planning
   and old restore tests remain private test support with no runtime callers.
-- Public configuration structs are non-exhaustive, including `UploadLimits`,
+- [embedder: breaking API] Public configuration structs are non-exhaustive, including `UploadLimits`,
   `QuotaLimits`, `OutboxBacklogCap`, `TicketCaps`, `GrantSettings`, `LeaseParams`,
   `SliceLimits`, `MemberSourceLimits`, `RefRule`, `RefPolicy`, `HttpMountOptions`,
   `HttpReadRuntime`, `HttpSeams`, `AuthorityFence` and the Workers adapter's
@@ -139,34 +154,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SliceLimits` also provide builders for common overrides. Existing
   `PipelineConfig::new`, `IndexedConfig::default`, `HttpObjectsConfig::default`
   and `WorkerConfig::from_vars`/`from_env` remain the construction API.
-- `takedown::work::Work` is non-exhaustive. Replace runtime literals with
+- [embedder: breaking API] `takedown::work::Work` is non-exhaustive. Replace runtime literals with
   `Work::new(metadata, serving, preserved, WorkConfig::new(..))`; configure
   purge, discovery margin and acquisition profile on the non-exhaustive
   `WorkConfig` before assembly. Routing, retention and clock remain explicit.
-- The duplicate HTTP admission seam (`HttpAdmission`, `AdmitRequest`,
+- [embedder: breaking API] The duplicate HTTP admission seam (`HttpAdmission`, `AdmitRequest`,
   `AdmitDecision`, `Admitted`, `NoAdmission` and `HttpSeams::admission`) becomes
   crate-private. Implement `pipeline::Admission` in the `HookSet` and enable
   `HttpObjectsConfig::admit_reads`; HTTP serving and settlement keep their
   existing behavior. `HttpSeams` retains its constructor and other public seams.
-- `ObjectReader::object_sizes` is removed. Use `object_metadata`, selecting
+- [embedder: breaking API] `ObjectReader::object_sizes` is removed. Use `object_metadata`, selecting
   `logical_len` for Blob payload lengths and `canonical_len` for other kinds
   to reproduce the old mixed-size result.
-- `admin::{plan_operation, plan_system, OperationReplay}` and takedown denial
+- [embedder: breaking API] `admin::{plan_operation, plan_system, OperationReplay}` and takedown denial
   key/codec helpers become crate-private. Use authenticated `admin::Engine`
   operations or the pipeline; no adapter or application called these helpers.
-- `download` becomes crate-private and unused `takedown::ACTIVATED` is removed.
+- [embedder: breaking API] `download` becomes crate-private and unused `takedown::ACTIVATED` is removed.
   Bindings use the pipeline download API; activation is determined by the
   deployment's takedown configuration.
-- Purge and indexed slices now use one `budget::SliceBudget`, re-exported at
+- [embedder: breaking API] Purge and indexed slices now use one `budget::SliceBudget`, re-exported at
   both existing paths. Purge callers migrate `charge(n)` to
   `charge_operations(n)`; request callers retain `charge()`/`charge_many(n)`.
   Local purge reservations still remain charged after parent refusal.
-- The Cargo `test-faults` feature is renamed to internal `__test-faults` in the
+- [embedder: breaking API] The Cargo `test-faults` feature is renamed to internal `__test-faults` in the
   server, adapter and dependent test hosts. Update Cargo feature lists; the
   wire capability and conformance script's `--test-faults` flag are unchanged.
 
 
-- The 0.5.0 comparison also includes earlier unreleased API changes:
+- [embedder: breaking API] The 0.5.0 comparison also includes earlier unreleased API changes:
   `indexed::publication::Exhaustion::IndexLookup` is a new exhaustion variant
   (handle it in matches); removed `pipeline::{published, PublishedSource}` and
   `Pipeline::with_published_source` are replaced by verified stored publication
@@ -177,10 +192,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Fault-hook types and test methods remain available only with the renamed
   internal `__test-faults` feature; enable it explicitly in repository tests.
 
-- `mkit_server::sql` moves to `mkit_server_worker::sql`, and the `sql`
+- [embedder: breaking API] `mkit_server::sql` moves to `mkit_server_worker::sql`, and the `sql`
   feature is removed. Import SQL store types from the Workers adapter and
   remove `sql` from `mkit-server` feature lists.
-- `mkit_server::telemetry::pressure` and `mkit_server::relay::WORKER_*`
+- [embedder: breaking API] `mkit_server::telemetry::pressure` and `mkit_server::relay::WORKER_*`
   move to `mkit_server_worker::telemetry::pressure` and
   `mkit_server_worker::relay::WORKER_*`. Update imports to the adapter.
 
@@ -188,17 +203,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 compares against the 0.5.0 baseline as the 0.6 release. Reset unsupported
 stored shapes instead of upgrading or downgrading them.
 
-- Request reservations and outcomes record their operation. `ReservationV1::{Pending,
+- [embedder: breaking API] Request reservations and outcomes record their operation. `ReservationV1::{Pending,
   Committed, Aborted, ReadServed}` require `StoredProcedure` and are
   `#[non_exhaustive]`: use the constructors with the operation argument and
   match with `..`. `ReservationV1::Expired`, `Ticketed`, `OutcomeRef` and
   `AbortReason` are unchanged.
-- `Outcome` gains `procedure: Option<Procedure>` and
+- [embedder: breaking API] `Outcome` gains `procedure: Option<Procedure>` and
   `visibility: Option<RepoVisibility>`. Request outcomes identify their
   operation, including a reservation the crash reconciler abandons; expired
   tickets derive `BeginUpload`. System `RepoStorageChanged` outcomes omit the
   procedure. Visibility is present only for visibility-change outcomes.
-- `mkit_server::indexed::publication::{verify, verify_inspected}` are removed.
+  Migration: use `Outcome::new` or `Outcome::from_reservation` for construction,
+  and read the optional operation/visibility fields when handling outcomes.
+- [embedder: breaking API] `mkit_server::indexed::publication::{verify, verify_inspected}` are removed.
   They had no callers: the pipeline verifies within the request's publication
   ledger.
 
@@ -215,7 +232,8 @@ stored shapes instead of upgrading or downgrading them.
 - Embedder documentation explains durable sink retries, unordered at-least-once
   delivery, and admission backpressure only above the configured backlog cap.
 
-- Exact per-repository stored-bytes accounting for multi-repository
+- [embedder: breaking API] [embedder: stored-format change]
+  [embedder: store reset required] Exact per-repository stored-bytes accounting for multi-repository
   deployments: the sum of the sizes of the distinct packs that are members of
   a repository (a pack shared by two repositories counts in each). A
   per-repository counter lives in the coordinator, created with the
@@ -248,20 +266,21 @@ stored shapes instead of upgrading or downgrading them.
 
 ### Removed
 
-- The Workers-only `published-view` optimization (ref snapshots in R2, its
+- [embedder: breaking API] The Workers-only `published-view` optimization (ref snapshots in R2, its
   timer, `PublishedViewConfig`, `fetch_configured`, `ns_object_configured`,
   the `PUBLISHED_SNAPSHOTS` binding) and the `mkit-server` `published-view`
   cargo feature with `pipeline::published` and `Pipeline::with_published_source`
   are removed. Nothing enabled them by default. `timers::registry::kinds::PUBLISHED_VIEW`
   is removed and timer kind 10 stays reserved. `embedding_pipeline` and
   `purge::LocalCache` no longer carry snapshot parameters.
-- The production embedder's deprecated profile alias is removed; use
+- [embedder: breaking API] The production embedder's deprecated profile alias is removed; use
   `LAUNCH_PROFILE=paid-workers`.
-- The never-set `PipelineConfig::inspection_mode` and
+- [embedder: breaking API] The never-set `PipelineConfig::inspection_mode` and
   `WorkerConfig::inspection_mode` fields and the no-op Worker inspection
   marker guard are removed. Enabling inspection still requires an empty store;
   this is now documented as an operator requirement.
-- The namespace-scoped purge no longer walks the namespace's repository
+- [embedder: breaking API] [embedder: stored-format change]
+  [embedder: store reset required] The namespace-scoped purge no longer walks the namespace's repository
   catalog; with no per-repository URL paths that step deleted nothing. A
   namespace purge deletes its own exact paths from the local cache and is
   delivered once to the configured sink, unchanged. `PurgeDelivery::fire_with_local`
@@ -281,7 +300,7 @@ stored shapes instead of upgrading or downgrading them.
   a copy of an existing store) and inspection (empty store). New regression
   tests pin the baseline fail-closed behavior of every selected path. No
   production behavior changes.
-- `ObjectReader::object_metadata` now fails the whole batch with
+- [embedder: breaking API] `ObjectReader::object_metadata` now fails the whole batch with
   `ResourceExhausted` when a proven object's delta depth or external base
   lookup cap is hit, matching `read_canonical` (previously the ID was silently
   absent).

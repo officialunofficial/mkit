@@ -65,6 +65,7 @@ on:
       - 'rust/crates/mkit-transport-connect/**'
       - 'scripts/vcs-worker-conformance.sh'
       - 'scripts/embedded-worker-conformance.*'
+      - 'scripts/reference-worker-acceptance.py'
       - 'scripts/connect-deadline-runtime.py'
       - 'rust/vendor/ruzstd/**'
       - 'rust/crates/mkit-core-wasm-check/**'
@@ -141,6 +142,7 @@ jobs:
               - 'rust/crates/mkit-server-conformance/**'
               - 'scripts/vcs-worker-conformance.sh'
               - 'scripts/embedded-worker-conformance.*'
+              - 'scripts/reference-worker-acceptance.py'
               - 'scripts/connect-deadline-runtime.py'
               - 'rust/vendor/ruzstd/**'
               - 'rust/crates/mkit-core-wasm-check/**'
@@ -488,6 +490,7 @@ jobs:
         with:
           workspaces: |
             rust -> rust/target
+            apps/embedded-worker -> apps/embedded-worker/target
             apps/embedded-worker/tests/embedding-conformance -> apps/embedded-worker/tests/embedding-conformance/target
           prefix-key: paid-acceptance
           cache-on-failure: false
@@ -498,6 +501,7 @@ jobs:
         run: |
           cargo install worker-build --locked --version 0.8.6
           cargo install wasm-pack --locked --version 0.13.1
+          cargo install b3sum --locked --version 1.8.5
       - name: Install locked local runtime
         working-directory: apps/workspace-worker
         run: npm ci --ignore-scripts
@@ -518,6 +522,11 @@ jobs:
         env:
           MKIT_MINIFLARE_MODULE: ${{ github.workspace }}/apps/workspace-worker/node_modules/miniflare
         run: python3 scripts/paid-worker-acceptance.py
+      - name: Generic reference sessions, storage projection, purge and cold retry
+        timeout-minutes: 10
+        env:
+          MKIT_MINIFLARE_MODULE: ${{ github.workspace }}/apps/workspace-worker/node_modules/miniflare
+        run: python3 scripts/reference-worker-acceptance.py
       - name: Retain acceptance diagnostics
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
