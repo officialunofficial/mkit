@@ -1727,8 +1727,9 @@ across all nodes and reconstruction bases, in addition to its session ledger.
 Ref capture, node loading and retained page/witness checks MUST share the same
 I/O admission envelope. Denial proofs MAY consume the actual verified source
 locations and sealed inventory without locating those targets again. Final
-source guards MUST start fresh after body I/O, live callbacks and descriptor
-checks; inventory facts MUST NOT establish additional traversal edges.
+source guards MUST start fresh after body I/O, final authorization and proof
+revalidation, live callbacks and descriptor checks; inventory facts MUST NOT
+establish additional traversal edges.
 
 Commit/path reader primitives MUST first prove the selected commit through
 parents, then walk only the path trees. Components are exact decoded name bytes;

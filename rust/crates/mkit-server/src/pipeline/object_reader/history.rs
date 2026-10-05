@@ -503,7 +503,21 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             {
                 return Ok(None);
             }
-            // Loading, seam callbacks and descriptor I/O may revoke a source.
+            io.calls.charge_many(2).map_err(|_| exhausted())?;
+            let current = self.authorize(calls).await?;
+            proofs.bind(
+                &self.identity,
+                current,
+                ms(self.pipe.clock.now_ms()),
+                self.cfg,
+            )?;
+            proofs
+                .revalidate(&meta, &self.repo, self.seams.takedown.as_ref(), &targets)
+                .await?;
+            if !proofs.contains(&id) {
+                return Ok(None);
+            }
+            // Loading, authorization, seam callbacks and descriptor I/O may revoke a source.
             // The final target/pack guards are one fresh bounded phase.
             checks.reset();
             checks
@@ -537,22 +551,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             {
                 return Ok(None);
             }
-            io.calls.charge_many(2).map_err(|_| exhausted())?;
-            let current = self.authorize(calls).await?;
-            proofs.bind(
-                &self.identity,
-                current,
-                ms(self.pipe.clock.now_ms()),
-                self.cfg,
-            )?;
-            proofs
-                .revalidate(&meta, &self.repo, self.seams.takedown.as_ref(), &targets)
-                .await?;
             if !proofs.current(ms(self.pipe.clock.now_ms())) {
                 return Err(exhausted());
-            }
-            if !proofs.contains(&id) {
-                return Ok(None);
             }
             let object = mkit_core::serialize::deserialize(&bytes).map_err(failure)?;
             // Preserve the existing canonical manifest/chunk contract for a
@@ -871,6 +871,21 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             {
                 return Err(ServerError::not_found("object reader unavailable"));
             }
+            session.io.calls.charge_many(2).map_err(|_| exhausted())?;
+            let authority = self.authorize(calls).await?;
+            session.proofs.bind(
+                &self.identity,
+                authority,
+                ms(self.pipe.clock.now_ms()),
+                self.cfg,
+            )?;
+            session
+                .proofs
+                .revalidate(&meta, &self.repo, self.seams.takedown.as_ref(), &ids)
+                .await?;
+            if ids.iter().any(|id| !session.proofs.contains(id)) {
+                return Err(ServerError::not_found("object reader unavailable"));
+            }
             checks.reset();
             checks
                 .prefetch_locations(&locations)
@@ -904,23 +919,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     return Err(ServerError::not_found("object reader unavailable"));
                 }
             }
-            session.io.calls.charge_many(2).map_err(|_| exhausted())?;
-            let authority = self.authorize(calls).await?;
-            session.proofs.bind(
-                &self.identity,
-                authority,
-                ms(self.pipe.clock.now_ms()),
-                self.cfg,
-            )?;
-            session
-                .proofs
-                .revalidate(&meta, &self.repo, self.seams.takedown.as_ref(), &ids)
-                .await?;
             if !session.proofs.current(ms(self.pipe.clock.now_ms())) {
                 return Err(exhausted());
-            }
-            if ids.iter().any(|id| !session.proofs.contains(id)) {
-                return Err(ServerError::not_found("object reader unavailable"));
             }
             Ok(())
         }

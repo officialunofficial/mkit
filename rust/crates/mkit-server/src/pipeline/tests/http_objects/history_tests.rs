@@ -1815,6 +1815,121 @@ fn selected_ref_evidence_does_not_narrow_later_general_id_reads() {
 struct DelayedAuthorization {
     next: Mutex<Option<Arc<ManualClock>>>,
 }
+
+#[derive(Default)]
+struct BlockingAuthorization {
+    next: Mutex<Option<(Arc<MemoryKv>, Hash)>>,
+    applied: std::sync::atomic::AtomicUsize,
+}
+impl Authorizer for Arc<BlockingAuthorization> {
+    async fn authorize(&self, _: &Operation) -> Result<AuthzFacts, ServerError> {
+        let next = self.next.lock().unwrap().take();
+        if let Some((store, target)) = next {
+            store
+                .apply(
+                    &crate::store::content_shard(&target),
+                    Batch::new().put(
+                        keys::block(&target),
+                        codec::encode_block_entry(&crate::store::BlockEntry::new(
+                            "authorization stop",
+                            T0 as u64,
+                        )),
+                    ),
+                )
+                .await
+                .unwrap();
+            self.applied.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(AuthzFacts::default())
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Singleton and retained response boundaries across both views and denial modes.
+fn final_authorization_blocks_history_and_path_sources_before_output() {
+    use std::sync::atomic::AtomicUsize;
+    for denial in [false, true] {
+        for writer in [false, true] {
+            for pack_block in [false, true] {
+                for shape in 0..4 {
+                    let az = Arc::new(BlockingAuthorization::default());
+                    let hooks = Hooks {
+                        authorizer: az.clone(),
+                        admission: DefaultAdmission,
+                        pre_receive: NoPreReceive,
+                        receipts: NoReceipts,
+                        outcomes: NoOutcomes,
+                    };
+                    let mut fx = fixture_with(hooks, http_cfg());
+                    fx.pipe.cfg.takedown_denial = false;
+                    let leaf = blob(b"authorization boundary");
+                    let root = tree(&[("leaf", EntryMode::Blob, &leaf)]);
+                    let old = commit(&root, &[], "old");
+                    let tip = commit(&root, &[&old], "tip");
+                    let pack = fx.push("room", &[&leaf, &root, &old, &tip], id(&tip), None);
+                    fx.pipe.cfg.takedown_denial = denial;
+                    let target = if shape < 2 { id(&tip) } else { id(&leaf) };
+                    let stopped = if pack_block { pack } else { target };
+                    let boundary = if shape % 2 == 0 { 1 } else { 2 };
+                    let checks = Arc::new(AtomicUsize::new(0));
+                    let store = fx.pipe.meta.inner.clone();
+                    let armed = az.clone();
+                    fx.pipe = fx.pipe.with_http_seams(|mut seams| {
+                        seams.takedown = Arc::new(ChangeAfterBody {
+                            target,
+                            change: Box::new(move || {
+                                let (checks, store, armed) =
+                                    (checks.clone(), store.clone(), armed.clone());
+                                Box::pin(async move {
+                                    if checks.fetch_add(1, Ordering::SeqCst) + 1 == boundary {
+                                        // The next authorization is the node's final check,
+                                        // or the retained page/witness check on the second visit.
+                                        *armed.next.lock().unwrap() = Some((store, stopped));
+                                    }
+                                })
+                            }),
+                        });
+                        seams
+                    });
+                    in_view(&fx, writer, |reader| {
+                        let mut session = ReaderSession::default();
+                        if shape < 2 {
+                            assert!(
+                                block_on(reader.walk_history_in(
+                                    &mut session,
+                                    HEAD,
+                                    None,
+                                    if shape == 0 { 1 } else { 2 },
+                                    HistoryOptions::default(),
+                                ))
+                                .unwrap()
+                                .is_none()
+                            );
+                        } else {
+                            assert!(
+                                block_on(reader.read_commit_path_in(
+                                    &mut session,
+                                    HEAD,
+                                    id(&tip),
+                                    &[b"leaf".to_vec()],
+                                    None,
+                                    PathOptions {
+                                        include_witness: shape == 3,
+                                        ..PathOptions::default()
+                                    },
+                                ))
+                                .unwrap()
+                                .is_none()
+                            );
+                        }
+                        assert_eq!(session.used().output_bytes, 0);
+                        assert_eq!(az.applied.load(Ordering::SeqCst), 1);
+                    });
+                }
+            }
+        }
+    }
+}
 impl Authorizer for Arc<DelayedAuthorization> {
     async fn authorize(&self, _: &Operation) -> Result<AuthzFacts, ServerError> {
         let clock = self.next.lock().unwrap().take();
