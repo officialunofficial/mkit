@@ -7,19 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Embedder migration entries use `[embedder: breaking API]`,
+`[embedder: stored-format change]` and `[embedder: store reset required]` tags.
+Combine tags when applicable; every breaking API entry states a replacement and
+every stored-format entry states whether a store reset is required. Embedders
+collect the applicable entries between their old and new immutable pins.
+
 ### Added
 
+- `mkit-push`: a bounded async ticketed push primitive for native and wasm
+  clients, with injectable HTTP transport, signer and clock. It shares
+  canonical transport messages, uploads parts where necessary, polls pending
+  verification and exposes conflict/replan outcomes. Staging, persistence,
+  scheduling and policy remain host-owned; the CLI push path is unchanged.
+- `mkit-rpc/transport-messages` exposes the same generated messages without
+  Connect bindings or tokio. Existing `transport` consumers keep their APIs.
 - Portable conformance cases publish empty files, deep trees and byte-distinct
   Unicode/case paths through the transport and read them through HTTP. Core
   lookup covers a 2 KB path; HTTP keeps its 1024-byte decoded-path contract.
   Shared deadline cases complement the wasm entry-point runtime regression.
   A signed takedown contract checks public, private-token and owner denial before
   and after restart. The existing multipart binary fixture adds HEAD/range checks.
-Embedder migration entries use `[embedder: breaking API]`,
-`[embedder: stored-format change]` and `[embedder: store reset required]` tags.
-Combine tags when applicable; every breaking API entry states a replacement and
-every stored-format entry states whether a store reset is required. Embedders
-collect the applicable entries between their old and new immutable pins.
 
 ### Fixed
 

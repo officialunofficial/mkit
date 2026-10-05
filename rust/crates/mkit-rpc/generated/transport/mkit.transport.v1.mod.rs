@@ -306,4 +306,5 @@ pub use self::__buffa::view::SetAuthorityGenerationResponseView;
 pub use self::__buffa::view::SetAuthorityGenerationResponseOwnedView;
 #[doc(inline)]
 pub use self::__buffa::register_types;
+#[cfg(feature = "transport")]
 include!("mkit.transport.v1.transport.__connect.rs");

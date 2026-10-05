@@ -14,7 +14,7 @@
 use std::path::PathBuf;
 
 fn main() {
-    #[cfg(feature = "transport")]
+    #[cfg(any(feature = "transport", feature = "transport-messages"))]
     transport::stage();
     #[cfg(feature = "hooks")]
     hooks::stage();
@@ -137,7 +137,7 @@ mod hooks {
     }
 }
 
-#[cfg(feature = "transport")]
+#[cfg(any(feature = "transport", feature = "transport-messages"))]
 mod transport {
     use std::path::{Path, PathBuf};
 
@@ -154,27 +154,33 @@ mod transport {
         let marker = out_dir.join(MARKER);
 
         if std::env::var_os("MKIT_TRANSPORT_CODEGEN").is_some() {
-            // The repo-root canonical proto module, three hops up
-            // (rust/crates/mkit-rpc -> repo root).
-            let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../../proto")
-                .canonicalize()
-                .expect("canonical proto root not found: expected proto/ at repo root");
-            let transport = root.join("mkit/transport/v1/transport.proto");
-            let health = root.join("grpc/health/v1/health.proto");
-            println!("cargo:rerun-if-changed={}", transport.display());
-            println!("cargo:rerun-if-changed={}", health.display());
-            connectrpc_build::Config::new()
-                .files(&[
-                    transport.to_str().expect("proto path is valid UTF-8"),
-                    health.to_str().expect("proto path is valid UTF-8"),
-                ])
-                .includes(&[root.to_str().expect("proto root is valid UTF-8")])
-                .include_file("_connectrpc.rs")
-                .compile()
-                .expect("connectrpc-build codegen failed for the canonical protos");
-            std::fs::write(&marker, b"").expect("write codegen marker");
-            return;
+            #[cfg(feature = "transport")]
+            {
+                // The repo-root canonical proto module, three hops up
+                // (rust/crates/mkit-rpc -> repo root).
+                let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../../proto")
+                    .canonicalize()
+                    .expect("canonical proto root not found: expected proto/ at repo root");
+                let transport = root.join("mkit/transport/v1/transport.proto");
+                let health = root.join("grpc/health/v1/health.proto");
+                println!("cargo:rerun-if-changed={}", transport.display());
+                println!("cargo:rerun-if-changed={}", health.display());
+                connectrpc_build::Config::new()
+                    .files(&[
+                        transport.to_str().expect("proto path is valid UTF-8"),
+                        health.to_str().expect("proto path is valid UTF-8"),
+                    ])
+                    .includes(&[root.to_str().expect("proto root is valid UTF-8")])
+                    .include_file("_connectrpc.rs")
+                    .compile()
+                    .expect("connectrpc-build codegen failed for the canonical protos");
+                gate_bindings(&out_dir);
+                std::fs::write(&marker, b"").expect("write codegen marker");
+                return;
+            }
+            #[cfg(not(feature = "transport"))]
+            panic!("transport codegen requires the transport feature");
         }
 
         let _ = std::fs::remove_file(&marker);
@@ -189,9 +195,30 @@ mod transport {
                 staged += 1;
             }
         }
+        gate_bindings(&out_dir);
         assert!(
             staged > 0,
             "generated/transport/ contains no .rs modules: run scripts/regen-transport-proto.sh"
         );
+    }
+
+    // Keep a single generated message tree, while allowing consumers to omit
+    // the Connect runtime. Codegen and staging use exactly the same gate.
+    fn gate_bindings(out_dir: &Path) {
+        for module in ["mkit.transport.v1.mod.rs", "grpc.health.v1.mod.rs"] {
+            let path = out_dir.join(module);
+            let source = std::fs::read_to_string(&path).expect("read generated module");
+            if source.contains("#[cfg(feature = \"transport\")]\ninclude!") {
+                continue;
+            }
+            let source = source.replace(
+                "include!(\"mkit.transport.v1.transport.__connect.rs\");",
+                "#[cfg(feature = \"transport\")]\ninclude!(\"mkit.transport.v1.transport.__connect.rs\");",
+            ).replace(
+                "include!(\"grpc.health.v1.health.__connect.rs\");",
+                "#[cfg(feature = \"transport\")]\ninclude!(\"grpc.health.v1.health.__connect.rs\");",
+            );
+            std::fs::write(path, source).expect("gate generated bindings");
+        }
     }
 }

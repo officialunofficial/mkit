@@ -214,12 +214,31 @@ impl TestHost {
     /// Returns a message if binding, hook construction, profile configuration,
     /// or pipeline construction fails.
     pub async fn start_with_hooks_factory<H, F>(
-        mut profile: Profile,
+        profile: Profile,
         make_hooks: F,
     ) -> Result<Self, String>
     where
         H: HookSet + 'static,
         F: FnOnce(&str, Arc<ManualClock>) -> Result<H, String>,
+    {
+        Self::start_with_test_layers(profile, make_hooks, |_| {}, |app| app).await
+    }
+
+    /// Starts a host with an opt-in HTTP test layer, applied after the core
+    /// routes. Contract consumers can capture wire bytes or inject response
+    /// loss while retaining the host's exact origin and real core handlers.
+    /// Ordinary hosts retain their streaming boundary without this layer.
+    pub async fn start_with_test_layers<H, F, C, L>(
+        mut profile: Profile,
+        make_hooks: F,
+        configure: C,
+        layer: L,
+    ) -> Result<Self, String>
+    where
+        H: HookSet + 'static,
+        F: FnOnce(&str, Arc<ManualClock>) -> Result<H, String>,
+        C: FnOnce(&mut PipelineConfig),
+        L: FnOnce(axum::Router) -> axum::Router,
     {
         profile.derive_features();
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -234,7 +253,8 @@ impl TestHost {
         if let WireAuth::AuthV2 { audience, .. } = &mut profile.auth {
             audience.clone_from(&base_url);
         }
-        let config = profile_config(&profile, &base_url)?;
+        let mut config = profile_config(&profile, &base_url)?;
+        configure(&mut config);
 
         profile.sign_reads = config.url_tokens.is_some();
         profile.derive_features();
@@ -265,6 +285,7 @@ impl TestHost {
             preserved.clone(),
             pipeline,
         )?;
+        let app = layer(app);
         let listener_task = tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
