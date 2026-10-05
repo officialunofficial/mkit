@@ -510,3 +510,15 @@ separate work.
 | Cached private or paid content never becomes public | composing privacy overrides (§5.3) |
 | A reservation has one durable terminal result | conditional read outcomes and reconciliation (§7; SPEC-SERVER §5) |
 | Token credentials do not enter observability output | query redaction (§6) |
+
+## Conformance coverage
+
+The portable file cases in `mkit-server-conformance` exercise transport publication
+and exact object/ref HTTP bytes, empty GET/HEAD/range behavior, 100-directory
+lookup and byte-distinct NFC/NFD and case-only names. `files.path_limits` pins
+1024 accepted decoded bytes and rejection at 1025 and at a 256-byte component.
+`files.long_path` separates the legal 2048-byte core object path from this HTTP
+route bound: core lookup and object-ID readback succeed, while the ref URL is 400.
+The existing multipart binary case pins exact range and HEAD metadata.
+`takedown.contract` and its restart phase cover the enabled denial contract;
+see the conformance crate README for the feature and fixture requirements.

@@ -429,14 +429,25 @@ async fn upload_ticket(
     Ok(id)
 }
 
-async fn ticketed_pair(
+pub(super) async fn ticketed_pair(
     ctx: &Ctx,
     pack: &[u8],
     head: Hash,
     leaf: &str,
     canonical: bool,
 ) -> Result<(String, Signed), Failure> {
-    let (repository, _) = super::repository::identities(ctx, "async-verify", "unused")?;
+    ticketed_pair_in(ctx, pack, head, leaf, canonical, "async-verify").await
+}
+
+pub(super) async fn ticketed_pair_in(
+    ctx: &Ctx,
+    pack: &[u8],
+    head: Hash,
+    leaf: &str,
+    canonical: bool,
+    name: &str,
+) -> Result<(String, Signed), Failure> {
+    let (repository, _) = super::repository::identities(ctx, name, "unused")?;
     let signer = ctx.v2_signer("repository-a")?;
     let pack_id = hash(pack);
     let branch = ctx.head(leaf);
@@ -713,7 +724,8 @@ pub(super) async fn embedding_multipart_file_readback(ctx: Ctx) -> CaseResult {
     let id = file.id().map_err(|e| format!("file id: {e}"))?;
     let (pack, head) = verification_fixture_pack(Some(&data), 0, false)?;
     ensure!(pack.len() > 8 << 20, "multipart fixture fits one part");
-    let (repository, pending) = commit_pack(&ctx, &pack, head, true).await?;
+    let (repository, pending) = super::portable_reads::publish(&ctx, &pack, head).await?;
+    super::portable_reads::file_semantics(&ctx, &repository, &id, "extracted.txt", &data).await?;
     check_extracted_http(&ctx, &repository, &id, &data).await?;
     ctx.set_note(format!("repository={repository} pack_bytes={} pending_polls={pending} extracted_blob={} extracted_blob_bytes={} chunks=36 sidecar_bytes=304", pack.len(), to_hex(&id), data.len()));
     Ok(())

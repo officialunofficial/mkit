@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Portable conformance cases publish empty files, deep trees and byte-distinct
+  Unicode/case paths through the transport and read them through HTTP. Core
+  lookup covers a 2 KB path; HTTP keeps its 1024-byte decoded-path contract.
+  Shared deadline cases complement the wasm entry-point runtime regression.
+  A signed takedown contract checks public, private-token and owner denial before
+  and after restart. The existing multipart binary fixture adds HEAD/range checks.
 Embedder migration entries use `[embedder: breaking API]`,
 `[embedder: stored-format change]` and `[embedder: store reset required]` tags.
 Combine tags when applicable; every breaking API entry states a replacement and

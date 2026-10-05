@@ -46,12 +46,14 @@ mod multipart;
 mod outcomes;
 mod packs;
 mod policy;
+mod portable_reads;
 mod quota;
 mod reads;
 mod ref_scopes;
 mod refs;
 mod replay;
 mod repository;
+mod takedown;
 mod tickets;
 mod timers;
 mod upload;
@@ -215,6 +217,14 @@ macro_rules! cases {
 }
 
 cases! {
+    "takedown.contract" => takedown::contract, M5, [Takedown, Admin, IndexedMode, MultiRepo, Tickets, AuthV2, HttpObjects, SignedReads], [];
+    "takedown.persisted_denial" => takedown::persisted, M5, [Takedown, Admin, IndexedMode, MultiRepo, Tickets, AuthV2, HttpObjects, SignedReads], [];
+    "files.path_limits" => portable_reads::path_limits, M4, [IndexedMode, MultiRepo, Tickets, AuthV2, HttpObjects], [];
+    "files.empty_readback" => portable_reads::empty, M4, [IndexedMode, MultiRepo, Tickets, AuthV2, HttpObjects], [];
+    "files.deep_tree" => portable_reads::deep_tree, M4, [IndexedMode, MultiRepo, Tickets, AuthV2, HttpObjects], [];
+    "files.long_path" => portable_reads::long_path, M4, [IndexedMode, MultiRepo, Tickets, AuthV2, HttpObjects], [];
+    "files.byte_distinct_names" => portable_reads::byte_names, M4, [IndexedMode, MultiRepo, Tickets, AuthV2, HttpObjects], [];
+    "health.deadline_headers" => health::deadline_headers, M0, [Health], [];
     "admission.challenge_402_typed_detail" => admission::challenge_402_typed_detail, M3, [Admission, HookStub, AuthV2], [];
     "admission.deny_403_no_detail" => admission::deny_403_no_detail, M3, [Admission, HookStub, AuthV2], [];
     "admission.no_state_on_challenge" => admission::no_state_on_challenge, M3, [Admission, HookStub, AuthV2], [];
@@ -333,7 +343,7 @@ cases! {
     "launch.admin_fixture" => indexed::launch_admin_fixture, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2], [TestFaults];
     "embedding.reference_fixture" => indexed::embedding_reference_fixture, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2], [TestFaults];
     "embedding.public_fixture" => indexed::embedding_public_fixture, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2], [TestFaults];
-    "embedding.multipart_file_readback" => indexed::embedding_multipart_file_readback, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2, Multipart, HttpObjects], [TestFaults];
+    "embedding.multipart_file_readback" => indexed::embedding_multipart_file_readback, M4, [IndexedMode, MultiRepo, Tickets, AuthV2, Multipart, HttpObjects], [TestFaults];
     "launch.inspection_rejects_advance" => indexed::inspection_rejects_advance, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2, SyncInspection], [TestFaults];
     "launch.read_fixture_public" => launch_reads::public, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2, HttpObjects, LaunchReadFixture], [TestFaults];
     "launch.read_fixture_private" => launch_reads::private, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2, HttpObjects, LaunchReadFixture], [TestFaults];
