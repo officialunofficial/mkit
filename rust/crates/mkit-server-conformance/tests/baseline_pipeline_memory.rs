@@ -610,7 +610,9 @@ async fn namespace_cap_after_rollup_at(window_ms: i64) {
     profile.features.insert(Feature::NamespacePolicy);
     profile.features.insert(Feature::TestFaults);
     profile.sharding_d34 = true;
-    profile.server_clock = Some(Arc::new(mkit_server::ManualClock::new(mkit_server_conformance::wire::sign::now_ms())));
+    profile.server_clock = Some(Arc::new(mkit_server::ManualClock::new(
+        mkit_server_conformance::wire::sign::now_ms(),
+    )));
     let (origin, _) = serve_sharding(
         auth,
         Some(ServerQuota::new(window_ms, QUOTA.max_ops, QUOTA.max_bytes)),
