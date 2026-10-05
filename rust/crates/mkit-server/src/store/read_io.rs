@@ -74,7 +74,8 @@ impl ReadReservation {
                 current = reservation.inherited.as_deref();
             }
         }
-        let mut future = std::pin::pin!(future);
+        // Nested mutation scopes must not multiply inline future-frame size.
+        let mut future = Box::pin(future);
         futures::future::poll_fn(|cx| {
             let _scope = CreditScope::enter(&mut credits);
             future.as_mut().poll(cx)

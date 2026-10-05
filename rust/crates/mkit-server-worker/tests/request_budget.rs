@@ -600,36 +600,73 @@ fn blob_read_credit_rejects_unrelated_deletes_even_inside_its_scope() {
     });
 }
 
+struct MultipartCreditFixture {
+    bucket: common::SimBucket,
+    bytes: Vec<u8>,
+    plan: PartPlan,
+    cvs: Vec<[u8; 32]>,
+    key: BlobKey,
+    object: BlobKey,
+    root: [u8; 32],
+    ticket: Vec<u8>,
+    token: Vec<u8>,
+}
+
+async fn multipart_credit_fixture() -> MultipartCreditFixture {
+    let bucket = common::SimBucket::default();
+    let unbudgeted = R2BlobStore::new(bucket.clone(), PACKS_KEYSPACE);
+    let bytes = vec![7; usize::try_from(MIN_PART_SIZE).unwrap() + 4];
+    let plan = PartPlan::new(bytes.len() as u64, MIN_PART_SIZE, 10_000).unwrap();
+    let root = hash(&bytes);
+    let cvs: Vec<_> = (0..plan.count())
+        .map(|index| {
+            let start = usize::try_from(plan.offset(index).unwrap()).unwrap();
+            let end = start + usize::try_from(plan.expected_len(index).unwrap()).unwrap();
+            part_subtree_cv(&plan, index, &bytes[start..end]).unwrap()
+        })
+        .collect();
+    let key = BlobKey::pack(root);
+    let object = BlobKey::object([9; 32]);
+    bucket.replace_object(
+        &unbudgeted.object_key(&key).unwrap(),
+        Bytes::copy_from_slice(&bytes),
+    );
+    let ticket = unbudgeted
+        .begin_multipart_for_ticket(key, plan.total(), plan.part_size(), [3; 32])
+        .await
+        .unwrap();
+    let token = unbudgeted
+        .begin_verified_object(object, &plan, root, &cvs, [4; 32])
+        .await
+        .unwrap();
+    MultipartCreditFixture {
+        bucket,
+        bytes,
+        plan,
+        cvs,
+        key,
+        object,
+        root,
+        ticket,
+        token,
+    }
+}
+
 #[test]
 fn multipart_mutation_reads_cannot_consume_the_reserved_reader_call() {
     block_on(async {
-        let bucket = common::SimBucket::default();
-        let plain = R2BlobStore::new(bucket.clone(), PACKS_KEYSPACE);
-        let bytes = vec![7; usize::try_from(MIN_PART_SIZE).unwrap() + 4];
-        let plan = PartPlan::new(bytes.len() as u64, MIN_PART_SIZE, 10_000).unwrap();
-        let root = hash(&bytes);
-        let cvs: Vec<_> = (0..plan.count())
-            .map(|index| {
-                let start = usize::try_from(plan.offset(index).unwrap()).unwrap();
-                let end = start + usize::try_from(plan.expected_len(index).unwrap()).unwrap();
-                part_subtree_cv(&plan, index, &bytes[start..end]).unwrap()
-            })
-            .collect();
+        let MultipartCreditFixture {
+            bucket,
+            plan,
+            cvs,
+            key,
+            object,
+            root,
+            ticket,
+            token,
+            ..
+        } = multipart_credit_fixture().await;
         let cv = cvs[0];
-        let key = BlobKey::pack(root);
-        let object = BlobKey::object([9; 32]);
-        bucket.replace_object(
-            &plain.object_key(&key).unwrap(),
-            Bytes::copy_from_slice(&bytes),
-        );
-        let ticket = plain
-            .begin_multipart_for_ticket(key, plan.total(), plan.part_size(), [3; 32])
-            .await
-            .unwrap();
-        let token = plain
-            .begin_verified_object(object, &plan, root, &cvs, [4; 32])
-            .await
-            .unwrap();
         let budget = SliceBudget::new(1);
         let dispatches = Arc::<AtomicU32>::default();
         let blobs = R2BlobStore::new(
@@ -682,28 +719,43 @@ fn multipart_mutation_reads_cannot_consume_the_reserved_reader_call() {
         .await;
         assert_eq!(dispatches.load(Ordering::SeqCst), 1);
         assert_eq!(budget.used(), 1);
+    });
+}
 
-        // Part commit revalidates metadata independently of the begin/complete
-        // guards above. Exercise public and verified part sinks with live loans.
-        async fn check_part<P: PartSink>(
-            mut part: P,
-            bytes: &[u8],
-            blobs: &R2BlobStore<CountedBucket>,
-            key: BlobKey,
-            dispatches: &AtomicU32,
-        ) {
-            for chunk in bytes.chunks(256 * 1024) {
-                part.write(Bytes::copy_from_slice(chunk)).await.unwrap();
-            }
-            let reservation = blobs.reserve_read_calls(1).unwrap();
-            ReadReservation::scope(&[reservation], async {
-                assert!(part.commit().await.is_err());
-                assert_eq!(dispatches.load(Ordering::SeqCst), 2);
-                assert!(blobs.head(&key).await.unwrap().is_some());
-            })
-            .await;
-            assert_eq!(dispatches.load(Ordering::SeqCst), 3);
-        }
+async fn check_part<P: PartSink>(
+    mut part: P,
+    bytes: &[u8],
+    blobs: &R2BlobStore<CountedBucket>,
+    key: BlobKey,
+    dispatches: &AtomicU32,
+) {
+    for chunk in bytes.chunks(256 * 1024) {
+        part.write(Bytes::copy_from_slice(chunk)).await.unwrap();
+    }
+    let reservation = blobs.reserve_read_calls(1).unwrap();
+    ReadReservation::scope(&[reservation], async {
+        assert!(part.commit().await.is_err());
+        assert_eq!(dispatches.load(Ordering::SeqCst), 2);
+        assert!(blobs.head(&key).await.unwrap().is_some());
+    })
+    .await;
+    assert_eq!(dispatches.load(Ordering::SeqCst), 3);
+}
+#[test]
+fn multipart_part_commit_cannot_borrow_the_reserved_reader_call() {
+    block_on(async {
+        let MultipartCreditFixture {
+            bucket,
+            bytes,
+            plan,
+            cvs,
+            key,
+            object,
+            ticket,
+            token,
+            ..
+        } = multipart_credit_fixture().await;
+        let cv = cvs[0];
         for verified in [false, true] {
             let budget = SliceBudget::new(3);
             let dispatches = Arc::<AtomicU32>::default();
@@ -723,10 +775,10 @@ fn multipart_mutation_reads_cannot_consume_the_reserved_reader_call() {
                     .begin_verified_object_part(object, &token, &plan, 0, cv)
                     .await
                     .unwrap();
-                check_part(part, first, &blobs, key, &dispatches).await;
+                Box::pin(check_part(part, first, &blobs, key, &dispatches)).await;
             } else {
                 let part = blobs.begin_part(key, &ticket, &plan, 0, cv).await.unwrap();
-                check_part(part, first, &blobs, key, &dispatches).await;
+                Box::pin(check_part(part, first, &blobs, key, &dispatches)).await;
             }
             assert_eq!(budget.used(), 3);
         }

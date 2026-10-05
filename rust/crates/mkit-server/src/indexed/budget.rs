@@ -249,15 +249,22 @@ impl<S: NamespaceStore> NamespaceStore for Budgeted<'_, S> {
     }
     async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
         self.charge()?;
-        self.note(crate::store::ReadReservation::scope(&[], self.inner.apply(p, batch)).await)
+        self.note(
+            crate::store::ReadReservation::scope(&[], async { self.inner.apply(p, batch).await })
+                .await,
+        )
     }
     async fn stats(&self, p: &Partition) -> Result<PartitionStats, StoreError> {
         self.charge()?;
-        self.note(crate::store::ReadReservation::scope(&[], self.inner.stats(p)).await)
+        self.note(
+            crate::store::ReadReservation::scope(&[], async { self.inner.stats(p).await }).await,
+        )
     }
     async fn probe(&self) -> Result<(), StoreError> {
         self.charge()?;
-        self.note(crate::store::ReadReservation::scope(&[], self.inner.probe()).await)
+        self.note(
+            crate::store::ReadReservation::scope(&[], async { self.inner.probe().await }).await,
+        )
     }
 }
 
@@ -286,7 +293,7 @@ impl<B: BlobStore> BlobStore for Budgeted<'_, B> {
             .map(|local| Some(local.with_inherited(inherited)))
     }
     async fn begin(&self, key: BlobKey, len: u64) -> Result<Self::Sink, StoreError> {
-        crate::store::ReadReservation::scope(&[], self.inner.begin(key, len)).await
+        crate::store::ReadReservation::scope(&[], async { self.inner.begin(key, len).await }).await
     }
     async fn get(
         &self,
@@ -337,10 +344,10 @@ impl<B: BlobStore> BlobStore for Budgeted<'_, B> {
         self.note(self.inner.head(key).await)
     }
     async fn probe(&self) -> Result<(), StoreError> {
-        crate::store::ReadReservation::scope(&[], self.inner.probe()).await
+        crate::store::ReadReservation::scope(&[], async { self.inner.probe().await }).await
     }
     async fn delete(&self, key: &BlobKey) -> Result<bool, StoreError> {
-        crate::store::ReadReservation::scope(&[], self.inner.delete(key)).await
+        crate::store::ReadReservation::scope(&[], async { self.inner.delete(key).await }).await
     }
 }
 
