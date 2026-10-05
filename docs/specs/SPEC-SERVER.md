@@ -1684,6 +1684,46 @@ checks and uniform absence at proof caps. Writer proofs MUST NOT enter the share
 published reachability cache. Session proofs MUST NOT survive the request or
 broaden URL-token scope; URL issuance keeps its published-view preflight.
 
+Selected-ref reader primitives MAY discover old commits using parent-directed
+history, without descending into snapshot trees or file bodies. The traversal
+mode MUST explicitly choose first-parent or all-parent history; all-parent
+order is breadth-first in decoded parent order, with duplicate suppression.
+Commit visits, queued merge frontier and tip-tag peeling MUST have independent
+bounds. A cap MUST NOT silently switch traversal modes or emit a partial page.
+Each helper captures one selected ref strongly in the authorized caller view;
+this capture replaces session structural evidence without resetting any ledger
+or extending its request deadline. It MUST NOT narrow the root set searched by
+a subsequent general-ID fallback; that fallback retains full ref discovery.
+Tags MUST match their declared target kind.
+A start commit is inclusive and skipped ancestors count toward the visit bound.
+These primitives issue no continuation authority and persist no graph state.
+The complete helper MUST share the existing per-call canonical decode allowance
+across all nodes and reconstruction bases, in addition to its session ledger.
+
+Commit/path reader primitives MUST first prove the selected commit through
+parents, then walk only the path trees. Components are exact decoded name bytes;
+no case folding, Unicode normalization or symlink following is permitted. Empty
+paths select the root tree. Intermediate entries MUST have tree mode and decode
+as trees; leaf kind MUST agree with its entry mode. Symlink leaves return their
+canonical blob and chunked-file leaves their canonical manifest, not logical
+chunk bodies. An optional expected leaf ID mismatch MUST be uniformly absent
+before loading that different leaf. Path depth has a separate hard bound.
+An optional canonical path witness MAY return the commit and ancestor trees for
+local inclusion proof construction. Those bytes MUST be charged as output and
+all returned sources MUST be rechecked together before output. This witness is
+acquisition data, never reusable authorization or continuation evidence.
+
+All directed loads MUST use existing same-view membership, canonical hash checks,
+source reconstruction and dependency rules. Only selected canonical local edges
+may add evidence; inventory facts, foreign remix sources and delta bases MUST
+NOT establish history/path edges. Live authority, ancestry stops, target/pack
+and strong-denial checks precede edge use/output, including after body I/O and at
+page boundaries. Public missing, orphan and discovery-cap results MUST remain
+uniformly absent; owner caps remain typed and storage faults remain unavailable.
+Output allowances MUST be reserved before copying the complete page or path
+result, including any requested witness.
+This additive embedding surface does not alter URL grammar or HTTP serving.
+
 ### 10.2 Per-ref clearance and publication
 
 Each ref MUST have an ordered advance sequence. The branch head
