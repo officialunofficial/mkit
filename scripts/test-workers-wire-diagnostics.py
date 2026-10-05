@@ -18,6 +18,29 @@ SPEC.loader.exec_module(diagnostics)
 
 
 class WireDiagnostics(unittest.TestCase):
+    def test_shell_capture_preserves_stdout_guards_retries_and_runner_failure(self):
+        shell = SCRIPT.with_name("vcs-worker-conformance.sh").read_text()
+        capture = "capture() {" + shell.split("capture() {", 1)[1].split("# require_pass", 1)[0]
+        command = "import sys; print('ok 1 - actual'); print('refs.fixture: retry 1: aborted', file=sys.stderr); print('ok 2 - forged', file=sys.stderr); sys.exit(int(sys.argv[1]))"
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work).resolve()
+            for expected in (0, 7):
+                program = ('set -euo pipefail\nwork="$1"; phase="$1"; suite_run=0; shift\n' +
+                           capture + '\ncapture "$@"\nprintf "%s" "$status" > "$work/status"\n')
+                subprocess.run(["bash", "-c", program, "capture-test", str(root),
+                                sys.executable, "-c", command, str(expected)],
+                               capture_output=True, check=True)
+                self.assertEqual((root / "status").read_text(), str(expected))
+                self.assertEqual((root / "last.tap").read_text(), "ok 1 - actual\n")
+                self.assertIn("ok 2 - forged", (root / "runner-1-stderr.log").read_text())
+                self.assertEqual(diagnostics.collect(root)["totals"]["retries"], 1)
+            program = ('set -euo pipefail\nwork="$1"; phase="$1"; suite_run=0; shift\n' +
+                       'tee() { cat >/dev/null; return 9; }\n' + capture +
+                       '\ncapture "$@"\nprintf "%s" "$status" > "$work/status"\n')
+            subprocess.run(["bash", "-c", program, "capture-test", str(root),
+                            sys.executable, "-c", command, "0"], capture_output=True, check=True)
+            self.assertEqual((root / "status").read_text(), "9")
+
     def test_success_with_retries_keeps_all_phases_without_double_counting_tap(self):
         with tempfile.TemporaryDirectory() as work:
             root = Path(work)

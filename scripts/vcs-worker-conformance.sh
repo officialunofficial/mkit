@@ -267,7 +267,7 @@ cold_start() {
     echo ">> [${name}] concurrent cold-start passed: 30/30 HTTP 200 / SERVING"
 }
 
-# Keep every invocation, including stderr retry records, beside its runtime log.
+# Keep stdout and stderr separately so pass guards still inspect only TAP stdout.
 # Preserve the runner's failure status and fail on a broken log capture too.
 capture() {
     suite_run=$((suite_run + 1))
@@ -275,10 +275,12 @@ capture() {
     set +e
     env TMPDIR="$(cd "${TMPDIR:-/tmp}" && pwd -P)" \
         MKIT_CONFORMANCE_HTTP_TRACE="${phase}/http-${suite_run}.jsonl" \
-        "$@" 2>&1 | tee "${work}/last.tap" "${phase}/runner-${suite_run}.log"
+        "$@" 2>"${phase}/runner-${suite_run}-stderr.log" | tee "${work}/last.tap" "${phase}/runner-${suite_run}.log"
     statuses=("${PIPESTATUS[@]}")
     status=${statuses[0]}
     if [ "${status}" -eq 0 ]; then status=${statuses[1]}; fi
+    # The runner has closed stderr; replay it after capture without altering TAP.
+    cat "${phase}/runner-${suite_run}-stderr.log" >&2 || { if [ "${status}" -eq 0 ]; then status=1; fi; }
     set -e
 }
 
