@@ -285,12 +285,9 @@ fn history_counts_only_commit_decodes_and_old_path_fits_budget() {
                     .iter()
                     .filter(|&&op| op == "scan_many_index")
                     .count();
-                let primary_scans = scans
-                    - if denial {
-                        33 + if include_witness { 13 } else { 0 }
-                    } else {
-                        0
-                    };
+                // Denial consumes the verified locations, including witnesses;
+                // it adds no repeated index lookup to the path walk.
+                let primary_scans = scans;
                 assert!(
                     primary_scans <= 35,
                     "{primary_scans} primary, {scans} total"
@@ -1829,6 +1826,119 @@ fn initial_authorization_counts_against_the_original_deadline() {
                     }
                 }
             });
+        }
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Real single-pack history across views, proof modes and admission widths.
+fn history_reuses_sealed_facts_and_shares_guard_admission() {
+    use crate::store::read_probe::{self, Config};
+    for denial in [false, true] {
+        let mut fx = fixture_tweaked(Hooks::new(), http_cfg(), |cfg| {
+            cfg.sharding = Sharding::D34;
+            cfg.takedown_denial = false;
+        });
+        let tree = Object::Tree(Tree { entries: vec![] });
+        let mut commits = Vec::new();
+        for n in 0..30 {
+            commits.push(commit(
+                &tree,
+                &commits.last().into_iter().collect::<Vec<_>>(),
+                &format!("history {n}"),
+            ));
+        }
+        let mut objects = vec![&tree];
+        objects.extend(&commits);
+        let pack = fx.push("room", &objects, id(commits.last().unwrap()), None);
+        drain(&fx);
+        fx.pipe.cfg.takedown_denial = denial;
+        fx.pipe
+            .meta
+            .count_partition_scans
+            .store(true, Ordering::SeqCst);
+        let head = Key::new([keys::block(&pack).as_bytes(), b"\0inventory-head"].concat());
+        for writer in [false, true] {
+            for concurrency in [1, 6] {
+                let parent =
+                    crate::indexed::budget::SliceBudget::new(crate::limits::OBJECT_READER_CALLS);
+                *fx.pipe.meta.request_budget.lock().unwrap() = Some(parent.clone());
+                in_view(&fx, writer, |reader| {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_time()
+                        .start_paused(true)
+                        .build()
+                        .unwrap();
+                    let trace = Arc::new(Mutex::new(Vec::new()));
+                    let (kv, charged, seen, gets) = (
+                        fx.pipe.meta.calls(),
+                        parent.used(),
+                        fx.pipe.meta.seen().len(),
+                        get_count(&fx),
+                    );
+                    fx.pipe.meta.latency_ms.store(1, Ordering::SeqCst);
+                    fx.pipe.blobs.latency_ms.store(1, Ordering::SeqCst);
+                    let mut session = ReaderSession::default();
+                    let page = runtime
+                        .block_on(read_probe::run(
+                            Config {
+                                concurrency,
+                                trace: trace.clone(),
+                            },
+                            reader.walk_history_in(
+                                &mut session,
+                                HEAD,
+                                None,
+                                30,
+                                HistoryOptions::default(),
+                            ),
+                        ))
+                        .unwrap()
+                        .unwrap();
+                    fx.pipe.meta.latency_ms.store(0, Ordering::SeqCst);
+                    fx.pipe.blobs.latency_ms.store(0, Ordering::SeqCst);
+                    assert_eq!(
+                        page.commits.iter().map(|c| c.id).collect::<Vec<_>>(),
+                        commits.iter().rev().map(id).collect::<Vec<_>>()
+                    );
+                    assert!(page.complete);
+                    for (result, expected) in page.commits.iter().zip(commits.iter().rev()) {
+                        assert_eq!(result.canonical, serialize(expected).unwrap());
+                    }
+                    assert_eq!(get_count(&fx) - gets, 60, "only commit frames are loaded");
+                    assert_eq!(
+                        parent.used() - charged,
+                        fx.pipe.meta.calls() - kv,
+                        "inherited waves must charge each actual namespace call exactly once"
+                    );
+                    let observed = fx.pipe.meta.seen();
+                    assert_eq!(
+                        observed[seen..].iter().filter(|key| **key == head).count(),
+                        if denial { 32 } else { 0 },
+                        "one seal per node, then two bounded final-page groups; no re-location"
+                    );
+                    let events = trace.lock().unwrap();
+                    let mut edges: Vec<_> = events
+                        .iter()
+                        .flat_map(|event| [(event.start, 1i32), (event.end, -1i32)])
+                        .collect();
+                    edges.sort();
+                    let (mut active, mut peak) = (0, 0);
+                    for (_, delta) in edges {
+                        active += delta;
+                        peak = peak.max(active);
+                    }
+                    assert!(
+                        peak <= i32::try_from(concurrency).unwrap(),
+                        "all metadata, guard, directory and blob RPCs share admission: peak={peak}"
+                    );
+                    if concurrency == 6 {
+                        assert!(peak > 1, "independent guards are batched");
+                    }
+                    assert!(session.used().storage_calls < crate::limits::OBJECT_READER_CALLS);
+                });
+                *fx.pipe.meta.request_budget.lock().unwrap() = None;
+            }
         }
     }
 }

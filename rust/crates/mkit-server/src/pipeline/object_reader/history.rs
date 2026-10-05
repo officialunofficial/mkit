@@ -2,11 +2,14 @@
 use super::{
     AtomicBool, BTreeSet, Budget, Budgeted, Caps, Code, Env, Hash, HookSet, MultipartBlobStore,
     NamespaceStore, OBJECT_READER_CALLS, ObjectReader, ObjectType, ReaderSession, ReaderView,
-    ServerError, SliceBudget, TakedownVerdict, ViewStore, denied, exhausted, failure, ms,
-    object_denials, resolution_failure, resolve, settle,
+    ServerError, SliceBudget, TakedownVerdict, ViewStore, denied, exhausted, failure, inventory,
+    ms, object_denials, resolution_failure, resolve, settle,
 };
 use mkit_core::object::{EntryMode, Object, TreeEntry};
-use std::{collections::VecDeque, sync::Arc};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    sync::Arc,
+};
 
 const MAX_NODES: usize = 50_000;
 const MAX_TAGS: usize = 16;
@@ -202,6 +205,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             return Err(ServerError::invalid_argument("invalid history page size"));
         }
         let calls = SliceBudget::new(OBJECT_READER_CALLS);
+        let admission = crate::store::read_io::ReadIo::new();
         let mut decode = Budget(self.cfg.http_decode_budget);
         let result = self
             .history_nodes(
@@ -211,6 +215,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 limit,
                 options,
                 &calls,
+                &admission,
                 &mut decode,
             )
             .await;
@@ -271,6 +276,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             return Err(ServerError::invalid_argument("invalid commit path"));
         }
         let calls = SliceBudget::new(OBJECT_READER_CALLS);
+        let admission = crate::store::read_io::ReadIo::new();
         let mut decode = Budget(self.cfg.http_decode_budget);
         let result = self
             .path_node(
@@ -281,6 +287,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 expected,
                 options,
                 &calls,
+                &admission,
                 &mut decode,
             )
             .await;
@@ -340,6 +347,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         session: &mut ReaderSession,
         reference: &str,
         calls: &SliceBudget,
+        admission: &crate::store::read_io::ReadIo,
     ) -> Result<Option<Hash>, ServerError> {
         let started = ms(self.pipe.clock.now_ms());
         session.io.calls.charge_many(2).map_err(|_| exhausted())?;
@@ -354,7 +362,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         let capped = AtomicBool::new(false);
         let meta = Budgeted::new(&self.pipe.meta, calls)
             .with_session(&session.io.calls)
-            .flagging(&capped);
+            .flagging(&capped)
+            .with_io(admission);
         let view = ViewStore {
             store: &meta,
             repo: &self.repo,
@@ -378,6 +387,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         id: Hash,
         role: Role,
         calls: &SliceBudget,
+        admission: &crate::store::read_io::ReadIo,
         operation: &mut Budget,
     ) -> Result<Option<Node>, ServerError> {
         session.io.calls.charge_many(2).map_err(|_| exhausted())?;
@@ -400,11 +410,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             };
             let meta = Budgeted::new(&self.pipe.meta, calls)
                 .with_session(&io.calls)
-                .flagging(&capped);
+                .flagging(&capped)
+                .with_io(admission);
             let blobs = Budgeted::new(&self.pipe.blobs, calls)
                 .with_session(&io.calls)
                 .with_encoded(&io.encoded)
-                .flagging(&capped);
+                .flagging(&capped)
+                .with_io(admission);
             let targets = BTreeSet::from([id]);
             proofs
                 .revalidate(&meta, &self.repo, self.seams.takedown.as_ref(), &targets)
@@ -415,8 +427,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             if !proofs.contains(&id) {
                 return Ok(None);
             }
+            let checks = super::super::reader_checks::Checks::new(&meta);
             let view = ViewStore {
-                store: &meta,
+                store: &checks,
                 repo: &self.repo,
                 writer,
                 policy: self.pipe.publication_policy.as_deref(),
@@ -438,7 +451,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             let Some((_, location)) = located.into_iter().next() else {
                 return Ok(None);
             };
-            if denied(&meta, &id).await? || denied(&meta, &location.pack).await? {
+            let locations = [(id, location)];
+            checks
+                .prefetch_locations(&locations)
+                .await
+                .map_err(failure)?;
+            if denied(&checks, &id).await? || denied(&checks, &location.pack).await? {
                 return Ok(None);
             }
             let bytes = match resolve::load(&env, id, location, &mut decode.charge.budget).await {
@@ -456,12 +474,28 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             ) {
                 return Ok(None);
             }
+            // Descriptor proofs retain live dependency reads after their
+            // strong directory walk, rather than borrowing phase guard replies.
+            let live_view = ViewStore {
+                store: &meta,
+                repo: &self.repo,
+                writer,
+                policy: self.pipe.publication_policy.as_deref(),
+            };
+            let facts = if self.pipe.cfg.takedown_denial {
+                inventory::located_entries(&live_view, &locations)
+                    .await
+                    .map_err(failure)?
+            } else {
+                BTreeMap::new()
+            };
             if self.pipe.cfg.takedown_denial
                 && !object_denials(
-                    &view,
+                    &live_view,
                     self.pipe.shards.as_ref(),
                     &self.repo,
-                    &targets,
+                    &locations,
+                    &facts,
                     self.indexed,
                 )
                 .await?
@@ -469,6 +503,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             {
                 return Ok(None);
             }
+            // Loading, seam callbacks and descriptor I/O may revoke a source.
+            // The final target/pack guards are one fresh bounded phase.
+            checks.reset();
+            checks
+                .prefetch_locations(&locations)
+                .await
+                .map_err(failure)?;
             if !view
                 .has(
                     &self
@@ -555,15 +596,22 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         limit: usize,
         options: HistoryOptions,
         calls: &SliceBudget,
+        admission: &crate::store::read_io::ReadIo,
         decode: &mut Budget,
     ) -> Result<Option<(Vec<Node>, bool)>, ServerError> {
-        let Some(mut tip) = self.capture_ref(session, reference, calls).await? else {
+        let Some(mut tip) = self
+            .capture_ref(session, reference, calls, admission)
+            .await?
+        else {
             return Ok(None);
         };
         let mut tags = BTreeSet::new();
         let mut role = Role::Tip;
         let first = loop {
-            let Some(node) = self.proved_node(session, tip, role, calls, decode).await? else {
+            let Some(node) = self
+                .proved_node(session, tip, role, calls, admission, decode)
+                .await?
+            else {
                 return Ok(None);
             };
             if let Object::Tag(tag) = &node.object {
@@ -598,7 +646,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 first
             } else {
                 let Some(node) = self
-                    .proved_node(session, id, Role::Commit, calls, decode)
+                    .proved_node(session, id, Role::Commit, calls, admission, decode)
                     .await?
                 else {
                     continue;
@@ -623,7 +671,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 // A singleton here is the node just validated, with no await
                 // afterward. Retained pages must refresh their earlier nodes.
                 if output.len() > 1 {
-                    self.final_nodes(session, &output, calls).await?;
+                    self.final_nodes(session, &output, calls, admission).await?;
                 }
                 return Ok(Some((output, complete)));
             }
@@ -648,7 +696,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         if !emitting {
             return Ok(None);
         }
-        self.final_nodes(session, &output, calls).await?;
+        self.final_nodes(session, &output, calls, admission).await?;
         Ok(Some((output, true)))
     }
     #[allow(clippy::too_many_arguments)] // Exact path target and operation context.
@@ -661,6 +709,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         expected: Option<Hash>,
         options: PathOptions,
         calls: &SliceBudget,
+        admission: &crate::store::read_io::ReadIo,
         decode: &mut Budget,
     ) -> Result<Option<(Node, EntryMode, Vec<Node>)>, ServerError> {
         if path.len() > options.max_depth {
@@ -674,6 +723,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 1,
                 options.history,
                 calls,
+                admission,
                 decode,
             )
             .await?
@@ -697,7 +747,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 return Ok(None);
             }
             let Some(node) = self
-                .proved_node(session, id, Role::Entry(mode), calls, decode)
+                .proved_node(session, id, Role::Entry(mode), calls, admission, decode)
                 .await?
             else {
                 return Ok(None);
@@ -721,14 +771,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             return Ok(None);
         }
         let Some(node) = self
-            .proved_node(session, id, Role::Entry(mode), calls, decode)
+            .proved_node(session, id, Role::Entry(mode), calls, admission, decode)
             .await?
         else {
             return Ok(None);
         };
         if options.include_witness {
             ancestors.push(node);
-            self.final_nodes(session, &ancestors, calls).await?;
+            self.final_nodes(session, &ancestors, calls, admission)
+                .await?;
             let leaf = ancestors.pop().ok_or_else(|| failure(()))?;
             Ok(Some((leaf, mode, ancestors)))
         } else {
@@ -743,6 +794,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         session: &mut ReaderSession,
         nodes: &[Node],
         calls: &SliceBudget,
+        admission: &crate::store::read_io::ReadIo,
     ) -> Result<(), ServerError> {
         if nodes.is_empty() {
             return Ok(());
@@ -760,9 +812,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         let result = async {
             let meta = Budgeted::new(&self.pipe.meta, calls)
                 .with_session(&session.io.calls)
-                .flagging(&capped);
+                .flagging(&capped)
+                .with_io(admission);
+            let checks = super::super::reader_checks::Checks::new(&meta);
             let view = ViewStore {
-                store: &meta,
+                store: &checks,
                 repo: &self.repo,
                 writer,
                 policy: self.pipe.publication_policy.as_deref(),
@@ -778,6 +832,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             if ids.iter().any(|id| !session.proofs.contains(id)) {
                 return Err(ServerError::not_found("object reader unavailable"));
             }
+            let locations: Vec<_> = nodes.iter().map(|node| (node.id, node.location)).collect();
             for node in nodes {
                 meta.charge().map_err(|_| exhausted())?;
                 if !matches!(
@@ -787,12 +842,28 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     return Err(ServerError::not_found("object reader unavailable"));
                 }
             }
+            // Descriptor proofs retain live dependency reads after their
+            // strong directory walk, rather than borrowing phase guard replies.
+            let live_view = ViewStore {
+                store: &meta,
+                repo: &self.repo,
+                writer,
+                policy: self.pipe.publication_policy.as_deref(),
+            };
+            let facts = if self.pipe.cfg.takedown_denial {
+                inventory::located_entries(&live_view, &locations)
+                    .await
+                    .map_err(failure)?
+            } else {
+                BTreeMap::new()
+            };
             if self.pipe.cfg.takedown_denial
                 && !object_denials(
-                    &view,
+                    &live_view,
                     self.pipe.shards.as_ref(),
                     &self.repo,
-                    &ids,
+                    &locations,
+                    &facts,
                     self.indexed,
                 )
                 .await?
@@ -800,6 +871,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             {
                 return Err(ServerError::not_found("object reader unavailable"));
             }
+            checks.reset();
+            checks
+                .prefetch_locations(&locations)
+                .await
+                .map_err(failure)?;
             for node in nodes {
                 // Retain the actual body source, not a different newly selected
                 // pack that could conceal denial of the source just read.

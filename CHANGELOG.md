@@ -63,6 +63,9 @@ collect the applicable entries between their old and new immutable pins.
   served prefixes so continuation is admitted by the reader.
   Raw-load waves shrink for large encoded frames to retain the previous
   single-member transient memory allowance alongside earlier canonical results.
+  Bounded history and commit/path reads share that admission envelope across the
+  complete operation, reuse actual source locations and sealed facts for denial,
+  and retain fresh final page/witness guards after callbacks and descriptor I/O.
 - Opt into canonical/metadata batches of up to 45 ids with
   `ObjectReader::with_batch_limit(45)?`; the 16-id default, URL issuance cap and
   all accounting allowances remain unchanged.
