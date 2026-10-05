@@ -183,7 +183,7 @@ impl<B: ObjectBucket> PartSink for R2PartSink<B> {
         ReadReservation::scope(&[], async {
             self.sink.abort().await;
         })
-        .await
+        .await;
     }
 }
 

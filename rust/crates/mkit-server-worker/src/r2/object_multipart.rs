@@ -468,7 +468,7 @@ impl<B: ObjectBucket> PartSink for VerifiedObjectPart<B> {
         ReadReservation::scope(&[], async {
             self.put.fail().await;
         })
-        .await
+        .await;
     }
 }
 

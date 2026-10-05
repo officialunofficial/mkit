@@ -633,7 +633,7 @@ impl<B: ObjectBucket> PackSink for R2PackSink<B> {
         mkit_server::store::ReadReservation::scope(&[], async {
             self.fail().await;
         })
-        .await
+        .await;
     }
 }
 
