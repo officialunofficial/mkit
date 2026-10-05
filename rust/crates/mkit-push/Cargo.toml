@@ -11,8 +11,8 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
-[lints.clippy]
-all = { level = "warn", priority = -1 }
+[lints]
+workspace = true
 
 [dependencies]
 mkit-core = { version = "0.5", path = "../mkit-core", default-features = false }

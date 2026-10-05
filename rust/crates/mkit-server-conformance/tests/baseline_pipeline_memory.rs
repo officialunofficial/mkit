@@ -273,7 +273,12 @@ async fn serve_observed_sharding(
     );
     cfg.ticket_caps.per_signer = 4;
     cfg.ticket_caps.per_ref = 8;
-    let clock = Arc::new(SystemClock);
+    // A profile that carries a manual server clock drives the server with it,
+    // so a case can step a window edge without waiting on the wall clock.
+    let clock: Arc<dyn mkit_server::Clock> = match multi.and_then(|p| p.server_clock.clone()) {
+        Some(manual) => manual,
+        None => Arc::new(SystemClock),
+    };
     let kv = Arc::new(MemoryKv::with_clock(clock.clone()));
     let meta = Shared(kv, mutant, Arc::default());
     let blobs = MemoryBlobStore::default();
@@ -568,6 +573,26 @@ async fn pipeline_d34_quota_per_branch() {
 #[cfg(feature = "__test-faults")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pipeline_d34_multi_namespace_cap_after_rollup() {
+    namespace_cap_after_rollup_at(QUOTA.window_ms).await;
+}
+
+/// The same case with the server clock ten seconds before a quota window
+/// edge (the window is sized so the next edge is that close to now): the case steps the manual clock past the edge instead of sleeping
+/// on the wall clock, so the run stays fast (it once slept up to ~197 s).
+#[cfg(feature = "__test-faults")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pipeline_d34_multi_namespace_cap_after_rollup_at_window_edge() {
+    let started = std::time::Instant::now();
+    let window = mkit_server_conformance::wire::sign::now_ms() + 10_000;
+    namespace_cap_after_rollup_at(window).await;
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "the edge must be stepped on the manual clock, not waited out"
+    );
+}
+
+#[cfg(feature = "__test-faults")]
+async fn namespace_cap_after_rollup_at(window_ms: i64) {
     let auth = |origin: &str| AuthMode::AuthV2(AuthV2Config::new(origin, "").unwrap());
     let mut profile = profile(WireAuth::AuthV2 {
         audience: "http://localhost".into(),
@@ -576,7 +601,7 @@ async fn pipeline_d34_multi_namespace_cap_after_rollup() {
     });
     profile.milestone = Milestone::M1;
     profile.quota = Some(QuotaLimits {
-        window_ms: QUOTA.window_ms,
+        window_ms,
         max_ops: QUOTA.max_ops,
         max_bytes: QUOTA.max_bytes,
     });
@@ -585,9 +610,12 @@ async fn pipeline_d34_multi_namespace_cap_after_rollup() {
     profile.features.insert(Feature::NamespacePolicy);
     profile.features.insert(Feature::TestFaults);
     profile.sharding_d34 = true;
+    profile.server_clock = Some(Arc::new(mkit_server::ManualClock::new(
+        mkit_server_conformance::wire::sign::now_ms(),
+    )));
     let (origin, _) = serve_sharding(
         auth,
-        Some(QUOTA),
+        Some(ServerQuota::new(window_ms, QUOTA.max_ops, QUOTA.max_bytes)),
         Mutant::None,
         Some(&profile),
         mkit_server::pipeline::Sharding::D34,

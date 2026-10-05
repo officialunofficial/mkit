@@ -1,5 +1,15 @@
 use crate::connect::Rpc;
-use crate::{Clock, Destination, Error, HttpTransport, Plan, Signer, proto::*};
+use crate::{
+    Clock, Destination, Error, HttpTransport, Plan, Signer,
+    proto::{
+        AdvanceOutcome, AdvanceRefsRequest, AdvanceRefsResponse, BeginUploadRequest,
+        BeginUploadResponse, CompleteUploadRequest, CompleteUploadResponse, GetServerInfoRequest,
+        GetServerInfoResponse, PackChunk, ReadRefRequest, ReadRefResponse, RefExpectation,
+        UpdateRefRequest, UpdateRefResponse, UploadPackHeader, UploadPackRequest,
+        UploadPackResponse, UploadPartHeader, UploadPartRequest, UploadPartResponse,
+        begin_upload_response, upload_part_request,
+    },
+};
 use mkit_core::{
     hash::Hash,
     pack,
@@ -83,6 +93,8 @@ impl Push {
     /// Runs the operation over host boundaries. The host transport may retry
     /// an exact signed request, journal it, add grants or stop on cancellation.
     /// The host clock schedules pending polls without requiring tokio.
+    // One linear retry loop over upload, advance and head-conflict handling.
+    #[allow(clippy::too_many_lines)]
     pub async fn run<T: HttpTransport, S: Signer, C: Clock>(
         &self,
         transport: &T,
@@ -180,7 +192,7 @@ impl Push {
             match result {
                 Ok(response) => match response.outcome.and_then(|outcome| outcome.as_known()) {
                     Some(AdvanceOutcome::Committed) => return Ok(Outcome::Committed),
-                    Some(AdvanceOutcome::PackmapConflict) => continue,
+                    Some(AdvanceOutcome::PackmapConflict) => {}
                     Some(AdvanceOutcome::HeadConflict) => {
                         return head_conflict(&rpc, &self.head_ref, self.tip).await;
                     }
@@ -214,6 +226,9 @@ impl Push {
     }
 }
 
+// The upload steps share one ticket/deadline state across the single-part
+// and multipart paths; splitting them would thread that state through helpers.
+#[allow(clippy::too_many_lines)]
 async fn upload<T: HttpTransport, S: Signer, C: Clock>(
     rpc: &mut Rpc<'_, T, S, C>,
     head_ref: &str,
@@ -251,7 +266,7 @@ async fn upload<T: HttpTransport, S: Signer, C: Clock>(
         let part_size = ticket.part_size.ok_or(Error::Invalid("ticket part size"))?;
         if part_size < 8 * 1024 * 1024
             || !part_size.is_power_of_two()
-            || ticket.token.as_deref().is_none_or(|token| token.is_empty())
+            || ticket.token.as_deref().is_none_or(<[u8]>::is_empty)
         {
             return Err(Error::Invalid("ticket geometry/token"));
         }
@@ -278,12 +293,16 @@ async fn upload<T: HttpTransport, S: Signer, C: Clock>(
         .map_err(|_| Error::Limit("multipart geometry"))?;
         let mut receipts = Vec::new();
         for index in 0..plan.count() {
-            let offset = plan
-                .offset(index)
-                .map_err(|_| Error::Invalid("part offset"))? as usize;
-            let len = plan
-                .expected_len(index)
-                .map_err(|_| Error::Invalid("part length"))? as usize;
+            let offset = usize::try_from(
+                plan.offset(index)
+                    .map_err(|_| Error::Invalid("part offset"))?,
+            )
+            .map_err(|_| Error::Invalid("part offset"))?;
+            let len = usize::try_from(
+                plan.expected_len(index)
+                    .map_err(|_| Error::Invalid("part length"))?,
+            )
+            .map_err(|_| Error::Invalid("part length"))?;
             let part = &bytes[offset..offset + len];
             let commitment = ContentCommitment::Part(PartCommitment {
                 ticket: id,
