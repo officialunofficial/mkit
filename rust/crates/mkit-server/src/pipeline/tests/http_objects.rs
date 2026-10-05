@@ -2509,6 +2509,7 @@ mod takedown_denial;
 
 mod object_reader_tests;
 
+mod history_tests;
 mod reader_proof_cost;
 mod reader_proof_tests;
 

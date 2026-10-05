@@ -15,6 +15,15 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Added
 
+- Server readers add `walk_history_in`, `locate_commit_in` and
+  `read_commit_path_in` for bounded selected-ref parent discovery and exact
+  decoded paths. First-parent and all-parent traversal are explicit; merge
+  frontiers, tag peeling and path depth are bounded. The request session
+  retains all accounting and live view/authority/denial checks. This fixes
+  old-history acquisition budgets without claiming a latency target. Optional
+  path witnesses supply output-budgeted commit/tree bytes for local proofs.
+  Existing reader APIs and URL target grammar are unchanged.
+
 - `mkit-push`: a bounded async ticketed push primitive for native and wasm
   clients, with injectable HTTP transport, signer and clock. It shares
   canonical transport messages, uploads parts where necessary, polls pending
