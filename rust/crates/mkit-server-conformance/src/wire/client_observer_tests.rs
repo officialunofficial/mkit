@@ -149,7 +149,21 @@ async fn cases_isolate_idle_connections_but_pool_requests_within_each_case() {
             }
             // Refuse a request from the next case on this old connection. With
             // a shared pool this deterministically fails the next Health call.
-            let reused = stream.peek(&mut [0]).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_millis(100)))
+                .unwrap();
+            let reused = match stream.peek(&mut [0]) {
+                Ok(count) => count,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    0
+                }
+                Err(error) => panic!("cannot inspect idle connection: {error}"),
+            };
             counts.push(expected + reused);
         }
         counts
