@@ -75,6 +75,7 @@ pub struct ReadCredits {
     identity: Arc<()>,
 }
 impl ReadCredits {
+    #[must_use]
     pub fn prepay(&self, count: u32) -> ReadReservation {
         ReadReservation {
             credit: Arc::new(Credit {
@@ -86,6 +87,7 @@ impl ReadCredits {
             inherited: None,
         }
     }
+    #[must_use]
     pub fn paid(&self) -> bool {
         self.consume(|c| {
             c.left
