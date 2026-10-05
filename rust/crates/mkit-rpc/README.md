@@ -48,3 +48,9 @@ their existing public paths. The feature uses ConnectRPC without its native
 client or server runtime features and builds for wasm32. Default RPC consumers
 do not enable it. Refresh `generated/transport/` with
 `scripts/regen-transport-proto.sh`; ordinary builds require no protoc.
+
+For runtime-independent clients, enable `transport-messages` instead. It
+exposes the same message types at the same paths, without service bindings,
+ConnectRPC or tokio. The `transport` feature includes this feature. Both
+features stage the same generated files; the build script gates only the
+binding includes, including during regeneration. `mkit-push` uses this surface.

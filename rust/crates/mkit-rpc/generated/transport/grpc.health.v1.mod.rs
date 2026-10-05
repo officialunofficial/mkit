@@ -36,4 +36,5 @@ pub use self::__buffa::view::HealthCheckResponseView;
 pub use self::__buffa::view::HealthCheckResponseOwnedView;
 #[doc(inline)]
 pub use self::__buffa::register_types;
+#[cfg(feature = "transport")]
 include!("grpc.health.v1.health.__connect.rs");

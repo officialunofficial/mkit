@@ -103,7 +103,7 @@ mod tests {
 pub mod hooks;
 
 /// Shared transport and health wire types and Connect service traits.
-#[cfg(feature = "transport")]
+#[cfg(any(feature = "transport", feature = "transport-messages"))]
 #[allow(missing_debug_implementations, clippy::all, clippy::pedantic)]
 pub mod transport {
     include!(concat!(env!("OUT_DIR"), "/_connectrpc.rs"));

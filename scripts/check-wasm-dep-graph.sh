@@ -114,6 +114,12 @@ check_tree "mkit-rpc (hooks)" "rust/crates/mkit-rpc" "--features hooks" "buffa e
 check_tree "mkit-rpc (transport)" "rust/crates/mkit-rpc" "--features transport" "buffa connectrpc" \
     blst zstd-sys commonware-runtime commonware-storage
 
+# The generic push API and messages-only schema surface have no runtime edge.
+check_tree "mkit-rpc (transport-messages)" "rust/crates/mkit-rpc" "--features transport-messages" "buffa" \
+    blst zstd-sys commonware-runtime commonware-storage tokio connectrpc
+check_tree "mkit-push" "rust/crates/mkit-push" "" "buffa mkit-rpc" \
+    blst zstd-sys commonware-runtime commonware-storage tokio connectrpc
+
 if [ "$fail" -ne 0 ]; then
   echo
   echo "See docs/INVARIANTS.md (\"wasm32 dependency graphs contain no C-toolchain crates\")."
