@@ -502,12 +502,15 @@ impl<B: ObjectBucket> BlobStore for R2BlobStore<B> {
     }
 
     async fn begin(&self, key: BlobKey, len: u64) -> Result<R2PackSink<B>, StoreError> {
-        if len > self.max_bytes {
-            return Err(StoreError::Invalid(
-                "blob exceeds the store's size cap".into(),
-            ));
-        }
-        Ok(self.sink(self.object_key(&key)?, Withheld::new(key, len)))
+        mkit_server::store::ReadReservation::scope(&[], async {
+            if len > self.max_bytes {
+                return Err(StoreError::Invalid(
+                    "blob exceeds the store's size cap".into(),
+                ));
+            }
+            Ok(self.sink(self.object_key(&key)?, Withheld::new(key, len)))
+        })
+        .await
     }
 
     async fn get(
@@ -548,10 +551,13 @@ impl<B: ObjectBucket> BlobStore for R2BlobStore<B> {
     }
 
     async fn probe(&self) -> Result<(), StoreError> {
-        self.bucket
-            .probe()
-            .await
-            .map_err(|e| backend_error(StorageOp::BlobHead, e))
+        mkit_server::store::ReadReservation::scope(&[], async {
+            self.bucket
+                .probe()
+                .await
+                .map_err(|e| backend_error(StorageOp::BlobHead, e))
+        })
+        .await
     }
 
     async fn delete(&self, key: &BlobKey) -> Result<bool, StoreError> {
@@ -596,20 +602,23 @@ impl<B: ObjectBucket> R2BlobStore<B> {
 
 impl<B: ObjectBucket> PackSink for R2PackSink<B> {
     async fn write(&mut self, chunk: Bytes) -> Result<(), StoreError> {
-        if self.failed {
-            return Err(StoreError::Invalid("write after a failed write".into()));
-        }
-        match self.core.push(chunk) {
-            Ok(forward) => {
-                self.send(forward).await;
-                Ok(())
+        mkit_server::store::ReadReservation::scope(&[], async {
+            if self.failed {
+                return Err(StoreError::Invalid("write after a failed write".into()));
             }
-            Err(e) => {
-                self.failed = true;
-                self.fail().await;
-                Err(e)
+            match self.core.push(chunk) {
+                Ok(forward) => {
+                    self.send(forward).await;
+                    Ok(())
+                }
+                Err(e) => {
+                    self.failed = true;
+                    self.fail().await;
+                    Err(e)
+                }
             }
-        }
+        })
+        .await
     }
 
     async fn commit(self) -> Result<CommitOutcome, StoreError> {
@@ -621,7 +630,10 @@ impl<B: ObjectBucket> PackSink for R2PackSink<B> {
     }
 
     async fn abort(mut self) {
-        self.fail().await;
+        mkit_server::store::ReadReservation::scope(&[], async {
+            self.fail().await;
+        })
+        .await
     }
 }
 
@@ -629,6 +641,7 @@ impl<B: ObjectBucket> R2PackSink<B> {
     /// Verify against `root` (the key's hash for `None`), then release the
     /// withheld byte.
     async fn finish(mut self, root: Option<Hash>) -> Result<CommitOutcome, StoreError> {
+        mkit_server::store::ReadReservation::scope(&[], async {
         if self.failed {
             self.fail().await;
             return Err(StoreError::Invalid("commit after a failed write".into()));
@@ -673,13 +686,15 @@ impl<B: ObjectBucket> R2PackSink<B> {
             Err(detail) => {
                 // A key holds only verified bytes: if it is present now (a
                 // concurrent writer, R2's per-key write rate), ours are too.
-                if matches!(mkit_server::store::ReadReservation::scope(&[], self.bucket.head(&self.object)).await, Ok(Some(n)) if n == self.core.len)
+                if matches!(self.bucket.head(&self.object).await, Ok(Some(n)) if n == self.core.len)
                 {
                     return Ok(CommitOutcome::AlreadyPresent);
                 }
                 Err(backend_error(StorageOp::BlobPut, detail))
             }
         }
+        })
+        .await
     }
 }
 

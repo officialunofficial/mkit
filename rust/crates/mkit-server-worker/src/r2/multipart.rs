@@ -5,6 +5,7 @@ use futures::StreamExt as _;
 use mkit_core::hash::{Hash, to_hex_bytes};
 use mkit_core::upload_parts::{PartPlan, merge_to_root};
 use mkit_server::storage_error::StorageOp;
+use mkit_server::store::ReadReservation;
 use mkit_server::{
     BlobKey, BlobStore, CommitOutcome, MultipartBlobStore, PackSink, PartRef, PartSink, StoreError,
 };
@@ -132,48 +133,57 @@ pub struct R2PartSink<B: ObjectBucket> {
 
 impl<B: ObjectBucket> PartSink for R2PartSink<B> {
     async fn write(&mut self, chunk: Bytes) -> Result<(), StoreError> {
-        if self.failed {
-            return Err(StoreError::Invalid("write after a failed write".into()));
-        }
-        if chunk.is_empty() {
-            self.failed = true;
-            return Err(StoreError::Invalid("empty part chunk".into()));
-        }
-        self.sink.write(chunk).await
+        ReadReservation::scope(&[], async {
+            if self.failed {
+                return Err(StoreError::Invalid("write after a failed write".into()));
+            }
+            if chunk.is_empty() {
+                self.failed = true;
+                return Err(StoreError::Invalid("empty part chunk".into()));
+            }
+            self.sink.write(chunk).await
+        })
+        .await
     }
 
     async fn commit(self) -> Result<Vec<u8>, StoreError> {
-        if self.failed {
-            return Err(StoreError::Invalid("commit after a failed write".into()));
-        }
-        self.store
-            .check_meta(&self.meta_key, &self.expected_meta)
-            .await?;
-        self.sink.commit().await?;
-        // A concurrent same-index writer may race this cleanup. Its loser
-        // re-uploads if completion finds no current object.
-        let sibling_prefix = format!("{}{}-", self.prefix, self.index);
-        self.store
-            .delete_prefix(&sibling_prefix, Some(&self.object))
-            .await?;
-        if self
-            .store
-            .check_meta(&self.meta_key, &self.expected_meta)
-            .await
-            .is_err()
-        {
+        ReadReservation::scope(&[], async {
+            if self.failed {
+                return Err(StoreError::Invalid("commit after a failed write".into()));
+            }
             self.store
-                .bucket
-                .delete(&self.object)
+                .check_meta(&self.meta_key, &self.expected_meta)
+                .await?;
+            self.sink.commit().await?;
+            // A concurrent same-index writer may race this cleanup. Its loser
+            // re-uploads if completion finds no current object.
+            let sibling_prefix = format!("{}{}-", self.prefix, self.index);
+            self.store
+                .delete_prefix(&sibling_prefix, Some(&self.object))
+                .await?;
+            if self
+                .store
+                .check_meta(&self.meta_key, &self.expected_meta)
                 .await
-                .map_err(|e| backend_error(StorageOp::BlobPut, e))?;
-            return Err(StoreError::SessionGone);
-        }
-        Ok(self.cv.to_vec())
+                .is_err()
+            {
+                self.store
+                    .bucket
+                    .delete(&self.object)
+                    .await
+                    .map_err(|e| backend_error(StorageOp::BlobPut, e))?;
+                return Err(StoreError::SessionGone);
+            }
+            Ok(self.cv.to_vec())
+        })
+        .await
     }
 
     async fn abort(self) {
-        self.sink.abort().await;
+        ReadReservation::scope(&[], async {
+            self.sink.abort().await;
+        })
+        .await
     }
 }
 
@@ -192,15 +202,18 @@ impl<B: ObjectBucket> MultipartBlobStore for R2BlobStore<B> {
         part_size: u64,
         ticket_id: [u8; 32],
     ) -> Result<Vec<u8>, StoreError> {
-        let plan = PartPlan::new(len, part_size, Self::MAX_PARTS)
-            .map_err(|e| StoreError::Invalid(e.to_string().into()))?;
-        let prefix = session_prefix(self, &ticket_id)?;
-        let meta_key = format!("{prefix}meta");
-        let expected = metadata(key, &plan);
-        self.put_small(meta_key.clone(), Bytes::from(expected.clone()))
-            .await?;
-        self.check_meta(&meta_key, &expected).await?;
-        Ok(ticket_id.to_vec())
+        ReadReservation::scope(&[], async {
+            let plan = PartPlan::new(len, part_size, Self::MAX_PARTS)
+                .map_err(|e| StoreError::Invalid(e.to_string().into()))?;
+            let prefix = session_prefix(self, &ticket_id)?;
+            let meta_key = format!("{prefix}meta");
+            let expected = metadata(key, &plan);
+            self.put_small(meta_key.clone(), Bytes::from(expected.clone()))
+                .await?;
+            self.check_meta(&meta_key, &expected).await?;
+            Ok(ticket_id.to_vec())
+        })
+        .await
     }
 
     async fn begin_part(
@@ -211,24 +224,27 @@ impl<B: ObjectBucket> MultipartBlobStore for R2BlobStore<B> {
         index: u32,
         expected_cv: [u8; 32],
     ) -> Result<Self::PartSink, StoreError> {
-        let prefix = session_prefix(self, session)?;
-        let meta_key = format!("{prefix}meta");
-        let expected_meta = metadata(key, plan);
-        self.check_meta(&meta_key, &expected_meta).await?;
-        let object = part_key(&prefix, index, &expected_cv);
-        let core = Withheld::part(expected_cv, plan, index)?;
-        let sink = self.sink(object.clone(), core);
-        Ok(R2PartSink {
-            store: self.clone(),
-            sink,
-            meta_key,
-            expected_meta,
-            prefix,
-            object,
-            index,
-            cv: expected_cv,
-            failed: false,
+        ReadReservation::scope(&[], async {
+            let prefix = session_prefix(self, session)?;
+            let meta_key = format!("{prefix}meta");
+            let expected_meta = metadata(key, plan);
+            self.check_meta(&meta_key, &expected_meta).await?;
+            let object = part_key(&prefix, index, &expected_cv);
+            let core = Withheld::part(expected_cv, plan, index)?;
+            let sink = self.sink(object.clone(), core);
+            Ok(R2PartSink {
+                store: self.clone(),
+                sink,
+                meta_key,
+                expected_meta,
+                prefix,
+                object,
+                index,
+                cv: expected_cv,
+                failed: false,
+            })
         })
+        .await
     }
 
     async fn complete(
@@ -238,7 +254,10 @@ impl<B: ObjectBucket> MultipartBlobStore for R2BlobStore<B> {
         plan: &PartPlan,
         parts: &[PartRef],
     ) -> Result<CommitOutcome, StoreError> {
-        self.complete_with(key, session, plan, parts, None).await
+        ReadReservation::scope(&[], async {
+            self.complete_with(key, session, plan, parts, None).await
+        })
+        .await
     }
 
     async fn complete_with_root(
@@ -249,8 +268,11 @@ impl<B: ObjectBucket> MultipartBlobStore for R2BlobStore<B> {
         parts: &[PartRef],
         content_root: Hash,
     ) -> Result<CommitOutcome, StoreError> {
-        self.complete_with(key, session, plan, parts, Some(content_root))
-            .await
+        ReadReservation::scope(&[], async {
+            self.complete_with(key, session, plan, parts, Some(content_root))
+                .await
+        })
+        .await
     }
 
     fn single_put_limit(&self) -> Option<u64> {
@@ -258,17 +280,20 @@ impl<B: ObjectBucket> MultipartBlobStore for R2BlobStore<B> {
     }
 
     async fn abort(&self, _key: BlobKey, session: &[u8]) -> Result<(), StoreError> {
-        if self.defer_abort {
-            return Err(StoreError::Unavailable(
-                "expiry cleanup deferred: Free alarm R2 budget".into(),
-            ));
-        }
-        let prefix = session_prefix(self, session)?;
-        self.bucket
-            .delete(&format!("{prefix}meta"))
-            .await
-            .map_err(|e| backend_error(StorageOp::BlobPut, e))?;
-        self.delete_prefix(&prefix, None).await
+        ReadReservation::scope(&[], async {
+            if self.defer_abort {
+                return Err(StoreError::Unavailable(
+                    "expiry cleanup deferred: Free alarm R2 budget".into(),
+                ));
+            }
+            let prefix = session_prefix(self, session)?;
+            self.bucket
+                .delete(&format!("{prefix}meta"))
+                .await
+                .map_err(|e| backend_error(StorageOp::BlobPut, e))?;
+            self.delete_prefix(&prefix, None).await
+        })
+        .await
     }
 }
 

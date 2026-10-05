@@ -13,13 +13,16 @@ use bytes::Bytes;
 use futures::FutureExt as _;
 use futures::channel::oneshot;
 use futures::executor::block_on;
+use mkit_core::hash::hash;
 use mkit_core::protocol::PackKey;
+use mkit_core::upload_parts::{MIN_PART_SIZE, PartPlan, part_subtree_cv};
 use mkit_server::indexed::budget::SliceBudget;
 use mkit_server::pipeline::{AuthMode, Hooks, Pipeline, PipelineConfig, RequestMeta};
 use mkit_server::store::ReadReservation;
 use mkit_server::{
-    Addressing, BlobKey, BlobStore, ByteRange, NamespaceKey, NamespaceStore, NoopMetrics,
-    Partition, Procedure, RepoId, RepoName, StoreError, SystemClock,
+    Addressing, BlobKey, BlobStore, ByteRange, MultipartBlobStore, NamespaceKey, NamespaceStore,
+    NoopMetrics, PackSink, PartSink, Partition, Procedure, RepoId, RepoName, StoreError,
+    SystemClock,
 };
 use mkit_server_worker::naming::DoTarget;
 use mkit_server_worker::ns_client::{DoNamespaceStore, NsTransport, charge_request};
@@ -95,6 +98,21 @@ impl ObjectBucket for CountedBucket {
             return rx;
         }
         self.inner.spawn_put(key, len, body)
+    }
+    fn spawn_object_part(
+        &self,
+        key: String,
+        upload: String,
+        number: u16,
+        len: u64,
+        body: PutBody,
+    ) -> oneshot::Receiver<Result<String, String>> {
+        if let Err(error) = self.dispatch(false) {
+            let (tx, rx) = oneshot::channel();
+            let _ = tx.send(Err(error));
+            return rx;
+        }
+        self.inner.spawn_object_part(key, upload, number, len, body)
     }
     async fn head(&self, key: &str) -> Result<Option<u64>, String> {
         self.dispatch(true)?;
@@ -579,5 +597,173 @@ fn blob_read_credit_rejects_unrelated_deletes_even_inside_its_scope() {
         .await;
         assert_eq!(dispatches.load(Ordering::SeqCst), 4);
         assert_eq!(budget.used(), 4);
+    });
+}
+
+#[test]
+fn multipart_mutation_reads_cannot_consume_the_reserved_reader_call() {
+    block_on(async {
+        let bucket = common::SimBucket::default();
+        let plain = R2BlobStore::new(bucket.clone(), PACKS_KEYSPACE);
+        let bytes = vec![7; usize::try_from(MIN_PART_SIZE).unwrap() + 4];
+        let plan = PartPlan::new(bytes.len() as u64, MIN_PART_SIZE, 10_000).unwrap();
+        let root = hash(&bytes);
+        let cvs: Vec<_> = (0..plan.count())
+            .map(|index| {
+                let start = usize::try_from(plan.offset(index).unwrap()).unwrap();
+                let end = start + usize::try_from(plan.expected_len(index).unwrap()).unwrap();
+                part_subtree_cv(&plan, index, &bytes[start..end]).unwrap()
+            })
+            .collect();
+        let cv = cvs[0];
+        let key = BlobKey::pack(root);
+        let object = BlobKey::object([9; 32]);
+        bucket.replace_object(
+            &plain.object_key(&key).unwrap(),
+            Bytes::copy_from_slice(&bytes),
+        );
+        let ticket = plain
+            .begin_multipart_for_ticket(key, plan.total(), plan.part_size(), [3; 32])
+            .await
+            .unwrap();
+        let token = plain
+            .begin_verified_object(object, &plan, root, &cvs, [4; 32])
+            .await
+            .unwrap();
+        let budget = SliceBudget::new(1);
+        let dispatches = Arc::<AtomicU32>::default();
+        let blobs = R2BlobStore::new(
+            CountedBucket {
+                inner: bucket.clone(),
+                budget: budget.clone(),
+                alarm: None,
+                dispatches: dispatches.clone(),
+                read_credits: Arc::default(),
+            },
+            PACKS_KEYSPACE,
+        );
+        let reservation = blobs.reserve_read_calls(1).unwrap();
+        ReadReservation::scope(&[reservation], async {
+            assert!(blobs.complete(key, &ticket, &plan, &[]).await.is_err());
+            assert!(
+                blobs
+                    .complete_with_root(key, &ticket, &plan, &[], root)
+                    .await
+                    .is_err()
+            );
+            assert!(blobs.begin_part(key, &ticket, &plan, 0, cv).await.is_err());
+            assert!(
+                blobs
+                    .begin_verified_object(object, &plan, root, &cvs, [4; 32])
+                    .await
+                    .is_err()
+            );
+            assert!(
+                blobs
+                    .begin_verified_object_part(object, &token, &plan, 0, cv)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                blobs
+                    .complete_verified_object(object, &token, &plan, &[], root)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                blobs
+                    .abort_verified_object(object, &token, &plan)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(dispatches.load(Ordering::SeqCst), 0);
+            assert!(blobs.head(&key).await.unwrap().is_some());
+        })
+        .await;
+        assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+        assert_eq!(budget.used(), 1);
+
+        // Part commit revalidates metadata independently of the begin/complete
+        // guards above. Exercise public and verified part sinks with live loans.
+        async fn check_part<P: PartSink>(
+            mut part: P,
+            bytes: &[u8],
+            blobs: &R2BlobStore<CountedBucket>,
+            key: BlobKey,
+            dispatches: &AtomicU32,
+        ) {
+            for chunk in bytes.chunks(256 * 1024) {
+                part.write(Bytes::copy_from_slice(chunk)).await.unwrap();
+            }
+            let reservation = blobs.reserve_read_calls(1).unwrap();
+            ReadReservation::scope(&[reservation], async {
+                assert!(part.commit().await.is_err());
+                assert_eq!(dispatches.load(Ordering::SeqCst), 2);
+                assert!(blobs.head(&key).await.unwrap().is_some());
+            })
+            .await;
+            assert_eq!(dispatches.load(Ordering::SeqCst), 3);
+        }
+        for verified in [false, true] {
+            let budget = SliceBudget::new(3);
+            let dispatches = Arc::<AtomicU32>::default();
+            let blobs = R2BlobStore::new(
+                CountedBucket {
+                    inner: bucket.clone(),
+                    budget: budget.clone(),
+                    alarm: None,
+                    dispatches: dispatches.clone(),
+                    read_credits: Arc::default(),
+                },
+                PACKS_KEYSPACE,
+            );
+            let first = &bytes[..usize::try_from(plan.expected_len(0).unwrap()).unwrap()];
+            if verified {
+                let part = blobs
+                    .begin_verified_object_part(object, &token, &plan, 0, cv)
+                    .await
+                    .unwrap();
+                check_part(part, first, &blobs, key, &dispatches).await;
+            } else {
+                let part = blobs.begin_part(key, &ticket, &plan, 0, cv).await.unwrap();
+                check_part(part, first, &blobs, key, &dispatches).await;
+            }
+            assert_eq!(budget.used(), 3);
+        }
+    });
+}
+
+#[test]
+fn root_pinning_sink_cannot_borrow_credit_after_its_put_was_charged() {
+    block_on(async {
+        let budget = SliceBudget::new(2);
+        let dispatches = Arc::<AtomicU32>::default();
+        let bucket = common::SimBucket::default();
+        let blobs = R2BlobStore::new(
+            CountedBucket {
+                inner: bucket.clone(),
+                budget: budget.clone(),
+                alarm: None,
+                dispatches: dispatches.clone(),
+                read_credits: Arc::default(),
+            },
+            PACKS_KEYSPACE,
+        );
+        let key = BlobKey::pack([5; 32]);
+        bucket.replace_object(
+            &blobs.object_key(&key).unwrap(),
+            Bytes::from_static(b"test"),
+        );
+        let mut sink = blobs.begin(BlobKey::object([9; 32]), 1).await.unwrap();
+        sink.write(Bytes::from_static(b"x")).await.unwrap();
+        let reservation = blobs.reserve_read_calls(1).unwrap();
+        ReadReservation::scope(&[reservation], async {
+            assert!(sink.commit_with_root(hash(b"x")).await.is_err());
+            assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+            assert!(blobs.head(&key).await.unwrap().is_some());
+        })
+        .await;
+        assert_eq!(dispatches.load(Ordering::SeqCst), 2);
+        assert_eq!(budget.used(), 2);
     });
 }
