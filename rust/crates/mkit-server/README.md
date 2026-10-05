@@ -108,7 +108,10 @@ version includes the bound; the tracked PR does not establish released coverage.
 
 ## Object-reader sessions and entry sizes
 
-With `http-objects`, pass one `pipeline::ReaderSession` to
+With `http-objects`, opt into 45-id canonical/metadata calls with
+`pipeline.object_reader(repo, view).await?.with_batch_limit(45)?`; the default
+remains 16 and URL issuance still accepts at most 16 targets. This changes no
+call, row, byte, decode or output allowance. Pass one `pipeline::ReaderSession` to
 `ObjectReader::read_canonical_in` and `object_metadata_in` to share an allowance
 across calls (and readers). `ReadLimits::new(calls, decoded, encoded, output)`
 sets the four dimensions; `ReaderSession::used()` reports consumption.
@@ -125,7 +128,34 @@ row bytes are excluded. Decode work counts canonical objects, proof ancestors
 and delta bases each time they are decoded. Canonical outputs count duplicates
 individually; metadata outputs have no canonical byte charge. Failed calls keep
 charges already incurred. Cancellation settles completed decode work and keeps
-I/O reservations. Existing per-invocation `SliceBudget` decorators still work.
+I/O reservations, including decoded reservations for parallel raw-member waves. Existing per-invocation `SliceBudget` decorators still work.
+
+Keep one reader and one session per logical operation. Read canonical parents
+before their children: a commit proves its tree and parents, and a returned tree
+proves its entries. Use metadata only when lengths are needed; metadata does not
+create decoded child proofs. Do not fetch unchanged file bodies merely to keep
+their hashes when loading a base tree.
+
+Each batch shares verified locations and sealed inventory, and coalesces denial
+reads only within the operation. With `takedown_denial` enabled, the descriptor
+directory is read strongly for every batch. Disabling that option skips the
+descriptor proofs, but direct object/pack blocklist guards remain mandatory
+(SPEC-SERVER §14.2), including fail-closed reads and blocked reconstruction bases.
+A fresh denial phase and a final gate precede output; external delta
+bases still follow repository/view membership, denial and reconstruction limits.
+Index scans, membership reads and independent raw member loads share one
+six-call I/O admission envelope. Scan waves retain the existing 1,000 transient
+row allowance across all concurrent replies, and results are processed in
+partition/input order. Encoded ranges, calls and decoded raw members are reserved
+before dispatch. Failed or cancelled waves keep their reservations. Delta chains
+use the bounded sequential resolver. Raw-load waves also bound combined encoded
+buffers and canonical results to the previous single-member transient allowance;
+large frames therefore run in smaller waves. Decoder scratch overlaps only one
+synchronous decode. Store decorators that impose an inherited
+call or byte budget must forward the hidden reader-admission and reservation hooks, so the entire
+wave is admitted before the first backend dispatch. Activate the returned
+reservations only around their owning read future with `ReadReservation::scope`;
+unrelated tasks and mutations cannot consume that wave’s prepaid credit.
 
 The old reader methods retain their signatures and per-call allowances. Cap
 hits return `ResourceExhausted` with `OBJECT_READER_LIMIT_MESSAGE` (`object reader
@@ -200,8 +230,14 @@ structural evidence while retaining budgets/deadline. Authority, membership,
 source dependencies, denial and ancestry stops remain live. Public unprovable
 starts/paths are absent; owner caps use the existing typed exhaustion message.
 The complete helper shares the existing per-call decode allowance across all
-nodes/bases, in addition to its session ledger. These helpers reduce
-history/path acquisition work within the unchanged reader
+nodes/bases, in addition to its session ledger. Ref capture, node loads and
+retained page/witness checks use one shared I/O admission envelope. Denial proofs
+reuse the actual source locations and sealed inventory in bounded groups;
+final authorization and proof revalidation precede the live inventory/descriptor
+checks. Target/pack guards then start fresh after that work and all callbacks.
+The inventory supplies
+clearance facts, never new history edges.
+These helpers reduce history/path acquisition work within the unchanged reader
 allowance. They add no persisted state, continuation tokens, URL forms, canonical
 windows or latency guarantee. Existing arbitrary-ID and metadata APIs remain
 available, and can reuse the selected canonical edges in the same session.

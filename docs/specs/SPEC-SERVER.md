@@ -1659,6 +1659,31 @@ decode caps MUST remain uniformly absent (SPEC-HTTP-OBJECTS §4). Storage failur
 remain `unavailable`. Existing per-call allowances and invocation call budgets
 remain applicable. This embedding API does not change HTTP error mappings.
 
+Embedders MAY opt into canonical/metadata batches of up to 45 ids; the default
+is 16. This MUST NOT raise storage, row, byte, decode or output allowances or
+change the 16-target URL issuance cap.
+
+An operation MAY reuse verified locations and sealed inventory across its denial
+and metadata consumers. Inventory batches MUST validate completion, entry digest,
+type/length facts and reconstruction dependencies. Repeated target/pack denial
+reads MAY be coalesced within one operation phase; the final access phase MUST
+start fresh after independently loaded objects complete. A strongly empty denial
+directory MUST NOT be cached across calls. Final access gates and external-base
+membership/denial remain mandatory.
+
+Independent reader I/O MAY run concurrently with one shared concurrency, transient
+row and byte admission envelope across scans, membership groups and object loads.
+Every wave MUST reserve page, row, byte and call allowances before dispatch, drain
+all dispatched replies on failure, and process replies deterministically. Served
+scan-prefix cursors, rotations and first-member pack ordering MUST remain intact.
+Prepaid credits MUST belong to the dispatched wave and its inherited ledgers;
+unrelated work or cancellation of another wave MUST NOT consume them.
+Cancellation MUST release in-flight admission while retaining charged reservations.
+Raw-load waves MUST NOT multiply the single-member transient payload allowance:
+their combined encoded frames and canonical results MUST fit that allowance.
+Retained earlier results remain subject to batch/output bounds; synchronous
+decoder scratch and canonical conversion overlap only one member at a time.
+
 A reader session MAY also retain bounded structural reachability proofs. These
 MUST be privately bound to its reader/backend, full repository identity, view
 and verified credential scope. A context change MUST discard proofs without
@@ -1699,6 +1724,12 @@ A start commit is inclusive and skipped ancestors count toward the visit bound.
 These primitives issue no continuation authority and persist no graph state.
 The complete helper MUST share the existing per-call canonical decode allowance
 across all nodes and reconstruction bases, in addition to its session ledger.
+Ref capture, node loading and retained page/witness checks MUST share the same
+I/O admission envelope. Denial proofs MAY consume the actual verified source
+locations and sealed inventory without locating those targets again. Final
+authorization and proof revalidation MUST precede the live inventory/descriptor
+checks. Source guards MUST then start fresh after that work and all callbacks;
+inventory facts MUST NOT establish additional traversal edges.
 
 Commit/path reader primitives MUST first prove the selected commit through
 parents, then walk only the path trees. Components are exact decoded name bytes;

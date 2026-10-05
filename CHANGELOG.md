@@ -163,6 +163,34 @@ collect the applicable entries between their old and new immutable pins.
 - Borrowed server stores forward batched content-index reads to the backend.
   Two-key denial probes use one batch, and member dependency checks use one
   batch each for the object and its pack. Fail-closed checks remain live.
+- Server readers share located member facts and sealed inventory within each
+  batch, coalesce repeated denial checks, and bound independent scans, membership
+  reads and raw canonical loads with one shared six-call I/O envelope. Scan-prefix
+  pagination and deterministic first-member selection retain their existing caps.
+  Strong denial directories and final access phases remain fresh per operation.
+  Waves reserve inherited backend budgets before dispatch; fallback graph walks
+  recheck an ancestor's stop after loading before exposing its children. Read
+  credits are scoped to their owning wave; unrelated work and cancellation of
+  another wave cannot spend them. Multipart and root-pinning mutations isolate
+  their internal probes from active read credits. Public views preserve backend
+  served prefixes so continuation is admitted by the reader.
+  Raw-load waves shrink for large encoded frames to retain the previous
+  single-member transient memory allowance alongside earlier canonical results.
+  Bounded history and commit/path reads share that admission envelope across the
+  complete operation, reuse actual source locations and sealed facts for denial,
+  and retain fresh final page/witness guards after callbacks and descriptor I/O.
+  Final authorization and proof revalidation precede live descriptor checks and
+  fresh source guards, including singleton history/path results and retained
+  pages or witnesses, so callbacks cannot reuse earlier indirect chunk clearance.
+  Canonical and metadata batches also refresh final guards after takedown
+  callbacks, so a durable source block installed by a callback remains absent.
+- Opt into canonical/metadata batches of up to 45 ids with
+  `ObjectReader::with_batch_limit(45)?`; the 16-id default, URL issuance cap and
+  all accounting allowances remain unchanged.
+- Keep one reader/session per operation, supply canonical parents before children,
+  and request metadata only when lengths are needed. Parallel raw-member
+  reservations count against session allowances.
+
 - Server reader sessions capture roots once and reuse bounded local graph proofs
   across canonical and metadata batches. Retain the same reader/session through
   a request; start a new session to observe new commits before proof expiry.

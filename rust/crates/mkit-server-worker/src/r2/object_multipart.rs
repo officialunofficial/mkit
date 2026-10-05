@@ -7,6 +7,7 @@ use bytes::Bytes;
 use futures::{StreamExt as _, channel::mpsc};
 use mkit_core::hash::{Hash, hash, to_hex_bytes};
 use mkit_core::upload_parts::{PartPlan, merge_to_root};
+use mkit_server::store::ReadReservation;
 use mkit_server::{BlobKey, BlobStore, CommitOutcome, PartSink, StoreError};
 use serde::{Deserialize, Serialize};
 
@@ -157,70 +158,76 @@ impl<B: ObjectBucket> R2BlobStore<B> {
         cvs: &[Hash],
         operation: Hash,
     ) -> Result<Vec<u8>, StoreError> {
-        key.expected_root(Some(root))?;
-        if plan.count() > 10_000 {
-            return Err(invalid());
-        }
-        if cvs.len() != plan.count() as usize
-            || merge_to_root(plan, cvs).map_err(|_| invalid())? != root
-        {
-            return Err(invalid());
-        }
-        let definition = Definition {
-            object: self.object_key(&key)?,
-            root,
-            len: plan.total(),
-            part_size: plan.part_size(),
-            cvs: cvs.to_vec(),
-            operation,
-        };
-        self.pin_object_root(&definition.object, root, plan.total())
-            .await?;
-        let meta_key = self.object_session_key(&operation);
-        if let Some(bytes) = self.read_object_metadata(&meta_key).await? {
-            let old: Session = decode(&bytes)?;
-            if old.definition != definition || old.upload.is_empty() || old.upload.len() > MAX_ID {
+        ReadReservation::scope(&[], async {
+            key.expected_root(Some(root))?;
+            if plan.count() > 10_000 {
                 return Err(invalid());
             }
-            return Ok(operation.to_vec());
-        }
-        let upload = self
-            .bucket
-            .create_object_upload(&definition.object)
-            .await
-            .map_err(failed)?;
-        if upload.is_empty() || upload.len() > MAX_ID {
-            return Err(invalid());
-        }
-        let candidate = Session { definition, upload };
-        let bytes = encode(&candidate)?;
-        // Conditional PUT selects one immutable session; a losing creator
-        // aborts only its own private upload, never the winner's session.
-        let result = self
-            .put_object_metadata(meta_key.clone(), Bytes::from(bytes))
-            .await;
-        let observed = self.read_object_metadata(&meta_key).await;
-        if let Ok(Some(bytes)) = observed {
-            let winner: Session = decode(&bytes)?;
-            if winner.upload != candidate.upload {
-                let _ = self
-                    .bucket
-                    .abort_object_upload(&candidate.definition.object, &candidate.upload)
-                    .await;
-            }
-            if winner.definition != candidate.definition {
+            if cvs.len() != plan.count() as usize
+                || merge_to_root(plan, cvs).map_err(|_| invalid())? != root
+            {
                 return Err(invalid());
             }
-            result?;
-            Ok(operation.to_vec())
-        } else {
-            // An uncertain write may have committed. Leave the upload
-            // conservatively; lifecycle abort reclaims orphaned sessions.
-            result?;
-            Err(StoreError::unavailable(
-                "object session publication unavailable",
-            ))
-        }
+            let definition = Definition {
+                object: self.object_key(&key)?,
+                root,
+                len: plan.total(),
+                part_size: plan.part_size(),
+                cvs: cvs.to_vec(),
+                operation,
+            };
+            self.pin_object_root(&definition.object, root, plan.total())
+                .await?;
+            let meta_key = self.object_session_key(&operation);
+            if let Some(bytes) = self.read_object_metadata(&meta_key).await? {
+                let old: Session = decode(&bytes)?;
+                if old.definition != definition
+                    || old.upload.is_empty()
+                    || old.upload.len() > MAX_ID
+                {
+                    return Err(invalid());
+                }
+                return Ok(operation.to_vec());
+            }
+            let upload = self
+                .bucket
+                .create_object_upload(&definition.object)
+                .await
+                .map_err(failed)?;
+            if upload.is_empty() || upload.len() > MAX_ID {
+                return Err(invalid());
+            }
+            let candidate = Session { definition, upload };
+            let bytes = encode(&candidate)?;
+            // Conditional PUT selects one immutable session; a losing creator
+            // aborts only its own private upload, never the winner's session.
+            let result = self
+                .put_object_metadata(meta_key.clone(), Bytes::from(bytes))
+                .await;
+            let observed = self.read_object_metadata(&meta_key).await;
+            if let Ok(Some(bytes)) = observed {
+                let winner: Session = decode(&bytes)?;
+                if winner.upload != candidate.upload {
+                    let _ = self
+                        .bucket
+                        .abort_object_upload(&candidate.definition.object, &candidate.upload)
+                        .await;
+                }
+                if winner.definition != candidate.definition {
+                    return Err(invalid());
+                }
+                result?;
+                Ok(operation.to_vec())
+            } else {
+                // An uncertain write may have committed. Leave the upload
+                // conservatively; lifecycle abort reclaims orphaned sessions.
+                result?;
+                Err(StoreError::unavailable(
+                    "object session publication unavailable",
+                ))
+            }
+        })
+        .await
     }
 
     async fn checked_object_session(
@@ -264,35 +271,38 @@ impl<B: ObjectBucket> R2BlobStore<B> {
         index: u32,
         cv: Hash,
     ) -> Result<VerifiedObjectPart<B>, StoreError> {
-        let (session, binding) = self.checked_object_session(key, token, plan).await?;
-        if session.definition.cvs.get(index as usize) != Some(&cv) {
-            return Err(invalid());
-        }
-        let core = Withheld::part(cv, plan, index)?;
-        let number = u16::try_from(index + 1).map_err(|_| invalid())?;
-        let (tx, rx) = mpsc::channel(0);
-        let done = self.bucket.spawn_object_part(
-            session.definition.object.clone(),
-            session.upload.clone(),
-            number,
-            core.len,
-            rx,
-        );
-        Ok(VerifiedObjectPart {
-            store: self.clone(),
-            key,
-            token: token.to_vec(),
-            plan: *plan,
-            binding,
-            cv,
-            core,
-            put: Running {
-                tx: Some(tx),
-                done: Some(done),
-                answer: None,
-            },
-            failed: false,
+        ReadReservation::scope(&[], async {
+            let (session, binding) = self.checked_object_session(key, token, plan).await?;
+            if session.definition.cvs.get(index as usize) != Some(&cv) {
+                return Err(invalid());
+            }
+            let core = Withheld::part(cv, plan, index)?;
+            let number = u16::try_from(index + 1).map_err(|_| invalid())?;
+            let (tx, rx) = mpsc::channel(0);
+            let done = self.bucket.spawn_object_part(
+                session.definition.object.clone(),
+                session.upload.clone(),
+                number,
+                core.len,
+                rx,
+            );
+            Ok(VerifiedObjectPart {
+                store: self.clone(),
+                key,
+                token: token.to_vec(),
+                plan: *plan,
+                binding,
+                cv,
+                core,
+                put: Running {
+                    tx: Some(tx),
+                    done: Some(done),
+                    answer: None,
+                },
+                failed: false,
+            })
         })
+        .await
     }
 
     /// Validate every pinned identity/root before bounded backend publication.
@@ -305,57 +315,60 @@ impl<B: ObjectBucket> R2BlobStore<B> {
         parts: &[VerifiedObjectPartRef],
         root: Hash,
     ) -> Result<CommitOutcome, StoreError> {
-        let (session, binding) = self.checked_object_session(key, token, plan).await?;
-        if session.definition.root != root || parts.len() != plan.count() as usize {
-            return Err(invalid());
-        }
-        let mut selected = Vec::with_capacity(parts.len());
-        for (index, part) in parts.iter().enumerate() {
-            let cv = &session.definition.cvs[index];
-            if part.index as usize != index
-                || part.len != plan.expected_len(part.index).map_err(|_| invalid())?
-                || part.tag.len() < 66
-                || part.tag.len() > MAX_RECEIPT
-                || part.tag[0] != 1
-                || &part.tag[1..33] != cv
-                || part.tag[33..65] != binding
-            {
+        ReadReservation::scope(&[], async {
+            let (session, binding) = self.checked_object_session(key, token, plan).await?;
+            if session.definition.root != root || parts.len() != plan.count() as usize {
                 return Err(invalid());
             }
-            let etag = std::str::from_utf8(&part.tag[65..]).map_err(|_| invalid())?;
-            if etag.is_empty() || etag.len() > MAX_ETAG {
-                return Err(invalid());
+            let mut selected = Vec::with_capacity(parts.len());
+            for (index, part) in parts.iter().enumerate() {
+                let cv = &session.definition.cvs[index];
+                if part.index as usize != index
+                    || part.len != plan.expected_len(part.index).map_err(|_| invalid())?
+                    || part.tag.len() < 66
+                    || part.tag.len() > MAX_RECEIPT
+                    || part.tag[0] != 1
+                    || &part.tag[1..33] != cv
+                    || part.tag[33..65] != binding
+                {
+                    return Err(invalid());
+                }
+                let etag = std::str::from_utf8(&part.tag[65..]).map_err(|_| invalid())?;
+                if etag.is_empty() || etag.len() > MAX_ETAG {
+                    return Err(invalid());
+                }
+                selected.push((
+                    u16::try_from(index + 1).map_err(|_| invalid())?,
+                    etag.to_owned(),
+                ));
             }
-            selected.push((
-                u16::try_from(index + 1).map_err(|_| invalid())?,
-                etag.to_owned(),
-            ));
-        }
-        self.pin_object_root(&session.definition.object, root, plan.total())
-            .await?;
-        if let Some(meta) = self.head(&key).await? {
-            return if meta.len == plan.total() {
-                Ok(CommitOutcome::AlreadyPresent)
-            } else {
-                Err(invalid())
-            };
-        }
-        match self
-            .bucket
-            .complete_object_upload(&session.definition.object, &session.upload, selected)
-            .await
-        {
-            Ok(()) => Ok(CommitOutcome::Created),
-            Err(detail) => {
-                // Lost completion reply/duplicate completion is recoverable
-                // only under the immutable root/length binding checked above.
-                if matches!(self.head(&key).await?, Some(meta) if meta.len == plan.total()) {
+            self.pin_object_root(&session.definition.object, root, plan.total())
+                .await?;
+            if let Some(meta) = self.head(&key).await? {
+                return if meta.len == plan.total() {
                     Ok(CommitOutcome::AlreadyPresent)
                 } else {
-                    Err(failed(detail))
+                    Err(invalid())
+                };
+            }
+            match self
+                .bucket
+                .complete_object_upload(&session.definition.object, &session.upload, selected)
+                .await
+            {
+                Ok(()) => Ok(CommitOutcome::Created),
+                Err(detail) => {
+                    // Lost completion reply/duplicate completion is recoverable
+                    // only under the immutable root/length binding checked above.
+                    if matches!(self.head(&key).await?, Some(meta) if meta.len == plan.total()) {
+                        Ok(CommitOutcome::AlreadyPresent)
+                    } else {
+                        Err(failed(detail))
+                    }
                 }
             }
-        }
+        })
+        .await
     }
 
     /// Abort this private session without deleting immutable metadata. A new
@@ -366,11 +379,14 @@ impl<B: ObjectBucket> R2BlobStore<B> {
         token: &[u8],
         plan: &PartPlan,
     ) -> Result<(), StoreError> {
-        let (session, _) = self.checked_object_session(key, token, plan).await?;
-        self.bucket
-            .abort_object_upload(&session.definition.object, &session.upload)
-            .await
-            .map_err(failed)
+        ReadReservation::scope(&[], async {
+            let (session, _) = self.checked_object_session(key, token, plan).await?;
+            self.bucket
+                .abort_object_upload(&session.definition.object, &session.upload)
+                .await
+                .map_err(failed)
+        })
+        .await
     }
 }
 
@@ -391,57 +407,68 @@ pub struct VerifiedObjectPart<B: ObjectBucket> {
 
 impl<B: ObjectBucket> PartSink for VerifiedObjectPart<B> {
     async fn write(&mut self, chunk: Bytes) -> Result<(), StoreError> {
-        if self.failed || chunk.is_empty() || chunk.len() > mkit_server::store::MAX_BLOB_PIECE_BYTES
-        {
-            self.failed = true;
-            return Err(invalid());
-        }
-        match self.core.push(chunk) {
-            Ok(forward) => {
-                self.put.send(forward).await;
-                Ok(())
-            }
-            Err(error) => {
+        ReadReservation::scope(&[], async {
+            if self.failed
+                || chunk.is_empty()
+                || chunk.len() > mkit_server::store::MAX_BLOB_PIECE_BYTES
+            {
                 self.failed = true;
-                Err(error)
+                return Err(invalid());
             }
-        }
+            match self.core.push(chunk) {
+                Ok(forward) => {
+                    self.put.send(forward).await;
+                    Ok(())
+                }
+                Err(error) => {
+                    self.failed = true;
+                    Err(error)
+                }
+            }
+        })
+        .await
     }
     async fn commit(mut self) -> Result<Vec<u8>, StoreError> {
-        if self.failed {
-            self.put.fail().await;
-            return Err(invalid());
-        }
-        let last = match self.core.finish(None) {
-            Ok(last) => last,
-            Err(error) => {
+        ReadReservation::scope(&[], async {
+            if self.failed {
                 self.put.fail().await;
-                return Err(error);
+                return Err(invalid());
             }
-        };
-        let (_, binding) = self
-            .store
-            .checked_object_session(self.key, &self.token, &self.plan)
-            .await?;
-        if binding != self.binding {
-            self.put.fail().await;
-            return Err(invalid());
-        }
-        if let Some(last) = last {
-            self.put.send(last).await;
-        }
-        let etag = self.put.finish().await.map_err(failed)?;
-        if etag.is_empty() || etag.len() > MAX_ETAG {
-            return Err(invalid());
-        }
-        let mut tag = vec![1];
-        tag.extend_from_slice(&self.cv);
-        tag.extend_from_slice(&self.binding);
-        tag.extend_from_slice(etag.as_bytes());
-        Ok(tag)
+            let last = match self.core.finish(None) {
+                Ok(last) => last,
+                Err(error) => {
+                    self.put.fail().await;
+                    return Err(error);
+                }
+            };
+            let (_, binding) = self
+                .store
+                .checked_object_session(self.key, &self.token, &self.plan)
+                .await?;
+            if binding != self.binding {
+                self.put.fail().await;
+                return Err(invalid());
+            }
+            if let Some(last) = last {
+                self.put.send(last).await;
+            }
+            let etag = self.put.finish().await.map_err(failed)?;
+            if etag.is_empty() || etag.len() > MAX_ETAG {
+                return Err(invalid());
+            }
+            let mut tag = vec![1];
+            tag.extend_from_slice(&self.cv);
+            tag.extend_from_slice(&self.binding);
+            tag.extend_from_slice(etag.as_bytes());
+            Ok(tag)
+        })
+        .await
     }
     async fn abort(self) {
-        self.put.fail().await;
+        ReadReservation::scope(&[], async {
+            self.put.fail().await;
+        })
+        .await;
     }
 }
 

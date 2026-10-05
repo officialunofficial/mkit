@@ -46,6 +46,8 @@ mod read_limits;
 #[cfg(feature = "http-objects")]
 pub(crate) mod read_proofs;
 #[cfg(feature = "http-objects")]
+mod reader_checks;
+#[cfg(feature = "http-objects")]
 pub use object_reader::{
     CommitPathRead, HistoryCommit, HistoryMode, HistoryOptions, HistoryPage, IssuedUrl,
     OBJECT_READER_BATCH, OBJECT_READER_CALLS, OBJECT_READER_LIMIT_MESSAGE, ObjectMetadata,
@@ -332,6 +334,8 @@ pub struct PipelineConfig {
     /// Indexed ingestion and pre-receive verification, off by default.
     pub indexed: Option<crate::indexed::IndexedConfig>,
     /// Global takedown proofs; the Worker launch enables them with preservation.
+    /// Disabling these descriptor-based proofs does not disable direct strong
+    /// object/pack blocklist checks or reconstruction-base serving stops.
     pub takedown_denial: bool,
     /// Per-ref allowed signers and fast-forward-only rules (SPEC-SERVER
     /// §9.7). Native embedders and the Worker launch can configure them. A

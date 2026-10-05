@@ -124,6 +124,14 @@ pub enum RangeRead {
 /// (`EnvBucket`, wasm32), a simulation in tests. Errors carry the backend's
 /// detail, which the store logs and never returns.
 pub trait ObjectBucket: MaybeSend + MaybeSync + Clone + 'static {
+    /// Reserve backend calls before a bounded read wave.
+    #[doc(hidden)]
+    fn reserve_read_calls(
+        &self,
+        _calls: u32,
+    ) -> Result<Option<mkit_server::store::ReadReservation>, StoreError> {
+        Ok(None)
+    }
     /// Start, now, a put of `key` that writes only if the key is absent,
     /// with a body of exactly `len` bytes read from `body`. The put must
     /// make progress while the caller is still writing into `body` (it is
@@ -486,14 +494,23 @@ impl<B: ObjectBucket> R2PackSink<B> {
 
 impl<B: ObjectBucket> BlobStore for R2BlobStore<B> {
     type Sink = R2PackSink<B>;
+    fn reserve_read_calls(
+        &self,
+        calls: u32,
+    ) -> Result<Option<mkit_server::store::ReadReservation>, StoreError> {
+        self.bucket.reserve_read_calls(calls)
+    }
 
     async fn begin(&self, key: BlobKey, len: u64) -> Result<R2PackSink<B>, StoreError> {
-        if len > self.max_bytes {
-            return Err(StoreError::Invalid(
-                "blob exceeds the store's size cap".into(),
-            ));
-        }
-        Ok(self.sink(self.object_key(&key)?, Withheld::new(key, len)))
+        mkit_server::store::ReadReservation::scope(&[], async {
+            if len > self.max_bytes {
+                return Err(StoreError::Invalid(
+                    "blob exceeds the store's size cap".into(),
+                ));
+            }
+            Ok(self.sink(self.object_key(&key)?, Withheld::new(key, len)))
+        })
+        .await
     }
 
     async fn get(
@@ -534,22 +551,29 @@ impl<B: ObjectBucket> BlobStore for R2BlobStore<B> {
     }
 
     async fn probe(&self) -> Result<(), StoreError> {
-        self.bucket
-            .probe()
-            .await
-            .map_err(|e| backend_error(StorageOp::BlobHead, e))
+        mkit_server::store::ReadReservation::scope(&[], async {
+            self.bucket
+                .probe()
+                .await
+                .map_err(|e| backend_error(StorageOp::BlobHead, e))
+        })
+        .await
     }
 
     async fn delete(&self, key: &BlobKey) -> Result<bool, StoreError> {
-        let object = self.object_key(key)?;
-        if self.head_len(&object).await?.is_none() {
-            return Ok(false);
-        }
-        self.bucket
-            .delete(&object)
-            .await
-            .map_err(|e| backend_error(StorageOp::BlobPut, e))?;
-        Ok(true)
+        // The existence probe belongs to mutation, not an admitted read wave.
+        mkit_server::store::ReadReservation::scope(&[], async {
+            let object = self.object_key(key)?;
+            if self.head_len(&object).await?.is_none() {
+                return Ok(false);
+            }
+            self.bucket
+                .delete(&object)
+                .await
+                .map_err(|e| backend_error(StorageOp::BlobPut, e))?;
+            Ok(true)
+        })
+        .await
     }
 }
 
@@ -578,20 +602,23 @@ impl<B: ObjectBucket> R2BlobStore<B> {
 
 impl<B: ObjectBucket> PackSink for R2PackSink<B> {
     async fn write(&mut self, chunk: Bytes) -> Result<(), StoreError> {
-        if self.failed {
-            return Err(StoreError::Invalid("write after a failed write".into()));
-        }
-        match self.core.push(chunk) {
-            Ok(forward) => {
-                self.send(forward).await;
-                Ok(())
+        mkit_server::store::ReadReservation::scope(&[], async {
+            if self.failed {
+                return Err(StoreError::Invalid("write after a failed write".into()));
             }
-            Err(e) => {
-                self.failed = true;
-                self.fail().await;
-                Err(e)
+            match self.core.push(chunk) {
+                Ok(forward) => {
+                    self.send(forward).await;
+                    Ok(())
+                }
+                Err(e) => {
+                    self.failed = true;
+                    self.fail().await;
+                    Err(e)
+                }
             }
-        }
+        })
+        .await
     }
 
     async fn commit(self) -> Result<CommitOutcome, StoreError> {
@@ -603,7 +630,10 @@ impl<B: ObjectBucket> PackSink for R2PackSink<B> {
     }
 
     async fn abort(mut self) {
-        self.fail().await;
+        mkit_server::store::ReadReservation::scope(&[], async {
+            self.fail().await;
+        })
+        .await;
     }
 }
 
@@ -611,6 +641,7 @@ impl<B: ObjectBucket> R2PackSink<B> {
     /// Verify against `root` (the key's hash for `None`), then release the
     /// withheld byte.
     async fn finish(mut self, root: Option<Hash>) -> Result<CommitOutcome, StoreError> {
+        mkit_server::store::ReadReservation::scope(&[], async {
         if self.failed {
             self.fail().await;
             return Err(StoreError::Invalid("commit after a failed write".into()));
@@ -662,6 +693,8 @@ impl<B: ObjectBucket> R2PackSink<B> {
                 Err(backend_error(StorageOp::BlobPut, detail))
             }
         }
+        })
+        .await
     }
 }
 
@@ -730,6 +763,7 @@ pub struct EnvBucket {
     env: worker::Env,
     binding: &'static str,
     request_budget: Option<mkit_server::indexed::budget::SliceBudget>,
+    read_credits: std::sync::Arc<mkit_server::store::ReadCredits>,
     alarm_budget: Option<mkit_server::purge::SliceBudget>,
 }
 
@@ -742,6 +776,7 @@ impl EnvBucket {
             env,
             binding,
             request_budget: None,
+            read_credits: std::sync::Arc::default(),
             alarm_budget: None,
         }
     }
@@ -750,6 +785,7 @@ impl EnvBucket {
     #[must_use]
     pub fn with_budget(mut self, budget: mkit_server::indexed::budget::SliceBudget) -> Self {
         self.request_budget = Some(budget);
+        self.read_credits = std::sync::Arc::default();
         self
     }
 
@@ -757,13 +793,17 @@ impl EnvBucket {
     #[must_use]
     pub fn with_alarm_budget(mut self, budget: mkit_server::purge::SliceBudget) -> Self {
         self.alarm_budget = Some(budget);
+        self.read_credits = std::sync::Arc::default();
         self
     }
 
-    fn bucket(&self) -> Result<worker::Bucket, String> {
-        crate::ns_client::charge_request(self.request_budget.as_ref())
-            .map_err(|e| e.to_string())?;
-        crate::ns_client::charge_alarm(self.alarm_budget.as_ref()).map_err(|e| e.to_string())?;
+    fn bucket(&self, prepaid_read: bool) -> Result<worker::Bucket, String> {
+        if !prepaid_read || !self.read_credits.paid() {
+            crate::ns_client::charge_request(self.request_budget.as_ref())
+                .map_err(|e| e.to_string())?;
+            crate::ns_client::charge_alarm(self.alarm_budget.as_ref())
+                .map_err(|e| e.to_string())?;
+        }
         self.env.bucket(self.binding).map_err(|e| e.to_string())
     }
 }
@@ -773,7 +813,7 @@ impl crate::backup::BackupBucket for EnvBucket {
     async fn put(&self, key: &str, bytes: Vec<u8>, partition_hex: &str) -> Result<(), String> {
         let metadata =
             std::collections::HashMap::from([("partition".to_owned(), partition_hex.to_owned())]);
-        self.bucket()?
+        self.bucket(false)?
             .put(key, bytes)
             .custom_metadata(metadata)
             .only_if(worker::Conditional {
@@ -793,9 +833,20 @@ pub type WorkerBlobStore = R2BlobStore<EnvBucket>;
 
 #[cfg(target_arch = "wasm32")]
 impl ObjectBucket for EnvBucket {
+    fn reserve_read_calls(
+        &self,
+        calls: u32,
+    ) -> Result<Option<mkit_server::store::ReadReservation>, StoreError> {
+        crate::ns_client::reserve_calls(
+            self.request_budget.as_ref(),
+            self.alarm_budget.as_ref(),
+            calls,
+        )?;
+        Ok(Some(self.read_credits.prepay(calls)))
+    }
     fn spawn_put(&self, key: String, len: u64, body: PutBody) -> oneshot::Receiver<PutResult> {
         let (tx, rx) = oneshot::channel();
-        let bucket = self.bucket();
+        let bucket = self.bucket(false);
         worker::wasm_bindgen_futures::spawn_local(async move {
             let result = async move {
                 let body = body.map(|item| {
@@ -821,7 +872,11 @@ impl ObjectBucket for EnvBucket {
     }
 
     async fn head(&self, key: &str) -> Result<Option<u64>, String> {
-        let object = self.bucket()?.head(key).await.map_err(|e| e.to_string())?;
+        let object = self
+            .bucket(true)?
+            .head(key)
+            .await
+            .map_err(|e| e.to_string())?;
         Ok(object.map(|o| o.size()))
     }
 
@@ -830,7 +885,7 @@ impl ObjectBucket for EnvBucket {
         key: &str,
         range: Option<Range<u64>>,
     ) -> Result<Option<(u64, ObjectStream)>, String> {
-        let bucket = self.bucket()?;
+        let bucket = self.bucket(true)?;
         let mut get = bucket.get(key);
         if let Some(r) = range {
             get = get.range(worker::Range::OffsetWithLength {
@@ -853,7 +908,7 @@ impl ObjectBucket for EnvBucket {
         range: Range<u64>,
         etag: Option<&str>,
     ) -> Result<RangeRead, String> {
-        let bucket = self.bucket()?;
+        let bucket = self.bucket(true)?;
         let mut get = bucket.get(key).range(worker::Range::OffsetWithLength {
             offset: range.start,
             length: range.end - range.start,
@@ -878,11 +933,14 @@ impl ObjectBucket for EnvBucket {
     }
 
     async fn delete(&self, key: &str) -> Result<(), String> {
-        self.bucket()?.delete(key).await.map_err(|e| e.to_string())
+        self.bucket(false)?
+            .delete(key)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     async fn list(&self, prefix: &str, cursor: Option<&str>) -> Result<ObjectPage, String> {
-        let bucket = self.bucket()?;
+        let bucket = self.bucket(false)?;
         let mut listing = bucket.list().prefix(prefix).limit(1000);
         if let Some(cursor) = cursor {
             listing = listing.cursor(cursor);
@@ -895,7 +953,7 @@ impl ObjectBucket for EnvBucket {
     }
 
     async fn delete_many(&self, keys: Vec<String>) -> Result<(), String> {
-        self.bucket()?
+        self.bucket(false)?
             .delete_multiple(keys)
             .await
             .map_err(|e| e.to_string())
@@ -903,7 +961,7 @@ impl ObjectBucket for EnvBucket {
 
     async fn create_object_upload(&self, key: &str) -> Result<String, String> {
         let upload = self
-            .bucket()?
+            .bucket(false)?
             .create_multipart_upload(key)
             .execute()
             .await
@@ -920,7 +978,7 @@ impl ObjectBucket for EnvBucket {
         body: PutBody,
     ) -> oneshot::Receiver<Result<String, String>> {
         let (tx, rx) = oneshot::channel();
-        let bucket = self.bucket();
+        let bucket = self.bucket(false);
         worker::wasm_bindgen_futures::spawn_local(async move {
             let result = async move {
                 let body = body.map(|item| {
@@ -948,7 +1006,7 @@ impl ObjectBucket for EnvBucket {
         upload: &str,
         parts: Vec<(u16, String)>,
     ) -> Result<(), String> {
-        self.bucket()?
+        self.bucket(false)?
             .resume_multipart_upload(key, upload)
             .map_err(|e| e.to_string())?
             .complete(
@@ -962,7 +1020,7 @@ impl ObjectBucket for EnvBucket {
     }
 
     async fn abort_object_upload(&self, key: &str, upload: &str) -> Result<(), String> {
-        self.bucket()?
+        self.bucket(false)?
             .resume_multipart_upload(key, upload)
             .map_err(|e| e.to_string())?
             .abort()
