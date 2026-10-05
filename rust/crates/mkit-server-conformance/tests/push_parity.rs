@@ -406,6 +406,14 @@ async fn primitive(
         },
     )
     .expect("valid parity fixture");
+    run_plan(host, tip, lease, plan).await
+}
+async fn run_plan(
+    host: &TestHost,
+    tip: Hash,
+    lease: RefWriteCondition,
+    plan: Plan,
+) -> (Outcome, Vec<Duration>) {
     let push = Push::new(
         Destination::new(host.base_url().into(), repository(host).into())
             .expect("valid parity fixture"),
@@ -590,6 +598,49 @@ async fn cli_and_async_push_have_identical_ticketed_mutations() {
         native_host.shutdown().await;
         async_host.shutdown().await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn repeated_pack_contents_match_the_cli_without_duplicate_tickets() {
+    let temp = tempfile::tempdir().expect("valid parity fixture");
+    let store = Arc::new(
+        ObjectStore::init(&RepoLayout::single(temp.path())).expect("valid parity fixture"),
+    );
+    let tip = fixture(&store, 512, 3);
+    let input = entries(&store, tip);
+    let cap = input
+        .iter()
+        .map(|entry| match entry {
+            Entry::Raw { bytes, .. } => bytes.len() as u64,
+            Entry::Delta { stream, .. } => 32 + stream.len() as u64,
+        })
+        .sum();
+    let (native_host, native_record) = host(Fault::None).await;
+    let (async_host, async_record) = host(Fault::None).await;
+    let plan = Plan::prepare(
+        input.iter().cycle().take(input.len() * 8).cloned(),
+        Limits {
+            payload_bytes: cap,
+            max_pack_bytes: async_host.profile().max_pack_bytes,
+            max_parts: 10_000,
+            ..Limits::default()
+        },
+    )
+    .expect("valid repeated input");
+    assert_eq!(plan.pack_ids().count(), 1);
+    assert_eq!(
+        cli(&native_host, store, tip, cap, RefWriteCondition::Missing).await,
+        Outcome::Committed
+    );
+    assert_eq!(
+        run_plan(&async_host, tip, RefWriteCondition::Missing, plan)
+            .await
+            .0,
+        Outcome::Committed
+    );
+    assert_same_mutations(&native_record, &async_record);
+    native_host.shutdown().await;
+    async_host.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

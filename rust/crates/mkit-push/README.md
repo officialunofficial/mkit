@@ -9,6 +9,7 @@ then constructs a `Push` with its destination, head lease, tip and packmap mode.
 `Push::run` plans the packmap, reserves and uploads data and packmap tickets
 (including multipart uploads), and atomically advances both refs. Results
 include committed, head conflict, packmap contention and explicit replan reasons.
+Repeated sealed pack contents are retained once, in first occurrence order.
 
 The host implements `HttpTransport`, `Signer` and `Clock`. Their futures need
 not be `Send`. The HTTP boundary carries standard `http::Request<Vec<u8>>`

@@ -92,6 +92,7 @@ impl Plan {
             mkit_core::transfer::encode_packlist(Some([0; 32]), &[])?.len() as u64 + 4;
         let mut writer = PackWriter::new();
         let mut packs = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         let mut staged = 0_u64;
         let cap = limits.payload_bytes.min(pack::MAX_TOTAL_PAYLOAD);
         for entry in entries {
@@ -106,7 +107,7 @@ impl Plan {
                         writer.entry_count() + 1,
                     ) > limits.max_pack_bytes)
             {
-                seal(&mut writer, &mut packs, &mut staged, limits)?;
+                seal(&mut writer, &mut packs, &mut seen, &mut staged, limits)?;
             }
             if size > cap || bound(size, 1) > limits.max_pack_bytes {
                 return Err(Error::Limit("one entry exceeds pack limit"));
@@ -136,7 +137,7 @@ impl Plan {
                 }
             }
         }
-        seal(&mut writer, &mut packs, &mut staged, limits)?;
+        seal(&mut writer, &mut packs, &mut seen, &mut staged, limits)?;
         if !packs.is_empty() {
             // Reserve the largest node shape before any upload can reserve
             // server resources. A prior pointer adds 32 bytes.
@@ -165,6 +166,7 @@ fn bound(payload: u64, entries: usize) -> u64 {
 fn seal(
     writer: &mut PackWriter,
     packs: &mut Vec<Pack>,
+    seen: &mut std::collections::HashSet<Hash>,
     staged: &mut u64,
     limits: Limits,
 ) -> Result<(), Error> {
@@ -172,6 +174,10 @@ fn seal(
         return Ok(());
     }
     let bytes = std::mem::take(writer).finish()?;
+    let key = pack::pack_key(&bytes);
+    if !seen.insert(key) {
+        return Ok(());
+    }
     *staged = staged.saturating_add(bytes.len() as u64);
     if bytes.len() as u64 > limits.max_pack_bytes || *staged > limits.max_staged_bytes {
         return Err(Error::Limit("sealed input limit"));
@@ -188,10 +194,7 @@ fn seal(
             "advance requires more than six ticketed data packs",
         ));
     }
-    packs.push(Pack {
-        key: pack::pack_key(&bytes),
-        bytes,
-    });
+    packs.push(Pack { key, bytes });
     Ok(())
 }
 
@@ -233,6 +236,31 @@ mod tests {
             Plan::prepare([make(1)], limits),
             Err(Error::Limit(_))
         ));
+    }
+    #[test]
+    fn repeated_sealed_packs_keep_first_order_and_use_one_ticket_slot_each() {
+        let make = |salt| {
+            let bytes = serialize(&Object::Blob(Blob { data: vec![salt] })).unwrap();
+            Entry::Raw {
+                id: mkit_core::hash::hash(&bytes),
+                bytes,
+            }
+        };
+        let limits = Limits {
+            payload_bytes: serialize(&Object::Blob(Blob { data: vec![0] }))
+                .unwrap()
+                .len() as u64,
+            max_pack_bytes: 1024,
+            ticket_threshold_bytes: 0,
+            ..Limits::default()
+        };
+        let expected = Plan::prepare([make(1), make(2)], limits).unwrap();
+        let repeated = Plan::prepare((0..16).map(|index| make(1 + index % 2)), limits).unwrap();
+        assert_eq!(
+            repeated.pack_ids().collect::<Vec<_>>(),
+            expected.pack_ids().collect::<Vec<_>>()
+        );
+        assert_eq!(repeated.packs.len(), 2);
     }
     #[test]
     fn tiny_entries_reject_before_buffering_the_whole_over_budget_plan() {
