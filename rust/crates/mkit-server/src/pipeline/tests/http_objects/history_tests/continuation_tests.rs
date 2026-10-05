@@ -316,7 +316,108 @@ fn continuation_pages_complete_long_changing_histories_without_cursor_walk() {
 }
 
 #[test]
-fn continuation_scope_mac_replay_and_corrupt_state_fail_uniformly() {
+fn continuation_replay_serves_same_page_and_reruns_live_checks() {
+    for denial in [false, true] {
+        for writer in [false, true] {
+            for block_source in [false, true] {
+                let az = Arc::new(Scripted::default());
+                let mut fx = fixture_tweaked(scripted(&az), http_cfg(), |cfg| {
+                    cfg.takedown_denial = denial;
+                });
+                let root = tree(&[]);
+                let base = commit(&root, &[], "base");
+                let middle = commit(&root, &[&base], "middle");
+                let head = commit(&root, &[&middle], "head");
+                let pack = fx.push("room", &[&root, &base, &middle, &head], id(&head), None);
+                enable(&mut fx);
+                let token = first(&fx, writer, 1);
+                let copied = token.token.expose().to_owned();
+                let guards = Arc::new(AtomicU32::new(0));
+                let observed = guards.clone();
+                Arc::get_mut(&mut fx.pipe.meta).unwrap().hook =
+                    Some(Box::new(move |_, _, batch| {
+                        assert!(
+                            batch.writes.is_empty(),
+                            "redemption allocates no paging rows"
+                        );
+                        observed.fetch_add(1, Ordering::SeqCst);
+                    }));
+                let mut expected = None;
+                let mut measured = None;
+                for supplied in [token.token.expose(), copied.as_str()] {
+                    let before = (
+                        fx.pipe.meta.calls(),
+                        get_count(&fx),
+                        az.seen.lock().unwrap().len(),
+                    );
+                    in_view(&fx, writer, |reader| {
+                        let page = block_on(reader.walk_history_page_in(
+                            &mut ReaderSession::default(),
+                            HEAD,
+                            Some(supplied),
+                            1,
+                        ))
+                        .unwrap()
+                        .unwrap();
+                        assert_eq!(page.commits[0].id, id(&middle));
+                        assert_eq!(
+                            page.next.as_ref().unwrap().expires_at_ms,
+                            token.expires_at_ms
+                        );
+                        if let Some(previous) = &expected {
+                            assert_eq!(&page, previous);
+                        }
+                        expected = Some(page);
+                    });
+                    let current = (
+                        fx.pipe.meta.calls() - before.0,
+                        get_count(&fx) - before.1,
+                        az.seen.lock().unwrap().len() - before.2,
+                    );
+                    assert_eq!(current.1, 2, "replay reloads only its requested commit");
+                    assert!(current.2 > 0, "replay reauthorizes");
+                    if let Some(previous) = measured {
+                        assert_eq!(current, previous, "replay repeats all physical/live checks");
+                    }
+                    measured = Some(current);
+                }
+                assert_eq!(guards.load(Ordering::SeqCst), 2);
+                if block_source {
+                    block_on(
+                        crate::store::ContentIndex::new(crate::store::BorrowedStore(
+                            &fx.pipe.meta.inner,
+                        ))
+                        .block(
+                            &pack,
+                            &crate::store::BlockEntry::new("replay", T0 as u64),
+                            T0 as u64,
+                        ),
+                    )
+                    .unwrap();
+                }
+                in_view(&fx, writer, |reader| {
+                    if !block_source {
+                        *az.verdict.lock().unwrap() = Some(Code::PermissionDenied);
+                    }
+                    assert!(
+                        block_on(reader.walk_history_page_in(
+                            &mut ReaderSession::default(),
+                            HEAD,
+                            Some(&copied),
+                            1,
+                        ))
+                        .unwrap()
+                        .is_none(),
+                        "replay does not retain source or authority clearance"
+                    );
+                });
+            }
+        }
+    }
+}
+
+#[test]
+fn continuation_scope_mac_and_corrupt_state_fail_uniformly() {
     for denial in [false, true] {
         let (mut fx, _, _, _) = history(4, 1, 2, denial);
         enable(&mut fx);
@@ -341,23 +442,6 @@ fn continuation_scope_mac_replay_and_corrupt_state_fail_uniformly() {
                 }
                 reject(&fx, writer, &config.mint(&c).unwrap());
             }
-            let copied = token.token.expose().to_owned();
-            // The copy wins at most once in its original scope. Both the copied
-            // MAC and the original fail after that atomic redemption.
-            in_view(&fx, writer, |reader| {
-                assert!(
-                    block_on(reader.walk_history_page_in(
-                        &mut ReaderSession::default(),
-                        HEAD,
-                        Some(token.token.expose()),
-                        1
-                    ))
-                    .unwrap()
-                    .is_some()
-                );
-            });
-            reject(&fx, writer, token.token.expose());
-            reject(&fx, writer, &copied);
         }
     }
 }
@@ -704,7 +788,7 @@ impl TakedownGate for PauseCursor {
 }
 
 #[test]
-fn continuation_cancel_and_replay_loss_discard_imported_proofs() {
+fn continuation_cancel_discards_imported_proofs() {
     for writer in [false, true] {
         let (mut fx, commits, _, _) = history(3, 1, 2, false);
         enable(&mut fx);
@@ -738,43 +822,6 @@ fn continuation_cancel_and_replay_loss_discard_imported_proofs() {
                 block_on(reader.read_canonical_in(&mut session, &[cursor])).unwrap()[0].is_some()
             );
             assert!(session.used().storage_calls > spent);
-        });
-        let (mut fx, commits, _, _) = history(3, 1, 2, false);
-        enable(&mut fx);
-        let token = first(&fx, writer, 1);
-        let claims = fx
-            .pipe
-            .cfg
-            .history_tokens
-            .as_ref()
-            .unwrap()
-            .verify(token.token.expose())
-            .unwrap();
-        let row = keys::history_continuation(&claims.chain);
-        Arc::get_mut(&mut fx.pipe.meta).unwrap().hook =
-            Some(Box::new(move |store, shard, batch| {
-                if batch
-                    .writes
-                    .iter()
-                    .any(|w| matches!(w, Write::Put(k, _) if *k == row))
-                {
-                    now(store.apply(shard, Batch::new().delete(row.clone()))).unwrap();
-                }
-            }));
-        in_view(&fx, writer, |reader| {
-            let mut session = ReaderSession::default();
-            assert!(
-                block_on(reader.walk_history_page_in(
-                    &mut session,
-                    HEAD,
-                    Some(token.token.expose()),
-                    1
-                ))
-                .unwrap()
-                .is_none()
-            );
-            assert!(!session.proofs.contains(&id(&commits[1])));
-            assert!(session.used().storage_calls > 0);
         });
     }
 }
@@ -853,7 +900,7 @@ fn continuation_ref_change_after_acceptance_cut_invalidates_successor() {
                         (store.clone(), repo.clone(), shard.clone(), count.clone());
                     Box::pin(async move {
                         // Body validation is first; final serving validation is
-                        // second, after atomic acceptance and closing reads.
+                        // second, after the write-free guard and closing reads.
                         if count.fetch_add(1, Ordering::SeqCst) == 1 {
                             let key = keys::publication(&repo.name, HEAD);
                             let raw = store.inner.get(&shard, &key).await.unwrap();

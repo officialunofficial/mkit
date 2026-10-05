@@ -236,7 +236,6 @@ pub(crate) struct Claims {
     pub issued: u64,
     pub expires: u64,
     pub cursor: Hash,
-    pub chain: Hash,
     pub ancestry: Vec<Hash>,
 }
 
@@ -263,7 +262,6 @@ mod tests {
             issued: 1,
             expires: 1001,
             cursor: [1; 32],
-            chain: [3; 32],
             ancestry: vec![[1; 32]],
         }
     }

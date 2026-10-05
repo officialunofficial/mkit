@@ -1770,8 +1770,7 @@ unpadded encoding. Claims contain version `1`, purpose
 ref, writer/public view, stable verified principal/credential digest, strict
 anchor ID, full authoritative publication record (sequence, published prefix,
 deletion boundary, membership generation and published pair), live security
-digest, issuance time, original absolute expiry, cursor, random paging-chain ID,
-and ordered stop-sensitive ancestry including the cursor. The credential digest
+digest, issuance time, original absolute expiry, cursor, and ordered stop-sensitive ancestry including the cursor. The credential digest
 includes the trusted auth audience, signer, grant and captured credential headers;
 it excludes envelope nonce, fingerprint and verification time so a fresh signed
 request can continue the same credential scope. The security digest binds the
@@ -1798,13 +1797,15 @@ Parsing is bounded to 256 KiB decoded claims and 1,024 ancestry IDs. The server
 MUST authenticate current credentials and recheck visibility, epoch, grants and
 authorizer before importing evidence. It MUST strongly read the selected ref
 and authoritative publication fence, and compare them again at the closing
-boundary. The guarded replay apply is the strict-ref and single-use linearization
-cut: it guards both the original publication row and live ref bytes, detecting
-torn capture even if a multi-key read is sequential. Closing security/anchor
-reads MAY reject subsequently observed changes, then live object validation
-MUST be the last asynchronous phase before output. Independent stores and hooks
-do not provide a simultaneous snapshot. Ref changes after the accepted cut are
-concurrent with that redemption and invalidate its successor.
+boundary. A write-free guarded apply defines the strict-ref validation cut:
+it compares both the original publication record and live ref bytes and
+checks the fixed expiry on the backend clock. It allocates no paging state.
+The server MUST NOT assume that a multi-key read is atomic. Closing
+security/anchor reads MAY reject subsequently observed changes, then live
+object validation MUST be the last asynchronous phase before output.
+Independent stores and hooks do not provide a simultaneous snapshot. Ref
+changes after the validation cut are concurrent with that redemption and
+invalidate later redemption of either the original token or its successor.
 Public anchors use the authoritative published value, not an index projection.
 A missing ledger or partial capture MUST NOT issue or redeem evidence.
 Append, rewind, deletion/recreation, replacement and publication/incarnation
@@ -1824,14 +1825,13 @@ Invalid scope, MAC, anchor, boundary, expiry, retired key and inaccessible state
 MUST return uniform absence for either view, without probing cursor membership.
 Storage faults and owner resource exhaustion retain their existing classifications.
 
-Continuations are single-use: the selected ref partition stores one expected
-token digest per random paging chain (`hc`) and a fixed expiry index (`hx`).
-Atomic compare-and-replace advances to the successor, or deletes a completed
-chain. The apply MUST enforce the fixed expiry on the backend clock. Competing
-copies in the original scope can win at most once; all later replays are absent.
-These records contain no permissions or graph data. Expired chains are pruned
-in batches of at most eight on new paging requests; store capacity limits still
-apply. Response loss after consumption requires restarting from the selected ref.
+A caller MAY replay a continuation within its scope and fixed expiry, including
+to retry a lost response. The same token and page parameters serve the same
+canonical page when every live check still permits it. Each redemption MUST
+repeat those checks; a previous success MUST NOT cache authority or denial.
+History continuations allocate no replay or expiry records. Successors retain
+the original expiry, including after replay. A caller restarts at the selected
+ref when the token expires or its bound anchor or authority changes.
 
 ### 10.2 Per-ref clearance and publication
 

@@ -11,7 +11,7 @@ use crate::store::{
     Batch, BatchOutcome, Precondition, Value, codec, keys, publication::Publication,
 };
 
-/// Single-use selected-ref continuation; credential text is redacted in Debug.
+/// Retryable selected-ref continuation; credential text is redacted in Debug.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryContinuation {
     /// Opaque authenticated structural evidence, passed to the next page.
@@ -79,12 +79,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
     /// Each request uses a new reader/session and fresh credentials. MACs carry
     /// structural evidence only; live authority, membership, dependencies and
     /// denial are checked for every served object. Anchor equality includes
-    /// the never-reset publication stamp. Continuations are single-use even
-    /// when a client loses the response; restart from the ref in that case.
+    /// the never-reset publication stamp. Replays within the same scope and
+    /// fixed expiry rerun live checks and can retry a lost response.
     /// An all-parent mode is intentionally not exposed by this API.
     /// # Errors
     /// Invalid ref/limits or disabled configuration. Invalid, revoked, expired,
-    /// replayed or inaccessible continuations return uniform `Ok(None)` in
+    /// inaccessible continuations return uniform `Ok(None)` in
     /// either view. Backend faults remain `Unavailable`, owner budget exhaustion
     /// remains typed, and no spent allowance is refunded on failure.
     pub async fn walk_history_page_in(
@@ -225,22 +225,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             {
                 return Err(absent());
             }
-            let meta = Budgeted::new(&self.pipe.meta, calls)
-                .with_session(&session.io.calls)
-                .flagging(capped);
-            let expected =
-                Value::new(mkit_core::hash::hash(token.ok_or_else(absent)?.as_bytes()).to_vec());
-            if meta
-                .get(
-                    &self.pipe.shards.ref_shard(&self.repo, reference),
-                    &keys::history_continuation(&c.chain),
-                )
-                .await
-                .map_err(failure)?
-                != Some(expected)
-            {
-                return Err(absent());
-            }
             session
                 .proofs
                 .restore_history(&c.ancestry, c.expires)
@@ -300,10 +284,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         if now >= expires || !session.proofs.current(now) {
             return Err(absent());
         }
-        let mut chain = claims.as_ref().map_or([0; 32], |c| c.chain);
-        if claims.is_none() {
-            getrandom::fill(&mut chain).map_err(failure)?;
-        }
         let next = if let Some(cursor) = successor {
             let ancestry = session
                 .proofs
@@ -325,7 +305,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 issued,
                 expires,
                 cursor,
-                chain,
                 ancestry,
             };
             let token = config.mint(&new).map_err(|()| exhausted())?;
@@ -361,12 +340,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         {
             return Err(absent());
         }
+        // Validate a coherent anchor without allocating or consuming paging
+        // state. Batched reads alone need not be atomic.
         let meta = Budgeted::new(&self.pipe.meta, calls)
             .with_session(&session.io.calls)
             .flagging(capped);
-        let shard = self.pipe.shards.ref_shard(&self.repo, reference);
-        let row = keys::history_continuation(&chain);
-        let mut batch = Batch::new()
+        let batch = Batch::new()
             .require(Precondition::NotAfter(expires.saturating_sub(1)))
             .require(guard(
                 keys::publication(&self.repo.name, reference),
@@ -376,53 +355,16 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 keys::ref_key(&self.repo.name, reference),
                 anchor.raw[1].as_ref(),
             ));
-        batch = if let Some(token) = token {
-            batch.require(Precondition::Equals(
-                row.clone(),
-                Value::new(mkit_core::hash::hash(token.as_bytes()).to_vec()),
-            ))
-        } else {
-            batch.require(Precondition::Absent(row.clone()))
-        };
-        let expiry_key = keys::history_continuation_expiry(expires, &chain);
-        batch = if let Some(next) = &next {
-            batch
-                .put(
-                    row,
-                    Value::new(mkit_core::hash::hash(next.token.expose().as_bytes()).to_vec()),
-                )
-                .put(expiry_key, Value::default())
-        } else {
-            batch.delete(row).delete(expiry_key)
-        };
-        // Cleanup is bounded and lazy; expired IDs can never be revived.
-        if claims.is_none() {
-            let (start, end) =
-                keys::history_continuation_expiry_range(ms(self.pipe.clock.now_ms()));
-            let stale = meta
-                .scan(&shard, &start, &end, None, 8)
-                .await
-                .map_err(failure)?;
-            for (key, _) in stale.entries {
-                let Some(keys::ParsedKey::HistoryContinuationExpiry { chain, .. }) =
-                    keys::parse(&key)
-                else {
-                    return Err(failure(()));
-                };
-                batch = batch.delete(keys::history_continuation(&chain)).delete(key);
-            }
-        }
-        if meta.apply(&shard, batch).await.map_err(failure)? != BatchOutcome::Committed {
+        if meta
+            .apply(&self.pipe.shards.ref_shard(&self.repo, reference), batch)
+            .await
+            .map_err(failure)?
+            != BatchOutcome::Committed
+        {
             return Err(absent());
         }
-        if ms(self.pipe.clock.now_ms()) >= expires {
-            return Err(absent());
-        }
-        // Guarded apply is the ref/replay linearization cut. Closing reads
-        // reject subsequently observed changes before the last serving phase.
-        let meta = Budgeted::new(&self.pipe.meta, calls)
-            .with_session(&session.io.calls)
-            .flagging(capped);
+        // The write-free guard is the ref validation cut. Closing reads
+        // reject subsequently observed boundary changes before serving.
         if self.history_security(&meta, false).await? != security {
             return Err(absent());
         }
@@ -434,8 +376,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         {
             return Err(absent());
         }
-        // No bookkeeping I/O follows live object serving validation. Ref
-        // changes after the accepted cut invalidate the successor.
+        // Live serving validation is the last asynchronous phase. A later ref
+        // change invalidates both the original token and its successor.
         self.final_nodes(session, &nodes, calls).await?;
         if ms(self.pipe.clock.now_ms()) >= expires {
             return Err(absent());

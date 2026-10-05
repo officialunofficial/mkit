@@ -125,7 +125,7 @@ remote-hooks = [
 # SPEC-HTTP-OBJECTS). No new dependencies, wasm-clean. Off by default;
 # embedders and the Workers launch opt in through their adapters.
 # Requires `PipelineConfig::http_objects` and indexed mode.
-http-objects = ["dep:getrandom"]
+http-objects = []
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # `fs` delegates ref CAS, the ref lock and atomic writes to FileTransport, so

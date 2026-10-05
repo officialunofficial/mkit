@@ -253,12 +253,12 @@ All-parent logs retain the separate bounded `walk_history_in` API.
 
 Any ref/publication or security-boundary change, expiry or key replacement
 invalidates the chain uniformly. Successors keep its original expiry. Tokens
-are single-use: response loss requires restarting at the ref. Imported proofs
-are isolated from later operations in the same session, including on cancellation.
-The atomic guarded replay write defines the ref equality cut; later ref changes
-are concurrent with the accepted page and invalidate its successor. The selected ref
-partition keeps one token digest and expiry index per paging chain and lazily
-prunes at most eight expired chains per new request. Ancestry is bounded to
+can retry a lost response within the same scope and expiry. Each replay loads
+the same requested page and reruns live checks. Imported proofs remain isolated
+from later operations in the same session, including on cancellation. Matching
+ref/publication checks in a write-free guarded apply define the validation cut.
+Later ref changes invalidate further redemption of the original token and its
+successor. Paging allocates no replay or expiry records. Ancestry is bounded to
 1,024 IDs; parsing and token output consume the existing session allowances.
 This removes cursor proof walks without adding a latency guarantee or changing
 the ordinary history/path methods, URL grammar or HTTP object serving.
