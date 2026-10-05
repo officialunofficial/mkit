@@ -65,6 +65,7 @@ on:
       - 'rust/crates/mkit-transport-connect/**'
       - 'scripts/vcs-worker-conformance.sh'
       - 'scripts/workers-wire-diagnostics.py'
+      - 'scripts/test-workers-wire-diagnostics.py'
       - 'scripts/workers-runtime-versions.cjs'
       - 'scripts/embedded-worker-conformance.*'
       - 'scripts/reference-worker-acceptance.py'
@@ -144,6 +145,7 @@ jobs:
               - 'rust/crates/mkit-server-conformance/**'
               - 'scripts/vcs-worker-conformance.sh'
               - 'scripts/workers-wire-diagnostics.py'
+              - 'scripts/test-workers-wire-diagnostics.py'
               - 'scripts/workers-runtime-versions.cjs'
               - 'scripts/embedded-worker-conformance.*'
               - 'scripts/reference-worker-acceptance.py'
@@ -467,6 +469,7 @@ jobs:
         id: wire-diagnostics
         if: always()
         run: |
+          python3 scripts/test-workers-wire-diagnostics.py
           python3 scripts/workers-wire-diagnostics.py "${RUNNER_TEMP}/wire-logs" \
             --output "${RUNNER_TEMP}/wire-logs/diagnostics.json" \
             --summary "$GITHUB_STEP_SUMMARY" --github-output "$GITHUB_OUTPUT"
