@@ -136,6 +136,9 @@ if [ "${indexed}" -eq 1 ] && { [ "${test_faults}" -ne 1 ] || [ "${sharding}" != 
 fi
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/vcs-worker-conformance.XXXXXX")"
+work="$(cd "${work}" && pwd -P)"
+phase=""
+suite_run=0
 server_pid=""
 log=""
 
@@ -157,7 +160,11 @@ stop_server() {
 cleanup() {
     local status=$?
     stop_server
-    if [ "${status}" -ne 0 ] || [ -n "${VCS_CONFORMANCE_KEEP:-}" ]; then
+    # Keep successful runs too when an existing retry recovered a dropped response.
+    local diagnostic_status=0
+    python3 scripts/workers-wire-diagnostics.py "${work}" --output "${work}/diagnostics.json" --keep-file "${work}/retain-diagnostics" || diagnostic_status=$?
+    if [ "${status}" -eq 0 ] && [ "${diagnostic_status}" -ne 0 ]; then status=${diagnostic_status}; fi
+    if [ "${status}" -ne 0 ] || [ -n "${VCS_CONFORMANCE_KEEP:-}" ] || [ -f "${work}/retain-diagnostics" ]; then
         echo "state and wrangler logs kept in ${work}" >&2
     else
         rm -rf "${work}"
@@ -171,7 +178,8 @@ trap cleanup EXIT
 start_server() {
     local name="$1"
     shift
-    mkdir -p "${work}/${name}"
+    phase="${work}/${name}"
+    mkdir -p "${phase}"
     log="${work}/${name}/wrangler.log"
     echo ">> [${name}] starting wrangler ${WRANGLER_VERSION} dev on ${ORIGIN}"
     # `set -m`: the server gets its own process group, so stop_server
@@ -180,7 +188,7 @@ start_server() {
     (
         cd apps/vcs-worker
         # shellcheck disable=SC2086 # extra args split on spaces by design
-        exec env WRANGLER_SEND_METRICS=false npx --yes "wrangler@${WRANGLER_VERSION}" dev \
+        exec env WRANGLER_SEND_METRICS=false WRANGLER_LOG_PATH="${phase}/wrangler-debug.log" npx --yes "wrangler@${WRANGLER_VERSION}" dev \
             --config wrangler.dev.jsonc --ip 127.0.0.1 --port "${PORT}" \
             --persist-to "${work}/${name}/state" --show-interactive-dev-session=false \
             "$@" ${VCS_CONFORMANCE_WRANGLER_ARGS:-}
@@ -259,12 +267,18 @@ cold_start() {
     echo ">> [${name}] concurrent cold-start passed: 30/30 HTTP 200 / SERVING"
 }
 
-# capture <command...>: run it with its TAP on stdout kept in ${work}/last.tap
-# as well; the command's exit status lands in ${status}.
+# Keep every invocation, including stderr retry records, beside its runtime log.
+# Preserve the runner's failure status and fail on a broken log capture too.
 capture() {
+    suite_run=$((suite_run + 1))
+    local statuses
     set +e
-    "$@" | tee "${work}/last.tap"
-    status=${PIPESTATUS[0]}
+    env TMPDIR="$(cd "${TMPDIR:-/tmp}" && pwd -P)" \
+        MKIT_CONFORMANCE_HTTP_TRACE="${phase}/http-${suite_run}.jsonl" \
+        "$@" 2>&1 | tee "${work}/last.tap" "${phase}/runner-${suite_run}.log"
+    statuses=("${PIPESTATUS[@]}")
+    status=${statuses[0]}
+    if [ "${status}" -eq 0 ]; then status=${statuses[1]}; fi
     set -e
 }
 
@@ -388,6 +402,9 @@ if [ "${hooks}" -eq 1 ]; then
     build_args=(--release --features __test-faults,signed-http-hooks)
 fi
 
+git rev-parse HEAD >"${work}/head.txt"
+npx --yes --package "wrangler@${WRANGLER_VERSION}" -c 'node scripts/workers-runtime-versions.cjs' >"${work}/runtime-versions.json"
+
 echo ">> building the conformance runner"
 cargo build --manifest-path rust/Cargo.toml -p mkit-server-conformance \
     --bin mkit-server-conformance
@@ -482,13 +499,12 @@ if [ "${multi}" -eq 1 ]; then
     for filter in repo. repository. policy. tickets.advance_other_repository \
         tickets.advance_ticket_bindings info.; do
         echo ">> running the Multi wire suite (features: ${multi_features}) --filter ${filter}"
-        status=0
-        "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
+        capture "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
             --repository "${REPOSITORY}" --signer-seed-hex "${multi_seed}" \
             --run-id "${multi_run_id}" --atomic-advance --fresh-target --milestone M1 \
             --max-pack-bytes "${MAX_PACK_BYTES}" --features "${multi_features}" \
             --sharding "${sharding}" --filter "${filter}" \
-            ${runner_args[@]+"${runner_args[@]}"} || status=$?
+            ${runner_args[@]+"${runner_args[@]}"}
         if [ "${status}" -ne 0 ]; then
             echo "Multi wire suite failed (exit ${status}); wrangler log tail:" >&2
             tail -n 80 "${log}" >&2
@@ -574,8 +590,7 @@ if [ "${multi}" -eq 1 ]; then
             --var "TEST_QUOTA_BYTES:${TEST_QUOTA_BYTES}" \
             --var "TEST_QUOTA_WINDOW_MS:${multi_quota_window_ms}"
         echo ">> running the Multi + D34 quota wire case"
-        status=0
-        "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
+        capture "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
             --repository "${REPOSITORY}" --signer-seed-hex "${multi_seed}" \
             --run-id "${multi_run_id}" --atomic-advance --fresh-target --milestone M1 \
             --max-pack-bytes "${MAX_PACK_BYTES}" \
@@ -583,7 +598,7 @@ if [ "${multi}" -eq 1 ]; then
             --quota-ops "${multi_quota_ops}" --quota-bytes "${TEST_QUOTA_BYTES}" \
             --quota-window-ms "${multi_quota_window_ms}" \
             --filter quota.namespace_cap_after_rollup \
-            ${runner_args[@]+"${runner_args[@]}"} || status=$?
+            ${runner_args[@]+"${runner_args[@]}"}
         if [ "${status}" -ne 0 ]; then
             echo "Multi + D34 quota case failed (exit ${status}); wrangler log tail:" >&2
             tail -n 80 "${log}" >&2
@@ -615,7 +630,7 @@ if [ "${indexed}" -eq 1 ]; then
         --run-id "${indexed_run_id}" --atomic-advance --fresh-target --milestone M4 \
         --max-pack-bytes "${MAX_PACK_BYTES}" --features "${indexed_features}" \
         --sharding d34 --filter indexed.async \
-        ${runner_args[@]+"${runner_args[@]}"} || status=$?
+        ${runner_args[@]+"${runner_args[@]}"}
     if [ "${status}" -ne 0 ]; then
         echo "indexed wire case failed (exit ${status}); wrangler log tail:" >&2
         tail -n 80 "${log}" >&2

@@ -40,6 +40,11 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Fixed
 
+- Workers wire CI retains runtime, server/alarm and request correlation logs
+  when existing retries recover connection losses, including successful runs.
+  The job summary reports retries by phase and case; runtime versions accompany
+  the artifact. Conformance assertions and retry policies are unchanged.
+
 - Wasm Connect dispatch ignores both client timeout headers before connectrpc
   computes a deadline, including direct `connect::service` calls. Configured
   deadline policies are ignored on wasm; native deadlines are unchanged.

@@ -4230,11 +4230,16 @@ arrival order and retains the source event's occurred time. Purge delivery MUST
 NOT depend on successful audit delivery.
 
 The mapping of profiles to conformance-suite cases is specified with M5.
+Local Workers wire diagnostics retain recovered connection losses and report
+existing retries; see the [operator guide](../operations/workers.md#wire-connection-diagnostics).
+This evidence does not change conformance verdicts, replay policy or the
+client-visible error contract.
 
 ## 19. Version history
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | Document retained local Workers wire connection-loss diagnostics (§18); no conformance, runtime or wire change. |
 | 1 | draft | Bounded request-local reader graph proofs (§10.1): captured roots, fixed scope/expiry, decoded local edges and live security checks. No persisted cache, stored-row or wire change. |
 | 1 | draft | Exact per-repository stored-bytes accounting (§6.5.1): a per-repository counter and counted-pack markers in the coordinator, counted exactly once per pack under D34 by the coordinator's relay hook; additive `Outcome.repo_storage_changed` (field 11) carrying the absolute total and a monotonic version; admission `new_to_repo_bytes` observes whether the pack is already counted. `Committed.new_to_repo` is documented as an observation. New stored rows `rb` and `rn`, and a new terminal reservation row state; no existing row changes. |
 | 1 | draft | §10.2 binds publication evidence to the publication state it was computed against (generation, sequence and deletion boundary) and requires new evidence or a retryable refusal on any difference; execution-capacity exhaustion is `unavailable` with one request allowance across preparation, dependency visibility and final-apply retries, and unsupported historical capacity is a terminal stop. §9.3 distinguishes per-lookup index caps (permanent) from capacity. No stored-row or wire change. |

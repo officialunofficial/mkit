@@ -64,6 +64,8 @@ on:
       - 'rust/crates/mkit-server-conformance/**'
       - 'rust/crates/mkit-transport-connect/**'
       - 'scripts/vcs-worker-conformance.sh'
+      - 'scripts/workers-wire-diagnostics.py'
+      - 'scripts/workers-runtime-versions.cjs'
       - 'scripts/embedded-worker-conformance.*'
       - 'scripts/reference-worker-acceptance.py'
       - 'scripts/connect-deadline-runtime.py'
@@ -141,6 +143,8 @@ jobs:
               - 'rust/crates/mkit-server-worker/**'
               - 'rust/crates/mkit-server-conformance/**'
               - 'scripts/vcs-worker-conformance.sh'
+              - 'scripts/workers-wire-diagnostics.py'
+              - 'scripts/workers-runtime-versions.cjs'
               - 'scripts/embedded-worker-conformance.*'
               - 'scripts/reference-worker-acceptance.py'
               - 'scripts/connect-deadline-runtime.py'
@@ -413,7 +417,10 @@ jobs:
       # D34 is the default sharding (WP-1.28c); the explicit single phase
       # keeps the snapshot round-trip and single-sharding growth coverage.
       - name: Create diagnostic log directory
-        run: mkdir -p "${RUNNER_TEMP}/wire-logs"
+        run: |
+          mkdir -p "${RUNNER_TEMP}/wire-logs"
+          npx --yes --package wrangler@4.134.0 -c 'node scripts/workers-runtime-versions.cjs' \
+            >"${RUNNER_TEMP}/wire-logs/runtime-versions.json"
 
       - name: Portable contracts on the native test host (show case verdicts)
         working-directory: rust
@@ -456,8 +463,16 @@ jobs:
           VCS_CONFORMANCE_KEEP: '1'
         run: scripts/vcs-worker-conformance.sh --indexed-only
 
+      - name: Summarize connection losses and retries
+        id: wire-diagnostics
+        if: always()
+        run: |
+          python3 scripts/workers-wire-diagnostics.py "${RUNNER_TEMP}/wire-logs" \
+            --output "${RUNNER_TEMP}/wire-logs/diagnostics.json" \
+            --summary "$GITHUB_STEP_SUMMARY" --github-output "$GITHUB_OUTPUT"
+
       - name: Upload Wrangler and Miniflare diagnostics
-        if: failure()
+        if: always() && (failure() || steps.wire-diagnostics.outputs.keep == 'true')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: workers-wire-logs

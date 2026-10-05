@@ -317,3 +317,51 @@ fn missing_socket_metadata_stays_unknown_and_non_ascii_header_has_no_unbounded_c
     assert!(header(&record, "content-type")["value"].is_null());
     assert_eq!(header(&record, "content-type")["truncated"], false);
 }
+
+#[tokio::test]
+async fn lost_response_and_replay_share_case_and_request_identity_without_secrets() {
+    let payload = b"private-write-body";
+    let signed = Signer::new([0x32; 32], "https://vcs.launch.invalid", "fixture")
+        .sign_body(Rpc::UpdateRef.procedure(), payload);
+    let (base, server) = server(
+        vec![
+            fixed(500, b"Error: Network connection lost", ""),
+            fixed(200, b"saved-result", ""),
+        ],
+        false,
+    );
+    let trace = file();
+    let client = client(&base, Some(trace.as_file().try_clone().unwrap()))
+        .with_case("refs.many_refs_one_repository");
+    for expected in [500, 200] {
+        let reply = client
+            .post(
+                Rpc::UpdateRef.procedure(),
+                UNARY_PROTO,
+                &signed.headers,
+                payload.to_vec(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply.status, expected);
+    }
+    let requests = server.join().unwrap();
+    assert_eq!(requests[0].bytes, requests[1].bytes);
+    let observed = records(&trace);
+    assert_eq!(observed.len(), 2);
+    assert_eq!(observed[0]["connection_loss"], true);
+    assert_eq!(observed[1]["connection_loss"], false);
+    assert_eq!(observed[0]["case"], "refs.many_refs_one_repository");
+    assert_eq!(observed[0]["request"], observed[1]["request"]);
+    assert_eq!(observed[0]["request"]["path"], Rpc::UpdateRef.procedure());
+    assert_eq!(
+        observed[0]["request"]["body_hash"],
+        mkit_core::hash::to_hex(&mkit_core::hash::hash(payload))
+    );
+    assert!(observed[0]["request"]["replay_key_hash"].is_string());
+    let serialized = std::fs::read_to_string(trace.path()).unwrap();
+    for forbidden in ["private-write-body", "saved-result", &signed.nonce] {
+        assert!(!serialized.contains(forbidden));
+    }
+    assert_eq!(client.reconnect().unwrap().trace_case, client.trace_case);
+}

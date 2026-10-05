@@ -151,6 +151,7 @@ pub struct Client {
     http: HttpClient,
     base: Arc<str>,
     http_trace: Option<Arc<File>>,
+    trace_case: Option<&'static str>,
 }
 
 // Default-off response metadata only; no IO occurs inside the exchange timeout.
@@ -332,6 +333,7 @@ impl Client {
             http,
             base: Arc::from(base),
             http_trace: http_trace_file(),
+            trace_case: None,
         })
     }
 
@@ -339,16 +341,29 @@ impl Client {
     pub fn reconnect(&self) -> Result<Self, String> {
         let mut fresh = Self::new(&Url::parse(&self.base).map_err(|e| e.to_string())?)?;
         fresh.http_trace.clone_from(&self.http_trace);
+        fresh.trace_case = self.trace_case;
         Ok(fresh)
+    }
+
+    pub(crate) fn with_case(mut self, case: &'static str) -> Self {
+        self.trace_case = Some(case);
+        self
     }
 
     async fn send(&self, req: http::Request<Bytes>) -> Result<Reply, String> {
         let (parts, body) = req.into_parts();
-        let req = http::Request::from_parts(parts, full_body(body));
         let mut observed = self.http_trace.as_ref().map(|_| (Instant::now(), serde_json::json!({
             "started_unix_ms": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|time| time.as_millis()),
-            "phase": "send"
+            "phase": "send",
+            "case": self.trace_case,
+            "request": {
+                "method": parts.method.as_str(), "path": parts.uri.path(),
+                "body_hash": mkit_core::hash::to_hex(&mkit_core::hash::hash(&body)),
+                "replay_key_hash": parts.headers.get("idempotency-key").map(|value| mkit_core::hash::to_hex(&mkit_core::hash::hash(value.as_bytes()))),
+                "signer_hash": parts.headers.get("x-public-key").map(|value| mkit_core::hash::to_hex(&mkit_core::hash::hash(value.as_bytes())))
+            }
         })));
+        let req = http::Request::from_parts(parts, full_body(body));
         let exchange = async {
             let resp = self
                 .http
@@ -385,6 +400,16 @@ impl Client {
                 Ok(Ok(_)) => "reply",
             }
             .into();
+            fields["connection_loss"] = serde_json::json!(match &result {
+                Ok(Ok(reply)) =>
+                    reply.status >= 500
+                        && reply
+                            .body
+                            .windows(b"Network connection lost".len())
+                            .any(|window| window == b"Network connection lost"),
+                Ok(Err(error)) => error.contains("Network connection lost"),
+                Err(_) => false,
+            });
             fields["result_ms"] = serde_json::json!(started.elapsed().as_millis());
             if let Ok(mut line) = serde_json::to_vec(&fields) {
                 line.push(b'\n');

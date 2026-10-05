@@ -665,7 +665,7 @@ pub(crate) fn sign_unary(
 impl Ctx {
     pub(crate) fn new(client: Client, profile: Arc<Profile>, case: &'static str) -> Self {
         Self {
-            client,
+            client: client.with_case(case),
             profile,
             case,
             note: Arc::default(),

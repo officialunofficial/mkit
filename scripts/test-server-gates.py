@@ -67,7 +67,12 @@ class ServerGates(unittest.TestCase):
         self.assertIn("needs: [ci, workspace, vcs-worker-conformance, paid-acceptance]", gate)
         self.assertIn('"${PAID}"', gate)
         conformance = section(yaml, "vcs-worker-conformance:")
-        self.assertEqual(conformance.count("if:"), 2, "wire scenarios must not be conditionally skipped")
+        self.assertEqual(conformance.count("if:"), 3, "only path selection, summary and artifacts may be conditional")
+        summary = section(conformance, "- name: Summarize connection losses and retries")
+        self.assertIn("if: always()", summary)
+        self.assertIn('scripts/workers-wire-diagnostics.py', summary)
+        upload = section(conformance, "- name: Upload Wrangler and Miniflare diagnostics")
+        self.assertIn("if: always() && (failure() || steps.wire-diagnostics.outputs.keep == 'true')", upload)
         self.assertNotIn("continue-on-error", conformance)
         signer_tool = "cargo install b3sum --locked --version 1.8.5"
         deadline_test = "python3 scripts/connect-deadline-runtime.py"
