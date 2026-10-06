@@ -134,6 +134,10 @@ fn config() -> PipelineConfig {
 }
 
 fn statement(namespace: &str, generation: u64) -> String {
+    statement_with_nonce(namespace, generation, &"ab".repeat(32))
+}
+
+fn statement_with_nonce(namespace: &str, generation: u64, nonce: &str) -> String {
     let created = u64::try_from(T0).unwrap();
     let text = [
         "mkit-authority-generation:v1".to_owned(),
@@ -143,7 +147,7 @@ fn statement(namespace: &str, generation: u64) -> String {
         AUDIENCE.to_owned(),
         created.to_string(),
         (created + 60_000).to_string(),
-        "ab".repeat(32),
+        nonce.to_owned(),
     ]
     .join("\n");
     let signature = key(8).sign(&hash(text.as_bytes()));
@@ -890,5 +894,57 @@ fn authorize_refuses_an_unregistered_namespace_on_every_sharding() {
             "namespace not registered",
         );
         assert_eq!(shared.hook_calls.load(Ordering::SeqCst), 0);
+    }
+}
+
+fn set(env: &Fixture, wire: &str) -> Result<u64, ServerError> {
+    now(env.pipe.set_authority_generation(wire))
+}
+
+/// Resend outcomes after a lost reply, on both shardings. A statement carries
+/// no replay state, so the byte-identical resend and a freshly signed one
+/// (different nonce) behave the same: both converge on the stored generation.
+#[test]
+fn resending_set_authority_generation_is_idempotent_after_a_lost_reply() {
+    for sharding in [Sharding::Single, Sharding::D34] {
+        let shared = Shared::new();
+        let mut cfg = config();
+        cfg.sharding = sharding;
+        let env = shared.pipe(cfg, None);
+        let fresh = |g, tag: &str| statement_with_nonce(NS, g, &tag.repeat(32));
+
+        // g = 0 on an unregistered namespace.
+        let first = statement(NS, 0);
+        assert_eq!(set(&env, &first).unwrap(), 0, "{sharding:?}");
+        // Get cannot tell registered-at-0 from unregistered: both read 0.
+        assert_eq!(now(env.pipe.get_authority_generation(NS)).unwrap(), 0);
+        assert_eq!(now(env.pipe.get_authority_generation(OTHER)).unwrap(), 0);
+        assert_eq!(set(&env, &first).unwrap(), 0, "identical {sharding:?}");
+        assert_eq!(set(&env, &fresh(0, "cd")).unwrap(), 0, "fresh {sharding:?}");
+        assert_eq!(update(&env, NS, 1).unwrap(), UpdateRefResult::Committed);
+        // The unregistered namespace stays refused: Get's 0 proves nothing.
+        expect_denied(
+            &update(&env, OTHER, 2).unwrap_err(),
+            "namespace not registered",
+        );
+        // A resend after a write is still Ok(0).
+        assert_eq!(set(&env, &first).unwrap(), 0);
+
+        // g > 0.
+        let one = statement(NS, 1);
+        assert_eq!(set(&env, &one).unwrap(), 1);
+        shared.generation.store(1, Ordering::SeqCst);
+        assert_eq!(set(&env, &one).unwrap(), 1, "identical {sharding:?}");
+        assert_eq!(set(&env, &fresh(1, "ef")).unwrap(), 1, "fresh {sharding:?}");
+        assert_eq!(now(env.pipe.get_authority_generation(NS)).unwrap(), 1);
+        assert_eq!(update(&env, NS, 3).unwrap(), UpdateRefResult::Committed);
+        // No rollback, identical or fresh.
+        for wire in [first.clone(), fresh(0, "12")] {
+            expect_denied(
+                &set(&env, &wire).unwrap_err(),
+                "authority generation step rejected",
+            );
+        }
+        assert_eq!(now(env.pipe.get_authority_generation(NS)).unwrap(), 1);
     }
 }
