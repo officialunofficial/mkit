@@ -522,21 +522,16 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             // Loading, authorization, seam callbacks and descriptor I/O may revoke a source.
             // The final target/pack guards are one fresh bounded phase.
             checks.reset();
-            checks
-                .prefetch_locations(&locations)
-                .await
-                .map_err(failure)?;
-            if !view
-                .has(
-                    &self
-                        .pipe
-                        .shards
-                        .membership(&self.repo, &crate::store::BlobKey::pack(location.pack)),
-                    &crate::store::keys::membership(&self.repo.name, &location.pack),
-                )
-                .await
-                .map_err(failure)?
-            {
+            // The guards and the source pack's membership row are independent
+            // reads of the same final phase: one round, not two. A guard failure
+            // keeps precedence over the membership answer.
+            let (guards, member) = futures::future::join(
+                checks.prefetch_locations(&locations),
+                self.pack_present(&view, location.pack),
+            )
+            .await;
+            guards.map_err(failure)?;
+            if !member.map_err(failure)? {
                 return Ok(None);
             }
             if !crate::indexed::resolve::member_dependencies_clear(
@@ -889,23 +884,21 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 return Err(ServerError::not_found("object reader unavailable"));
             }
             checks.reset();
-            checks
-                .prefetch_locations(&locations)
-                .await
-                .map_err(failure)?;
-            for node in nodes {
+            // Each node's source-pack membership row is an independent read of
+            // this final phase: all of them share the guards' rounds. Results are
+            // consumed below in node order, so precedence is unchanged.
+            let packs: Vec<Hash> = nodes.iter().map(|node| node.location.pack).collect();
+            let (guards, present) = futures::future::join(
+                checks.prefetch_locations(&locations),
+                self.packs_present(&view, &packs),
+            )
+            .await;
+            guards.map_err(failure)?;
+            let present = present.map_err(failure)?;
+            for (node, present) in nodes.iter().zip(present) {
                 // Retain the actual body source, not a different newly selected
                 // pack that could conceal denial of the source just read.
-                if !view
-                    .has(
-                        &self.pipe.shards.membership(
-                            &self.repo,
-                            &crate::store::BlobKey::pack(node.location.pack),
-                        ),
-                        &crate::store::keys::membership(&self.repo.name, &node.location.pack),
-                    )
-                    .await
-                    .map_err(failure)?
+                if !present.map_err(failure)?
                     || !crate::indexed::resolve::member_dependencies_clear(
                         &view,
                         self.pipe.shards.as_ref(),
@@ -930,6 +923,56 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         settle(result, &capped)
     }
 }
+impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
+    ObjectReader<'_, B, N, H>
+{
+    /// Whether this repository's membership row for `pack` exists.
+    async fn pack_present<S: NamespaceStore>(
+        &self,
+        store: &S,
+        pack: Hash,
+    ) -> Result<bool, crate::store::StoreError> {
+        store
+            .has(
+                &self
+                    .pipe
+                    .shards
+                    .membership(&self.repo, &crate::store::BlobKey::pack(pack)),
+                &crate::store::keys::membership(&self.repo.name, &pack),
+            )
+            .await
+    }
+
+    /// [`Self::pack_present`] for several packs, in order. The reads are
+    /// independent, so each wave of up to `read_io::parallelism()` of them is
+    /// reserved against the call ledger and dispatched together. A reservation
+    /// failure fails the whole batch before any dispatch.
+    async fn packs_present<S: NamespaceStore>(
+        &self,
+        store: &S,
+        packs: &[Hash],
+    ) -> Result<Vec<Result<bool, crate::store::StoreError>>, crate::store::StoreError> {
+        let mut answers = Vec::with_capacity(packs.len());
+        for wave in packs.chunks(crate::store::read_io::parallelism()) {
+            let reservation = if store.reader_admission() {
+                store.reserve_read_calls(u32::try_from(wave.len()).unwrap_or(u32::MAX))?
+            } else {
+                None
+            };
+            answers.extend(
+                crate::store::ReadReservation::scope(
+                    &[reservation],
+                    futures::future::join_all(
+                        wave.iter().map(|pack| self.pack_present(store, *pack)),
+                    ),
+                )
+                .await,
+            );
+        }
+        Ok(answers)
+    }
+}
+
 fn validate_history(reference: &str, options: HistoryOptions) -> Result<(), ServerError> {
     if !crate::refs::is_served_ref_name(reference)
         || reference.starts_with("refs/mkit/packmap/")

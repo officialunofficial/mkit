@@ -40,8 +40,10 @@
 //!
 //! **Get.** A body is always a [`BlobBody::Stream`] over the R2 object
 //! body, re-chunked to pieces of at most [`MAX_BLOB_PIECE_BYTES`] and
-//! checked against the expected length. A range reads R2's range; the blob
-//! length it is resolved against comes from a `head` first.
+//! checked against the expected length. A bounded range is one ranged GET:
+//! R2 answers the object's size with the body, which the range is resolved
+//! against. Only a malformed range, a start beyond R2's range precision, or a
+//! GET that R2 rejects consults a `head`.
 //!
 //! The store serves the bytes it verified and nothing else: it never
 //! decodes or re-encodes pack contents (serving pushed zstd frames is
@@ -492,6 +494,10 @@ impl<B: ObjectBucket> R2PackSink<B> {
     }
 }
 
+/// The largest offset or length R2 ranges carry (2^53 - 1, the Workers
+/// binding's precision limit).
+pub const MAX_R2_RANGE: u64 = (1 << 53) - 1;
+
 impl<B: ObjectBucket> BlobStore for R2BlobStore<B> {
     type Sink = R2PackSink<B>;
     fn reserve_read_calls(
@@ -519,20 +525,44 @@ impl<B: ObjectBucket> BlobStore for R2BlobStore<B> {
         range: Option<ByteRange>,
     ) -> Result<Option<BlobBody>, StoreError> {
         let object = self.object_key(key)?;
-        let span = match range {
-            None => None,
+        let (got, span) = match range {
+            None => (self.get_object(&object, None).await?, None),
+            // A well-formed range is one ranged GET: R2 answers the object's
+            // size with the body, so no HEAD precedes it. A malformed range
+            // keeps the HEAD first, so a missing object stays uniformly absent.
+            // Offsets and lengths beyond R2's range precision are not sent
+            // (the Workers binding panics on them); the end is clamped to it,
+            // as `resolve` clamps to the object.
+            Some(range) if range.start <= range.end_inclusive && range.start < MAX_R2_RANGE => {
+                let end = range.end_inclusive.saturating_add(1).min(MAX_R2_RANGE);
+                match self.bucket.get(&object, Some(range.start..end)).await {
+                    Ok(None) => return Ok(None),
+                    Ok(Some((size, stream))) => (Some((size, stream)), Some(range.resolve(size)?)),
+                    Err(e) => {
+                        // A range R2 cannot satisfy is an error there; a HEAD
+                        // classifies it as absent, unsatisfiable or a backend
+                        // failure, exactly as before. The GET error is logged
+                        // first so it is never silently dropped.
+                        let failure = backend_error(StorageOp::BlobGet, e);
+                        let Some(len) = self.head_len(&object).await? else {
+                            return Ok(None);
+                        };
+                        range.resolve(len)?;
+                        return Err(failure);
+                    }
+                }
+            }
             Some(range) => {
                 let Some(len) = self.head_len(&object).await? else {
                     return Ok(None);
                 };
-                Some(range.resolve(len)?)
+                let span = range.resolve(len)?;
+                (
+                    self.get_object(&object, Some(span.clone())).await?,
+                    Some(span),
+                )
             }
         };
-        let got = self
-            .bucket
-            .get(&object, span.clone())
-            .await
-            .map_err(|e| backend_error(StorageOp::BlobGet, e))?;
         let Some((size, stream)) = got else {
             return Ok(None);
         };
@@ -590,6 +620,17 @@ impl<B: ObjectBucket> R2BlobStore<B> {
             #[cfg(feature = "__test-faults")]
             fail_final: self.fail_final.clone(),
         }
+    }
+
+    async fn get_object(
+        &self,
+        object: &str,
+        span: Option<Range<u64>>,
+    ) -> Result<Option<(u64, ObjectStream)>, StoreError> {
+        self.bucket
+            .get(object, span)
+            .await
+            .map_err(|e| backend_error(StorageOp::BlobGet, e))
     }
 
     async fn head_len(&self, object: &str) -> Result<Option<u64>, StoreError> {

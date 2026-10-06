@@ -2515,6 +2515,7 @@ mod reader_proof_tests;
 
 mod reader_batch_cost;
 
+mod read_rounds;
 mod reader_batch_limit_tests;
 mod reader_guard_tests;
 mod reader_real_cost;

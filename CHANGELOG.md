@@ -204,6 +204,19 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Performance
 
+- Fewer sequential storage rounds per read, with no change to results, limits,
+  guards. Backend R2 calls drop; KV calls and ledger charges drop only by the removed publish-time block read (one per proof-expanding decoded object; a nine-file show with sizes goes from 72 to 69 KV calls, with fewer for a no-sizes show and a six-file show). A rare failure path, where the pack prefix exceeds the decode budget before the frame read, can now send and charge the frame read. The Workers R2 adapter serves a bounded blob range with
+  one ranged GET instead of a HEAD followed by a GET (a missing object is still
+  absent, a start past the end is still unsatisfiable, a malformed range is still
+  invalid, and the read ledger still charges two units). A public reader's first
+  root enumeration scans the sharded ref index in reserved waves of the shared
+  six-call envelope rather than one shard per round. A raw member reads its pack
+  prefix and frame together, a history page re-checks its nodes' source packs
+  and final guards in the same round. A duplicate block-row read at publish
+  time, which asked the final guards' question again, is removed. Every authorization, membership, denial, source
+  and final fresh check keeps its boundary. In the call/round model, a nine-file
+  show with sizes goes from 59 to 34 rounds, a five-commit log from 54 to 34, and
+  a fifty-commit log from 621 to 380.
 - Borrowed server stores forward batched content-index reads to the backend.
   Two-key denial probes use one batch, and member dependency checks use one
   batch each for the object and its pack. Fail-closed checks remain live.

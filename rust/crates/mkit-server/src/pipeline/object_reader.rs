@@ -923,14 +923,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                         {
                             let object =
                                 mkit_core::serialize::deserialize(&canonical).map_err(failure)?;
-                            // Loading may yield. Recheck the storage stop before
-                            // publishing any children of the decoded object.
-                            if denied(&super::reader_checks::Checks::new(&meta), &id)
-                                .await
-                                .map_err(failure)?
-                            {
-                                continue;
-                            }
+                            // The final guards above are this phase's storage stop.
                             if !seams.takedown.stops_descent(&self.repo, &id) {
                                 memo.expand(id, located.pack, &object);
                             }

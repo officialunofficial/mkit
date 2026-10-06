@@ -215,8 +215,8 @@ fn request_budget_combines_do_r2_range_proofs_and_pipeline_serving() {
         );
         assert_eq!(
             budget.used(),
-            3,
-            "range HEAD and GET share the metadata allowance"
+            2,
+            "a bounded range is one GET: one probe and one GET"
         );
         let proof_budget = SliceBudget::new(9000);
         for _ in 0..2 {
@@ -317,7 +317,7 @@ fn inventory_transport_peak_includes_base64_reply_and_nested_raw_pages() {
 #[test]
 fn alarm_budget_counts_real_range_and_delete_calls_and_survives_clones() {
     block_on(async {
-        let budget = mkit_server::purge::SliceBudget::new(5);
+        let budget = mkit_server::purge::SliceBudget::new(4);
         let dispatches = Arc::new(AtomicU32::new(0));
         let transport = EmptyTransport::default();
         let meta = DoNamespaceStore::new(
@@ -358,11 +358,12 @@ fn alarm_budget_counts_real_range_and_delete_calls_and_survives_clones() {
                 .unwrap()
                 .is_some()
         );
-        assert_eq!(budget.used(), 3);
+        // One metadata read and one GET: a bounded range has no HEAD.
+        assert_eq!(budget.used(), 2);
         assert!(blobs.delete(&key).await.unwrap());
-        assert_eq!(budget.used(), 5);
+        assert_eq!(budget.used(), 4);
         let actual = transport.0.load(Ordering::SeqCst) + dispatches.load(Ordering::SeqCst);
-        assert_eq!(actual, 5);
+        assert_eq!(actual, 4);
         assert!(meta.clone().get(&partition, &metadata).await.is_err());
         assert!(blobs.head(&key).await.is_err());
         assert_eq!(
@@ -466,8 +467,9 @@ fn blob_and_namespace_waves_preflight_the_same_invocation_ledger() {
                     }
                 })
                 .await;
+                // Two single-call ranged reads; the four prepaid calls stay charged.
                 assert_eq!(budget.used(), 10);
-                assert_eq!(dispatches.load(Ordering::SeqCst), 4);
+                assert_eq!(dispatches.load(Ordering::SeqCst), 2);
             }
         }
     });
@@ -595,8 +597,8 @@ fn blob_read_credit_rejects_unrelated_deletes_even_inside_its_scope() {
             }
         })
         .await;
-        assert_eq!(dispatches.load(Ordering::SeqCst), 4);
-        assert_eq!(budget.used(), 4);
+        assert_eq!(dispatches.load(Ordering::SeqCst), 2);
+        assert_eq!(budget.used(), 4, "unused prepaid calls stay charged");
     });
 }
 

@@ -199,6 +199,23 @@ fn row_wire_bound(name: &str) -> usize {
     proto.max(name.len() + 96)
 }
 
+/// The rows each source may contribute to one page.
+fn per_source(page_size: u32, sources: usize) -> u32 {
+    let count = u32::try_from(sources).unwrap_or(u32::MAX);
+    page_size.min(2 * page_size.div_ceil(count) + 8)
+}
+
+/// A continued scan must carry at least one row to bound the merge by.
+fn continued_boundary(scan: &Scan) -> Result<Option<&str>, StoreError> {
+    if !scan.more {
+        return Ok(None);
+    }
+    scan.rows
+        .last()
+        .map(|(name, _)| Some(name.as_str()))
+        .ok_or_else(|| StoreError::Corrupt("empty continued ref scan".into()))
+}
+
 /// Read one bounded page. Every source is scanned once, sequentially.
 /// A failed source fails the entire page; no partial merge is exposed.
 pub(super) async fn page<S: BucketSource>(
@@ -210,18 +227,71 @@ pub(super) async fn page<S: BucketSource>(
     byte_budget: usize,
 ) -> Result<ListPage, StoreError> {
     assert!(!sources.is_empty() && page_size > 0);
-    let count = u32::try_from(sources.len()).unwrap_or(u32::MAX);
-    let per_source = page_size.min(2 * page_size.div_ceil(count) + 8);
+    let per_source = per_source(page_size, sources.len());
+    let mut scans = Vec::with_capacity(sources.len());
+    for source in sources {
+        let scan = source.scan(repo, prefix, last, per_source).await?;
+        continued_boundary(&scan)?;
+        scans.push(scan);
+    }
+    merge(repo, prefix, scans, page_size, byte_budget)
+}
+
+#[cfg(feature = "http-objects")]
+/// [`page`] for a read operation: the sources are independent scans, so each
+/// wave of up to [`crate::store::read_io::parallelism`] of them is reserved
+/// against the operation's call ledger and dispatched together. The page is
+/// the same; only the number of sequential rounds changes. A failed source
+/// fails the entire page, and every dispatched reply of a failed wave is drained.
+pub(super) async fn page_in_waves<S: BucketSource, N: NamespaceStore>(
+    store: &N,
+    sources: &[S],
+    repo: &RepoId,
+    prefix: &str,
+    last: Option<&str>,
+    page_size: u32,
+    byte_budget: usize,
+) -> Result<ListPage, StoreError> {
+    assert!(!sources.is_empty() && page_size > 0);
+    let per_source = per_source(page_size, sources.len());
+    let mut scans = Vec::with_capacity(sources.len());
+    for wave in sources.chunks(crate::store::read_io::parallelism()) {
+        let reservation = if store.reader_admission() {
+            store.reserve_read_calls(u32::try_from(wave.len()).unwrap_or(u32::MAX))?
+        } else {
+            None
+        };
+        let replies = crate::store::ReadReservation::scope(
+            &[reservation],
+            futures::future::join_all(
+                wave.iter()
+                    .map(|source| source.scan(repo, prefix, last, per_source)),
+            ),
+        )
+        .await;
+        for reply in replies {
+            let scan = reply?;
+            continued_boundary(&scan)?;
+            scans.push(scan);
+        }
+    }
+    merge(repo, prefix, scans, page_size, byte_budget)
+}
+
+/// Merge the sources' scans, in source order, into one page.
+fn merge(
+    repo: &RepoId,
+    prefix: &str,
+    scans: Vec<Scan>,
+    page_size: u32,
+    byte_budget: usize,
+) -> Result<ListPage, StoreError> {
     let mut rows = Vec::new();
     let mut boundary: Option<String> = None;
     let mut source_more = false;
-    for source in sources {
-        let scan = source.scan(repo, prefix, last, per_source).await?;
-        if scan.more {
-            let Some((name, _)) = scan.rows.last() else {
-                return Err(StoreError::Corrupt("empty continued ref scan".into()));
-            };
-            boundary = Some(boundary.map_or_else(|| name.clone(), |b| b.min(name.clone())));
+    for scan in scans {
+        if let Some(name) = continued_boundary(&scan)? {
+            boundary = Some(boundary.map_or_else(|| name.to_owned(), |b| b.min(name.to_owned())));
             source_more = true;
         }
         rows.extend(scan.rows);
