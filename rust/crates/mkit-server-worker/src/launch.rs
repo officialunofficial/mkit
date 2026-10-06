@@ -125,6 +125,12 @@ fn role_groups(cfg: &WorkerConfig) -> Vec<Vec<[u8; 32]>> {
             .as_ref()
             .map_or_else(Vec::new, |t| t.keys().public_keys().collect()),
     );
+    #[cfg(feature = "http-objects")]
+    groups.push(
+        cfg.history_tokens
+            .as_ref()
+            .map_or_else(Vec::new, |t| vec![t.public_key()]),
+    );
     groups
 }
 
@@ -158,6 +164,16 @@ fn validate_signing_seeds(
     public: &[[u8; 32]],
     var: &impl Fn(&str) -> Option<String>,
 ) -> Result<(), ConfigError> {
+    #[cfg(feature = "http-objects")]
+    if cfg
+        .history_tokens
+        .as_ref()
+        .is_some_and(|t| public.iter().any(|p| t.contains_secret(p)))
+    {
+        return Err(error(
+            "history continuation secret must differ from published role keys",
+        ));
+    }
     #[cfg(feature = "http-objects")]
     if cfg
         .url_tokens

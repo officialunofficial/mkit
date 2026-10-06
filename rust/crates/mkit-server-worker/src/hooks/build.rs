@@ -179,6 +179,10 @@ mod glue {
             if let Some(admin) = &cfg.admin {
                 other_keys.extend(admin.public_keys());
             }
+            #[cfg(feature = "http-objects")]
+            if let Some(tokens) = &cfg.history_tokens {
+                other_keys.push(tokens.public_key());
+            }
             if let Some(fence) = &cfg.authority_fence {
                 other_keys.extend(fence.public_keys());
             }
@@ -195,6 +199,14 @@ mod glue {
                 cfg.ticket_keys.as_ref(),
                 &other_keys,
             )?;
+            #[cfg(feature = "http-objects")]
+            if let Some(tokens) = &cfg.history_tokens {
+                tokens
+                    .check_public_roles(&[signer.public_key()])
+                    .map_err(|_| {
+                        ConfigError("history continuation key must differ from hook key".into())
+                    })?;
+            }
             #[cfg(feature = "http-objects")]
             if cfg
                 .url_tokens

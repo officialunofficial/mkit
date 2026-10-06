@@ -38,6 +38,7 @@
 //! | namespace record (`Coordinator`) | `nr 00` | codec `NamespaceRecord` |
 //! | repository listing index (`Coordinator`) | `rl 00 p/d 00 <repo>` | empty; explicit public / inherited |
 //! | repo record (`Coordinator`) | `rr 00 <repo>` | codec `RepoRecord` |
+//! | visibility revision (`Coordinator`) | `rj 00 <repo>` | codec u64; incremented atomically on visibility writes, never pruned |
 //! | repository visibility (`Coordinator`) | `rv 00 <repo>` | codec `RepoVisibilityV1`; absent uses the deployment default |
 //! | repo-known marker (ref shard) | `rk 00 <repo>` | empty |
 //! | repository stored-bytes counter (`Coordinator`) | `rb 00 <repo>` | codec `RepoStorageV1` (absolute pack bytes, version) |
@@ -194,6 +195,8 @@ pub const TAG_REPO_LIST: &str = "rl";
 /// Repository visibility tag (`Coordinator`): absent uses the deployment default; the
 /// row may exist without `rr` (SPEC-WRITE-GRANTS §9.1).
 pub const TAG_REPO_VISIBILITY: &str = "rv";
+/// Retained visibility revision, including same-clock changes.
+pub const TAG_REPO_VISIBILITY_REVISION: &str = "rj";
 /// Namespace list tag, reserved until namespace enumeration under
 /// `namespace_policy = any` is needed (WP-1.29 backup). No M1 consumer
 /// or deployment-wide partition exists. A backend may keep its own metadata.
@@ -329,6 +332,8 @@ pub enum ParsedKey {
     },
     /// `rv 00 <repo>`.
     RepoVisibility(RepoName),
+    /// `rj 00 <repo>`; never reset or pruned.
+    RepoVisibilityRevision(RepoName),
     /// `rk 00 <repo>`.
     RepoKnown(RepoName),
     /// `rb 00 <repo>`.
@@ -676,6 +681,12 @@ pub fn repo_visibility(repo: &RepoName) -> Key {
     key(TAG_REPO_VISIBILITY, &[repo.as_str().as_bytes()])
 }
 
+/// `rj 00 <repo>`: monotonic visibility revision; never reset or pruned.
+#[must_use]
+pub fn repo_visibility_revision(repo: &RepoName) -> Key {
+    key(TAG_REPO_VISIBILITY_REVISION, &[repo.as_str().as_bytes()])
+}
+
 /// `rk 00 <repo>`: the ref shard's repository registration marker.
 #[must_use]
 pub fn repo_known(repo: &RepoName) -> Key {
@@ -736,6 +747,7 @@ pub fn publication(repo: &RepoName, name: &str) -> Key {
         &[repo.as_str().as_bytes(), b"\0", name.as_bytes()],
     )
 }
+
 /// Retained value, ordered numerically within one ref sequence.
 #[must_use]
 pub fn advance(repo: &RepoName, name: &str, sequence: u64) -> Key {
@@ -1409,6 +1421,7 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
             repo: RepoName::new(text(&body[2..])?).ok()?,
         },
         b"rv" => ParsedKey::RepoVisibility(RepoName::new(text(body)?).ok()?),
+        b"rj" => ParsedKey::RepoVisibilityRevision(RepoName::new(text(body)?).ok()?),
         b"rh" => ParsedKey::RelayHighWater(Partition::decode(body).ok()?),
         b"rs" if body.is_empty() => ParsedKey::RelayScan,
         b"rk" => ParsedKey::RepoKnown(RepoName::new(text(body)?).ok()?),
@@ -1660,6 +1673,7 @@ mod tests {
             TAG_REPO_REGISTRY,
             TAG_REPO_LIST,
             TAG_REPO_VISIBILITY,
+            TAG_REPO_VISIBILITY_REVISION,
             TAG_REPO_KNOWN,
             TAG_REPO_STORAGE,
             TAG_REPO_STORAGE_PACK,

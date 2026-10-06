@@ -106,6 +106,10 @@ impl fmt::Debug for Authenticated {
 }
 
 impl Authenticated {
+    #[cfg(feature = "http-objects")]
+    pub(crate) fn credential_scope_digest(&self) -> mkit_core::hash::Hash {
+        super::admission::credential_scope_digest(&self.credential_capture)
+    }
     /// The procedure these credentials were checked for; every entry point
     /// refuses any other.
     #[must_use]

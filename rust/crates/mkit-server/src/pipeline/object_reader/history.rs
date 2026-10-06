@@ -14,6 +14,8 @@ use std::{
 const MAX_NODES: usize = 50_000;
 const MAX_TAGS: usize = 16;
 const MAX_PATH_DEPTH: usize = 1_024;
+mod continuation;
+pub use continuation::{ContinuedHistoryPage, HistoryContinuation};
 
 /// Explicit parent traversal at merges.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
