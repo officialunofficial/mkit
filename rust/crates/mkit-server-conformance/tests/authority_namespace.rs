@@ -15,7 +15,7 @@ use mkit_server::pipeline::{
     PipelineConfig, RequestMeta,
 };
 use mkit_server::policy::{AuthorizerRole, NamespacePolicy};
-use mkit_server::store::adapter_spi::{codec, keys};
+use mkit_server::store::adapter_spi::keys;
 use mkit_server::upload::{UploadLimits, token::TicketKeys};
 use mkit_server::url_token::{Binding, UrlTarget, UrlTokenConfig, UrlTokenKeys};
 use mkit_server::{
@@ -148,20 +148,7 @@ fn generation(audience: &str, namespace: &str, n: u64) -> String {
     )
 }
 
-async fn registered(pipe: &TestPipeline, meta: &MemoryKv, audience: &str, namespace: &str) {
-    let key = NamespaceMode::Authority.namespace(namespace).unwrap().key();
-    meta.apply(
-        &mkit_server::Partition::Namespace(key),
-        mkit_server::Batch::new().put(
-            keys::namespace_record(),
-            codec::encode_namespace_record(&codec::NamespaceRecord {
-                created_at_ms: u64::try_from(now_ms()).unwrap(),
-                config_version: 1,
-            }),
-        ),
-    )
-    .await
-    .unwrap();
+async fn registered(pipe: &TestPipeline, audience: &str, namespace: &str) {
     assert_eq!(
         pipe.set_authority_generation(&generation(audience, namespace, 0))
             .await
@@ -197,9 +184,9 @@ async fn uuid_namespace_write_read_list_visibility_url_and_wildcard_key() {
     let audience = format!("http://{}", listener.local_addr().unwrap());
     let cfg = config(&audience, NamespaceMode::Authority);
     let tokens = cfg.url_tokens.clone().unwrap();
-    let (pipe, meta, hook) = build(cfg).unwrap();
+    let (pipe, _, hook) = build(cfg).unwrap();
     for namespace in [NS, OTHER_NS] {
-        registered(&pipe, &meta, &audience, namespace).await;
+        registered(&pipe, &audience, namespace).await;
     }
     let pipe = Arc::new(pipe);
     let app = axum::Router::new().fallback_service(mkit_server::connect::service(pipe.clone()));
@@ -548,8 +535,8 @@ async fn hook_writer_view_owns_storage_objects_and_url_issuance_without_existenc
     let mut cfg = config(audience, NamespaceMode::Authority);
     cfg.indexed = Some(mkit_server::indexed::IndexedConfig::default());
     cfg.http_objects = Some(mkit_server::http_objects::HttpObjectsConfig::default());
-    let (pipe, meta, _) = build(cfg).unwrap();
-    registered(&pipe, &meta, audience, NS).await;
+    let (pipe, _, _) = build(cfg).unwrap();
+    registered(&pipe, audience, NS).await;
     let repository = format!("{NS}/repository");
     let signer = Signer::new([7; 32], audience, &repository);
     let (pack, tree, commit) = canonical_pack();

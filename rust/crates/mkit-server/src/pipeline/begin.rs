@@ -68,22 +68,38 @@ pub(super) async fn read_indexed<N: NamespaceStore>(
             let value = meta.get(p, &key).await.map_err(meta_error)?;
             snap.insert(key.clone(), value);
         }
-        // A superseded ticket is replaced in this batch, which also settles
-        // its reservation through the outbox.
+        // A superseded ticket is replaced in this batch, which also settles its
+        // reservation. The early read-ahead may predate a competing replacement
+        // or consumption, so read the index, ticket and reservation together:
+        // one coherent view, never a ticket paired with a later reservation.
         if let Some(ticket) = snap
             .get(&key)
             .and_then(|raw| codec::decode_ticket(raw).ok())
             && tickets::is_superseded(&ticket, spec.authority_generation)
         {
-            let mut wanted = vec![
+            let wanted = [
+                k.index.clone(),
+                k.per_ref.clone(),
+                k.per_signer.clone(),
+                key,
                 keys::reservation(&ticket.reservation_id).map_err(meta_error)?,
                 keys::outbox_sequence(),
                 keys::outcome_backlog(),
+                keys::membership(&ticket.repo, &ticket.pack_id),
+                keys::verification(&ticket.repo, &ticket.pack_id),
+                keys::verify_job(&ticket.repo, &ticket.pack_id),
             ];
-            wanted.retain(|key| !snap.contains(key));
             let values = meta.get_many(p, &wanted).await.map_err(meta_error)?;
             for (key, value) in wanted.into_iter().zip(values) {
                 snap.insert(key, value);
+            }
+            // The index may now name another ticket: a replacement that won.
+            if let Some(index) = snap.get(&k.index) {
+                let key = keys::ticket(&codec::decode_ref_id(index).map_err(meta_error)?);
+                if !snap.contains(&key) {
+                    let value = meta.get(p, &key).await.map_err(meta_error)?;
+                    snap.insert(key, value);
+                }
             }
         }
     }
@@ -423,22 +439,40 @@ fn plan_replacement(
     // Unread rows mean the snapshot predates the stale ticket: re-plan.
     let reservation = keys::reservation(&old.reservation_id).map_err(meta_error)?;
     let (os, oc) = (keys::outbox_sequence(), keys::outcome_backlog());
+    let rows = [
+        keys::membership(&old.repo, &old.pack_id),
+        keys::verification(&old.repo, &old.pack_id),
+        keys::verify_job(&old.repo, &old.pack_id),
+    ];
     if ![&reservation, &os, &oc]
-        .iter()
+        .into_iter()
+        .chain(&rows)
         .all(|key| snap.contains(key))
     {
         return Err(ServerError::aborted_retryable("upload ticket race"));
     }
-    let stored = snap.get(&reservation).ok_or_else(|| {
-        meta_error(crate::store::StoreError::Corrupt(
-            "ticket has no reservation".into(),
-        ))
-    })?;
+    // A reservation that is gone or settled means a competing consumption or
+    // replacement landed after this view was read: retry, never corruption.
+    let old_id = tickets::ticket_id(&old.reservation_id);
+    let stored = snap
+        .get(&reservation)
+        .filter(|raw| {
+            matches!(
+                codec::decode_reservation(raw),
+                Ok(codec::ReservationV1::Ticketed { ticket_id }) if ticket_id == old_id
+            )
+        })
+        .ok_or_else(|| ServerError::aborted_retryable("upload ticket race"))?;
     let stale = tickets::StaleTicket {
         ticket: old,
         raw,
         reservation: stored,
         repository,
+        verification: tickets::VerificationRows {
+            member: snap.get(&rows[0]),
+            state: snap.get(&rows[1]),
+            job: snap.get(&rows[2]),
+        },
     };
     match tickets::plan_ticket_replace(
         spec,

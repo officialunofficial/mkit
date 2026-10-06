@@ -41,6 +41,21 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         self.activate_authority(ns, false).await
     }
 
+    /// Authority mode: the namespace must hold an authority-generation row.
+    /// Read-only; rows are never deleted, so a later write cannot race a removal.
+    pub(super) async fn require_registered(&self, ns: &NamespaceKey) -> Result<(), ServerError> {
+        if self
+            .meta
+            .get(&self.shards.coordinator(ns), &keys::authority_generation())
+            .await
+            .map_err(meta_error)?
+            .is_none()
+        {
+            return Err(ServerError::permission_denied("namespace not registered"));
+        }
+        Ok(())
+    }
+
     /// `register` is true only for a verified deployment statement.
     #[allow(clippy::too_many_lines)] // One bounded read, mode write and ready barrier.
     async fn activate_authority(

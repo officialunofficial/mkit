@@ -24,6 +24,11 @@ pub fn abort_failures() -> u64 {
     ABORT_FAILURES.load(Ordering::Relaxed)
 }
 
+/// Count a best-effort session abort that failed outside the expiry handler.
+pub(crate) fn record_abort_failure() {
+    ABORT_FAILURES.fetch_add(1, Ordering::Relaxed);
+}
+
 /// Kind-2 expiry handler. The per-kind cap bounds each native and Worker tick.
 #[derive(Debug)]
 pub struct TicketExpiry<B> {

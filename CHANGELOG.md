@@ -44,6 +44,8 @@ collect the applicable entries between their old and new immutable pins.
   writes, uploads and visibility changes for an unregistered namespace are refused
   with `namespace not registered`. The fenced namespace-creation batch now carries
   the `ag` guard, so a stale Authority generation creates nothing.
+  The Get/Set-before-first-write change also applies to self-certifying fenced
+  deployments under policy `any`.
 - A fenced `BeginUpload` retried after a generation bump replaces its stale-generation
   ticket in one guarded batch instead of answering `moved` until expiry: the old
   reservation gets an `Aborted` (`EPOCH_MISMATCH`, `BeginUpload`) outcome, counters and

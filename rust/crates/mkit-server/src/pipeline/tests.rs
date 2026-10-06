@@ -4831,9 +4831,16 @@ fn d34_prune_retry_refreshes_the_epoch_even_without_a_counted_replan() {
         .identify(&a, OpKind::UpdateRef(refs[0].clone()))
         .unwrap();
     assert_eq!(
-        block_on(env.pipe.apply_loop(&op, &a, &p, &req, Some(ahead), None))
-            .unwrap_err()
-            .code(),
+        block_on(env.pipe.apply_loop(
+            &op,
+            &a,
+            &p,
+            &req,
+            Some(ahead),
+            (None, &ReplacedSession::default())
+        ))
+        .unwrap_err()
+        .code(),
         Code::PermissionDenied
     );
     assert_eq!(

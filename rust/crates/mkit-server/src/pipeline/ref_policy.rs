@@ -63,7 +63,17 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             advance: None,
             implicit: None,
         };
-        match self.apply_atomic(op, a, p, &req, ahead, None).await? {
+        match self
+            .apply_atomic(
+                op,
+                a,
+                p,
+                &req,
+                ahead,
+                (None, &super::ReplacedSession::default()),
+            )
+            .await?
+        {
             rejected @ StoredResult::Rejected(_) => Err(stored_mismatch(&rejected)),
             _ if reserved => Err(ServerError::aborted_retryable(
                 "operation already in flight; retry",

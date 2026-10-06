@@ -28,10 +28,15 @@ impl Authorizer for Generation {
     }
 }
 
-struct Reserve;
+struct Reserve(Arc<Mutex<Vec<(bool, bool)>>>);
 
 impl Admission for Reserve {
     async fn admit(&self, input: &AdmissionInput<'_>) -> Result<AdmissionDecision, ServerError> {
+        let creation = input.op.creation;
+        self.0
+            .lock()
+            .unwrap()
+            .push((creation.namespace, creation.repo));
         Ok(AdmissionDecision::allow(Vec::new())
             .with_reservation(format!("r:{}", input.idempotency_key.unwrap())))
     }
@@ -45,6 +50,7 @@ struct Shared {
     clock: Arc<ManualClock>,
     generation: Arc<AtomicU64>,
     hook_calls: Arc<AtomicU32>,
+    creations: Arc<Mutex<Vec<(bool, bool)>>>,
 }
 
 impl Shared {
@@ -56,6 +62,7 @@ impl Shared {
             clock,
             generation: Arc::new(AtomicU64::new(0)),
             hook_calls: Arc::new(AtomicU32::new(0)),
+            creations: Arc::default(),
         }
     }
 
@@ -63,7 +70,7 @@ impl Shared {
         let defaults = Hooks::new();
         let hooks = Hooks {
             authorizer: Generation(self.generation.clone(), self.hook_calls.clone()),
-            admission: Reserve,
+            admission: Reserve(self.creations.clone()),
             pre_receive: defaults.pre_receive,
             receipts: defaults.receipts,
             outcomes: defaults.outcomes,
@@ -90,7 +97,11 @@ impl Shared {
     }
 
     fn row(&self, namespace: &str, key: &Key) -> Option<Value> {
-        now(self.kv.get(&partition(namespace), key)).unwrap()
+        self.row_at(&partition(namespace), key)
+    }
+
+    fn row_at(&self, p: &Partition, key: &Key) -> Option<Value> {
+        now(self.kv.get(p, key)).unwrap()
     }
 }
 
@@ -262,8 +273,11 @@ fn a_statement_registers_a_namespace_and_unregistered_writes_are_refused() {
     register(&env, NS, 0);
     // Registration creates the fence row alone: no accounting namespace.
     assert_eq!(registry_rows(&shared, NS), [false, false, true]);
+    assert!(shared.creations.lock().unwrap().is_empty());
     assert_eq!(update(&env, NS, 4).unwrap(), UpdateRefResult::Committed);
     assert_eq!(registry_rows(&shared, NS), [true; 3]);
+    // The first write still reaches Admission as a namespace and repo creation.
+    assert_eq!(*shared.creations.lock().unwrap(), [(true, true)]);
     // Registration is per namespace.
     expect_denied(
         &update(&env, OTHER, 5).unwrap_err(),
@@ -477,7 +491,7 @@ fn a_ticket_from_a_newer_generation_than_the_hook_is_never_replaced() {
 }
 
 #[test]
-fn a_consumption_that_lands_first_makes_the_replacement_open_normally() {
+fn a_simulated_consumption_that_lands_first_makes_the_replacement_open_normally() {
     let shared = Shared::new();
     let first_ticket = Arc::new(Mutex::new(None::<TicketClaims>));
     let fired = Arc::new(AtomicBool::new(false));
@@ -491,7 +505,9 @@ fn a_consumption_that_lands_first_makes_the_replacement_open_normally() {
             if batch.writes.contains(&Write::Delete(old_keys[0].clone()))
                 && !fired.swap(true, Ordering::SeqCst)
             {
-                // A CompleteUpload-style consumption commits first.
+                // Simulated consumption: the ticket rows vanish while the old
+                // reservation is left untouched (a real consumption would also
+                // settle it; see the winner-at-pending tests for that shape).
                 let mut consume = Batch::new();
                 for key in old_keys {
                     consume = consume.delete(key);
@@ -631,4 +647,227 @@ fn a_bump_between_planning_and_commit_refuses_the_replacement_whole() {
         }
     ));
     assert_eq!(shared.blobs.multipart_session_count(), 1);
+}
+
+/// The winner commits (by `winner`) at the loser's pending-reservation apply:
+/// after the loser's decision read, before its plan.
+fn winner_at_pending(
+    fired: &Arc<AtomicBool>,
+    loser_nonce: u32,
+    winner: impl Fn(&Partition) + Send + Sync + 'static,
+) -> ApplyHook {
+    let (fired, pending) = (
+        fired.clone(),
+        keys::reservation(&format!("r:{}", nonce(loser_nonce))).unwrap(),
+    );
+    Box::new(move |_, p, batch| {
+        if batch
+            .preconditions
+            .contains(&Precondition::Absent(pending.clone()))
+            && !fired.swap(true, Ordering::SeqCst)
+        {
+            winner(p);
+        }
+    })
+}
+
+#[test]
+fn a_replacement_that_commits_after_the_losers_decision_read_makes_it_retry_not_fail() {
+    let shared = Shared::new();
+    let other = Arc::new(shared.pipe(config(), None));
+    let fired = Arc::new(AtomicBool::new(false));
+    let winner = {
+        let other = other.clone();
+        move |_: &Partition| {
+            claims(&other, begin(&other, 20).unwrap());
+        }
+    };
+    let env = shared.pipe(config(), Some(winner_at_pending(&fired, 2, winner)));
+    register(&env, NS, 0);
+    claims(&env, begin(&env, 1).unwrap());
+    register(&env, NS, 1);
+    shared.generation.store(1, Ordering::SeqCst);
+    let error = begin(&env, 2).unwrap_err();
+    assert!(fired.load(Ordering::SeqCst));
+    assert_eq!(error.code(), Code::Aborted, "{error:?}");
+    assert!(matches!(
+        reservation(&shared, &format!("r:{}", nonce(2))),
+        ReservationV1::Aborted { .. }
+    ));
+    assert!(matches!(
+        reservation(&shared, &format!("r:{}", nonce(1))),
+        ReservationV1::Aborted {
+            reason: AbortReason::EpochMismatch,
+            ..
+        }
+    ));
+    assert_eq!(shared.blobs.multipart_session_count(), 1);
+    assert_eq!(backlog_rows(&shared), 2);
+    // The retry returns the winner's live ticket.
+    let retry = claims(&env, begin(&env, 3).unwrap());
+    assert!(matches!(
+        reservation(&shared, &format!("r:{}", nonce(20))),
+        ReservationV1::Ticketed { ticket_id } if ticket_id == retry.ticket_id
+    ));
+}
+
+#[test]
+fn a_real_consumption_during_the_bump_window_makes_the_replacement_open_normally() {
+    // Leased sharding: the old ticket is consumed and its reservation settled
+    // `Committed` after the decision read.
+    let shared = Shared::new();
+    let mut cfg = config();
+    cfg.sharding = Sharding::D34;
+    let old = Arc::new(Mutex::new(None::<TicketClaims>));
+    let fired = Arc::new(AtomicBool::new(false));
+    let consume = {
+        let (shared_kv, old) = (shared.kv.clone(), old.clone());
+        move |p: &Partition| {
+            let old = old.lock().unwrap().clone().unwrap();
+            let mut batch = Batch::new();
+            for key in ticket_keys(&old) {
+                batch = batch.delete(key);
+            }
+            let committed = ReservationV1::committed(
+                format!("{NS}/{REPO}"),
+                u64::try_from(T0).unwrap(),
+                1,
+                1,
+                1,
+                Vec::new(),
+                codec::StoredProcedure::AdvanceRefs,
+            );
+            batch = batch.put(
+                keys::reservation(&format!("r:{}", nonce(1))).unwrap(),
+                codec::encode_reservation(&committed),
+            );
+            assert_eq!(
+                now(shared_kv.apply(p, batch)).unwrap(),
+                BatchOutcome::Committed
+            );
+        }
+    };
+    let env = shared.pipe(cfg, Some(winner_at_pending(&fired, 2, consume)));
+    register(&env, NS, 0);
+    let first = claims(&env, begin(&env, 1).unwrap());
+    *old.lock().unwrap() = Some(first);
+    register(&env, NS, 1);
+    shared.generation.store(1, Ordering::SeqCst);
+    let second = claims(&env, begin(&env, 2).unwrap());
+    assert!(fired.load(Ordering::SeqCst));
+    assert_eq!(second.authority_generation, Some(1));
+}
+
+#[test]
+fn a_late_complete_upload_with_the_old_token_is_refused_after_the_replacement() {
+    let shared = Shared::new();
+    let env = shared.pipe(config(), None);
+    register(&env, NS, 0);
+    let BeginUploadResult::Ticket {
+        token: old_token, ..
+    } = begin(&env, 1).unwrap()
+    else {
+        panic!("ticket")
+    };
+    register(&env, NS, 1);
+    shared.generation.store(1, Ordering::SeqCst);
+    let second = claims(&env, begin(&env, 2).unwrap());
+    assert_eq!(shared.blobs.multipart_session_count(), 1);
+    let complete = Req::signed_for(
+        &key(7),
+        Procedure::CompleteUpload,
+        &format!("{NS}/{REPO}"),
+        b"complete",
+        &nonce(9),
+        T0,
+    );
+    let auth = env.auth(&complete).unwrap();
+    expect_denied(
+        &now(env.pipe.complete_upload(&auth, &old_token, &[])).unwrap_err(),
+        "namespace authority generation changed",
+    );
+    // The new ticket, its rows and its session are untouched.
+    let new = ticket_keys(&second);
+    assert!(shared.row(NS, &new[0]).is_some());
+    assert_eq!(shared.blobs.multipart_session_count(), 1);
+}
+
+#[test]
+fn leased_sharding_replaces_in_the_ref_shard_under_the_lease_fence() {
+    let shared = Shared::new();
+    let mut cfg = config();
+    cfg.sharding = Sharding::D34;
+    let env = shared.pipe(cfg, None);
+    register(&env, NS, 0);
+    let first = claims(&env, begin(&env, 1).unwrap());
+    register(&env, NS, 1);
+    shared.generation.store(1, Ordering::SeqCst);
+    let second = claims(&env, begin(&env, 2).unwrap());
+    assert_eq!(second.authority_generation, Some(1));
+    let repo = RepoId {
+        namespace: partition_key(),
+        name: RepoName::new(REPO).unwrap(),
+    };
+    let p = env.pipe.shards.ref_shard(&repo, HEAD);
+    let (old, new) = (ticket_keys(&first), ticket_keys(&second));
+    assert!(shared.row_at(&p, &old[0]).is_none());
+    assert!(shared.row_at(&p, &new[0]).is_some());
+    assert!(shared.row_at(&p, &old[4]).is_none());
+    for key in &new[2..4] {
+        assert_eq!(shared.row_at(&p, key), Some(codec::encode_u64(1)));
+    }
+    let rid = |n| keys::reservation(&format!("r:{}", nonce(n))).unwrap();
+    assert!(matches!(
+        codec::decode_reservation(&shared.row_at(&p, &rid(1)).unwrap()).unwrap(),
+        ReservationV1::Aborted {
+            reason: AbortReason::EpochMismatch,
+            ..
+        }
+    ));
+    assert_eq!(
+        codec::decode_backlog(&shared.row_at(&p, &keys::outcome_backlog()).unwrap())
+            .unwrap()
+            .rows,
+        1
+    );
+    // The shard batch is fenced by the epoch lease, not by a direct `ag` guard.
+    let batches = env.pipe.meta.batches.lock().unwrap();
+    let replacement = batches
+        .iter()
+        .find(|batch| batch.writes.contains(&Write::Delete(old[0].clone())))
+        .expect("replacement batch");
+    let guards = |wanted: Key| {
+        replacement.preconditions.iter().any(|pre| {
+            matches!(pre, Precondition::Equals(key, _) | Precondition::Absent(key) if *key == wanted)
+        })
+    };
+    assert!(guards(keys::epoch_lease()));
+    assert!(!guards(keys::authority_generation()));
+}
+
+#[test]
+fn authorize_refuses_an_unregistered_namespace_on_every_sharding() {
+    for sharding in [Sharding::Single, Sharding::D34] {
+        let shared = Shared::new();
+        let mut cfg = config();
+        cfg.sharding = sharding;
+        let env = shared.pipe(cfg, None);
+        let auth = env
+            .auth(&request(Procedure::SetRepoVisibility, NS, 1))
+            .unwrap();
+        let op = env
+            .pipe
+            .identify(
+                &auth,
+                OpKind::SetRepoVisibility {
+                    visibility: Visibility::Private,
+                },
+            )
+            .unwrap();
+        expect_denied(
+            &now(env.pipe.authorize(&op)).unwrap_err(),
+            "namespace not registered",
+        );
+        assert_eq!(shared.hook_calls.load(Ordering::SeqCst), 0);
+    }
 }

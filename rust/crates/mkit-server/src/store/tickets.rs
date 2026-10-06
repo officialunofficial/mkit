@@ -346,6 +346,16 @@ pub(crate) struct StaleTicket<'a> {
     pub reservation: &'a Value,
     /// Wire repository identity recorded in the old reservation's outcome.
     pub repository: &'a str,
+    /// Rows the expiry handler also clears for an unconsumed pack.
+    pub verification: VerificationRows<'a>,
+}
+
+/// The pack's membership, verification state and scheduled-job rows.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct VerificationRows<'a> {
+    pub member: Option<&'a Value>,
+    pub state: Option<&'a Value>,
+    pub job: Option<&'a Value>,
 }
 
 /// Whether `ticket` was issued under an older authority generation than the
@@ -457,6 +467,31 @@ pub(crate) fn plan_ticket_replace(
     outbox
         .try_finish(&mut staged_pre, &mut staged_writes)
         .map_err(TicketPlanError::Corrupt)?;
+    // Same cleanup as the old ticket's expiry: an unconsumed pack's
+    // verification state goes, and a scheduled job is kicked to delete its rows.
+    let VerificationRows { member, state, job } = stale.verification;
+    if let (None, Some(raw)) = (member, state) {
+        let key = layout::verification(&old.repo, &old.pack_id);
+        staged_pre.push(Precondition::Equals(key.clone(), raw.clone()));
+        staged_pre.push(Precondition::Absent(layout::membership(
+            &old.repo,
+            &old.pack_id,
+        )));
+        staged_writes.push(Write::Delete(key));
+    } else {
+        staged_pre.push(guard(layout::membership(&old.repo, &old.pack_id), member));
+        staged_pre.push(guard(layout::verification(&old.repo, &old.pack_id), state));
+    }
+    if job.is_some() {
+        staged_writes.push(Write::Put(
+            layout::timer(
+                spec.now_ms,
+                kinds::VERIFY.get(),
+                &crate::indexed::checkpoint::timer_reference(&old.repo, &old.pack_id),
+            ),
+            Value::default(),
+        ));
+    }
     *pre = staged_pre;
     *writes = staged_writes;
     Ok(id)

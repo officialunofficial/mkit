@@ -870,6 +870,9 @@ fn replace(
     let record = old.record();
     let raw = codec::encode_ticket(&record);
     let reservation = get(store, &keys(old).reservation).unwrap();
+    let member = get(store, &layout::membership(&old.repo, &old.pack_id));
+    let state = get(store, &layout::verification(&old.repo, &old.pack_id));
+    let job = get(store, &layout::verify_job(&old.repo, &old.pack_id));
     plan_ticket_replace(
         new,
         StaleTicket {
@@ -877,6 +880,11 @@ fn replace(
             raw: &raw,
             reservation: &reservation,
             repository: REPOSITORY,
+            verification: VerificationRows {
+                member: member.as_ref(),
+                state: state.as_ref(),
+                job: job.as_ref(),
+            },
         },
         reads,
         (
@@ -1139,4 +1147,54 @@ fn replacement_refusals_leave_outputs_unchanged() {
         });
         assert_eq!(batch, before);
     }
+}
+
+#[test]
+fn replacement_clears_an_unconsumed_packs_verification_and_kicks_its_job() {
+    for member in [false, true] {
+        let (old, new) = (old_spec(0), new_spec(1, "reservation-2"));
+        let store = planted(&old, 1);
+        let state = layout::verification(&old.repo, &old.pack_id);
+        let job = layout::verify_job(&old.repo, &old.pack_id);
+        let mut rows = Batch::new()
+            .put(state.clone(), Value::new(&b"verified"[..]))
+            .put(job, Value::default());
+        if member {
+            rows = rows.put(
+                layout::membership(&old.repo, &old.pack_id),
+                Value::default(),
+            );
+        }
+        apply(&store, rows);
+        assert_eq!(
+            apply(&store, replacement(&old, &new, 1, &store)),
+            BatchOutcome::Committed
+        );
+        // A member pack keeps its state; the job's timer is kicked either way.
+        assert_eq!(get(&store, &state).is_some(), member);
+        let kick = layout::timer(
+            new.now_ms,
+            kinds::VERIFY.get(),
+            &crate::indexed::checkpoint::timer_reference(&old.repo, &old.pack_id),
+        );
+        assert!(get(&store, &kick).is_some());
+    }
+}
+
+#[test]
+fn a_verification_change_after_planning_fails_the_replacement() {
+    let (old, new) = (old_spec(0), new_spec(1, "reservation-2"));
+    let store = planted(&old, 1);
+    let batch = replacement(&old, &new, 1, &store);
+    apply(
+        &store,
+        Batch::new().put(
+            layout::verification(&old.repo, &old.pack_id),
+            Value::default(),
+        ),
+    );
+    assert!(matches!(
+        apply(&store, batch),
+        BatchOutcome::PreconditionFailed { .. }
+    ));
 }

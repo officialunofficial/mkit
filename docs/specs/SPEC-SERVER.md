@@ -583,18 +583,28 @@ namespace or repository row.
 When `BeginUpload` finds an unexpired ticket for the same binding (ref, pack
 and signer) issued under an older authority generation than the current
 Authority allowance, the server MUST NOT answer `permission_denied`. It MUST,
-in one guarded batch in the ref shard, close that ticket (ticket row, index
-row and expiry timer deleted, both open-ticket counters decremented), write
-an `Aborted` outcome with reason `ABORT_REASON_EPOCH_MISMATCH` and procedure
-`BeginUpload` for its reservation, and open the new ticket and reservation
-under normal admission. The batch MUST be guarded by the old ticket, the
-index and counter rows, the old reservation row, and `ag`. The ticket-count
+in one guarded batch in the ref shard, close that ticket (the ticket row and
+its expiry timer deleted), repoint the index row to the new ticket, guard both
+open-ticket counters so they net unchanged, write an `Aborted` outcome with
+reason `ABORT_REASON_EPOCH_MISMATCH` and procedure `BeginUpload` for the old
+reservation, open the new ticket and reservation under normal admission, and
+clear the pack's verification state and kick its scheduled job exactly as the
+old ticket's expiry would. The batch MUST be guarded by the old ticket, the
+index and counter rows, the old reservation row, those verification rows and
+the generation. Under single-partition sharding the generation guard is a
+direct comparison of `ag`; under leased sharding it is the epoch lease `el`,
+which carries the generation, as for every other shard write. The ticket-count
 caps do not apply because the counters net to zero. The server MUST NOT
-refund admission charges for the old reservation. After commit the server
-SHOULD abort the old multipart session, best effort. Only an older generation
-is replaced: a ticket from the same or a newer generation than the allowance
-still answers as before (idempotent return or `permission_denied`). Racing
-consumption, expiry or a second replacement fails a guard and re-plans.
+refund admission charges for the old reservation. After commit, and outside
+any write serialization, the server SHOULD abort the old multipart session,
+best effort: a lost commit acknowledgement or a crash between commit and abort
+leaves that session to backend sweeps and lifecycle rules, and failed aborts
+are counted with the expiry handler's. Only an older generation is replaced: a
+ticket from the same or a newer generation than the allowance still answers as
+before (idempotent return or `permission_denied`), and a ticket issued before
+fencing was enabled (no generation) is never replaced and answers
+`permission_denied` until it expires. Racing consumption, expiry or a second
+replacement fails a guard and re-plans or answers a retryable `aborted`.
 
 Activation MUST durably persist the authority mode and `ag = 0` atomically,
 without creating a business namespace or suppressing first-write admission and
@@ -653,7 +663,13 @@ statement (including generation 0) creates before any write. A write,
 `BeginUpload` or visibility change for an unregistered namespace MUST be
 refused with `permission_denied` (`namespace not registered`) before the
 Authority hook, Admission or any store write, so a first write is always
-fenced and no namespace can be squatted by a client. `GetAuthorityGeneration`
+fenced and no namespace can be squatted by a client. The check runs in
+authorization on every sharding (a read-only comparison under leased
+sharding, activation under single-partition sharding), so no transport or
+upload path reaches the hook, Admission or a replay or charge row for an
+unregistered namespace. Registration status is not confidential: an
+unsigned `GetAuthorityGeneration` already reveals a generation of 1 or more, and
+a write probe can tell an unregistered namespace from one registered at 0. `GetAuthorityGeneration`
 reports 0 for an unregistered namespace. The first accepted write still
 reaches Admission with its creation facts and charges unchanged.
 

@@ -52,7 +52,12 @@ Authority hook. When you bump it, a client's retried `BeginUpload` replaces its
 stale ticket at once: the old reservation receives an `Aborted` outcome with
 `EPOCH_MISMATCH` and procedure `BeginUpload`, the old multipart session is
 aborted after commit, and the admission charge for the old reservation is not
-refunded, so reconcile it from that outcome.
+refunded, so reconcile it from that outcome. Registration status is
+not confidential (an unsigned `GetAuthorityGeneration` already reveals a
+generation of 1 or more, and a write probe distinguishes unregistered from
+registered at 0); the refusal before your hooks protects their cost, not secrecy.
+A lost commit acknowledgement or a crash between commit and abort leaves the
+old multipart session to backend sweeps and lifecycle rules.
 
 Names are 1–72 lowercase ASCII bytes matching `[a-z0-9][a-z0-9._-]*`.
 `root`, `ed25519-` prefixes, and `0x` prefixes are reserved and rejected.
