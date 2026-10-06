@@ -276,6 +276,72 @@ async fn uuid_namespace_write_read_list_visibility_url_and_wildcard_key() {
     server.abort();
 }
 
+#[tokio::test]
+async fn registration_precedes_the_first_write_over_the_wire() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let audience = format!("http://{}", listener.local_addr().unwrap());
+    let (pipe, meta, hook) = build(config(&audience, NamespaceMode::Authority)).unwrap();
+    let pipe = Arc::new(pipe);
+    let app = axum::Router::new().fallback_service(mkit_server::connect::service(pipe.clone()));
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let client = Client::new(&Url::parse(&audience).unwrap()).unwrap();
+    let signer = Signer::new([7; 32], &audience, &format!("{NS}/repository"));
+    let body =
+        json!({"name":REF,"newId":STANDARD.encode([1;32]),"expectation":"REF_EXPECTATION_ANY"});
+    let bytes = serde_json::to_vec(&body).unwrap();
+    let credentials = signer.sign_body(Procedure::UpdateRef.connect_path(), &bytes);
+    let refused = client
+        .post(
+            Procedure::UpdateRef.connect_path(),
+            "application/json",
+            &credentials.headers,
+            bytes,
+        )
+        .await
+        .unwrap();
+    assert_eq!(refused.status, 403);
+    assert!(String::from_utf8_lossy(&refused.body).contains("namespace not registered"));
+    assert!(hook.0.lock().unwrap().is_empty());
+    // Registration needs no namespace record and creates none.
+    assert_eq!(pipe.get_authority_generation(NS).await.unwrap(), 0);
+    assert_eq!(
+        pipe.set_authority_generation(&generation(&audience, NS, 0))
+            .await
+            .unwrap(),
+        0
+    );
+    let key = NamespaceMode::Authority.namespace(NS).unwrap().key();
+    let partition = mkit_server::Partition::Namespace(key);
+    assert!(
+        meta.get(&partition, &keys::namespace_record())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    rpc(&client, &signer, Procedure::UpdateRef, body).await;
+    assert!(
+        meta.get(&partition, &keys::namespace_record())
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let other = Signer::new([7; 32], &audience, &format!("{OTHER_NS}/repository"));
+    let credentials = other.sign_body(Procedure::ReadRef.connect_path(), b"{}");
+    let read = client
+        .post(
+            Procedure::ReadRef.connect_path(),
+            "application/json",
+            &credentials.headers,
+            b"{}".to_vec(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(read.status, 500);
+    server.abort();
+}
+
 fn request<'a>(
     procedure: Procedure,
     headers: &'a dyn Fn(&str) -> Option<String>,

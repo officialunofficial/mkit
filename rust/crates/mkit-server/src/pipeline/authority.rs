@@ -32,9 +32,21 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
 
     /// Establish durable mode without creating an accounting namespace, then
     /// complete the shared initial barrier before issuing any fenced grant.
+    /// In authority namespace mode only a deployment statement registers a
+    /// namespace, so a write to an unregistered one is refused here.
     pub(super) async fn ensure_authority_activation(
         &self,
         ns: &NamespaceKey,
+    ) -> Result<Option<u64>, ServerError> {
+        self.activate_authority(ns, false).await
+    }
+
+    /// `register` is true only for a verified deployment statement.
+    #[allow(clippy::too_many_lines)] // One bounded read, mode write and ready barrier.
+    async fn activate_authority(
+        &self,
+        ns: &NamespaceKey,
+        register: bool,
     ) -> Result<Option<u64>, ServerError> {
         let p = self.shards.coordinator(ns);
         let wanted = [keys::authority_generation(), keys::lease_recovery()];
@@ -72,6 +84,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 return Err(ServerError::unavailable(
                     "authority generation missing from fenced namespace",
                 ));
+            }
+            if generation.is_none()
+                && !register
+                && self.cfg.namespace_mode == crate::namespace::NamespaceMode::Authority
+            {
+                return Err(ServerError::permission_denied("namespace not registered"));
             }
             if mode.authority_fence != Some(true) {
                 mode.authority_fence = Some(true);
@@ -185,11 +203,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             .namespace_mode
             .namespace(namespace)
             .map_err(|_| ServerError::invalid_argument("invalid namespace"))?;
-        self.authority_namespace(&ns).await?;
+        self.authority_namespace(&ns)?;
         self.stored_authority_generation(&ns.key()).await
     }
 
-    async fn authority_namespace(&self, ns: &Namespace) -> Result<(), ServerError> {
+    fn authority_namespace(&self, ns: &Namespace) -> Result<(), ServerError> {
         let Addressing::Multi(multi) = &self.cfg.addressing else {
             return Err(ServerError::unimplemented(
                 "authority fencing requires multi addressing",
@@ -199,20 +217,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             NamespacePolicy::Allowlist(allowed) if matches!(ns, Namespace::SelfCertifying(owner) if allowed.contains(owner)) => {
                 Ok(())
             }
-            NamespacePolicy::Any { .. } => {
-                let key = ns.key();
-                if self
-                    .meta
-                    .get(&self.shards.coordinator(&key), &keys::namespace_record())
-                    .await
-                    .map_err(meta_error)?
-                    .is_some()
-                {
-                    Ok(())
-                } else {
-                    Err(ServerError::permission_denied("namespace not served"))
-                }
-            }
+            // The deployment key signs each statement, so no namespace record is
+            // needed: a statement for generation 0 registers a namespace before
+            // its first write.
+            NamespacePolicy::Any { .. } => Ok(()),
             _ => Err(ServerError::permission_denied("namespace not served")),
         }
     }
@@ -233,7 +241,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             ));
         };
         let statement = fence.verify(wire, auth.audience(), self.clock.now_ms())?;
-        self.authority_namespace(&statement.namespace).await?;
+        self.authority_namespace(&statement.namespace)?;
         let ns = statement.namespace.key();
         if self
             .transition_fence(&ns, statement.generation, FenceKind::Authority)
@@ -244,7 +252,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 "authority generation step rejected",
             ));
         }
-        if let Some(completed) = Box::pin(self.ensure_authority_activation(&ns)).await? {
+        if let Some(completed) = Box::pin(self.activate_authority(&ns, true)).await? {
             if self.stored_authority_generation(&ns).await? == completed {
                 return Ok(completed);
             }

@@ -66,10 +66,62 @@ pub(super) async fn read_indexed<N: NamespaceStore>(
         let key = keys::ticket(&id);
         if !snap.contains(&key) {
             let value = meta.get(p, &key).await.map_err(meta_error)?;
-            snap.insert(key, value);
+            snap.insert(key.clone(), value);
+        }
+        // A superseded ticket is replaced in this batch, which also settles
+        // its reservation through the outbox.
+        if let Some(ticket) = snap
+            .get(&key)
+            .and_then(|raw| codec::decode_ticket(raw).ok())
+            && tickets::is_superseded(&ticket, spec.authority_generation)
+        {
+            let mut wanted = vec![
+                keys::reservation(&ticket.reservation_id).map_err(meta_error)?,
+                keys::outbox_sequence(),
+                keys::outcome_backlog(),
+            ];
+            wanted.retain(|key| !snap.contains(key));
+            let values = meta.get_many(p, &wanted).await.map_err(meta_error)?;
+            for (key, value) in wanted.into_iter().zip(values) {
+                snap.insert(key, value);
+            }
         }
     }
     Ok(())
+}
+
+/// The unexpired ticket of an older authority generation that this open
+/// replaces, with its stored value.
+pub(super) fn stale_ticket(
+    spec: &TicketSpec,
+    snap: &Snapshot,
+    now_ms: u64,
+) -> Result<Option<(codec::TicketV1, crate::store::Value)>, ServerError> {
+    let Some(index) = snap.get(&tickets::keys(spec).index) else {
+        return Ok(None);
+    };
+    let id = codec::decode_ref_id(index).map_err(meta_error)?;
+    let Some(raw) = snap.get(&keys::ticket(&id)) else {
+        return Ok(None);
+    };
+    let ticket = codec::decode_ticket(raw).map_err(meta_error)?;
+    Ok((ticket.expires_at_ms > now_ms
+        && tickets::is_superseded(&ticket, spec.authority_generation))
+    .then(|| (ticket, raw.clone())))
+}
+
+/// The multipart session of the ticket a committed open replaced, for a
+/// best-effort abort after the batch lands.
+pub(super) fn replaced_session(
+    begin: &BeginWrite,
+    snap: &Snapshot,
+    now_ms: u64,
+) -> Option<(PackKey, Vec<u8>)> {
+    let BeginWrite::Open(open) = begin else {
+        return None;
+    };
+    let (ticket, _) = stale_ticket(&open.spec, snap, now_ms).ok()??;
+    Some((PackKey(ticket.pack_id), ticket.upload_session?))
 }
 
 fn result(
@@ -196,6 +248,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             .ok_or_else(|| internal("ticket write lacks signer"))?;
         let ks = decision_keys(&op.repo.name, ref_name, &key.0, &auth.signer)?;
         let now = ms(self.clock.now_ms().saturating_add(a.business_skew_ms));
+        let mut replacing = false;
         if let Some(index) = snap.get(&ks[0]) {
             let id = codec::decode_ref_id(index).map_err(meta_error)?;
             let k = keys::ticket(&id);
@@ -219,10 +272,16 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     if self.cfg.authority_fence.is_some()
                         && ticket.authority_generation != op.authz.authority_generation
                     {
-                        return Err(crate::authority::moved());
+                        // An older generation's ticket is replaced by the open
+                        // below; any other mismatch is refused.
+                        if !tickets::is_superseded(&ticket, op.authz.authority_generation) {
+                            return Err(crate::authority::moved());
+                        }
+                        replacing = true;
+                    } else {
+                        let (keys, audience) = self.ticket_config()?;
+                        return Ok(Some(result(keys, audience, &a.repo().identity, &ticket)));
                     }
-                    let (keys, audience) = self.ticket_config()?;
-                    return Ok(Some(result(keys, audience, &a.repo().identity, &ticket)));
                 }
             }
         }
@@ -258,10 +317,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         if present {
             return Ok(Some(BeginUploadResult::AlreadyPresent));
         }
+        // A replacement nets the counters to zero, so the caps don't apply.
         for (k, cap) in [
             (&ks[1], self.cfg.ticket_caps.per_ref),
             (&ks[2], self.cfg.ticket_caps.per_signer),
-        ] {
+        ]
+        .into_iter()
+        .filter(|_| !replacing)
+        {
             let count = snap
                 .get(k)
                 .map(codec::decode_u64)
@@ -347,6 +410,53 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     }
 }
 
+/// Replace a superseded ticket in this batch (its rows were read with the ticket).
+fn plan_replacement(
+    spec: &TicketSpec,
+    (old, raw): (&codec::TicketV1, &crate::store::Value),
+    reads: &tickets::TicketReads,
+    repository: &str,
+    snap: &Snapshot,
+    pre: &mut Vec<crate::store::Precondition>,
+    writes: &mut Vec<crate::store::Write>,
+) -> Result<Hash, ServerError> {
+    // Unread rows mean the snapshot predates the stale ticket: re-plan.
+    let reservation = keys::reservation(&old.reservation_id).map_err(meta_error)?;
+    let (os, oc) = (keys::outbox_sequence(), keys::outcome_backlog());
+    if ![&reservation, &os, &oc]
+        .iter()
+        .all(|key| snap.contains(key))
+    {
+        return Err(ServerError::aborted_retryable("upload ticket race"));
+    }
+    let stored = snap.get(&reservation).ok_or_else(|| {
+        meta_error(crate::store::StoreError::Corrupt(
+            "ticket has no reservation".into(),
+        ))
+    })?;
+    let stale = tickets::StaleTicket {
+        ticket: old,
+        raw,
+        reservation: stored,
+        repository,
+    };
+    match tickets::plan_ticket_replace(
+        spec,
+        stale,
+        reads,
+        (snap.get(&os), snap.get(&oc)),
+        pre,
+        writes,
+    ) {
+        Ok(id) => Ok(id),
+        Err(TicketPlanError::Corrupt(err)) => Err(meta_error(err)),
+        Err(TicketPlanError::Invalid(detail)) => Err(internal(detail)),
+        Err(TicketPlanError::Existing(_) | TicketPlanError::CapExceeded { .. }) => {
+            Err(internal("ticket replacement planned an open"))
+        }
+    }
+}
+
 pub(super) fn plan(
     begin: &BeginWrite,
     snap: &Snapshot,
@@ -385,8 +495,8 @@ pub(super) fn plan(
         per_signer: snap.get(&k.per_signer).cloned(),
         reservation: snap.get(&k.reservation).cloned(),
     };
-    match tickets::plan_ticket_open(&spec, &reads, open.caps, pre, writes) {
-        Ok(id) => Ok(StoredResult::BeginUpload(BeginUploadResult::Ticket {
+    let opened = |id| {
+        Ok(StoredResult::BeginUpload(BeginUploadResult::Ticket {
             id,
             part_size: spec.part_size,
             expires_at_ms: spec.expires_at_ms,
@@ -402,7 +512,22 @@ pub(super) fn plan(
                 expires_at_ms: spec.expires_at_ms,
                 upload_session: spec.upload_session.clone().unwrap_or_default(),
             }),
-        })),
+        }))
+    };
+    if let Some((old, raw)) = stale_ticket(&spec, snap, spec.now_ms)? {
+        return plan_replacement(
+            &spec,
+            (&old, &raw),
+            &reads,
+            &open.repository,
+            snap,
+            pre,
+            writes,
+        )
+        .and_then(opened);
+    }
+    match tickets::plan_ticket_open(&spec, &reads, open.caps, pre, writes) {
+        Ok(id) => opened(id),
         Err(TicketPlanError::Existing(ticket)) if !open.reserved => {
             if spec.authority_generation.is_some()
                 && ticket.authority_generation != spec.authority_generation

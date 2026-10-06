@@ -4278,6 +4278,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     #[cfg(feature = "__test-faults")]
                     self.schedule_test_ref_timer(op, a, &on_commit, ms(clock.business_now_ms))
                         .await?;
+                    if let Some(begin) = req.begin
+                        && let Some((key, session)) =
+                            begin::replaced_session(begin, &snap, ms(clock.business_now_ms))
+                        && let Err(error) = self.blobs.abort(key.into(), &session).await
+                    {
+                        tracing::warn!(%error, "replaced ticket session abort failed");
+                    }
                     return Ok(on_commit);
                 }
                 Ok(BatchOutcome::DeadlinePassed { backend_now }) => {

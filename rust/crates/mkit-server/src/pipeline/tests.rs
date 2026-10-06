@@ -1,5 +1,6 @@
 //! Pipeline tests over the memory stores and a `ManualClock`.
 
+mod authority_bootstrap;
 #[path = "tests_begin_parts.rs"]
 mod begin_parts;
 mod denial_planning;

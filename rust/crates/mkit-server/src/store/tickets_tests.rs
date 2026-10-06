@@ -810,3 +810,333 @@ fn observed_reservation_or_ticket_row_is_rejected_before_planning() {
         assert_eq!(batch, Batch::new());
     }
 }
+
+// ------------------------------------------------ stale-generation replacement
+
+const REPOSITORY: &str = "ns/repo";
+
+fn old_spec(generation: u64) -> TicketSpec {
+    TicketSpec {
+        authority_generation: Some(generation),
+        ..spec()
+    }
+}
+
+fn new_spec(generation: u64, reservation: &str) -> TicketSpec {
+    TicketSpec {
+        authority_generation: Some(generation),
+        reservation_id: reservation.into(),
+        created_at_ms: 200,
+        now_ms: 200,
+        expires_at_ms: 1_200,
+        ..spec()
+    }
+}
+
+/// An open ticket under `old` with `open` tickets on its ref and signer.
+fn planted(old: &TicketSpec, open: u64) -> MemoryKv {
+    let store = MemoryKv::default();
+    assert_eq!(
+        apply(&store, super::tests::open(old, &TicketReads::default())),
+        BatchOutcome::Committed
+    );
+    let read_keys = keys(old);
+    let counters = Batch::new()
+        .put(read_keys.per_ref, codec::encode_u64(open))
+        .put(read_keys.per_signer, codec::encode_u64(open));
+    assert_eq!(apply(&store, counters), BatchOutcome::Committed);
+    store
+}
+
+fn replace_reads(old: &TicketSpec, open: u64, reservation: Option<Value>) -> TicketReads {
+    TicketReads {
+        index: Some(codec::encode_ref_id(&ticket_id(&old.reservation_id))),
+        per_ref: Some(codec::encode_u64(open)),
+        per_signer: Some(codec::encode_u64(open)),
+        reservation,
+        ..TicketReads::default()
+    }
+}
+
+#[allow(clippy::result_large_err)] // The planner's error type is shared with `plan_ticket_open`.
+fn replace(
+    old: &TicketSpec,
+    new: &TicketSpec,
+    reads: &TicketReads,
+    store: &MemoryKv,
+    pre: &mut Vec<Precondition>,
+    writes: &mut Vec<Write>,
+) -> Result<Hash, TicketPlanError> {
+    let record = old.record();
+    let raw = codec::encode_ticket(&record);
+    let reservation = get(store, &keys(old).reservation).unwrap();
+    plan_ticket_replace(
+        new,
+        StaleTicket {
+            ticket: &record,
+            raw: &raw,
+            reservation: &reservation,
+            repository: REPOSITORY,
+        },
+        reads,
+        (
+            get(store, &layout::outbox_sequence()).as_ref(),
+            get(store, &layout::outcome_backlog()).as_ref(),
+        ),
+        pre,
+        writes,
+    )
+}
+
+fn replacement(old: &TicketSpec, new: &TicketSpec, open: u64, store: &MemoryKv) -> Batch {
+    let mut batch = Batch::new();
+    replace(
+        old,
+        new,
+        &replace_reads(old, open, None),
+        store,
+        &mut batch.preconditions,
+        &mut batch.writes,
+    )
+    .unwrap();
+    batch
+}
+
+#[test]
+fn only_a_strictly_older_generation_is_superseded() {
+    let ticket = old_spec(3).record();
+    assert!(is_superseded(&ticket, Some(4)));
+    for current in [Some(3), Some(2), Some(0), None] {
+        assert!(!is_superseded(&ticket, current));
+    }
+    assert!(!is_superseded(&spec().record(), Some(4)));
+}
+
+#[test]
+fn replacement_swaps_ticket_index_timer_and_reservation_and_aborts_the_old_outcome() {
+    let (old, new) = (old_spec(0), new_spec(1, "reservation-2"));
+    let store = planted(&old, 3);
+    let batch = replacement(&old, &new, 3, &store);
+    batch.validate(&StoreCapabilities::full()).unwrap();
+    assert_eq!(apply(&store, batch), BatchOutcome::Committed);
+    let (old_id, new_id) = (
+        ticket_id(&old.reservation_id),
+        ticket_id(&new.reservation_id),
+    );
+    assert!(get(&store, &layout::ticket(&old_id)).is_none());
+    assert_eq!(
+        codec::decode_ticket(&get(&store, &layout::ticket(&new_id)).unwrap()).unwrap(),
+        new.record()
+    );
+    assert_eq!(
+        get(&store, &keys(&new).index),
+        Some(codec::encode_ref_id(&new_id))
+    );
+    // The counters net to zero.
+    for key in [keys(&new).per_ref, keys(&new).per_signer] {
+        assert_eq!(get(&store, &key), Some(codec::encode_u64(3)));
+    }
+    assert!(
+        get(
+            &store,
+            &layout::timer(old.expires_at_ms, kinds::TICKET_EXPIRY.get(), &old_id)
+        )
+        .is_none()
+    );
+    assert!(
+        get(
+            &store,
+            &layout::timer(new.expires_at_ms, kinds::TICKET_EXPIRY.get(), &new_id)
+        )
+        .is_some()
+    );
+    assert!(matches!(
+        codec::decode_reservation(&get(&store, &keys(&old).reservation).unwrap()).unwrap(),
+        ReservationV1::Aborted {
+            reason: codec::AbortReason::EpochMismatch,
+            procedure: codec::StoredProcedure::BeginUpload,
+            occurred_at_ms: 200,
+            ..
+        }
+    ));
+    assert_eq!(
+        codec::decode_reservation(&get(&store, &keys(&new).reservation).unwrap()).unwrap(),
+        ReservationV1::Ticketed { ticket_id: new_id }
+    );
+    assert_eq!(
+        codec::decode_backlog(&get(&store, &layout::outcome_backlog()).unwrap())
+            .unwrap()
+            .rows,
+        1
+    );
+}
+
+#[test]
+fn replacing_the_only_ticket_keeps_both_counters_at_one() {
+    let (old, new) = (old_spec(0), new_spec(1, "reservation-2"));
+    let store = planted(&old, 1);
+    assert_eq!(
+        apply(&store, replacement(&old, &new, 1, &store)),
+        BatchOutcome::Committed
+    );
+    for key in [keys(&new).per_ref, keys(&new).per_signer] {
+        assert_eq!(get(&store, &key), Some(codec::encode_u64(1)));
+    }
+}
+
+#[test]
+fn replacement_consumes_a_pending_admission_reservation() {
+    let (old, new) = (old_spec(0), new_spec(1, "reservation-2"));
+    let store = planted(&old, 1);
+    let pending = codec::encode_reservation(&ReservationV1::Pending {
+        repository: REPOSITORY.into(),
+        created_at_ms: 150,
+        reconcile_at_ms: 5_000,
+        op: codec::PendingOp::Write,
+        procedure: codec::StoredProcedure::BeginUpload,
+    });
+    apply(
+        &store,
+        Batch::new().put(keys(&new).reservation, pending.clone()),
+    );
+    let mut batch = Batch::new();
+    replace(
+        &old,
+        &new,
+        &replace_reads(&old, 1, Some(pending.clone())),
+        &store,
+        &mut batch.preconditions,
+        &mut batch.writes,
+    )
+    .unwrap();
+    assert!(
+        batch
+            .preconditions
+            .contains(&Precondition::Equals(keys(&new).reservation, pending))
+    );
+    assert_eq!(apply(&store, batch), BatchOutcome::Committed);
+    assert!(matches!(
+        codec::decode_reservation(&get(&store, &keys(&new).reservation).unwrap()).unwrap(),
+        ReservationV1::Ticketed { .. }
+    ));
+}
+
+#[test]
+fn a_consumption_or_expiry_that_lands_first_fails_the_replacement_guards() {
+    for why in [CloseReason::Consumed, CloseReason::ExpiryTimerFired] {
+        let (old, new) = (old_spec(0), new_spec(1, "reservation-2"));
+        let store = planted(&old, 1);
+        let batch = replacement(&old, &new, 1, &store);
+        assert_eq!(
+            apply(&store, close(&old.record(), 1, why)),
+            BatchOutcome::Committed
+        );
+        assert!(matches!(
+            apply(&store, batch),
+            BatchOutcome::PreconditionFailed { .. }
+        ));
+        assert!(get(&store, &layout::ticket(&ticket_id(&new.reservation_id))).is_none());
+    }
+}
+
+#[test]
+fn a_replacement_that_lands_first_fails_a_stale_consumption_or_expiry() {
+    for why in [CloseReason::Consumed, CloseReason::ExpiryTimerFired] {
+        let (old, new) = (old_spec(0), new_spec(1, "reservation-2"));
+        let store = planted(&old, 1);
+        let late_close = close(&old.record(), 1, why);
+        assert_eq!(
+            apply(&store, replacement(&old, &new, 1, &store)),
+            BatchOutcome::Committed
+        );
+        assert!(matches!(
+            apply(&store, late_close),
+            BatchOutcome::PreconditionFailed { .. }
+        ));
+        assert!(get(&store, &layout::ticket(&ticket_id(&new.reservation_id))).is_some());
+    }
+}
+
+#[test]
+fn only_one_of_two_racing_replacements_commits() {
+    let old = old_spec(0);
+    let store = planted(&old, 1);
+    let first = replacement(&old, &new_spec(1, "reservation-2"), 1, &store);
+    let second = replacement(&old, &new_spec(1, "reservation-3"), 1, &store);
+    assert_eq!(apply(&store, first), BatchOutcome::Committed);
+    assert!(matches!(
+        apply(&store, second),
+        BatchOutcome::PreconditionFailed { .. }
+    ));
+    // One abort outcome and one live ticket.
+    assert_eq!(
+        codec::decode_backlog(&get(&store, &layout::outcome_backlog()).unwrap())
+            .unwrap()
+            .rows,
+        1
+    );
+    assert!(get(&store, &keys(&new_spec(1, "reservation-3")).reservation).is_none());
+}
+
+#[test]
+fn replacement_refusals_leave_outputs_unchanged() {
+    let (old, new) = (old_spec(0), new_spec(1, "reservation-2"));
+    let store = planted(&old, 1);
+    let good = replace_reads(&old, 1, None);
+    let other_binding = TicketSpec {
+        pack_id: [3; 32],
+        ..new.clone()
+    };
+    let same_id = TicketSpec {
+        reservation_id: old.reservation_id.clone(),
+        ..new.clone()
+    };
+    let expired = TicketSpec {
+        expires_at_ms: new.now_ms,
+        ..new.clone()
+    };
+    let unindexed = TicketReads {
+        index: None,
+        ..good.clone()
+    };
+    let used_ticket = TicketReads {
+        ticket: Some(codec::encode_ticket(&new.record())),
+        ..good.clone()
+    };
+    let foreign_index = TicketReads {
+        index: Some(codec::encode_ref_id(&[9; 32])),
+        ..good.clone()
+    };
+    let used_reservation = TicketReads {
+        reservation: Some(codec::encode_reservation(&ReservationV1::Ticketed {
+            ticket_id: [4; 32],
+        })),
+        ..good.clone()
+    };
+    for (spec, reads, corrupt) in [
+        (&other_binding, &good, true),
+        (&same_id, &good, false),
+        (&expired, &good, false),
+        (&new, &unindexed, true),
+        (&new, &used_ticket, false),
+        (&new, &foreign_index, true),
+        (&new, &used_reservation, true),
+    ] {
+        let mut batch = Batch::new().require(Precondition::NotAfter(500));
+        let before = batch.clone();
+        let result = replace(
+            &old,
+            spec,
+            reads,
+            &store,
+            &mut batch.preconditions,
+            &mut batch.writes,
+        );
+        assert!(if corrupt {
+            matches!(result, Err(TicketPlanError::Corrupt(_)))
+        } else {
+            matches!(result, Err(TicketPlanError::Invalid(_)))
+        });
+        assert_eq!(batch, before);
+    }
+}

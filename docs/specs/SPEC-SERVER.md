@@ -570,6 +570,32 @@ After setter success, no older-generation acceptance may commit. Returning a
 previously committed replay result performs no new acceptance. An executor that
 cannot decode generation-bearing leases MUST NOT serve a fenced deployment.
 
+Under `namespace_policy = any`, `GetAuthorityGeneration` and
+`SetAuthorityGeneration` MUST NOT require the namespace record: the deployment
+key signs each statement, so a statement MAY precede the namespace's first
+write. Under an allowlist the namespace MUST be listed.
+
+A fenced namespace-creation batch (the coordinator batch that registers a new
+namespace or repository outside a shard lease) MUST carry the same guarded
+`ag` comparison as the ref batch. A stale Authority generation MUST create no
+namespace or repository row.
+
+When `BeginUpload` finds an unexpired ticket for the same binding (ref, pack
+and signer) issued under an older authority generation than the current
+Authority allowance, the server MUST NOT answer `permission_denied`. It MUST,
+in one guarded batch in the ref shard, close that ticket (ticket row, index
+row and expiry timer deleted, both open-ticket counters decremented), write
+an `Aborted` outcome with reason `ABORT_REASON_EPOCH_MISMATCH` and procedure
+`BeginUpload` for its reservation, and open the new ticket and reservation
+under normal admission. The batch MUST be guarded by the old ticket, the
+index and counter rows, the old reservation row, and `ag`. The ticket-count
+caps do not apply because the counters net to zero. The server MUST NOT
+refund admission charges for the old reservation. After commit the server
+SHOULD abort the old multipart session, best effort. Only an older generation
+is replaced: a ticket from the same or a newer generation than the allowance
+still answers as before (idempotent return or `permission_denied`). Racing
+consumption, expiry or a second replacement fails a guard and re-plans.
+
 Activation MUST durably persist the authority mode and `ag = 0` atomically,
 without creating a business namespace or suppressing first-write admission and
 creation charges. Before the first fenced acceptance, it MUST finish the shared
@@ -620,6 +646,16 @@ This accepts lowercase UUIDv7 names with dashes. A self-certifying deployment
 MUST reject these opaque names at repository request and HTTP route boundaries.
 Repository names and the maximum 173-byte identity length remain unchanged.
 The CLI and owner-statement codecs retain their self-certifying grammar.
+
+Registration: a namespace in authority mode is registered when its
+authority-generation row exists, which a verified `SetAuthorityGeneration`
+statement (including generation 0) creates before any write. A write,
+`BeginUpload` or visibility change for an unregistered namespace MUST be
+refused with `permission_denied` (`namespace not registered`) before the
+Authority hook, Admission or any store write, so a first write is always
+fenced and no namespace can be squatted by a client. `GetAuthorityGeneration`
+reports 0 for an unregistered namespace. The first accepted write still
+reaches Admission with its creation facts and charges unchanged.
 
 The deployment is the trust root. Ownership cannot be verified from the name
 alone. Only the Authority hook authorizes writes or assigns the caller's writer
@@ -4412,6 +4448,7 @@ client-visible error contract.
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | Authority-generation setter and getter without a namespace record under `any`; authority-mode registration and the refusal of unregistered writes (§6.2.2); the `ag` guard on the fenced namespace-creation batch; one-batch replacement of a stale-generation upload ticket (§6.2.1). No wire change; no stored row changes. |
 | 1 | draft | Opt-in authority-owned namespace grammar and trust model (§6.2.2), wildcard generation-key scopes, refused owner statements, and hook writer authority for owner-view operations. Default self-certifying deployments retain their behavior. |
 | 1 | draft | Document retained local Workers wire connection-loss diagnostics (§18); no conformance, runtime or wire change. |
 | 1 | draft | Bounded request-local reader graph proofs (§10.1): captured roots, fixed scope/expiry, decoded local edges and live security checks. No persisted cache, stored-row or wire change. |
