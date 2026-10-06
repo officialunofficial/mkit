@@ -1,13 +1,14 @@
 //! Deployment-authority generation statements (SPEC-SERVER §6.2.1).
 //! The outer RPC is unsigned; this bounded statement is its authorization.
 
+use crate::namespace::{Namespace, NamespaceMode};
 use crate::{
     ServerError,
     store::{Key, keys},
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signature, VerifyingKey};
-use mkit_core::{hash::hash, repo_identity::Namespace, write_auth::validate_audience};
+use mkit_core::{hash::hash, write_auth::validate_audience};
 use std::collections::BTreeSet;
 
 /// Dedicated statement domain, independent of grants and hook requests.
@@ -24,8 +25,17 @@ pub struct AuthorityKey {
     pub key_id: String,
     /// Strict Ed25519 public key; never a namespace-owner trust fallback.
     pub public_key: [u8; 32],
-    /// Exact self-certifying namespaces this key may fence.
-    pub namespaces: BTreeSet<Namespace>,
+    /// Exact namespaces or an authority-mode wildcard this key may fence.
+    pub scope: AuthorityScope,
+}
+
+/// Namespace permission of a dedicated deployment-authority key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthorityScope {
+    /// A bounded list of namespaces in the deployment's grammar.
+    Exact(BTreeSet<Namespace>),
+    /// Every served namespace; valid only in authority namespace mode.
+    Any,
 }
 
 /// Optional deployment fencing configuration. Construction validates all keys.
@@ -33,6 +43,7 @@ pub struct AuthorityKey {
 #[non_exhaustive]
 pub struct AuthorityFence {
     keys: Vec<AuthorityKey>,
+    mode: NamespaceMode,
 }
 
 fn rejected() -> ServerError {
@@ -57,6 +68,16 @@ impl AuthorityFence {
     /// # Errors
     /// Empty/oversized lists, malformed, weak or duplicate keys, and owner keys.
     pub fn new(keys: Vec<AuthorityKey>) -> Result<Self, ServerError> {
+        Self::new_with_mode(keys, NamespaceMode::SelfCertifying)
+    }
+
+    /// Validate dedicated keys and their scopes for a deployment namespace mode.
+    /// # Errors
+    /// Invalid keys or scopes, including wildcards in self-certifying mode.
+    pub fn new_with_mode(
+        keys: Vec<AuthorityKey>,
+        mode: NamespaceMode,
+    ) -> Result<Self, ServerError> {
         if keys.is_empty() || keys.len() > 16 {
             return Err(rejected());
         }
@@ -68,17 +89,18 @@ impl AuthorityFence {
                 || !ids.insert(&key.key_id)
                 || !publics.insert(key.public_key)
                 || public.is_weak()
-                || key.namespaces.is_empty()
-                || key.namespaces.len() > 1024
-                || key
-                    .namespaces
-                    .iter()
-                    .any(|ns| matches!(ns,Namespace::Ed25519(owner) if owner == &key.public_key))
+                || match &key.scope {
+                    AuthorityScope::Any => mode != NamespaceMode::Authority,
+                    AuthorityScope::Exact(namespaces) => namespaces.is_empty()
+                        || namespaces.len() > 1024
+                        || namespaces.iter().any(|ns| mode.namespace(&ns.to_string()).as_ref() != Ok(ns)
+                            || matches!(ns, Namespace::SelfCertifying(mkit_core::repo_identity::Namespace::Ed25519(owner)) if owner == &key.public_key)),
+                }
             {
                 return Err(rejected());
             }
         }
-        Ok(Self { keys })
+        Ok(Self { keys, mode })
     }
 
     /// Parse one `<key-id> <64 lowercase hex public key> <namespace[,namespace...]>`
@@ -86,6 +108,13 @@ impl AuthorityFence {
     /// # Errors
     /// Any malformed or unauthorized key configuration.
     pub fn parse(text: &str) -> Result<Self, ServerError> {
+        Self::parse_with_mode(text, NamespaceMode::SelfCertifying)
+    }
+
+    /// Parse key lines in the deployment grammar; `*` is authority-only.
+    /// # Errors
+    /// Malformed, duplicate, weak, or wrong-mode keys and scopes.
+    pub fn parse_with_mode(text: &str, mode: NamespaceMode) -> Result<Self, ServerError> {
         if text.len() > 256_000 {
             return Err(rejected());
         }
@@ -102,17 +131,35 @@ impl AuthorityFence {
                 return Err(rejected());
             }
             let public_key = mkit_core::hash::from_hex(public).map_err(|_| rejected())?;
-            let namespaces = namespaces
-                .split(',')
-                .map(|ns| Namespace::parse(ns).map_err(|_| rejected()))
-                .collect::<Result<BTreeSet<_>, _>>()?;
+            let scope = if *namespaces == "*" {
+                AuthorityScope::Any
+            } else {
+                AuthorityScope::Exact(
+                    namespaces
+                        .split(',')
+                        .map(|ns| mode.namespace(ns).map_err(|_| rejected()))
+                        .collect::<Result<BTreeSet<_>, _>>()?,
+                )
+            };
             keys.push(AuthorityKey {
                 key_id: (*id).to_owned(),
                 public_key,
-                namespaces,
+                scope,
             });
         }
-        Self::new(keys)
+        Self::new_with_mode(keys, mode)
+    }
+
+    /// Refuse a fence configured for another trust model before any request.
+    /// # Errors
+    /// The configured namespace modes differ.
+    pub fn validate_mode(&self, mode: NamespaceMode) -> Result<(), ServerError> {
+        if self.mode != mode {
+            return Err(ServerError::invalid_argument(
+                "authority key scopes must use the deployment namespace mode",
+            ));
+        }
+        Ok(())
     }
 
     /// All configured role keys, for adapter key separation.
@@ -161,14 +208,20 @@ impl AuthorityFence {
             return Err(rejected());
         };
         let raw_namespace = *namespace;
-        let namespace = Namespace::parse(raw_namespace).map_err(|_| rejected())?;
+        let namespace = self.mode.namespace(raw_namespace).map_err(|_| rejected())?;
         if namespace.to_string() != raw_namespace {
             return Err(rejected());
         }
         let key = self
             .keys
             .iter()
-            .find(|key| key.key_id == *id && key.namespaces.contains(&namespace))
+            .find(|key| {
+                key.key_id == *id
+                    && match &key.scope {
+                        AuthorityScope::Any => true,
+                        AuthorityScope::Exact(namespaces) => namespaces.contains(&namespace),
+                    }
+            })
             .ok_or_else(rejected)?;
         let created = decimal(created)?;
         let expiry = decimal(expiry)?;
@@ -316,6 +369,59 @@ mod tests {
                 .is_err()
         );
     }
+    #[test]
+    fn wildcard_is_authority_only_and_does_not_relax_key_validation() {
+        let public =
+            mkit_core::hash::to_hex(SigningKey::from_bytes(&[7; 32]).verifying_key().as_bytes());
+        let line = format!("deployment {public} *");
+        assert!(AuthorityFence::parse(&line).is_err());
+        let f = AuthorityFence::parse_with_mode(&line, NamespaceMode::Authority).unwrap();
+        assert!(f.validate_mode(NamespaceMode::SelfCertifying).is_err());
+        for namespace in ["019c88c3-a904-7bd1-8a5d-3182a0c6978a", "other-namespace"] {
+            let mut text = fields();
+            text[2] = namespace.into();
+            assert_eq!(
+                f.verify(&wire(&text, [7; 32]), "https://vcs.example", 1)
+                    .unwrap()
+                    .namespace
+                    .to_string(),
+                namespace
+            );
+        }
+        for namespace in [
+            ns(),
+            "0x0000000000000000000000000000000000000001".into(),
+            "root".into(),
+        ] {
+            let mut text = fields();
+            text[2] = namespace;
+            assert!(
+                f.verify(&wire(&text, [7; 32]), "https://vcs.example", 1)
+                    .is_err()
+            );
+        }
+        for bad in [
+            format!("{line}\n{line}"),
+            format!("deployment {} *", "00".repeat(32)),
+            format!("deployment {public} *,opaque"),
+            format!("deployment {public} {}", ns()),
+        ] {
+            assert!(AuthorityFence::parse_with_mode(&bad, NamespaceMode::Authority).is_err());
+        }
+        let exact = AuthorityFence::parse_with_mode(
+            &format!("deployment {public} allowed"),
+            NamespaceMode::Authority,
+        )
+        .unwrap();
+        let mut text = fields();
+        text[2] = "other".into();
+        assert!(
+            exact
+                .verify(&wire(&text, [7; 32]), "https://vcs.example", 1)
+                .is_err()
+        );
+    }
+
     #[test]
     fn deployment_keys_are_bounded_dedicated_and_permissioned() {
         let public =

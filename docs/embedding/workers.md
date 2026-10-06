@@ -6,6 +6,52 @@ suite define the contracts; the example is a small host, not an application
 policy or a deployed performance benchmark. Pin all mkit dependencies to the
 same immutable commit or release tag.
 
+## Authority-owned namespace setup
+
+Self-certifying namespace names remain the default. For opaque account names,
+including lowercase UUIDv7 names, configure `NAMESPACE_MODE=authority`,
+`ADDRESSING=multi`, `NAMESPACE_POLICY=any`, `AUTHORIZER_ROLE=authority`,
+`HOOK_ROLES=authorize`, and `AUTHORITY_FENCE=true`. Supply the Authority hook
+through `serve_with`, or configure its remote transport. Set `AUTHORITY_KEYS`
+to dedicated verification-key lines, for example
+`deployment <64 lowercase hex Ed25519 public key> *`. Exact opaque namespace
+lists also work. Keep authority keys separate from every other configured
+credential role. `*` is refused unless authority namespace mode is selected.
+
+The current Worker var parser requires `UNSAFE_OPEN_NAMESPACES=true` for `any`.
+Install a custom Admission hook that vets namespace creation; the setting is
+not a replacement for it. Startup rejects a missing fence, wrong hook role,
+Single addressing, or an allowlist in authority mode. Supply `TICKET_KEYS` and
+a separate URL-token key when you use object URLs. Mode, key-scope, and hook
+validation also run for programmatic configuration before requests reach stores.
+
+For direct core embedding, set `PipelineConfig.namespace_mode` to
+`namespace::NamespaceMode::Authority` and construct the fence with
+`AuthorityFence::parse_with_mode` or `new_with_mode`. Validate names with
+`NamespaceMode::namespace`; convert the result to a storage key with `key()`.
+Existing `NamespaceKey::from_namespace` and the core self-certifying parser
+remain available. Set the matching mode on standalone `admin::Config` and
+`takedown::Service` with `with_namespace_mode`, and on `WorkConfig.namespace_mode`.
+The Worker adapter supplies these settings automatically.
+
+Return `AuthzFacts::default()` with `authority_generation` set for a write
+allowance. For writer reads, set `caller_view = mkit_server::CallerView::Writer`;
+that allowance enables `repo_storage`, `repo_storage_many`, owner object reads,
+and owner-view `issue_urls`. Selecting `ReaderView::Owner` still requires a
+verified envelope and a fresh hook decision on each batch. Reader-only and
+denied callers receive uniform absence. Private namespace listing separately
+requires `list_repos_authority_full` and a namespace-wide writer allowance.
+
+Names are 1–72 lowercase ASCII bytes matching `[a-z0-9][a-z0-9._-]*`.
+`root`, `ed25519-` prefixes, and `0x` prefixes are reserved and rejected.
+The deployment is the trust root: names do not certify ownership. Owner-signed
+grants, grant epochs, and visibility statements are refused; change visibility
+with a signed envelope authorized by the hook. Keep keyrings, commit-signer
+policy, and landing-time storage in the embedder. Under `any`, namespace
+discovery is incomplete and you cannot claim complete deployment-wide takedown.
+The mkit CLI retains its self-certifying addressing behavior. See
+[the mode contract](../specs/SPEC-SERVER.md#622-opt-in-authority-owned-namespaces).
+
 ## Request routing and authority
 
 Construct one validated `WorkerConfig` on fetch and in every Durable Object.
@@ -29,8 +75,9 @@ on trusted, restricted ingress. Operator authentication still runs. See
 [admin exposure](../specs/SPEC-SERVER.md#161-service-exposure-and-off-by-default).
 
 `ReaderView::Public` sees public repositories and published refs/membership.
-`ReaderView::Owner(&meta)` requires a genuinely signed auth-v2 ListRefs envelope
-for the repository owner or an accepted write grant; selecting the enum does not
+`ReaderView::Owner(&meta)` requires a signed auth-v2 ListRefs envelope
+for the repository owner, an accepted write grant, or an Authority-hook writer
+allowance in authority namespace mode; selecting the enum does not
 grant authority. Preserve its exact body and headers in `RequestMeta`.
 Authorization and grant epochs are checked again on each batch. Owners read
 live refs, while publication holds and global denial still apply. URL issuance

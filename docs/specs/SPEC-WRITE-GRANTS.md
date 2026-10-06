@@ -25,6 +25,19 @@ vectors ([SPEC-CONVENTIONS §5](SPEC-CONVENTIONS.md#5-golden-vectors-and-conform
 land with each implementation; §13.1 lists those that exist and names
 the rest.
 
+These owner-derived authorization rules apply to `namespace_mode =
+self_certifying`, the default. An opt-in authority-owned deployment follows
+[SPEC-SERVER §6.2.2](SPEC-SERVER.md#622-opt-in-authority-owned-namespaces):
+opaque names carry no verifiable owner, and the Authority hook is its ownership
+source. Such a deployment MUST refuse presented owner-signed grants,
+grant-epoch operations, and owner-signed visibility statements with
+`permission_denied` and `owner statements are not supported in authority namespace mode`.
+It MUST NOT reinterpret a self-certifying statement as authority over an opaque
+name or advertise owner schemes. Signed visibility envelopes and URL-token
+statements still work; URL-token signatures authorize their exact deployment,
+repository, and published target rather than certify ownership. Under `any`,
+complete deployment-wide takedown claims are forbidden.
+
 Scope: who may write to, or read from, a repository on a
 multi-repository [SPEC-TRANSPORT-CONNECT](SPEC-TRANSPORT-CONNECT.md)
 deployment. The auth v2 contract
@@ -1253,6 +1266,7 @@ Landed so far (each pinned by BLAKE3 in the directory's `MANIFEST.txt`):
 
 | Version | Status | Changes |
 |---|---|---|
+| `1` | draft | Authority namespace mode refuses owner grants, grant epochs, and visibility statements; signed envelopes and dedicated URL tokens remain supported under SPEC-SERVER §6.2.2. Default mode and statement codecs remain unchanged. |
 | `1` (stored-shape amendment) | draft | §9.4 requires the current server-clock visibility change time for both envelope and statement changes; incomplete stored visibility rows fail closed. |
 | `1` (visibility admission amendment) | draft | `SetRepoVisibility` runs the server's admission and outcome stages in both modes (§9.1; SPEC-SERVER §3). No change to the statement, signature or stored visibility row. |
 | `1` (URL-token visibility amendment) | draft | A URL token issued at or before the repository's last visibility change is refused (§9.4). The stored visibility row requires a server-clock change time and refuses incomplete rows; the token statement and signature are unchanged. |

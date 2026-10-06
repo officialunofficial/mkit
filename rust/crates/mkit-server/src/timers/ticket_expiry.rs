@@ -2,8 +2,8 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::namespace::RepositoryIdentity;
 use mkit_core::hash::Hash;
-use mkit_core::repo_identity::RepositoryIdentity;
 
 use super::{DueTimer, Fired, TimerCtx, TimerHandler, TimerKind, registry::kinds};
 use crate::repo::NamespaceKey;
@@ -46,7 +46,7 @@ fn repository(partition: &Partition, ticket: &TicketV1) -> Result<String, StoreE
     } else {
         format!("{}/{}", ns.as_str(), ticket.repo.as_str())
     };
-    RepositoryIdentity::parse_bare_allowed(&name)
+    RepositoryIdentity::parse_stored_bare_allowed(&name)
         .map_err(|_| StoreError::Corrupt("invalid ticket repository".into()))?;
     Ok(name)
 }

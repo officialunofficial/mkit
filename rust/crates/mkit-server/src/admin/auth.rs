@@ -27,6 +27,7 @@ pub const HEADER_NAMES: [&str; 8] = [
 pub struct Config {
     pub(crate) audience: String,
     keys: Vec<Key>,
+    pub(crate) namespace_mode: crate::namespace::NamespaceMode,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -119,7 +120,15 @@ impl Config {
         Ok(Self {
             audience: audience.to_owned(),
             keys,
+            namespace_mode: crate::namespace::NamespaceMode::SelfCertifying,
         })
+    }
+
+    /// Select the deployment's namespace grammar for signed operator selectors.
+    #[must_use]
+    pub fn with_namespace_mode(mut self, mode: crate::namespace::NamespaceMode) -> Self {
+        self.namespace_mode = mode;
+        self
     }
 
     /// Canonical signing origin used by authentication and operator intents.

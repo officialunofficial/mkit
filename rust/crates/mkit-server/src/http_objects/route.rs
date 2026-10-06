@@ -2,9 +2,9 @@
 //! a 400 that depends on the request text and the route grammar alone, never
 //! on stored state (§2, §3 step 3).
 
+use crate::namespace::{NamespaceMode, RepositoryIdentity};
 use mkit_core::hash::{Hash, from_hex};
 use mkit_core::object::TreeEntry;
-use mkit_core::repo_identity::RepositoryIdentity;
 
 use crate::Redacted;
 
@@ -183,11 +183,15 @@ fn parse_query(raw: Option<&str>) -> Result<Query, BadUrl> {
 }
 
 /// Parse a binding's request, exposing the redacted query only here.
-pub(crate) fn parse_request(request: &super::HttpObjectRequest<'_>) -> Result<ParsedUrl, BadUrl> {
-    parse(
+pub(crate) fn parse_request(
+    request: &super::HttpObjectRequest<'_>,
+    mode: NamespaceMode,
+) -> Result<ParsedUrl, BadUrl> {
+    parse_with_mode(
         request.raw_path,
         request.raw_query.map(|query| query.0),
         RepoPrefix::Required,
+        mode,
     )
 }
 
@@ -202,6 +206,18 @@ pub fn parse(
     raw_query: Option<&str>,
     prefix: RepoPrefix,
 ) -> Result<ParsedUrl, BadUrl> {
+    parse_with_mode(raw_path, raw_query, prefix, NamespaceMode::SelfCertifying)
+}
+
+/// Parse HTTP object routes using the deployment namespace mode.
+/// # Errors
+/// [`BadUrl`] for malformed or wrong-mode identities.
+pub fn parse_with_mode(
+    raw_path: &str,
+    raw_query: Option<&str>,
+    prefix: RepoPrefix,
+    mode: NamespaceMode,
+) -> Result<ParsedUrl, BadUrl> {
     if raw_path.contains(['#', '?']) || raw_query.is_some_and(|q| q.contains('#')) {
         return Err(BadUrl);
     }
@@ -214,11 +230,8 @@ pub fn parse(
     } else {
         let identity = head.strip_prefix('/').ok_or(BadUrl)?;
         Some(
-            match prefix {
-                RepoPrefix::Required => RepositoryIdentity::parse(identity),
-                RepoPrefix::Omitted => RepositoryIdentity::parse_bare_allowed(identity),
-            }
-            .map_err(|_| BadUrl)?,
+            RepositoryIdentity::parse(identity, mode, prefix == RepoPrefix::Omitted)
+                .map_err(|_| BadUrl)?,
         )
     };
     let query = parse_query(raw_query)?;

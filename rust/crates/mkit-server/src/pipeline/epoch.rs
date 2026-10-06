@@ -49,6 +49,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// `invalid_argument` for a bad namespace, `unimplemented` under Single,
     /// or a mapped storage error.
     pub async fn get_grant_epoch(&self, namespace: &str) -> Result<u64, ServerError> {
+        if self.cfg.namespace_mode == crate::namespace::NamespaceMode::Authority {
+            return Err(crate::namespace::owner_statements_refused());
+        }
         let namespace = Namespace::parse(namespace)
             .map_err(|_| ServerError::invalid_argument("invalid namespace"))?;
         let Addressing::Multi(multi) = &self.cfg.addressing else {
@@ -88,6 +91,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// `permission_denied` for a rejected statement, `unimplemented` under
     /// Single, or `unavailable` while completion is pending.
     pub async fn set_grant_epoch(&self, signed_statement: &str) -> Result<u64, ServerError> {
+        if self.cfg.namespace_mode == crate::namespace::NamespaceMode::Authority {
+            return Err(crate::namespace::owner_statements_refused());
+        }
         let Addressing::Multi(multi) = &self.cfg.addressing else {
             return Err(ServerError::unimplemented(
                 "grant epochs require multi-repository addressing",

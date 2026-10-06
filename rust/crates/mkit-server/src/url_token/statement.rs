@@ -2,13 +2,13 @@
 //! codec and the `<statement>.<signature>` token encoding
 //! (SPEC-WRITE-GRANTS §9.4).
 
+use crate::namespace::RepositoryIdentity;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use mkit_attest::grant::GrantError;
 use mkit_attest::grant::text::{
     check_lifetime, decimal_millis, decimal_u64, encode_millis, join_fields, split_fields,
 };
 use mkit_core::hash::{Hash, from_hex, hash, to_hex, to_hex_bytes};
-use mkit_core::repo_identity::RepositoryIdentity;
 use mkit_core::write_auth::{is_hex, validate_audience};
 
 use super::{DOMAIN, MAX_PATH_BYTES, MAX_TTL_MS, UrlTokenError};
@@ -194,7 +194,7 @@ impl UrlTokenStatement {
         validate_audience(&self.audience).map_err(|_| GrantError::Audience)?;
         // The request's §7.4 identity, byte for byte: a single deployment's
         // may be a bare name (SPEC-WRITE-GRANTS §9.4, SPEC-HTTP-OBJECTS §2).
-        RepositoryIdentity::parse_bare_allowed(&self.repository)
+        RepositoryIdentity::parse_stored_bare_allowed(&self.repository)
             .map_err(|_| GrantError::Repository)?;
         check_lifetime(self.issued_ms, self.expiry_ms, max_ttl_i64())?;
         join_fields(&[
@@ -221,7 +221,7 @@ impl UrlTokenStatement {
             return Err(GrantError::Domain.into());
         }
         validate_audience(f[1]).map_err(|_| GrantError::Audience)?;
-        RepositoryIdentity::parse_bare_allowed(f[2]).map_err(|_| GrantError::Repository)?;
+        RepositoryIdentity::parse_stored_bare_allowed(f[2]).map_err(|_| GrantError::Repository)?;
         let target = UrlTarget::parse_field(f[3]).map_err(|_| UrlTokenError::Target)?;
         let epoch = decimal_u64(f[4])?;
         let issued_ms = decimal_millis(f[5])?;

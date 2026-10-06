@@ -42,6 +42,7 @@ pub mod indexed;
 pub mod limits;
 #[cfg(any(test, feature = "memory"))]
 mod memory;
+pub mod namespace;
 mod op;
 pub mod pipeline;
 pub mod policy;
@@ -70,8 +71,8 @@ pub use error::{
 #[cfg(any(test, feature = "memory"))]
 pub use memory::{MemoryBlobStore, MemoryFault, MemoryKv, MemoryPackSink};
 pub use op::{
-    AuthzFacts, Commitment, Creation, GrantRef, OpKind, Operation, PresenceRequirement, Procedure,
-    RefUpdate, VerifiedAuth,
+    AuthzFacts, CallerView, Commitment, Creation, GrantRef, OpKind, Operation, PresenceRequirement,
+    Procedure, RefUpdate, VerifiedAuth,
 };
 pub use policy::GrantConfig;
 pub use principal::Principal;

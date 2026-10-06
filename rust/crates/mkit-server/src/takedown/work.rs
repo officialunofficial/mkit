@@ -130,6 +130,8 @@ pub struct WorkConfig {
     pub shards: Arc<dyn ShardMap>,
     /// Repository addressing policy.
     pub addressing: Addressing,
+    /// Deployment namespace grammar for signed operator selectors.
+    pub namespace_mode: crate::namespace::NamespaceMode,
     /// Retention duration for accepted objects.
     pub retention_ms: u64,
     /// Additional discovery time after the retention window.
@@ -165,6 +167,7 @@ impl WorkConfig {
             root,
             shards,
             addressing,
+            namespace_mode: crate::namespace::NamespaceMode::SelfCertifying,
             retention_ms,
             discovery_margin_ms: 0,
             profile: acquisition::Profile::scheduled(),
@@ -184,6 +187,8 @@ pub struct Work<N, B, P> {
     pub root: Partition,
     pub shards: Arc<dyn ShardMap>,
     pub addressing: Addressing,
+    /// Deployment namespace grammar for signed operator selectors.
+    pub namespace_mode: crate::namespace::NamespaceMode,
     pub retention_ms: u64,
     pub discovery_margin_ms: u64,
     pub profile: acquisition::Profile,
@@ -200,6 +205,7 @@ impl<N, B, P> Work<N, B, P> {
             root: config.root,
             shards: config.shards,
             addressing: config.addressing,
+            namespace_mode: config.namespace_mode,
             retention_ms: config.retention_ms,
             discovery_margin_ms: config.discovery_margin_ms,
             profile: config.profile,
@@ -779,10 +785,9 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
                             let namespace = if name == "root" {
                                 crate::NamespaceKey::deployment_default()
                             } else {
-                                crate::NamespaceKey::from_namespace(
-                                    &mkit_core::repo_identity::Namespace::parse(name)
-                                        .map_err(|_| bad())?,
-                                )
+                                crate::namespace::Namespace::parse_stored(name)
+                                    .map_err(|_| bad())?
+                                    .key()
                             };
                             checkpoint.next_candidate(&namespace)?;
                             info.namespace_after = Some(candidate.as_bytes().to_vec());

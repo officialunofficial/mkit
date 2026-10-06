@@ -23,7 +23,7 @@ use crate::http_objects::{
     Fail, HttpBody, HttpObjectRequest, HttpObjectResponse, HttpSeams, METRIC_HTTP_REACH_CAPPED,
     ParsedUrl, Target, route,
 };
-use crate::repo::{NamespaceKey, RepoId, RepoName};
+use crate::repo::{RepoId, RepoName};
 use crate::store::read;
 use crate::{Code, ServerError};
 
@@ -100,7 +100,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
             "GET" | "HEAD" => {}
             _ => return HttpObjectResponse::error(405).with_header("Allow", ALLOW),
         }
-        let Ok(parsed) = route::parse_request(req) else {
+        let Ok(parsed) = route::parse_request(req, self.cfg.namespace_mode) else {
             return HttpObjectResponse::error(400);
         };
         // Precheck before any repository lookup; public repositories
@@ -605,7 +605,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
 fn repo_id(parsed: &ParsedUrl) -> Option<RepoId> {
     let identity = parsed.repository.as_ref()?;
     Some(RepoId {
-        namespace: NamespaceKey::from_namespace(identity.namespace()?),
+        namespace: identity.namespace()?.key(),
         name: RepoName::new(identity.name()).ok()?,
     })
 }

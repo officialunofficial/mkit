@@ -89,13 +89,13 @@ struct Scope {
     namespace: Option<String>,
 }
 impl Scope {
-    fn validate(&self) -> Result<(), ServerError> {
+    fn validate(&self, mode: crate::namespace::NamespaceMode) -> Result<(), ServerError> {
         match (&self.repository, &self.namespace) {
             (Some(repo), None) => {
-                intent::repository(repo)?;
+                mode.admin_repository(repo).map_err(|_| intent::invalid())?;
             }
             (None, Some(ns)) => {
-                intent::repository(&format!("{ns}/repo"))?;
+                mode.admin_namespace(ns).map_err(|_| intent::invalid())?;
             }
             (None, None) => {}
             _ => return Err(invalid()),
@@ -178,7 +178,7 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
     ) -> Result<Prepared, ServerError> {
         let input: List = serde_json::from_value(input.clone()).map_err(|_| invalid())?;
         let scope = input.scope.unwrap_or_default();
-        scope.validate()?;
+        scope.validate(self.namespace_mode)?;
         let page_size = u32::try_from(number(&input.page_size)?).map_err(|_| invalid())?;
         if !(1..=100).contains(&page_size) || input.page_token.len() > 2048 {
             return Err(invalid());
@@ -310,6 +310,7 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> AdminOperations for 
                         self.root.clone(),
                         self.shards.clone(),
                     )
+                    .with_namespace_mode(self.namespace_mode)
                     .with_purge(self.purge.clone())
                     .plan(path, input, digest, now, budget)
                     .await
@@ -387,6 +388,7 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> AdminOperations for 
                 self.root.clone(),
                 self.shards.clone(),
             )
+            .with_namespace_mode(self.namespace_mode)
             .with_purge(self.purge.clone())
             .after_commit(path, input, response, now, budget)
             .await
@@ -449,3 +451,37 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> AdminOperations for 
 #[cfg(all(test, feature = "memory"))]
 #[path = "admin_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod namespace_mode_tests {
+    use super::*;
+    use crate::namespace::NamespaceMode;
+
+    #[test]
+    fn selector_modes_keep_the_default_refusal_bytes() {
+        let namespace = "019c88c3-a904-7bd1-8a5d-3182a0c6978a";
+        for scope in [
+            Scope {
+                repository: Some(format!("{namespace}/repo")),
+                namespace: None,
+            },
+            Scope {
+                repository: None,
+                namespace: Some(namespace.into()),
+            },
+        ] {
+            let error = scope.validate(NamespaceMode::SelfCertifying).unwrap_err();
+            assert_eq!(
+                (error.code(), error.public_message()),
+                (Code::InvalidArgument, "invalid takedown request")
+            );
+            assert!(scope.validate(NamespaceMode::Authority).is_ok());
+        }
+        let root = Scope {
+            repository: Some("root/repo".into()),
+            namespace: None,
+        };
+        assert!(root.validate(NamespaceMode::SelfCertifying).is_ok());
+        assert!(root.validate(NamespaceMode::Authority).is_err());
+    }
+}
