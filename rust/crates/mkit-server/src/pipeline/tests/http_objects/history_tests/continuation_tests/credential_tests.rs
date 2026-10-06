@@ -135,6 +135,8 @@ fn accepts_fresh(
     head: Hash,
     cursor: Hash,
 ) {
+    // Verification time also changes between requests; it is not stable scope.
+    fx.clock.set(fx.clock.now_ms() + 1);
     with_request(fx, req, |reader| {
         let mut session = ReaderSession::default();
         let page = block_on(reader.walk_history_page_in(
