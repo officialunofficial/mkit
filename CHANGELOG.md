@@ -38,6 +38,20 @@ collect the applicable entries between their old and new immutable pins.
   issuance. `mkit_server::CallerView` is public for in-process authorizers.
   Default self-certifying deployments and the mkit CLI retain their behavior.
 
+- Authority fencing bootstraps before the first write. Under `any`, `GetAuthorityGeneration`
+  and `SetAuthorityGeneration` no longer require the namespace record; in authority
+  namespace mode a statement (including generation 0) registers a namespace and
+  writes, uploads and visibility changes for an unregistered namespace are refused
+  with `namespace not registered`. The fenced namespace-creation batch now carries
+  the `ag` guard, so a stale Authority generation creates nothing.
+  The Get/Set-before-first-write change also applies to self-certifying fenced
+  deployments under policy `any`.
+- A fenced `BeginUpload` retried after a generation bump replaces its stale-generation
+  ticket in one guarded batch instead of answering `moved` until expiry: the old
+  reservation gets an `Aborted` (`EPOCH_MISMATCH`, `BeginUpload`) outcome, counters and
+  the expiry timer are cleaned, and the old multipart session is aborted after commit.
+  The old admission charge is not refunded. No wire or stored-format change.
+
 - Server readers add `walk_history_page_in` for retryable, scoped first-parent
   history continuations. Dedicated MAC keys bind the repository/view, verified
   credential scope, strict ref/publication fence, live security boundaries and

@@ -149,9 +149,14 @@ fn run_proved_ticket(
         .pipe
         .identify(&a, OpKind::UpdateRef(refs[0].clone()))
         .unwrap();
-    now(env
-        .pipe
-        .apply_loop(&op, &a, &source, &req, Some(ahead), budget))
+    now(env.pipe.apply_loop(
+        &op,
+        &a,
+        &source,
+        &req,
+        Some(ahead),
+        (budget, &ReplacedSession::default()),
+    ))
 }
 
 #[test]

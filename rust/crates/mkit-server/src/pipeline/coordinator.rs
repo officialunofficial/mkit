@@ -115,6 +115,27 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 }
                 batch = batch.require(super::lease::observed_guard(key, observed.as_ref()));
             }
+            if let Some(generation) = op.authz.authority_generation {
+                // The guard commits with the registry rows, so a stale or
+                // unregistered authority view creates nothing.
+                let key = keys::authority_generation();
+                let observed = self.meta.get(&p, &key).await.map_err(meta_error)?;
+                let current = observed
+                    .as_ref()
+                    .map(codec::decode_u64)
+                    .transpose()
+                    .map_err(meta_error)?
+                    .unwrap_or(0);
+                if current != generation {
+                    return Err(crate::authority::moved());
+                }
+                if observed.is_none()
+                    && self.cfg.namespace_mode == crate::namespace::NamespaceMode::Authority
+                {
+                    return Err(ServerError::permission_denied("namespace not registered"));
+                }
+                batch = batch.require(super::lease::observed_guard(key, observed.as_ref()));
+            }
             if want.namespace {
                 let key = keys::namespace_record();
                 let record = codec::NamespaceRecord {

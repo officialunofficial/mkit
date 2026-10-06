@@ -564,7 +564,12 @@ pub struct Pipeline<B, N, H = Hooks> {
     http_seams: Option<crate::http_objects::HttpSeams>,
 }
 
+/// The multipart session of a ticket a committed `BeginUpload` replaced,
+/// aborted by the caller after the write gate is released.
+type ReplacedSession = std::sync::Mutex<Option<(crate::store::BlobKey, Vec<u8>)>>;
+
 struct WriteInputs<'a> {
+    replaced: &'a ReplacedSession,
     denial_ids: &'a std::collections::BTreeSet<Hash>,
     denial_packs: &'a [Hash],
     pending: Option<&'a reservation::PendingGuard>,
@@ -2637,6 +2642,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             ),
             None => None,
         };
+        let replaced = ReplacedSession::default();
         let write_result = async {
             let mut begin = self.begin_write(&op, a, existing, allowance.reservation.clone())?;
             self.precheck_namespace(&p, &allowance.charges, &mut ahead, a.business_skew_ms)?;
@@ -2721,6 +2727,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     WriteInputs {
                         denial_ids: &staged.denial_ids,
                         denial_packs: &staged.denial_packs,
+                        replaced: &replaced,
                         pending: pending.as_ref(),
                         implicit,
                         external_bases: &staged.external_bases,
@@ -2737,6 +2744,16 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             write_result
         }
         .await;
+        // After the write gate: object-store latency must not stall the stripe.
+        let replaced = replaced
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((key, session)) = replaced
+            && let Err(error) = self.blobs.abort(key, &session).await
+        {
+            crate::timers::ticket_expiry::record_abort_failure();
+            tracing::warn!(%error, "replaced ticket session abort failed");
+        }
         if let (Some(pending), Err(err)) = (&pending, &write_result) {
             let (reason, detail) = reservation::abort_reason(err);
             self.resolve_pending(&p, pending, reason, detail).await;
@@ -3495,6 +3512,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
         if self.cfg.authority_fence.is_some() && self.cfg.sharding == Sharding::Single {
             Box::pin(self.ensure_authority_activation(&op.repo.namespace)).await?;
+        } else if self.cfg.namespace_mode == crate::namespace::NamespaceMode::Authority {
+            // Leased sharding activates in `observe_lease`; refuse an
+            // unregistered namespace before the hook or Admission on every path.
+            self.require_registered(&op.repo.namespace).await?;
         }
         match &self.cfg.addressing {
             Addressing::Multi(multi) => self.owner_rule(op, Some(&multi.namespace_policy)).await,
@@ -3666,6 +3687,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         inputs: WriteInputs<'_>,
     ) -> Result<StoredResult, ServerError> {
         let WriteInputs {
+            replaced,
             denial_ids,
             denial_packs,
             pending,
@@ -3764,10 +3786,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
         if caps.atomic_multi_key || replay.is_some() || !charges.is_empty() {
             return self
-                .apply_atomic(op, a, p, &req, ahead, Some(&budget))
+                .apply_atomic(op, a, p, &req, ahead, (Some(&budget), replaced))
                 .await;
         }
-        self.apply_sequential(op, a, p, req, &budget).await
+        self.apply_sequential(op, a, p, req, &budget, replaced)
+            .await
     }
 
     async fn apply_sequential(
@@ -3777,6 +3800,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         p: &Partition,
         mut req: WriteRequest<'_>,
         budget: &publication_budget::PublicationBudget,
+        replaced: &ReplacedSession,
     ) -> Result<StoredResult, ServerError> {
         // `Transport::advance_refs`'s default: packmap first, then head.
         let kind = req.kind;
@@ -3784,7 +3808,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         req.kind = WriteKind::UpdateRef;
         for (i, update) in refs.iter().enumerate() {
             req.refs = core::slice::from_ref(update);
-            let result = self.apply_loop(op, a, p, &req, None, Some(budget)).await?;
+            let result = self
+                .apply_loop(op, a, p, &req, None, (Some(budget), replaced))
+                .await?;
             if let StoredResult::UpdateRef(UpdateRefResult::Conflict { .. }) = result {
                 if kind == WriteKind::UpdateRef {
                     return Ok(result);
@@ -4098,7 +4124,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         p: &Partition,
         req: &WriteRequest<'_>,
         ahead: Option<Snapshot>,
-        budget: Option<&publication_budget::PublicationBudget>,
+        budget: (
+            Option<&publication_budget::PublicationBudget>,
+            &ReplacedSession,
+        ),
     ) -> Result<StoredResult, ServerError> {
         if !self.meta.capabilities().atomic_multi_key {
             return Err(internal("replay and quota need atomic multi-key batches"));
@@ -4123,7 +4152,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         p: &Partition,
         req: &WriteRequest<'_>,
         mut ahead: Option<Snapshot>,
-        budget: Option<&publication_budget::PublicationBudget>,
+        (budget, replaced): (
+            Option<&publication_budget::PublicationBudget>,
+            &ReplacedSession,
+        ),
     ) -> Result<StoredResult, ServerError> {
         let mut req = req.for_store(self.meta.capabilities());
         // Held until the loop ends (see `with_write_gate`).
@@ -4278,6 +4310,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     #[cfg(feature = "__test-faults")]
                     self.schedule_test_ref_timer(op, a, &on_commit, ms(clock.business_now_ms))
                         .await?;
+                    if let Some(begin) = req.begin
+                        && let Some((key, session)) =
+                            begin::replaced_session(begin, &snap, ms(clock.business_now_ms))
+                    {
+                        *replaced
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            Some((key.into(), session));
+                    }
                     return Ok(on_commit);
                 }
                 Ok(BatchOutcome::DeadlinePassed { backend_now }) => {

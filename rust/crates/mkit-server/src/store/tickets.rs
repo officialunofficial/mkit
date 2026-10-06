@@ -337,6 +337,166 @@ pub fn plan_ticket_open(
     Ok(id)
 }
 
+/// A live ticket that a retried open replaces in the same batch.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StaleTicket<'a> {
+    pub ticket: &'a TicketV1,
+    pub raw: &'a Value,
+    /// The ticket's reservation row, still `Ticketed`.
+    pub reservation: &'a Value,
+    /// Wire repository identity recorded in the old reservation's outcome.
+    pub repository: &'a str,
+    /// Rows the expiry handler also clears for an unconsumed pack.
+    pub verification: VerificationRows<'a>,
+}
+
+/// The pack's membership, verification state and scheduled-job rows.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct VerificationRows<'a> {
+    pub member: Option<&'a Value>,
+    pub state: Option<&'a Value>,
+    pub job: Option<&'a Value>,
+}
+
+/// Whether `ticket` was issued under an older authority generation than the
+/// one now authorized. Never true for an equal, newer or absent generation.
+#[must_use]
+pub(crate) fn is_superseded(ticket: &TicketV1, current: Option<u64>) -> bool {
+    matches!((ticket.authority_generation, current), (Some(old), Some(new)) if old < new)
+}
+
+/// Replace `stale` with a new ticket for the same binding in one fragment:
+/// close the old ticket (its timer goes with it), abort its reservation with
+/// an `EpochMismatch` outcome, and open the new ticket and reservation.
+/// The counters net to zero, so the caps do not apply. Nothing is refunded.
+/// Errors change nothing.
+// Shares `plan_ticket_open`'s error type, whose `Existing` variant is large.
+#[allow(clippy::result_large_err, clippy::too_many_lines)] // One atomic close, abort and open fragment.
+pub(crate) fn plan_ticket_replace(
+    spec: &TicketSpec,
+    stale: StaleTicket<'_>,
+    reads: &TicketReads,
+    outbox_rows: (Option<&Value>, Option<&Value>),
+    pre: &mut Vec<Precondition>,
+    writes: &mut Vec<Write>,
+) -> Result<Hash, TicketPlanError> {
+    let value = codec::encode_ticket(&spec.record());
+    codec::decode_ticket(&value)
+        .map_err(|_| TicketPlanError::Invalid("invalid ticket specification"))?;
+    if spec.expires_at_ms <= spec.now_ms {
+        return Err(TicketPlanError::Invalid("new ticket is already expired"));
+    }
+    let old = stale.ticket;
+    let old_id = ticket_id(&old.reservation_id);
+    let id = ticket_id(&spec.reservation_id);
+    if old.repo != spec.repo
+        || old.ref_name != spec.ref_name
+        || old.signer != spec.signer
+        || old.pack_id != spec.pack_id
+        || reads
+            .index
+            .as_ref()
+            .map(codec::decode_ref_id)
+            .transpose()
+            .map_err(TicketPlanError::Corrupt)?
+            != Some(old_id)
+    {
+        return Err(TicketPlanError::Corrupt(StoreError::Corrupt(
+            "ticket index binding mismatch".into(),
+        )));
+    }
+    if id == old_id || reads.ticket.is_some() {
+        return Err(TicketPlanError::Invalid("ticket id already in use"));
+    }
+    if !matches!(
+        codec::decode_reservation(stale.reservation).map_err(TicketPlanError::Corrupt)?,
+        codec::ReservationV1::Ticketed { ticket_id } if ticket_id == old_id
+    ) {
+        return Err(TicketPlanError::Corrupt(StoreError::Corrupt(
+            "ticket reservation mismatch".into(),
+        )));
+    }
+    let read_keys = keys(spec);
+    let (mut staged_pre, mut staged_writes) = (pre.clone(), writes.clone());
+    plan_ticket_close(
+        &old_id,
+        old,
+        stale.raw,
+        reads.index.as_ref(),
+        reads.per_ref.as_ref(),
+        reads.per_signer.as_ref(),
+        CloseReason::Expired,
+        &mut staged_pre,
+        &mut staged_writes,
+    )
+    .map_err(TicketPlanError::Corrupt)?;
+    // The close deleted the index; the new ticket takes it over, still
+    // guarded by the old value.
+    staged_writes.retain(|w| !matches!(w, Write::Delete(k) if k == &read_keys.index));
+    staged_pre.push(Precondition::Absent(read_keys.ticket.clone()));
+    staged_writes.extend([
+        Write::Put(read_keys.ticket, value),
+        Write::Put(read_keys.index, codec::encode_ref_id(&id)),
+    ]);
+    for (key, prior) in [
+        (read_keys.per_ref, reads.per_ref.as_ref()),
+        (read_keys.per_signer, reads.per_signer.as_ref()),
+    ] {
+        adjust_counter(key, prior, true, &mut staged_pre, &mut staged_writes)
+            .map_err(TicketPlanError::Corrupt)?;
+    }
+    staged_writes.push(Write::Put(
+        layout::timer(spec.expires_at_ms, kinds::TICKET_EXPIRY.get(), &id),
+        Value::default(),
+    ));
+    let mut outbox =
+        OutboxBuilder::new(outbox_rows.0, outbox_rows.1).map_err(TicketPlanError::Corrupt)?;
+    outbox.outcome(
+        &old.reservation_id,
+        stale.reservation,
+        super::outbox::Terminal::new(codec::ReservationV1::Aborted {
+            repository: stale.repository.to_owned(),
+            occurred_at_ms: spec.now_ms,
+            reason: codec::AbortReason::EpochMismatch,
+            detail: String::new(),
+            procedure: codec::StoredProcedure::BeginUpload,
+        })
+        .map_err(TicketPlanError::Corrupt)?,
+    );
+    outbox.reserve(&spec.reservation_id, id, reads.reservation.as_ref());
+    outbox
+        .try_finish(&mut staged_pre, &mut staged_writes)
+        .map_err(TicketPlanError::Corrupt)?;
+    // Same cleanup as the old ticket's expiry: an unconsumed pack's
+    // verification state goes, and a scheduled job is kicked to delete its rows.
+    let VerificationRows { member, state, job } = stale.verification;
+    if let (None, Some(raw)) = (member, state) {
+        let key = layout::verification(&old.repo, &old.pack_id);
+        staged_pre.push(Precondition::Equals(key.clone(), raw.clone()));
+        staged_pre.push(Precondition::Absent(layout::membership(
+            &old.repo,
+            &old.pack_id,
+        )));
+        staged_writes.push(Write::Delete(key));
+    } else {
+        staged_pre.push(guard(layout::membership(&old.repo, &old.pack_id), member));
+        staged_pre.push(guard(layout::verification(&old.repo, &old.pack_id), state));
+    }
+    if job.is_some() {
+        staged_writes.push(Write::Put(
+            layout::timer(
+                spec.now_ms,
+                kinds::VERIFY.get(),
+                &crate::indexed::checkpoint::timer_reference(&old.repo, &old.pack_id),
+            ),
+            Value::default(),
+        ));
+    }
+    *pre = staged_pre;
+    *writes = staged_writes;
+    Ok(id)
+}
+
 /// Whether the caller consumed the ticket or processed its expiry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloseReason {

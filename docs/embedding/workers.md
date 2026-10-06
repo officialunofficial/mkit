@@ -42,6 +42,23 @@ verified envelope and a fresh hook decision on each batch. Reader-only and
 denied callers receive uniform absence. Private namespace listing separately
 requires `list_repos_authority_full` and a namespace-wide writer allowance.
 
+Register each account namespace before its first write by calling
+`SetAuthorityGeneration` with a statement for generation 0 (any valid statement
+registers). Under `any` this needs no prior namespace record. Writes,
+`BeginUpload` and visibility changes for an unregistered namespace fail with
+`permission_denied` ("namespace not registered") before your hooks run, and
+`GetAuthorityGeneration` reports 0. Return the current generation from the
+Authority hook. When you bump it, a client's retried `BeginUpload` replaces its
+stale ticket at once: the old reservation receives an `Aborted` outcome with
+`EPOCH_MISMATCH` and procedure `BeginUpload`, the old multipart session is
+aborted after commit, and the admission charge for the old reservation is not
+refunded, so reconcile it from that outcome. Registration status is
+not confidential (an unsigned `GetAuthorityGeneration` already reveals a
+generation of 1 or more, and a write probe distinguishes unregistered from
+registered at 0); the refusal before your hooks protects their cost, not secrecy.
+A lost commit acknowledgement or a crash between commit and abort leaves the
+old multipart session to backend sweeps and lifecycle rules.
+
 Names are 1–72 lowercase ASCII bytes matching `[a-z0-9][a-z0-9._-]*`.
 `root`, `ed25519-` prefixes, and `0x` prefixes are reserved and rejected.
 The deployment is the trust root: names do not certify ownership. Owner-signed
