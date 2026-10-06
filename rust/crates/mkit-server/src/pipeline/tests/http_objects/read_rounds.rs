@@ -203,6 +203,7 @@ fn measure(shape: &Shape, owner: bool, op: Op) -> (f64, u32, usize) {
         .unwrap();
     let fx = &shape.fx;
     let (kv, gets) = (fx.pipe.meta.calls(), get_count(fx));
+    fx.pipe.meta.touched.lock().unwrap().clear();
     fx.pipe
         .meta
         .latency_ms
@@ -227,11 +228,25 @@ fn measure(shape: &Shape, owner: bool, op: Op) -> (f64, u32, usize) {
     fx.pipe.meta.latency_ms.store(0, Ordering::SeqCst);
     fx.pipe.blobs.latency_ms.store(0, Ordering::SeqCst);
     let rounds = elapsed.as_secs_f64() * 1000.0 / f64::from(LATENCY);
+    let partitions: BTreeSet<Partition> = fx
+        .pipe
+        .meta
+        .touched
+        .lock()
+        .unwrap()
+        .iter()
+        .cloned()
+        .collect();
+    let mut by_kind = std::collections::BTreeMap::<&str, usize>::new();
+    for partition in &partitions {
+        *by_kind.entry(partition.kind()).or_default() += 1;
+    }
     println!(
-        "READ_ROUNDS denial={} owner={owner} op={op:?} rounds={rounds:.0} KV={} GET={} phases={}",
+        "READ_ROUNDS denial={} owner={owner} op={op:?} rounds={rounds:.0} KV={} GET={} partitions={} by_kind={by_kind:?} phases={}",
         fx.pipe.cfg.takedown_denial,
         fx.pipe.meta.calls() - kv,
         get_count(fx) - gets,
+        partitions.len(),
         read_probe::summary(&trace.lock().unwrap())
     );
     (rounds, fx.pipe.meta.calls() - kv, get_count(fx) - gets)
@@ -267,6 +282,8 @@ fn embedder_read_shapes_report_rounds() {
                 (&a, Op::Show { sizes: false }, false),
                 (&b, Op::Show { sizes: true }, true),
                 (&b, Op::Log(5), true),
+                (&c, Op::Log(5), false),
+                (&c, Op::Log(10), false),
                 (&c, Op::Log(50), true),
                 (&c, Op::Page1(50), false),
             ] {

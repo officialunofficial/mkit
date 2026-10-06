@@ -503,6 +503,78 @@ timestamps, stable ids, redacted errors, backlog and recovered results.
 | Scanner down | Inspect unavailable/invalid verdict fails closed without commit. Restore scanner and retry; verify fresh assigned capability, bounded retrieval and expiry/block denial |
 | Purge sink down | Intents remain durable and retry with backoff. Fresh global-denial/visibility checks remain authoritative. Restore sink, deduplicate ids and verify global invalidation plus audited completion; acceptance is not completion |
 
+### Diagnosing slow and cold reads
+
+The adapter adds no custom per-call telemetry. Cloudflare's platform tracing
+already records every Durable Object call, so use it instead of bespoke timers.
+
+**Enable tracing.** Set `observability.traces.enabled = true` in the Wrangler
+config (optionally with `head_sampling_rate`); no code changes are needed
+([Workers tracing](https://developers.cloudflare.com/workers/observability/traces/)).
+Traces propagate across Durable Object and service-binding calls, so one request
+is one trace rather than disconnected ones
+([changelog, May 2026](https://developers.cloudflare.com/changelog/post/2026-05-07-automatic-tracing-across-do-and-worker-subrequests/)).
+Durable Object root and child spans carry the instance ID in
+`cloudflare.durable_object.id` ([spans and attributes](https://developers.cloudflare.com/workers/observability/traces/spans-and-attributes/)),
+and Workers Logs carry it as `$workers.durableObjectId`
+([changelog, July 2026](https://developers.cloudflare.com/changelog/post/2026-07-24-durable-object-instance-observability/);
+[metrics and analytics](https://developers.cloudflare.com/durable-objects/observability/metrics-and-analytics/)).
+Filter logs by that field to follow one object across requests.
+
+**Read a cold versus warm request.** Open the trace of the slow read and:
+
+1. Count the distinct `cloudflare.durable_object.id` values. That is the number
+   of objects the read touched; compare it with the expected fan-out below.
+2. Take one object that appears in both a slow and a fast trace of the same
+   operation and compare its span durations. A cold activation shows as a much
+   longer first span for that object; the same object a few seconds later is
+   warm.
+3. If many objects are slow only on the first read after a quiet period, the
+   cost is activation fan-out, not a slow query. If one object is slow while
+   warm, look at that object's storage work instead.
+
+**Why one read touches many objects.** Every mkit storage partition is its own
+Durable Object, routed by `id_from_name(partition)` in the Workers adapter: the
+namespace coordinator, 16 ref-index buckets, 4096 repository index shards and
+4096 content shards keyed by object-id prefix, plus one object per ref. A read
+therefore fans out across the objects its ids hash to. The test probe
+`embedder_read_shapes` (`cargo test -p mkit-server --features http-objects --lib
+embedder_read_shapes -- --nocapture`) counts the distinct partitions a read
+touches. Expected counts for a public reader with takedown denial off:
+
+| Shape | Distinct objects | Coordinator | Ref index | Repo index | Content | Ref |
+| --- | --- | --- | --- | --- | --- | --- |
+| Show with sizes (8 files, 1 nested dir) | 43 | 1 | 16 | 13 | 13 | 0 |
+| Show without sizes | 25 | 1 | 16 | 4 | 4 | 0 |
+| Cat via `read_commit_path_in` | 12 | 1 | 0 | 5 | 5 | 1 |
+| Log of 5 (52-commit history) | 22 | 1 | 0 | 10 | 10 | 1 |
+| Log of 10 (52-commit history) | 42 | 1 | 0 | 20 | 20 | 1 |
+| Log of 50 (52-commit history) | 200 | 1 | 0 | 99 | 99 | 1 |
+
+These are upper-bound expectations for a tiny repository: object ids are
+uniform, so repo-index and content shard counts grow roughly with the number of
+objects read. Enabling takedown denial adds content-shard lookups (for example
+Cat 28 and Log of 50 215). A trace far above these numbers for the same shape
+is worth investigating.
+
+**Quiet periods.** An idle, non-hibernating Durable Object is evicted from
+memory after roughly 70-140 seconds without requests
+([lifecycle](https://developers.cloudflare.com/durable-objects/concepts/durable-object-lifecycle/)).
+After a quiet period the first read pays an activation on most of the objects
+above, in parallel where the pipeline allows, so the first read is the slow one
+and the next is fast.
+
+**Placement.** `NAMESPACE_LOCATION_HINT` maps to the Durable Object
+`locationHint`. A hint is best effort and applies only when an object is first
+created; existing objects do not move
+([data location](https://developers.cloudflare.com/durable-objects/reference/data-location/)).
+Set it before any data exists, or before a store reset, to the region where the
+Worker runs. Changing it later leaves existing partitions where they are. Also
+enable Smart Placement for the Worker (`placement.mode = "smart"`;
+[Smart Placement](https://developers.cloudflare.com/workers/configuration/placement/)).
+Cross-region calls multiply across the fan-out above, so a misplaced namespace
+shows up as uniformly slow spans for every object, warm or cold.
+
 ### Repository storage counter
 
 A missing repository storage counter (`rb`) indicates a corrupt store: stored-bytes relays for that repository stay queued, hold the namespace relay watermark and increment `mkit_server_relay_storage_counter_missing_total`. Write `rb = (0, 0)` in the repository's coordinator to resume.
