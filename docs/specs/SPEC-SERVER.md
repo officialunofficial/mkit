@@ -590,8 +590,9 @@ reason `ABORT_REASON_EPOCH_MISMATCH` and procedure `BeginUpload` for the old
 reservation, open the new ticket and reservation under normal admission, and
 clear the pack's verification state and kick its scheduled job exactly as the
 old ticket's expiry would. The batch MUST be guarded by the old ticket, the
-index and counter rows, the old reservation row, those verification rows and
-the generation. Under single-partition sharding the generation guard is a
+index and counter rows, the old reservation row, the membership and
+verification-state rows (a present job's timer is kicked, unguarded) and the
+generation. Under single-partition sharding the generation guard is a
 direct comparison of `ag`; under leased sharding it is the epoch lease `el`,
 which carries the generation, as for every other shard write. The ticket-count
 caps do not apply because the counters net to zero. The server MUST NOT

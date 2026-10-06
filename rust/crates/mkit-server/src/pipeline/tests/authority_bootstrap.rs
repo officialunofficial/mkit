@@ -750,12 +750,33 @@ fn a_real_consumption_during_the_bump_window_makes_the_replacement_open_normally
     let env = shared.pipe(cfg, Some(winner_at_pending(&fired, 2, consume)));
     register(&env, NS, 0);
     let first = claims(&env, begin(&env, 1).unwrap());
-    *old.lock().unwrap() = Some(first);
+    *old.lock().unwrap() = Some(first.clone());
     register(&env, NS, 1);
     shared.generation.store(1, Ordering::SeqCst);
     let second = claims(&env, begin(&env, 2).unwrap());
     assert!(fired.load(Ordering::SeqCst));
     assert_eq!(second.authority_generation, Some(1));
+    let repo = RepoId {
+        namespace: partition_key(),
+        name: RepoName::new(REPO).unwrap(),
+    };
+    let p = env.pipe.shards.ref_shard(&repo, HEAD);
+    let (old_keys, new_keys) = (ticket_keys(&first), ticket_keys(&second));
+    // The consumed ticket is gone and the index names the new ticket.
+    assert!(shared.row_at(&p, &old_keys[0]).is_none());
+    assert_eq!(
+        shared.row_at(&p, &old_keys[1]),
+        Some(codec::encode_ref_id(&second.ticket_id))
+    );
+    assert!(shared.row_at(&p, &new_keys[0]).is_some());
+    // The consumption's `Committed` outcome stands: no abort overwrote it and
+    // no outcome row was queued by the replan.
+    let rid = keys::reservation(&format!("r:{}", nonce(1))).unwrap();
+    assert!(matches!(
+        codec::decode_reservation(&shared.row_at(&p, &rid).unwrap()).unwrap(),
+        ReservationV1::Committed { .. }
+    ));
+    assert!(shared.row_at(&p, &keys::outcome_backlog()).is_none());
 }
 
 #[test]

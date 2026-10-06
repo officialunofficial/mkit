@@ -70,8 +70,14 @@ pub(super) async fn read_indexed<N: NamespaceStore>(
         }
         // A superseded ticket is replaced in this batch, which also settles its
         // reservation. The early read-ahead may predate a competing replacement
-        // or consumption, so read the index, ticket and reservation together:
-        // one coherent view, never a ticket paired with a later reservation.
+        // or consumption, so re-read the rows together. The default `get_many`
+        // is a sequence of single reads, so the KEY ORDER below is load-bearing:
+        // index, counters, ticket, reservation, then the rest. A live ticket
+        // implies the counters read before it are at least 1, and a consumption
+        // or replacement landing later shows up as a non-`Ticketed` reservation,
+        // which plans as a retryable race. Reordering (for example reservation
+        // before ticket) can pair a ticket with a later reservation and
+        // reintroduces a spurious `Corrupt`.
         if let Some(ticket) = snap
             .get(&key)
             .and_then(|raw| codec::decode_ticket(raw).ok())
