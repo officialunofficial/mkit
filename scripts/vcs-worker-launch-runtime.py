@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Run real Paid Workers indexed writes against an optimized local release Worker."""
+import http.client
 import argparse
 import datetime
 import gzip
@@ -149,7 +150,7 @@ def run_fixture(namespace, mode, port, run, runner, artifact, env, evidence):
                     if status == 200:
                         break
                     (folder / "startup-response.json").write_bytes(body)
-                except (urllib.error.URLError, TimeoutError):
+                except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException):
                     pass
                 if time.monotonic() >= deadline:
                     raise RuntimeError("release launch startup timed out; see " + str(folder))

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Pin native zstd push -> optimized Paid launch Worker over local HTTPS -> clone."""
+import http.client
 import argparse
 import datetime
 import gzip
@@ -377,7 +378,7 @@ process.stdout.write(createPublicKey(key).export({format:'der',type:'spki'}).sub
                     if status == 200:
                         break
                     (run / "startup-response.json").write_bytes(body)
-                except (urllib.error.URLError, TimeoutError):
+                except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException):
                     pass
                 if time.monotonic() >= deadline:
                     raise RuntimeError("release Worker HTTPS startup timed out")
