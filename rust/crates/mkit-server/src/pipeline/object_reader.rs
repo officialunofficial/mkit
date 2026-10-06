@@ -848,29 +848,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         // Loading and final callbacks may yield or revoke a source. Refresh
         // target/pack guards afterward, before dependencies and output.
         checks.reset();
-        // Each decoded object's own storage stop is read live again just before
-        // its children are published (below). Those reads are independent of the
-        // final guards and of each other, so they share the guards' wave rather
-        // than each costing a sequential round. The same calls are made; nothing
-        // is cached across the load, and a miss falls back to a live read.
-        let publish_guards = super::reader_checks::Checks::new(&meta);
-        let expandable: Vec<Hash> = proofs.as_deref().map_or_else(Vec::new, |memo| {
-            final_locations
-                .iter()
-                .filter(|(id, _)| {
-                    loaded
-                        .get(id)
-                        .is_some_and(|bytes| memo.can_decode(id, bytes))
-                })
-                .map(|(id, _)| *id)
-                .collect()
-        });
-        futures::future::try_join(
-            checks.prefetch_locations(&final_locations),
-            publish_guards.prefetch(&expandable),
-        )
-        .await
-        .map_err(failure)?;
+        checks
+            .prefetch_locations(&final_locations)
+            .await
+            .map_err(failure)?;
         let (mut bytes, mut sizes) = (BTreeMap::new(), BTreeMap::new());
         for (id, located) in final_locations {
             if denied(&checks, &id).await.map_err(failure)?
@@ -942,11 +923,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                         {
                             let object =
                                 mkit_core::serialize::deserialize(&canonical).map_err(failure)?;
-                            // Loading may yield. Recheck the storage stop before
-                            // publishing any children of the decoded object.
-                            if denied(&publish_guards, &id).await.map_err(failure)? {
-                                continue;
-                            }
+                            // The final guards above are this phase's storage stop.
                             if !seams.takedown.stops_descent(&self.repo, &id) {
                                 memo.expand(id, located.pack, &object);
                             }

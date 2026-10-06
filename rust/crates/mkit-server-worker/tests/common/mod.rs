@@ -325,7 +325,14 @@ impl ObjectBucket for SimBucket {
             return Ok(None);
         };
         let size = object.len() as u64;
-        // Like R2: the end clamps to the object, a start past it is an error.
+        // Like R2 and the Workers binding: an offset or length beyond 2^53 - 1
+        // panics, the end clamps to the object, a start past it is an error.
+        if let Some(r) = &range {
+            assert!(
+                r.start < (1 << 53) && r.end - r.start < (1 << 53),
+                "range exceeds R2 precision"
+            );
+        }
         let body = match range {
             Some(r) if r.start >= size => return Err("range not satisfiable".into()),
             Some(r) => object.slice(

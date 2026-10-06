@@ -40,8 +40,10 @@
 //!
 //! **Get.** A body is always a [`BlobBody::Stream`] over the R2 object
 //! body, re-chunked to pieces of at most [`MAX_BLOB_PIECE_BYTES`] and
-//! checked against the expected length. A range reads R2's range; the blob
-//! length it is resolved against comes from a `head` first.
+//! checked against the expected length. A bounded range is one ranged GET:
+//! R2 answers the object's size with the body, which the range is resolved
+//! against. Only a malformed range, a start beyond R2's range precision, or a
+//! GET that R2 rejects consults a `head`.
 //!
 //! The store serves the bytes it verified and nothing else: it never
 //! decodes or re-encodes pack contents (serving pushed zstd frames is
@@ -492,6 +494,10 @@ impl<B: ObjectBucket> R2PackSink<B> {
     }
 }
 
+/// The largest offset or length R2 ranges carry (2^53 - 1, the Workers
+/// binding's precision limit).
+pub const MAX_R2_RANGE: u64 = (1 << 53) - 1;
+
 impl<B: ObjectBucket> BlobStore for R2BlobStore<B> {
     type Sink = R2PackSink<B>;
     fn reserve_read_calls(
@@ -524,20 +530,25 @@ impl<B: ObjectBucket> BlobStore for R2BlobStore<B> {
             // A well-formed range is one ranged GET: R2 answers the object's
             // size with the body, so no HEAD precedes it. A malformed range
             // keeps the HEAD first, so a missing object stays uniformly absent.
-            Some(range) if range.start <= range.end_inclusive => {
-                let wanted = range.start..range.end_inclusive.saturating_add(1);
-                match self.bucket.get(&object, Some(wanted)).await {
+            // Offsets and lengths beyond R2's range precision are not sent
+            // (the Workers binding panics on them); the end is clamped to it,
+            // as `resolve` clamps to the object.
+            Some(range) if range.start <= range.end_inclusive && range.start < MAX_R2_RANGE => {
+                let end = range.end_inclusive.saturating_add(1).min(MAX_R2_RANGE);
+                match self.bucket.get(&object, Some(range.start..end)).await {
                     Ok(None) => return Ok(None),
                     Ok(Some((size, stream))) => (Some((size, stream)), Some(range.resolve(size)?)),
                     Err(e) => {
                         // A range R2 cannot satisfy is an error there; a HEAD
                         // classifies it as absent, unsatisfiable or a backend
-                        // failure, exactly as before.
+                        // failure, exactly as before. The GET error is logged
+                        // first so it is never silently dropped.
+                        let failure = backend_error(StorageOp::BlobGet, e);
                         let Some(len) = self.head_len(&object).await? else {
                             return Ok(None);
                         };
                         range.resolve(len)?;
-                        return Err(backend_error(StorageOp::BlobGet, e));
+                        return Err(failure);
                     }
                 }
             }

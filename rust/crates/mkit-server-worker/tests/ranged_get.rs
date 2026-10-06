@@ -69,6 +69,14 @@ fn bounded_range_is_one_backend_call() {
                 .unwrap_err();
             assert!(matches!(err, StoreError::RangeNotSatisfiable { len: 10 }));
         }
+        // Starts at or beyond R2's range precision are unsatisfiable, never sent.
+        for start in [(1 << 53) - 1, 1 << 53, u64::MAX - 1, u64::MAX] {
+            let err = blobs
+                .get(&key, Some(range(start, u64::MAX)))
+                .await
+                .unwrap_err();
+            assert!(matches!(err, StoreError::RangeNotSatisfiable { len: 10 }));
+        }
         // A malformed range on a present object is invalid.
         let err = blobs.get(&key, Some(range(5, 4))).await.unwrap_err();
         assert!(matches!(err, StoreError::Invalid(_)));

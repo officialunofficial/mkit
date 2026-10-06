@@ -36,10 +36,11 @@ repository may perform one coordinator apply to activate its retained visibility
 revision; following visibility writes maintain that fence even without token
 issuance configured.
 
-Physical calls are KV dispatches plus twice the ranged GET count, modeling the
-adapter's HEAD then GET. Paused Tokio time injects 30 ms and 130 ms RPC waits
+Physical calls are KV dispatches plus twice the ranged GET count, a
+conservative model: the Workers adapter now issues one GET for a bounded range
+(the read ledger likewise still charges two units). Paused Tokio time injects 30 ms and 130 ms RPC waits
 through the reader-batching latency probe. All continuation reads share the
-existing six-call I/O admission envelope. Blob delays include both sequential
+existing six-call I/O admission envelope. Blob delays include two sequential
 range RPCs. The fixture performs reader construction and guarded applies without
 delay; the reported wait adds their physical calls serially at the selected RPC
 latency. The table records virtual wait and its equivalent RPC rounds, including
