@@ -41,7 +41,7 @@ fn in_view<H: HookSet>(
     test(reader);
 }
 
-fn drain(fx: &Fx) {
+pub(super) fn drain(fx: &Fx) {
     let repo = fx.repo_id("room");
     let source = fx.pipe.shards.ref_shard(&repo, HEAD);
     let relay = crate::timers::TimerRegistry::new().register(crate::relay::RelayHandler {
@@ -128,7 +128,7 @@ fn history(
     (fx, commits, leaf, path)
 }
 
-fn get_count<H: HookSet>(fx: &Fx<H>) -> usize {
+pub(super) fn get_count<H: HookSet>(fx: &Fx<H>) -> usize {
     fx.calls
         .lock()
         .unwrap()

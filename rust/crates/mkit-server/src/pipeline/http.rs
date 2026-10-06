@@ -571,7 +571,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
                         partition,
                     })
                     .collect();
-                super::list::page(
+                // The shards are independent scans: one wave, not one round each.
+                super::list::page_in_waves(
+                    &view,
                     &buckets,
                     repo,
                     &scan,

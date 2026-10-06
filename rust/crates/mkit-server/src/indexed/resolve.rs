@@ -202,6 +202,23 @@ pub(super) async fn frame_bytes<B: BlobStore>(
     Ok(bytes)
 }
 
+/// The pack prefix and one raw member's frame, read in one round. The prefix
+/// keeps error precedence when both fail.
+async fn raw_member_reads<B: BlobStore>(
+    blobs: &B,
+    pack: Hash,
+    (offset, length): (u64, u64),
+    prefix_budget: u64,
+    frame_budget: u64,
+) -> Result<(Vec<u8>, Vec<u8>), ServerError> {
+    let (prefix, frame) = futures::future::join(
+        frame_bytes(blobs, pack, 0, 8, prefix_budget),
+        frame_bytes(blobs, pack, offset, length, frame_budget),
+    )
+    .await;
+    Ok((prefix?, frame?))
+}
+
 struct CachedBase(Option<(Hash, Arc<[u8]>)>);
 impl DeltaBaseSource for CachedBase {
     const VERIFIED: bool = false;
@@ -639,7 +656,26 @@ fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
                 delta_base,
                 ..
             } = located.value;
-            let prefix = frame_bytes(blobs, located.pack, 0, 8, available).await?;
+            let (prefix, mut raw_frame) = if delta_base.is_none() {
+                // A raw member's frame read does not depend on the pack prefix
+                // or on any base. Boxed: delta chains recurse through here, and
+                // the joined reads must not enlarge every level's frame.
+                let limit = source_limits.map_or(available, |limits| limits.max_frame_bytes);
+                let (prefix, frame) = Box::pin(raw_member_reads(
+                    blobs,
+                    located.pack,
+                    (frame_offset, frame_length),
+                    available,
+                    limit,
+                ))
+                .await?;
+                (prefix, Some(frame))
+            } else {
+                (
+                    frame_bytes(blobs, located.pack, 0, 8, available).await?,
+                    None,
+                )
+            };
             let version = u32::from_le_bytes(prefix[4..8].try_into().map_err(|_| unavailable())?);
             let mut depth = 0;
             let mut base_bytes = None;
@@ -678,14 +714,19 @@ fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
                 }
             }
             let available = memo.available(budget)?;
-            let frame = frame_bytes(
-                blobs,
-                located.pack,
-                frame_offset,
-                frame_length,
-                source_limits.map_or(available, |limits| limits.max_frame_bytes),
-            )
-            .await?;
+            let frame = match raw_frame.take() {
+                Some(frame) => frame,
+                None => {
+                    frame_bytes(
+                        blobs,
+                        located.pack,
+                        frame_offset,
+                        frame_length,
+                        source_limits.map_or(available, |limits| limits.max_frame_bytes),
+                    )
+                    .await?
+                }
+            };
             if source_limits.is_some() {
                 // A selected member's verified metadata is immutable. A changed
                 // object claim is corruption, even when it now exceeds the budget.

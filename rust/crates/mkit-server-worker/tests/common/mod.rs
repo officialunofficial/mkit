@@ -325,9 +325,12 @@ impl ObjectBucket for SimBucket {
             return Ok(None);
         };
         let size = object.len() as u64;
+        // Like R2: the end clamps to the object, a start past it is an error.
         let body = match range {
+            Some(r) if r.start >= size => return Err("range not satisfiable".into()),
             Some(r) => object.slice(
-                usize::try_from(r.start).expect("range")..usize::try_from(r.end).expect("range"),
+                usize::try_from(r.start).expect("range")
+                    ..usize::try_from(r.end.min(size)).expect("range"),
             ),
             None => object,
         };

@@ -519,20 +519,39 @@ impl<B: ObjectBucket> BlobStore for R2BlobStore<B> {
         range: Option<ByteRange>,
     ) -> Result<Option<BlobBody>, StoreError> {
         let object = self.object_key(key)?;
-        let span = match range {
-            None => None,
+        let (got, span) = match range {
+            None => (self.get_object(&object, None).await?, None),
+            // A well-formed range is one ranged GET: R2 answers the object's
+            // size with the body, so no HEAD precedes it. A malformed range
+            // keeps the HEAD first, so a missing object stays uniformly absent.
+            Some(range) if range.start <= range.end_inclusive => {
+                let wanted = range.start..range.end_inclusive.saturating_add(1);
+                match self.bucket.get(&object, Some(wanted)).await {
+                    Ok(None) => return Ok(None),
+                    Ok(Some((size, stream))) => (Some((size, stream)), Some(range.resolve(size)?)),
+                    Err(e) => {
+                        // A range R2 cannot satisfy is an error there; a HEAD
+                        // classifies it as absent, unsatisfiable or a backend
+                        // failure, exactly as before.
+                        let Some(len) = self.head_len(&object).await? else {
+                            return Ok(None);
+                        };
+                        range.resolve(len)?;
+                        return Err(backend_error(StorageOp::BlobGet, e));
+                    }
+                }
+            }
             Some(range) => {
                 let Some(len) = self.head_len(&object).await? else {
                     return Ok(None);
                 };
-                Some(range.resolve(len)?)
+                let span = range.resolve(len)?;
+                (
+                    self.get_object(&object, Some(span.clone())).await?,
+                    Some(span),
+                )
             }
         };
-        let got = self
-            .bucket
-            .get(&object, span.clone())
-            .await
-            .map_err(|e| backend_error(StorageOp::BlobGet, e))?;
         let Some((size, stream)) = got else {
             return Ok(None);
         };
@@ -590,6 +609,17 @@ impl<B: ObjectBucket> R2BlobStore<B> {
             #[cfg(feature = "__test-faults")]
             fail_final: self.fail_final.clone(),
         }
+    }
+
+    async fn get_object(
+        &self,
+        object: &str,
+        span: Option<Range<u64>>,
+    ) -> Result<Option<(u64, ObjectStream)>, StoreError> {
+        self.bucket
+            .get(object, span)
+            .await
+            .map_err(|e| backend_error(StorageOp::BlobGet, e))
     }
 
     async fn head_len(&self, object: &str) -> Result<Option<u64>, StoreError> {

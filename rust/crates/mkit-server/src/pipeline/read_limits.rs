@@ -8,7 +8,9 @@ use std::sync::atomic::Ordering;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ReadLimits {
-    /// Storage and authorization call units; ranged blob reads cost two units.
+    /// Storage and authorization call units. Ranged blob reads are charged two
+    /// units each, conservatively: the Workers adapter issues one backend call
+    /// for a bounded range, and an adapter without that shortcut issues two.
     pub storage_calls: u32,
     /// Canonical bytes decoded, including proof ancestors and delta bases.
     pub decoded_bytes: u64,
