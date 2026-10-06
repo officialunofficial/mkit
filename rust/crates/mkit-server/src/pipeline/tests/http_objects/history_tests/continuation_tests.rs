@@ -233,6 +233,23 @@ fn reject<H: HookSet>(fx: &Fx<H>, writer: bool, token: &str) {
 }
 
 #[test]
+fn continuation_pages_complete_changing_history_without_cursor_walk() {
+    let (mut fx, commits) = changing_history(40);
+    enable(&mut fx);
+    for denial in [false, true] {
+        fx.pipe.cfg.takedown_denial = denial;
+        for writer in [false, true] {
+            for size in [7, 10] {
+                for latency in [30, 130] {
+                    measured_pages(&fx, &commits, size, writer, latency);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "full real-upload fixture runs explicitly in the ignored CI lane"]
 fn continuation_pages_complete_long_changing_histories_without_cursor_walk() {
     for length in [201, 302] {
         let (mut fx, commits) = changing_history(length);

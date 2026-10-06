@@ -13,8 +13,16 @@ with denial ON**, in both views, relative to the selected-ref history primitive.
 Reproduce from `rust/`:
 
 ```sh
-CARGO_PROFILE_DEV_DEBUG=0 cargo test --locked -p mkit-server --all-features --lib continuation -- --nocapture --test-threads=1
+CARGO_PROFILE_DEV_DEBUG=0 cargo test --locked -p mkit-server --all-features --lib continuation_pages_complete_long_changing_histories_without_cursor_walk -- --ignored --nocapture --test-threads=1
 ```
+
+The default lane covers a 40-commit changing history over four/six pages, using
+the same canonical-byte, budget, fixed-expiry and no-cursor-walk assertions in
+all view/denial/latency configurations. The full fixture runs explicitly in the
+serial `ignored-lane` profile in GitHub Actions and Cloud Build. Its standalone
+debug measurement used 13.10 s CPU and 14.17 s wall time; parallel Cloud Build
+exceeded the default 60 s ceiling. The slow lane retains every assertion and a
+bounded 300 s timeout. No production allowance or general timeout changes.
 
 These are bounded memory-store dispatch measurements with a fixed business
 clock. Reader units retain the 8,500-unit request allowance, including parsing,
