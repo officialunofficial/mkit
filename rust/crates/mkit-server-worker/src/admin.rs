@@ -194,6 +194,7 @@ fn build_work(
         settings.retention_ms,
         std::sync::Arc::new(crate::clock::WorkerClock),
     );
+    config.namespace_mode = cfg.namespace_mode;
     config.purge = purge_config(cfg, metadata.clone(), request)?;
     config.discovery_margin_ms = indexed.relay_lag_bound_ms;
     Ok(mkit_server::takedown::work::Work::new(
@@ -286,8 +287,12 @@ pub(crate) async fn serve(
                     cfg.probe_partition(),
                 )
                 .with_budget(budget.clone());
-                let mut engine = Engine::new(store.clone(), cfg.probe_partition(), config.clone())
-                    .with_purge(purge_enabled(cfg));
+                let mut engine = Engine::new(
+                    store.clone(),
+                    cfg.probe_partition(),
+                    config.clone().with_namespace_mode(cfg.namespace_mode),
+                )
+                .with_purge(purge_enabled(cfg));
                 if enabled {
                     // Workers run on one thread; the shared core operations interface uses Arc.
                     #[allow(clippy::arc_with_non_send_sync)]

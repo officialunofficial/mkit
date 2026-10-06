@@ -14,13 +14,13 @@ use super::keys::validate_reservation_id;
 use super::kv::{Key, MAX_KEY_BYTES, MAX_VALUE_BYTES, Value};
 use super::partition::Partition;
 use crate::error::Code;
+use crate::namespace::RepositoryIdentity;
 use crate::quota::{NamespaceUsage, NamespaceView, QuotaState};
 use crate::refs::is_served_ref_name;
 use crate::replay::{
     BeginUploadResult, ReplayRecord, ReplayState, StoredRejection, StoredResult, UpdateRefResult,
 };
 use crate::repo::RepoName;
-use mkit_core::repo_identity::RepositoryIdentity;
 use mkit_core::upload_parts::MIN_PART_SIZE;
 use mkit_core::write_auth::is_hex;
 
@@ -1007,7 +1007,7 @@ pub fn decode_reservation(value: &Value) -> Result<ReservationV1, StoreError> {
         | ReservationV1::ReadServed { repository, .. }
         | ReservationV1::RepoStorageChanged { repository, .. } => repository,
     };
-    RepositoryIdentity::parse_bare_allowed(repository)
+    RepositoryIdentity::parse_stored_bare_allowed(repository)
         .map_err(|_| corrupt("bad outcome repository"))?;
     Ok(reservation)
 }

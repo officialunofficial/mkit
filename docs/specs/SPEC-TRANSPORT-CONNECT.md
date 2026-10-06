@@ -1148,13 +1148,27 @@ tail       = lead / "." / "_" / "-"
 HEXLC      = DIGIT / %x61-66              ; 0-9 a-f
 ```
 
-Namespaces are self-certifying: the namespace itself names its owner,
+In the default `self_certifying` namespace mode, namespaces are self-certifying:
+the namespace itself names its owner,
 so a verifier needs no registry to find the owner. The `ed25519-` form
 names an Ed25519 public key. The `0x` form names a 20-byte address;
 [SPEC-WRITE-GRANTS §4.1](SPEC-WRITE-GRANTS.md#41-address-derivation)
 defines how an owner key derives it.
-No other namespace form exists, and a deployment MUST NOT resolve
-other forms through a registry of its own.
+A self-certifying deployment MUST NOT resolve other forms through a registry.
+A deployment MAY instead opt in to `namespace_mode = authority` under
+[SPEC-SERVER §6.2.2](SPEC-SERVER.md#622-opt-in-authority-owned-namespaces).
+That mode accepts opaque namespaces matching `[a-z0-9][a-z0-9._-]{0,71}`,
+including lowercase UUIDv7 names, and MUST reject `root` and the `ed25519-`
+and `0x` prefixes. The two deployment grammars are disjoint. The deployment
+is the trust root; the name cannot verify ownership. Multi addressing,
+Authority-hook authorization, authority fencing, and `namespace_policy = any`
+are required. The mode MUST be validated at startup and MUST NOT be selected
+by a request. Owner-signed grants, grant epochs, and visibility statements
+are refused with the uniform §6.2.2 error; signed visibility envelopes and
+deployment URL tokens retain their separate authorization rules.
+A deployment under `any` MUST NOT claim complete deployment-wide takedown.
+The auth-v2 wire envelope and RPC schema do not change. CLI addressing retains
+the default self-certifying grammar.
 
 Identities are lowercase only, so two spellings never name one
 repository. A server MUST reject an identity that does not match the
@@ -1823,6 +1837,7 @@ Explicitly deferred to sibling issues:
 
 | Version | Status | Changes |
 |---|---|---|
+| `2` | draft | Opt-in authority-owned opaque namespace grammar in §7.4; disjoint from self-certifying names, with deployment-rooted ownership and refused owner statements under SPEC-SERVER §6.2.2. No wire schema or CLI change. |
 | `2` (ListRepos) | draft | Additive §7.10 namespace listing RPC and new messages, atomic coordinator visibility indexes, bounded sorted pages and integrity-protected tokens; grants retain public listing rights only. |
 | `2` (WP-2.16) | draft | Additive namespace Get/SetAuthorityGeneration RPCs outside auth-v2, with deployment-authority statements and pending completion hints. |
 | `2` (WP-1.28c) | draft | §7.9 states the client rule for stale listings: a listed branch whose packmap and head are both strongly absent is skipped without a tracking ref; a present head with no packmap and any transport error stay failures. |

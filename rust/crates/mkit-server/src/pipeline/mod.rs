@@ -260,6 +260,8 @@ struct ReadAuth {
 pub struct PipelineConfig {
     /// How requests map to a repository (M0: `Single`).
     pub addressing: Addressing,
+    /// Namespace trust model; self-certifying by default.
+    pub namespace_mode: crate::namespace::NamespaceMode,
     /// How metadata partitions are routed.
     pub sharding: Sharding,
     /// How requests authenticate.
@@ -389,6 +391,7 @@ impl PipelineConfig {
             authorizer_role: AuthorizerRole::Check,
             list_repos_authority_full: false,
             addressing,
+            namespace_mode: crate::namespace::NamespaceMode::SelfCertifying,
             sharding: Sharding::Single,
             auth,
             grants: None,
@@ -424,6 +427,45 @@ impl PipelineConfig {
             #[cfg(feature = "http-objects")]
             http_objects: None,
         }
+    }
+
+    /// Validate the namespace trust model and dedicated authority scopes at startup.
+    /// # Errors
+    /// Inconsistent addressing, hook role, fence, policy, or authority key roles.
+    pub fn validate_namespace_mode(&self) -> Result<(), ServerError> {
+        if self.namespace_mode == crate::namespace::NamespaceMode::Authority
+            && (self.authority_fence.is_none()
+                || self.authorizer_role != AuthorizerRole::Authority
+                || !matches!(&self.addressing, Addressing::Multi(multi) if matches!(multi.namespace_policy, NamespacePolicy::Any { .. })))
+        {
+            return Err(ServerError::invalid_argument(
+                "authority namespace mode requires Multi, an Authority hook, authority fencing and namespace_policy any",
+            ));
+        }
+        if let Some(fence) = &self.authority_fence {
+            fence.validate_mode(self.namespace_mode)?;
+            if self.namespace_mode == crate::namespace::NamespaceMode::Authority
+                && fence
+                    .public_keys()
+                    .any(|key| self.admin_keys.contains(&key))
+            {
+                return Err(ServerError::invalid_argument(
+                    "authority keys must differ from admin and publication keys",
+                ));
+            }
+            if self.namespace_mode == crate::namespace::NamespaceMode::Authority
+                && fence.public_keys().any(|key| {
+                    self.url_tokens.as_ref().is_some_and(|tokens| {
+                        tokens.keys().public_keys().any(|public| public == key)
+                    })
+                })
+            {
+                return Err(ServerError::invalid_argument(
+                    "authority keys must differ from URL-token keys",
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// The namespace policy advertised by `GetServerInfo` (STC §2.1).
@@ -667,6 +709,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }
             cfg.admin_keys.extend_from_slice(publication.public_keys());
         }
+        cfg.validate_namespace_mode()?;
         crate::scanner_retrieval::service::validate_config(&cfg)?;
         if let Some(purge) = &cfg.purge {
             purge.validate().map_err(meta_error)?;
@@ -1107,6 +1150,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     }
 
     fn authenticate_inner(&self, meta: &RequestMeta<'_>) -> Result<Authenticated, ServerError> {
+        if self.cfg.namespace_mode == crate::namespace::NamespaceMode::Authority
+            && (meta.header)("x-write-grant").is_some()
+        {
+            return Err(crate::namespace::owner_statements_refused());
+        }
         let signed = auth::signed_request(&self.cfg.auth, meta);
         // SPEC-WRITE-GRANTS §4.2: a grant header without auth v2 fails on
         // any procedure of every deployment.
@@ -1115,10 +1163,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 "write grant requires auth v2 authorization",
             ));
         }
-        let repo = self
-            .cfg
-            .addressing
-            .resolve((meta.header)("x-repository").as_deref(), signed)?;
+        let repo = self.cfg.addressing.resolve_with_mode(
+            (meta.header)("x-repository").as_deref(),
+            signed,
+            self.cfg.namespace_mode,
+        )?;
         let expected_repository = match (&self.cfg.addressing, &self.cfg.auth) {
             (Addressing::Single { .. }, AuthMode::AuthV2(cfg)) => cfg.repository(),
             _ => &repo.identity,
@@ -1690,6 +1739,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     "repository visibility is not supported by this deployment",
                 ));
             }
+            if self.cfg.namespace_mode == crate::namespace::NamespaceMode::Authority
+                && matches!(req, VisibilityRequest::Statement(_))
+            {
+                return Err(crate::namespace::owner_statements_refused());
+            }
             match (&req, a.auth.is_some()) {
                 (VisibilityRequest::Statement(_), true) => {
                     return Err(ServerError::invalid_argument(
@@ -1704,11 +1758,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 _ => {}
             }
             let repo = &a.repo().repo;
-            let namespace = Namespace::parse(repo.namespace.as_str())
+            let namespace = self.cfg.namespace_mode.namespace(repo.namespace.as_str())
                 .map_err(|_| internal("invalid resolved Multi namespace"))?;
             if let Addressing::Multi(multi) = &self.cfg.addressing
                 && let NamespacePolicy::Allowlist(allowed) = &multi.namespace_policy
-                && !allowed.contains(&namespace)
+                && !matches!(&namespace, crate::namespace::Namespace::SelfCertifying(ns) if allowed.contains(ns))
             {
                 return Err(ServerError::permission_denied("namespace not served"));
             }
@@ -1924,10 +1978,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         &self,
         op: &Operation,
     ) -> Result<AuthzFacts, ServerError> {
-        let owner = matches!(
-            Namespace::parse(op.repo.namespace.as_str()),
-            Ok(Namespace::Ed25519(key)) if op.principal.ed25519() == Some(&key)
-        );
+        let owner = self.namespace_owner(&op.repo, &op.principal);
         if self.cfg.authorizer_role == AuthorizerRole::Check && !owner {
             return Err(ServerError::permission_denied(
                 "SetRepoVisibility not permitted",
@@ -2866,9 +2917,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     .and_then(|g| read_policy::check_grant(g, header.expose(), op))
             });
         let signed = op.auth.is_some();
-        let owner = op.write_grant.is_none()
-            && matches!(Namespace::parse(op.repo.namespace.as_str()),
-                Ok(Namespace::Ed25519(key)) if op.principal.ed25519() == Some(&key));
+        let owner = op.write_grant.is_none() && self.namespace_owner(&op.repo, &op.principal);
         let Some((private, epoch)) = self
             .read_repo_state(&op.repo, meta, read_cap_message)
             .await?
@@ -3076,8 +3125,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             Principal::BearerHolder => CallerView::Reader,
             principal => {
                 if self.cfg.write_policy == WritePolicy::Open
-                    || matches!(Namespace::parse(op.repo.namespace.as_str()),
-                        Ok(Namespace::Ed25519(key)) if principal.ed25519() == Some(&key))
+                    || self.namespace_owner(&op.repo, principal)
                 {
                     CallerView::Writer
                 } else {
@@ -3470,8 +3518,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
     }
 
+    fn namespace_owner(&self, repo: &RepoId, principal: &Principal) -> bool {
+        self.cfg.namespace_mode == crate::namespace::NamespaceMode::SelfCertifying
+            && matches!(Namespace::parse(repo.namespace.as_str()), Ok(Namespace::Ed25519(key)) if principal.ed25519() == Some(&key))
+    }
+
     fn owner_key_is_admin(&self, namespace: &Namespace) -> bool {
-        matches!(namespace, Namespace::Ed25519(key) if self.cfg.admin_keys.contains(key))
+        self.cfg.namespace_mode == crate::namespace::NamespaceMode::SelfCertifying
+            && matches!(namespace, Namespace::Ed25519(key) if self.cfg.admin_keys.contains(key))
     }
 
     fn require_client_owner_key(&self, namespace: &Namespace) -> Result<(), ServerError> {
@@ -3495,6 +3549,29 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         op: &Operation,
         policy: Option<&NamespacePolicy>,
     ) -> Result<(AuthzFacts, Option<FastForward>), ServerError> {
+        if self.cfg.namespace_mode == crate::namespace::NamespaceMode::Authority {
+            self.cfg
+                .namespace_mode
+                .namespace(op.repo.namespace.as_str())
+                .map_err(|_| internal("invalid resolved authority namespace"))?;
+            if op.write_grant.is_some() {
+                return Err(crate::namespace::owner_statements_refused());
+            }
+            let mut authorized = op.clone();
+            authorized.authz = AuthzFacts {
+                caller_view: CallerView::Reader,
+                ..AuthzFacts::default()
+            };
+            let returned = self
+                .hooks
+                .authorizer()
+                .authorize(&authorized)
+                .await
+                .map_err(ServerError::strip_admission_shape)?;
+            self.merge_authority_facts(&mut authorized.authz, &returned)?;
+            authorized.authz.caller_view = CallerView::Writer;
+            return Ok((authorized.authz, None));
+        }
         let namespace = Namespace::parse(op.repo.namespace.as_str())
             .map_err(|_| internal("invalid resolved owner-policy namespace"))?;
         if op.write_grant.is_some() {

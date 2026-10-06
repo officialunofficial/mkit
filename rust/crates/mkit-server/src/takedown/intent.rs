@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};
 use std::{collections::BTreeSet, sync::Arc};
 const CALLS: u32 = 4_000;
-fn invalid() -> ServerError {
+pub(super) fn invalid() -> ServerError {
     ServerError::invalid_argument("invalid takedown request")
 }
 fn unavailable() -> ServerError {
@@ -66,9 +66,9 @@ pub(super) fn repository(s: &str) -> Result<RepoId, ServerError> {
     let namespace = if ns == "root" {
         NamespaceKey::deployment_default()
     } else {
-        NamespaceKey::from_namespace(
-            &mkit_core::repo_identity::Namespace::parse(ns).map_err(|_| invalid())?,
-        )
+        crate::namespace::Namespace::parse_stored(ns)
+            .map_err(|_| invalid())?
+            .key()
     };
     Ok(RepoId {
         namespace,
@@ -166,6 +166,7 @@ pub struct Service<N> {
     root: Partition,
     shards: Arc<dyn ShardMap>,
     purge: Option<crate::purge::PurgeConfig>,
+    namespace_mode: crate::namespace::NamespaceMode,
 }
 impl<N> std::fmt::Debug for Service<N> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -182,8 +183,16 @@ impl<N: NamespaceStore + Clone> Service<N> {
             root,
             shards,
             purge: None,
+            namespace_mode: crate::namespace::NamespaceMode::SelfCertifying,
         }
     }
+    /// Select the deployment grammar for incoming operator repository selectors.
+    #[must_use]
+    pub fn with_namespace_mode(mut self, mode: crate::namespace::NamespaceMode) -> Self {
+        self.namespace_mode = mode;
+        self
+    }
+
     /// Attach configured automatic cache invalidation for accepted actions.
     #[must_use]
     pub fn with_purge(mut self, purge: Option<crate::purge::PurgeConfig>) -> Self {
@@ -395,6 +404,9 @@ impl<N: NamespaceStore + Clone> AdminOperations for Service<N> {
                 return Err(invalid());
             }
             let request = Request::parse(input)?;
+            self.namespace_mode
+                .admin_repository(&request.repository)
+                .map_err(|_| invalid())?;
             let id = hash(
                 &[
                     b"mkit-takedown:v1\0".as_slice(),

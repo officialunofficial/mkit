@@ -3,8 +3,6 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use mkit_core::repo_identity::Namespace;
-
 use super::{
     AuthMode, Authenticated, CallerView, HookSet, OpKind, Pipeline, RequestMeta, read_policy,
 };
@@ -122,9 +120,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     error
                 }
             })?;
-        let owner = Namespace::parse(repo.namespace.as_str()).is_ok_and(
-            |n| matches!(n, Namespace::Ed25519(key) if a.principal.ed25519() == Some(&key)),
-        );
+        let owner = self.namespace_owner(repo, &a.principal);
+        let authority = self.cfg.namespace_mode == crate::namespace::NamespaceMode::Authority;
         let grant = self.visibility_gates_reads()
             && auth.facts.grant.is_some()
             && op
@@ -133,7 +130,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .zip(self.cfg.grants.as_ref())
                 .and_then(|(h, c)| read_policy::check_grant(c, h.expose(), op))
                 .is_some_and(|g| g.write);
-        if auth.facts.caller_view != CallerView::Writer || !(owner || grant) {
+        if auth.facts.caller_view != CallerView::Writer || !(owner || grant || authority) {
+            if authority {
+                return Err(ServerError::repository_not_found());
+            }
             return Err(ServerError::permission_denied("writer authority required"));
         }
         Ok(())

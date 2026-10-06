@@ -154,6 +154,22 @@ impl Addressing {
         x_repository: Option<&str>,
         signed: bool,
     ) -> Result<ResolvedRepo, ServerError> {
+        self.resolve_with_mode(
+            x_repository,
+            signed,
+            crate::namespace::NamespaceMode::SelfCertifying,
+        )
+    }
+
+    /// Resolve using the deployment namespace mode. Single remains self-certifying.
+    /// # Errors
+    /// The same errors as [`Self::resolve`], including wrong-mode namespaces.
+    pub fn resolve_with_mode(
+        &self,
+        x_repository: Option<&str>,
+        signed: bool,
+        mode: crate::namespace::NamespaceMode,
+    ) -> Result<ResolvedRepo, ServerError> {
         let header = x_repository.filter(|s| !s.is_empty());
         let invalid = || ServerError::invalid_argument("invalid X-Repository");
         match self {
@@ -183,11 +199,12 @@ impl Addressing {
             }
             Self::Multi(_) => {
                 let header = header.ok_or_else(invalid)?;
-                let identity = RepositoryIdentity::parse(header).map_err(|_| invalid())?;
+                let identity = crate::namespace::RepositoryIdentity::parse(header, mode, false)
+                    .map_err(|_| invalid())?;
                 let namespace = identity.namespace().ok_or_else(invalid)?;
                 Ok(ResolvedRepo {
                     repo: RepoId {
-                        namespace: NamespaceKey::from_namespace(namespace),
+                        namespace: namespace.key(),
                         name: RepoName::new(identity.name())?,
                     },
                     identity: header.to_owned(),

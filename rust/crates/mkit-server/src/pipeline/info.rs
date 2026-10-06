@@ -117,9 +117,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .receipt_publication
                 .as_ref()
                 .map_or_else(String::new, |keys| keys.key_id.clone()),
-            grant_schemes: self.cfg.grants.as_ref().map_or_else(Vec::new, |grants| {
-                grants.schemes().tokens().map(str::to_owned).collect()
-            }),
+            grant_schemes: if self.cfg.namespace_mode == crate::namespace::NamespaceMode::Authority
+            {
+                Vec::new()
+            } else {
+                self.cfg.grants.as_ref().map_or_else(Vec::new, |grants| {
+                    grants.schemes().tokens().map(str::to_owned).collect()
+                })
+            },
             namespace_policy: self.cfg.advertised_namespace_policy(),
             index_fanout: u32::from(INDEX_FANOUT),
             max_delta_chain_depth: self

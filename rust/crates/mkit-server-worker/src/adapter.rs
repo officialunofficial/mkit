@@ -198,6 +198,8 @@ pub struct WorkerConfig {
     pub scanner_retrieval: Option<Arc<mkit_server::scanner_retrieval::RetrievalConfig>>,
     /// Optional dedicated deployment-authority keys (`AUTHORITY_FENCE`, `AUTHORITY_KEYS`).
     pub authority_fence: Option<mkit_server::authority::AuthorityFence>,
+    /// `NAMESPACE_MODE`: self-certifying by default, or authority-owned names.
+    pub namespace_mode: mkit_server::namespace::NamespaceMode,
     /// `AUTH_AUDIENCE`: the canonical origin writes are signed for.
     pub audience: String,
     /// `AUTH_REPOSITORY`: the repository identity writes are signed for.
@@ -343,6 +345,7 @@ impl WorkerConfig {
         config.default_repo_visibility = self.default_repo_visibility;
         config.ticket_keys.clone_from(&self.ticket_keys);
         config.authority_fence.clone_from(&self.authority_fence);
+        config.namespace_mode = self.namespace_mode;
         config.scanner_retrieval.clone_from(&self.scanner_retrieval);
         config.admin_keys = self
             .admin
@@ -397,6 +400,9 @@ impl WorkerConfig {
                 config.ticket_ttl_ms = ttl;
             }
         }
+        config
+            .validate_namespace_mode()
+            .map_err(|error| bad(&error))?;
         mkit_server::scanner_retrieval::validate_config(&config).map_err(|error| bad(&error))?;
         Ok(config)
     }
@@ -557,6 +563,12 @@ impl WorkerConfig {
         custom_purge: Option<crate::embedding::PurgeHooks>,
         supplied_hooks: crate::embedding::HookCapabilities,
     ) -> Result<Self, ConfigError> {
+        let namespace_mode = mkit_server::namespace::NamespaceMode::parse(
+            var("NAMESPACE_MODE")
+                .as_deref()
+                .unwrap_or("self_certifying"),
+        )
+        .map_err(|e| ConfigError(e.into()))?;
         let indexed_requested = var(INDEXED_MODE_VAR).is_some_and(|value| {
             !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
         });
@@ -678,7 +690,8 @@ impl WorkerConfig {
                     h.authorizer_role
                 })
         });
-        let authority_fence = resolve_authority_fence(&var, multi, authorizer_role)?;
+        let authority_fence =
+            resolve_authority_fence(&var, multi, authorizer_role, namespace_mode)?;
         if let Some(fence) = &authority_fence
             && fence.public_keys().any(|key| {
                 ticket_keys
@@ -742,6 +755,7 @@ impl WorkerConfig {
             admin,
             scanner_retrieval,
             authority_fence,
+            namespace_mode,
             indexed,
             sharding,
             placement,
@@ -770,7 +784,9 @@ impl WorkerConfig {
             test_ticket_ttl_ms: test_ticket_ttl(&var)?,
         };
         crate::launch::validate(&mut cfg, &var)?;
-        if cfg.scanner_retrieval.is_some() {
+        if cfg.scanner_retrieval.is_some()
+            || cfg.namespace_mode == mkit_server::namespace::NamespaceMode::Authority
+        {
             cfg.pipeline_config()?;
         }
         Ok(cfg)
@@ -885,6 +901,7 @@ fn resolve_authority_fence(
     var: &impl Fn(&str) -> Option<String>,
     multi: bool,
     authorizer_role: mkit_server::policy::AuthorizerRole,
+    namespace_mode: mkit_server::namespace::NamespaceMode,
 ) -> Result<Option<mkit_server::authority::AuthorityFence>, ConfigError> {
     let enabled = match var("AUTHORITY_FENCE").as_deref() {
         None | Some("false") => false,
@@ -899,7 +916,7 @@ fn resolve_authority_fence(
     }
     let authority_fence = keys
         .map(|keys| {
-            mkit_server::authority::AuthorityFence::parse(&keys)
+            mkit_server::authority::AuthorityFence::parse_with_mode(&keys, namespace_mode)
                 .map_err(|_| ConfigError("AUTHORITY_KEYS is invalid".into()))
         })
         .transpose()?;
@@ -3444,6 +3461,63 @@ mod tests {
                 1
             );
         });
+    }
+
+    #[test]
+    fn namespace_mode_is_default_off_and_requires_the_authority_prerequisites() {
+        let key = "deployment ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c *";
+        let base = [
+            (AUDIENCE_VAR, "https://vcs.example"),
+            (ADDRESSING_VAR, "multi"),
+            (NAMESPACE_POLICY_VAR, "any"),
+            (UNSAFE_OPEN_NAMESPACES_VAR, "true"),
+            (
+                TICKET_KEYS_VAR,
+                "ticket 0909090909090909090909090909090909090909090909090909090909090909",
+            ),
+            ("HOOK_ROLES", "authorize"),
+            ("AUTHORIZER_ROLE", "authority"),
+        ];
+        assert_eq!(
+            WorkerConfig::from_vars(vars(&base)).unwrap().namespace_mode,
+            mkit_server::namespace::NamespaceMode::SelfCertifying
+        );
+        let mut pairs = base.to_vec();
+        pairs.extend([
+            ("NAMESPACE_MODE", "authority"),
+            ("AUTHORITY_FENCE", "true"),
+            ("AUTHORITY_KEYS", key),
+        ]);
+        let cfg = WorkerConfig::from_vars(vars(&pairs)).unwrap();
+        assert_eq!(
+            cfg.pipeline_config().unwrap().namespace_mode,
+            mkit_server::namespace::NamespaceMode::Authority
+        );
+        for field in ["AUTHORITY_FENCE", "AUTHORITY_KEYS", "AUTHORIZER_ROLE"] {
+            let missing = pairs
+                .iter()
+                .copied()
+                .filter(|(name, _)| *name != field)
+                .collect::<Vec<_>>();
+            assert!(WorkerConfig::from_vars(vars(&missing)).is_err(), "{field}");
+        }
+        let mut cfg = cfg;
+        cfg.addressing = mkit_server::Addressing::Multi(mkit_server::MultiAddressing::new());
+        assert!(cfg.validate().is_err());
+        let wrong = pairs
+            .iter()
+            .map(|(name, value)| {
+                (
+                    *name,
+                    if *name == "NAMESPACE_MODE" {
+                        "self_certifying"
+                    } else {
+                        value
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(WorkerConfig::from_vars(vars(&wrong)).is_err());
     }
 
     #[test]

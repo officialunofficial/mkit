@@ -283,8 +283,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
         let owner = a.auth.is_some()
             && a.write_grant.is_none()
-            && matches!(mkit_core::repo_identity::Namespace::parse(namespace),
-                Ok(mkit_core::repo_identity::Namespace::Ed25519(key)) if a.principal.ed25519() == Some(&key));
+            && self.namespace_owner(&op.repo, &a.principal);
         let mut full = owner;
         let authority = self.cfg.authorizer_role == AuthorizerRole::Authority;
         if !authority || (a.auth.is_some() && a.write_grant.is_none()) {

@@ -4,6 +4,7 @@ use super::{
     AuthMode, HookSet, Pipeline, meta_error, ms,
     revocation::{RevokeBudget, RevokeProgress},
 };
+use crate::namespace::Namespace;
 use crate::{
     authority::FenceKind,
     error::ServerError,
@@ -12,7 +13,6 @@ use crate::{
     store::{MultipartBlobStore, NamespaceStore, codec, keys},
 };
 use mkit_attest::grant::EpochTransition;
-use mkit_core::repo_identity::Namespace;
 
 impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     pub(super) async fn stored_authority_generation(
@@ -180,11 +180,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         if self.cfg.authority_fence.is_none() {
             return Err(ServerError::unimplemented("authority fencing is disabled"));
         }
-        let ns = Namespace::parse(namespace)
+        let ns = self
+            .cfg
+            .namespace_mode
+            .namespace(namespace)
             .map_err(|_| ServerError::invalid_argument("invalid namespace"))?;
         self.authority_namespace(&ns).await?;
-        self.stored_authority_generation(&NamespaceKey::from_namespace(&ns))
-            .await
+        self.stored_authority_generation(&ns.key()).await
     }
 
     async fn authority_namespace(&self, ns: &Namespace) -> Result<(), ServerError> {
@@ -194,9 +196,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             ));
         };
         match &multi.namespace_policy {
-            NamespacePolicy::Allowlist(allowed) if allowed.contains(ns) => Ok(()),
+            NamespacePolicy::Allowlist(allowed) if matches!(ns, Namespace::SelfCertifying(owner) if allowed.contains(owner)) => {
+                Ok(())
+            }
             NamespacePolicy::Any { .. } => {
-                let key = NamespaceKey::from_namespace(ns);
+                let key = ns.key();
                 if self
                     .meta
                     .get(&self.shards.coordinator(&key), &keys::namespace_record())
@@ -230,7 +234,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         };
         let statement = fence.verify(wire, auth.audience(), self.clock.now_ms())?;
         self.authority_namespace(&statement.namespace).await?;
-        let ns = NamespaceKey::from_namespace(&statement.namespace);
+        let ns = statement.namespace.key();
         if self
             .transition_fence(&ns, statement.generation, FenceKind::Authority)
             .await?

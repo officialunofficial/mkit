@@ -153,13 +153,13 @@ impl Request {
                 .rsplit_once('/')
                 .ok_or_else(|| invalid("invalid purge repository"))?;
             if ns != "root" {
-                mkit_core::repo_identity::Namespace::parse(ns)
+                crate::namespace::Namespace::parse_stored(ns)
                     .map_err(|_| invalid("invalid purge namespace"))?;
             }
             mkit_core::repo_identity::validate_name(repo)
                 .map_err(|_| invalid("invalid purge repository"))?;
         } else if self.namespace != "root" {
-            mkit_core::repo_identity::Namespace::parse(&self.namespace)
+            crate::namespace::Namespace::parse_stored(&self.namespace)
                 .map_err(|_| invalid("invalid purge namespace"))?;
         }
         for path in &self.url_paths {

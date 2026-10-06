@@ -913,6 +913,16 @@ impl<S: NamespaceStore> Engine<S> {
         request
             .validate()
             .map_err(|_| auth::invalid("invalid purge selectors"))?;
+        let grammar = if request.repository.is_empty() {
+            self.config
+                .namespace_mode
+                .admin_namespace(&request.namespace)
+        } else {
+            self.config
+                .namespace_mode
+                .admin_repository(&request.repository)
+        };
+        grammar.map_err(|_| auth::invalid("invalid purge selectors"))?;
         let mut prepared = super::Prepared {
             batch: Batch::new(),
             response: Response::json(&json!({"purgeId":id})),

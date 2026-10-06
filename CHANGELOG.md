@@ -29,6 +29,15 @@ collect the applicable entries between their old and new immutable pins.
   embedding guide now covers optional 45-ID batches, bounded path/history
   helpers, and scoped first-parent continuations.
 
+- Opt-in server `namespace_mode = authority` and Worker `NAMESPACE_MODE=authority`
+  accept opaque lowercase namespace names, including UUIDv7 names. Startup
+  requires Multi addressing, an Authority hook, authority fencing, and `any`.
+  The deployment supplies ownership; owner grants, grant epochs, and visibility
+  statements are refused. Dedicated authority keys can use `*` scopes. Hook
+  writer allowances enable storage counters and owner-view object reads and URL
+  issuance. `mkit_server::CallerView` is public for in-process authorizers.
+  Default self-certifying deployments and the mkit CLI retain their behavior.
+
 - Server readers add `walk_history_page_in` for retryable, scoped first-parent
   history continuations. Dedicated MAC keys bind the repository/view, verified
   credential scope, strict ref/publication fence, live security boundaries and
@@ -298,6 +307,20 @@ collect the applicable entries between their old and new immutable pins.
   URL-token reads, supplied hooks, cold outcome retry and injected slice recovery.
 
 ### Breaking (toward 0.6)
+
+- [embedder: breaking API] `AuthorityKey.namespaces` becomes `scope: AuthorityScope`.
+  Migration: wrap exact names in `AuthorityScope::Exact`, parsing each with the
+  deployment's `NamespaceMode::namespace`, and use `AuthorityScope::Any` only
+  in authority mode. `AuthorityFence::new` and `parse` keep the default mode;
+  use `new_with_mode` or `parse_with_mode` for authority-owned deployments.
+- [embedder: breaking API] `AuthorityStatement.namespace` and HTTP
+  `ParsedUrl.repository` use the server's mode-aware `namespace` types.
+  Migration: use namespace `key()` for storage routing and identity `name()`,
+  `namespace()`, and `Display` for selectors. Use `route::parse_with_mode` for
+  authority routes; `route::parse` retains the default grammar. The core
+  self-certifying namespace and identity types remain unchanged. These API
+  changes add no stored format or reset requirement; pre-production stores may
+  be reset when changing deployment trust models.
 
 - [embedder: breaking API] On wasm, `connect::service` returns `connect::ConnectService`, a protected
   Tower service, instead of raw `connectrpc::ConnectRpcService`. Use the new

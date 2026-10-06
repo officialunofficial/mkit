@@ -385,7 +385,8 @@ one of these two roles:
 - **`authority`:** the hook is the deployment-defined authority source
   of STC §7.5 rule 3. The built-in namespace policy (`allowlist`/`any`)
   MUST be evaluated first; a hook Allow MUST NOT override its denial.
-  Rules 1–2 (owner key and grant) MUST be evaluated before the hook.
+  In self-certifying mode, rules 1–2 (owner key and grant) MUST be evaluated before the hook.
+  Authority namespace mode instead follows §6.2.2.
   If either authorizes, the hook MUST still be called and MAY deny.
 - **`check`:** the built-in namespace and write policy MUST run first.
   The hook can only deny further; it MUST NOT authorize a write the
@@ -601,6 +602,64 @@ cursor load/save and final validation; it does not require a Paid Worker plan.
 The authority service must stop delegate authorization, persist its target,
 complete this barrier, then acknowledge revocation. Re-enrolling an identical
 key requires fresh keys or incarnation/operation binding in that service.
+
+### 6.2.2 Opt-in authority-owned namespaces
+
+A deployment MAY configure `namespace_mode = authority`. The default is
+`self_certifying`, which retains STC §7.4's owner-key and owner-address grammar
+and authorization rules. Authority mode MUST require Multi addressing,
+`AuthorizerRole::Authority`, the §6.2.1 authority-generation fence, and
+`namespace_policy = any`. Startup MUST refuse any inconsistent combination;
+the fence's auth-v2, transactional storage, and non-open hook prerequisites
+still apply. Namespace mode is a deployment setting, never a request header.
+
+Authority namespaces are opaque ASCII names of 1–72 bytes, matching
+`[a-z0-9][a-z0-9._-]*`. The server MUST reject `root` and every name beginning
+with `ed25519-` or `0x`, including otherwise valid self-certifying identities.
+This accepts lowercase UUIDv7 names with dashes. A self-certifying deployment
+MUST reject these opaque names at repository request and HTTP route boundaries.
+Repository names and the maximum 173-byte identity length remain unchanged.
+The CLI and owner-statement codecs retain their self-certifying grammar.
+
+The deployment is the trust root. Ownership cannot be verified from the name
+alone. Only the Authority hook authorizes writes or assigns the caller's writer
+view. The server MUST NOT derive an owner key from an opaque name. Authorize
+and Admit MUST receive `owner = false` and no grant; hook-returned owner/grant
+claims MUST NOT manufacture either fact. The authority-generation allowance
+still supplies the independent guarded write fence.
+
+Owner-signed grants, grant-epoch operations, and visibility statements MUST be
+refused with `permission_denied` and the uniform message
+`owner statements are not supported in authority namespace mode` before owner
+verification or repository-state access. This includes presented grant headers
+on reads. `GetServerInfo.grant_schemes` MUST be empty in this mode. Signed
+visibility envelopes continue to use Authority-hook authorization. URL-token,
+admin, publication, and commit signatures retain their separate trust roles;
+none provides ownership of an opaque namespace.
+
+Dedicated authority keys MAY use exact opaque namespace scopes or `*` in
+authority mode. A wildcard authorizes generation statements for every served
+namespace; it grants no client write or read permission and bypasses no
+namespace registration, statement audience, lifetime, signature, generation-step,
+or lease-barrier check. Wildcards MUST be refused in self-certifying mode.
+The 16-key bound and 1,024-namespace exact-scope bound remain. Authority keys
+MUST remain separate from owner, hook, ticket, URL-token, admin, publication,
+scanner, and history-token keys wherever those roles are configured.
+
+In authority mode, a signed auth-v2 ListRefs envelope with Authority-hook
+`caller_view = Writer` MUST satisfy the writer authority required by
+`repo_storage`, `repo_storage_many`, `ReaderView::Owner` object reads, and
+owner-view `issue_urls`. A reader allowance alone MUST NOT satisfy it.
+Unauthorized principals receive the same repository-absence response for
+existing and missing repositories; batched counters return `None` for both.
+The ordinary publication, reachability, visibility, and denial checks remain.
+Namespace-wide private listing still requires the explicit
+`list_repos_authority_full` opt-in and a namespace-scoped hook writer allowance.
+
+Under `namespace_policy = any`, namespace discovery is not exhaustive.
+Authority deployments MUST NOT claim complete deployment-wide takedown from
+the namespace names or the available catalog. Embedders own account models,
+keyrings, commit-signer policy, and any trusted landing-time storage.
 
 ### 6.3 Admit
 
@@ -4353,6 +4412,7 @@ client-visible error contract.
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | Opt-in authority-owned namespace grammar and trust model (§6.2.2), wildcard generation-key scopes, refused owner statements, and hook writer authority for owner-view operations. Default self-certifying deployments retain their behavior. |
 | 1 | draft | Document retained local Workers wire connection-loss diagnostics (§18); no conformance, runtime or wire change. |
 | 1 | draft | Bounded request-local reader graph proofs (§10.1): captured roots, fixed scope/expiry, decoded local edges and live security checks. No persisted cache, stored-row or wire change. |
 | 1 | draft | Exact per-repository stored-bytes accounting (§6.5.1): a per-repository counter and counted-pack markers in the coordinator, counted exactly once per pack under D34 by the coordinator's relay hook; additive `Outcome.repo_storage_changed` (field 11) carrying the absolute total and a monotonic version; admission `new_to_repo_bytes` observes whether the pack is already counted. `Committed.new_to_repo` is documented as an observation. New stored rows `rb` and `rn`, and a new terminal reservation row state; no existing row changes. |
