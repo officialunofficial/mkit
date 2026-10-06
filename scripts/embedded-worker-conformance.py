@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Release embedding example on pinned local workerd; never contacts a cloud account."""
+import http.client
 import argparse
 import hashlib
 import json
@@ -46,7 +47,7 @@ def wait_ready(url, process, timeout=120, body=b"{}"):
             raise RuntimeError("local wrangler exited before readiness")
         try:
             return request_json(url, body)
-        except (urllib.error.URLError, TimeoutError):
+        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException):
             time.sleep(0.25)
     raise RuntimeError("local wrangler did not become ready")
 

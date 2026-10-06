@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Local B3 counters around an ordinary release Worker; no full-matrix claim."""
+import http.client
 import argparse
 import datetime
 import importlib.util
@@ -191,7 +192,7 @@ def fixture(namespace, port, run, artifact, runner, env, evidence):
                         "/mkit.transport.v1.TransportService/GetServerInfo", b"{}")
                     if status == 200:
                         break
-                except (urllib.error.URLError, TimeoutError):
+                except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException):
                     pass
                 check(time.monotonic() < deadline, "release startup timed out")
                 time.sleep(0.25)

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise artifact selection using recovered, terminal and clean wire logs."""
 # SPDX-License-Identifier: MIT OR Apache-2.0
+import http.client
 import importlib.util
 import json
 from pathlib import Path
@@ -8,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.dont_write_bytecode = True
 
@@ -15,6 +17,46 @@ SCRIPT = Path(__file__).with_name("workers-wire-diagnostics.py")
 SPEC = importlib.util.spec_from_file_location("diagnostics", SCRIPT)
 diagnostics = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(diagnostics)
+
+
+CONFORMANCE = SCRIPT.with_name("embedded-worker-conformance.py")
+CONF_SPEC = importlib.util.spec_from_file_location("embedded_conformance", CONFORMANCE)
+conformance = importlib.util.module_from_spec(CONF_SPEC)
+CONF_SPEC.loader.exec_module(conformance)
+
+
+class ReadinessProbe(unittest.TestCase):
+    class Alive:
+        def poll(self):
+            return None
+
+    def run_probe(self, first):
+        calls = []
+
+        def fake(url, body=None):
+            calls.append(url)
+            if len(calls) == 1:
+                raise first
+            return {"ok": True}
+
+        original = conformance.request_json
+        conformance.request_json = fake
+        try:
+            with mock.patch.object(conformance.time, "sleep"):
+                result = conformance.wait_ready("http://probe", self.Alive(), timeout=5)
+        finally:
+            conformance.request_json = original
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(len(calls), 2)
+
+    def test_retries_connection_reset(self):
+        self.run_probe(ConnectionResetError(104, "Connection reset by peer"))
+
+    def test_retries_remote_disconnected(self):
+        self.run_probe(http.client.RemoteDisconnected("closed"))
+
+    def test_retries_garbled_status_line(self):
+        self.run_probe(http.client.BadStatusLine("garbage"))
 
 
 class WireDiagnostics(unittest.TestCase):
