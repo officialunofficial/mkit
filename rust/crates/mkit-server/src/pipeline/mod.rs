@@ -1150,13 +1150,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 "scanner key cannot authenticate client calls",
             ));
         }
-        // Credentials are captured for admission, which only signed writes
-        // reach: signed reads and `SetRepoVisibility` never run it (§9.1).
-        if matches!(self.cfg.auth, AuthMode::AuthV2(_))
-            && a.auth.is_some()
-            && meta.procedure.is_write()
-            && meta.procedure != Procedure::SetRepoVisibility
-        {
+        // Capture stable credential scope for signed reads as well as writes.
+        // Validation still runs only at admission; reads and visibility statements
+        // do not run admission (§9.1).
+        if matches!(self.cfg.auth, AuthMode::AuthV2(_)) && a.auth.is_some() {
             a.credential_capture =
                 admission::capture_credentials(meta, &self.cfg.admission_credential_headers);
         }

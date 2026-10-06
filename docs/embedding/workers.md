@@ -50,9 +50,12 @@ dimensions and the outer `budget.used()` as host metrics before returning an
 error or success. Encoded reservations include failed I/O; duplicate canonical
 outputs count separately; metadata emits no canonical output bytes.
 
-Each call accepts at most `OBJECT_READER_BATCH` (**16**) IDs, preserving order
-and duplicates. Each call also has `OBJECT_READER_CALLS` (**8,500**) core call
-units and HTTP decode/denial caps. Default `ReadLimits` aggregate 8,500 calls,
+Canonical and metadata calls accept at most `OBJECT_READER_BATCH` (**16**) IDs
+by default, preserving order and duplicates. Opt into batches of up to **45**
+with `ObjectReader::with_batch_limit`; this changes no storage, byte, decode,
+output, or denial allowance. URL issuance still accepts at most **16** targets.
+Reader operations retain `OBJECT_READER_CALLS` (**8,500**) core call units and
+HTTP decode/denial caps. Default `ReadLimits` aggregate 8,500 calls,
 256 MiB decoded and 256 MiB output bytes, with no additional encoded-byte cap;
 choose explicit tighter limits for the host. Ranged blob reads cost two units.
 These units are conservative internal allowances, not exact platform subrequests
@@ -79,16 +82,51 @@ an earlier absolute Unix-ms deadline using the pipeline clock. Public
 unprovable objects remain absent; authenticated owner exhaustion is typed
 `ResourceExhausted`. Do not convert storage failure into successful absence.
 
-Read parents before children: prefetch a commit, its root tree, then selected
-subtrees, manifests and chunks in batches of up to 16. Fetch metadata only when
-you need kind, canonical length or logical file length; a canonical read already
-gives bytes. ChunkedBlob canonical bytes are the manifest, not the complete file.
-For deep paths, `mkit_core::verify::build_disclosure_from` selects a path over a
-synchronous ObjectSource; prefetch the needed ancestors into `MemorySource`
-first. There is no async ObjectReader path helper or server tree/diff cursor. The host owns bounded
-traversal stacks, ordering, filters, page tokens and durable pagination state.
-See [object format](../specs/SPEC-OBJECTS.md) and
-[published membership](../specs/SPEC-SERVER.md#103-every-reader-surface-uses-the-published-view).
+For general-ID reads, read parents before children: prefetch a commit, its root
+tree, then selected subtrees, manifests, and chunks within the reader's batch
+limit. Fetch metadata only when you need kind, canonical length, or logical file
+length; a canonical read already gives bytes. ChunkedBlob canonical bytes are
+the manifest, not the complete file.
+
+For a selected ref, use `walk_history_in` for bounded parent discovery,
+`locate_commit_in` for one commit, and `read_commit_path_in` for an exact decoded
+path at a proved commit. `HistoryOptions.mode` explicitly selects
+`HistoryMode::FirstParent` or `HistoryMode::AllParents`; all-parent traversal
+uses breadth-first decoded parent order with duplicate suppression. Visit,
+frontier, tag-peeling, and path-depth bounds prevent unbounded traversal.
+These helpers capture a fresh selected ref per operation without refunding the
+session ledger or extending its deadline. Optional path witnesses supply commit
+and ancestor-tree bytes for local inclusion proofs; they grant no authority.
+See the [selected-ref reader contract](../specs/SPEC-SERVER.md#101-callers-view)
+and [object format](../specs/SPEC-OBJECTS.md).
+
+For cross-request first-parent paging, configure `PipelineConfig.history_tokens`
+with a dedicated `HistoryTokenConfig` secret, backend realm, and TTL. The Worker
+adapter exposes the optional `HISTORY_TOKEN_KEYS` setting. Use
+`walk_history_page_in` with the previous page's opaque continuation. This API
+has no all-parent DAG frontier. Supply a fresh signed credential envelope for
+an owner request and create a fresh reader and session for every request.
+The stable signer, grant, captured credential headers, and trusted audience must
+match; envelope nonce and timestamps may change. Public requests remain public.
+Successors inherit the original expiry, bounded at issuance by the configured
+TTL, proof lag/deadline, and credential/grant expiry. Live authorization and
+source/denial checks run again on every redemption.
+
+Invalid or expired tokens return uniform absence. Ref/publication changes,
+visibility changes, grant epochs, authority generations, and key replacement
+invalidate continuations; returning a ref to its old hash does not restore them.
+Restart at the selected ref after expiry or a bound scope/state change. Paging
+proofs stay confined to each operation, and failed work retains its charges.
+See the [continuation contract](../specs/SPEC-SERVER.md#authenticated-history-continuations)
+for configuration, validation, and invalidation details, and
+[history paging measurements](../operations/history-paging.md) for bounded
+fixture measurements and their limits.
+
+The host owns filtering, ordering beyond these history modes, general tree/diff
+traversal, and unrelated application pagination or durable pagination state.
+For synchronous local disclosure construction,
+`mkit_core::verify::build_disclosure_from` selects a path over an `ObjectSource`;
+you can prefetch ancestors into `MemorySource`.
 
 ## Durable writes, retries and deadlines
 

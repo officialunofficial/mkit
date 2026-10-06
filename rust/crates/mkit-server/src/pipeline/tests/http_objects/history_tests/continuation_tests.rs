@@ -1,3 +1,4 @@
+mod credential_tests;
 use super::*;
 use crate::history_token::HistoryTokenConfig;
 use crate::pipeline::HistoryContinuation;
