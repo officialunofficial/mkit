@@ -1706,7 +1706,8 @@ Structural evidence does not cache authorization, visibility, grant epochs,
 member availability or takedown clearance. Every batch MUST retain the existing
 live target, pack, dependency and gate checks, including metadata dependency
 checks and uniform absence at proof caps. Writer proofs MUST NOT enter the shared
-published reachability cache. Session proofs MUST NOT survive the request or
+published reachability cache. Except for the authenticated continuation contract
+below, session proofs MUST NOT survive the request or
 broaden URL-token scope; URL issuance keeps its published-view preflight.
 
 Selected-ref reader primitives MAY discover old commits using parent-directed
@@ -1754,6 +1755,83 @@ uniformly absent; owner caps remain typed and storage faults remain unavailable.
 Output allowances MUST be reserved before copying the complete page or path
 result, including any requested witness.
 This additive embedding surface does not alter URL grammar or HTTP serving.
+
+#### Authenticated history continuations
+
+As an explicit exception to request-local structural evidence, a server MAY
+authenticate a selected-ref first-parent cursor across requests. The continuation
+MUST NOT confer permission. `walk_history_page_in` exposes this contract separately
+from the all-parent traversal above; it MUST NOT silently narrow an all-parent log.
+No DAG frontier or duplicate-suppression state is exposed in version 1.
+
+Version 1 is `<base64url(JSON claims)>.<base64url(32-byte MAC)>`, with strict
+unpadded encoding. Claims contain version `1`, purpose
+`mkit-history-continuation:v1`, backend realm, full namespace/repository, selected
+ref, writer/public view, stable verified principal/credential digest, strict
+anchor ID, full authoritative publication record (sequence, published prefix,
+deletion boundary, membership generation and published pair), live security
+digest, issuance time, original absolute expiry, cursor, and ordered stop-sensitive ancestry including the cursor. The credential digest
+includes the trusted auth audience, signer, grant and captured credential headers;
+it excludes envelope nonce, fingerprint and verification time so a fresh signed
+request can continue the same credential scope. The security digest binds the
+repository record, visibility row including change time, monotonic visibility
+revision, grant epoch, authority generation and deployment default visibility.
+A first paging request activates the retained revision before capturing security
+evidence. Once activated, every committed visibility write MUST increment it
+atomically under its observed-value guard, even for a writer that does not issue
+continuations; it MUST NOT reset on deletion/recreation. This
+fences a public/private/public return even within one clock millisecond. Digests frame each component's
+length to avoid concatenation ambiguity.
+
+The MAC is keyed BLAKE3 with a key derived using that exact purpose as its domain.
+The source secret MUST be independent of URL, upload, scanner, hook, receipt,
+authority, admin and client/owner keys. Reuse the deployment secret-management
+pattern of URL tokens: dedicated secret binding/key file, zeroized owned source,
+redacted diagnostics, and explicit key replacement. This MAC is symmetric:
+there are no retained public verification keys. Rotation/retirement immediately
+invalidates outstanding tokens. Deployment realms MUST distinguish backends
+even when their repository names and auth audiences coincide.
+
+MAC, format, expiry and stateless scope checks MUST precede sensitive reads.
+Parsing is bounded to 256 KiB decoded claims and 1,024 ancestry IDs. The server
+MUST authenticate current credentials and recheck visibility, epoch, grants and
+authorizer before importing evidence. It MUST strongly read the selected ref
+and authoritative publication fence, and compare them again at the closing
+boundary. A write-free guarded apply defines the strict-ref validation cut:
+it compares both the original publication record and live ref bytes and
+checks the fixed expiry on the backend clock. It allocates no paging state.
+The server MUST NOT assume that a multi-key read is atomic. Closing
+security/anchor reads MAY reject subsequently observed changes, then live
+object validation MUST be the last asynchronous phase before output.
+Independent stores and hooks do not provide a simultaneous snapshot. Ref
+changes after the validation cut are concurrent with that redemption and
+invalidate later redemption of either the original token or its successor.
+Public anchors use the authoritative published value, not an index projection.
+A missing ledger or partial capture MUST NOT issue or redeem evidence.
+Append, rewind, deletion/recreation, replacement and publication/incarnation
+changes invalidate the continuation even when the ref returns to the same hash.
+Delayed projections MUST NOT reinstate an invalidated continuation.
+
+Successors MUST inherit the original expiry. Initial expiry is bounded by the
+configured token TTL, root-proof lag/deadline and credential/grant expiry.
+Imported proofs MUST be confined to the paging operation and discarded on
+success, failure or cancellation, preserving spent allowances and the original
+request deadline; they MUST NOT authorize a later shared-session operation.
+Expiry reached during redemption MUST also return uniform absence.
+Every returned object retains current membership, actual source, reconstruction
+dependencies, denial and authorizer checks. Custom ancestry descent stops MUST
+be rechecked; neither empty denial results nor permission are carried in claims.
+Invalid scope, MAC, anchor, boundary, expiry, retired key and inaccessible state
+MUST return uniform absence for either view, without probing cursor membership.
+Storage faults and owner resource exhaustion retain their existing classifications.
+
+A caller MAY replay a continuation within its scope and fixed expiry, including
+to retry a lost response. The same token and page parameters serve the same
+canonical page when every live check still permits it. Each redemption MUST
+repeat those checks; a previous success MUST NOT cache authority or denial.
+History continuations allocate no replay or expiry records. Successors retain
+the original expiry, including after replay. A caller restarts at the selected
+ref when the token expires or its bound anchor or authority changes.
 
 ### 10.2 Per-ref clearance and publication
 

@@ -24,6 +24,18 @@ collect the applicable entries between their old and new immutable pins.
   racers follow the documented `aborted` backoff policy with one signed identity;
   exactly-one-winner and final-value assertions remain unchanged.
 
+- Server readers add `walk_history_page_in` for retryable, scoped first-parent
+  history continuations. Dedicated MAC keys bind the repository/view, verified
+  credential scope, strict ref/publication fence, live security boundaries and
+  fixed expiry; each page retains fresh permission, source and denial checks.
+  `PipelineConfig.history_tokens` and the optional Worker `HISTORY_TOKEN_KEYS`
+  setting enable it. Existing reader methods keep their behavior. Visibility
+  writes increment a retained coordinator revision to fence same-clock visibility
+  changes; existing stores need no reset. Replays rerun live checks and allocate no paging state.
+  Temporary paging proofs are discarded even on cancellation. The default
+  paging regression covers a 40-commit history; the full 201/302-commit fixture
+  runs explicitly in the serial slow CI lane with all assertions retained.
+
 - Server readers add `walk_history_in`, `locate_commit_in` and
   `read_commit_path_in` for bounded selected-ref parent discovery and exact
   decoded paths. First-parent and all-parent traversal are explicit; merge

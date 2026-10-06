@@ -264,11 +264,20 @@ test-group = 'heap-bounds'
 # PR quarantined keeps the lane green regardless of what other
 # `#[ignore]`d tests exist.
 #
-default-filter = 'test(/hang_before_stdout_times_out_and_reaps_child|fills_stderr_before_stdout_does_not_deadlock|valid_response_then_never_exits_is_bounded|open_accepts_syntactically_valid_mkit_ssh_url|second_mutating_command_blocks_on_worktree_lock|list_refs_round_trip_over_real_tcp|post_handshake_idle_timeout_drops_silent_peer|wait_child_timeout_kills_stalled_child|list_refs_retries_past_dropped_connection_via_reconnect|ssh_clone_retries_past_a_dropped_first_connection|large_mixed_pack_decodes_under_production_resident_cap|listing_over_32_mib_pages_under_d34/)'
+default-filter = 'test(/hang_before_stdout_times_out_and_reaps_child|fills_stderr_before_stdout_does_not_deadlock|valid_response_then_never_exits_is_bounded|open_accepts_syntactically_valid_mkit_ssh_url|second_mutating_command_blocks_on_worktree_lock|list_refs_round_trip_over_real_tcp|post_handshake_idle_timeout_drops_silent_peer|wait_child_timeout_kills_stalled_child|list_refs_retries_past_dropped_connection_via_reconnect|ssh_clone_retries_past_a_dropped_first_connection|large_mixed_pack_decodes_under_production_resident_cap|listing_over_32_mib_pages_under_d34|continuation_pages_complete_long_changing_histories_without_cursor_walk/)'
 # Run serially so the quarantined tests' real timers/sockets don't
 # contend with each other; only localhost networking is needed, which
 # every CI runner (Linux + macOS) provides.
 test-threads = 1
+
+# Real uploads build 201/302 changing commits, then validate 200 page/latency
+# cases. Alone, the debug test used 13.10s CPU and 14.17s wall; the parallel
+# Cloud Build lane exceeded 60s. Keep every assertion, run it serially here,
+# and retain a bounded ceiling for loaded runners. The default 40-commit
+# case uses the same assertions over four/six pages in every configuration.
+[[profile.ignored-lane.overrides]]
+filter = 'package(mkit-server) and test(=pipeline::tests::http_objects::history_tests::continuation_tests::continuation_pages_complete_long_changing_histories_without_cursor_walk)'
+slow-timeout = { period = "300s", terminate-after = 1 }
 
 # The pack residency regression decodes more than 200 MiB on the wire and
 # verifies all stored objects. Its measured debug run exceeds 30 seconds,

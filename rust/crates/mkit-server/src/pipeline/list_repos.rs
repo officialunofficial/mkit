@@ -144,7 +144,36 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         batch: &mut Batch,
     ) -> Result<(), ServerError> {
         let key = keys::repo_record(&repo.name);
-        let record = self.meta.get(p, &key).await.map_err(meta_error)?;
+        let revision_key = keys::repo_visibility_revision(&repo.name);
+        let rows = self
+            .meta
+            .get_many(p, &[key.clone(), revision_key.clone()])
+            .await
+            .map_err(meta_error)?;
+        let [record, revision]: [Option<Value>; 2] = rows
+            .try_into()
+            .map_err(|_| internal("invalid visibility boundary read"))?;
+        // A writer planned before activation must retry after the fence appears.
+        batch.preconditions.push(super::lease::observed_guard(
+            revision_key.clone(),
+            revision.as_ref(),
+        ));
+        // Once continuation fencing is activated, every writer maintains it,
+        // including pipelines that do not themselves issue history tokens.
+        if self.cfg.history_tokens.is_some() || revision.is_some() {
+            let next_revision = revision
+                .as_ref()
+                .map(codec::decode_u64)
+                .transpose()
+                .map_err(meta_error)?
+                .unwrap_or(0)
+                .checked_add(1)
+                .ok_or_else(|| internal("visibility revision exhausted"))?;
+            batch.writes.push(crate::store::Write::Put(
+                revision_key,
+                codec::encode_u64(next_revision),
+            ));
+        }
         if let Some(value) = &record {
             codec::decode_repo_record(value).map_err(meta_error)?;
         }

@@ -247,6 +247,9 @@ pub struct WorkerConfig {
     /// Feature-gated `URL_TOKEN_KEYS`/`URL_TOKEN_TTL`; no mount is enabled by these vars.
     #[cfg(feature = "http-objects")]
     pub url_tokens: Option<mkit_server::url_token::UrlTokenConfig>,
+    /// Dedicated optional `HISTORY_TOKEN_KEYS` and fixed `HISTORY_TOKEN_TTL`.
+    #[cfg(feature = "http-objects")]
+    pub history_tokens: Option<mkit_server::history_token::HistoryTokenConfig>,
     /// `TEST_QUOTA_OPS`, `TEST_QUOTA_BYTES` and `TEST_QUOTA_WINDOW_MS`,
     /// when all three are set: the write quota instead of the default
     /// (`__test-faults` builds only, for the wire suite's quota and growth
@@ -362,6 +365,7 @@ impl WorkerConfig {
             config.indexed = Some(mount.indexed);
             config.http_objects = Some(mount.http_objects);
             config.url_tokens.clone_from(&self.url_tokens);
+            config.history_tokens.clone_from(&self.history_tokens);
         }
         config.indexed = config.indexed.map(|mut indexed| {
             indexed.max_ancestry_commits = indexed.max_ancestry_commits.min(64);
@@ -634,6 +638,8 @@ impl WorkerConfig {
         )?;
         #[cfg(feature = "http-objects")]
         let url_tokens = crate::http_mount::token_config_for_tickets(&var, ticket_keys.as_ref())?;
+        #[cfg(feature = "http-objects")]
+        let history_tokens = crate::http_mount::history_token_config(&var, &audience)?;
         let admin = crate::admin::parse(&var, &audience, ticket_keys.as_ref())?;
         let hooks = crate::hooks::config::HookVars::parse(&var)?;
         let takedown = crate::admin::takedown(
@@ -754,6 +760,8 @@ impl WorkerConfig {
             http_mount: None,
             #[cfg(feature = "http-objects")]
             url_tokens,
+            #[cfg(feature = "http-objects")]
+            history_tokens,
             #[cfg(feature = "__test-faults")]
             test_quota: test_quota(&var)?,
             #[cfg(feature = "__test-faults")]

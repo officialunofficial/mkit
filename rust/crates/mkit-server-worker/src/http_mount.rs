@@ -96,6 +96,41 @@ pub fn token_config(
     Ok(Some(tokens))
 }
 
+/// Optional history MAC secret, using the deployment URL-token key-file pattern.
+/// # Errors
+/// Invalid key material or fixed TTL (seconds, 1–900), or TTL without keys.
+pub fn history_token_config(
+    var: &impl Fn(&str) -> Option<String>,
+    realm: &str,
+) -> Result<Option<mkit_server::history_token::HistoryTokenConfig>, ConfigError> {
+    let keys = var("HISTORY_TOKEN_KEYS");
+    let ttl = var("HISTORY_TOKEN_TTL");
+    let Some(keys) = keys else {
+        return if ttl.is_some() {
+            Err(ConfigError(
+                "HISTORY_TOKEN_TTL requires HISTORY_TOKEN_KEYS".into(),
+            ))
+        } else {
+            Ok(None)
+        };
+    };
+    let ttl_ms = ttl
+        .map_or(Some(900_000), |v| {
+            v.parse::<u64>()
+                .ok()
+                .filter(|n| n.to_string() == v)
+                .and_then(|n| n.checked_mul(1000))
+        })
+        .ok_or_else(|| ConfigError("HISTORY_TOKEN_TTL is invalid".into()))?;
+    mkit_server::history_token::HistoryTokenConfig::parse_key_file_secret(
+        keys,
+        realm.into(),
+        ttl_ms,
+    )
+    .map(Some)
+    .map_err(|_| ConfigError("HISTORY_TOKEN_KEYS or HISTORY_TOKEN_TTL is invalid".into()))
+}
+
 /// Parse tokens and enforce separation from every accepted ticket secret.
 pub(crate) fn token_config_for_tickets(
     var: &impl Fn(&str) -> Option<String>,
