@@ -56,6 +56,11 @@ refunded, so reconcile it from that outcome. Registration status is
 not confidential (an unsigned `GetAuthorityGeneration` already reveals a
 generation of 1 or more, and a write probe distinguishes unregistered from
 registered at 0); the refusal before your hooks protects their cost, not secrecy.
+To reconcile a lost `SetAuthorityGeneration` reply or a crash, re-sign and
+resend Set for the target generation: it returns that generation again, whether
+the statement is byte-identical or freshly signed. `GetAuthorityGeneration`
+returns 0 for both an unregistered namespace and one registered at 0, so it
+cannot serve as the reconcile check. A resend never rolls a generation back.
 A lost commit acknowledgement or a crash between commit and abort leaves the
 old multipart session to backend sweeps and lifecycle rules.
 
