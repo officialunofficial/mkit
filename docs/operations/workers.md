@@ -102,7 +102,36 @@ scheduled verifier heap regression with only `memory,pack-ruzstd` enabled.
 
 ## Wire connection diagnostics
 
+The hosted wire job connects directly to workerd, bypassing the Wrangler/Miniflare
+HTTP dev proxy. It keeps Wrangler `4.134.0`, its resolved Miniflare/workerd and
+the configured compatibility date. `scripts/workers-wire-runtime.cjs` uses
+Wrangler's config-to-Miniflare translation for the same variables, R2 buckets
+and SQLite Durable Object classes, then exposes the user Worker through
+`unsafeDirectSockets` / `unsafeGetDirectURL`. The release and test-faults
+`worker-build` commands, cold-start concurrency, cases and assertions are unchanged.
+The portable/deadline fixture keeps its entry points and test-only R2 observer;
+its persisted takedown check restarts workerd against the same state directory.
+No production Worker entry or config changes.
+
+The direct fixture sets `MKIT_CONFORMANCE_HTTP_CONNECTION_CLOSE=1` for the raw
+wire client. Each HTTP/1.1 request asks the server to close its connection, avoiding
+idle socket reuse without changing signed headers/bodies, case concurrency,
+assertions or replay limits. Preliminary full-suite runs exposed `SendRequest`
+errors both between cases and during parallel writes within one case. Resetting
+pools between cases did not remove the latter. Native wire runs keep pooling;
+the shared production transport is unchanged.
+
+Concurrent `UpdateRef` racers retry Connect `aborted` on the standard
+`BackoffIterator` ladder (SPEC-TRANSPORT-CONNECT §§5, 7.3). Each racer signs once
+and reuses the same body, nonce and validity window. Exhaustion still fails;
+terminal losers must be `failed_precondition`, and exactly one winner and its
+stored value are still required. Lease-grant contention is a transient backend
+answer; it is distinct from SPEC-SERVER §5's pending-reservation apply condition,
+which requires `unavailable`.
+
 The wire job always summarizes existing retry records by phase and case.
+Any retry also produces a CI warning and a prominent warning in the summary,
+including a retry for an error other than connection loss.
 It uploads `workers-wire-logs` on failure or when any connection-loss or retry
 counter is nonzero, including a successful recovered run. Artifacts expire after
 seven days. Runtime/runner loss counters count literal log lines, which can
@@ -110,8 +139,8 @@ repeat the same event; traced losses count HTTP exchanges. Neither is a
 per-request failure probability.
 
 Each harness invocation retains its commit, resolved Wrangler/Miniflare/workerd
-versions and compatibility date. Each server phase keeps Wrangler console and
-debug logs (including server/alarm telemetry), all runner stdout/stderr, and
+versions and compatibility date. Each server phase keeps runtime console output in `wrangler.log` and
+Wrangler SDK debug logs (including server/alarm telemetry), all runner stdout/stderr, and
 HTTP JSON lines. Join by phase and wall-clock timestamp; case, procedure,
 body hash, signer hash and idempotency-key hash identify the request and its
 same-envelope replay without saving signatures or request bodies. Existing

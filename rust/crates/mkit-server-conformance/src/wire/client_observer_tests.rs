@@ -5,8 +5,8 @@ use std::thread;
 use super::*;
 use crate::wire::sign::Signer;
 
-struct RequestCapture {
-    bytes: Vec<u8>,
+pub(crate) struct RequestCapture {
+    pub(crate) bytes: Vec<u8>,
     server: SocketAddr,
     client: SocketAddr,
 }
@@ -43,7 +43,7 @@ fn request(stream: &mut TcpStream) -> Vec<u8> {
     bytes
 }
 
-fn server(
+pub(crate) fn server(
     responses: Vec<Vec<u8>>,
     persistent: bool,
 ) -> (Url, thread::JoinHandle<Vec<RequestCapture>>) {
@@ -72,7 +72,7 @@ fn server(
     (Url::parse(&format!("http://{address}")).unwrap(), handle)
 }
 
-fn fixed(status: u16, body: &[u8], headers: &str) -> Vec<u8> {
+pub(crate) fn fixed(status: u16, body: &[u8], headers: &str) -> Vec<u8> {
     let mut response = format!(
         "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\n{headers}\r\n",
         body.len()
@@ -98,6 +98,47 @@ fn records(file: &tempfile::NamedTempFile) -> Vec<serde_json::Value> {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect()
+}
+
+#[tokio::test]
+async fn direct_fixture_closes_connections_without_changing_signed_requests() {
+    let payload = b"signed bytes";
+    let signed = Signer::new([0x32; 32], "https://vcs.launch.invalid", "fixture")
+        .sign_body(Rpc::UpdateRef.procedure(), payload);
+    let (base, server) = server(vec![fixed(200, b"", ""); 2], false);
+    let mut client = client(&base, None);
+    client.close_connections = true;
+    assert!(client.reconnect().unwrap().close_connections);
+    for _ in 0..2 {
+        let reply = client
+            .post(
+                Rpc::UpdateRef.procedure(),
+                UNARY_PROTO,
+                &signed.headers,
+                payload.to_vec(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply.status, 200);
+    }
+    let requests = server.join().unwrap();
+    assert_ne!(requests[0].client, requests[1].client);
+    for request in requests {
+        let end = request
+            .bytes
+            .windows(4)
+            .position(|p| p == b"\r\n\r\n")
+            .unwrap();
+        let headers = std::str::from_utf8(&request.bytes[..end]).unwrap();
+        assert!(headers.lines().any(|line| line == "connection: close"));
+        assert_eq!(&request.bytes[end + 4..], payload);
+        for (name, value) in &signed.headers {
+            assert!(headers.lines().any(|line| line.split_once(':').is_some_and(
+                |(actual_name, actual_value)| actual_name.eq_ignore_ascii_case(name)
+                    && actual_value.trim() == value
+            )));
+        }
+    }
 }
 
 fn header<'a>(record: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {

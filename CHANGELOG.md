@@ -15,6 +15,15 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Added
 
+- Workers wire CI bypasses the local dev HTTP proxy using a direct workerd
+  socket, with the same pinned runtime, Worker builds, phases and assertions.
+  Existing replay-safe retries remain; any retry emits a CI and summary warning.
+  Recovered-loss diagnostics remain downloadable on successful runs. Direct
+  fixture requests close their HTTP connections to avoid idle socket reuse;
+  signed request bytes and case concurrency are unchanged. Concurrent ref CAS
+  racers follow the documented `aborted` backoff policy with one signed identity;
+  exactly-one-winner and final-value assertions remain unchanged.
+
 - Server readers add `walk_history_page_in` for retryable, scoped first-parent
   history continuations. Dedicated MAC keys bind the repository/view, verified
   credential scope, strict ref/publication fence, live security boundaries and

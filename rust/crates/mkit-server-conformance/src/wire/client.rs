@@ -148,6 +148,7 @@ pub struct StreamReply<M> {
 /// The raw client of one server.
 #[derive(Clone)]
 pub struct Client {
+    close_connections: bool,
     http: HttpClient,
     base: Arc<str>,
     http_trace: Option<Arc<File>>,
@@ -330,6 +331,8 @@ impl Client {
         };
         let base = base.as_str().trim_end_matches('/');
         Ok(Self {
+            close_connections: std::env::var("MKIT_CONFORMANCE_HTTP_CONNECTION_CLOSE")
+                .is_ok_and(|value| value == "1"),
             http,
             base: Arc::from(base),
             http_trace: http_trace_file(),
@@ -340,6 +343,7 @@ impl Client {
     /// A new HTTP client for the same server, with no connection state.
     pub fn reconnect(&self) -> Result<Self, String> {
         let mut fresh = Self::new(&Url::parse(&self.base).map_err(|e| e.to_string())?)?;
+        fresh.close_connections = self.close_connections;
         fresh.http_trace.clone_from(&self.http_trace);
         fresh.trace_case = self.trace_case;
         Ok(fresh)
@@ -351,7 +355,15 @@ impl Client {
     }
 
     async fn send(&self, req: http::Request<Bytes>) -> Result<Reply, String> {
-        let (parts, body) = req.into_parts();
+        let (mut parts, body) = req.into_parts();
+        // The direct Workers fixture avoids idle-socket races without adding
+        // retries or changing signed request bytes. Native wire runs still pool.
+        if self.close_connections {
+            parts.headers.insert(
+                http::header::CONNECTION,
+                http::HeaderValue::from_static("close"),
+            );
+        }
         let mut observed = self.http_trace.as_ref().map(|_| (Instant::now(), serde_json::json!({
             "started_unix_ms": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|time| time.as_millis()),
             "phase": "send",
@@ -609,7 +621,7 @@ pub fn decode_stream<M: Message>(reply: &Reply) -> Result<StreamReply<M>, String
 
 #[cfg(test)]
 #[path = "client_observer_tests.rs"]
-mod observer_tests;
+pub(crate) mod observer_tests;
 
 #[cfg(test)]
 mod tests {

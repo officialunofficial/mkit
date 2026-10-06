@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 #
 # Run the black-box wire suite (mkit-server-conformance, WP-M0-07) against
-# apps/vcs-worker under a local `wrangler dev`: the M0 "nothing changes on
+# apps/vcs-worker on a direct workerd socket: the M0 "nothing changes on
 # the wire" exit check for the vcs-worker port (WP-M0-17).
 #
 #   scripts/vcs-worker-conformance.sh [--test-faults] [--hooks] [--sharding single|d34] [--multi] [--indexed] [-- <extra runner args>]
@@ -57,10 +57,11 @@
 #                  advance then commits (`indexed.async_verification_commits`).
 #                  The wrangler log must show the injected slice failure.
 #   --indexed-only run only the injected indexed phase, with test faults.
+#   --no-build    reuse the runner and Worker built with the same flags (local repeats).
 #   -- ARGS        passed to every `mkit-server-conformance wire` run (e.g.
 #                  `-- --filter refs.`, `-- --list-refs 1000`).
 #
-# Every server starts from an empty `--persist-to` state directory, so the
+# Every server starts from an empty runtime state directory, so the
 # runs declare `--fresh-target` (whole-server listings stay bounded). Needs
 # `worker-build` (cargo install worker-build --locked), Node.js with `npx`,
 # curl, and the Rust toolchain of rust/rust-toolchain.toml.
@@ -69,8 +70,8 @@
 #   VCS_CONFORMANCE_PORT   local port (default 8791)
 #   VCS_CONFORMANCE_KEEP   keep the state and log directory (default: removed
 #                          on success)
-#   VCS_CONFORMANCE_WRANGLER_ARGS  extra `wrangler dev` arguments, split on
-#                          spaces (e.g. `--compatibility-date 2024-09-23`)
+#   VCS_CONFORMANCE_WRANGLER_ARGS  direct runtime overrides, split on
+#                          spaces (`--compatibility-date DATE` only)
 #
 # Run it locally whenever server behavior changes.
 # `.github/workflows/workers.yml`'s `vcs-worker-conformance` job runs it on
@@ -105,6 +106,7 @@ multi=0
 hooks=0
 indexed=0
 indexed_only=0
+no_build=0
 runner_args=()
 # Under D34 a ListRefs page scans 16 buckets and each lag poll re-lists, so the
 # 10,000-ref case would take many minutes in miniflare; 1,000 exercises paging
@@ -117,6 +119,7 @@ while [ $# -gt 0 ]; do
         --multi) multi=1 ;;
         --hooks) hooks=1 ;;
         --indexed) indexed=1 ;;
+        --no-build) no_build=1 ;;
         --indexed-only) indexed=1; indexed_only=1; test_faults=1 ;;
         --sharding)
             if [ $# -lt 2 ] || { [ "$2" != single ] && [ "$2" != d34 ]; }; then
@@ -144,7 +147,7 @@ log=""
 
 stop_server() {
     if [ -n "${server_pid}" ]; then
-        # `npx` forks wrangler, which forks workerd: stop the whole group.
+        # `npx` forks the harness, which forks workerd: stop the whole group.
         kill -- "-${server_pid}" 2>/dev/null || kill "${server_pid}" 2>/dev/null || true
         wait "${server_pid}" 2>/dev/null || true
         server_pid=""
@@ -165,7 +168,7 @@ cleanup() {
     python3 scripts/workers-wire-diagnostics.py "${work}" --output "${work}/diagnostics.json" --keep-file "${work}/retain-diagnostics" || diagnostic_status=$?
     if [ "${status}" -eq 0 ] && [ "${diagnostic_status}" -ne 0 ]; then status=${diagnostic_status}; fi
     if [ "${status}" -ne 0 ] || [ -n "${VCS_CONFORMANCE_KEEP:-}" ] || [ -f "${work}/retain-diagnostics" ]; then
-        echo "state and wrangler logs kept in ${work}" >&2
+        echo "state and runtime logs kept in ${work}" >&2
     else
         rm -rf "${work}"
     fi
@@ -173,7 +176,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# start_server <name> <wrangler dev args...>: a fresh server whose state and
+# start_server <name> <binding overrides...>: a fresh server whose state and
 # log live under ${work}/<name>.
 start_server() {
     local name="$1"
@@ -181,16 +184,16 @@ start_server() {
     phase="${work}/${name}"
     mkdir -p "${phase}"
     log="${work}/${name}/wrangler.log"
-    echo ">> [${name}] starting wrangler ${WRANGLER_VERSION} dev on ${ORIGIN}"
+    echo ">> [${name}] starting direct workerd (Wrangler ${WRANGLER_VERSION} SDK) on ${ORIGIN}"
     # `set -m`: the server gets its own process group, so stop_server
     # stops wrangler and workerd with it.
     set -m
     (
-        cd apps/vcs-worker
         # shellcheck disable=SC2086 # extra args split on spaces by design
-        exec env WRANGLER_SEND_METRICS=false WRANGLER_LOG_PATH="${phase}/wrangler-debug.log" npx --yes "wrangler@${WRANGLER_VERSION}" dev \
-            --config wrangler.dev.jsonc --ip 127.0.0.1 --port "${PORT}" \
-            --persist-to "${work}/${name}/state" --show-interactive-dev-session=false \
+        exec env WRANGLER_SEND_METRICS=false WRANGLER_LOG_PATH="${phase}/wrangler-debug.log" \
+            npx --yes --package "wrangler@${WRANGLER_VERSION}" -- node scripts/workers-wire-runtime.cjs \
+            "${root}/apps/vcs-worker/wrangler.dev.jsonc" \
+            "${root}/apps/vcs-worker/build" "${phase}/state" "${PORT}" \
             "$@" ${VCS_CONFORMANCE_WRANGLER_ARGS:-}
     ) >"${log}" 2>&1 &
     server_pid=$!
@@ -213,7 +216,7 @@ function connect() {
 connect();
 NODE
     then
-        echo "wrangler dev did not open its port; its log:" >&2
+        echo "direct workerd did not open its port; its log:" >&2
         tail -n 80 "${log}" >&2
         exit 1
     fi
@@ -225,7 +228,7 @@ NODE
         -H 'content-type: application/json' -H 'connect-protocol-version: 1' \
         --data '{}' 2>/dev/null | grep -q SERVING; do
         if ! kill -0 "${server_pid}" 2>/dev/null || [ "${SECONDS}" -ge "${deadline}" ]; then
-            echo "wrangler dev did not become healthy; its log:" >&2
+            echo "direct workerd did not become healthy; its log:" >&2
             tail -n 80 "${log}" >&2
             exit 1
         fi
@@ -275,6 +278,7 @@ capture() {
     set +e
     env TMPDIR="$(cd "${TMPDIR:-/tmp}" && pwd -P)" \
         MKIT_CONFORMANCE_HTTP_TRACE="${phase}/http-${suite_run}.jsonl" \
+        MKIT_CONFORMANCE_HTTP_CONNECTION_CLOSE=1 \
         "$@" 2>"${phase}/runner-${suite_run}-stderr.log" | tee "${work}/last.tap" "${phase}/runner-${suite_run}.log"
     statuses=("${PIPESTATUS[@]}")
     status=${statuses[0]}
@@ -301,10 +305,7 @@ run_suite() {
     local features="$1"
     shift
     echo ">> running the wire suite (features: ${features}) $*"
-    # List fixture concurrency: miniflare's proxy drops UpdateRef ("Network
-    # connection lost"; the dev server continues) when several slow writes are
-    # in flight, so local runs pace to 1. CI keeps 8, the concurrent-UpdateRef
-    # load (and a throughput signal); the harness resends dropped writes.
+    # Keep the existing local/CI concurrency and replay-safe retry policy.
     # Override with VCS_LIST_PARALLEL.
     local list_parallel="${VCS_LIST_PARALLEL:-}"
     if [ -z "${list_parallel}" ]; then
@@ -407,14 +408,21 @@ fi
 git rev-parse HEAD >"${work}/head.txt"
 npx --yes --package "wrangler@${WRANGLER_VERSION}" -c 'node scripts/workers-runtime-versions.cjs' >"${work}/runtime-versions.json"
 
-echo ">> building the conformance runner"
-cargo build --manifest-path rust/Cargo.toml -p mkit-server-conformance \
-    --bin mkit-server-conformance
+# --no-build reuses a previously built profile for local reliability repeats.
+# Hosted phases always build their exact release/test-faults feature set.
 runner="${root}/rust/target/debug/mkit-server-conformance"
-
-echo ">> building apps/vcs-worker (worker-build ${build_args[*]})"
-(cd apps/vcs-worker && CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true \
-    CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true worker-build "${build_args[@]}")
+if [ "${no_build}" -eq 0 ]; then
+    echo ">> building the conformance runner"
+    cargo build --manifest-path rust/Cargo.toml -p mkit-server-conformance \
+        --bin mkit-server-conformance
+    echo ">> building apps/vcs-worker (worker-build ${build_args[*]})"
+    (cd apps/vcs-worker && CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true \
+        CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true worker-build "${build_args[@]}")
+    printf '%s\n' "${build_args[*]}" >apps/vcs-worker/build/wire-profile.txt
+elif [ "$(cat apps/vcs-worker/build/wire-profile.txt)" != "${build_args[*]}" ]; then
+    echo "--no-build requires a Worker built by this harness with the same feature flags" >&2
+    exit 2
+fi
 
 if [ "${indexed_only}" -eq 0 ]; then
 start_server suite "${vars[@]}"

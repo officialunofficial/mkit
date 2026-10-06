@@ -76,6 +76,7 @@ def main():
     scratch = scratch.resolve()
     work = Path(tempfile.mkdtemp(prefix="deadline-", dir=scratch))
     env = dict(os.environ, CARGO_PROFILE_DEV_DEBUG="0", TMPDIR=str(scratch),
+               MKIT_CONFORMANCE_HTTP_CONNECTION_CLOSE="1",
                WRANGLER_SEND_METRICS="false", WRANGLER_REGISTRY_PATH=str(work / "registry"),
                WRANGLER_LOG_PATH=str(work / "wrangler-debug.log"))
     if env.get("CARGO_TARGET_DIR"):
@@ -133,10 +134,11 @@ def main():
     process = None
     try:
         with (work / "wrangler.log").open("w") as log:
-            process = subprocess.Popen(["npx", "--yes", f"wrangler@{harness.WRANGLER}", "dev", "--local",
-                "--config", str(config_path), "--ip", "127.0.0.1", "--port", str(args.port),
-                "--persist-to", str(work / "state"), "--show-interactive-dev-session=false"],
-                cwd=APP, env=env, stdout=log, stderr=log, start_new_session=True)
+            command = ["npx", "--yes", "--package", f"wrangler@{harness.WRANGLER}", "--",
+                "node", "scripts/workers-wire-runtime.cjs", str(config_path),
+                str(APP / "build"), str(work / "state"), str(args.port)]
+            process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=log, stderr=log,
+                                       start_new_session=True)
             harness.wait_ready(origin + "/direct/grpc.health.v1.Health/Check", process)
             for entry in ["direct", "default", "router", "serve", "serve_with", "fetch", "fetch_with", "fetch_with_context"]:
                 for headers in VARIANTS:
@@ -176,10 +178,8 @@ def main():
                 for prefix, expected in [("files.", 5), ("health.deadline_headers", 1), ("embedding.multipart_file_readback", 1), ("takedown.contract", 1)]:
                     portable_wire(common, prefix, expected, env, work, cases)
                 harness.stop(process)
-                process = subprocess.Popen(["npx", "--yes", f"wrangler@{harness.WRANGLER}", "dev", "--local",
-                    "--config", str(config_path), "--ip", "127.0.0.1", "--port", str(args.port),
-                    "--persist-to", str(work / "state"), "--show-interactive-dev-session=false"],
-                    cwd=APP, env=env, stdout=log, stderr=log, start_new_session=True)
+                process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=log, stderr=log,
+                                           start_new_session=True)
                 harness.wait_ready(origin + "/direct/grpc.health.v1.Health/Check", process)
                 portable_wire(common, "takedown.persisted_denial", 1, env, work, cases)
                 observed = (work / "wrangler.log").read_text()
@@ -190,7 +190,7 @@ def main():
             assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip() == source_sha
             assert not subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True)
             evidence = {"source_sha": source_sha,
-                        "wrangler": harness.WRANGLER, "artifacts": artifacts, "cases": cases}
+                        "runtime": "direct-workerd", "wrangler": harness.WRANGLER, "artifacts": artifacts, "cases": cases}
             (work / "evidence.json").write_text(json.dumps(evidence, indent=2))
     finally:
         harness.stop(process)

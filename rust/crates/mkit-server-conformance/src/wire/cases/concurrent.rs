@@ -11,7 +11,7 @@
 
 use buffa::Message as _;
 use futures::future::join_all;
-use mkit_core::hash::hash;
+use mkit_core::{hash::hash, protocol::BackoffIterator};
 use mkit_transport_connect::generated::{
     AdvanceOutcome, AdvanceRefsResponse, UpdateRefRequest, UpdateRefResponse,
 };
@@ -70,13 +70,38 @@ async fn race_update(ctx: &Ctx, round: usize, exp: Exp<'_>) -> CaseResult {
     let racers = (0..RACERS).map(|i| {
         let req = update_req(&name, exp, &racer_id(round, i));
         let label = racer_label(round, i);
-        async move {
-            ctx.call_as::<UpdateRefResponse>(&label, Rpc::UpdateRef, &req)
-                .await
-        }
+        async move { contender_update(ctx, &label, &req, BackoffIterator::new()).await }
     });
     let winner = one_winner(round, join_all(racers).await, "failed_precondition")?;
     ctx.expect_ref(&name, Some(&racer_id(round, winner))).await
+}
+
+// STC §§5, 7.3: backend contention is retryable, not a terminal CAS loss.
+// Sign once per racer so every attempt keeps its nonce and validity window.
+async fn contender_update(
+    ctx: &Ctx,
+    label: &str,
+    req: &UpdateRefRequest,
+    mut backoff: BackoffIterator,
+) -> Result<Result<UpdateRefResponse, RpcError>, String> {
+    let body = req.encode_to_vec();
+    let headers = ctx.auth_headers_as(label, Rpc::UpdateRef, super::Commit::Body(&body));
+    loop {
+        match ctx
+            .client()
+            .unary(Rpc::UpdateRef, body.clone(), &headers)
+            .await?
+        {
+            Err(error) if error.code == "aborted" => {
+                let Some(delay) = backoff.next() else {
+                    return Ok(Err(error));
+                };
+                ctx.record_retry(&error.to_string());
+                tokio::time::sleep(delay).await;
+            }
+            result => return Ok(result),
+        }
+    }
 }
 
 pub(super) async fn missing_one_winner(ctx: Ctx) -> CaseResult {
@@ -249,4 +274,104 @@ pub(super) async fn many_refs(ctx: Ctx) -> CaseResult {
         "ListRefs names differ from the {MANY} created refs: {names:?}"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wire::client::Client;
+    use crate::wire::client::observer_tests::{fixed, server};
+    use crate::wire::{Profile, WireAuth};
+    use std::{sync::Arc, time::Duration};
+
+    fn fixture(base: &url::Url) -> Ctx {
+        Ctx::new(
+            Client::new(base).unwrap(),
+            Arc::new(Profile::new(WireAuth::AuthV2 {
+                audience: "https://vcs.launch.invalid".into(),
+                repository: "fixture".into(),
+                seed: [3; 32],
+            })),
+            "refs.concurrent_missing_one_winner",
+        )
+    }
+
+    fn aborted() -> Vec<u8> {
+        fixed(
+            409,
+            br#"{"code":"aborted","message":"coordinator lease grant contention"}"#,
+            "Content-Type: application/json\r\n",
+        )
+    }
+
+    fn backoff() -> BackoffIterator {
+        BackoffIterator::with(Duration::ZERO, Duration::ZERO, 5)
+    }
+
+    #[tokio::test]
+    async fn contention_retries_the_exact_signed_request_then_counts_a_winner() {
+        let (base, worker) = server(vec![aborted(), fixed(200, b"", "")], true);
+        let ctx = fixture(&base);
+        let request = update_req("refs/heads/race", Exp::Missing, &A);
+        let result = contender_update(&ctx, "racer", &request, backoff()).await;
+        assert!(result.as_ref().unwrap().is_ok());
+        assert_eq!(
+            one_winner(0, vec![result], "failed_precondition").unwrap(),
+            0
+        );
+        assert_eq!(ctx.take_note().as_deref(), Some("retries=1"));
+        let requests = worker.join().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].bytes, requests[1].bytes);
+        assert!(
+            std::str::from_utf8(
+                &requests[0].bytes[..requests[0]
+                    .bytes
+                    .windows(4)
+                    .position(|p| p == b"\r\n\r\n")
+                    .unwrap()]
+            )
+            .unwrap()
+            .contains("idempotency-key:")
+        );
+    }
+
+    #[tokio::test]
+    async fn exhausted_contention_is_a_failure_never_a_counted_cas_loser() {
+        let (base, worker) = server(vec![aborted(); 6], true);
+        let ctx = fixture(&base);
+        let request = update_req("refs/heads/race", Exp::Missing, &A);
+        let result = contender_update(&ctx, "racer", &request, backoff()).await;
+        assert_eq!(
+            result.as_ref().unwrap().as_ref().unwrap_err().code,
+            "aborted"
+        );
+        assert!(one_winner(0, vec![result], "failed_precondition").is_err());
+        assert_eq!(ctx.take_note().as_deref(), Some("retries=5"));
+        assert_eq!(worker.join().unwrap().len(), 6);
+    }
+
+    #[tokio::test]
+    async fn cas_conflict_is_terminal_and_zero_or_multiple_winners_still_fail() {
+        let (base, worker) = server(
+            vec![fixed(
+                412,
+                br#"{"code":"failed_precondition"}"#,
+                "Content-Type: application/json\r\n",
+            )],
+            true,
+        );
+        let ctx = fixture(&base);
+        let result = contender_update(
+            &ctx,
+            "racer",
+            &update_req("refs/heads/race", Exp::Missing, &A),
+            backoff(),
+        )
+        .await;
+        assert!(one_winner(0, vec![result], "failed_precondition").is_err());
+        assert!(one_winner(0, vec![Ok(Ok(())), Ok(Ok(()))], "failed_precondition").is_err());
+        assert!(ctx.take_note().is_none());
+        assert_eq!(worker.join().unwrap().len(), 1);
+    }
 }

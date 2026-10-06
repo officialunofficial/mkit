@@ -45,6 +45,8 @@ def markdown(report):
         lines.append(f'| `{row["phase"]}` | {row["retries"]} | {row["traced_losses"]} | '
                      f'{row["runtime_loss_lines"]} | {row["runner_loss_lines"]} |')
     totals = report["totals"]
+    if totals["retries"]:
+        lines[2:2] = [f'> **Warning: {totals["retries"]} wire retries occurred.** Inspect the retained diagnostics.', ""]
     lines += [f'| **Total** | **{totals["retries"]}** | **{totals["traced_losses"]}** | '
               f'**{totals["runtime_loss_lines"]}** | **{totals["runner_loss_lines"]}** |', "",
               "Runtime/runner counts are literal log lines, not unique requests; they can overlap.",
@@ -70,6 +72,9 @@ def main():
     if args.summary:
         with args.summary.open("a") as summary:
             summary.write(markdown(report))
+    if args.github_output and report["totals"]["retries"]:
+        print(f'::warning title=Workers wire retries::{report["totals"]["retries"]} retries occurred; '
+              'inspect the connection diagnostics in the job summary and workers-wire-logs.')
     if args.github_output:
         with args.github_output.open("a") as output:
             output.write(f'keep={str(report["keep"]).lower()}\n')

@@ -2,8 +2,10 @@
 
 The connection-loss cause remains unresolved. The comparison favors the
 Wrangler proxy path, but does not prove a Miniflare-only defect or exclude a
-runtime/server behavior that depends on scheduling. Stop after isolation:
-no runtime fix, proxy upgrade, retry change or assertion change is justified.
+runtime/server behavior that depends on scheduling. The investigation ended at isolation; it did not justify a production fix.
+The wire harness now bypasses the dev proxy while retaining the pinned runtime,
+all assertions and the existing replay-safe retry policy; see the
+[operator guide](workers.md#wire-connection-diagnostics).
 
 ## Comparison
 
@@ -47,7 +49,7 @@ is not evidence that these events cannot occur.
 
 ## Reproduction and retained evidence
 
-For a fresh proxy run, use the existing harness, with its normal cold-start
+The current harness uses a direct workerd socket, with the same cold-start
 assertions and replay policy:
 
 ```sh
