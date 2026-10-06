@@ -325,6 +325,12 @@ collect the applicable entries between their old and new immutable pins.
   [KillingSpark/zstd-rs #124](https://github.com/KillingSpark/zstd-rs/pull/124),
   "Refuse blocks that decode past Block_Maximum_Size". Embedders still require
   their workspace `[patch.crates-io]` until a release includes the fix.
+- The Workers operator guide gains "Diagnosing slow and cold reads": enable
+  Workers automatic tracing, count distinct Durable Object IDs per trace, and
+  compare cold and warm spans. It lists the expected distinct-partition counts
+  per read shape, the Durable Object idle eviction window and the one-time
+  effect of `NAMESPACE_LOCATION_HINT`. The read-rounds test probe now also
+  reports distinct partitions per read by kind. No production behavior changes.
 
 ### CI
 

@@ -696,6 +696,7 @@ struct Spy {
     ops: Mutex<Vec<&'static str>>,
     batches: Mutex<Vec<Batch>>,
     calls: AtomicU32,
+    touched: Mutex<Vec<Partition>>,
     fail_next_apply: Arc<AtomicBool>,
 }
 
@@ -720,6 +721,7 @@ impl Spy {
             ops: Mutex::default(),
             batches: Mutex::default(),
             calls: AtomicU32::new(0),
+            touched: Mutex::default(),
             fail_next_apply: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -769,6 +771,11 @@ impl Spy {
         self.pause_as("authorization_other", op).await;
     }
 
+    /// Record the partition a KV call addressed.
+    fn touch(&self, p: &Partition) {
+        self.touched.lock().unwrap().push(p.clone());
+    }
+
     fn saw(&self, key: &Key) {
         self.seen.lock().unwrap().push(key.clone());
     }
@@ -802,6 +809,7 @@ impl NamespaceStore for Spy {
     }
 
     async fn get(&self, p: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
+        self.touch(p);
         self.pause_as(crate::store::read_probe::phase(key.as_bytes()), "get")
             .await;
         self.maybe_fail_read()?;
@@ -814,6 +822,7 @@ impl NamespaceStore for Spy {
         p: &Partition,
         keys: &[Key],
     ) -> Result<Vec<Option<Value>>, StoreError> {
+        self.touch(p);
         self.pause_as(
             keys.first().map_or("authorization_other", |key| {
                 crate::store::read_probe::phase(key.as_bytes())
@@ -842,6 +851,7 @@ impl NamespaceStore for Spy {
         after: Option<&crate::store::Cursor>,
         limit: u32,
     ) -> Result<ScanPage, StoreError> {
+        self.touch(p);
         self.pause_as(crate::store::read_probe::phase(start.as_bytes()), "scan")
             .await;
         if let Some(hook) = &self.scan_hook {
@@ -871,6 +881,7 @@ impl NamespaceStore for Spy {
         ranges: &[crate::store::RangeScan],
     ) -> Result<Vec<ScanPage>, StoreError> {
         if self.count_partition_scans.load(Ordering::SeqCst) {
+            self.touch(p);
             self.pause_as(
                 ranges.first().map_or("authorization_other", |range| {
                     crate::store::read_probe::phase(range.start.as_bytes())

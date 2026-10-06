@@ -269,6 +269,14 @@ Use owner-authorized `repo_storage` or `repo_storage_many` (up to 100 names) to
 reconcile; `Committed.bytes_stored`/`new_to_repo` are not the accounting source.
 See [storage accounting](../specs/SPEC-SERVER.md#651-repository-storage-accounting).
 
+## Diagnosing slow and cold reads
+
+A read touches many Durable Objects (every storage partition is its own object),
+and objects idle for roughly 70-140 seconds are evicted, so the first read after
+a quiet period is slower. Use Workers automatic tracing, not custom telemetry;
+see [diagnosing slow and cold reads](../operations/workers.md#diagnosing-slow-and-cold-reads)
+for the expected object counts per read shape and placement guidance.
+
 ## Decoder patch and per-pin upgrades
 
 Cargo does not inherit a dependency workspace's `[patch]`. `pack-ruzstd` requires
