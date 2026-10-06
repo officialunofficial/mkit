@@ -1758,6 +1758,10 @@ This additive embedding surface does not alter URL grammar or HTTP serving.
 
 #### Authenticated history continuations
 
+See the [Workers embedding guide](../embedding/workers.md#one-reader-and-one-session-per-request)
+for request composition and the [history paging measurements](../operations/history-paging.md)
+for bounded fixture results.
+
 As an explicit exception to request-local structural evidence, a server MAY
 authenticate a selected-ref first-parent cursor across requests. The continuation
 MUST NOT confer permission. `walk_history_page_in` exposes this contract separately

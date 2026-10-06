@@ -112,6 +112,35 @@ fn assert_nothing_written<H: HookSet>(e: &Env<H>, owner: &SigningKey) {
     assert_eq!(now(e.pipe.meta.inner.stats(&p)).unwrap().keys, Some(0));
 }
 
+struct EmptyVisibilityCredentials;
+impl Admission for EmptyVisibilityCredentials {
+    async fn admit(&self, input: &AdmissionInput<'_>) -> Result<AdmissionDecision, ServerError> {
+        assert_eq!(input.op.procedure(), Procedure::SetRepoVisibility);
+        assert!(input.credential_headers.is_empty());
+        Ok(allow())
+    }
+}
+
+#[test]
+fn signed_visibility_keeps_credential_headers_out_of_admission() {
+    let owner = key(1);
+    let repo = repository(&owner);
+    let clock = clock();
+    let e = build(
+        config(&owner, AuthorizerRole::Check),
+        Spy::new(store(&clock)),
+        with_admission(EmptyVisibilityCredentials),
+        clock,
+    );
+    for (number, credential) in [(1, "invalid,credential"), (2, "Payment valid")] {
+        let req = signed_visibility(&owner, &repo, number, b"v")
+            .header("payment-authorization", credential)
+            .header("payment-signature", "valid")
+            .header("authorization", "Payment valid");
+        set(&e, &req, VisibilityRequest::Envelope(Visibility::Private)).unwrap();
+    }
+}
+
 #[test]
 fn admission_sees_the_visibility_operation_in_both_modes() {
     let owner = key(1);

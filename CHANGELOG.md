@@ -24,6 +24,11 @@ collect the applicable entries between their old and new immutable pins.
   racers follow the documented `aborted` backoff policy with one signed identity;
   exactly-one-winner and final-value assertions remain unchanged.
 
+- Continuation credential tests exercise real signed requests, grants, captured
+  headers, trusted audiences, and anonymous/owner view changes. The Workers
+  embedding guide now covers optional 45-ID batches, bounded path/history
+  helpers, and scoped first-parent continuations.
+
 - Server readers add `walk_history_page_in` for retryable, scoped first-parent
   history continuations. Dedicated MAC keys bind the repository/view, verified
   credential scope, strict ref/publication fence, live security boundaries and
@@ -103,6 +108,10 @@ collect the applicable entries between their old and new immutable pins.
   and metadata reads to cap aggregate calls, decode work, encoded I/O and output.
 
 ### Fixed
+
+- Signed reader envelopes now capture credential headers for continuation scope.
+  Changing payment, authorization, or configured credential headers invalidates
+  a continuation; signed reads still do not run admission validation.
 
 - Workers wire CI retains runtime, server/alarm and request correlation logs
   when existing retries recover connection losses, including successful runs.
