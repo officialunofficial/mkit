@@ -94,6 +94,7 @@ fn missing_object_is_absent_for_every_range_shape() {
             Some(range(0, 3)),
             Some(range(5, 4)),
             Some(range(100, 200)),
+            Some(range(0, u64::MAX)),
         ] {
             assert!(blobs.get(&key, r).await.unwrap().is_none(), "{r:?}");
         }

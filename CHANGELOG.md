@@ -205,7 +205,7 @@ collect the applicable entries between their old and new immutable pins.
 ### Performance
 
 - Fewer sequential storage rounds per read, with no change to results, limits,
-  guards, KV call counts or ledger charges (backend R2 calls do drop). The Workers R2 adapter serves a bounded blob range with
+  guards. Backend R2 calls drop; KV calls and ledger charges drop only by the removed publish-time block read (one per proof-expanding decoded object; a nine-file show with sizes goes from 72 to 69 KV calls, with fewer for a no-sizes show and a six-file show). A rare failure path, where the pack prefix exceeds the decode budget before the frame read, can now send and charge the frame read. The Workers R2 adapter serves a bounded blob range with
   one ranged GET instead of a HEAD followed by a GET (a missing object is still
   absent, a start past the end is still unsatisfiable, a malformed range is still
   invalid, and the read ledger still charges two units). A public reader's first
