@@ -2,7 +2,7 @@
 //! the branch tip's tree into the working directory.
 //!
 //! The file-restoration half calls
-//! `mkit_core::ops::restore::restore_tree_to_worktree_with` (via
+//! `mkit_core::ops::restore::restore_tree_to_worktree_incremental` (via
 //! `crate::restore_fanout::read_chunks_fanout`, this crate's rayon fan-out
 //! for a `ChunkedBlob`'s per-chunk reads), which respects `.mkitignore`
 //! and rejects symlinks that would escape the repo root.
@@ -14,7 +14,7 @@ use mkit_core::hash::Hash;
 use mkit_core::index::EntryStatus;
 use mkit_core::layout::RepoLayout;
 use mkit_core::object::Object;
-use mkit_core::ops::restore::{RestoreOptions, restore_tree_to_worktree_with};
+use mkit_core::ops::restore::{RestoreOptions, restore_tree_to_worktree_incremental};
 use mkit_core::refs;
 use mkit_core::store::ObjectStore;
 
@@ -233,6 +233,17 @@ pub fn run(args: &[String]) -> u8 {
         sparse_patterns: None,
     };
 
+    // HEAD's tree, read before HEAD is advanced below. Without `--force`
+    // the safety gate has proven the worktree matches it, so entries
+    // identical between it and the target are skipped rather than
+    // re-read and rewritten. `--force` discards local edits, so it must
+    // rewrite everything.
+    let base_tree = if opts.force {
+        None
+    } else {
+        super::current_head_tree(&layout, &store).ok().flatten()
+    };
+
     // Run the destructive-restore safety gate (#176) BEFORE touching
     // anything. This is read-only — it refuses the checkout if dirty
     // tracked files, staged changes, or untracked-path collisions with
@@ -295,9 +306,10 @@ pub fn run(args: &[String]) -> u8 {
     // directories that became empty — git removes those on a branch
     // switch; `fs::remove_dir` only succeeds on EMPTY dirs, so a dir
     // still holding untracked files survives.
-    let report = match restore_tree_to_worktree_with(
+    let report = match restore_tree_to_worktree_incremental(
         &store,
         &tree_hash,
+        base_tree,
         &cwd,
         &sparse_opts,
         &crate::restore_fanout::read_chunks_fanout,

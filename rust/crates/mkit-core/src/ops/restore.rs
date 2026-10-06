@@ -303,7 +303,7 @@ pub fn restore_tree_to_worktree(
     // regression `restore_blob` (the `restore_tree`/stash path) avoids
     // by not batching at all. `restore_tree_to_worktree_with` below is
     // the path real (parallel-capable) `read_chunks` callers want.
-    restore_tree_to_worktree_impl(store, tree, root, opts, 1, &sequential_read_chunks)
+    restore_tree_to_worktree_impl(store, tree, root, opts, 1, None, &sequential_read_chunks)
 }
 
 /// [`restore_tree_to_worktree`], parameterised over how a
@@ -362,7 +362,62 @@ pub fn restore_tree_to_worktree_with<F>(
 where
     F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
 {
-    restore_tree_to_worktree_impl(store, tree, root, opts, RESTORE_CHUNK_BATCH, read_chunks)
+    restore_tree_to_worktree_impl(
+        store,
+        tree,
+        root,
+        opts,
+        RESTORE_CHUNK_BATCH,
+        None,
+        read_chunks,
+    )
+}
+
+/// [`restore_tree_to_worktree_with`], but skips every entry (file,
+/// symlink, or whole subtree) whose mode and object hash are identical
+/// in `base_tree` — the tree the worktree is already known to match.
+/// Switching branches then rewrites only what actually differs instead
+/// of re-materialising (re-reading, re-verifying, re-writing) every
+/// tracked file, e.g. an untouched 100 MiB file.
+///
+/// # Caller contract
+/// The worktree's tracked content MUST already equal `base_tree` (for
+/// the paths this restore covers). `checkout` establishes this with its
+/// destructive-restore safety gate, and so must NOT use this under
+/// `--force`, where local edits are meant to be discarded. Skipped
+/// entries are not counted in the returned [`RestoreReport`].
+///
+/// The skip is disabled (full restore) when `opts.clean` is set or
+/// `opts.sparse_patterns` is `Some`: a sweep must visit every entry, and
+/// a sparse worktree's contents don't necessarily mirror `base_tree`.
+///
+/// # Errors
+/// Same as [`restore_tree_to_worktree_with`].
+pub fn restore_tree_to_worktree_incremental<F>(
+    store: &ObjectStore,
+    tree: &Hash,
+    base_tree: Option<Hash>,
+    root: &Path,
+    opts: &RestoreOptions,
+    read_chunks: &F,
+) -> RestoreResult<RestoreReport>
+where
+    F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
+{
+    let base = if opts.clean || opts.sparse_patterns.is_some() {
+        None
+    } else {
+        base_tree
+    };
+    restore_tree_to_worktree_impl(
+        store,
+        tree,
+        root,
+        opts,
+        RESTORE_CHUNK_BATCH,
+        base,
+        read_chunks,
+    )
 }
 
 /// Shared implementation behind [`restore_tree_to_worktree`] and
@@ -376,6 +431,7 @@ fn restore_tree_to_worktree_impl<F>(
     root: &Path,
     opts: &RestoreOptions,
     batch_size: usize,
+    base_tree: Option<Hash>,
     read_chunks: &F,
 ) -> RestoreResult<RestoreReport>
 where
@@ -398,6 +454,7 @@ where
         &mut report,
         0,
         batch_size,
+        base_tree,
         read_chunks,
     )?;
     Ok(report)
@@ -414,6 +471,7 @@ fn restore_tree_to_worktree_inner<F>(
     report: &mut RestoreReport,
     depth: usize,
     batch_size: usize,
+    base_tree: Option<Hash>,
     read_chunks: &F,
 ) -> RestoreResult<()>
 where
@@ -425,6 +483,14 @@ where
     let obj = store.read_object(&tree_hash)?;
     let Object::Tree(tree) = obj else {
         return Err(RestoreError::NotATree);
+    };
+    // Entries of the already-materialised tree at this level, by name.
+    // An unreadable/non-tree base just disables skipping here.
+    let base_obj = base_tree.and_then(|b| store.read_object(&b).ok());
+    let base_entries: std::collections::HashMap<&[u8], &crate::object::TreeEntry> = match &base_obj
+    {
+        Some(Object::Tree(bt)) => bt.entries.iter().map(|e| (e.name.as_slice(), e)).collect(),
+        _ => std::collections::HashMap::new(),
     };
 
     if options.clean {
@@ -442,6 +508,12 @@ where
             continue;
         }
         let name = std::str::from_utf8(&entry.name).map_err(|_| RestoreError::InvalidUtf8)?;
+        let base_entry = base_entries.get(entry.name.as_slice());
+        // Identical to what the worktree already holds (see
+        // `restore_tree_to_worktree_incremental`): nothing to write.
+        if base_entry.is_some_and(|b| b.mode == entry.mode && b.object_hash == entry.object_hash) {
+            continue;
+        }
         let full_path = if path_prefix.is_empty() {
             name.to_string()
         } else {
@@ -493,6 +565,9 @@ where
                     report,
                     depth + 1,
                     batch_size,
+                    base_entry
+                        .filter(|b| b.mode == EntryMode::Tree)
+                        .map(|b| b.object_hash),
                     read_chunks,
                 )?;
             }
@@ -1233,6 +1308,67 @@ mod tests {
         );
         restore_tree(&store, tree, target.path(), &RestoreOptions::default()).unwrap();
         assert_eq!(fs::read(target.path().join("file.txt")).unwrap(), b"new");
+    }
+
+    #[test]
+    fn incremental_restore_skips_unchanged_and_writes_changed() {
+        let (_d, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        let entry = |n: &str, h| TreeEntry {
+            name: n.as_bytes().to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: h,
+        };
+        let (same, a1, a2) = (
+            put_blob(&store, b"same"),
+            put_blob(&store, b"a-old"),
+            put_blob(&store, b"a-new"),
+        );
+        let sub1 = put_tree_with(&store, vec![entry("x", same), entry("y", a1)]);
+        let sub2 = put_tree_with(&store, vec![entry("x", same), entry("y", a2)]);
+        let mk = |sub, a| {
+            put_tree_with(
+                &store,
+                vec![
+                    entry("a", a),
+                    TreeEntry {
+                        name: b"d".to_vec(),
+                        mode: EntryMode::Tree,
+                        object_hash: sub,
+                    },
+                    entry("same", same),
+                ],
+            )
+        };
+        let (base, next) = (mk(sub1, a1), mk(sub2, a2));
+        let opts = RestoreOptions {
+            clean: false,
+            sparse_patterns: None,
+        };
+        let rd = |s: &ObjectStore, h: &[Hash]| sequential_read_chunks(s, h);
+        restore_tree_to_worktree_with(&store, &base, target.path(), &opts, &rd).unwrap();
+        // Tamper with unchanged files: an incremental restore must leave
+        // them alone, a full one would overwrite them.
+        fs::write(target.path().join("same"), b"sentinel").unwrap();
+        fs::write(target.path().join("d/x"), b"sentinel").unwrap();
+        let report = restore_tree_to_worktree_incremental(
+            &store,
+            &next,
+            Some(base),
+            target.path(),
+            &opts,
+            &rd,
+        )
+        .unwrap();
+        assert_eq!(report.files_written, 2);
+        assert_eq!(fs::read(target.path().join("a")).unwrap(), b"a-new");
+        assert_eq!(fs::read(target.path().join("d/y")).unwrap(), b"a-new");
+        assert_eq!(fs::read(target.path().join("same")).unwrap(), b"sentinel");
+        assert_eq!(fs::read(target.path().join("d/x")).unwrap(), b"sentinel");
+        // No base => full restore.
+        restore_tree_to_worktree_incremental(&store, &next, None, target.path(), &opts, &rd)
+            .unwrap();
+        assert_eq!(fs::read(target.path().join("same")).unwrap(), b"same");
     }
 
     #[test]
