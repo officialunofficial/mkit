@@ -235,6 +235,26 @@ fn continuation_cross_credential_signers() {
 }
 
 #[test]
+fn continuation_cross_credential_same_grant_signers() {
+    for denial in [false, true] {
+        let (fx, head, cursor) = scope_fixture(denial);
+        let other = key(56);
+        let grant = scope_grant(&fx, &other, 1);
+        // On a public repo the Authority hook may classify the namespace owner
+        // as Writer despite a grant naming someone else. The reader accepts
+        // actual ownership for A and this same valid grant for B: only signer differs.
+        for (a, b) in [(&fx.owner, &other), (&other, &fx.owner)] {
+            let issued = envelope(&fx, a, AUDIENCE, T0).header("x-write-grant", &grant);
+            let fresh = envelope(&fx, a, AUDIENCE, T0 - 1).header("x-write-grant", &grant);
+            let changed = envelope(&fx, b, AUDIENCE, T0).header("x-write-grant", &grant);
+            let token = issue(&fx, Some(&issued));
+            accepts_fresh(&fx, Some(&fresh), &token, head, cursor);
+            rejects_scope(&fx, Some(&changed), &token, cursor);
+        }
+    }
+}
+
+#[test]
 fn continuation_cross_credential_no_grant_authority_cannot_construct_owner_reader() {
     for denial in [false, true] {
         for private in [false, true] {

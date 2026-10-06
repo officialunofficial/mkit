@@ -1151,9 +1151,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             ));
         }
         // Capture stable credential scope for signed reads as well as writes.
-        // Validation still runs only at admission; reads and visibility statements
-        // do not run admission (§9.1).
-        if matches!(self.cfg.auth, AuthMode::AuthV2(_)) && a.auth.is_some() {
+        // Reads do not run admission; visibility requests keep their existing
+        // credential exclusion on their separate admission path (§9.1).
+        if matches!(self.cfg.auth, AuthMode::AuthV2(_))
+            && a.auth.is_some()
+            && meta.procedure != Procedure::SetRepoVisibility
+        {
             a.credential_capture =
                 admission::capture_credentials(meta, &self.cfg.admission_credential_headers);
         }
