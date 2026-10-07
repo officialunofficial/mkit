@@ -1831,7 +1831,8 @@ bounds. A cap MUST NOT silently switch traversal modes or emit a partial page.
 Each helper captures one selected ref strongly in the authorized caller view;
 this capture replaces session structural evidence without resetting any ledger
 or extending its request deadline. It MUST NOT narrow the root set searched by
-a subsequent general-ID fallback; that fallback retains full ref discovery.
+a subsequent general-ID fallback on an unscoped reader; that fallback retains
+full ref discovery.
 Tags MUST match their declared target kind.
 A start commit is inclusive and skipped ancestors count toward the visit bound.
 These primitives issue no continuation authority and persist no graph state.
@@ -1843,6 +1844,24 @@ locations and sealed inventory without locating those targets again. Final
 authorization and proof revalidation MUST precede the live inventory/descriptor
 checks. Source guards MUST then start fresh after that work and all callbacks;
 inventory facts MUST NOT establish additional traversal edges.
+
+Selected-ref reader sessions MUST be explicitly opt-in: `with_selected_ref`
+narrows only session canonical and metadata reads on that reader. The
+session's root capture MUST read only the selected ref through the
+authoritative anchor — the owner view's live ref, the public view's published
+head — where a missing or empty publication ledger is uniformly absent, and
+MUST capture the security digest after visibility-revision activation. The
+retained checkpoint MUST be immutable: the selected ref, the raw publication
+and ref values, the full publication, the security digest, the expiry and the
+capture's identity generation. Selected sessions MUST NOT fall back to
+all-ref root discovery, and MUST prove targets before locating them in either
+view. Every proof reset, expiry, reader rebind or helper capture MUST
+invalidate the checkpoint. Parent and tag-target history roles and decoded
+commit/remix kind and timestamp MAY be recorded only while a checkpoint is
+valid; they are structural evidence, never permission. Non-session reads and
+URL issuance MUST keep the unscoped contract. This introduces no
+stored-format change; activation reuses the existing visibility-revision
+record.
 
 Commit/path reader primitives MUST first prove the selected commit through
 parents, then walk only the path trees. Components are exact decoded name bytes;

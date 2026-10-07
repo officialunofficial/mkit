@@ -202,6 +202,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         limit: usize,
         options: HistoryOptions,
     ) -> Result<Option<HistoryPage>, ServerError> {
+        self.check_selected(reference)?;
         validate_history(reference, options)?;
         if limit == 0 || limit > options.max_nodes {
             return Err(ServerError::invalid_argument("invalid history page size"));
@@ -271,6 +272,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         expected: Option<Hash>,
         options: PathOptions,
     ) -> Result<Option<CommitPathRead>, ServerError> {
+        self.check_selected(reference)?;
         validate_history(reference, options.history)?;
         if options.max_depth > MAX_PATH_DEPTH
             || path.iter().any(|name| !TreeEntry::validate_name(name))

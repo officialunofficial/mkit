@@ -5,7 +5,7 @@ use crate::pipeline::{
     HistoryMode, HistoryOptions, ObjectReader, PathOptions, ReadLimits, ReaderSession, ReaderView,
 };
 
-fn in_view<H: HookSet>(
+pub(super) fn in_view<H: HookSet>(
     fx: &Fx<H>,
     writer: bool,
     test: impl FnOnce(ObjectReader<'_, SpyBlobs, Arc<Spy>, H>),

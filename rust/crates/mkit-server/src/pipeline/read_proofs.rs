@@ -2,7 +2,8 @@
 use super::Authenticated;
 use crate::http_objects::{HttpObjectsConfig, TakedownGate};
 use crate::store::NamespaceStore;
-use crate::{RepoId, ServerError};
+use crate::store::publication::Publication;
+use crate::{RepoId, ServerError, Value};
 use mkit_core::{
     hash::Hash,
     object::{Object, ObjectType},
@@ -22,6 +23,97 @@ struct Proof {
     manifest_pack: Option<Hash>,
 }
 
+/// One selected-ref capture retained by a session. Identity is the `Arc`
+/// pointer; every proofs reset drops it.
+#[derive(Debug)]
+pub(crate) struct Checkpoint {
+    /// The ref name the capture is bound to.
+    pub(crate) reference: String,
+    /// Unpeeled anchor id (a tag ref keeps its tag id).
+    pub(crate) tip: Hash,
+    /// Full publication row read by the authoritative anchor.
+    pub(crate) publication: Publication,
+    /// Raw `[publication, ref]` values the anchor read.
+    pub(crate) raw: Vec<Option<Value>>,
+    /// `history_security` digest, captured after revision activation.
+    pub(crate) security: Hash,
+    /// Memo expiry at install.
+    pub(crate) expires: u64,
+}
+
+/// Opaque handle to one selected-ref capture; identity is the generation.
+/// The handle is not authority: it is valid only with the same session and
+/// reader, the same credential scope, unchanged ref/publication/security
+/// state and before its expiry.
+#[derive(Debug, Clone)]
+pub struct CaptureCheckpoint(pub(crate) Arc<Checkpoint>);
+
+impl CaptureCheckpoint {
+    /// The ref the capture is bound to.
+    #[must_use]
+    pub fn reference(&self) -> &str {
+        &self.0.reference
+    }
+    /// The unpeeled anchor id captured.
+    #[must_use]
+    pub fn tip(&self) -> Hash {
+        self.0.tip
+    }
+    /// Absolute Unix-ms expiry inherited from the session's memo.
+    #[must_use]
+    pub fn expires_at_ms(&self) -> u64 {
+        self.0.expires
+    }
+}
+
+/// How a decoded object reached a child row: its history role, or none for
+/// content edges (trees, chunks, identity objects).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HistoryEdge {
+    /// The captured selected-ref tip.
+    Root,
+    /// A commit/remix parent.
+    Parent,
+    /// A tag's target.
+    TagTarget,
+}
+
+/// A decoded commit-like object's kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HistoryKind {
+    Commit,
+    Remix,
+}
+
+/// Per-row lineage: structural evidence only, never a permission.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Lineage {
+    edge: Option<HistoryEdge>,
+    decoded: Option<(HistoryKind, u64)>,
+}
+
+/// One row's recorded history link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HistoryLink {
+    /// The object that introduced this row (`None` for a root).
+    pub(crate) predecessor: Option<Hash>,
+    /// The role that linked it.
+    pub(crate) edge: HistoryEdge,
+    /// Decoded commit/remix kind and timestamp, when recorded.
+    pub(crate) decoded: Option<(HistoryKind, u64)>,
+}
+
+/// The history role `child` plays in `object`'s decoded edges, if any. A
+/// tree entry that names a commit is a content edge: it records no role.
+fn history_edge(object: &Object, child: Hash) -> Option<HistoryEdge> {
+    match object {
+        Object::Commit(c) if c.parents.contains(&child) => Some(HistoryEdge::Parent),
+        Object::Remix(r) if r.parents.contains(&child) => Some(HistoryEdge::Parent),
+        Object::Tag(t) if t.target == child => Some(HistoryEdge::TagTarget),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct ReadProofs {
     identity: Option<Arc<()>>,
@@ -31,6 +123,8 @@ pub(crate) struct ReadProofs {
     pub(crate) tips: Option<Vec<Hash>>,
     cap: usize,
     proofs: BTreeMap<Hash, Proof>,
+    checkpoint: Option<Arc<Checkpoint>>,
+    lineage: BTreeMap<Hash, Lineage>,
 }
 
 impl ReadProofs {
@@ -97,13 +191,22 @@ impl ReadProofs {
         Ok(())
     }
 
+    /// Every reset of structural evidence drops a selected checkpoint and
+    /// its recorded lineage: lineage never survives into another root set.
+    fn drop_checkpoint(&mut self) {
+        self.checkpoint = None;
+        self.lineage.clear();
+    }
+
     fn clear(&mut self) {
         self.tips = None;
         self.proofs.clear();
+        self.drop_checkpoint();
     }
 
     pub(crate) fn capture(&mut self, tips: Vec<Hash>) {
         self.proofs.clear();
+        self.drop_checkpoint();
         // Root enumeration already reserves its bounded rows before dispatch.
         // Oversized root sets are usable by the ordinary walk, without a memo.
         if tips.len() <= self.cap {
@@ -125,6 +228,46 @@ impl ReadProofs {
     pub(crate) fn capture_selected(&mut self, tip: Option<Hash>) {
         self.capture(tip.into_iter().collect());
         self.tips = None;
+    }
+
+    /// Install a selected-ref capture as this session's only root set. The
+    /// checkpoint is immutable evidence; it dies with every proofs reset.
+    pub(crate) fn capture_checkpoint(&mut self, mut checkpoint: Checkpoint) {
+        let tip = checkpoint.tip;
+        checkpoint.expires = self.expires;
+        self.capture(vec![tip]);
+        if self.proofs.contains_key(&tip) {
+            self.lineage.insert(
+                tip,
+                Lineage {
+                    edge: Some(HistoryEdge::Root),
+                    ..Lineage::default()
+                },
+            );
+        }
+        self.checkpoint = Some(Arc::new(checkpoint));
+    }
+
+    /// The live selected-ref capture, if this session holds one.
+    pub(crate) fn checkpoint(&self) -> Option<&Arc<Checkpoint>> {
+        self.checkpoint.as_ref()
+    }
+
+    /// The recorded history link for a proved object, or `None` when this
+    /// session holds no selected checkpoint or the row has no history edge.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "consumed by history continuation issuance")
+    )]
+    pub(crate) fn history_link(&self, id: &Hash) -> Option<HistoryLink> {
+        self.checkpoint.as_ref()?;
+        let proof = self.proofs.get(id)?;
+        let lineage = self.lineage.get(id)?;
+        Some(HistoryLink {
+            predecessor: proof.parent,
+            edge: lineage.edge?,
+            decoded: lineage.decoded,
+        })
     }
 
     pub(crate) fn current(&self, now: u64) -> bool {
@@ -215,6 +358,11 @@ impl ReadProofs {
                 manifest_pack: None,
             },
         );
+        if self.checkpoint.is_some()
+            && let Some(edge) = history_edge(object, child)
+        {
+            self.lineage.entry(child).or_default().edge = Some(edge);
+        }
         true
     }
 
@@ -244,6 +392,15 @@ impl ReadProofs {
         if !self.contains(&id) {
             return;
         }
+        if self.checkpoint.is_some()
+            && let Some(decoded) = match object {
+                Object::Commit(c) => Some((HistoryKind::Commit, c.timestamp)),
+                Object::Remix(r) => Some((HistoryKind::Remix, r.timestamp)),
+                _ => None,
+            }
+        {
+            self.lineage.entry(id).or_default().decoded = Some(decoded);
+        }
         let count = match object {
             Object::Commit(c) => 1 + c.parents.len(),
             Object::Remix(r) => 1 + r.parents.len(),
@@ -262,10 +419,17 @@ impl ReadProofs {
             proof.manifest_pack = matches!(object, Object::ChunkedBlob(_)).then_some(pack);
         }
         for child in children {
-            self.proofs.entry(child).or_insert(Proof {
-                parent: Some(id),
-                manifest_pack: None,
-            });
+            if let std::collections::btree_map::Entry::Vacant(slot) = self.proofs.entry(child) {
+                slot.insert(Proof {
+                    parent: Some(id),
+                    manifest_pack: None,
+                });
+                if self.checkpoint.is_some()
+                    && let Some(edge) = history_edge(object, child)
+                {
+                    self.lineage.entry(child).or_default().edge = Some(edge);
+                }
+            }
         }
     }
 
@@ -308,6 +472,7 @@ impl ReadProofs {
         }
         if stopped {
             self.proofs.clear();
+            self.drop_checkpoint();
             if let Some(tips) = &self.tips
                 && tips.len() <= self.cap
             {
@@ -329,7 +494,186 @@ impl ReadProofs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mkit_core::object::ChunkedBlob;
+    use crate::repo::{NamespaceKey, RepoName};
+    use futures_executor::block_on;
+    use mkit_core::object::{ChunkedBlob, Commit, EntryMode, Identity, Tree, TreeEntry};
+
+    fn repo() -> RepoId {
+        RepoId {
+            namespace: NamespaceKey::deployment_default(),
+            name: RepoName::new("room").unwrap(),
+        }
+    }
+
+    fn checkpoint(tip: Hash) -> Checkpoint {
+        Checkpoint {
+            reference: "refs/heads/main".into(),
+            tip,
+            publication: Publication::default(),
+            raw: Vec::new(),
+            security: [7; 32],
+            expires: 0,
+        }
+    }
+
+    fn commit(tree: Hash, parents: &[Hash]) -> Object {
+        Object::Commit(Commit::new_unannotated(
+            tree,
+            parents.to_vec(),
+            Identity::ed25519([0; 32]),
+            [0; 32],
+            Vec::new(),
+            7,
+            [0; 64],
+        ))
+    }
+
+    fn tree(children: &[Hash]) -> Object {
+        Object::Tree(Tree {
+            entries: children
+                .iter()
+                .enumerate()
+                .map(|(index, child)| TreeEntry {
+                    name: vec![u8::try_from(index).unwrap()],
+                    mode: EntryMode::Blob,
+                    object_hash: *child,
+                })
+                .collect(),
+        })
+    }
+
+    struct StopAt(Hash);
+    impl TakedownGate for StopAt {
+        fn stops_descent(&self, _: &RepoId, id: &Hash) -> bool {
+            *id == self.0
+        }
+        fn check<'a>(
+            &'a self,
+            _: &'a RepoId,
+            _: &'a Hash,
+        ) -> crate::BoxFuture<'a, Result<crate::http_objects::TakedownVerdict, ServerError>>
+        {
+            Box::pin(async { Ok(crate::http_objects::TakedownVerdict::Clear) })
+        }
+    }
+
+    fn bound_memo(cap: usize) -> ReadProofs {
+        let cfg = HttpObjectsConfig {
+            max_walk_objects: cap,
+            ..HttpObjectsConfig::default()
+        };
+        let mut memo = ReadProofs::default();
+        memo.bind(&Arc::new(()), None, 0, &cfg).unwrap();
+        memo
+    }
+
+    #[test]
+    fn a_checkpoint_records_roles_and_decoded_facts_on_new_rows_only() {
+        let mut memo = bound_memo(16);
+        memo.capture_checkpoint(checkpoint([1; 32]));
+        let link = memo.history_link(&[1; 32]).unwrap();
+        assert_eq!(link.edge, HistoryEdge::Root);
+        assert_eq!(link.predecessor, None);
+        assert_eq!(link.decoded, None);
+        let head = commit([9; 32], &[[2; 32], [3; 32]]);
+        memo.expand([1; 32], [0; 32], &head);
+        for parent in [[2; 32], [3; 32]] {
+            let link = memo.history_link(&parent).unwrap();
+            assert_eq!(link.edge, HistoryEdge::Parent);
+            assert_eq!(link.predecessor, Some([1; 32]));
+            assert_eq!(link.decoded, None);
+        }
+        // A tree child is a content edge: a row, but no history link.
+        assert!(memo.contains(&[9; 32]));
+        assert!(memo.history_link(&[9; 32]).is_none());
+        // A tree entry naming a commit records no edge for it either.
+        memo.expand([9; 32], [0; 32], &tree(&[[4; 32], [5; 32]]));
+        assert!(memo.contains(&[4; 32]));
+        assert!(memo.history_link(&[4; 32]).is_none());
+        // Decoding the expanded object fills in its fact, not a new edge.
+        let parent = commit([9; 32], &[[3; 32], [6; 32]]);
+        memo.expand([2; 32], [0; 32], &parent);
+        let link = memo.history_link(&[2; 32]).unwrap();
+        assert_eq!(link.edge, HistoryEdge::Parent);
+        assert_eq!(link.decoded, Some((HistoryKind::Commit, 7)));
+        // A second path to an existing row keeps its first recorded role.
+        assert!(memo.link([2; 32], &parent, [3; 32]));
+        let link = memo.history_link(&[3; 32]).unwrap();
+        assert_eq!(link.edge, HistoryEdge::Parent);
+        assert_eq!(link.predecessor, Some([1; 32]));
+        let link = memo.history_link(&[6; 32]).unwrap();
+        assert_eq!(link.edge, HistoryEdge::Parent);
+        assert_eq!(link.predecessor, Some([2; 32]));
+    }
+
+    #[test]
+    fn no_checkpoint_means_no_lineage() {
+        let mut memo = bound_memo(16);
+        memo.capture(vec![[1; 32]]);
+        let head = commit([9; 32], &[[2; 32]]);
+        memo.expand([1; 32], [0; 32], &head);
+        assert!(memo.history_link(&[1; 32]).is_none());
+        assert!(memo.history_link(&[2; 32]).is_none());
+        assert!(memo.lineage.is_empty());
+    }
+
+    #[test]
+    fn every_reset_path_drops_the_checkpoint() {
+        let resets: [fn(&mut ReadProofs); 3] = [
+            |memo| {
+                memo.capture(vec![[8; 32]]);
+            },
+            |memo| {
+                memo.capture_selected(Some([8; 32]));
+            },
+            |memo| {
+                memo.restore_history(&[[9; 32]], u64::MAX).unwrap();
+            },
+        ];
+        for reset in resets {
+            let mut memo = bound_memo(16);
+            memo.capture_checkpoint(checkpoint([1; 32]));
+            memo.expand([1; 32], [0; 32], &commit([9; 32], &[[2; 32]]));
+            reset(&mut memo);
+            assert!(memo.checkpoint().is_none());
+            assert!(memo.lineage.is_empty());
+            assert!(memo.history_link(&[2; 32]).is_none());
+        }
+        // Rebinding to another identity resets proofs like any other capture.
+        let mut memo = bound_memo(16);
+        memo.capture_checkpoint(checkpoint([1; 32]));
+        let cfg = HttpObjectsConfig::default();
+        memo.bind(&Arc::new(()), None, 1, &cfg).unwrap();
+        assert!(memo.checkpoint().is_none());
+        assert!(memo.lineage.is_empty());
+        // Expiry is a reset too: the same identity re-binds empty.
+        let mut memo = ReadProofs::default();
+        let identity = Arc::new(());
+        let cfg = HttpObjectsConfig {
+            reachability_lag_ms: 5,
+            ..HttpObjectsConfig::default()
+        };
+        memo.bind(&identity, None, 0, &cfg).unwrap();
+        memo.capture_checkpoint(checkpoint([1; 32]));
+        memo.bind(&identity, None, 5, &cfg).unwrap();
+        assert!(memo.checkpoint().is_none());
+        assert!(memo.lineage.is_empty());
+        // A stopped revalidation reseeds the tips without the checkpoint.
+        let mut memo = bound_memo(16);
+        memo.capture_checkpoint(checkpoint([1; 32]));
+        memo.expand([1; 32], [0; 32], &commit([9; 32], &[[2; 32]]));
+        let store = crate::memory::MemoryKv::default();
+        block_on(memo.revalidate(
+            &store,
+            &repo(),
+            &StopAt([1; 32]),
+            &BTreeSet::from([[2; 32]]),
+        ))
+        .unwrap();
+        assert!(memo.checkpoint().is_none());
+        assert!(memo.lineage.is_empty());
+        assert!(memo.contains(&[1; 32]));
+    }
 
     #[test]
     fn expansion_reserves_all_edges_before_publishing_and_declines_huge_manifests() {

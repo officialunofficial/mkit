@@ -32,6 +32,30 @@ a Worker invocation through repeated proofs, or trust corrupted prefetched bytes
 read prohibition; reader presence/call-count/poisoned-frame/grant-revocation tests;
 native HTTP disclosure byte parity; `store::memory` integrity tests.
 
+## A selected-ref session never uses all-ref root discovery and its checkpoint never survives a proof reset
+
+**Always:** session canonical and metadata reads on a `with_selected_ref`
+reader root only at that ref's authoritative anchor — the owner view's live
+ref, the public view's published head — never at all-ref discovery. The
+immutable capture checkpoint (ref, raw publication/ref values, full
+publication, post-activation security digest, expiry, identity generation) dies
+with every proof reset, expiry, reader rebind, helper capture or revalidation
+stop. Parent/tag-target roles and decoded commit/remix facts exist only under
+a live checkpoint and are structural evidence, never permission.
+
+**Because:** history continuation issuance must trust that the capture
+it re-verifies is the exact anchor the session read from, and that lineage was
+recorded under that capture only.
+
+**If violated:** a session could silently broaden to unrelated refs, an
+issuance fence could pass against a replaced anchor, or recorded history edges
+could outlive the capture that authorized their interpretation.
+
+**Enforced by:** `pipeline::read_proofs` checkpoint/lineage and reset funnel,
+`pipeline::object_reader::selected` capture and fence; `selected_ref_tests`
+single-ref capture/tag/unpeeled/off-ref/divergent-anchor/missing-ledger/ABA/
+expiry/rebind/helper tests and `read_proofs` reset/lineage unit tests.
+
 ## Private scanner retrieval requires current ticket and global-denial checks
 
 **Always:** scanner byte reads require both a dedicated short-lived capability
