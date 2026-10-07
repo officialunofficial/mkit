@@ -290,6 +290,7 @@ fn apply_sparse_after_clone(
     restore_tree_to_worktree_with(
         &store,
         &tree_hash,
+        None,
         target,
         &restore_opts,
         &crate::restore_fanout::read_chunks_fanout,

@@ -233,6 +233,17 @@ pub fn run(args: &[String]) -> u8 {
         sparse_patterns: None,
     };
 
+    // HEAD's tree, read before HEAD is advanced below. Without `--force`
+    // the safety gate has proven the worktree matches it, so entries
+    // identical between it and the target are skipped rather than
+    // re-read and rewritten. `--force` discards local edits, so it must
+    // rewrite everything.
+    let base_tree = if opts.force {
+        None
+    } else {
+        super::current_head_tree(&layout, &store).ok().flatten()
+    };
+
     // Run the destructive-restore safety gate (#176) BEFORE touching
     // anything. This is read-only — it refuses the checkout if dirty
     // tracked files, staged changes, or untracked-path collisions with
@@ -298,6 +309,7 @@ pub fn run(args: &[String]) -> u8 {
     let report = match restore_tree_to_worktree_with(
         &store,
         &tree_hash,
+        base_tree,
         &cwd,
         &sparse_opts,
         &crate::restore_fanout::read_chunks_fanout,
