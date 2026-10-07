@@ -51,7 +51,8 @@ const ORDER_ID_TIMESTAMP_DISCOVERY: u8 = 0x01;
 
 const FLAG_DEDUP_ACTIVE: u8 = 0x01;
 const FLAG_SELECTED: u8 = 0x02;
-const KNOWN_FLAGS: u8 = FLAG_DEDUP_ACTIVE | FLAG_SELECTED;
+const FLAG_SEALED: u8 = 0x04;
+const KNOWN_FLAGS: u8 = FLAG_DEDUP_ACTIVE | FLAG_SELECTED | FLAG_SEALED;
 
 /// The explicit all-parent ordering produced by [`TimestampDiscovery`].
 ///
@@ -105,6 +106,7 @@ pub struct ParentEdge {
 /// What the walk needs from its caller next, from
 /// [`TimestampDiscovery::step`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WalkStep {
     /// Emit this id: decode it, serve it, then register it with
     /// [`TimestampDiscovery::emit`].
@@ -142,6 +144,11 @@ pub enum HistoryOrderError {
     /// [`TimestampDiscovery::push`] named the outstanding selected id.
     #[error("id is the outstanding selected candidate")]
     SelectedCandidate,
+    /// [`TimestampDiscovery::push`] after the first completed emission.
+    /// The seed window is closed: a late seed could descend into the
+    /// unrecorded linear prefix and re-emit it.
+    #[error("push after the first completed emission")]
+    WalkStarted,
     /// [`TimestampDiscovery::provide_timestamp`] named an id that is not a
     /// pending slot.
     #[error("id is not pending")]
@@ -210,11 +217,15 @@ pub enum HistoryOrderError {
 /// - `selected` is the popped candidate awaiting [`Self::emit`]; `step`
 ///   refuses to advance while it is set so a page cannot skip the
 ///   complete-parent-enqueue step.
+/// - `sealed` latches at the first completed `emit`: seeding is open only
+///   before the first emission, because pre-activation emissions are not
+///   recorded and a later seed could descend into them unseen.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TimestampDiscovery {
     pending: Vec<PendingCandidate>,
     emitted: BTreeSet<Hash>,
     dedup_active: bool,
+    sealed: bool,
     selected: Option<Hash>,
 }
 
@@ -233,12 +244,18 @@ impl TimestampDiscovery {
     }
 
     /// Append a frontier candidate (a page-1 root, or a host-side
-    /// discovery). Slots are retained verbatim — duplicate ids stay
-    /// duplicate and count toward [`FRONTIER_MAX`]; emission suppression
-    /// handles them at pop. Pushing the outstanding selected id is refused
-    /// because the queue cannot legitimately rediscover an id its owner has
-    /// not finished expanding.
+    /// discovery made before the walk started). Slots are retained
+    /// verbatim — duplicate ids stay duplicate and count toward
+    /// [`FRONTIER_MAX`]; emission suppression handles them at pop.
+    /// Pushing the outstanding selected id is refused because the queue
+    /// cannot legitimately rediscover an id its owner has not finished
+    /// expanding, and every push after the first completed emission is
+    /// refused: the seed window must close before output begins so a late
+    /// seed cannot descend into the unrecorded linear prefix.
     pub fn push(&mut self, candidate: PendingCandidate) -> Result<(), HistoryOrderError> {
+        if self.sealed {
+            return Err(HistoryOrderError::WalkStarted);
+        }
         if self.selected == Some(candidate.id) {
             return Err(HistoryOrderError::SelectedCandidate);
         }
@@ -294,24 +311,28 @@ impl TimestampDiscovery {
     /// are not pending and keys that disagree with an already-keyed slot.
     pub fn provide_timestamp(&mut self, id: Hash, timestamp: u64) -> Result<(), HistoryOrderError> {
         let mut any = false;
-        for e in &mut self.pending {
+        for e in &self.pending {
             if e.id != id {
                 continue;
             }
             any = true;
-            match e.timestamp {
-                Some(recorded) if recorded != timestamp => {
-                    return Err(HistoryOrderError::ConflictingTimestamp {
-                        id,
-                        recorded,
-                        supplied: timestamp,
-                    });
-                }
-                _ => e.timestamp = Some(timestamp),
+            if let Some(recorded) = e.timestamp
+                && recorded != timestamp
+            {
+                return Err(HistoryOrderError::ConflictingTimestamp {
+                    id,
+                    recorded,
+                    supplied: timestamp,
+                });
             }
         }
         if !any {
             return Err(HistoryOrderError::NotPending(id));
+        }
+        for e in &mut self.pending {
+            if e.id == id {
+                e.timestamp = Some(timestamp);
+            }
         }
         Ok(())
     }
@@ -358,6 +379,7 @@ impl TimestampDiscovery {
         if dedup_after {
             self.emitted.insert(id);
         }
+        self.sealed = true;
         self.pending.extend(accepted);
         self.selected = None;
         Ok(())
@@ -369,7 +391,10 @@ impl TimestampDiscovery {
         WalkStep::Emit(e.id)
     }
 
-    /// Pending slots in retained order, including duplicate ids.
+    /// Pending slots in retained order, including duplicate ids. While
+    /// dedup is live the slice may contain already-emitted ids; they are
+    /// dead slots that the next [`Self::step`] drops and that can never
+    /// emit.
     #[must_use]
     pub fn pending(&self) -> &[PendingCandidate] {
         &self.pending
@@ -381,10 +406,18 @@ impl TimestampDiscovery {
         self.emitted.iter()
     }
 
-    /// Whether dedup is active (a multi-local-parent node was emitted).
+    /// Whether dedup is active: a multi-local-parent node was emitted, or
+    /// an emission completed while other candidates still pend.
     #[must_use]
     pub fn dedup_active(&self) -> bool {
         self.dedup_active
+    }
+
+    /// Whether the seed window is closed (the first emission completed;
+    /// [`Self::push`] now refuses).
+    #[must_use]
+    pub fn sealed(&self) -> bool {
+        self.sealed
     }
 
     /// The outstanding selected id awaiting [`Self::emit`], if any.
@@ -427,6 +460,9 @@ impl TimestampDiscovery {
         }
         if self.selected.is_some() {
             flags |= FLAG_SELECTED;
+        }
+        if self.sealed {
+            flags |= FLAG_SEALED;
         }
         out.push(SNAPSHOT_VERSION);
         out.push(ORDER_ID_TIMESTAMP_DISCOVERY);
@@ -533,6 +569,7 @@ impl TimestampDiscovery {
             pending,
             emitted,
             dedup_active,
+            sealed: flags & FLAG_SEALED != 0,
             selected,
         })
     }
@@ -986,6 +1023,94 @@ mod tests {
     }
 
     #[test]
+    fn push_after_first_emission_refused() {
+        // The hole the sealed latch closes: a linear emission while
+        // pending is empty leaves dedup off and E unrecorded; a late seed
+        // could descend into E and force a second emission.
+        let mut g = Graph::default();
+        g.node(id(b'E'), 50, &[id(b'F')])
+            .node(id(b'F'), 40, &[])
+            .node(id(b'S'), 60, &[id(b'E')]);
+        let mut walk = TimestampDiscovery::new();
+        walk.push(PendingCandidate {
+            id: id(b'E'),
+            timestamp: Some(50),
+        })
+        .unwrap();
+        assert_eq!(walk.step().unwrap(), WalkStep::Emit(id(b'E')));
+        walk.emit(&[ParentEdge {
+            id: id(b'F'),
+            timestamp: Some(40),
+            enqueue: true,
+        }])
+        .unwrap();
+        // E was never recorded (dedup stayed off) and the seed window is
+        // now closed.
+        assert!(!walk.dedup_active());
+        assert!(walk.sealed());
+        assert_eq!(
+            walk.push(PendingCandidate {
+                id: id(b'S'),
+                timestamp: Some(60)
+            }),
+            Err(HistoryOrderError::WalkStarted)
+        );
+        // The seal survives a snapshot round-trip.
+        let mut resumed = TimestampDiscovery::decode(&walk.encode()).unwrap();
+        assert!(resumed.sealed());
+        assert_eq!(
+            resumed.push(PendingCandidate {
+                id: id(b'S'),
+                timestamp: Some(60)
+            }),
+            Err(HistoryOrderError::WalkStarted)
+        );
+        let mut stats = Stats::default();
+        assert_eq!(
+            page(&mut resumed, &g, usize::MAX, true, &mut stats).unwrap(),
+            vec![id(b'F')]
+        );
+        assert!(resumed.is_complete());
+    }
+
+    #[test]
+    fn push_between_select_and_emit_still_allowed() {
+        // Sealing latches at emit, not at select: a discovery made mid-step
+        // is still inside the seed window, and the pending-nonempty dedup
+        // trigger covers its convergence on the selected node.
+        let mut g = Graph::default();
+        g.node(id(b'E'), 50, &[id(b'F')])
+            .node(id(b'F'), 40, &[])
+            .node(id(b'S'), 60, &[id(b'E')]);
+        let mut walk = TimestampDiscovery::new();
+        walk.push(PendingCandidate {
+            id: id(b'E'),
+            timestamp: Some(50),
+        })
+        .unwrap();
+        assert_eq!(walk.step().unwrap(), WalkStep::Emit(id(b'E')));
+        walk.push(PendingCandidate {
+            id: id(b'S'),
+            timestamp: Some(60),
+        })
+        .unwrap();
+        walk.emit(&[ParentEdge {
+            id: id(b'F'),
+            timestamp: Some(40),
+            enqueue: true,
+        }])
+        .unwrap();
+        assert!(walk.dedup_active());
+        // S emits next; its edge back to the already-emitted E is omitted,
+        // so E never re-emits.
+        let mut stats = Stats::default();
+        assert_eq!(
+            page(&mut walk, &g, usize::MAX, true, &mut stats).unwrap(),
+            vec![id(b'S'), id(b'F')]
+        );
+    }
+
+    #[test]
     fn misuse_errors_are_explicit() {
         let mut walk = TimestampDiscovery::new();
         assert_eq!(walk.emit(&[]), Err(HistoryOrderError::NoSelectedCandidate));
@@ -1165,6 +1290,7 @@ mod tests {
             Vec<PendingCandidate>,
             Vec<Hash>,
             bool,
+            bool,
             Option<Hash>,
         ) {
             (
@@ -1172,6 +1298,7 @@ mod tests {
                 walk.pending().to_vec(),
                 walk.emitted().copied().collect(),
                 walk.dedup_active(),
+                walk.sealed(),
                 walk.selected(),
             )
         }
@@ -1209,7 +1336,7 @@ mod tests {
                 }
             }
         }
-        for (bytes, pending, emitted, dedup, selected) in seen_states {
+        for (bytes, pending, emitted, dedup, sealed, selected) in seen_states {
             let restored = TimestampDiscovery::decode(&bytes).unwrap();
             // Canonical form: re-encoding restores the identical bytes.
             assert_eq!(restored.encode(), bytes);
@@ -1217,6 +1344,7 @@ mod tests {
             assert_eq!(restored.pending(), pending.as_slice());
             assert_eq!(restored.emitted().copied().collect::<Vec<_>>(), emitted);
             assert_eq!(restored.dedup_active(), dedup);
+            assert_eq!(restored.sealed(), sealed);
             assert_eq!(restored.selected(), selected);
         }
         // A mid-step snapshot resumes exactly where it paused.
@@ -1289,10 +1417,10 @@ mod tests {
             Err(HistoryOrderError::UnsupportedOrder(0x7f))
         );
         let mut bad = good.clone();
-        bad[2] = 0x04;
+        bad[2] = 0x08;
         assert_eq!(
             TimestampDiscovery::decode(&bad),
-            Err(HistoryOrderError::InvalidFlags(0x04))
+            Err(HistoryOrderError::InvalidFlags(0x08))
         );
         let mut bad = good.clone();
         bad[3..5].copy_from_slice(&u16::try_from(FRONTIER_MAX + 1).unwrap().to_le_bytes());
@@ -1335,6 +1463,12 @@ mod tests {
         // dedup flag set but the emitted set is empty (or clear with a
         // non-empty set): not a canonical state.
         let inconsistent = vec![0x01, 0x01, FLAG_DEDUP_ACTIVE, 0, 0, 0, 0];
+        assert_eq!(
+            TimestampDiscovery::decode(&inconsistent),
+            Err(HistoryOrderError::InconsistentDedupState)
+        );
+        let mut inconsistent = vec![0x01, 0x01, 0x00, 0, 0, 1, 0];
+        inconsistent.extend_from_slice(&id(b'A'));
         assert_eq!(
             TimestampDiscovery::decode(&inconsistent),
             Err(HistoryOrderError::InconsistentDedupState)

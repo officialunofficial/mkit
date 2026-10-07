@@ -139,9 +139,11 @@ collect the applicable entries between their old and new immutable pins.
   ids; exceeding either bound fails explicitly without truncation, eviction or
   re-emission. Dedup goes live with the first revisitable emission and decoded
   is distinct from emitted, so a page can snapshot after the last output's
-  parent enqueue and resume byte-identically. A strict little-endian snapshot
-  encoding (`encode`/`decode`) carries the full state for continuation
-  issuance. The order, caps, duplicate-slot policy and snapshot format are
+  parent enqueue and resume byte-identically. Seeding closes at the first
+  completed emission (`WalkStarted`) so a late seed cannot force a
+  re-emission. A strict little-endian snapshot encoding (`encode`/`decode`)
+  carries the full state for continuation issuance. The order, caps,
+  duplicate-slot policy and snapshot format are
   normative in `docs/specs/SPEC-HISTORY-ORDER.md`. Existing traversal APIs —
   the server's BFS `HistoryMode::AllParents` and the CLI's date-order log —
   are unchanged.

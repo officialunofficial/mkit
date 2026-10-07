@@ -2426,7 +2426,8 @@ exceeds 192 ids; crossing either bound fails the operation with no partial
 state. Dedup goes live with the first revisitable emission (a
 multi-local-parent node, or any emission while candidates remain pending) and
 records every later emission; decoded is not emitted, and parent enqueue
-completes before any snapshot.
+completes before any snapshot. Seeding closes at the first completed emission
+so a late seed cannot descend into the unrecorded linear prefix.
 
 **Because:** server issuance/redemption and embedder page loops must produce
 byte-identical pages from the same state without re-walking the emitted

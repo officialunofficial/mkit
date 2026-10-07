@@ -114,8 +114,15 @@ A conforming reducer MUST behave exactly as follows.
    inconsistent input generally: callers MUST feed an acyclic ancestry
    DAG with true canonical keys and the decoded node's true local
    parent list.
-9. **Done.** The walk completes when no pending candidate could emit;
-   no continuation token is issued exactly in this state.
+9. **Seeding.** Candidates enter pending only by caller seed or by
+   parent discovery in rule 3. Every seed push MUST precede the walk's
+   first completed emission; a conforming reducer MUST refuse a seed
+   after that point, including after a snapshot decode (flag bit2 in §5
+   persists the closed window). Pre-activation emissions are not
+   recorded, so a later seed could otherwise descend into them unseen
+   and force a re-emission.
+10. **Done.** The walk completes when no pending candidate could emit;
+    no continuation token is issued exactly in this state.
 
 ## 4. Bounds and failure
 
@@ -140,8 +147,9 @@ resuming completes its `emit` before continuing.
 offset  size      field          value
 0       1         version        0x01
 1       1         order          0x01 = timestamp-discovery
-2       1         flags          bit0: dedup live; bit1: selected present
-                                 remaining bits MUST be zero
+2       1         flags          bit0: dedup live; bit1: selected
+                                 present; bit2: seed window closed
+                                 (§3.9); remaining bits MUST be zero
 3       2         pending_len    u16, <= 256
 5       2         emitted_len    u16, <= 192
 7       var       pending        per slot, in retained order:
@@ -186,6 +194,8 @@ produced by a conforming encoder is bit-for-bit reproducible:
 and pages `[M,A],[B,X],[C]` with frontier `[B,X]`, emitted `{M,A}`),
 `clock_skew_shared_ancestor_suppressed` (`M,A,X,B`; `[M,A],[X,B]`),
 `linear_chain_needs_no_lookahead`, `parent_newer_than_child_wins`,
+`push_after_first_emission_refused` and
+`push_between_select_and_emit_still_allowed`,
 `duplicate_parent_ids_emit_once`,
 `independent_seeds_converging_without_merge_dedup`,
 `held_back_parent_still_counts_for_merge`,
@@ -204,5 +214,6 @@ and pages `[M,A],[B,X],[C]` with frontier `[B,X]`, emitted `{M,A}`),
 | Frontier <= 256, emitted <= 192 | `FrontierFull`, `EmittedFull`, `LimitExceeded` |
 | Decoded != emitted | `emit` is the only path into the emitted set |
 | Parent enqueue precedes snapshot | `CandidateOutstanding` blocks `step` mid-step |
+| Seeding precedes first emission | sealed latch (`WalkStarted`); snapshot bit2 |
 | Snapshots round-trip bit-for-bit | strict decoder; canonical emitted order |
 | Caps publish no partial state | both bounds checked before mutation |
