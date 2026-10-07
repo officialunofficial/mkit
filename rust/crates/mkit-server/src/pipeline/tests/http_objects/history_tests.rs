@@ -5,7 +5,7 @@ use crate::pipeline::{
     HistoryMode, HistoryOptions, ObjectReader, PathOptions, ReadLimits, ReaderSession, ReaderView,
 };
 
-fn in_view<H: HookSet>(
+pub(super) fn in_view<H: HookSet>(
     fx: &Fx<H>,
     writer: bool,
     test: impl FnOnce(ObjectReader<'_, SpyBlobs, Arc<Spy>, H>),
@@ -41,7 +41,7 @@ fn in_view<H: HookSet>(
     test(reader);
 }
 
-pub(super) fn drain(fx: &Fx) {
+pub(super) fn drain<H: HookSet>(fx: &Fx<H>) {
     let repo = fx.repo_id("room");
     let source = fx.pipe.shards.ref_shard(&repo, HEAD);
     let relay = crate::timers::TimerRegistry::new().register(crate::relay::RelayHandler {

@@ -25,6 +25,7 @@ pub use history::{
     CommitPathRead, ContinuedHistoryPage, HistoryCommit, HistoryContinuation, HistoryMode,
     HistoryOptions, HistoryPage, PathOptions, PathTree, PathWitness,
 };
+mod selected;
 /// Verified lengths describe canonical objects separately from logical files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ObjectMetadata {
@@ -64,6 +65,7 @@ pub enum ReaderView<'a> {
 #[derive(Debug)]
 pub struct ObjectReader<'a, B, N, H> {
     identity: std::sync::Arc<()>,
+    selected: Option<String>,
     batch_limit: usize,
     pipe: &'a Pipeline<B, N, H>,
     repo: RepoId,
@@ -109,6 +111,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
         };
         let reader = ObjectReader {
             identity: std::sync::Arc::new(()),
+            selected: None,
             batch_limit: OBJECT_READER_BATCH,
             pipe: self,
             repo,
@@ -140,6 +143,43 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         }
         self.batch_limit = limit;
         Ok(self)
+    }
+
+    /// Scope session reads to one ref. Only `read_canonical_in` and
+    /// `object_metadata_in` narrow: each session captures that ref's
+    /// authoritative anchor and security digest once, proves targets from
+    /// that single root before locating them and never falls back to all-ref
+    /// discovery. `read_canonical`, `object_metadata`, `issue_urls` and a
+    /// session used without this reader keep the unscoped contract, and
+    /// history helpers on this reader must still name the same ref. Capture
+    /// requires the publication ledger: a missing or empty ledger makes
+    /// session reads uniformly absent. Binding a session bound to the
+    /// previous reader resets its proofs.
+    /// # Errors
+    /// `invalid_argument` unless `reference` is a served ref name outside
+    /// `refs/mkit/packmap/`. This performs no I/O.
+    pub fn with_selected_ref(mut self, reference: &str) -> Result<Self, ServerError> {
+        if !crate::refs::is_served_ref_name(reference)
+            || reference.starts_with("refs/mkit/packmap/")
+        {
+            return Err(ServerError::invalid_argument("invalid selected ref"));
+        }
+        self.selected = Some(reference.to_owned());
+        self.identity = std::sync::Arc::new(());
+        Ok(self)
+    }
+
+    /// A selected reader's history helpers must name its ref; a mismatch is a
+    /// caller bug, refused before any I/O.
+    fn check_selected(&self, reference: &str) -> Result<(), ServerError> {
+        if let Some(selected) = &self.selected
+            && selected != reference
+        {
+            return Err(ServerError::invalid_argument(
+                "ref differs from the selected ref",
+            ));
+        }
+        Ok(())
     }
 
     async fn authorize(
@@ -579,7 +619,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             metrics: pipe.metrics.as_ref(),
             caps: Caps::Reader,
         };
-        let mut located = if capped_as_absent {
+        // Selected sessions prove targets before locating them, as the capped
+        // path does, so an off-ref target is never looked up.
+        let prove_first = capped_as_absent || self.selected.is_some() && proofs.is_some();
+        let mut located = if prove_first {
             Vec::new()
         } else {
             resolve::locate_ids(&env, ids, resolve::OnCap::Fail)
@@ -600,7 +643,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         }
         located = clear;
         // Issuance proves missing IDs too: proof cost must not expose membership.
-        let mut targets = if capped_as_absent {
+        let mut targets = if prove_first {
             ids.iter().copied().collect::<BTreeSet<_>>()
         } else {
             located.iter().map(|(id, _)| *id).collect::<BTreeSet<_>>()
@@ -626,6 +669,28 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             }
         }
         if let Some(memo) = &mut proofs {
+            if let Some(reference) = self.selected.as_deref()
+                && memo.checkpoint().is_none()
+            {
+                if !memo.current(ms(pipe.clock.now_ms())) {
+                    return if capped_as_absent {
+                        Ok((BTreeMap::new(), BTreeMap::new()))
+                    } else {
+                        Err(exhausted())
+                    };
+                }
+                match self.install_selected(&meta, memo, reference).await {
+                    Ok(true) => {}
+                    Ok(false) => return Ok((BTreeMap::new(), BTreeMap::new())),
+                    Err(error)
+                        if capped_as_absent
+                            && (absorb(capped) || error.code() == Code::ResourceExhausted) =>
+                    {
+                        return Ok((BTreeMap::new(), BTreeMap::new()));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
             match memo
                 .revalidate(&meta, &self.repo, seams.takedown.as_ref(), &targets)
                 .await
@@ -646,7 +711,16 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         }
         targets.retain(|id| !reached.contains(id));
         if !targets.is_empty() {
-            let tips = if let Some(tips) = proofs.as_ref().and_then(|memo| memo.tips.as_ref()) {
+            let tips = if self.selected.is_some() && proofs.is_some() {
+                // A selected session's only root set is its captured tip.
+                Ok((
+                    proofs
+                        .as_ref()
+                        .and_then(|memo| memo.tips.clone())
+                        .unwrap_or_default(),
+                    false,
+                ))
+            } else if let Some(tips) = proofs.as_ref().and_then(|memo| memo.tips.as_ref()) {
                 Ok((tips.clone(), false))
             } else {
                 pipe.reader_tips(&meta, &self.repo, cfg.max_walk_objects, writer)
@@ -710,7 +784,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 reached.extend(found);
             }
         }
-        if capped_as_absent {
+        if prove_first {
             // Do not locate inaccessible targets: membership-dependent work can
             // distinguish a stored orphan from a missing ID near the call cap.
             checks
@@ -723,10 +797,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     accessible.push(*id);
                 }
             }
-            located = resolve::locate_ids(&env, &accessible, resolve::OnCap::Skip)
+            let (members, skipped) = resolve::locate_ids(&env, &accessible, resolve::OnCap::Skip)
                 .await
-                .map_err(resolution_failure)?
-                .0;
+                .map_err(resolution_failure)?;
+            if skipped && !capped_as_absent {
+                return Err(exhausted());
+            }
+            located = members;
             reached = located.iter().map(|(id, _)| *id).collect();
         }
         located.retain(|(id, _)| reached.contains(id));

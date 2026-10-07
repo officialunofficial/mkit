@@ -64,6 +64,19 @@ collect the applicable entries between their old and new immutable pins.
   paging regression covers a 40-commit history; the full 201/302-commit fixture
   runs explicitly in the serial slow CI lane with all assertions retained.
 
+- Server readers add opt-in selected-ref sessions:
+  `ObjectReader::with_selected_ref` narrows session canonical and metadata
+  reads to one ref's authoritative anchor — the owner view's live ref, the
+  public view's published head — plus the post-activation security digest,
+  retained as an immutable `CaptureCheckpoint`. Selected sessions prove
+  targets before locating them in either view and never fall back to all-ref
+  root discovery; every proof reset, expiry, rebind or helper capture
+  invalidates the checkpoint. Session proofs record parent and tag-target
+  roles and decoded commit/remix kind and timestamp only under a live
+  checkpoint, as structural evidence for history continuation issuance.
+  `selected_capture_in` starts a page-1 loop; unscoped sessions, non-session
+  reads and `issue_urls` are unchanged.
+
 - Server readers add `walk_history_in`, `locate_commit_in` and
   `read_commit_path_in` for bounded selected-ref parent discovery and exact
   decoded paths. First-parent and all-parent traversal are explicit; merge

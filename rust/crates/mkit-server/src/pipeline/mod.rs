@@ -56,6 +56,8 @@ pub use object_reader::{
 };
 #[cfg(feature = "http-objects")]
 pub use read_limits::{ReadLimits, ReaderSession};
+#[cfg(feature = "http-objects")]
+pub use read_proofs::CaptureCheckpoint;
 mod implicit;
 mod info;
 mod repo_storage;

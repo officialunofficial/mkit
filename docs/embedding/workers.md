@@ -151,6 +151,14 @@ an earlier absolute Unix-ms deadline using the pipeline clock. Public
 unprovable objects remain absent; authenticated owner exhaustion is typed
 `ResourceExhausted`. Do not convert storage failure into successful absence.
 
+When page-1 loops walk one ref's history, scope the reader once:
+`reader.with_selected_ref(ref)` narrows `read_canonical_in` and
+`object_metadata_in` to that ref's authoritative anchor, and
+`selected_capture_in` returns the capture's tip so the loop can start at the
+head. The capture is reused until proof expiry or any reset; a later handle is
+a different capture. Non-session reads and URL issuance keep the unscoped
+contract.
+
 For general-ID reads, read parents before children: prefetch a commit, its root
 tree, then selected subtrees, manifests, and chunks within the reader's batch
 limit. Fetch metadata only when you need kind, canonical length, or logical file

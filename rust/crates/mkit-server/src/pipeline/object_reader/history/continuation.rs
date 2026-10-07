@@ -47,10 +47,10 @@ impl Drop for HistoryProofScope<'_> {
     }
 }
 
-struct Anchor {
-    tip: Hash,
-    publication: Publication,
-    raw: Vec<Option<Value>>,
+pub(crate) struct Anchor {
+    pub(crate) tip: Hash,
+    pub(crate) publication: Publication,
+    pub(crate) raw: Vec<Option<Value>>,
 }
 fn absent() -> ServerError {
     ServerError::not_found("object reader unavailable")
@@ -98,6 +98,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             mode: HistoryMode::FirstParent,
             ..HistoryOptions::default()
         };
+        self.check_selected(reference)?;
         validate_history(reference, options)?;
         if limit == 0 || limit > options.max_nodes {
             return Err(ServerError::invalid_argument("invalid history page size"));
@@ -411,7 +412,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         }))
     }
 
-    async fn continuation_anchor(
+    pub(crate) async fn continuation_anchor(
         &self,
         meta: &impl NamespaceStore,
         reference: &str,
@@ -449,7 +450,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             raw: values,
         })
     }
-    async fn history_security(
+    pub(crate) async fn history_security(
         &self,
         meta: &impl NamespaceStore,
         activate: bool,

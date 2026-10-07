@@ -8,7 +8,9 @@
 use super::history_tests::{drain, get_count};
 use super::*;
 use crate::history_token::HistoryTokenConfig;
-use crate::pipeline::{HistoryMode, HistoryOptions, PathOptions, ReaderSession, ReaderView};
+use crate::pipeline::{
+    HistoryMode, HistoryOptions, ObjectReader, PathOptions, ReaderSession, ReaderView,
+};
 use crate::store::read_probe::{self, Config};
 use std::collections::BTreeSet;
 
@@ -20,6 +22,8 @@ enum Op {
     Cat,
     Log(usize),
     Page1(usize),
+    CanonicalLog(usize),
+    SelectedLog(usize),
 }
 
 struct Shape {
@@ -190,6 +194,37 @@ async fn run(
                 .unwrap();
             assert_eq!(page.commits.len(), size.min(shape.commits));
         }
+        Op::CanonicalLog(count) => canonical_log(&reader, session, shape.head, count).await?,
+        Op::SelectedLog(count) => {
+            let reader = reader.with_selected_ref(HEAD)?;
+            let checkpoint = reader.selected_capture_in(session).await?.unwrap();
+            assert_eq!(checkpoint.tip(), shape.head);
+            canonical_log(&reader, session, checkpoint.tip(), count).await?;
+        }
+    }
+    Ok(())
+}
+
+/// The embedder's page-1 loop: walk first parents through canonical reads.
+async fn canonical_log(
+    reader: &ObjectReader<'_, SpyBlobs, Arc<Spy>, Hooks>,
+    session: &mut ReaderSession,
+    head: Hash,
+    count: usize,
+) -> Result<(), crate::ServerError> {
+    let mut current = head;
+    for _ in 0..count {
+        let bytes = reader
+            .read_canonical_in(session, &[current])
+            .await?
+            .into_iter()
+            .next()
+            .flatten()
+            .unwrap();
+        let Object::Commit(commit) = mkit_core::serialize::deserialize(&bytes).unwrap() else {
+            panic!("expected a commit");
+        };
+        current = commit.parents[0];
     }
     Ok(())
 }
@@ -286,6 +321,8 @@ fn embedder_read_shapes_report_rounds() {
                 (&c, Op::Log(10), false),
                 (&c, Op::Log(50), true),
                 (&c, Op::Page1(50), false),
+                (&c, Op::CanonicalLog(10), false),
+                (&c, Op::SelectedLog(10), false),
             ] {
                 let (rounds, ..) = measure(shape, owner, op);
                 if guard {
