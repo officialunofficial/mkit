@@ -3,10 +3,10 @@ use super::history_tests::{drain, in_view};
 use super::*;
 use crate::history_token::HistoryTokenConfig;
 use crate::pipeline::read_proofs::{HistoryEdge, HistoryKind};
-use crate::pipeline::{HistoryOptions, ReaderSession};
+use crate::pipeline::{HistoryOptions, ReadLimits, ReaderSession};
 use crate::store::publication::Publication;
 
-fn simple_history(fx: &Fx) -> (Object, Object, Object, Object, Hash) {
+fn simple_history<H: HookSet>(fx: &Fx<H>) -> (Object, Object, Object, Object, Hash) {
     let file = blob(b"selected file");
     let root = tree(&[("file", EntryMode::Blob, &file)]);
     let base = commit(&root, &[], "base");
@@ -476,6 +476,74 @@ fn unscoped_sessions_record_no_lineage() {
             assert!(session.proofs.history_link(&id(&head)).is_none());
         });
     }
+}
+
+#[test]
+fn capture_failures_map_like_session_reads() {
+    // A refusal that lands after reader construction is typed for an owner
+    // capture, never a silent absence; the public view stays absent.
+    let az = Arc::new(Scripted::default());
+    let fx = fixture_with(scripted(&az), http_cfg());
+    simple_history(&fx);
+    in_view(&fx, true, |reader| {
+        let reader = reader.with_selected_ref(HEAD).unwrap();
+        *az.verdict.lock().unwrap() = Some(Code::PermissionDenied);
+        let mut session = ReaderSession::default();
+        let error = block_on(reader.selected_capture_in(&mut session)).unwrap_err();
+        assert_eq!(error.code(), Code::PermissionDenied);
+    });
+    in_view(&fx, false, |reader| {
+        let reader = reader.with_selected_ref(HEAD).unwrap();
+        let mut session = ReaderSession::default();
+        assert!(
+            block_on(reader.selected_capture_in(&mut session))
+                .unwrap()
+                .is_none()
+        );
+    });
+    // A private repository is uniformly absent for a public capture too.
+    let fx = fixture();
+    simple_history(&fx);
+    fx.make_private("room");
+    in_view(&fx, false, |reader| {
+        let reader = reader.with_selected_ref(HEAD).unwrap();
+        let mut session = ReaderSession::default();
+        assert!(
+            block_on(reader.selected_capture_in(&mut session))
+                .unwrap()
+                .is_none()
+        );
+    });
+}
+
+#[test]
+fn an_owner_sessions_capped_batch_is_typed_never_absent() {
+    let fx = fixture();
+    let (file, _, _, _, _) = simple_history(&fx);
+    in_view(&fx, true, |reader| {
+        let reader = reader.with_selected_ref(HEAD).unwrap();
+        // Measure a capture plus one proved read. The second read reuses the
+        // checkpoint and the memoized proof, so its own charge and the
+        // denial prefetch consume three calls before the post-proof locate.
+        let mut probe = ReaderSession::default();
+        block_on(reader.selected_capture_in(&mut probe))
+            .unwrap()
+            .unwrap();
+        let reads = block_on(reader.read_canonical_in(&mut probe, &[id(&file)])).unwrap();
+        assert_eq!(reads, vec![Some(serialize(&file).unwrap())]);
+        let spent = probe.used().storage_calls;
+        let mut session =
+            ReaderSession::new(ReadLimits::new(spent + 3, u64::MAX, u64::MAX, u64::MAX));
+        block_on(reader.selected_capture_in(&mut session))
+            .unwrap()
+            .unwrap();
+        assert!(
+            block_on(reader.read_canonical_in(&mut session, &[id(&file)])).unwrap()[0].is_some()
+        );
+        // A capped locate is typed exhaustion for an owner, never `None`.
+        let error = block_on(reader.read_canonical_in(&mut session, &[id(&file)])).unwrap_err();
+        assert_eq!(error.code(), Code::ResourceExhausted);
+    });
 }
 
 fn set_visibility(fx: &Fx, visibility: codec::StoredVisibility) {

@@ -59,7 +59,9 @@ impl CaptureCheckpoint {
     pub fn tip(&self) -> Hash {
         self.0.tip
     }
-    /// Absolute Unix-ms expiry inherited from the session's memo.
+    /// Absolute Unix-ms expiry inherited from the session's memo: expiry at
+    /// capture; the session's proofs may expire earlier (a later deadline
+    /// only shrinks it), so validity is always rechecked.
     #[must_use]
     pub fn expires_at_ms(&self) -> u64 {
         self.0.expires
@@ -232,20 +234,24 @@ impl ReadProofs {
 
     /// Install a selected-ref capture as this session's only root set. The
     /// checkpoint is immutable evidence; it dies with every proofs reset.
-    pub(crate) fn capture_checkpoint(&mut self, mut checkpoint: Checkpoint) {
+    /// `false` installs nothing: the tip could not be memoized (cap 0).
+    pub(crate) fn capture_checkpoint(&mut self, mut checkpoint: Checkpoint) -> bool {
         let tip = checkpoint.tip;
         checkpoint.expires = self.expires;
         self.capture(vec![tip]);
-        if self.proofs.contains_key(&tip) {
-            self.lineage.insert(
-                tip,
-                Lineage {
-                    edge: Some(HistoryEdge::Root),
-                    ..Lineage::default()
-                },
-            );
+        if !self.proofs.contains_key(&tip) {
+            self.tips = None;
+            return false;
         }
+        self.lineage.insert(
+            tip,
+            Lineage {
+                edge: Some(HistoryEdge::Root),
+                ..Lineage::default()
+            },
+        );
         self.checkpoint = Some(Arc::new(checkpoint));
+        true
     }
 
     /// The live selected-ref capture, if this session holds one.
@@ -570,7 +576,7 @@ mod tests {
     #[test]
     fn a_checkpoint_records_roles_and_decoded_facts_on_new_rows_only() {
         let mut memo = bound_memo(16);
-        memo.capture_checkpoint(checkpoint([1; 32]));
+        assert!(memo.capture_checkpoint(checkpoint([1; 32])));
         let link = memo.history_link(&[1; 32]).unwrap();
         assert_eq!(link.edge, HistoryEdge::Root);
         assert_eq!(link.predecessor, None);
@@ -618,6 +624,16 @@ mod tests {
     }
 
     #[test]
+    fn a_tip_that_cannot_be_memoized_installs_no_checkpoint() {
+        let mut memo = bound_memo(0);
+        assert!(!memo.capture_checkpoint(checkpoint([1; 32])));
+        assert!(memo.checkpoint().is_none());
+        assert!(memo.tips.is_none());
+        assert!(memo.lineage.is_empty());
+        assert!(!memo.contains(&[1; 32]));
+    }
+
+    #[test]
     fn every_reset_path_drops_the_checkpoint() {
         let resets: [fn(&mut ReadProofs); 3] = [
             |memo| {
@@ -632,7 +648,7 @@ mod tests {
         ];
         for reset in resets {
             let mut memo = bound_memo(16);
-            memo.capture_checkpoint(checkpoint([1; 32]));
+            assert!(memo.capture_checkpoint(checkpoint([1; 32])));
             memo.expand([1; 32], [0; 32], &commit([9; 32], &[[2; 32]]));
             reset(&mut memo);
             assert!(memo.checkpoint().is_none());
@@ -641,7 +657,7 @@ mod tests {
         }
         // Rebinding to another identity resets proofs like any other capture.
         let mut memo = bound_memo(16);
-        memo.capture_checkpoint(checkpoint([1; 32]));
+        assert!(memo.capture_checkpoint(checkpoint([1; 32])));
         let cfg = HttpObjectsConfig::default();
         memo.bind(&Arc::new(()), None, 1, &cfg).unwrap();
         assert!(memo.checkpoint().is_none());
@@ -654,13 +670,13 @@ mod tests {
             ..HttpObjectsConfig::default()
         };
         memo.bind(&identity, None, 0, &cfg).unwrap();
-        memo.capture_checkpoint(checkpoint([1; 32]));
+        assert!(memo.capture_checkpoint(checkpoint([1; 32])));
         memo.bind(&identity, None, 5, &cfg).unwrap();
         assert!(memo.checkpoint().is_none());
         assert!(memo.lineage.is_empty());
         // A stopped revalidation reseeds the tips without the checkpoint.
         let mut memo = bound_memo(16);
-        memo.capture_checkpoint(checkpoint([1; 32]));
+        assert!(memo.capture_checkpoint(checkpoint([1; 32])));
         memo.expand([1; 32], [0; 32], &commit([9; 32], &[[2; 32]]));
         let store = crate::memory::MemoryKv::default();
         block_on(memo.revalidate(

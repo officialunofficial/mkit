@@ -41,7 +41,7 @@ pub(super) fn in_view<H: HookSet>(
     test(reader);
 }
 
-pub(super) fn drain(fx: &Fx) {
+pub(super) fn drain<H: HookSet>(fx: &Fx<H>) {
     let repo = fx.repo_id("room");
     let source = fx.pipe.shards.ref_shard(&repo, HEAD);
     let relay = crate::timers::TimerRegistry::new().register(crate::relay::RelayHandler {

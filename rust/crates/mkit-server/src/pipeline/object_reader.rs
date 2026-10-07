@@ -682,7 +682,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 match self.install_selected(&meta, memo, reference).await {
                     Ok(true) => {}
                     Ok(false) => return Ok((BTreeMap::new(), BTreeMap::new())),
-                    Err(_) if capped_as_absent && absorb(capped) => {
+                    Err(error)
+                        if capped_as_absent
+                            && (absorb(capped) || error.code() == Code::ResourceExhausted) =>
+                    {
                         return Ok((BTreeMap::new(), BTreeMap::new()));
                     }
                     Err(error) => return Err(error),
@@ -794,10 +797,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     accessible.push(*id);
                 }
             }
-            located = resolve::locate_ids(&env, &accessible, resolve::OnCap::Skip)
+            let (members, skipped) = resolve::locate_ids(&env, &accessible, resolve::OnCap::Skip)
                 .await
-                .map_err(resolution_failure)?
-                .0;
+                .map_err(resolution_failure)?;
+            if skipped && !capped_as_absent {
+                return Err(exhausted());
+            }
+            located = members;
             reached = located.iter().map(|(id, _)| *id).collect();
         }
         located.retain(|(id, _)| reached.contains(id));

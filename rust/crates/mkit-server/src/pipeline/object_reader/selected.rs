@@ -11,7 +11,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
 {
     /// Capture the selected ref's authoritative anchor and security digest as
     /// `memo`'s only root set. `false` installs nothing: the ledger is
-    /// missing or empty, so the session is uniformly absent.
+    /// missing or empty, or the tip could not be memoized, so the session is
+    /// uniformly absent.
     pub(super) async fn install_selected(
         &self,
         meta: &impl NamespaceStore,
@@ -32,25 +33,24 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         if !memo.current(ms(self.pipe.clock.now_ms())) {
             return Err(exhausted());
         }
-        memo.capture_checkpoint(Checkpoint {
+        Ok(memo.capture_checkpoint(Checkpoint {
             reference: reference.to_owned(),
             tip: anchor.tip,
             publication: anchor.publication,
             raw: anchor.raw,
             security,
             expires: memo.expiry(),
-        });
-        Ok(true)
+        }))
     }
 
     /// Capture this reader's selected ref for `session`, or reuse the live
     /// capture. A page-1 loop learns the tip from the returned handle; a
     /// recapture after expiry or any proofs reset returns a different handle.
     /// # Errors
-    /// `invalid_argument` on an unselected reader. Authority, storage and
-    /// owner exhaustion failures are as session reads; a missing or empty
-    /// publication ledger, a missing ref and refused or capped public reads
-    /// are uniformly `Ok(None)`.
+    /// `invalid_argument` on an unselected reader; other failures map as
+    /// session reads'. `not_found` is `Ok(None)` in either view, and so are
+    /// refused, unauthenticated and exhausted public reads. An owner keeps
+    /// typed `PermissionDenied`, `Unauthenticated` and `ResourceExhausted`.
     pub async fn selected_capture_in(
         &self,
         session: &mut ReaderSession,
@@ -92,11 +92,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         .await;
         match settle(result, &capped) {
             Err(error)
-                if matches!(
-                    error.code(),
-                    Code::NotFound | Code::PermissionDenied | Code::Unauthenticated
-                ) || (matches!(self.view, ReaderView::Public)
-                    && error.code() == Code::ResourceExhausted) =>
+                if error.code() == Code::NotFound
+                    || (matches!(self.view, ReaderView::Public)
+                        && matches!(
+                            error.code(),
+                            Code::ResourceExhausted
+                                | Code::PermissionDenied
+                                | Code::Unauthenticated
+                        )) =>
             {
                 Ok(None)
             }
@@ -107,7 +110,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
     /// Continuation issuance's opening fence: whether `session` still holds this
     /// exact capture and the ref, publication and security state are
     /// unchanged. Never installs or replaces a checkpoint and never clears
-    /// the memo beyond what `bind` does.
+    /// the memo beyond what `bind` does. Unlike `selected_capture_in`, a
+    /// refused, unauthenticated or capped failure is `false` in either view —
+    /// the uniform absence H5 redemption requires.
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "consumed by history continuation issuance")
