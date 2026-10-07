@@ -731,10 +731,11 @@ async fn dispatch_http_objects<H: HookSet + 'static>(
         HttpObjectResponse::new(204).with_header("Allow", "GET, HEAD, OPTIONS")
     } else if !matches!(method.as_str(), "GET" | "HEAD") {
         HttpObjectResponse::error(405).with_header("Allow", "GET, HEAD, OPTIONS")
-    } else if mkit_server::http_objects::parse(
+    } else if mkit_server::http_objects::parse_with_mode(
         &path,
         query.as_deref(),
         mkit_server::http_objects::RepoPrefix::Required,
+        pipeline.namespace_mode(),
     )
     .is_err()
     {

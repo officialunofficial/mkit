@@ -31,7 +31,9 @@ pub use body::{EndHook, HttpBody, exact as exact_body, with_hook as body_with_ho
 pub use paid::HttpReadRuntime;
 pub(crate) use paid::ReadFinalizer;
 pub use reach::{Reachability, TtlReachability};
-pub use route::{BadUrl, ParsedUrl, Query, RepoPrefix, Target, is_http_object_path, parse};
+pub use route::{
+    BadUrl, ParsedUrl, Query, RepoPrefix, Target, is_http_object_path, parse, parse_with_mode,
+};
 #[cfg(test)]
 pub(crate) use seams::{AdmitDecision, HttpAdmission};
 pub(crate) use seams::{AdmitRequest, Admitted};

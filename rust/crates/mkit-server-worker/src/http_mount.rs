@@ -3,6 +3,7 @@
 use mkit_server::http_objects::HttpObjectsConfig;
 use mkit_server::http_objects::mount::HttpMountOptions;
 use mkit_server::indexed::IndexedConfig;
+use mkit_server::namespace::NamespaceMode;
 use mkit_server::url_token::{UrlTokenConfig, UrlTokenKeys};
 
 use crate::adapter::ConfigError;
@@ -185,17 +186,20 @@ pub fn prepare_response(
 }
 
 /// Reject unsupported methods and malformed URLs before Worker binding or hook I/O.
+/// Use the deployment namespace mode for the same grammar as object serving.
 #[must_use]
 pub fn early_object_error(
     method: &str,
     url: &str,
+    mode: NamespaceMode,
 ) -> Option<mkit_server::http_objects::HttpObjectResponse> {
-    use mkit_server::http_objects::{HttpObjectResponse, RepoPrefix, parse};
+    use mkit_server::http_objects::{HttpObjectResponse, RepoPrefix, parse_with_mode};
     if !matches!(method, "GET" | "HEAD") {
         return Some(HttpObjectResponse::error(405).with_header("Allow", "GET, HEAD, OPTIONS"));
     }
-    let invalid = !raw_path_query(url)
-        .is_ok_and(|(path, query)| parse(path, query, RepoPrefix::Required).is_ok());
+    let invalid = !raw_path_query(url).is_ok_and(|(path, query)| {
+        parse_with_mode(path, query, RepoPrefix::Required, mode).is_ok()
+    });
     invalid.then(|| HttpObjectResponse::error(400))
 }
 
@@ -227,24 +231,32 @@ pub fn response_to_worker(
     glue::finish(glue::bridge(response, method)?, method, origin, options)
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 pub(crate) mod glue {
+    #[cfg(target_arch = "wasm32")]
     use futures::StreamExt as _;
-    use mkit_server::http_objects::mount::{KEY_PATH, apply_cors, key_document};
-    use mkit_server::http_objects::{
-        HttpBody, HttpObjectRequest, HttpObjectResponse, RedactedQuery, is_http_object_path,
-    };
+    #[cfg(target_arch = "wasm32")]
+    use mkit_server::http_objects::mount::apply_cors;
+    use mkit_server::http_objects::mount::{KEY_PATH, key_document};
+    #[cfg(target_arch = "wasm32")]
+    use mkit_server::http_objects::{HttpBody, HttpObjectRequest, RedactedQuery};
+    use mkit_server::http_objects::{HttpObjectResponse, is_http_object_path};
+    #[cfg(target_arch = "wasm32")]
     use mkit_server::pipeline::{HookSet, Pipeline};
+    #[cfg(target_arch = "wasm32")]
     use worker::{Request, Response};
 
-    use super::{
-        HttpMountOptions, bridge_chunks, early_object_error, prepare_response, raw_path_query,
-    };
+    #[cfg(target_arch = "wasm32")]
+    use super::{HttpMountOptions, bridge_chunks, prepare_response};
+    use super::{early_object_error, raw_path_query};
     use crate::adapter::WorkerConfig;
+    #[cfg(target_arch = "wasm32")]
     use crate::ns_client::WorkerNamespaceStore;
+    #[cfg(target_arch = "wasm32")]
     use crate::r2::WorkerBlobStore;
 
     /// Only a configured HTTP mount can select this dispatcher.
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn mounted_request(req: &Request, cfg: &WorkerConfig) -> bool {
         cfg.http_mount.is_some()
             && raw_path_query(&req.inner().url())
@@ -253,6 +265,7 @@ pub(crate) mod glue {
 
     /// A selected environment mount retains its HTTP error contract even if
     /// another setting prevents the full configuration from being parsed.
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn env_mounted_request(req: &Request, env: &worker::Env) -> bool {
         let selected = env
             .secret("HTTP_OBJECTS")
@@ -266,6 +279,7 @@ pub(crate) mod glue {
     }
 
     /// CORS and body suppression apply even to adapter/configuration errors.
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn finish(
         mut response: Response,
         method: &str,
@@ -315,6 +329,7 @@ pub(crate) mod glue {
         Ok(response)
     }
 
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn bridge(response: HttpObjectResponse, method: &str) -> worker::Result<Response> {
         let response = prepare_response(response, method);
         let mut output = match response.body {
@@ -342,31 +357,37 @@ pub(crate) mod glue {
     }
 
     /// The public key document and preflight precede hook/store construction.
-    pub(crate) fn early(req: &Request, cfg: &WorkerConfig) -> worker::Result<Option<Response>> {
-        if !mounted_request(req, cfg) {
-            return Ok(None);
+    pub(crate) fn early(method: &str, raw: &str, cfg: &WorkerConfig) -> Option<HttpObjectResponse> {
+        cfg.http_mount.as_ref()?;
+        let (path, _) = raw_path_query(raw).ok()?;
+        if path != KEY_PATH && !is_http_object_path(path) {
+            return None;
         }
-        let method = req.method();
-        let raw = req.inner().url();
-        let (path, _) = raw_path_query(&raw)
-            .map_err(|_| worker::Error::RustError("invalid request URL".into()))?;
-        let response = if method == worker::Method::Options {
+        let response = if method == "OPTIONS" {
             HttpObjectResponse::new(204).with_header("Allow", "GET, HEAD, OPTIONS")
         } else if path == KEY_PATH {
             cfg.url_tokens
                 .as_ref()
                 .map_or_else(HttpObjectResponse::not_found, |config| {
-                    key_document(config, method.as_ref())
+                    key_document(config, method)
                 })
         } else {
-            let Some(response) = early_object_error(method.as_ref(), &raw) else {
-                return Ok(None);
-            };
-            response
+            early_object_error(method, raw, cfg.namespace_mode)?
         };
-        Ok(Some(bridge(response, method.as_ref())?))
+        Some(response)
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn early_worker(
+        req: &Request,
+        cfg: &WorkerConfig,
+    ) -> worker::Result<Option<Response>> {
+        early(req.method().as_ref(), &req.inner().url(), cfg)
+            .map(|response| bridge(response, req.method().as_ref()))
+            .transpose()
+    }
+
+    #[cfg(target_arch = "wasm32")]
     pub(crate) async fn serve<H: HookSet + 'static>(
         pipe: &Pipeline<WorkerBlobStore, WorkerNamespaceStore, H>,
         req: &Request,
@@ -511,26 +532,124 @@ mod tests {
             "11".repeat(32),
             "00".repeat(32)
         );
-        assert!(early_object_error("GET", &url).is_none());
-        assert!(early_object_error("HEAD", &url).is_none());
+        assert!(early_object_error("GET", &url, NamespaceMode::SelfCertifying).is_none());
+        assert!(early_object_error("HEAD", &url, NamespaceMode::SelfCertifying).is_none());
         assert_eq!(
-            early_object_error("GET", &format!("{url}?"))
+            early_object_error("GET", &format!("{url}?"), NamespaceMode::SelfCertifying)
                 .unwrap()
                 .status,
             400
         );
         assert_eq!(
-            early_object_error("HEAD", &format!("{url}?unknown=secret"))
-                .unwrap()
-                .status,
+            early_object_error(
+                "HEAD",
+                &format!("{url}?unknown=secret"),
+                NamespaceMode::SelfCertifying
+            )
+            .unwrap()
+            .status,
             400
         );
         assert_eq!(
-            early_object_error("POST", &format!("{url}?unknown=secret"))
+            early_object_error(
+                "POST",
+                &format!("{url}?unknown=secret"),
+                NamespaceMode::SelfCertifying
+            )
+            .unwrap()
+            .status,
+            405
+        );
+    }
+
+    #[test]
+    fn early_object_validation_uses_deployment_namespace_mode() {
+        let url = format!(
+            "https://example.org/019c88c3-a904-7bd1-8a5d-3182a0c6978a/repo/-/objects/{}",
+            "00".repeat(32)
+        );
+        for method in ["GET", "HEAD"] {
+            assert!(early_object_error(method, &url, NamespaceMode::Authority).is_none());
+            assert_eq!(
+                early_object_error(method, &url, NamespaceMode::SelfCertifying)
+                    .unwrap()
+                    .status,
+                400
+            );
+            for namespace in [
+                format!("ed25519-{}", "11".repeat(32)),
+                format!("0x{}", "11".repeat(20)),
+                "root".into(),
+            ] {
+                let url = format!(
+                    "https://example.org/{namespace}/repo/-/objects/{}",
+                    "00".repeat(32)
+                );
+                assert_eq!(
+                    early_object_error(method, &url, NamespaceMode::Authority)
+                        .unwrap()
+                        .status,
+                    400
+                );
+            }
+        }
+        assert_eq!(
+            early_object_error("POST", &url, NamespaceMode::Authority)
                 .unwrap()
                 .status,
             405
         );
+    }
+
+    #[test]
+    fn authority_worker_mount_passes_uuid_routes_through_early_gate() {
+        let mut cfg = crate::adapter::WorkerConfig::from_vars(|name| match name {
+            "AUTH_AUDIENCE" => Some("https://example.org".into()),
+            "ADDRESSING" => Some("multi".into()),
+            "NAMESPACE_POLICY" => Some("any".into()),
+            "UNSAFE_OPEN_NAMESPACES" | "AUTHORITY_FENCE" => Some("true".into()),
+            "NAMESPACE_MODE" | "AUTHORIZER_ROLE" => Some("authority".into()),
+            "HOOK_ROLES" => Some("authorize".into()),
+            "AUTHORITY_KEYS" => Some(format!("deployment {} *", "11".repeat(32))),
+            "TICKET_KEYS" => Some(format!("ticket {}", "09".repeat(32))),
+            _ => None,
+        })
+        .unwrap();
+        cfg.http_mount = Some(WorkerHttpMountConfig::new(
+            IndexedConfig::default(),
+            HttpObjectsConfig::default(),
+            HttpMountOptions::default(),
+        ));
+        let url = format!(
+            "https://example.org/019c88c3-a904-7bd1-8a5d-3182a0c6978a/repo/-/objects/{}",
+            "00".repeat(32)
+        );
+        for method in ["GET", "HEAD"] {
+            assert!(glue::early(method, &url, &cfg).is_none());
+        }
+        cfg.namespace_mode = NamespaceMode::SelfCertifying;
+        assert_eq!(glue::early("GET", &url, &cfg).unwrap().status, 400);
+    }
+
+    #[test]
+    fn unparseable_urls_stay_outside_the_http_mount() {
+        let mut cfg = crate::adapter::WorkerConfig::from_vars(|name| match name {
+            "AUTH_AUDIENCE" => Some("https://example.org".into()),
+            "AUTH_REPOSITORY" => Some("repo".into()),
+            _ => None,
+        })
+        .unwrap();
+        cfg.http_mount = Some(WorkerHttpMountConfig::new(
+            IndexedConfig::default(),
+            HttpObjectsConfig::default(),
+            HttpMountOptions::default(),
+        ));
+        for url in ["not-a-url", "https://example.org/repo#fragment"] {
+            assert!(raw_path_query(url).is_err());
+            for method in ["GET", "HEAD", "OPTIONS", "POST"] {
+                assert!(glue::early(method, url, &cfg).is_none());
+            }
+        }
     }
 
     #[test]
