@@ -443,7 +443,7 @@ async fn verify_ticketed_optional<B: MultipartBlobStore, S: NamespaceStore>(
         None
     };
     let mut acquired = BTreeMap::new();
-    let result = verify_ticketed_inner(
+    let result = boxed_verify_ticketed_inner(
         blobs,
         store,
         shards,
@@ -470,6 +470,41 @@ async fn verify_ticketed_optional<B: MultipartBlobStore, S: NamespaceStore>(
         }
     }
     result
+}
+
+// Keep the large verification state out of the enclosing futures' stack
+// temporaries. Allocation stays at this helper boundary on every target.
+#[allow(clippy::too_many_arguments)]
+fn boxed_verify_ticketed_inner<'a, B: MultipartBlobStore, S: NamespaceStore>(
+    blobs: &'a B,
+    store: &'a S,
+    shards: &'a dyn ShardMap,
+    repo: &'a RepoId,
+    source: &'a Partition,
+    tickets: &'a [TicketV1],
+    ticket_ids: &'a [Hash],
+    head: Hash,
+    cfg: IndexedConfig,
+    clock: &'a dyn Clock,
+    metrics: &'a dyn Metrics,
+    acquired: &'a mut BTreeMap<Hash, HeldLease>,
+    inspection_limit: Option<(usize, u64)>,
+) -> BoxFuture<'a, Result<StagedCommits, ServerError>> {
+    Box::pin(verify_ticketed_inner(
+        blobs,
+        store,
+        shards,
+        repo,
+        source,
+        tickets,
+        ticket_ids,
+        head,
+        cfg,
+        clock,
+        metrics,
+        acquired,
+        inspection_limit,
+    ))
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]

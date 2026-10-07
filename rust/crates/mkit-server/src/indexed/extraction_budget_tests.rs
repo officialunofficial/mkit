@@ -523,9 +523,13 @@ impl mkit_core::pack::DeltaBaseSource for OneBase {
 }
 
 fn seed_fifty_cross_pack_member_deltas(rig: &Rig, payload_bytes: usize) -> Hash {
+    seed_cross_pack_member_deltas(rig, payload_bytes, 50)
+}
+
+fn seed_cross_pack_member_deltas(rig: &Rig, payload_bytes: usize, depth: u16) -> Hash {
     let (mut base, mut prior) = blob(0, payload_bytes);
     seed_member(rig, base, &prior);
-    for depth in 1..=50_u16 {
+    for depth in 1..=depth {
         let (id, raw) = blob(depth, payload_bytes);
         let bytes = thin(base, &prior, &raw);
         let (ticket, _) = rig.add(&bytes);
@@ -547,7 +551,9 @@ fn seed_fifty_cross_pack_member_deltas(rig: &Rig, payload_bytes: usize) -> Hash 
             },
         )
         .unwrap();
-        let row = index_entries(&frames, 50).unwrap().remove(0);
+        let row = index_entries(&frames, rig.cfg.max_delta_chain_depth)
+            .unwrap()
+            .remove(0);
         block_on(
             rig.store.apply(
                 &rig.source(),
@@ -961,6 +967,75 @@ fn a_valid_fifty_deep_member_chunk_exceeding_one_entrys_memory_finishes() {
 #[test]
 fn a_fifty_deep_member_chunk_matches_native_at_the_whole_source_quota_boundary() {
     fifty_deep_member_chunk(250 << 10, 16 << 20, true);
+}
+
+fn on_small_stack(check: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .stack_size(512 << 10)
+        .spawn(check)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn fifty_deep_quota_boundary_uses_a_small_stack() {
+    on_small_stack(|| fifty_deep_member_chunk(250 << 10, 16 << 20, true));
+}
+
+fn member_chain_matches_native(depth: u16) {
+    let mut reference = Rig::new();
+    reference.cfg.max_delta_chain_depth = u32::from(depth);
+    reference.cfg.extract_min_bytes = 1;
+    let chunk = seed_cross_pack_member_deltas(&reference, 2_000, depth);
+    let manifest = Object::ChunkedBlob(ChunkedBlob {
+        total_size: 2_002,
+        chunk_size: 0,
+        chunks: vec![chunk],
+    });
+    let object = manifest.id().unwrap();
+    let (tree, commit, head) = tree_head(&[object]);
+    let bytes = pack(&[manifest, tree, commit]);
+    let ticket = reference.add(&bytes);
+    let expected = native(&reference, &[ticket], head);
+
+    let mut scheduled = Rig::new();
+    scheduled.cfg = reference.cfg;
+    assert_eq!(
+        seed_cross_pack_member_deltas(&scheduled, 2_000, depth),
+        chunk
+    );
+    let (ticket, id) = scheduled.add(&bytes);
+    assert!(scheduled.check(&[(&ticket, id)], head).is_err());
+    drive(
+        &scheduled,
+        &TestExtraction::new(&scheduled),
+        &[ticket.pack_id],
+    );
+    assert_eq!(scheduled.check(&[(&ticket, id)], head).unwrap(), expected);
+    for key in [BlobKey::object(object), BlobKey::object_offsets(object)] {
+        assert_eq!(
+            read_blob(&scheduled.blobs, &key),
+            read_blob(&reference.blobs, &key)
+        );
+    }
+    assert_holder(&scheduled, object);
+}
+
+#[test]
+fn depth_one_member_chain_matches_native() {
+    member_chain_matches_native(1);
+}
+
+#[test]
+fn maximum_configured_member_chain_matches_native_on_a_small_stack() {
+    on_small_stack(|| {
+        let maximum = IndexedConfig::default().max_delta_chain_depth;
+        assert_eq!(maximum, 50);
+        member_chain_matches_native(u16::try_from(maximum).unwrap());
+        // The bound is configured, rather than hard-coded to the default.
+        member_chain_matches_native(64);
+    });
 }
 
 fn lower_order_forty_nine_hop_pack(before: Hash) -> Vec<u8> {

@@ -132,6 +132,11 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Fixed
 
+- Indexed member delta reconstruction descends and reconstructs iteratively,
+  preventing call-stack growth at the configured chain-depth limit. Integrity,
+  denial, membership, and budget checks keep their order; raw member prefix and
+  frame reads remain concurrent. No public API, wire, or stored-format change.
+
 - Signed reader envelopes now capture credential headers for continuation scope.
   Changing payment, authorization, or configured credential headers invalidates
   a continuation; signed reads still do not run admission validation.

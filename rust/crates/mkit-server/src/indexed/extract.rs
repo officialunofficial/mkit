@@ -513,7 +513,7 @@ impl<B: MultipartBlobStore, S: NamespaceStore> Extractor<'_, B, S> {
                 }
                 if let Some(mut w) = upload.take() {
                     let filled = w.push(&blob.data, renew).await;
-                    self.close(w, filled, renew).await?;
+                    Self::close(w, filled, renew).await?;
                 }
             }
             Object::ChunkedBlob(cb) => {
@@ -632,89 +632,101 @@ impl<B: MultipartBlobStore, S: NamespaceStore> Extractor<'_, B, S> {
     }
 
     /// Commit `w` if `filled` succeeded, else abort it (nothing is visible).
-    async fn close<R: Renew, T>(
-        &self,
-        w: Writer<'_, B>,
-        filled: Result<T, impl Into<ExtractError>>,
-        renew: &mut R,
-    ) -> Result<T, ExtractError> {
-        match filled {
-            Ok(value) => {
-                w.finish(renew).await?;
-                Ok(value)
+    fn close<'b, R: Renew, T: MaybeSend + 'b>(
+        w: Writer<'b, B>,
+        filled: Result<T, impl Into<ExtractError> + MaybeSend + 'b>,
+        renew: &'b mut R,
+    ) -> BoxFuture<'b, Result<T, ExtractError>> {
+        Box::pin(async move {
+            match filled {
+                Ok(value) => {
+                    w.finish(renew).await?;
+                    Ok(value)
+                }
+                Err(error) => {
+                    w.abort().await;
+                    Err(error.into())
+                }
             }
-            Err(error) => {
-                w.abort().await;
-                Err(error.into())
-            }
-        }
+        })
     }
 
     /// Verify a manifest's chunks against it and charge their resolution,
     /// streaming them into `Object(id)` when `upload` is there (a fresh
     /// object), then write the offsets sidecar.
-    async fn reassemble<R: Renew>(
-        &self,
+    fn reassemble<'b, R: Renew>(
+        &'b self,
         id: Hash,
-        cb: &ChunkedBlob,
-        hold: &Hash,
-        upload: Option<Writer<'_, B>>,
-        renew: &mut R,
-    ) -> Result<(), ExtractError> {
-        let Some(mut w) = upload else {
-            self.walk_chunks(cb, None, renew).await?;
-            return Ok(());
-        };
-        let filled = self.walk_chunks(cb, Some(&mut w), renew).await;
-        let boundaries = self.close(w, filled, renew).await?;
-        let sidecar = encode_offsets(&boundaries);
-        let mut w = self
-            .writer(BlobKey::object_offsets(id), sidecar.len() as u64, hold)
-            .await?;
-        let filled = w.push(&sidecar, renew).await;
-        self.close(w, filled, renew).await
+        cb: &'b ChunkedBlob,
+        hold: &'b Hash,
+        upload: Option<Writer<'b, B>>,
+        renew: &'b mut R,
+    ) -> BoxFuture<'b, Result<(), ExtractError>> {
+        Box::pin(async move {
+            let Some(mut w) = upload else {
+                self.walk_chunks(cb, None, renew).await?;
+                return Ok(());
+            };
+            let filled = self.walk_chunks(cb, Some(&mut w), renew).await;
+            let boundaries = Self::close(w, filled, renew).await?;
+            let sidecar = encode_offsets(&boundaries);
+            let mut w = self
+                .writer(BlobKey::object_offsets(id), sidecar.len() as u64, hold)
+                .await?;
+            let filled = w.push(&sidecar, renew).await;
+            Self::close(w, filled, renew).await
+        })
     }
 
     /// Resolve, verify and charge every chunk of `cb`, in order, returning
     /// the offset boundaries; with a writer, also stream the bytes into it.
-    async fn walk_chunks<R: Renew>(
-        &self,
-        cb: &ChunkedBlob,
-        mut w: Option<&mut Writer<'_, B>>,
-        renew: &mut R,
-    ) -> Result<Vec<u64>, ExtractError> {
-        let mut boundaries = Vec::with_capacity(cb.chunks.len() + 1);
-        boundaries.push(0_u64);
-        for window in cb.chunks.chunks(MAX_LOOKUP_IDS) {
-            let unstaged: BTreeSet<Hash> = window
-                .iter()
-                .filter(|id| !self.staged.contains_key(*id))
-                .copied()
-                .collect();
-            let unstaged: Vec<Hash> = unstaged.into_iter().collect();
-            let located = if unstaged.is_empty() {
-                BTreeMap::new()
-            } else {
-                resolve::locate_split(self.store, self.shards, self.repo, &unstaged, self.metrics)
+    fn walk_chunks<'b, R: Renew>(
+        &'b self,
+        cb: &'b ChunkedBlob,
+        w: Option<&'b mut Writer<'_, B>>,
+        renew: &'b mut R,
+    ) -> BoxFuture<'b, Result<Vec<u64>, ExtractError>> {
+        Box::pin(async move {
+            let mut w = w;
+            let mut boundaries = Vec::with_capacity(cb.chunks.len() + 1);
+            boundaries.push(0_u64);
+            for window in cb.chunks.chunks(MAX_LOOKUP_IDS) {
+                let unstaged: BTreeSet<Hash> = window
+                    .iter()
+                    .filter(|id| !self.staged.contains_key(*id))
+                    .copied()
+                    .collect();
+                let unstaged: Vec<Hash> = unstaged.into_iter().collect();
+                let located = if unstaged.is_empty() {
+                    BTreeMap::new()
+                } else {
+                    resolve::locate_split(
+                        self.store,
+                        self.shards,
+                        self.repo,
+                        &unstaged,
+                        self.metrics,
+                    )
                     .await?
-            };
-            for chunk in window {
-                let data = self.chunk_data(chunk, &located).await?;
-                let end = boundaries
-                    .last()
-                    .and_then(|at| at.checked_add(data.len() as u64))
-                    .filter(|end| *end <= cb.total_size)
-                    .ok_or_else(malformed_manifest)?;
-                if let Some(w) = w.as_deref_mut() {
-                    w.push(&data, renew).await?;
+                };
+                for chunk in window {
+                    let data = self.chunk_data(chunk, &located).await?;
+                    let end = boundaries
+                        .last()
+                        .and_then(|at| at.checked_add(data.len() as u64))
+                        .filter(|end| *end <= cb.total_size)
+                        .ok_or_else(malformed_manifest)?;
+                    if let Some(w) = w.as_deref_mut() {
+                        w.push(&data, renew).await?;
+                    }
+                    boundaries.push(end);
                 }
-                boundaries.push(end);
             }
-        }
-        if boundaries.last() != Some(&cb.total_size) {
-            return Err(malformed_manifest());
-        }
-        Ok(boundaries)
+            if boundaries.last() != Some(&cb.total_size) {
+                return Err(malformed_manifest());
+            }
+            Ok(boundaries)
+        })
     }
 
     /// One chunk's content: from this push, else this repository's

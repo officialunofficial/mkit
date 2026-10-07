@@ -619,6 +619,17 @@ several colos, and retain operator access through separately controlled ingress.
 A WAF block creates no takedown or preservation record. Reopen only after the
 underlying denial and cache state are verified, with explicit incident approval.
 
+### Member reconstruction limits
+
+Indexed member reconstruction uses iterative descent and reverse reconstruction
+in both native servers and Workers. `IndexedConfig::max_delta_chain_depth`
+bounds the pending delta metadata; its default and advertised value is 50.
+A terminal raw base can add one active member. The metadata vector grows only
+as the chain is visited, with capacity capped at the configured depth;
+encoded and canonical bytes keep their existing source and decode budgets.
+Delta depth does not increase call-stack use. Prefix/frame read concurrency,
+denial and membership checks, and budget charging keep their existing order.
+
 ### Publication verification limits
 
 Publishing a ref value runs a verifier chosen by the deployment's
