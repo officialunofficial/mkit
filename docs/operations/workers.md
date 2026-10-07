@@ -308,6 +308,12 @@ an attachment. HTML, HTM, XHTML, XML, SVG, JS, MJS, CSS and unknown extensions
 remain `application/octet-stream` attachments. Object-id and proof responses
 keep their existing types.
 
+The HTTP early gate uses `WorkerConfig::namespace_mode`, matching the serving
+pipeline. Custom mounts must pass that mode to
+`http_mount::early_object_error(method, url, cfg.namespace_mode)`. Authority
+mode accepts opaque namespace names, including UUIDs, and rejects owner IDs
+and `root` before binding or hook I/O.
+
 GET and HEAD retain encoded RFC 5987 filenames, `nosniff`, sandbox CSP and
 `no-referrer`. Video playback can use a single `Range: bytes=a-b` request,
 which returns 206 with `Content-Range` and the selected length; HEAD has no

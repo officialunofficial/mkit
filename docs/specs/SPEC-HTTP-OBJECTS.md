@@ -43,6 +43,9 @@ HTTP serving routes. A single-repository deployment MAY omit the repository
 prefix. An explicit prefix MUST obey STC §7.4, including the bare-name
 restriction. HTTP selects the repository only by this path and MUST ignore
 `X-Repository`, Host, and forwarded headers as repository selectors.
+Adapters that validate routes before serving MUST use the pipeline's deployment
+namespace mode (SPEC-SERVER §6.2.2). Authority mode accepts opaque namespace
+names and rejects self-certifying owner IDs and `root` at both gates.
 
 ```abnf
 http-path    = repo-prefix "/-/" ( objects-form / refs-form )

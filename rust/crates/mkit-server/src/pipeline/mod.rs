@@ -684,6 +684,12 @@ fn validate_upload_ticket_config<H: HookSet>(
 }
 
 impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
+    /// The deployment namespace grammar used to resolve request routes.
+    #[must_use]
+    pub fn namespace_mode(&self) -> crate::namespace::NamespaceMode {
+        self.cfg.namespace_mode
+    }
+
     /// A pipeline over `blobs` and `meta`, routed by `cfg.sharding`.
     ///
     /// # Errors

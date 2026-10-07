@@ -616,6 +616,136 @@ async fn hook_writer_view_owns_storage_objects_and_url_issuance_without_existenc
     }
 }
 
+#[cfg(all(feature = "http-objects", feature = "test-host"))]
+async fn authority_http_host() -> (mkit_server_conformance::test_host::TestHost, TestPipeline) {
+    use mkit_server_conformance::test_host::TestHost;
+    use mkit_server_conformance::wire::{Profile, WireAuth};
+    let hooks = || {
+        let defaults = Hooks::new();
+        Hooks {
+            authorizer: Authority::default(),
+            admission: Admit,
+            pre_receive: defaults.pre_receive,
+            receipts: defaults.receipts,
+            outcomes: defaults.outcomes,
+        }
+    };
+    let configure_http = |cfg: &mut PipelineConfig| {
+        let AuthMode::AuthV2(auth) = &cfg.auth else {
+            panic!("expected auth v2");
+        };
+        *cfg = config(auth.audience(), NamespaceMode::Authority);
+        cfg.indexed = Some(mkit_server::indexed::IndexedConfig::default());
+        cfg.http_objects = Some(mkit_server::http_objects::HttpObjectsConfig::default());
+    };
+    let host = TestHost::start_with_test_layers(
+        Profile::new(WireAuth::AuthV2 {
+            audience: "http://placeholder.invalid".into(),
+            repository: "repository".into(),
+            seed: [7; 32],
+        }),
+        |_, _| Ok(hooks()),
+        configure_http,
+        |app| app,
+    )
+    .await
+    .unwrap();
+    let audience = host.base_url();
+    let mut cfg = config(audience, NamespaceMode::Authority);
+    configure_http(&mut cfg);
+    // Seed objects with the same stores, mode, keys, and clock as the HTTP host.
+    let pipe = Pipeline::new(
+        host.blobs().clone(),
+        host.kv().clone(),
+        hooks(),
+        cfg,
+        host.clock().clone(),
+        Arc::new(mkit_server::NoopMetrics),
+    )
+    .unwrap();
+    (host, pipe)
+}
+
+#[cfg(all(feature = "http-objects", feature = "test-host"))]
+#[tokio::test]
+async fn authority_http_routes_cross_test_host_early_gate_and_keep_uniform_absence() {
+    use mkit_core::{refs::RefWriteCondition, serialize::serialize};
+    use mkit_server::RefUpdate;
+    use mkit_server::pipeline::{ReaderView, RepoVisibility, VisibilityRequest};
+    let (host, pipe) = authority_http_host().await;
+    let audience = host.base_url();
+    registered(&pipe, audience, NS).await;
+    let repository = format!("{NS}/repository");
+    let signer = Signer::new([7; 32], audience, &repository);
+    let (pack, _, commit) = canonical_pack();
+    let head = commit.id().unwrap();
+    let pack_id = hash(&pack);
+    let (id, repo) = upload_pack(&pipe, &signer, &pack).await;
+    let update = |name: &str, id| RefUpdate {
+        name: name.into(),
+        condition: RefWriteCondition::Missing,
+        new: Some(id),
+    };
+    pipe.advance_refs_with_tickets(
+        &auth(&pipe, &signer, Procedure::AdvanceRefs),
+        update(REF, head),
+        update("refs/mkit/packmap/main", pack_id),
+        vec![id],
+    )
+    .await
+    .unwrap();
+    pipe.set_repo_visibility(
+        &auth(&pipe, &signer, Procedure::SetRepoVisibility),
+        VisibilityRequest::Envelope(RepoVisibility::Private),
+    )
+    .await
+    .unwrap();
+    // Tokens must be issued strictly after the visibility change.
+    host.clock().advance(1);
+    let credentials = signer.sign_body(Procedure::ListRefs.connect_path(), b"{}");
+    let headers = |name: &str| lookup(&credentials, name);
+    let envelope = request(Procedure::ListRefs, &headers, Some(b"{}"));
+    let reader = pipe
+        .object_reader(repo, ReaderView::Owner(&envelope))
+        .await
+        .unwrap();
+    let urls = reader
+        .issue_urls(&[UrlTarget::Object(head)], 60)
+        .await
+        .unwrap();
+    let client = Client::new(&Url::parse(audience).unwrap()).unwrap();
+    let path = format!("/{repository}/-/objects/{}", to_hex(&head));
+    let allowed_path = format!("{path}?token={}", urls[0].as_ref().unwrap().expose());
+    let allowed = client.get(&allowed_path).await.unwrap();
+    assert_eq!(allowed.status, 200);
+    assert_eq!(allowed.body, serialize(&commit).unwrap());
+    let allowed_head = client.read("HEAD", &allowed_path, &[]).await.unwrap();
+    assert_eq!(allowed_head.status, 200);
+    assert!(allowed_head.body.is_empty());
+    let denied = client.get(&path).await.unwrap();
+    let missing = client
+        .get(&format!("/{NS}/missing/-/objects/{}", to_hex(&head)))
+        .await
+        .unwrap();
+    assert_eq!((denied.status, missing.status), (404, 404));
+    assert_eq!(denied.body, missing.body);
+    for namespace in [
+        format!("ed25519-{}", "11".repeat(32)),
+        format!("0x{}", "11".repeat(20)),
+        "root".into(),
+    ] {
+        let invalid = client
+            .get(&format!(
+                "/{namespace}/repository/-/objects/{}",
+                to_hex(&head)
+            ))
+            .await
+            .unwrap();
+        assert_eq!(invalid.status, 400);
+    }
+    host.shutdown().await;
+}
+
 #[cfg(feature = "http-objects")]
 async fn assert_owner_absence(
     pipe: &TestPipeline,

@@ -2622,7 +2622,7 @@ mod glue {
         if crate::http_mount::glue::mounted_request(&req, cfg) {
             let method = req.method();
             let origin = req.headers().get("Origin")?;
-            let response = match crate::http_mount::glue::early(&req, cfg) {
+            let response = match crate::http_mount::glue::early_worker(&req, cfg) {
                 Ok(Some(response)) => response,
                 Ok(None) => match serve_inner_with(req, env, cfg, make_hooks).await {
                     Ok(response) => response,

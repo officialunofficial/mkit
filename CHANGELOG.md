@@ -341,6 +341,12 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Breaking (toward 0.6)
 
+- [embedder: breaking API] `http_mount::early_object_error` now requires the
+  deployment namespace mode, so authority-mode HTTP object routes pass the
+  early gate. Migration: pass the deployment's `NamespaceMode` as the third
+  argument, for example `early_object_error(method, url, cfg.namespace_mode)`
+  with `cfg: WorkerConfig`. No wire or stored-format change.
+
 - [embedder: breaking API] `AuthorityKey.namespaces` becomes `scope: AuthorityScope`.
   Migration: wrap exact names in `AuthorityScope::Exact`, parsing each with the
   deployment's `NamespaceMode::namespace`, and use `AuthorityScope::Any` only
