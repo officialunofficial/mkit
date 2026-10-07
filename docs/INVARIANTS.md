@@ -2415,3 +2415,29 @@ removes only its own rows and fences delayed pages before removing the ref recor
 **Enforced by:** [hold regressions](../rust/crates/mkit-server/src/store/inspection_holds_tests.rs)
 (`repository_wide_cross_ref_holds_and_own_release_in_single_and_d34`,
 `release_fences_delayed_pages_and_preserves_fallback_until_cleanup_in_single_and_d34`).
+
+## Timestamp-priority history traversal is bounded and exact
+
+**Always:** the shared `TimestampDiscovery` reducer emits all-parent history in
+decreasing canonical `Commit.timestamp`/`Remix.timestamp` order with
+retained-discovery ties — never a hash tiebreak, never a topological gate. The
+pending frontier never exceeds 256 verbatim slots and the emitted set never
+exceeds 192 ids; crossing either bound fails the operation with no partial
+state. Dedup goes live with the first revisitable emission (a
+multi-local-parent node, or any emission while candidates remain pending) and
+records every later emission; decoded is not emitted, and parent enqueue
+completes before any snapshot. Seeding closes at the first completed emission
+so a late seed cannot descend into the unrecorded linear prefix.
+
+**Because:** server issuance/redemption and embedder page loops must produce
+byte-identical pages from the same state without re-walking the emitted
+prefix; a skipped ancestor or duplicate emission is a conformance break, and
+unbounded seen state cannot travel in a bounded token.
+
+**If violated:** pages could repeat or drop commits, drift between
+implementations, or grow a continuation token without bound.
+
+**Enforced by:** `mkit-core::history_order` reference reducer and
+[SPEC-HISTORY-ORDER](specs/SPEC-HISTORY-ORDER.md); fixture, page-boundary,
+snapshot round-trip and explicit cap tests, plus proptest
+split-vs-single-run equivalence.

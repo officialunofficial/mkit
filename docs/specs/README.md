@@ -18,6 +18,7 @@ proofs that check them, with each result's bounds.
 - [SPEC-GC](SPEC-GC.md) &mdash; garbage collection, object pruning, and recovery.
 - [SPEC-GIT-BRIDGE](SPEC-GIT-BRIDGE.md) &mdash; mkit→git export bridge (fork mode) and its verifiers.
 - [SPEC-GIT-IMPORT](SPEC-GIT-IMPORT.md) &mdash; git→mkit import bridge (one-way fork) and its verifiers.
+- [SPEC-HISTORY-ORDER](SPEC-HISTORY-ORDER.md) &mdash; bounded timestamp/discovery all-parent traversal order and reducer snapshot format.
 - [SPEC-HISTORY-PROOF](SPEC-HISTORY-PROOF.md) &mdash; MMB-based history proofs for light-client verification.
 - [SPEC-HTTP-OBJECTS](SPEC-HTTP-OBJECTS.md) &mdash; HTTP object serving, published-view access, and disclosure proofs.
 - [SPEC-INDEX](SPEC-INDEX.md) &mdash; repo-local staging-area index (advisory, not exchanged).
