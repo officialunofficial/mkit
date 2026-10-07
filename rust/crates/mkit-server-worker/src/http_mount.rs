@@ -246,9 +246,9 @@ pub(crate) mod glue {
     #[cfg(target_arch = "wasm32")]
     use worker::{Request, Response};
 
-    use super::{ConfigError, early_object_error, raw_path_query};
     #[cfg(target_arch = "wasm32")]
     use super::{HttpMountOptions, bridge_chunks, prepare_response};
+    use super::{early_object_error, raw_path_query};
     use crate::adapter::WorkerConfig;
     #[cfg(target_arch = "wasm32")]
     use crate::ns_client::WorkerNamespaceStore;
@@ -357,17 +357,11 @@ pub(crate) mod glue {
     }
 
     /// The public key document and preflight precede hook/store construction.
-    pub(crate) fn early(
-        method: &str,
-        raw: &str,
-        cfg: &WorkerConfig,
-    ) -> Result<Option<HttpObjectResponse>, ConfigError> {
-        if cfg.http_mount.is_none() {
-            return Ok(None);
-        }
-        let (path, _) = raw_path_query(raw)?;
+    pub(crate) fn early(method: &str, raw: &str, cfg: &WorkerConfig) -> Option<HttpObjectResponse> {
+        cfg.http_mount.as_ref()?;
+        let (path, _) = raw_path_query(raw).ok()?;
         if path != KEY_PATH && !is_http_object_path(path) {
-            return Ok(None);
+            return None;
         }
         let response = if method == "OPTIONS" {
             HttpObjectResponse::new(204).with_header("Allow", "GET, HEAD, OPTIONS")
@@ -378,12 +372,9 @@ pub(crate) mod glue {
                     key_document(config, method)
                 })
         } else {
-            let Some(response) = early_object_error(method, raw, cfg.namespace_mode) else {
-                return Ok(None);
-            };
-            response
+            early_object_error(method, raw, cfg.namespace_mode)?
         };
-        Ok(Some(response))
+        Some(response)
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -392,7 +383,6 @@ pub(crate) mod glue {
         cfg: &WorkerConfig,
     ) -> worker::Result<Option<Response>> {
         early(req.method().as_ref(), &req.inner().url(), cfg)
-            .map_err(|_| worker::Error::RustError("invalid request URL".into()))?
             .map(|response| bridge(response, req.method().as_ref()))
             .transpose()
     }
@@ -635,10 +625,31 @@ mod tests {
             "00".repeat(32)
         );
         for method in ["GET", "HEAD"] {
-            assert!(glue::early(method, &url, &cfg).unwrap().is_none());
+            assert!(glue::early(method, &url, &cfg).is_none());
         }
         cfg.namespace_mode = NamespaceMode::SelfCertifying;
-        assert_eq!(glue::early("GET", &url, &cfg).unwrap().unwrap().status, 400);
+        assert_eq!(glue::early("GET", &url, &cfg).unwrap().status, 400);
+    }
+
+    #[test]
+    fn unparseable_urls_stay_outside_the_http_mount() {
+        let mut cfg = crate::adapter::WorkerConfig::from_vars(|name| match name {
+            "AUTH_AUDIENCE" => Some("https://example.org".into()),
+            "AUTH_REPOSITORY" => Some("repo".into()),
+            _ => None,
+        })
+        .unwrap();
+        cfg.http_mount = Some(WorkerHttpMountConfig::new(
+            IndexedConfig::default(),
+            HttpObjectsConfig::default(),
+            HttpMountOptions::default(),
+        ));
+        for url in ["not-a-url", "https://example.org/repo#fragment"] {
+            assert!(raw_path_query(url).is_err());
+            for method in ["GET", "HEAD", "OPTIONS", "POST"] {
+                assert!(glue::early(method, url, &cfg).is_none());
+            }
+        }
     }
 
     #[test]
