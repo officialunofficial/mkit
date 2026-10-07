@@ -39,9 +39,9 @@ use crate::hash::{HASH_LEN, Hash};
 use std::collections::BTreeSet;
 
 /// Maximum pending frontier slots, counting every retained slot including
-/// duplicate ids. Spec: SPEC-HISTORY-ORDER §3.
+/// duplicate ids. Spec: SPEC-HISTORY-ORDER §4.
 pub const FRONTIER_MAX: usize = 256;
-/// Maximum remembered emitted ids. Spec: SPEC-HISTORY-ORDER §3.
+/// Maximum remembered emitted ids. Spec: SPEC-HISTORY-ORDER §4.
 pub const EMITTED_MAX: usize = 192;
 
 /// Snapshot encoding version accepted by [`TimestampDiscovery::decode`].
