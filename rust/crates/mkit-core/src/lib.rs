@@ -37,6 +37,10 @@ pub mod batch;
 pub mod chunker;
 pub mod delta;
 pub mod hash;
+// Bounded timestamp/discovery-order all-parent history traversal shared by
+// the server and embedders (SPEC-HISTORY-ORDER). Pure and wasm-safe: no I/O,
+// no features.
+pub mod history_order;
 pub mod merkle;
 pub mod object;
 pub mod ops;
@@ -109,6 +113,10 @@ pub use sparse::{
 };
 
 pub use hash::{HASH_LEN, HEX_LEN, Hash, Hasher, to_hex, to_hex_bytes};
+pub use history_order::{
+    EMITTED_MAX as HISTORY_EMITTED_MAX, FRONTIER_MAX as HISTORY_FRONTIER_MAX, HistoryOrder,
+    HistoryOrderError, ParentEdge, PendingCandidate, TimestampDiscovery, WalkStep,
+};
 pub use object::{
     Blob, ChunkedBlob, Commit, Delta, EntryMode, IDENTITY_MAX_LEN, Identity, IdentityKind, MAGIC,
     MkitError, Object, ObjectType, Remix, RemixSource, SCHEMA_VERSION, TAG_NAME_MAX_LEN, Tag, Tree,

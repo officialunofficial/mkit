@@ -130,6 +130,22 @@ collect the applicable entries between their old and new immutable pins.
 - Server embedders can share `ReadLimits` and `ReaderSession` across canonical
   and metadata reads to cap aggregate calls, decode work, encoded I/O and output.
 
+- `mkit-core::history_order` adds a pure, I/O-free timestamp/discovery-order
+  all-parent history reducer shared by the server and embedders
+  (`TimestampDiscovery`, `HistoryOrder::TimestampDiscovery`). Decreasing
+  canonical `Commit.timestamp`/`Remix.timestamp` keys break ties by retained
+  discovery order — never a hash tiebreak, never a topological gate. The
+  pending frontier is capped at 256 verbatim slots and the emitted set at 192
+  ids; exceeding either bound fails explicitly without truncation, eviction or
+  re-emission. Dedup goes live with the first revisitable emission and decoded
+  is distinct from emitted, so a page can snapshot after the last output's
+  parent enqueue and resume byte-identically. A strict little-endian snapshot
+  encoding (`encode`/`decode`) carries the full state for continuation
+  issuance. The order, caps, duplicate-slot policy and snapshot format are
+  normative in `docs/specs/SPEC-HISTORY-ORDER.md`. Existing traversal APIs —
+  the server's BFS `HistoryMode::AllParents` and the CLI's date-order log —
+  are unchanged.
+
 ### Fixed
 
 - Signed reader envelopes now capture credential headers for continuation scope.
