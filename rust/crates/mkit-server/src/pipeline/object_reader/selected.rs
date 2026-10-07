@@ -110,9 +110,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
     /// Continuation issuance's opening fence: whether `session` still holds this
     /// exact capture and the ref, publication and security state are
     /// unchanged. Never installs or replaces a checkpoint and never clears
-    /// the memo beyond what `bind` does. Unlike `selected_capture_in`, a
-    /// refused, unauthenticated or capped failure is `false` in either view —
-    /// the uniform absence H5 redemption requires.
+    /// the memo beyond what `bind` does. Unlike `selected_capture_in`, refused
+    /// and unauthenticated failures are `false` in either view, as H5
+    /// redemption requires; public caps are `false` and owner exhaustion
+    /// stays typed.
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "consumed by history continuation issuance")
