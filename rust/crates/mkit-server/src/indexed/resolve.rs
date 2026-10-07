@@ -598,199 +598,282 @@ fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
     source_limits: Option<MemberSourceLimits>,
 ) -> BoxFuture<'a, Result<ResolvedMember, ResolveFailure>> {
     Box::pin(async move {
-        if memo.no_reads.contains(&id) {
-            return Err(budget_exceeded().into());
-        }
-        if enforce_denial {
-            crate::takedown::denial::require_clear(store, &id).await?;
-            crate::takedown::denial::require_clear(store, &located.pack).await?;
-        }
-        let source_limits = Some(source_limits.unwrap_or(MemberSourceLimits::new(
-            super::geometry::FRAME_BYTES,
-            super::geometry::CANONICAL_BYTES,
-        )));
-        if source_limits.is_some_and(|limits| {
-            located.value.frame_length > limits.max_frame_bytes
-                || located.value.decoded_size > limits.max_decoded_bytes
-        }) {
-            return Err(budget_exceeded().into());
-        }
-        let location = (id, located.pack, located.value.frame_offset);
-        if let Some(selected) =
-            selected_frame(store, memo.selection.as_ref(), visiting.len(), id).await?
-        {
-            if selected != located {
-                return Err(unavailable().into());
-            }
-            if !store
-                .has(
-                    &shards.membership(repo, &BlobKey::pack(located.pack)),
-                    &keys::membership(&repo.name, &located.pack),
-                )
-                .await
-                .map_err(|_| unavailable())?
-            {
-                return Err(ResolveFailure::Missing);
-            }
-        }
-        let available = memo.available(budget)?;
-        if let Some(value) = memo.rows.get(&location) {
-            if value.1 > cap {
-                memo.depth_capped = true;
-                return Err(ServerError::invalid_argument("delta chain too deep").into());
-            }
-            return Ok(value.clone());
-        }
-        // An ancestry frontier is already charged by the walk; recursive,
-        // uncached delta bases share its work budget. Cache hits are free.
-        if !visiting.is_empty() {
-            memo.charge_work(1)?;
-        }
-        if !visiting.insert(location) {
-            return Err(ServerError::invalid_argument("delta chain too deep").into());
-        }
-        let result: Result<ResolvedMember, ResolveFailure> = async {
-            let IndexValue {
-                frame_offset,
-                frame_length,
-                delta_base,
-                ..
-            } = located.value;
-            let (prefix, mut raw_frame) = if delta_base.is_none() {
-                // A raw member's frame read does not depend on the pack prefix
-                // or on any base. Boxed: delta chains recurse through here, and
-                // the joined reads must not enlarge every level's frame.
-                let limit = source_limits.map_or(available, |limits| limits.max_frame_bytes);
-                let (prefix, frame) = Box::pin(raw_member_reads(
-                    blobs,
-                    located.pack,
-                    (frame_offset, frame_length),
-                    available,
-                    limit,
-                ))
-                .await?;
-                (prefix, Some(frame))
-            } else {
-                (
-                    frame_bytes(blobs, located.pack, 0, 8, available).await?,
-                    None,
-                )
-            };
-            let version = u32::from_le_bytes(prefix[4..8].try_into().map_err(|_| unavailable())?);
-            let mut depth = 0;
-            let mut base_bytes = None;
-            if let Some(base) = delta_base {
-                // A raw terminal base may be one node beyond the hop cap;
-                // another delta may not. Stop before a long chain recurses.
-                if visiting.len() > usize::try_from(cap).unwrap_or(usize::MAX) {
-                    memo.depth_capped = true;
+        let (mut id, mut located) = (id, located);
+        let mut source_limits = source_limits;
+        let mut pending = Vec::<PendingMember>::new();
+        let mut current = None;
+        let result = async {
+            let mut value = loop {
+                if memo.no_reads.contains(&id) {
+                    return Err(budget_exceeded().into());
+                }
+                if enforce_denial {
+                    crate::takedown::denial::require_clear(store, &id).await?;
+                    crate::takedown::denial::require_clear(store, &located.pack).await?;
+                }
+                source_limits = Some(source_limits.unwrap_or(MemberSourceLimits::new(
+                    super::geometry::FRAME_BYTES,
+                    super::geometry::CANONICAL_BYTES,
+                )));
+                if source_limits.is_some_and(|limits| {
+                    located.value.frame_length > limits.max_frame_bytes
+                        || located.value.decoded_size > limits.max_decoded_bytes
+                }) {
+                    return Err(budget_exceeded().into());
+                }
+                let location = (id, located.pack, located.value.frame_offset);
+                if let Some(selected) =
+                    selected_frame(store, memo.selection.as_ref(), visiting.len(), id).await?
+                {
+                    if selected != located {
+                        return Err(unavailable().into());
+                    }
+                    if !store
+                        .has(
+                            &shards.membership(repo, &BlobKey::pack(located.pack)),
+                            &keys::membership(&repo.name, &located.pack),
+                        )
+                        .await
+                        .map_err(|_| unavailable())?
+                    {
+                        return Err(ResolveFailure::Missing);
+                    }
+                }
+                let available = memo.available(budget)?;
+                if let Some(value) = memo.rows.get(&location) {
+                    if value.1 > cap {
+                        memo.depth_capped = true;
+                        return Err(ServerError::invalid_argument("delta chain too deep").into());
+                    }
+                    break value.clone();
+                }
+                // An ancestry frontier is already charged by the walk;
+                // uncached delta bases share its work budget. Cache hits are free.
+                if !visiting.is_empty() {
+                    memo.charge_work(1)?;
+                }
+                if !visiting.insert(location) {
                     return Err(ServerError::invalid_argument("delta chain too deep").into());
                 }
-                let selected =
-                    selected_frame(store, memo.selection.as_ref(), visiting.len(), base).await?;
-                let next =
-                    member_base(store, shards, repo, base, located, metrics, selected).await?;
-                let (canonical, base_depth) = member_object_inner(
+                current = Some(location);
+                let IndexValue {
+                    frame_offset,
+                    frame_length,
+                    delta_base,
+                    ..
+                } = located.value;
+                let (prefix, raw_frame) = if delta_base.is_none() {
+                    // A raw member's frame read does not depend on the pack prefix
+                    // or on any base. Keep both reads in the same round.
+                    let limit = source_limits.map_or(available, |limits| limits.max_frame_bytes);
+                    let (prefix, frame) = Box::pin(raw_member_reads(
+                        blobs,
+                        located.pack,
+                        (frame_offset, frame_length),
+                        available,
+                        limit,
+                    ))
+                    .await?;
+                    (prefix, Some(frame))
+                } else {
+                    (
+                        frame_bytes(blobs, located.pack, 0, 8, available).await?,
+                        None,
+                    )
+                };
+                let version =
+                    u32::from_le_bytes(prefix[4..8].try_into().map_err(|_| unavailable())?);
+                if let Some(base) = delta_base {
+                    // Preserve the prefix read before the hop-cap check. A raw
+                    // terminal base may be one node beyond the configured cap.
+                    if visiting.len() > usize::try_from(cap).unwrap_or(usize::MAX) {
+                        memo.depth_capped = true;
+                        return Err(ServerError::invalid_argument("delta chain too deep").into());
+                    }
+                    let selected =
+                        selected_frame(store, memo.selection.as_ref(), visiting.len(), base)
+                            .await?;
+                    let next =
+                        member_base(store, shards, repo, base, located, metrics, selected).await?;
+                    if pending.len() == pending.capacity() {
+                        let remaining = usize::try_from(cap).unwrap_or(usize::MAX) - pending.len();
+                        pending.reserve_exact(pending.len().max(1).min(remaining));
+                    }
+                    pending.push(PendingMember {
+                        id,
+                        located,
+                        base,
+                        version,
+                    });
+                    current = None;
+                    id = base;
+                    located = next;
+                    continue;
+                }
+                let decoded = decode_member(
                     blobs,
-                    store,
-                    shards,
-                    repo,
-                    base,
-                    next,
-                    cap,
+                    id,
+                    located,
+                    version,
+                    0,
+                    None,
+                    raw_frame,
                     budget,
                     memo,
-                    visiting,
-                    metrics,
-                    enforce_denial,
                     source_limits,
                 )
-                .await?;
-                base_bytes = Some((base, canonical));
-                depth = base_depth.saturating_add(1);
+                .await;
+                visiting.remove(&location);
+                current = None;
+                let value = decoded?;
+                memo.insert(location, value.clone(), budget)?;
+                break value;
+            };
+            while let Some(parent) = pending.pop() {
+                let location = parent.location();
+                current = Some(location);
+                let depth = value.1.saturating_add(1);
                 if depth > cap {
                     memo.depth_capped = true;
                     return Err(ServerError::invalid_argument("delta chain too deep").into());
                 }
+                let decoded = decode_member(
+                    blobs,
+                    parent.id,
+                    parent.located,
+                    parent.version,
+                    depth,
+                    Some((parent.base, value.0)),
+                    None,
+                    budget,
+                    memo,
+                    source_limits,
+                )
+                .await;
+                visiting.remove(&location);
+                current = None;
+                value = decoded?;
+                memo.insert(location, value.clone(), budget)?;
             }
-            let available = memo.available(budget)?;
-            let frame = match raw_frame.take() {
-                Some(frame) => frame,
-                None => {
-                    frame_bytes(
-                        blobs,
-                        located.pack,
-                        frame_offset,
-                        frame_length,
-                        source_limits.map_or(available, |limits| limits.max_frame_bytes),
-                    )
-                    .await?
-                }
-            };
-            if source_limits.is_some() {
-                // A selected member's verified metadata is immutable. A changed
-                // object claim is corruption, even when it now exceeds the budget.
-                // Raw deltas carry their reconstructed size in the delta header;
-                // compressed delta outer claims instead describe stream size.
-                let claim = match frame.first() {
-                    Some(0x00) => Some(frame.len().saturating_sub(5) as u64),
-                    Some(0x03) => frame.get(5..9).and_then(|bytes| {
-                        bytes.try_into().ok().map(u32::from_le_bytes).map(u64::from)
-                    }),
-                    Some(0x02) => frame.get(42..46).and_then(|bytes| {
-                        bytes.try_into().ok().map(u32::from_le_bytes).map(u64::from)
-                    }),
-                    // The outer claim is a stream size. Inspect just the inner
-                    // delta header before a corrupted result can hit the budget.
-                    // An unsuccessful peek proves no mismatch: let normal decode
-                    // retain its existing corruption/resource error separation.
-                    Some(0x04) => frame
-                        .get(41..)
-                        .and_then(|bytes| peek_delta_header(bytes).ok())
-                        .map(|(_, result)| u64::from(result)),
-                    _ => None,
-                };
-                if frame.first().copied() != Some(located.value.wire_type)
-                    || claim.is_some_and(|size| size != located.value.decoded_size)
-                {
-                    return Err(ResolveFailure::Corrupt(ServerError::invalid_argument(
-                        "verified source frame metadata mismatch",
-                    )));
-                }
-            }
-            let mut source = CachedBase(base_bytes);
-            // Reserve canonical decode work even if hash verification or decoding
-            // fails; a reader session must not refund expensive corrupt inputs.
-            memo.decoded_work = memo
-                .decoded_work
-                .saturating_add(located.value.decoded_size.min(available));
-            let (actual, bytes) = decode_frame_with(
-                &frame,
-                version,
-                &mut source,
-                super::geometry::entry_limits(
-                    source_limits
-                        .map_or(available, |limits| available.min(limits.max_decoded_bytes)),
-                ),
-            )
-            .map_err(|error| {
-                if matches!(error, PackError::PackfileTooLarge) {
-                    ResolveFailure::Other(budget_exceeded())
-                } else {
-                    ResolveFailure::Corrupt(ServerError::invalid_argument("object hash mismatch"))
-                }
-            })?;
-            if actual != id {
-                return Err(ResolveFailure::Corrupt(ServerError::invalid_argument(
-                    "object hash mismatch",
-                )));
-            }
-            Ok((Arc::from(bytes), depth))
+            Ok(value)
         }
         .await;
-        visiting.remove(&location);
-        let value = result?;
-        memo.insert(location, value.clone(), budget)?;
-        Ok(value)
+        // Match recursive unwinding: clear only locations this call inserted,
+        // deepest first, even when a guard, read, decode or retention fails.
+        if let Some(location) = current {
+            visiting.remove(&location);
+        }
+        for parent in pending.into_iter().rev() {
+            visiting.remove(&parent.location());
+        }
+        result
     })
+}
+
+// At most `cap` deferred deltas (default 50), checked before each push, and
+// one active member. No frame bytes or canonical bases are retained here;
+// those retain their existing source limits and MemberCache byte budget.
+struct PendingMember {
+    id: Hash,
+    located: LocatedObject,
+    base: Hash,
+    version: u32,
+}
+
+impl PendingMember {
+    fn location(&self) -> Location {
+        (self.id, self.located.pack, self.located.value.frame_offset)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn decode_member<B: BlobStore>(
+    blobs: &B,
+    id: Hash,
+    located: LocatedObject,
+    version: u32,
+    depth: u32,
+    base_bytes: Option<(Hash, Arc<[u8]>)>,
+    mut raw_frame: Option<Vec<u8>>,
+    budget: u64,
+    memo: &mut MemberCache,
+    source_limits: Option<MemberSourceLimits>,
+) -> Result<ResolvedMember, ResolveFailure> {
+    let IndexValue {
+        frame_offset,
+        frame_length,
+        ..
+    } = located.value;
+    let available = memo.available(budget)?;
+    let frame = match raw_frame.take() {
+        Some(frame) => frame,
+        None => {
+            frame_bytes(
+                blobs,
+                located.pack,
+                frame_offset,
+                frame_length,
+                source_limits.map_or(available, |limits| limits.max_frame_bytes),
+            )
+            .await?
+        }
+    };
+    if source_limits.is_some() {
+        // A selected member's verified metadata is immutable. A changed
+        // object claim is corruption, even when it now exceeds the budget.
+        // Raw deltas carry their reconstructed size in the delta header;
+        // compressed delta outer claims instead describe stream size.
+        let claim = match frame.first() {
+            Some(0x00) => Some(frame.len().saturating_sub(5) as u64),
+            Some(0x03) => frame
+                .get(5..9)
+                .and_then(|bytes| bytes.try_into().ok().map(u32::from_le_bytes).map(u64::from)),
+            Some(0x02) => frame
+                .get(42..46)
+                .and_then(|bytes| bytes.try_into().ok().map(u32::from_le_bytes).map(u64::from)),
+            // The outer claim is a stream size. Inspect just the inner
+            // delta header before a corrupted result can hit the budget.
+            // An unsuccessful peek proves no mismatch: let normal decode
+            // retain its existing corruption/resource error separation.
+            Some(0x04) => frame
+                .get(41..)
+                .and_then(|bytes| peek_delta_header(bytes).ok())
+                .map(|(_, result)| u64::from(result)),
+            _ => None,
+        };
+        if frame.first().copied() != Some(located.value.wire_type)
+            || claim.is_some_and(|size| size != located.value.decoded_size)
+        {
+            return Err(ResolveFailure::Corrupt(ServerError::invalid_argument(
+                "verified source frame metadata mismatch",
+            )));
+        }
+    }
+    let mut source = CachedBase(base_bytes);
+    // Reserve canonical decode work even if hash verification or decoding
+    // fails; a reader session must not refund expensive corrupt inputs.
+    memo.decoded_work = memo
+        .decoded_work
+        .saturating_add(located.value.decoded_size.min(available));
+    let (actual, bytes) = decode_frame_with(
+        &frame,
+        version,
+        &mut source,
+        super::geometry::entry_limits(
+            source_limits.map_or(available, |limits| available.min(limits.max_decoded_bytes)),
+        ),
+    )
+    .map_err(|error| {
+        if matches!(error, PackError::PackfileTooLarge) {
+            ResolveFailure::Other(budget_exceeded())
+        } else {
+            ResolveFailure::Corrupt(ServerError::invalid_argument("object hash mismatch"))
+        }
+    })?;
+    if actual != id {
+        return Err(ResolveFailure::Corrupt(ServerError::invalid_argument(
+            "object hash mismatch",
+        )));
+    }
+    Ok((Arc::from(bytes), depth))
 }

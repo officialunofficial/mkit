@@ -1695,6 +1695,13 @@ Clients plan uploads against the advertised effective value.
 The default in indexed mode is 50. A chain deeper than the advertised
 cap fails under §9.3, even if all its bases are visible in the repository.
 
+The reference server resolves member chains with iterative descent and reverse
+reconstruction. It retains at most the configured number of pending delta
+metadata entries, plus one active member; call-stack use does not grow with
+chain depth. Encoded frames and canonical bytes remain subject to the existing
+source and decode budgets. This implementation preserves the checks, charging
+order, and concurrent raw-member prefix/frame reads described above.
+
 When indexed mode is off, the server MUST advertise
 `max_delta_chain_depth = 0`. That value indicates that the indexed
 verification cap is inapplicable; it does not enable indexed validation
