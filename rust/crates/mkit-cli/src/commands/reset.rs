@@ -223,6 +223,7 @@ pub fn run(args: &[String]) -> u8 {
         if let Err(e) = restore_tree_to_worktree_with(
             &store,
             &tree_hash,
+            None,
             &cwd,
             &restore_opts,
             &crate::restore_fanout::read_chunks_fanout,

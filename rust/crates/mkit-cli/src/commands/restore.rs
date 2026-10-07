@@ -341,6 +341,7 @@ fn restore_worktree(
     if let Err(e) = restore_tree_to_worktree_with(
         store,
         &source_tree,
+        None,
         cwd,
         &restore_opts,
         &crate::restore_fanout::read_chunks_fanout,

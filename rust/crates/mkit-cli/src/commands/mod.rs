@@ -907,6 +907,7 @@ pub fn restore_worktree_and_index(
     restore_tree_to_worktree_with(
         store,
         &tree_hash,
+        None,
         layout.worktree_root(),
         &RestoreOptions::default(),
         &crate::restore_fanout::read_chunks_fanout,

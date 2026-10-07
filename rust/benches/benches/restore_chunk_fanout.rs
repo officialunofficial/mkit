@@ -174,6 +174,7 @@ fn bench_file_restore(c: &mut Criterion) {
                 restore_tree_to_worktree_with(
                     &store,
                     &tree_hash,
+                    None,
                     target_dir.path(),
                     &RestoreOptions::default(),
                     &|store: &ObjectStore, hashes: &[Hash]| {
