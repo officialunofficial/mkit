@@ -15,6 +15,20 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Added
 
+- All-parent history continuations in canonical timestamp order. An embedder
+  drives page 1 with per-commit `read_canonical_in` on a selected-ref reader
+  and session, feeding `mkit_core::history_order::TimestampDiscovery`, then
+  `ObjectReader::issue_history_continuation_in` mints a version-2 binary
+  continuation from session memo evidence and live fences alone — no object or
+  storage proof calls. `walk_history_page_with_options_in` with
+  `ContinuedHistoryOrder::TimestampDiscovery` redeems pages 2+ on fresh
+  readers and sessions without replaying page 1, hydrating unknown priority
+  keys in batches inside the existing read envelope. History state caps
+  (frontier, emitted set, witness, payload) report the new typed
+  `HistoryStateLimit` error in both public and owner views.
+  `walk_history_page_in` first-parent paging is unchanged and mints version-2
+  tokens.
+
 - Workers wire CI bypasses the local dev HTTP proxy using a direct workerd
   socket, with the same pinned runtime, Worker builds, phases and assertions.
   Existing replay-safe retries remain; any retry emits a CI and summary warning.
@@ -376,6 +390,18 @@ collect the applicable entries between their old and new immutable pins.
   URL-token reads, supplied hooks, cold outcome retry and injected slice recovery.
 
 ### Breaking (toward 0.6)
+
+- [embedder: breaking API] History continuation tokens are a fixed-order
+  binary encoding under purpose `mkit-history-continuation:v2`; version-1 JSON
+  tokens are rejected. First-parent paging whose provenance chain exceeds
+  1,024 commits now fails with an explicit `HistoryStateLimit::Provenance` in
+  both public and owner views, replacing the previous exhaustion/absence
+  behavior. The bound itself is unchanged in effect: the version-1 ancestry
+  claim carried the same tip-to-cursor chain under the same 1,024 cap and
+  stopped at the same depth, silently for public readers. Migration: restart
+  paging from page 1 — `walk_history_page_in` mints version-2 tokens, and the
+  new `issue_history_continuation_in` mints timestamp continuations from a
+  sealed `TimestampDiscovery` walk. No stored-format change.
 
 - [embedder: breaking API] `http_mount::early_object_error` now requires the
   deployment namespace mode, so authority-mode HTTP object routes pass the

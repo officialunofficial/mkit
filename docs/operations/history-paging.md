@@ -254,3 +254,59 @@ completion. Canonical windows and permission/denial caches are absent.
 | 302 | 100 | 2 | owner | ON | 130 | 4125 | 3323 | 200 | 3723 | 2087.00 | 271.310 |
 | 302 | 100 | 3 | owner | ON | 130 | 4121 | 3319 | 200 | 3719 | 2086.00 | 271.180 |
 | 302 | 100 | 4 | owner | ON | 130 | 109 | 91 | 4 | 99 | 54.00 | 7.020 |
+
+## Timestamp-discovery continuation pages
+
+The `timestamp_pages_match_reducer_and_stay_bounded` test pages a 52-commit
+linear history and a 52-commit merge-heavy history in canonical timestamp order
+(page size 10): the embedder drives page 1 with per-commit canonical reads and
+issues a version-2 continuation, then fresh readers and sessions redeem server
+pages until the walk completes. Concatenated IDs and canonical bytes match an
+in-memory `TimestampDiscovery` replay of the fixture graph. Pending keys are
+either all hydrated before issuance (`hydrate=true`) or left unknown for the
+redemption to hydrate in batches (`hydrate=false`). Each measured page is one
+fresh request with the reader-batching latency probe; blob loads equal emitted
+plus hydrated objects and no page performs a cursor walk, a ref-index or
+all-ref partition scan, or a `reader_tips` call. All rounds are far below the
+400-round page budget.
+
+Reproduce from `rust/`:
+
+```sh
+CARGO_PROFILE_DEV_DEBUG=0 cargo test --locked -p mkit-server --all-features --lib timestamp_pages_match_reducer_and_stay_bounded -- --nocapture
+```
+
+| Fixture | Hydrated | View | Denial | Page | KV | Blob GETs | Modeled rounds |
+|---|---|---|---|---:|---:|---:|---:|
+| linear | no | public | OFF | 2 | 119 | 20 | 92 |
+| linear | no | public | OFF | 3 | 118 | 20 | 92 |
+| linear | no | owner | OFF | 2 | 120 | 20 | 93 |
+| linear | no | owner | OFF | 3 | 119 | 20 | 93 |
+| linear | no | public | ON | 2 | 346 | 20 | 176 |
+| linear | no | public | ON | 3 | 345 | 20 | 176 |
+| linear | no | owner | ON | 2 | 347 | 20 | 177 |
+| linear | no | owner | ON | 3 | 346 | 20 | 177 |
+| linear | yes | public | OFF | 2 | 119 | 20 | 92 |
+| linear | yes | public | OFF | 3 | 118 | 20 | 92 |
+| linear | yes | owner | OFF | 2 | 120 | 20 | 93 |
+| linear | yes | owner | OFF | 3 | 119 | 20 | 93 |
+| linear | yes | public | ON | 2 | 346 | 20 | 176 |
+| linear | yes | public | ON | 3 | 345 | 20 | 176 |
+| linear | yes | owner | ON | 2 | 347 | 20 | 177 |
+| linear | yes | owner | ON | 3 | 346 | 20 | 177 |
+| merge | no | public | OFF | 2 | 109 | 20 | 76 |
+| merge | no | public | OFF | 3 | 113 | 22 | 76 |
+| merge | no | owner | OFF | 2 | 110 | 20 | 77 |
+| merge | no | owner | OFF | 3 | 114 | 22 | 77 |
+| merge | no | public | ON | 2 | 302 | 20 | 152 |
+| merge | no | public | ON | 3 | 308 | 22 | 154 |
+| merge | no | owner | ON | 2 | 303 | 20 | 153 |
+| merge | no | owner | ON | 3 | 309 | 22 | 155 |
+| merge | yes | public | OFF | 2 | 109 | 20 | 76 |
+| merge | yes | public | OFF | 3 | 113 | 22 | 76 |
+| merge | yes | owner | OFF | 2 | 110 | 20 | 77 |
+| merge | yes | owner | OFF | 3 | 114 | 22 | 77 |
+| merge | yes | public | ON | 2 | 302 | 20 | 152 |
+| merge | yes | public | ON | 3 | 308 | 22 | 154 |
+| merge | yes | owner | ON | 2 | 303 | 20 | 153 |
+| merge | yes | owner | ON | 3 | 309 | 22 | 155 |

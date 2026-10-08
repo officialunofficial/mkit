@@ -56,6 +56,37 @@ could outlive the capture that authorized their interpretation.
 single-ref capture/tag/unpeeled/off-ref/divergent-anchor/missing-ledger/ABA/
 expiry/rebind/helper tests and `read_proofs` reset/lineage unit tests.
 
+## History continuations carry verified state, never permission, and caps never truncate
+
+**Always:** `issue_history_continuation_in` performs no object or storage
+proof I/O — it validates the sealed `TimestampDiscovery` walk against session
+memo evidence (recorded history edges and decoded timestamps) and re-fences
+the retained capture checkpoint, so a version-2 token carries only
+server-verified priority keys plus a bounded witness of pending lineage. A
+redeemed token confers no permission: every served object is re-read live with
+current membership, denial and authorizer checks, a carried key is rechecked
+against the object at emission, and imported proofs die with the request.
+History state caps — frontier, emitted set, witness, payload — fail as typed
+`HistoryStateLimit` errors in both views, never as truncated output or
+uniform absence.
+
+**Because:** a continuation is the only place the server trusts carried
+priority state across requests; if issuance re-read objects it would re-walk
+page 1, if a token conferred permission a replayed or stale credential would
+serve objects, and if a cap truncated silently the caller would lose history
+entries without any signal to restart.
+
+**If violated:** issuance could re-walk page 1 per request, a forged or stale
+token could widen visibility or skip denial, or a reducer cap could drop
+commits silently, corrupting the caller's log while looking complete.
+
+**Enforced by:** `pipeline::object_reader::history::continuation::issue`
+memo-only validation and fences, `history_token` bounded v2 codec and
+`HistoryStateLimit` mint/verify mapping, `read_proofs::restore_witness`
+isolated proof scope; `timestamp_tests` no-object-I/O issuance, replay,
+seed-window, cancellation, refusal and cap tests plus the `history_token`
+codec bounds.
+
 ## Private scanner retrieval requires current ticket and global-denial checks
 
 **Always:** scanner byte reads require both a dedicated short-lived capability

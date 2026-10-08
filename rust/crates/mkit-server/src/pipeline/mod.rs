@@ -48,11 +48,13 @@ pub(crate) mod read_proofs;
 #[cfg(feature = "http-objects")]
 mod reader_checks;
 #[cfg(feature = "http-objects")]
+pub use crate::HistoryStateLimit;
+#[cfg(feature = "http-objects")]
 pub use object_reader::{
-    CommitPathRead, ContinuedHistoryPage, HistoryCommit, HistoryContinuation, HistoryMode,
-    HistoryOptions, HistoryPage, IssuedUrl, OBJECT_READER_BATCH, OBJECT_READER_CALLS,
-    OBJECT_READER_LIMIT_MESSAGE, ObjectMetadata, ObjectReader, PathOptions, PathTree, PathWitness,
-    ReaderView,
+    CommitPathRead, ContinuedHistoryOptions, ContinuedHistoryOrder, ContinuedHistoryPage,
+    HistoryCommit, HistoryContinuation, HistoryContinuationState, HistoryMode, HistoryOptions,
+    HistoryPage, IssuedUrl, OBJECT_READER_BATCH, OBJECT_READER_CALLS, OBJECT_READER_LIMIT_MESSAGE,
+    ObjectMetadata, ObjectReader, PathOptions, PathTree, PathWitness, ReaderView,
 };
 #[cfg(feature = "http-objects")]
 pub use read_limits::{ReadLimits, ReaderSession};

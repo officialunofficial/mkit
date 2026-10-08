@@ -180,14 +180,35 @@ and [object format](../specs/SPEC-OBJECTS.md).
 For cross-request first-parent paging, configure `PipelineConfig.history_tokens`
 with a dedicated `HistoryTokenConfig` secret, backend realm, and TTL. The Worker
 adapter exposes the optional `HISTORY_TOKEN_KEYS` setting. Use
-`walk_history_page_in` with the previous page's opaque continuation. This API
-has no all-parent DAG frontier. Supply a fresh signed credential envelope for
-an owner request and create a fresh reader and session for every request.
-The stable signer, grant, captured credential headers, and trusted audience must
-match; envelope nonce and timestamps may change. Public requests remain public.
+`walk_history_page_in` with the previous page's opaque continuation. Supply a
+fresh signed credential envelope for an owner request and create a fresh reader
+and session for every request. The stable signer, grant, captured credential
+headers, and trusted audience must match; envelope nonce and timestamps may
+change. Public requests remain public.
 Successors inherit the original expiry, bounded at issuance by the configured
 TTL, proof lag/deadline, and credential/grant expiry. Live authorization and
 source/denial checks run again on every redemption.
+
+For cross-request all-parent paging in canonical timestamp order, the embedder
+drives page 1 itself on one selected reader and session: capture with
+`selected_capture_in`, seed `TimestampDiscovery` with the tip peeled through
+any tags to its commit/remix (the checkpoint keeps the unpeeled anchor) before
+its first emission, then loop `step` — `read_canonical_in` each ID the walk
+asks about, `provide_timestamp` the decoded commit/remix time, and `emit` the
+returned parents. After at least one emission, `issue_history_continuation_in` hands a
+`HistoryContinuationState` (the retained `CaptureCheckpoint` plus the walk) to
+the same session and returns an opaque token; issuance reads no objects — it
+validates the walk against session memo evidence and live fences only. Page 2
+onward is stateless: `walk_history_page_with_options_in` with
+`ContinuedHistoryOrder::TimestampDiscovery` and the token, on a fresh reader
+and session per request. Tokens travel inside request and response bodies,
+never in URLs or headers; the host enforces a streamed 128 KiB request-body
+cap — never trust `Content-Length` alone — and refuses oversized bodies with
+HTTP 413, and tokens are not logged. History state caps return a typed
+`HistoryStateLimit` in either view — restart the walk from page 1; smaller
+pages cannot cure an emitted-set or frontier cap. Version 1 tokens are
+rejected; restart from page 1. The reference embedding route in
+`apps/embedded-worker` does not serve history, so it is unchanged.
 
 Invalid or expired tokens return uniform absence. Ref/publication changes,
 visibility changes, grant epochs, authority generations, and key replacement

@@ -528,6 +528,10 @@ fn tree(entries: &[(&str, EntryMode, &Object)]) -> Object {
 }
 
 fn commit(tree: &Object, parents: &[&Object], message: &str) -> Object {
+    commit_at(tree, parents, message, 42)
+}
+
+fn commit_at(tree: &Object, parents: &[&Object], message: &str, timestamp: u64) -> Object {
     let signer = KeyPair::from_seed([9; 32]);
     let mut commit = Commit::new_unannotated(
         tree.id().unwrap(),
@@ -535,7 +539,7 @@ fn commit(tree: &Object, parents: &[&Object], message: &str) -> Object {
         Identity::ed25519(signer.public.0),
         signer.public.0,
         message.as_bytes().to_vec(),
-        42,
+        timestamp,
         [0; 64],
     );
     commit.signature = sign_commit(&commit, &signer).unwrap().0;

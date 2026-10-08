@@ -1901,18 +1901,31 @@ for request composition and the [history paging measurements](../operations/hist
 for bounded fixture results.
 
 As an explicit exception to request-local structural evidence, a server MAY
-authenticate a selected-ref first-parent cursor across requests. The continuation
-MUST NOT confer permission. `walk_history_page_in` exposes this contract separately
-from the all-parent traversal above; it MUST NOT silently narrow an all-parent log.
-No DAG frontier or duplicate-suppression state is exposed in version 1.
+authenticate a selected-ref history cursor across requests. The continuation
+MUST NOT confer permission. `walk_history_page_in` exposes first-parent paging
+separately from the all-parent traversal above; it MUST NOT silently narrow an
+all-parent log. `walk_history_page_with_options_in` additionally continues an
+all-parent `TimestampDiscovery` walk ([SPEC-HISTORY-ORDER](SPEC-HISTORY-ORDER.md)),
+whose sealed reducer state travels in the token.
 
-Version 1 is `<base64url(JSON claims)>.<base64url(32-byte MAC)>`, with strict
-unpadded encoding. Claims contain version `1`, purpose
-`mkit-history-continuation:v1`, backend realm, full namespace/repository, selected
-ref, writer/public view, stable verified principal/credential digest, strict
-anchor ID, full authoritative publication record (sequence, published prefix,
-deletion boundary, membership generation and published pair), live security
-digest, issuance time, original absolute expiry, cursor, and ordered stop-sensitive ancestry including the cursor. The credential digest
+Version 2 is `<base64url(binary claims)>.<base64url(32-byte MAC)>`, with strict
+unpadded encoding and a MAC string of exactly 43 characters. Claims are a
+fixed-order little-endian encoding: version `0x02`; order (`0x00` first-parent,
+`0x01` timestamp-discovery); purpose `mkit-history-continuation:v2`; backend
+realm; full namespace/repository; selected ref; writer/public view; stable
+verified principal/credential digest; strict anchor ID; the full authoritative
+publication record (sequence, published prefix, deletion boundary, membership
+generation and published pair) as its `Publication::encode` bytes; live
+security digest; issuance time; original absolute expiry; an ordered witness
+of 1–1,024 history nodes (each an ID plus a predecessor index: index 0 MUST be
+the unique root, every other node's predecessor MUST name an earlier index,
+and IDs MUST be unique); and, for timestamp-discovery only, the verbatim
+SPEC-HISTORY-ORDER snapshot of the sealed reducer. A first-parent witness is a
+linear chain and the last node is the cursor. Decoding rejects truncation,
+trailing bytes, an unknown order, an empty or oversized witness, duplicate
+witness IDs, a missing or misplaced root, forward predecessors, a malformed
+snapshot, an unsealed or outstanding-selected reducer, and any pending ID
+absent from the witness. The credential digest
 includes the trusted auth audience, signer, grant and captured credential headers;
 it excludes envelope nonce, fingerprint and verification time so a fresh signed
 request can continue the same credential scope. The security digest binds the
@@ -1935,7 +1948,12 @@ invalidates outstanding tokens. Deployment realms MUST distinguish backends
 even when their repository names and auth audiences coincide.
 
 MAC, format, expiry and stateless scope checks MUST precede sensitive reads.
-Parsing is bounded to 256 KiB decoded claims and 1,024 ancestry IDs. The server
+Parsing is bounded to a 65,536-byte decoded payload, an 87,426-byte token,
+1,024 witness nodes, and the SPEC-HISTORY-ORDER §4 reducer bounds (256 pending
+slots, 192 emitted IDs). The token's order MUST equal the requested order
+before any sensitive read. Version 1 JSON claims are rejected at every
+deployment boundary; a caller holding one restarts paging at the selected ref.
+The server
 MUST authenticate current credentials and recheck visibility, epoch, grants and
 authorizer before importing evidence. It MUST strongly read the selected ref
 and authoritative publication fence, and compare them again at the closing
@@ -1953,6 +1971,38 @@ A missing ledger or partial capture MUST NOT issue or redeem evidence.
 Append, rewind, deletion/recreation, replacement and publication/incarnation
 changes invalidate the continuation even when the ref returns to the same hash.
 Delayed projections MUST NOT reinstate an invalidated continuation.
+
+Issuance is memo-only. The caller seeds the walk at the selected tip peeled
+through any tags to its commit/remix; the checkpoint keeps the unpeeled
+anchor. `issue_history_continuation_in` re-fences the retained capture
+checkpoint — credential, selected ref, anchor, security and expiry — against
+live state, and validates the caller's sealed walk against session evidence
+alone. Every pending or emitted ID MUST be recorded in the session
+memo on the selected ref: an emitted ID must be a proven commit/remix with its
+decoded timestamp, and a pending ID must hold a recorded history edge whose
+decoded timestamp, when known, supplies the reducer key. Issuance performs zero
+object or storage proof calls — at most 448 supplied-ID memo lookups plus at
+most 1,024 witness traversals. An outstanding selected candidate, an unsealed
+walk, a pending ID that is off-ref or never read, an emitted ID that is not a
+proven history object, or a supplied key that disagrees with the recorded
+timestamp refuses issuance as uniform absence; invalid reader or walk state is
+invalid input. The witness proves the pending IDs' lineage back to the
+checkpoint tip; emitted IDs are not carried.
+
+A timestamp-discovery redemption restores the sealed snapshot and emits the
+next page in canonical order. Pending IDs whose priority keys the token does
+not carry are hydrated in batches within the existing six-call read envelope
+before output selection; a key the token carries is rechecked against the live
+object at emission, and any disagreement refuses the page — carried state is
+never reordered or amended. History state caps are explicit rather than
+absent: frontier or emitted-set overflow, oversized witness and oversized
+payload each report `HistoryStateLimit` typed in both public and owner views.
+A redemption NEVER extends expiry, mints no records, and pages a token it can
+replay.
+
+Tokens travel only inside request and response bodies — never in URL query
+strings or headers — and MUST NOT be logged. The host enforces its separately
+streamed request-body cap rather than trusting Content-Length alone.
 
 Successors MUST inherit the original expiry. Initial expiry is bounded by the
 configured token TTL, root-proof lag/deadline and credential/grant expiry.

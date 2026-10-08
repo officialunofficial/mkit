@@ -22,8 +22,9 @@ use std::collections::{BTreeMap, BTreeSet};
 type Prefetched = (BTreeMap<Hash, Vec<u8>>, BTreeMap<Hash, ObjectMetadata>);
 mod history;
 pub use history::{
-    CommitPathRead, ContinuedHistoryPage, HistoryCommit, HistoryContinuation, HistoryMode,
-    HistoryOptions, HistoryPage, PathOptions, PathTree, PathWitness,
+    CommitPathRead, ContinuedHistoryOptions, ContinuedHistoryOrder, ContinuedHistoryPage,
+    HistoryCommit, HistoryContinuation, HistoryContinuationState, HistoryMode, HistoryOptions,
+    HistoryPage, PathOptions, PathTree, PathWitness,
 };
 mod selected;
 /// Verified lengths describe canonical objects separately from logical files.

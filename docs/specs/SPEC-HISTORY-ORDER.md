@@ -174,7 +174,9 @@ produced by a conforming encoder is bit-for-bit reproducible:
   proof state, descent stops, and every I/O loop.
 - The continuation token claims and MAC that wrap a snapshot, and any
   provenance/witness encoding (see
-  [SPEC-SERVER](SPEC-SERVER.md) authenticated history continuations).
+  [SPEC-SERVER](SPEC-SERVER.md) authenticated history continuations). Its
+  version-2 timestamp continuations carry the §5 snapshot verbatim; wrapping
+  does not bump the snapshot version.
 - Any other traversal order (first-parent, breadth-first, topological,
   CLI date order) and any second `HistoryOrder` variant.
 - Unbounded or approximate seen sets (Bloom filters, hash prefixes);

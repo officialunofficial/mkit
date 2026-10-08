@@ -264,7 +264,7 @@ Never substitute another role's key to satisfy a failed startup check.
 | `TICKET_KEYS` | Secret: `<key-id> <64 hex>` per line; first signs upload tickets and multipart receipts, all verify; blank lines and `#` comments allowed |
 | `MKIT_HOOK_KEY` | Secret: `<key-id> <64 hex Ed25519 seed>`; outgoing signed hooks, including purge |
 | `URL_TOKEN_KEYS` | Secret: `active <64 hex seed>` plus `retired <64 hex public key> <retired_at_ms>` lines; HTTP bearer URL tokens |
-| `HISTORY_TOKEN_KEYS` | Optional dedicated MAC secret: one `active <64 hex secret>` line; scoped first-parent history continuations |
+| `HISTORY_TOKEN_KEYS` | Optional dedicated MAC secret: one `active <64 hex secret>` line; scoped first-parent and timestamp-discovery history continuations |
 | `HISTORY_TOKEN_TTL` | Fixed maximum lifetime in seconds, 1–900 (default 900); bounded further by proof lag/deadline and credentials |
 | `SCANNER_KEYS` | Secret configuration containing 1–32 distinct non-weak Ed25519 public keys, one 64-hex key per line; incoming scanner signatures |
 | `SCANNER_RETRIEVAL_KEYS` | Secret: exactly one `active <id> <64 hex MAC secret>` plus up to 15 `retained <id> <64 hex MAC secret> <retired_at_ms>` lines; assigned-pack capabilities |
