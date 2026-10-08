@@ -743,7 +743,7 @@ where
         Ok(())
     }
 
-    /// Commit only completed entries, after their idempotent provisional facts.
+    /// Commit completed entries with their final bounded provisional rows.
     /// A lost reply resumes this cursor; an interrupted entry replays once.
     async fn checkpoint_decode(
         &self,
@@ -753,6 +753,11 @@ where
         state: Option<&(VerificationV1, Value)>,
         held: Option<&Value>,
     ) -> Result<(), StoreError> {
+        // Earlier chunks are idempotent; the final chunk and cursor commit
+        // together. Leave room for the job header/body and three guards.
+        let tail = st
+            .writes
+            .split_off(st.writes.len().saturating_sub(WRITE_BATCH));
         self.flush(st).await?;
         let raw = st
             .job_guard
@@ -761,13 +766,14 @@ where
         job.cursor = cursor;
         job.attempts = 0;
         let vs = keys::verification(&self.repo.name, &self.pack);
-        let batch = Batch::new()
+        let mut batch = Batch::new()
             .require(Precondition::NotAfter(self.deadline()))
             .require(Precondition::Equals(self.job_key(), raw.clone()))
             .require(match held.or_else(|| state.map(|(_, raw)| raw)) {
                 Some(raw) => Precondition::Equals(vs, raw.clone()),
                 None => Precondition::Absent(vs),
             });
+        batch.writes.extend(tail);
         let batch = checkpoint::write_job(batch, job, Some(raw), &self.repo.name, &self.pack)?;
         crate::takedown::inventory::committed(&self.local.apply(self.source, batch).await?)?;
         st.job_guard = Some(encode_job(job));

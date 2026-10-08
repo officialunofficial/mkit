@@ -1494,8 +1494,8 @@ business-clock timestamp before reading its guarded snapshot. Its 10-second
 Snapshot CAS preconditions MUST remain in the same atomic batch. Expiry and CAS
 contention MUST have distinct typed causes and telemetry labels.
 
-A scheduled Decode checkpoint MUST follow the completed entry's provisional
-writes and include its post-entry cursor, under the existing job and verification
+A scheduled Decode checkpoint MUST commit after, or atomically with, the completed
+entry's provisional writes and include its post-entry cursor, under the existing job and verification
 state guards. Retries resume that durable boundary. Interrupted entry writes may
 be replayed idempotently; completed entries MUST NOT be discarded by a later
 storage error. Partial immutable reference pages remain unreachable until the

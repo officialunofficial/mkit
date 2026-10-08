@@ -72,6 +72,20 @@ committed phase, relay delivery → next fire, and usable → final CAS separate
 The first fire can precede readiness by several slices. A reported nine-second
 pending interval remains unexplained until this trace identifies its gaps.
 
+A verification timer fire is one bounded handler slice, including any chained
+phases. Count failed retries separately from successful progress. Completed
+Decode slices reschedule immediately; the Worker arms the next alarm strictly
+after the current time, without a fixed cadence. Delivery and missing-dependency
+waits have their own deadlines. Infrastructure failures use persisted exponential
+backoff, saturating at 600 seconds indefinitely.
+
+Each completed Decode entry adds one local guarded cursor write. Its final
+provisional facts share that apply; larger fact sets flush bounded chunks first.
+The existing attempt marker and timer checkpoint remain. These writes consume no
+remote slice calls and preserve the portable 100-operation, 1 MiB apply bounds.
+Readers acquire no additional guard or lease: their reads cannot change the
+inventory head or job-generation CAS.
+
 After relay delivery, at most sixteen future timer rows are inspected and eight
 waiting jobs are nudged with guarded timer moves. Only ordinary delivery polls
 qualify; infrastructure backoff is preserved. There is no upper time cutoff:

@@ -179,7 +179,8 @@ collect the applicable entries between their old and new immutable pins.
 
 - Scheduled pack verification plans a fresh 10-second deadline for each bounded
   inventory write and checkpoints every completed Decode entry. Slow stores and
-  retries retain durable progress. Inventory expiry and CAS contention now have
+  retries retain durable progress; the final bounded facts and cursor share one
+  guarded apply. Inventory expiry and CAS contention now have
   distinct typed causes and metric labels, with per-attempt staging progress.
   No stored-format change; no wipe or store reset is needed.
 

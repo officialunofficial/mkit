@@ -12,21 +12,18 @@ use mkit_core::{
 use mkit_server::{
     Batch, BatchOutcome, BlobBody, BlobKey, BlobMeta, BlobStore, BoxFuture, ByteRange, Clock,
     Cursor, Key, ManualClock, MemoryBlobStore, MemoryKv, Metrics, NamespaceKey, NamespaceStore,
-    PackSink, Partition, PartitionStats, RangeScan, RepoId, RepoName, ScanPage, StoreCapabilities,
-    StoreError, Value, Write,
+    PackSink, Partition, PartitionStats, Precondition, RangeScan, RepoId, RepoName, ScanPage,
+    StoreCapabilities, StoreError, Value, Write,
 };
 use mkit_server::{
     indexed::{
-        self, IndexedConfig, VerificationMode,
+        self, IndexedConfig,
         budget::{BlobWindows, PackWindows, Window, WindowError},
         checkpoint::{self, Phase},
         job::{FailClosedExtraction, SliceLimits, VerifyTimer},
     },
     pipeline::{D34Shards, LeaseParams, ShardMap},
-    store::adapter_spi::{
-        codec::{self, TicketV1},
-        keys, tickets,
-    },
+    store::adapter_spi::keys,
     timers::{TickBudget, TimerRegistry, run_due},
 };
 use std::sync::{
@@ -42,11 +39,14 @@ impl<T> Clone for Shared<T> {
 }
 
 impl<T: BlobStore> BlobStore for Shared<T> {
-    type Sink = T::Sink;
+    type Sink = SlowSink<T::Sink>;
     async fn begin(&self, key: BlobKey, len: u64) -> Result<Self::Sink, StoreError> {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         self.1.advance(50);
-        self.0.begin(key, len).await
+        self.0
+            .begin(key, len)
+            .await
+            .map(|sink| SlowSink(sink, self.1.clone()))
     }
     async fn get(
         &self,
@@ -72,6 +72,124 @@ impl<T: BlobStore> BlobStore for Shared<T> {
         self.1.advance(50);
         self.0.delete(key).await
     }
+}
+
+struct SlowSink<T>(T, Arc<ManualClock>);
+async fn pause(clock: &ManualClock) {
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    clock.advance(50);
+}
+impl<T: PackSink> PackSink for SlowSink<T> {
+    async fn write(&mut self, chunk: Bytes) -> Result<(), StoreError> {
+        pause(&self.1).await;
+        self.0.write(chunk).await
+    }
+    async fn commit(self) -> Result<mkit_server::CommitOutcome, StoreError> {
+        pause(&self.1).await;
+        self.0.commit().await
+    }
+    async fn abort(self) {
+        self.0.abort().await;
+    }
+}
+impl mkit_server::MultipartBlobStore for Shared<MemoryBlobStore> {
+    type PartSink = mkit_server::UnsupportedPartSink;
+    const MAX_PARTS: u32 = <MemoryBlobStore as mkit_server::MultipartBlobStore>::MAX_PARTS;
+}
+
+type Pipeline =
+    mkit_server::pipeline::Pipeline<Shared<MemoryBlobStore>, Slow, mkit_server::pipeline::Hooks>;
+fn authenticate(
+    pipe: &Pipeline,
+    clock: &ManualClock,
+    procedure: mkit_server::Procedure,
+    nonce: u32,
+) -> mkit_server::pipeline::Authenticated {
+    use ed25519_dalek::{Signer, SigningKey};
+    use mkit_core::{
+        hash::{to_hex, to_hex_bytes},
+        write_auth::{Context, Operation as SignedOp},
+    };
+    let owner = SigningKey::from_bytes(&[7; 32]);
+    let namespace = mkit_core::repo_identity::Namespace::Ed25519(*owner.verifying_key().as_bytes());
+    let identity = format!("{namespace}/slow-verification");
+    let digest = to_hex(&hash(b"slow-verification"));
+    let commitment = format!("body:{digest}");
+    let nonce = format!("{nonce:064x}");
+    let now = clock.now_ms();
+    let expires = now + 300_000;
+    let envelope = SignedOp {
+        context: Context {
+            audience: "https://verification.example",
+            repository: &identity,
+        },
+        procedure: procedure.connect_path(),
+        commitment: &commitment,
+        created_at: now,
+        expires_at: expires,
+        nonce: &nonce,
+    };
+    let signature = owner.sign(&envelope.digest().unwrap());
+    let headers = [
+        ("x-envelope-version", "2".to_owned()),
+        ("x-audience", "https://verification.example".to_owned()),
+        ("x-repository", identity),
+        ("x-public-key", to_hex(owner.verifying_key().as_bytes())),
+        ("x-signature", to_hex_bytes(&signature.to_bytes())),
+        ("x-content-commitment", commitment),
+        ("x-digest", digest),
+        ("x-created-at", now.to_string()),
+        ("x-expires-at", expires.to_string()),
+        ("idempotency-key", nonce),
+    ];
+    pipe.authenticate(&mkit_server::pipeline::RequestMeta {
+        procedure,
+        header: &|name| {
+            headers
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.clone())
+        },
+        header_values: None,
+        unary_body: Some(b"slow-verification"),
+        transport_principal: None,
+    })
+    .unwrap()
+}
+async fn upload(
+    pipe: &Pipeline,
+    blobs: &Shared<MemoryBlobStore>,
+    clock: &ManualClock,
+    bytes: Vec<u8>,
+    nonce: u32,
+) -> Hash {
+    use mkit_server::BeginUploadResult;
+    let pack = hash(&bytes);
+    let auth = authenticate(pipe, clock, mkit_server::Procedure::BeginUpload, nonce);
+    let BeginUploadResult::Ticket { id, .. } = pipe
+        .begin_upload(&auth, "refs/heads/main", &pack, bytes.len() as u64)
+        .await
+        .unwrap()
+    else {
+        panic!("expected ticket")
+    };
+    let mut sink = blobs
+        .begin(BlobKey::pack(pack), bytes.len() as u64)
+        .await
+        .unwrap();
+    sink.write(Bytes::from(bytes)).await.unwrap();
+    sink.commit().await.unwrap();
+    // The normal upload adapter writes this content-addressed possession proof.
+    let mut marker = b"mkit-upload-marker:v1\0".to_vec();
+    marker.extend(id);
+    marker.extend(pack);
+    let mut sink = blobs
+        .begin(BlobKey::upload_marker(hash(&marker)), marker.len() as u64)
+        .await
+        .unwrap();
+    sink.write(Bytes::from(marker)).await.unwrap();
+    sink.commit().await.unwrap();
+    id
 }
 
 fn signed_commit(tree: Hash, parents: Vec<Hash>, seed: u8, message: &[u8]) -> (Object, Hash) {
@@ -121,6 +239,14 @@ fn tree_pack(count: u16, size: usize) -> (Vec<u8>, Hash) {
     (writer.finish().unwrap(), head)
 }
 
+#[derive(Default)]
+struct Ledger {
+    calls: u64,
+    job_writes: u64,
+    job_batches: u64,
+    max_batch_ops: usize,
+    max_batch_bytes: usize,
+}
 #[derive(Clone)]
 struct Slow {
     inner: Arc<MemoryKv>,
@@ -129,9 +255,11 @@ struct Slow {
     fault: Option<&'static str>,
     barrier: Option<Arc<tokio::sync::Barrier>>,
     heads: Arc<AtomicU32>,
+    ledger: Arc<Mutex<Ledger>>,
 }
 impl Slow {
     async fn pause(&self) {
+        self.ledger.lock().unwrap().calls += 1;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         self.clock.advance(50);
     }
@@ -180,6 +308,45 @@ impl NamespaceStore for Slow {
     }
     async fn apply(&self, partition: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
         self.pause().await;
+        batch.validate(&self.capabilities())?;
+        {
+            let mut ledger = self.ledger.lock().unwrap();
+            let jobs = batch
+                .writes
+                .iter()
+                .filter(|write| {
+                    matches!(write,
+                Write::Put(key, _) if matches!(keys::parse(key),
+                    Some(keys::ParsedKey::VerifyCursor { sub: keys::VC_JOB, .. })))
+                })
+                .count();
+            let jobs = u64::try_from(jobs).unwrap();
+            ledger.job_writes += jobs;
+            ledger.job_batches += u64::from(jobs > 0);
+            ledger.max_batch_ops = ledger
+                .max_batch_ops
+                .max(batch.writes.len() + batch.preconditions.len());
+            let bytes = batch
+                .preconditions
+                .iter()
+                .map(|guard| match guard {
+                    Precondition::Absent(key) | Precondition::Present(key) => key.as_bytes().len(),
+                    Precondition::Equals(key, value) => {
+                        key.as_bytes().len() + value.as_bytes().len()
+                    }
+                    Precondition::NotAfter(_) => 0,
+                })
+                .sum::<usize>()
+                + batch
+                    .writes
+                    .iter()
+                    .map(|write| match write {
+                        Write::Put(key, value) => key.as_bytes().len() + value.as_bytes().len(),
+                        Write::Delete(key) => key.as_bytes().len(),
+                    })
+                    .sum::<usize>();
+            ledger.max_batch_bytes = ledger.max_batch_bytes.max(bytes);
+        }
         let staging = batch.writes.iter().any(|write| {
             matches!(write, Write::Put(key, _) if key.as_bytes().windows(11)
                 .any(|bytes| bytes == b"\0inventory\0"))
@@ -260,62 +427,77 @@ async fn verifies(objects: u16, fault: Option<&'static str>) {
         fault,
         barrier: None,
         heads: Arc::default(),
+        ledger: Arc::default(),
     };
-    let blobs = Arc::new(MemoryBlobStore::default());
-    let (bytes, _) = tree_pack(objects - 2, 8);
+    let blobs = Shared(Arc::new(MemoryBlobStore::default()), clock.clone());
+    let (bytes, head) = tree_pack(objects - 2, 8);
     let pack = hash(&bytes);
-    let mut sink = blobs
-        .begin(BlobKey::pack(pack), bytes.len() as u64)
-        .await
-        .unwrap();
-    sink.write(Bytes::from(bytes.clone())).await.unwrap();
-    sink.commit().await.unwrap();
+    let owner = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+    let namespace = mkit_core::repo_identity::Namespace::Ed25519(*owner.verifying_key().as_bytes());
     let repo = RepoId {
-        namespace: NamespaceKey::deployment_default(),
+        namespace: NamespaceKey::from_namespace(&namespace),
         name: RepoName::new("slow-verification").unwrap(),
     };
     let shards: Arc<dyn ShardMap> = Arc::new(D34Shards);
     let source = shards.ref_shard(&repo, "refs/heads/main");
-    let ticket = TicketV1 {
-        authority_generation: None,
-        repo: repo.name.clone(),
-        ref_name: "refs/heads/main".into(),
-        signer: [3; 32],
-        pack_id: pack,
-        bytes: bytes.len() as u64,
-        part_size: 8 << 20,
-        expires_at_ms: 1_700_086_400_000,
-        created_at_ms: 1_700_000_000_000,
-        reservation_id: "slow:1".into(),
-        upload_session: None,
+    let cfg = IndexedConfig::scheduled(1 << 30);
+    let recorder = Arc::new(Recorder::default());
+    let mut pipeline_cfg = mkit_server::pipeline::PipelineConfig::new(
+        mkit_server::Addressing::Multi(mkit_server::MultiAddressing::new().with_namespace_policy(
+            mkit_server::policy::NamespacePolicy::Allowlist([namespace].into()),
+        )),
+        mkit_server::pipeline::AuthMode::AuthV2(
+            mkit_server::auth_v2::AuthV2Config::new(
+                "https://verification.example",
+                "slow-verification",
+            )
+            .unwrap(),
+        ),
+        mkit_server::upload::UploadLimits::new(1 << 30, 64),
+    );
+    pipeline_cfg.begin_upload_threshold_bytes = 0;
+    pipeline_cfg.write_policy = mkit_server::policy::WritePolicy::Owner;
+    pipeline_cfg.sharding = mkit_server::pipeline::Sharding::D34;
+    pipeline_cfg.indexed = Some(cfg);
+    pipeline_cfg.ticket_keys =
+        Some(mkit_server::upload::token::TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap());
+    let pipe = Pipeline::new(
+        blobs.clone(),
+        store.clone(),
+        mkit_server::pipeline::Hooks::new(),
+        pipeline_cfg,
+        clock.clone(),
+        recorder.clone(),
+    )
+    .unwrap();
+    let started = clock.now_ms();
+    let packmap_bytes = mkit_core::transfer::encode_packlist(None, &[pack]).unwrap();
+    let map = hash(&packmap_bytes);
+    let tickets = vec![
+        upload(&pipe, &blobs, &clock, bytes, 1).await,
+        upload(&pipe, &blobs, &clock, packmap_bytes, 2).await,
+    ];
+    let advance = |name: &str, id| mkit_server::RefUpdate {
+        name: name.into(),
+        condition: mkit_core::refs::RefWriteCondition::Missing,
+        new: Some(id),
     };
-    let id = tickets::ticket_id(&ticket.reservation_id);
-    inner
-        .apply(
-            &source,
-            Batch::new().put(keys::ticket(&id), codec::encode_ticket(&ticket)),
+    let auth = authenticate(&pipe, &clock, mkit_server::Procedure::AdvanceRefs, 3);
+    let error = pipe
+        .advance_refs_with_tickets(
+            &auth,
+            advance("refs/heads/main", head),
+            advance("refs/mkit/packmap/main", map),
+            tickets.clone(),
         )
         .await
-        .unwrap();
-    indexed::scheduled::create_job(
-        inner.as_ref(),
-        &source,
-        &repo,
-        &ticket,
-        id,
-        clock.as_ref(),
-        None,
-    )
-    .await
-    .unwrap();
-    let mut cfg = IndexedConfig::default();
-    cfg.verification = VerificationMode::Scheduled;
-    let recorder = Arc::new(Recorder::default());
+        .unwrap_err();
+    assert_eq!(error.public_message(), "pack verification pending");
     let handler = VerifyTimer {
         remote: store.clone(),
-        blobs: Shared(blobs.clone(), clock.clone()),
+        blobs: blobs.clone(),
         windows: Windows {
-            blobs: Shared(blobs, clock.clone()),
+            blobs: blobs.clone(),
         },
         shards,
         cfg,
@@ -333,10 +515,14 @@ async fn verifies(objects: u16, fault: Option<&'static str>) {
                 hook: mkit_server::relay::NoHook,
                 budget: mkit_server::relay::RelayBudget::default(),
             });
+    let mut waits = 0;
+    let mut failed_waits = 0;
+    let mut max_jobs = 0;
     let mut failures = 0;
     let mut previous_entries = 0;
-    for attempt in 1..=1024 {
+    for attempt in 1_u32..=1024 {
         let now = u64::try_from(clock.now_ms()).unwrap();
+        let before_jobs = store.ledger.lock().unwrap().job_writes;
         let report = run_due(
             &store,
             &source,
@@ -347,6 +533,7 @@ async fn verifies(objects: u16, fault: Option<&'static str>) {
         )
         .await
         .unwrap();
+        max_jobs = max_jobs.max(store.ledger.lock().unwrap().job_writes - before_jobs);
         let (job, state) = checkpoint::read_job(inner.as_ref(), &source, &repo.name, &pack)
             .await
             .unwrap();
@@ -367,7 +554,12 @@ async fn verifies(objects: u16, fault: Option<&'static str>) {
         }
         assert!(job.entries >= previous_entries, "durable cursor regressed");
         previous_entries = job.entries;
-        if job.phase == Phase::Watch {
+        let map_ready = checkpoint::read_job(inner.as_ref(), &source, &repo.name, &map)
+            .await
+            .unwrap()
+            .0
+            .is_some_and(|(job, _)| job.usable());
+        if job.phase == Phase::Watch && map_ready {
             assert!(job.usable(), "verification outcome: {:?}", job.outcome);
             assert!(matches!(
                 state,
@@ -386,9 +578,77 @@ async fn verifies(objects: u16, fault: Option<&'static str>) {
                 );
             }
             eprintln!(
-                "{objects} objects completed in {} verification attempts, {attempt} alarm ticks ({failures} failures); entries={}",
+                "{objects} objects completed in {} verification timer fires, {attempt} alarm ticks ({failures} failed retries); entries={}",
                 recorder.attempts.load(Ordering::SeqCst),
                 job.entries
+            );
+            let auth = authenticate(&pipe, &clock, mkit_server::Procedure::AdvanceRefs, 4);
+            assert_eq!(
+                pipe.advance_refs_with_tickets(
+                    &auth,
+                    advance("refs/heads/main", head),
+                    advance("refs/mkit/packmap/main", map),
+                    tickets.clone()
+                )
+                .await
+                .unwrap(),
+                mkit_core::protocol::AdvanceOutcome::Committed
+            );
+            let mut publication_ticks = 0;
+            loop {
+                let auth = authenticate(&pipe, &clock, mkit_server::Procedure::ListRefs, 5);
+                let refs = pipe.list_refs(&auth, "refs/heads/").await.unwrap();
+                if refs
+                    .iter()
+                    .any(|entry| entry.name == "main" && entry.id == head)
+                {
+                    break;
+                }
+                publication_ticks += 1;
+                assert!(publication_ticks < 10);
+                run_due(
+                    &store,
+                    &source,
+                    &registry,
+                    clock.as_ref(),
+                    u64::try_from(clock.now_ms()).unwrap(),
+                    &TickBudget::default(),
+                )
+                .await
+                .unwrap();
+            }
+            let results = recorder.results.lock().unwrap();
+            let checkpoints: f64 = results
+                .iter()
+                .filter(|(_, progress, _)| progress == "checkpointed")
+                .map(|(_, _, value)| *value)
+                .sum();
+            let max_checkpoints = results
+                .iter()
+                .filter(|(_, progress, _)| progress == "checkpointed")
+                .map(|(_, _, value)| *value)
+                .fold(0.0_f64, f64::max);
+            let ledger = store.ledger.lock().unwrap();
+            assert!((checkpoints - f64::from(objects)).abs() < f64::EPSILON);
+            let elapsed = clock.now_ms() - started;
+            if fault.is_none() {
+                assert_eq!(failures, 0);
+                assert_eq!(failed_waits, 0);
+                // Successful slices have no fixed alarm cadence or retry backoff.
+                // Allow one delivery wait, plus the driver's immediate wake ticks.
+                assert!(waits <= u64::from(attempt) * 2 + 2_000);
+                assert!(elapsed <= i64::from(objects) * 700 + 20_000);
+            }
+            eprintln!(
+                "CHECKPOINTS objects={objects} entries={checkpoints} max_per_slice={max_checkpoints}"
+            );
+            eprintln!(
+                "LEDGER objects={objects} publication_ticks={publication_ticks} elapsed_ms={} waits_ms={waits} failed_waits_ms={failed_waits} calls={} job_writes={} max_jobs_tick={max_jobs} max_ops={} max_bytes={}",
+                elapsed,
+                ledger.calls,
+                ledger.job_writes,
+                ledger.max_batch_ops,
+                ledger.max_batch_bytes
             );
             return;
         }
@@ -396,27 +656,32 @@ async fn verifies(objects: u16, fault: Option<&'static str>) {
             .next_wake_ms
             .unwrap_or(now + 1_000)
             .max(u64::try_from(clock.now_ms()).unwrap() + 1);
+        let wait = next - u64::try_from(clock.now_ms()).unwrap();
+        waits += wait;
+        if report.failed > 0 {
+            failed_waits += wait;
+        }
         clock.set(i64::try_from(next).unwrap());
     }
     panic!("{objects} objects exceeded 1024 alarm ticks");
 }
 #[tokio::test(start_paused = true)]
 async fn decode_inventory_500_objects_at_50ms() {
-    verifies(500, None).await;
+    Box::pin(verifies(500, None)).await;
 }
 #[tokio::test(start_paused = true)]
 #[ignore = "large scheduled verification; exercised by the ignored-lane CI profile"]
 async fn decode_inventory_3000_objects_at_50ms() {
-    verifies(3000, None).await;
+    Box::pin(verifies(3000, None)).await;
 }
 
 #[tokio::test(start_paused = true)]
 async fn decode_retries_checkpoint_strict_progress_after_cas_contention() {
-    verifies(50, Some("cas_contention")).await;
+    Box::pin(verifies(50, Some("cas_contention"))).await;
 }
 #[tokio::test(start_paused = true)]
 async fn decode_retries_checkpoint_strict_progress_after_expiry() {
-    verifies(50, Some("expired")).await;
+    Box::pin(verifies(50, Some("expired"))).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -431,16 +696,25 @@ async fn concurrent_inventory_stagers_keep_cas_and_distinct_expiry() {
         fault: None,
         barrier: Some(Arc::new(tokio::sync::Barrier::new(2))),
         heads: Arc::default(),
+        ledger: Arc::default(),
     };
     let pack = [7; 32];
     let a = Object::Blob(Blob { data: vec![1] });
     let b = Object::Blob(Blob { data: vec![2] });
     let aid = a.id().unwrap();
     let bid = b.id().unwrap();
-    let (left, right) = tokio::join!(
+    let (left, right, reads) = tokio::join!(
         inventory::stage(&store, &pack, 100, &aid, &a, None, 0),
-        inventory::stage(&store, &pack, 100, &bid, &b, None, 0)
+        inventory::stage(&store, &pack, 100, &bid, &b, None, 0),
+        async {
+            for _ in 0..32 {
+                inventory::entry(&store, &pack, &aid).await.unwrap();
+                inventory::entry(&store, &pack, &bid).await.unwrap();
+            }
+            64
+        }
     );
+    assert_eq!(reads, 64);
     assert_eq!(usize::from(left.is_ok()) + usize::from(right.is_ok()), 1);
     let failed = left.as_ref().err().or(right.as_ref().err()).unwrap();
     let StoreError::Unavailable(source) = failed else {
