@@ -57,6 +57,7 @@ observation for the particular ticket, not the latest retry.
 | `job_created`, `verification_timer_due` | The guarded job/group creation committed; `due_at_ms` is the initial logical wake, already due immediately. |
 | `verification_physical_alarm` | A physical Worker alarm entered; `verification_alarm_partition` associates dispatched source partitions in that invocation. |
 | `verify_fire`, `verification_timer_entry`, `verification_slice_start` | An actual verification handler started; entry is recorded before the job read, with pack/source correlation. The later slice start adds the ticket and phase. `first_decode` identifies an empty decode cursor, including retries; it does **not** mean ready. |
+| `verification_inventory_progress` | Per-attempt `entries_staged` counts successful inventory entry/dependency staging calls, including idempotent replay; `entries_checkpointed` counts newly durable Decode entries. `result` distinguishes `expired`, `cas_contention`, other failures and completed slices. Slice-start `entries_durable` records the cursor total, including any previously lost commit reply. Pack/source fields correlate attempts without metric IDs. |
 | `verification_slice_result` | Proposed old/new phases, generation, slice attempt, relay sequence and next wake; this proposal can still lose its commit guard. |
 | `verify_checkpoint`, `verification_checkpoint` | The guarded timer/job checkpoint committed. Use these old/new phases as durable progress. |
 | `verification_timer_result` | The timer attempt committed, raced or failed; `attempt` counts persisted infrastructure retries and `scheduled_ms` is the physical timer's wake. |
@@ -70,6 +71,20 @@ as well. Compare upload → advance, job due → physical alarm → first fire, 
 committed phase, relay delivery → next fire, and usable → final CAS separately.
 The first fire can precede readiness by several slices. A reported nine-second
 pending interval remains unexplained until this trace identifies its gaps.
+
+A verification timer fire is one bounded handler slice, including any chained
+phases. Count failed retries separately from successful progress. Completed
+Decode slices reschedule immediately; the Worker arms the next alarm strictly
+after the current time, without a fixed cadence. Delivery and missing-dependency
+waits have their own deadlines. Infrastructure failures use persisted exponential
+backoff, saturating at 600 seconds indefinitely.
+
+Each completed Decode entry adds one local guarded cursor write. Its final
+provisional facts share that apply; larger fact sets flush bounded chunks first.
+The existing attempt marker and timer checkpoint remain. These writes consume no
+remote slice calls and preserve the portable 100-operation, 1 MiB apply bounds.
+Readers acquire no additional guard or lease: their reads cannot change the
+inventory head or job-generation CAS.
 
 After relay delivery, at most sixteen future timer rows are inspected and eight
 waiting jobs are nudged with guarded timer moves. Only ordinary delivery polls

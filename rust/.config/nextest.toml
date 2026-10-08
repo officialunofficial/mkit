@@ -264,7 +264,7 @@ test-group = 'heap-bounds'
 # PR quarantined keeps the lane green regardless of what other
 # `#[ignore]`d tests exist.
 #
-default-filter = 'test(/hang_before_stdout_times_out_and_reaps_child|fills_stderr_before_stdout_does_not_deadlock|valid_response_then_never_exits_is_bounded|open_accepts_syntactically_valid_mkit_ssh_url|second_mutating_command_blocks_on_worktree_lock|list_refs_round_trip_over_real_tcp|post_handshake_idle_timeout_drops_silent_peer|wait_child_timeout_kills_stalled_child|list_refs_retries_past_dropped_connection_via_reconnect|ssh_clone_retries_past_a_dropped_first_connection|large_mixed_pack_decodes_under_production_resident_cap|listing_over_32_mib_pages_under_d34|continuation_pages_complete_long_changing_histories_without_cursor_walk/)'
+default-filter = 'test(/hang_before_stdout_times_out_and_reaps_child|fills_stderr_before_stdout_does_not_deadlock|valid_response_then_never_exits_is_bounded|open_accepts_syntactically_valid_mkit_ssh_url|second_mutating_command_blocks_on_worktree_lock|list_refs_round_trip_over_real_tcp|post_handshake_idle_timeout_drops_silent_peer|wait_child_timeout_kills_stalled_child|list_refs_retries_past_dropped_connection_via_reconnect|ssh_clone_retries_past_a_dropped_first_connection|large_mixed_pack_decodes_under_production_resident_cap|listing_over_32_mib_pages_under_d34|continuation_pages_complete_long_changing_histories_without_cursor_walk|decode_inventory_3000_objects_at_50ms/)'
 # Run serially so the quarantined tests' real timers/sockets don't
 # contend with each other; only localhost networking is needed, which
 # every CI runner (Linux + macOS) provides.
@@ -314,3 +314,8 @@ fail-fast = false
 [[profile.ignored-lane.overrides]]
 filter = 'test(=listing_over_32_mib_pages_under_d34)'
 slow-timeout = { period = "1800s", terminate-after = 1 }
+
+# Full Decode and subsequent verification over 3,000 objects at modeled 50 ms I/O.
+[[profile.ignored-lane.overrides]]
+filter = 'binary(=inventory_stage_guard) and test(=decode_inventory_3000_objects_at_50ms)'
+slow-timeout = { period = "300s", terminate-after = 1 }

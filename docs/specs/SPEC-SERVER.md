@@ -1488,6 +1488,19 @@ or public error response.
 
 ### 9.5 Asynchronous verification
 
+Inventory staging MUST plan each bounded page or entry write with a fresh
+business-clock timestamp before reading its guarded snapshot. Its 10-second
+`NotAfter` bound limits stale plans, not the duration of a whole pack or alarm.
+Snapshot CAS preconditions MUST remain in the same atomic batch. Expiry and CAS
+contention MUST have distinct typed causes and telemetry labels.
+
+A scheduled Decode checkpoint MUST commit after, or atomically with, the completed
+entry's provisional writes and include its post-entry cursor, under the existing job and verification
+state guards. Retries resume that durable boundary. Interrupted entry writes may
+be replayed idempotently; completed entries MUST NOT be discarded by a later
+storage error. Partial immutable reference pages remain unreachable until the
+entry is staged, and the inventory seal still follows complete verification.
+
 Verification MAY run asynchronously after upload completion. While a
 consumed pack is still unverified, `AdvanceRefs` MUST fail with
 `unavailable` and exactly one `PendingVerification` detail, as

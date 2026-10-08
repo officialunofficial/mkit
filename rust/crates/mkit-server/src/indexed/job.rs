@@ -4,9 +4,9 @@
 //! repository-isolated checks; Scheduled error priority and duplicate budget
 //! charging follow R-171's stricter deployment rules. Each fire runs one phase
 //! step of a [`VerifyJobV1`] and ends in `Fired::Reschedule`, whose batch
-//! carries the job put guarded by the job row (and `vs`) as it was read, so a
-//! duplicate fire loses. Rows a slice writes ahead of that batch (frames,
-//! owed children, charged bases) are pure functions of the pack, so a crash
+//! carries the job put guarded by the latest job row (and `vs`), so a
+//! duplicate fire loses. Decode also checkpoints each completed entry.
+//! Rows a slice writes ahead of that batch (frames, owed children, charged bases) are pure functions of the pack, so a crash
 //! only replays them. Phases: `Decode`, `ClosureResolve`, `EmitIndex`,
 //! `AwaitDelivery`, `Extract`, `Verify`, `Recheck`, `Watch`.
 //!
@@ -367,6 +367,9 @@ impl DeltaBaseSource for CacheBases<'_> {
 struct SliceState {
     guards: Vec<Precondition>,
     job_guard: Option<Value>,
+    decode_checkpoint: Option<VerifyJobV1>,
+    entries_staged: u64,
+    entries_checkpointed: u64,
     cache: Lru,
     memo: MemberCache,
     visiting: BTreeSet<(Hash, Hash, u64)>,
@@ -454,7 +457,7 @@ where
         tracing::info!(event = "verification_slice_start", now_ms = now_ms(self.h.clock.as_ref()),
             source = ?self.source, ticket = %mkit_core::hash::to_hex(&job.ticket_id),
             pack = %mkit_core::hash::to_hex(&self.pack), old_phase = ?job.phase,
-            generation = job.generation, attempt = job.attempts,
+            generation = job.generation, attempt = job.attempts, entries_durable = job.entries,
             first_decode = job.phase == Phase::Decode && job.cursor.is_empty(),
             due_at_ms = timer.due_at_ms);
         if job.gone {
@@ -522,6 +525,33 @@ where
                 .step(&mut st, &mut job, state.as_ref(), &mut held)
                 .await;
         }
+        let inventory_result = match &result {
+            Err(Stop::Store(StoreError::Unavailable(source))) => source
+                .downcast_ref::<crate::takedown::inventory::StagingFailure>()
+                .map_or("unavailable", |failure| failure.label()),
+            Err(_) => "interrupted",
+            Ok(_) => "completed",
+        };
+        self.h.metrics.incr(
+            crate::telemetry::METRIC_INDEX_INVENTORY_ATTEMPTS,
+            &[("result", inventory_result)],
+            1,
+        );
+        for (progress, entries) in [
+            ("staged", st.entries_staged),
+            ("checkpointed", st.entries_checkpointed),
+        ] {
+            self.h.metrics.gauge(
+                crate::telemetry::METRIC_INDEX_INVENTORY_ENTRIES,
+                &[("result", inventory_result), ("progress", progress)],
+                f64::from(u32::try_from(entries).unwrap_or(u32::MAX)),
+            );
+        }
+        tracing::info!(event = "verification_inventory_progress", result = inventory_result,
+            pack = %mkit_core::hash::to_hex(&self.pack), source = ?self.source,
+            entries_staged = st.entries_staged, entries_checkpointed = st.entries_checkpointed);
+        // Decode may have durably advanced before a later entry stopped this slice.
+        raw = st.job_guard.clone().unwrap_or(raw);
         let delay = match result {
             Ok(delay) | Err(Stop::Yield(delay)) => delay,
             Err(Stop::Store(error)) => {
@@ -530,9 +560,9 @@ where
                 }
                 return Err(error);
             }
-            // Nothing this slice counted is persisted: the cursor did not move.
+            // Discard unfinished-entry accounting, retaining the last durable boundary.
             Err(Stop::Wait(delay)) => {
-                job = start;
+                job = st.decode_checkpoint.take().unwrap_or(start);
                 delay
             }
             Err(Stop::Restart) => {
@@ -713,6 +743,45 @@ where
         Ok(())
     }
 
+    /// Commit completed entries with their final bounded provisional rows.
+    /// A lost reply resumes this cursor; an interrupted entry replays once.
+    async fn checkpoint_decode(
+        &self,
+        st: &mut SliceState,
+        job: &mut VerifyJobV1,
+        cursor: Vec<u8>,
+        state: Option<&(VerificationV1, Value)>,
+        held: Option<&Value>,
+    ) -> Result<(), StoreError> {
+        // Earlier chunks are idempotent; the final chunk and cursor commit
+        // together. Leave room for the job header/body and three guards.
+        let tail = st
+            .writes
+            .split_off(st.writes.len().saturating_sub(WRITE_BATCH));
+        self.flush(st).await?;
+        let raw = st
+            .job_guard
+            .as_ref()
+            .ok_or_else(|| StoreError::Corrupt("missing Decode job guard".into()))?;
+        job.cursor = cursor;
+        job.attempts = 0;
+        let vs = keys::verification(&self.repo.name, &self.pack);
+        let mut batch = Batch::new()
+            .require(Precondition::NotAfter(self.deadline()))
+            .require(Precondition::Equals(self.job_key(), raw.clone()))
+            .require(match held.or_else(|| state.map(|(_, raw)| raw)) {
+                Some(raw) => Precondition::Equals(vs, raw.clone()),
+                None => Precondition::Absent(vs),
+            });
+        batch.writes.extend(tail);
+        let batch = checkpoint::write_job(batch, job, Some(raw), &self.repo.name, &self.pack)?;
+        crate::takedown::inventory::committed(&self.local.apply(self.source, batch).await?)?;
+        st.job_guard = Some(encode_job(job));
+        st.decode_checkpoint = Some(job.clone());
+        st.entries_checkpointed += 1;
+        Ok(())
+    }
+
     /// Delete a finished or abandoned job's rows, then `vs` unless the pack
     /// became a member (kind-2 self-cleaning, R-148). Local rows only, so
     /// several pages fit one fire.
@@ -869,7 +938,7 @@ where
                 job.phase = Phase::Verify;
                 Ok(0)
             }
-            Phase::Verify => self.verify(job, state, held).await,
+            Phase::Verify => self.verify(st, job, state, held).await,
             Phase::Recheck => self.recheck(st, job).await,
             Phase::Watch => Ok(WATCH_POLL_MS),
         }
@@ -915,10 +984,10 @@ where
         }
     }
 
-    fn reader_error(job: &VerifyJobV1, error: &PackError) -> Stop {
+    fn reader_error(resumed: bool, restarts: u8, error: &PackError) -> Stop {
         match error {
             PackError::PackfileTooLarge => Stop::Outcome(Outcome::DecodeBudget),
-            _ if !job.cursor.is_empty() && job.restarts == 0 => Stop::Restart,
+            _ if resumed && restarts == 0 => Stop::Restart,
             _ => Stop::Reject("object hash mismatch"),
         }
     }
@@ -1027,16 +1096,23 @@ where
             }
         }
         let limits = self.decode_limits();
+        // Per-entry commits advance job.cursor; error classification belongs
+        // to the source boundary this reader resumed, not a later checkpoint.
+        let resumed = !job.cursor.is_empty();
+        let restarts = job.restarts;
         let mut reader = if job.cursor.is_empty() {
             WindowReader::new(job.pack_len, window_bytes, limits, Some(self.pack))
         } else {
             WindowCursor::from_bytes(&job.cursor)
                 .and_then(|cursor| WindowReader::resume(&cursor, limits))
         }
-        .map_err(|e| Self::reader_error(job, &e))?;
+        .map_err(|e| Self::reader_error(resumed, restarts, &e))?;
         let (mut fed, mut processed) = (0_u32, 0_u32);
         loop {
-            match reader.step().map_err(|e| Self::reader_error(job, &e))? {
+            match reader
+                .step()
+                .map_err(|e| Self::reader_error(resumed, restarts, &e))?
+            {
                 Step::NeedWindow(request) => {
                     let window = match preloaded.take() {
                         Some(window)
@@ -1048,7 +1124,7 @@ where
                     };
                     reader
                         .feed_owned(request.offset, window.bytes)
-                        .map_err(|e| Self::reader_error(job, &e))?;
+                        .map_err(|e| Self::reader_error(resumed, restarts, &e))?;
                     fed += 1;
                     job.windows_done = job.windows_done.saturating_add(1);
                 }
@@ -1067,21 +1143,23 @@ where
                             .ok_or_else(|| unavailable("delta entry lost its boundary"))?;
                         drop(reader);
                         self.entry(st, job, frame, entry).await?;
-                        job.cursor = cursor.to_bytes();
-                        job.attempts = 0;
+                        self.checkpoint_decode(st, job, cursor.to_bytes(), state, held.as_ref())
+                            .await?;
                         return Ok(0);
                     }
                     self.entry(st, job, frame, entry).await?;
+                    let cursor = reader
+                        .checkpoint()
+                        .ok_or_else(|| unavailable("decoded entry lost its boundary"))?;
+                    self.checkpoint_decode(st, job, cursor.to_bytes(), state, held.as_ref())
+                        .await?;
                     processed += 1;
                     // One window of progress per slice: the resumed window
                     // and the next. Only an entry boundary can be saved.
-                    if (fed >= 2
+                    if fed >= 2
                         || processed >= job.entry_cap
-                        || self.budget.remaining() < ENTRY_RESERVE)
-                        && let Some(cursor) = reader.checkpoint()
+                        || self.budget.remaining() < ENTRY_RESERVE
                     {
-                        job.cursor = cursor.to_bytes();
-                        job.attempts = 0;
                         return Ok(0);
                     }
                 }
@@ -1197,16 +1275,17 @@ where
             })?;
         let object = mkit_core::serialize::deserialize(&bytes)
             .map_err(|_| Stop::Reject("object hash mismatch"))?;
-        crate::takedown::inventory::stage(
+        crate::takedown::inventory::stage_with_clock(
             self.remote,
             &self.pack,
             job.pack_len,
             &id,
             &object,
             base,
-            self.now,
+            self.h.clock.as_ref(),
         )
         .await?;
+        st.entries_staged += 1;
         let size = bytes.len() as u64;
         let existing = self.frame_row(st, &id).await?;
         // A replayed entry meets its own row; a real duplicate meets an
@@ -1437,9 +1516,10 @@ where
                 &self.pack,
                 job.pack_len,
                 &id,
-                self.now,
+                now_ms(self.h.clock.as_ref()),
             )
             .await?;
+            st.entries_staged += 1;
             st.writes.push(Write::Put(
                 self.row(keys::VC_DEPENDENCY, &pack),
                 Value::default(),
@@ -1694,6 +1774,7 @@ where
     /// The guarded `Pending` to `Verified` transition, monotone.
     async fn verify(
         &self,
+        st: &mut SliceState,
         job: &mut VerifyJobV1,
         state: Option<&(VerificationV1, Value)>,
         held: &mut Option<Value>,
@@ -1730,14 +1811,21 @@ where
                     &self.pack,
                     job.pack_len,
                     child,
-                    now,
+                    now_ms(self.h.clock.as_ref()),
                 )
                 .await?;
+                st.entries_staged += 1;
                 offset += 1;
                 job.scan = offset.to_be_bytes().to_vec();
             }
         }
-        crate::takedown::inventory::complete(self.remote, &self.pack, job.pack_len, now).await?;
+        crate::takedown::inventory::complete(
+            self.remote,
+            &self.pack,
+            job.pack_len,
+            now_ms(self.h.clock.as_ref()),
+        )
+        .await?;
         job.scan.clear();
         match state {
             Some((VerificationV1::Rejected { .. }, _)) => {
