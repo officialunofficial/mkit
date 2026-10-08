@@ -396,10 +396,12 @@ collect the applicable entries between their old and new immutable pins.
   tokens are rejected. First-parent paging whose provenance chain exceeds
   1,024 commits now fails with an explicit `HistoryStateLimit::Provenance` in
   both public and owner views, replacing the previous exhaustion/absence
-  behavior. Migration: restart paging from page 1 — `walk_history_page_in`
-  mints version-2 tokens, and the new `issue_history_continuation_in` mints
-  timestamp continuations from a sealed `TimestampDiscovery` walk. No
-  stored-format change.
+  behavior. The bound itself is unchanged in effect: the version-1 ancestry
+  claim carried the same tip-to-cursor chain under the same 1,024 cap and
+  stopped at the same depth, silently for public readers. Migration: restart
+  paging from page 1 — `walk_history_page_in` mints version-2 tokens, and the
+  new `issue_history_continuation_in` mints timestamp continuations from a
+  sealed `TimestampDiscovery` walk. No stored-format change.
 
 - [embedder: breaking API] `http_mount::early_object_error` now requires the
   deployment namespace mode, so authority-mode HTTP object routes pass the
