@@ -1125,14 +1125,14 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
         }
         for entry in &pack.entries {
             let (_, object, _) = staged.get(&entry.object).ok_or_else(storage_failed)?;
-            crate::takedown::inventory::stage(
+            crate::takedown::inventory::stage_with_clock(
                 store,
                 &pack.ticket.pack_id,
                 pack.ticket.bytes,
                 &entry.object,
                 object,
                 entry.value.delta_base,
-                now_ms(clock),
+                clock,
             )
             .await
             .map_err(|_| storage_failed())?;

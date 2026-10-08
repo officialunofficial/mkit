@@ -89,6 +89,24 @@ pub(super) async fn stage_references<S: NamespaceStore>(
     sorted_pages: bool,
     now: u64,
 ) -> Result<StoredAction, StoreError> {
+    stage_references_planned(
+        store,
+        object,
+        action,
+        ids,
+        sorted_pages,
+        super::inventory::PlanningTime::Fixed(now),
+    )
+    .await
+}
+pub(super) async fn stage_references_planned<S: NamespaceStore>(
+    store: &S,
+    object: &Hash,
+    action: &BlockAction,
+    ids: &[Hash],
+    sorted_pages: bool,
+    time: super::inventory::PlanningTime<'_>,
+) -> Result<StoredAction, StoreError> {
     let mut digest = blake3::Hasher::new();
     let mut pages = Vec::new();
     for (page, chunk_ids) in ids.chunks(PAGE_HASHES).enumerate() {
@@ -115,6 +133,7 @@ pub(super) async fn stage_references<S: NamespaceStore>(
         });
         let value = Value::new(bytes);
         let partition = crate::store::content_shard(object);
+        let deadline = time.deadline();
         let old = store.get(&partition, &key).await?;
         if let Some(old) = old {
             if old != value {
@@ -123,14 +142,12 @@ pub(super) async fn stage_references<S: NamespaceStore>(
         } else {
             let batch = crate::Batch::new()
                 .require(crate::Precondition::Absent(key.clone()))
-                .require(crate::Precondition::NotAfter(
-                    now.saturating_add(crate::store::CONTENT_APPLY_WINDOW_MS),
-                ))
+                .require(deadline)
                 .put(key.clone(), value.clone());
             match store.apply(&partition, batch).await? {
                 crate::BatchOutcome::Committed => {}
                 _ if store.get(&partition, &key).await?.as_ref() == Some(&value) => {}
-                _ => return Err(StoreError::unavailable("denial chunk page race")),
+                outcome => super::inventory::committed(&outcome)?,
             }
         }
     }

@@ -34,6 +34,11 @@ pub const METRIC_RELAY_STORAGE_COUNTER_MISSING: &str =
 pub const METRIC_RELAY_BACKLOG_ROWS: &str = "mkit_server_relay_backlog_rows";
 /// Gauge: subrequests the last scheduled-verification slice spent (WP-4.8).
 pub const METRIC_INDEX_SLICE_SUBREQUESTS: &str = "mkit_server_index_slice_subrequests";
+/// Counter: verification inventory attempts. Label: `result`.
+pub const METRIC_INDEX_INVENTORY_ATTEMPTS: &str = "mkit_server_index_inventory_attempts_total";
+/// Gauge: completed staging calls and durable Decode entries per attempt.
+/// Labels: `result`, `progress` (`staged` or `checkpointed`).
+pub const METRIC_INDEX_INVENTORY_ENTRIES: &str = "mkit_server_index_inventory_entries";
 /// Counter: an object index lookup hit a bounded-work cap. Label: `reason`.
 pub const METRIC_INDEX_LOOKUP_CAPPED: &str = "mkit_server_index_lookup_capped_total";
 /// Counter: a foreground checkpoint committed a new publication limit-reached

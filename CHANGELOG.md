@@ -177,6 +177,12 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Fixed
 
+- Scheduled pack verification plans a fresh 10-second deadline for each bounded
+  inventory write and checkpoints every completed Decode entry. Slow stores and
+  retries retain durable progress. Inventory expiry and CAS contention now have
+  distinct typed causes and metric labels, with per-attempt staging progress.
+  No stored-format change; no wipe or store reset is needed.
+
 - Indexed member delta reconstruction descends and reconstructs iteratively,
   preventing call-stack growth at the configured chain-depth limit. Integrity,
   denial, membership, and budget checks keep their order; raw member prefix and

@@ -10,6 +10,53 @@ use mkit_core::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+/// A rejected bounded staging write; no effects were committed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum StagingFailure {
+    #[error("staging planning deadline expired (backend time {backend_now})")]
+    Expired { backend_now: u64 },
+    #[error("staging CAS contention (precondition {index})")]
+    CasContention { index: usize },
+}
+impl StagingFailure {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Expired { .. } => "expired",
+            Self::CasContention { .. } => "cas_contention",
+        }
+    }
+}
+pub(crate) fn committed(outcome: &BatchOutcome) -> Result<(), StoreError> {
+    match outcome {
+        BatchOutcome::Committed => Ok(()),
+        BatchOutcome::DeadlinePassed { backend_now } => {
+            Err(StoreError::unavailable(StagingFailure::Expired {
+                backend_now: *backend_now,
+            }))
+        }
+        BatchOutcome::PreconditionFailed { index, .. } => {
+            Err(StoreError::unavailable(StagingFailure::CasContention {
+                index: *index,
+            }))
+        }
+    }
+}
+#[derive(Clone, Copy)]
+pub(super) enum PlanningTime<'a> {
+    Fixed(u64),
+    Clock(&'a dyn crate::Clock),
+}
+impl PlanningTime<'_> {
+    pub(super) fn deadline(self) -> Precondition {
+        let now = match self {
+            Self::Fixed(now) => now,
+            Self::Clock(clock) => u64::try_from(clock.now_ms()).unwrap_or(0),
+        };
+        deadline(now)
+    }
+}
 /// Bound scan values and their temporary base64/JSON transport representation.
 pub const SCAN_ROWS: u32 = 8;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,19 +143,17 @@ pub async fn stage_packlist<S: NamespaceStore>(
         return Err(bad());
     }
     head.packlist = Some(facts);
-    if store
-        .apply(
-            &p,
-            Batch::new()
-                .require(guard(key.clone(), raw))
-                .require(deadline(now))
-                .put(key, encode(&head)?),
-        )
-        .await?
-        != BatchOutcome::Committed
-    {
-        return Err(StoreError::unavailable("packlist inventory contention"));
-    }
+    committed(
+        &store
+            .apply(
+                &p,
+                Batch::new()
+                    .require(guard(key.clone(), raw))
+                    .require(deadline(now))
+                    .put(key, encode(&head)?),
+            )
+            .await?,
+    )?;
     Ok(())
 }
 /// Canonical source was verified before these immutable facts were sealed.
@@ -279,6 +324,47 @@ pub async fn stage<S: NamespaceStore>(
     base: Option<Hash>,
     now: u64,
 ) -> Result<(), StoreError> {
+    stage_planned(
+        store,
+        pack,
+        length,
+        id,
+        object,
+        base,
+        PlanningTime::Fixed(now),
+    )
+    .await
+}
+/// Plan each bounded reference page and entry CAS from the current business clock.
+pub(crate) async fn stage_with_clock<S: NamespaceStore>(
+    store: &S,
+    pack: &Hash,
+    length: u64,
+    id: &Hash,
+    object: &Object,
+    base: Option<Hash>,
+    clock: &dyn crate::Clock,
+) -> Result<(), StoreError> {
+    stage_planned(
+        store,
+        pack,
+        length,
+        id,
+        object,
+        base,
+        PlanningTime::Clock(clock),
+    )
+    .await
+}
+async fn stage_planned<S: NamespaceStore>(
+    store: &S,
+    pack: &Hash,
+    length: u64,
+    id: &Hash,
+    object: &Object,
+    base: Option<Hash>,
+    time: PlanningTime<'_>,
+) -> Result<(), StoreError> {
     let p = content_shard(pack);
     let key = entry_key(pack, id);
     if let Some(raw) = store.get(&p, &key).await? {
@@ -308,7 +394,7 @@ pub async fn stage<S: NamespaceStore>(
             None,
         ),
     };
-    let references = denial::stage_references(
+    let references = denial::stage_references_planned(
         store,
         pack,
         &BlockAction {
@@ -320,7 +406,7 @@ pub async fn stage<S: NamespaceStore>(
         },
         chunks,
         false,
-        now,
+        time,
     )
     .await?;
     let row = encode(&Entry {
@@ -331,7 +417,7 @@ pub async fn stage<S: NamespaceStore>(
         base,
         references,
     })?;
-    put_entry(store, pack, length, id, row, now).await
+    put_entry(store, pack, length, id, row, time).await
 }
 async fn put_entry<S: NamespaceStore>(
     store: &S,
@@ -339,8 +425,9 @@ async fn put_entry<S: NamespaceStore>(
     length: u64,
     id: &Hash,
     row: Value,
-    now: u64,
+    time: PlanningTime<'_>,
 ) -> Result<(), StoreError> {
+    let deadline = time.deadline();
     let p = content_shard(pack);
     let key = entry_key(pack, id);
     let existing = store.get(&p, &key).await?;
@@ -375,7 +462,7 @@ async fn put_entry<S: NamespaceStore>(
     let mut batch = Batch::new()
         .require(guard(hk.clone(), old))
         .require(guard(key.clone(), existing))
-        .require(deadline(now))
+        .require(deadline)
         .put(hk, encode(&head)?)
         .put(key, row.clone())
         .put(
@@ -385,9 +472,7 @@ async fn put_entry<S: NamespaceStore>(
     if matches!(parent.kind, 2 | 5) {
         batch = batch.put(parent_key(pack, id), row);
     }
-    if store.apply(&p, batch).await? != BatchOutcome::Committed {
-        return Err(StoreError::unavailable("inventory stage contention"));
-    }
+    committed(&store.apply(&p, batch).await?)?;
     Ok(())
 }
 pub async fn dependency<S: NamespaceStore>(
@@ -423,7 +508,7 @@ pub async fn dependency<S: NamespaceStore>(
             base: None,
             references: refs,
         })?,
-        now,
+        PlanningTime::Fixed(now),
     )
     .await
 }
@@ -453,9 +538,7 @@ pub async fn complete<S: NamespaceStore>(
         .require(guard(key.clone(), old))
         .require(deadline(now))
         .put(key, encode(&head)?);
-    if store.apply(&p, batch).await? != BatchOutcome::Committed {
-        return Err(StoreError::unavailable("inventory seal contention"));
-    }
+    committed(&store.apply(&p, batch).await?)?;
     Ok(())
 }
 pub async fn seal<S: NamespaceStore>(store: &S, pack: &Hash) -> Result<Hash, StoreError> {
