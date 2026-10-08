@@ -1,4 +1,5 @@
 mod credential_tests;
+mod timestamp_tests;
 use super::*;
 use crate::history_token::HistoryTokenConfig;
 use crate::pipeline::HistoryContinuation;
@@ -501,12 +502,34 @@ fn continuation_scope_mac_and_corrupt_state_fail_uniformly() {
                     1 => c.namespace = "other".into(),
                     2 => c.realm = "other-backend".into(),
                     3 => c.credential = [0; 32],
-                    4 => c.purpose = "mkit-url-token:v1".into(),
-                    5 => c.ancestry.push(c.cursor), // cyclic/duplicated authenticated state
-                    6 => c.ancestry.clear(),
-                    _ => unreachable!(),
+                    // 4 mints under a foreign purpose below; a version-2
+                    // payload MAC'd by the wrong domain fails verify.
+                    5 => {
+                        // Duplicated authenticated node: the witness id repeats.
+                        let id = c.witness[0].id;
+                        c.witness.push(crate::history_token::WitnessNode {
+                            id,
+                            predecessor: Some(0),
+                        });
+                    }
+                    6 => {
+                        // A second root: only the first witness node may have
+                        // no predecessor.
+                        c.witness.push(crate::history_token::WitnessNode {
+                            id: [9; 32],
+                            predecessor: None,
+                        });
+                    }
+                    _ => {}
                 }
-                reject(&fx, writer, &config.mint(&c).unwrap());
+                let minted = if dimension == 4 {
+                    config
+                        .mint_purpose_test(&c, crate::url_token::DOMAIN)
+                        .unwrap()
+                } else {
+                    config.mint(&c).unwrap()
+                };
+                reject(&fx, writer, &minted);
             }
         }
     }
@@ -1094,7 +1117,10 @@ fn token_cursor<H: HookSet>(fx: &Fx<H>, token: &HistoryContinuation) -> Hash {
         .unwrap()
         .verify(token.token.expose())
         .unwrap()
-        .cursor
+        .witness
+        .last()
+        .unwrap()
+        .id
 }
 
 #[test]

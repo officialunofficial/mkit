@@ -107,10 +107,71 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         }
     }
 
-    /// Continuation issuance's opening fence: whether `session` still holds this
-    /// exact capture and the ref, publication and security state are
-    /// unchanged. Never installs or replaces a checkpoint and never clears
-    /// the memo beyond what `bind` does. Unlike `selected_capture_in`, refused
+    /// Continuation issuance's opening fence: the checkpoint must still be
+    /// this session's live capture for this reader's selected ref, and the
+    /// ref, publication and security state must be unchanged. Never installs
+    /// or replaces a checkpoint and never clears the memo beyond what `bind`
+    /// does. On success returns the held checkpoint and the fresh authority
+    /// (before `bind` consumed it) so issuance can mint the credential scope
+    /// itself. `None` refuses issuance without minting; errors propagate for
+    /// the caller's view mapping.
+    pub(crate) async fn checkpoint_fence(
+        &self,
+        session: &mut ReaderSession,
+        checkpoint: &CaptureCheckpoint,
+        calls: &SliceBudget,
+        admission: &crate::store::read_io::ReadIo,
+        capped: &AtomicBool,
+    ) -> Result<Option<(Arc<Checkpoint>, Option<crate::pipeline::Authenticated>)>, ServerError>
+    {
+        session.io.calls.charge_many(2).map_err(|_| exhausted())?;
+        let authority = self.authorize(calls).await?;
+        session.proofs.bind(
+            &self.identity,
+            authority.clone(),
+            ms(self.pipe.clock.now_ms()),
+            self.cfg,
+        )?;
+        let Some(reference) = self.selected.as_deref() else {
+            return Ok(None);
+        };
+        let now = ms(self.pipe.clock.now_ms());
+        let Some(held) = session.proofs.checkpoint() else {
+            return Ok(None);
+        };
+        if !Arc::ptr_eq(held, &checkpoint.0)
+            || held.reference != reference
+            || !session.proofs.current(now)
+        {
+            return Ok(None);
+        }
+        let meta = Budgeted::new(&self.pipe.meta, calls)
+            .with_session(&session.io.calls)
+            .flagging(capped)
+            .with_io(admission);
+        let anchor = match self.continuation_anchor(&meta, reference).await {
+            Ok(anchor) => anchor,
+            Err(error) if error.code() == Code::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let security = match self.history_security(&meta, false).await {
+            Ok(security) => security,
+            Err(error) if error.code() == Code::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if anchor.raw != held.raw
+            || anchor.publication != held.publication
+            || anchor.tip != held.tip
+            || security != held.security
+        {
+            return Ok(None);
+        }
+        Ok(Some((held.clone(), authority)))
+    }
+
+    /// Whether `session` still holds this exact capture and the ref,
+    /// publication and security state are unchanged, as
+    /// [`Self::checkpoint_fence`]. Unlike `selected_capture_in`, refused
     /// and unauthenticated failures are `false` in either view, as H5
     /// redemption requires; public caps are `false` and owner exhaustion
     /// stays typed.
@@ -126,48 +187,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         let calls = SliceBudget::new(OBJECT_READER_CALLS);
         let admission = crate::store::read_io::ReadIo::new();
         let capped = AtomicBool::new(false);
-        let result = async {
-            session.io.calls.charge_many(2).map_err(|_| exhausted())?;
-            let authority = self.authorize(&calls).await?;
-            session.proofs.bind(
-                &self.identity,
-                authority,
-                ms(self.pipe.clock.now_ms()),
-                self.cfg,
-            )?;
-            let Some(reference) = self.selected.as_deref() else {
-                return Ok(false);
-            };
-            let now = ms(self.pipe.clock.now_ms());
-            let Some(held) = session.proofs.checkpoint() else {
-                return Ok(false);
-            };
-            if !Arc::ptr_eq(held, &checkpoint.0)
-                || held.reference != reference
-                || !session.proofs.current(now)
-            {
-                return Ok(false);
-            }
-            let meta = Budgeted::new(&self.pipe.meta, &calls)
-                .with_session(&session.io.calls)
-                .flagging(&capped)
-                .with_io(&admission);
-            let anchor = match self.continuation_anchor(&meta, reference).await {
-                Ok(anchor) => anchor,
-                Err(error) if error.code() == Code::NotFound => return Ok(false),
-                Err(error) => return Err(error),
-            };
-            let security = match self.history_security(&meta, false).await {
-                Ok(security) => security,
-                Err(error) if error.code() == Code::NotFound => return Ok(false),
-                Err(error) => return Err(error),
-            };
-            Ok(anchor.raw == held.raw
-                && anchor.publication == held.publication
-                && anchor.tip == held.tip
-                && security == held.security)
-        }
-        .await;
+        let result = self
+            .checkpoint_fence(session, checkpoint, &calls, &admission, &capped)
+            .await;
         match settle(result, &capped) {
             Err(error)
                 if matches!(
@@ -178,7 +200,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             {
                 Ok(false)
             }
-            other => other,
+            other => other.map(|result| result.is_some()),
         }
     }
 }

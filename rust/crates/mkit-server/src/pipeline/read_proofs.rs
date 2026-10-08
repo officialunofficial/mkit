@@ -23,6 +23,15 @@ struct Proof {
     manifest_pack: Option<Hash>,
 }
 
+/// Why a witness export refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WitnessError {
+    /// A target has no complete, well-typed discovery chain to the root.
+    Unproven,
+    /// The union of discovery chains exceeds the token witness cap.
+    Limit,
+}
+
 /// One selected-ref capture retained by a session. Identity is the `Arc`
 /// pointer; every proofs reset drops it.
 #[derive(Debug)]
@@ -261,10 +270,6 @@ impl ReadProofs {
 
     /// The recorded history link for a proved object, or `None` when this
     /// session holds no selected checkpoint or the row has no history edge.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "consumed by history continuation issuance")
-    )]
     pub(crate) fn history_link(&self, id: &Hash) -> Option<HistoryLink> {
         self.checkpoint.as_ref()?;
         let proof = self.proofs.get(id)?;
@@ -284,54 +289,138 @@ impl ReadProofs {
         self.expires
     }
 
-    /// Export only a bounded commit/tag path, including the proved cursor.
-    pub(crate) fn history_ancestry(&self, cursor: Hash) -> Option<Vec<Hash>> {
-        let mut ancestry = Vec::new();
-        let mut next = Some(cursor);
-        let mut seen = BTreeSet::new();
-        while let Some(id) = next {
-            if ancestry.len() >= crate::history_token::MAX_ANCESTORS || !seen.insert(id) {
-                return None;
+    /// Export the proved discovery chains for `targets`, root-first, as the
+    /// token witness. A row must exist for every link (unproven targets,
+    /// cycles and manifest-denied rows fail `Unproven`), the union may hold
+    /// at most [`crate::history_token::MAX_WITNESS`] nodes (`Limit`) and
+    /// converge on exactly one root. With `typed`, a selected checkpoint is
+    /// required and every node's recorded history role must match its
+    /// position: the root is the checkpoint tip, every other node a
+    /// parent/tag-target edge.
+    pub(crate) fn history_witness(
+        &self,
+        targets: &[Hash],
+        typed: bool,
+    ) -> Result<Vec<crate::history_token::WitnessNode>, WitnessError> {
+        use crate::history_token::WitnessNode;
+        let mut out: Vec<WitnessNode> = Vec::new();
+        let mut index: BTreeMap<Hash, usize> = BTreeMap::new();
+        for target in targets {
+            // Walk this target's discovery chain child-first; convergence on
+            // an already-exported node inherits its whole chain.
+            let mut chain = Vec::new();
+            let mut seen = BTreeSet::new();
+            let mut next = Some(*target);
+            while let Some(id) = next {
+                if index.contains_key(&id) {
+                    break;
+                }
+                if !seen.insert(id) {
+                    return Err(WitnessError::Unproven);
+                }
+                let proof = self.proofs.get(&id).ok_or(WitnessError::Unproven)?;
+                if proof.manifest_pack.is_some() {
+                    return Err(WitnessError::Unproven);
+                }
+                chain.push(id);
+                next = proof.parent;
             }
-            let proof = self.proofs.get(&id)?;
-            if proof.manifest_pack.is_some() {
-                return None;
+            for &id in chain.iter().rev() {
+                if index.contains_key(&id) {
+                    continue;
+                }
+                if out.len() >= crate::history_token::MAX_WITNESS {
+                    return Err(WitnessError::Limit);
+                }
+                let predecessor = match self.proofs[&id].parent {
+                    None => None,
+                    Some(parent) => Some(
+                        u16::try_from(*index.get(&parent).ok_or(WitnessError::Unproven)?)
+                            .map_err(|_| WitnessError::Unproven)?,
+                    ),
+                };
+                index.insert(id, out.len());
+                out.push(WitnessNode { id, predecessor });
             }
-            ancestry.push(id);
-            next = proof.parent;
         }
-        ancestry.reverse();
-        Some(ancestry)
+        if out.first().is_none_or(|n| n.predecessor.is_some())
+            || out.iter().filter(|n| n.predecessor.is_none()).count() != 1
+        {
+            return Err(WitnessError::Unproven);
+        }
+        if typed {
+            let checkpoint = self.checkpoint.as_ref().ok_or(WitnessError::Unproven)?;
+            for node in &out {
+                let link = self.history_link(&node.id).ok_or(WitnessError::Unproven)?;
+                let well_formed = if node.predecessor.is_none() {
+                    link.edge == HistoryEdge::Root
+                } else {
+                    matches!(link.edge, HistoryEdge::Parent | HistoryEdge::TagTarget)
+                };
+                if !well_formed {
+                    return Err(WitnessError::Unproven);
+                }
+            }
+            if out[0].id != checkpoint.tip {
+                return Err(WitnessError::Unproven);
+            }
+        }
+        Ok(out)
     }
 
     /// Only the authenticated history-token path may call this. MAC validation,
-    /// current authority, strict anchor/fence and ancestry stops precede import.
-    pub(crate) fn restore_history(
+    /// current authority, strict anchor/fence and witness stops precede import.
+    /// Node 0 is the chain's single root; every other predecessor indexes an
+    /// earlier node.
+    pub(crate) fn restore_witness(
         &mut self,
-        ancestry: &[Hash],
+        nodes: &[crate::history_token::WitnessNode],
         expiry: u64,
     ) -> Result<(), ServerError> {
-        if ancestry.is_empty()
-            || ancestry.len() > self.cap
-            || ancestry.len() > crate::history_token::MAX_ANCESTORS
-            || ancestry.iter().collect::<BTreeSet<_>>().len() != ancestry.len()
+        if nodes.is_empty()
+            || nodes.len() > self.cap
+            || nodes.len() > crate::history_token::MAX_WITNESS
         {
             return Err(super::repo_storage::exhausted());
         }
+        let mut seen = BTreeSet::new();
+        for (index, node) in nodes.iter().enumerate() {
+            let well_formed = match (index, node.predecessor) {
+                (0, None) => true,
+                (_, Some(p)) => usize::from(p) < index,
+                _ => false,
+            };
+            if !well_formed || !seen.insert(node.id) {
+                return Err(super::repo_storage::exhausted());
+            }
+        }
         self.clear();
         self.expires = self.expires.min(expiry);
-        let mut parent = None;
-        for id in ancestry {
+        for node in nodes {
             self.proofs.insert(
-                *id,
+                node.id,
                 Proof {
-                    parent,
+                    parent: node.predecessor.map(|p| nodes[usize::from(p)].id),
                     manifest_pack: None,
                 },
             );
-            parent = Some(*id);
         }
         Ok(())
+    }
+
+    /// Strict ancestors of `targets` through recorded discovery edges.
+    pub(crate) fn ancestors(&self, targets: &BTreeSet<Hash>) -> BTreeSet<Hash> {
+        let mut ancestors = BTreeSet::new();
+        for target in targets {
+            let mut node = self.proofs.get(target).and_then(|p| p.parent);
+            while let Some(id) = node {
+                if !ancestors.insert(id) {
+                    break;
+                }
+                node = self.proofs.get(&id).and_then(|p| p.parent);
+            }
+        }
+        ancestors
     }
 
     pub(crate) fn contains(&self, id: &Hash) -> bool {
@@ -451,16 +540,7 @@ impl ReadProofs {
         gate: &dyn TakedownGate,
         targets: &BTreeSet<Hash>,
     ) -> Result<(), ServerError> {
-        let mut ancestors = BTreeSet::new();
-        for target in targets {
-            let mut node = self.proofs.get(target).and_then(|p| p.parent);
-            while let Some(id) = node {
-                if !ancestors.insert(id) {
-                    break;
-                }
-                node = self.proofs.get(&id).and_then(|p| p.parent);
-            }
-        }
+        let ancestors = self.ancestors(targets);
         let mut stopped = false;
         let mut checks = BTreeSet::new();
         for id in ancestors {
@@ -643,7 +723,14 @@ mod tests {
                 memo.capture_selected(Some([8; 32]));
             },
             |memo| {
-                memo.restore_history(&[[9; 32]], u64::MAX).unwrap();
+                memo.restore_witness(
+                    &[crate::history_token::WitnessNode {
+                        id: [9; 32],
+                        predecessor: None,
+                    }],
+                    u64::MAX,
+                )
+                .unwrap();
             },
         ];
         for reset in resets {
@@ -720,6 +807,111 @@ mod tests {
         memo.expand([1; 32], [9; 32], &object);
         assert_eq!(memo.proofs.len(), 4);
         assert!(!memo.can_decode(&[1; 32], &[ObjectType::ChunkedBlob as u8; 1]));
+    }
+
+    #[test]
+    fn witness_merges_shared_prefix_and_keeps_discovery_order() {
+        let mut memo = bound_memo(16);
+        assert!(memo.capture_checkpoint(checkpoint([1; 32])));
+        // tip 1 -> {2, 3}; 2 -> 4; 3 -> {4, 5}: one root, shared node 4.
+        memo.expand([1; 32], [0; 32], &commit([9; 32], &[[2; 32], [3; 32]]));
+        memo.expand([2; 32], [0; 32], &commit([9; 32], &[[4; 32]]));
+        memo.expand([3; 32], [0; 32], &commit([9; 32], &[[4; 32], [5; 32]]));
+        let witness = memo
+            .history_witness(&[[4; 32], [5; 32]], true)
+            .expect("typed witness");
+        let ids: Vec<Hash> = witness.iter().map(|n| n.id).collect();
+        // Root first, each node after its predecessor, each id once.
+        assert_eq!(ids[0], [1; 32]);
+        assert_eq!(ids.iter().collect::<BTreeSet<_>>().len(), ids.len());
+        for (i, node) in witness.iter().enumerate() {
+            match node.predecessor {
+                None => assert_eq!(i, 0),
+                Some(p) => assert!(usize::from(p) < i),
+            }
+        }
+        let pos = |id: Hash| {
+            witness
+                .iter()
+                .position(|n| n.id == id)
+                .expect("id in witness")
+        };
+        assert!(pos([2; 32]) < pos([4; 32]));
+        assert!(pos([3; 32]) < pos([5; 32]));
+        assert_eq!(witness[4].id, [5; 32]);
+    }
+
+    #[test]
+    fn witness_refuses_over_cap_and_content_edges() {
+        let mut memo = bound_memo(2048);
+        assert!(memo.capture_checkpoint(checkpoint([0; 32])));
+        // A 1,200-node linear chain exceeds the witness cap.
+        let mut previous = [0; 32];
+        for i in 1..1_200u16 {
+            let id = {
+                let mut id = [0; 32];
+                id[..2].copy_from_slice(&i.to_be_bytes());
+                id
+            };
+            memo.expand(previous, [9; 32], &commit([8; 32], &[id]));
+            previous = id;
+        }
+        assert_eq!(
+            memo.history_witness(&[previous], true),
+            Err(WitnessError::Limit)
+        );
+        // A content edge (a commit reachable only through a tree) cannot be
+        // typed evidence: the chain breaks at the tree row's missing lineage.
+        let mut memo = bound_memo(16);
+        assert!(memo.capture_checkpoint(checkpoint([1; 32])));
+        memo.expand([1; 32], [0; 32], &commit([9; 32], &[[2; 32]]));
+        memo.expand([9; 32], [0; 32], &tree(&[[4; 32]]));
+        assert!(memo.history_witness(&[[4; 32]], false).is_ok());
+        assert_eq!(
+            memo.history_witness(&[[4; 32]], true),
+            Err(WitnessError::Unproven)
+        );
+        // A commit never read through the checkpoint is unproven.
+        assert_eq!(
+            memo.history_witness(&[[7; 32]], true),
+            Err(WitnessError::Unproven)
+        );
+    }
+
+    #[test]
+    fn restore_witness_enforces_the_chain_rules() {
+        use crate::history_token::WitnessNode;
+        let node = |id: u8, predecessor: Option<u16>| WitnessNode {
+            id: [id; 32],
+            predecessor,
+        };
+        for bad in [
+            // Empty.
+            vec![],
+            // No root.
+            vec![node(1, Some(0))],
+            // A root that is not first.
+            vec![node(1, None), node(2, Some(0)), node(3, None)],
+            // A forward predecessor.
+            vec![node(1, None), node(2, Some(2))],
+            vec![node(1, None), node(2, Some(5))],
+            // Duplicates.
+            vec![node(1, None), node(2, Some(0)), node(1, Some(0))],
+        ] {
+            let mut memo = bound_memo(2048);
+            assert!(memo.restore_witness(&bad, u64::MAX).is_err(), "{bad:?}");
+        }
+        let mut memo = bound_memo(16);
+        memo.restore_witness(&[node(1, None), node(2, Some(0))], u64::MAX)
+            .unwrap();
+        assert!(memo.contains(&[1; 32]));
+        assert!(memo.contains(&[2; 32]));
+        // A non-root predecessor must index an earlier node.
+        let mut memo = bound_memo(16);
+        assert!(
+            memo.restore_witness(&[node(2, Some(0)), node(1, None)], 0)
+                .is_err()
+        );
     }
 
     #[test]

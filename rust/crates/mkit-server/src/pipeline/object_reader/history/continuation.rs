@@ -6,10 +6,15 @@ use super::{
     reserve_output, settle, validate_history,
 };
 use crate::Redacted;
-use crate::history_token::{Claims, DOMAIN};
+use crate::history_token::{ClaimState, Claims, WitnessNode};
+use crate::pipeline::read_proofs::WitnessError;
 use crate::store::{
     Batch, BatchOutcome, Precondition, Value, codec, keys, publication::Publication,
 };
+
+mod issue;
+mod timestamp;
+pub use issue::HistoryContinuationState;
 
 /// Retryable selected-ref continuation; credential text is redacted in Debug.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,10 +24,30 @@ pub struct HistoryContinuation {
     /// Original absolute expiry, never extended by successors.
     pub expires_at_ms: u64,
 }
-/// First-parent page; all-parent DAG traversal uses `walk_history_in`.
+/// Which order a continued page walks.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ContinuedHistoryOrder {
+    /// First-parent paging; the token carries one linear provenance chain.
+    #[default]
+    FirstParent,
+    /// All-parents paging in the timestamp-discovery order of
+    /// `mkit_core::history_order::TimestampDiscovery`; the token carries the
+    /// sealed reducer snapshot verbatim. Page 1 is the embedder's own loop —
+    /// this order requires an issued continuation.
+    TimestampDiscovery,
+}
+/// Options for [`ObjectReader::walk_history_page_with_options_in`].
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ContinuedHistoryOptions {
+    /// The continuation order; a token whose order byte differs is refused.
+    pub order: ContinuedHistoryOrder,
+}
+/// A page of commits in the requested order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContinuedHistoryPage {
-    /// Canonical commits in first-parent order.
+    /// Canonical commits in the requested order.
     pub commits: Vec<HistoryCommit>,
     /// Absent at the end of accessible history.
     pub next: Option<HistoryContinuation>,
@@ -81,7 +106,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
     /// denial are checked for every served object. Anchor equality includes
     /// the never-reset publication stamp. Replays within the same scope and
     /// fixed expiry rerun live checks and can retry a lost response.
-    /// An all-parent mode is intentionally not exposed by this API.
+    /// All-parent paging uses [`Self::walk_history_page_with_options_in`] with
+    /// [`ContinuedHistoryOrder::TimestampDiscovery`].
     /// # Errors
     /// Invalid ref/limits or disabled configuration. Invalid, revoked, expired,
     /// inaccessible continuations return uniform `Ok(None)` in
@@ -94,14 +120,50 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         continuation: Option<&str>,
         limit: usize,
     ) -> Result<Option<ContinuedHistoryPage>, ServerError> {
-        let options = HistoryOptions {
+        self.walk_history_page_with_options_in(
+            session,
+            reference,
+            continuation,
+            limit,
+            ContinuedHistoryOptions::default(),
+        )
+        .await
+    }
+
+    /// Page a selected ref's history in `options.order`. First-parent page 1
+    /// passes `None` and mints a continuation; timestamp-discovery order needs
+    /// an issued token — its page 1 is the embedder's own
+    /// [`TimestampDiscovery`](mkit_core::history_order::TimestampDiscovery)
+    /// loop over `read_canonical_in`, then
+    /// [`Self::issue_history_continuation_in`]. A token minted for one order
+    /// refused by the other. Every object is re-validated live.
+    /// # Errors
+    /// Invalid ref/limits/order or disabled configuration. Invalid, revoked,
+    /// expired, inaccessible continuations return uniform `Ok(None)` in either
+    /// view. A bounded history-state cap reports a typed
+    /// [`HistoryStateLimit`](crate::HistoryStateLimit); backend faults remain
+    /// `Unavailable` and no spent allowance is refunded on failure.
+    pub async fn walk_history_page_with_options_in(
+        &self,
+        session: &mut ReaderSession,
+        reference: &str,
+        continuation: Option<&str>,
+        limit: usize,
+        options: ContinuedHistoryOptions,
+    ) -> Result<Option<ContinuedHistoryPage>, ServerError> {
+        self.check_selected(reference)?;
+        let defaults = HistoryOptions {
             mode: HistoryMode::FirstParent,
             ..HistoryOptions::default()
         };
-        self.check_selected(reference)?;
-        validate_history(reference, options)?;
-        if limit == 0 || limit > options.max_nodes {
+        validate_history(reference, defaults)?;
+        if limit == 0 || limit > defaults.max_nodes {
             return Err(ServerError::invalid_argument("invalid history page size"));
+        }
+        if options.order == ContinuedHistoryOrder::TimestampDiscovery && continuation.is_none() {
+            return Err(ServerError::invalid_argument(
+                "timestamp continuations resume an issued token",
+            ));
         }
         let config = self
             .pipe
@@ -126,7 +188,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 reference,
                 continuation,
                 limit,
-                options,
+                options.order,
                 config,
                 &calls,
                 &admission,
@@ -136,8 +198,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             .await;
         let result = settle(result, &capped);
         let result = match result {
+            // Exhaustion after the token's expiry is absence; a typed history
+            // state cap is never folded into absence.
             Err(e)
                 if e.code() == Code::ResourceExhausted
+                    && e.history_state_limit().is_none()
                     && token_expiry
                         .is_some_and(|expiry| ms(self.pipe.clock.now_ms()) >= expiry) =>
             {
@@ -165,7 +230,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         reference: &str,
         token: Option<&str>,
         limit: usize,
-        options: HistoryOptions,
+        order: ContinuedHistoryOrder,
         config: &crate::history_token::HistoryTokenConfig,
         calls: &SliceBudget,
         admission: &crate::store::read_io::ReadIo,
@@ -173,7 +238,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         token_expiry: &mut Option<u64>,
     ) -> Result<Option<ContinuedHistoryPage>, ServerError> {
         let claims = if let Some(token) = token {
-            // Reserve parsing bytes before base64/JSON allocations. MAC and
+            // Reserve parsing bytes before binary/base64 allocations. MAC and
             // stateless bindings precede repository/security state reads.
             let (_, mut charge, _, _) = session.split_with_proofs(self.cfg.http_decode_budget);
             let len = u64::try_from(token.len()).map_err(|_| exhausted())?;
@@ -182,7 +247,16 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             }
             charge.budget.0 -= len;
             let claims = config.verify(token).map_err(|()| absent())?;
-            if claims.namespace != self.repo.namespace.as_str()
+            let matching = matches!(
+                (&claims.state, order),
+                (ClaimState::FirstParent, ContinuedHistoryOrder::FirstParent)
+                    | (
+                        ClaimState::TimestampDiscovery(_),
+                        ContinuedHistoryOrder::TimestampDiscovery
+                    )
+            );
+            if !matching
+                || claims.namespace != self.repo.namespace.as_str()
                 || claims.repository != self.repo.name.as_str()
                 || claims.reference != reference
                 || claims.writer != matches!(self.view, ReaderView::Owner(_))
@@ -224,30 +298,40 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             if c.anchor != anchor.tip
                 || c.publication != anchor.publication
                 || c.security != security
-                || c.ancestry.first() != Some(&anchor.tip)
-                || c.ancestry[..c.ancestry.len() - 1]
+                || c.witness.first().map(|node| node.id) != Some(anchor.tip)
+                || c.witness
                     .iter()
-                    .any(|id| self.seams.takedown.stops_descent(&self.repo, id))
+                    .filter_map(|node| node.predecessor)
+                    .any(|predecessor| {
+                        self.seams
+                            .takedown
+                            .stops_descent(&self.repo, &c.witness[usize::from(predecessor)].id)
+                    })
             {
                 return Err(absent());
             }
             session
                 .proofs
-                .restore_history(&c.ancestry, c.expires)
+                .restore_witness(&c.witness, c.expires)
                 .map_err(|_| absent())?;
         }
         let mut decode = Budget(self.cfg.http_decode_budget);
-        let (nodes, complete) = if let Some(c) = &claims {
-            self.resume_linear(
-                session,
-                c.cursor,
-                limit,
-                None,
-                calls,
-                admission,
-                &mut decode,
-            )
-            .await?
+        let carried = claims.as_ref().map(|c| (c.issued, c.expires));
+        let (nodes, successor) = if let Some(c) = claims {
+            match c.state {
+                ClaimState::FirstParent => {
+                    let cursor = c.witness.last().ok_or_else(absent)?.id;
+                    let (nodes, complete) = self
+                        .resume_linear(session, cursor, limit, None, calls, admission, &mut decode)
+                        .await?;
+                    let next = self.linear_next(session, &nodes, complete)?;
+                    (nodes, next)
+                }
+                ClaimState::TimestampDiscovery(walk) => {
+                    self.resume_timestamp(session, walk, limit, calls, admission, &mut decode)
+                        .await?
+                }
+            }
         } else {
             session.proofs.capture_selected(Some(anchor.tip));
             let mut tip = anchor.tip;
@@ -259,7 +343,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     .await?
                     .ok_or_else(absent)?;
                 if let Object::Tag(tag) = &node.object {
-                    if tags.len() >= options.max_tags || !tags.insert(tip) {
+                    if tags.len() >= HistoryOptions::default().max_tags || !tags.insert(tip) {
                         return Err(exhausted());
                     }
                     if !matches!(
@@ -275,46 +359,35 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     break node;
                 }
             };
-            self.resume_linear(
-                session,
-                tip,
-                limit,
-                Some(first),
-                calls,
-                admission,
-                &mut decode,
-            )
-            .await?
-        };
-        // Canonical edges from the last validated commit prove the next cursor.
-        let successor = if complete {
-            None
-        } else {
-            let node = nodes.last().ok_or_else(absent)?;
-            let parent = *node.parents().and_then(|p| p.first()).ok_or_else(absent)?;
-            self.link_node(session, node, parent)?.then_some(parent)
+            let (nodes, complete) = self
+                .resume_linear(
+                    session,
+                    tip,
+                    limit,
+                    Some(first),
+                    calls,
+                    admission,
+                    &mut decode,
+                )
+                .await?;
+            let next = self.linear_next(session, &nodes, complete)?;
+            (nodes, next)
         };
         let now = ms(self.pipe.clock.now_ms());
-        let expires = claims.as_ref().map_or_else(
+        let expires = carried.map_or_else(
             || {
                 now.saturating_add(config.ttl_ms())
                     .min(session.proofs.expiry())
                     .min(credential_expiry)
             },
-            |c| c.expires,
+            |(_, expires)| expires,
         );
         if now >= expires || !session.proofs.current(now) {
             return Err(absent());
         }
-        let next = if let Some(cursor) = successor {
-            let ancestry = session
-                .proofs
-                .history_ancestry(cursor)
-                .ok_or_else(exhausted)?;
-            let issued = claims.as_ref().map_or(now, |c| c.issued);
+        let next = if let Some((state, witness)) = successor {
+            let issued = carried.map_or(now, |(issued, _)| issued);
             let new = Claims {
-                version: 1,
-                purpose: DOMAIN.into(),
                 realm: config.realm().into(),
                 namespace: self.repo.namespace.as_str().into(),
                 repository: self.repo.name.as_str().into(),
@@ -326,10 +399,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 security,
                 issued,
                 expires,
-                cursor,
-                ancestry,
+                state,
+                witness,
             };
-            let token = config.mint(&new).map_err(|()| exhausted())?;
+            let token = config
+                .mint(&new)
+                .map_err(ServerError::history_state_limit_exceeded)?;
             Some(HistoryContinuation {
                 token: Redacted::new(token),
                 expires_at_ms: expires,
@@ -351,54 +426,30 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             .with_session(&session.io.calls)
             .flagging(capped)
             .with_io(admission);
-        let batch = Batch::new()
-            .require(Precondition::NotAfter(expires.saturating_sub(1)))
-            .require(guard(
-                keys::publication(&self.repo.name, reference),
-                anchor.raw[0].as_ref(),
-            ))
-            .require(guard(
-                keys::ref_key(&self.repo.name, reference),
-                anchor.raw[1].as_ref(),
-            ));
-        if meta
-            .apply(&self.pipe.shards.ref_shard(&self.repo, reference), batch)
-            .await
-            .map_err(failure)?
-            != BatchOutcome::Committed
-        {
-            return Err(absent());
-        }
-        // The write-free guard is the ref validation cut. Closing reads
-        // reject subsequently observed boundary changes before serving.
-        if self.history_security(&meta, false).await? != security {
-            return Err(absent());
-        }
-        let final_anchor = self.continuation_anchor(&meta, reference).await?;
-        if final_anchor.raw != anchor.raw
-            || final_anchor.publication != anchor.publication
-            || final_anchor.tip != anchor.tip
-            || ms(self.pipe.clock.now_ms()) >= expires
-        {
-            return Err(absent());
-        }
+        self.closing_fence(
+            &meta,
+            reference,
+            &anchor.raw,
+            &anchor.publication,
+            anchor.tip,
+            security,
+            expires,
+        )
+        .await?;
         // Live serving validation is the last asynchronous phase. A later ref
         // change invalidates both the original token and its successor.
         self.final_nodes(session, &nodes, calls, admission).await?;
         if ms(self.pipe.clock.now_ms()) >= expires {
             return Err(absent());
         }
-        for node in &nodes {
-            let ancestry = session
-                .proofs
-                .history_ancestry(node.id)
-                .ok_or_else(absent)?;
-            if ancestry[..ancestry.len() - 1]
-                .iter()
-                .any(|id| self.seams.takedown.stops_descent(&self.repo, id))
-            {
-                return Err(absent());
-            }
+        let emitted: BTreeSet<Hash> = nodes.iter().map(|node| node.id).collect();
+        if session
+            .proofs
+            .ancestors(&emitted)
+            .iter()
+            .any(|id| self.seams.takedown.stops_descent(&self.repo, id))
+        {
+            return Err(absent());
         }
         Ok(Some(ContinuedHistoryPage {
             commits: nodes
@@ -410,6 +461,81 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 .collect(),
             next,
         }))
+    }
+
+    /// The minted successor state of a non-final first-parent page: the cursor
+    /// is the last served commit's first parent and its provenance chain is
+    /// the token's witness.
+    fn linear_next(
+        &self,
+        session: &mut ReaderSession,
+        nodes: &[Node],
+        complete: bool,
+    ) -> Result<Option<(ClaimState, Vec<WitnessNode>)>, ServerError> {
+        if complete {
+            return Ok(None);
+        }
+        let node = nodes.last().ok_or_else(absent)?;
+        let parent = *node.parents().and_then(|p| p.first()).ok_or_else(absent)?;
+        if !self.link_node(session, node, parent)? {
+            return Ok(None);
+        }
+        match session.proofs.history_witness(&[parent], false) {
+            Ok(witness) => Ok(Some((ClaimState::FirstParent, witness))),
+            Err(WitnessError::Limit) => Err(ServerError::history_state_limit_exceeded(
+                crate::HistoryStateLimit::Provenance,
+            )),
+            Err(WitnessError::Unproven) => Err(absent()),
+        }
+    }
+
+    /// The write-free ref guard and closing reads shared by issuance and
+    /// redemption: the fence rejects any ref/publication/security change
+    /// observed since `raw`/`publication`/`tip` were read, and any lapse into
+    /// `expires`.
+    #[allow(clippy::too_many_arguments)] // One ordered write-free validation cut.
+    async fn closing_fence(
+        &self,
+        meta: &impl NamespaceStore,
+        reference: &str,
+        raw: &[Option<Value>],
+        publication: &Publication,
+        tip: Hash,
+        security: Hash,
+        expires: u64,
+    ) -> Result<(), ServerError> {
+        let batch = Batch::new()
+            .require(Precondition::NotAfter(expires.saturating_sub(1)))
+            .require(guard(
+                keys::publication(&self.repo.name, reference),
+                raw.first().and_then(Option::as_ref),
+            ))
+            .require(guard(
+                keys::ref_key(&self.repo.name, reference),
+                raw.get(1).and_then(Option::as_ref),
+            ));
+        if meta
+            .apply(&self.pipe.shards.ref_shard(&self.repo, reference), batch)
+            .await
+            .map_err(failure)?
+            != BatchOutcome::Committed
+        {
+            return Err(absent());
+        }
+        // The write-free guard is the ref validation cut. Closing reads
+        // reject subsequently observed boundary changes before serving.
+        if self.history_security(meta, false).await? != security {
+            return Err(absent());
+        }
+        let final_anchor = self.continuation_anchor(meta, reference).await?;
+        if final_anchor.raw != raw
+            || final_anchor.publication != *publication
+            || final_anchor.tip != tip
+            || ms(self.pipe.clock.now_ms()) >= expires
+        {
+            return Err(absent());
+        }
+        Ok(())
     }
 
     pub(crate) async fn continuation_anchor(
@@ -520,7 +646,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         )]);
         Ok(digest_parts(parts))
     }
-    fn history_credential(
+    pub(crate) fn history_credential(
         &self,
         authority: Option<&crate::pipeline::Authenticated>,
     ) -> Result<(Hash, u64), ServerError> {

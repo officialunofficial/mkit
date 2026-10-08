@@ -193,6 +193,7 @@ pub struct ServerError {
     headers: Vec<(String, String)>,
     details: Vec<ErrorDetail>,
     abort: Option<AbortCause>,
+    history_limit: Option<HistoryStateLimit>,
     transport_admission: bool,
 }
 
@@ -209,6 +210,33 @@ pub(crate) enum AbortCause {
     QuotaWindow,
     /// Re-planning was exhausted by guard contention (`os`/`oc`, refs, quota).
     Contention,
+}
+
+/// The bounded history-walk state a request exceeded while issuing or
+/// redeeming a history continuation token.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryStateLimit {
+    /// The reducer's pending frontier exceeded its slot cap.
+    Frontier,
+    /// The reducer's emitted set exceeded its entry cap.
+    Emitted,
+    /// The token's authenticated provenance witness exceeded its node cap.
+    Provenance,
+    /// The continuation token payload exceeded its byte cap.
+    TokenBytes,
+}
+
+#[cfg(feature = "http-objects")]
+impl HistoryStateLimit {
+    fn message(self) -> &'static str {
+        match self {
+            Self::Frontier => "history state limit: frontier",
+            Self::Emitted => "history state limit: emitted set",
+            Self::Provenance => "history state limit: witness nodes",
+            Self::TokenBytes => "history state limit: token bytes",
+        }
+    }
 }
 
 impl fmt::Debug for ServerError {
@@ -236,6 +264,7 @@ impl fmt::Debug for ServerError {
             .field("headers", &Headers(&self.headers))
             .field("details", &self.details)
             .field("abort", &self.abort)
+            .field("history_limit", &self.history_limit)
             .field("transport_admission", &self.transport_admission)
             .finish()
     }
@@ -253,8 +282,27 @@ impl ServerError {
             headers: Vec::new(),
             details: Vec::new(),
             abort: None,
+            history_limit: None,
             transport_admission: false,
         }
+    }
+
+    /// [`Code::ResourceExhausted`] caused by a bounded history-walk state
+    /// cap. Unlike a generic exhaustion this must reach the caller in every
+    /// view: a full reducer state is never "absent".
+    #[cfg(feature = "http-objects")]
+    #[must_use]
+    pub(crate) fn history_state_limit_exceeded(limit: HistoryStateLimit) -> Self {
+        Self {
+            history_limit: Some(limit),
+            ..Self::new(Code::ResourceExhausted, limit.message())
+        }
+    }
+
+    /// The history-walk state cap this error reports, if any.
+    #[must_use]
+    pub fn history_state_limit(&self) -> Option<HistoryStateLimit> {
+        self.history_limit
     }
 
     /// Tag the error with the reservation abort cause.
