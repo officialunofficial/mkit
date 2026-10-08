@@ -1150,13 +1150,10 @@ where
                     processed += 1;
                     // One window of progress per slice: the resumed window
                     // and the next. Only an entry boundary can be saved.
-                    if (fed >= 2
+                    if fed >= 2
                         || processed >= job.entry_cap
-                        || self.budget.remaining() < ENTRY_RESERVE)
-                        && let Some(cursor) = reader.checkpoint()
+                        || self.budget.remaining() < ENTRY_RESERVE
                     {
-                        job.cursor = cursor.to_bytes();
-                        job.attempts = 0;
                         return Ok(0);
                     }
                 }
