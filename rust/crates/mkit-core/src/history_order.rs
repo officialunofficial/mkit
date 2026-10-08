@@ -17,8 +17,9 @@
 //! Driving the walk:
 //!
 //! 1. Seed the frontier with [`TimestampDiscovery::push`]. A selected-ref
-//!    page seeds the (unpeeled) tip; a continuation page reconstructs the
-//!    walk with [`TimestampDiscovery::decode`] instead.
+//!    page seeds the tip peeled through any tags to its commit/remix; a
+//!    continuation page reconstructs the walk with
+//!    [`TimestampDiscovery::decode`] instead.
 //! 2. Call [`TimestampDiscovery::step`]. [`WalkStep::NeedTimestamp`] asks
 //!    the caller to decode that candidate's canonical timestamp and report
 //!    it with [`TimestampDiscovery::provide_timestamp`];

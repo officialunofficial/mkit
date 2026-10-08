@@ -413,6 +413,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         admission: &crate::store::read_io::ReadIo,
         operation: &mut Budget,
     ) -> Result<Vec<Option<Node>>, ServerError> {
+        // Callers deduplicate; `found.remove` below serves one slot per id.
+        debug_assert!(
+            ids.iter().collect::<BTreeSet<_>>().len() == ids.len(),
+            "proved_nodes requires deduplicated ids"
+        );
         session.io.calls.charge_many(2).map_err(|_| exhausted())?;
         let authority = self.authorize(calls).await?;
         let writer = authority.is_some();

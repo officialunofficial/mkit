@@ -234,7 +234,8 @@ impl HistoryTokenConfig {
         if payload.len() > MAX_PAYLOAD || !bool::from(self.mac(&payload).as_slice().ct_eq(&mac)) {
             return Err(());
         }
-        // Authenticate before allocating the bounded graph/strings.
+        // The bounded payload is decoded and MAC-checked before any claims
+        // structure is parsed.
         let claims = decode(&payload)?;
         if claims.realm != self.realm
             || claims.issued >= claims.expires

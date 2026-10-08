@@ -45,13 +45,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
     /// session proof expiry and the credential expiry, and is never extended.
     /// A complete walk returns `Ok(None)` — no continuation exists to mint.
     /// # Errors
-    /// `invalid_argument` for an unselected reader or a walk that is unsealed
-    /// or holds an outstanding selected candidate. Refusals — pending ids the
-    /// memo never proved, memo keys disagreeing with supplied keys, a foreign
-    /// checkpoint, a changed ref — return `Ok(None)` in either view. A witness
-    /// or token exceeding its cap reports a typed
-    /// [`HistoryStateLimit`](crate::HistoryStateLimit); backend faults remain
-    /// typed.
+    /// `invalid_argument` for caller misuse: an unselected reader, a walk that
+    /// is unsealed or holds an outstanding selected candidate, or a reader
+    /// whose selected ref differs from the checkpoint's ref. Refusals —
+    /// pending ids the memo never proved, memo keys disagreeing with supplied
+    /// keys, a checkpoint this session does not still hold, a changed ref —
+    /// return `Ok(None)` in either view. A witness or token exceeding its cap
+    /// reports a typed [`HistoryStateLimit`](crate::HistoryStateLimit);
+    /// backend faults remain typed.
     pub async fn issue_history_continuation_in(
         &self,
         session: &mut ReaderSession,

@@ -132,6 +132,99 @@ fn octopus_graph(roots: usize) -> (Fx, BTreeMap<Hash, Object>, Hash) {
     (fx, by_id, tip_id)
 }
 
+/// `drain`, but for a non-HEAD ref's shard: ref updates on `reference` queue
+/// their own membership work there.
+fn drain_ref<H: HookSet>(fx: &Fx<H>, reference: &str) {
+    let repo = fx.repo_id("room");
+    let source = fx.pipe.shards.ref_shard(&repo, reference);
+    let relay = crate::timers::TimerRegistry::new().register(crate::relay::RelayHandler {
+        target: crate::store::BorrowedStore(&fx.pipe.meta),
+        hook: crate::relay::NoHook,
+        budget: crate::relay::RelayBudget::default(),
+    });
+    for _ in 0..128 {
+        block_on(crate::timers::run_due(
+            &fx.pipe.meta,
+            &source,
+            &relay,
+            fx.clock.as_ref(),
+            T0 as u64,
+            &crate::timers::TickBudget::default(),
+        ))
+        .unwrap();
+    }
+}
+
+/// A 12-commit mainline with one merge, ref-anchored by an annotated tag:
+/// the tag ref's target — and so the capture checkpoint's tip — is the
+/// unpeeled tag id. Returns the tag id and the peeled commit.
+fn tagged_graph() -> (Fx, BTreeMap<Hash, Object>, Hash, Hash) {
+    let fx = fixture_tweaked(Hooks::new(), http_cfg(), |cfg| {
+        cfg.sharding = Sharding::D34;
+        cfg.takedown_denial = false;
+    });
+    fx.pipe
+        .meta
+        .count_partition_scans
+        .store(true, Ordering::SeqCst);
+    let mut by_id: BTreeMap<Hash, Object> = BTreeMap::new();
+    let mut objects: Vec<Object> = Vec::new();
+    let mut mainline: Vec<Hash> = Vec::new();
+    for n in 0..12u64 {
+        let file = blob(format!("main {n}").as_bytes());
+        let root = tree(&[("f", EntryMode::Blob, &file)]);
+        objects.extend([file, root.clone()]);
+        by_id.insert(id(&root), root.clone());
+        let mut parents: Vec<Hash> = mainline.last().copied().into_iter().collect();
+        if n == 5 {
+            let side_file = blob(b"side".as_slice());
+            let side_root = tree(&[("s", EntryMode::Blob, &side_file)]);
+            let side = commit_at(
+                &side_root,
+                &[&by_id[&mainline[3]]],
+                "side",
+                100 + n * 10 + 5,
+            );
+            parents.push(id(&side));
+            objects.extend([side_file, side_root, side.clone()]);
+            by_id.insert(id(&side), side);
+        }
+        let parent_refs: Vec<&Object> = parents.iter().map(|p| &by_id[p]).collect();
+        let head = commit_at(&root, &parent_refs, &format!("main {n}"), 100 + n * 10);
+        mainline.push(id(&head));
+        objects.push(head.clone());
+        by_id.insert(id(&head), head);
+    }
+    let tip = *mainline.last().unwrap();
+    let all: Vec<&Object> = objects.iter().collect();
+    fx.push("room", &all, tip, None);
+    drain(&fx);
+    let signer = KeyPair::from_seed([9; 32]);
+    let mut tag = Tag {
+        target: tip,
+        target_type: ObjectType::Commit,
+        name: b"v1".to_vec(),
+        tagger: Identity::ed25519(signer.public.0),
+        signer: signer.public.0,
+        message: b"tag".to_vec(),
+        timestamp: 1,
+        signature: [0; 64],
+    };
+    tag.signature = mkit_core::sign::sign_tag(&tag, &signer).unwrap().0;
+    let tag = Object::Tag(tag);
+    let (outcome, _) = fx.push_ref(
+        "room",
+        &[&tag],
+        (TAG_REF, TAG_PACKMAP),
+        id(&tag),
+        (Missing, Missing),
+    );
+    assert_eq!(outcome, AdvanceOutcome::Committed);
+    drain(&fx);
+    drain_ref(&fx, TAG_REF);
+    (fx, by_id, id(&tag), tip)
+}
+
 /// The single-run reducer over the fixture graph: the served order both the
 /// embedder's page 1 and every redeemed page must concatenate to.
 fn reference_order(by_id: &BTreeMap<Hash, Object>, tip: Hash) -> Vec<Hash> {
@@ -338,6 +431,7 @@ fn token_walk<H: HookSet>(fx: &Fx<H>, token: &HistoryContinuation) -> TimestampD
 fn redeem_page(
     fx: &Fx,
     writer: bool,
+    reference: &str,
     token: &HistoryContinuation,
     size: usize,
     latency: Option<u32>,
@@ -374,7 +468,7 @@ fn redeem_page(
                 },
                 reader.walk_history_page_with_options_in(
                     &mut session,
-                    HEAD,
+                    reference,
                     Some(token.token.expose()),
                     size,
                     ts_options(),
@@ -408,7 +502,7 @@ fn redeem_page(
         } else {
             result = block_on(reader.walk_history_page_with_options_in(
                 &mut session,
-                HEAD,
+                reference,
                 Some(token.token.expose()),
                 size,
                 ts_options(),
@@ -419,7 +513,7 @@ fn redeem_page(
     let ops = fx.pipe.meta.ops()[op_start..].to_vec();
     assert!(
         !ops.contains(&"scan"),
-        "a redeemed page never scans one range at a time: {ops:?}"
+        "a redeemed page never scans one range at a time"
     );
     let touched = fx.pipe.meta.touched.lock().unwrap().clone();
     assert!(
@@ -463,8 +557,15 @@ fn timestamp_pages_match_reducer_and_stay_bounded() {
                     loop {
                         page_number += 1;
                         let measure = matches!(page_number, 2 | 3);
-                        let (page, measured) =
-                            redeem_page(&fx, writer, &token, 10, measure.then_some(50), &by_id);
+                        let (page, measured) = redeem_page(
+                            &fx,
+                            writer,
+                            HEAD,
+                            &token,
+                            10,
+                            measure.then_some(50),
+                            &by_id,
+                        );
                         let page = page.unwrap();
                         if let Some((rounds, kv, gets)) = measured {
                             println!(
@@ -490,6 +591,115 @@ fn timestamp_pages_match_reducer_and_stay_bounded() {
                 }
             }
         }
+    }
+}
+
+/// A ref whose target is an annotated tag: the capture checkpoint's tip is
+/// the unpeeled tag, so the embedder's page-1 loop peels to the commit — a
+/// `TagTarget` memo edge — before seeding the walk. Issuance's typed witness
+/// then roots the pending lineage at the tag, and redeemed pages match a
+/// reference walk seeded at the peeled commit.
+#[test]
+#[allow(clippy::too_many_lines)] // One peel, page-1 and redeem loop per view.
+fn tag_anchored_ref_pages_from_the_peeled_commit() {
+    for writer in [false, true] {
+        let (mut fx, by_id, tag_id, peeled) = tagged_graph();
+        enable(&mut fx);
+        let expected: Vec<(Hash, Vec<u8>)> = reference_order(&by_id, peeled)
+            .into_iter()
+            .map(|id| (id, serialize(&by_id[&id]).unwrap()))
+            .collect();
+        let mut page_one = Vec::new();
+        let mut issued = None;
+        in_view(&fx, writer, |reader| {
+            let reader = reader.with_selected_ref(TAG_REF).unwrap();
+            let mut session = ReaderSession::default();
+            let checkpoint = block_on(reader.selected_capture_in(&mut session))
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                checkpoint.tip(),
+                tag_id,
+                "the capture anchors the unpeeled tag"
+            );
+            // Peel to the commit/remix before seeding, bounded like the
+            // server's own tag peel.
+            let mut seed = checkpoint.tip();
+            for _ in 0..16 {
+                let bytes = block_on(reader.read_canonical_in(&mut session, &[seed]))
+                    .unwrap()
+                    .pop()
+                    .flatten()
+                    .unwrap();
+                let Object::Tag(tag) = mkit_core::serialize::deserialize(&bytes).unwrap() else {
+                    break;
+                };
+                seed = tag.target;
+            }
+            assert_eq!(seed, peeled);
+            let mut walk = TimestampDiscovery::new();
+            walk.push(PendingCandidate {
+                id: seed,
+                timestamp: None,
+            })
+            .unwrap();
+            while page_one.len() < 3 {
+                match walk.step().unwrap() {
+                    WalkStep::Done => break,
+                    WalkStep::NeedTimestamp(need) => {
+                        let bytes = block_on(reader.read_canonical_in(&mut session, &[need]))
+                            .unwrap()
+                            .pop()
+                            .flatten()
+                            .unwrap();
+                        let object = mkit_core::serialize::deserialize(&bytes).unwrap();
+                        walk.provide_timestamp(need, object_timestamp(&object))
+                            .unwrap();
+                    }
+                    WalkStep::Emit(id) => {
+                        let bytes = block_on(reader.read_canonical_in(&mut session, &[id]))
+                            .unwrap()
+                            .pop()
+                            .flatten()
+                            .unwrap();
+                        let object = mkit_core::serialize::deserialize(&bytes).unwrap();
+                        let edges: Vec<ParentEdge> = object_parents(&object)
+                            .iter()
+                            .map(|p| ParentEdge {
+                                id: *p,
+                                timestamp: None,
+                                enqueue: true,
+                            })
+                            .collect();
+                        walk.emit(&edges).unwrap();
+                        page_one.push((id, bytes));
+                    }
+                    _ => panic!("canonical walk step"),
+                }
+            }
+            issued = block_on(reader.issue_history_continuation_in(
+                &mut session,
+                &HistoryContinuationState { checkpoint, walk },
+            ))
+            .unwrap();
+        });
+        let mut token = issued.expect("an incomplete walk on a tag ref issues");
+        let mut all = page_one;
+        loop {
+            let (page, _) = redeem_page(&fx, writer, TAG_REF, &token, 10, None, &by_id);
+            let page = page.unwrap();
+            for commit in &page.commits {
+                all.push((commit.id, commit.canonical.clone()));
+            }
+            match page.next {
+                Some(next) => token = next,
+                None => break,
+            }
+        }
+        assert_eq!(
+            all, expected,
+            "owner={writer}: concatenated ids and canonical bytes match the peeled walk"
+        );
     }
 }
 

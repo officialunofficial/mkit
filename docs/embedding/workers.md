@@ -191,10 +191,11 @@ source/denial checks run again on every redemption.
 
 For cross-request all-parent paging in canonical timestamp order, the embedder
 drives page 1 itself on one selected reader and session: capture with
-`selected_capture_in`, seed `TimestampDiscovery` with the tip before its first
-emission, then loop `step` — `read_canonical_in` each ID the walk asks about,
-`provide_timestamp` the decoded commit/remix time, and `emit` the returned
-parents. After at least one emission, `issue_history_continuation_in` hands a
+`selected_capture_in`, seed `TimestampDiscovery` with the tip peeled through
+any tags to its commit/remix (the checkpoint keeps the unpeeled anchor) before
+its first emission, then loop `step` — `read_canonical_in` each ID the walk
+asks about, `provide_timestamp` the decoded commit/remix time, and `emit` the
+returned parents. After at least one emission, `issue_history_continuation_in` hands a
 `HistoryContinuationState` (the retained `CaptureCheckpoint` plus the walk) to
 the same session and returns an opaque token; issuance reads no objects — it
 validates the walk against session memo evidence and live fences only. Page 2

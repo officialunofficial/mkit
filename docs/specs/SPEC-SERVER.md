@@ -1972,10 +1972,12 @@ Append, rewind, deletion/recreation, replacement and publication/incarnation
 changes invalidate the continuation even when the ref returns to the same hash.
 Delayed projections MUST NOT reinstate an invalidated continuation.
 
-Issuance is memo-only. `issue_history_continuation_in` re-fences the retained
-capture checkpoint — credential, selected ref, anchor, security and expiry —
-against live state, and validates the caller's sealed walk against session
-evidence alone. Every pending or emitted ID MUST be recorded in the session
+Issuance is memo-only. The caller seeds the walk at the selected tip peeled
+through any tags to its commit/remix; the checkpoint keeps the unpeeled
+anchor. `issue_history_continuation_in` re-fences the retained capture
+checkpoint — credential, selected ref, anchor, security and expiry — against
+live state, and validates the caller's sealed walk against session evidence
+alone. Every pending or emitted ID MUST be recorded in the session
 memo on the selected ref: an emitted ID must be a proven commit/remix with its
 decoded timestamp, and a pending ID must hold a recorded history edge whose
 decoded timestamp, when known, supplies the reducer key. Issuance performs zero
