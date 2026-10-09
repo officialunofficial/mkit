@@ -86,6 +86,11 @@ remote slice calls and preserve the portable 100-operation, 1 MiB apply bounds.
 Readers acquire no additional guard or lease: their reads cannot change the
 inventory head or job-generation CAS.
 
+Reference-free inventory entries use one fresh entry read, one head read and
+one guarded apply (three remote calls). Entries with reference pages retain an
+early replay lookup and refresh their plan after page staging. Inventory applies and durable cursor checkpoints are still
+per entry; the 10-second planning deadline and storage layout are unchanged.
+
 After relay delivery, at most sixteen future timer rows are inspected and eight
 waiting jobs are nudged with guarded timer moves. Only ordinary delivery polls
 qualify; infrastructure backoff is preserved. There is no upper time cutoff:

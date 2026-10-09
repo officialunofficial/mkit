@@ -365,16 +365,21 @@ async fn stage_planned<S: NamespaceStore>(
     base: Option<Hash>,
     time: PlanningTime<'_>,
 ) -> Result<(), StoreError> {
-    let p = content_shard(pack);
-    let key = entry_key(pack, id);
-    if let Some(raw) = store.get(&p, &key).await? {
-        let existing: Entry = decode(&raw)?;
+    let deadline = time.deadline();
+    let existing = store
+        .get(&content_shard(pack), &entry_key(pack, id))
+        .await?;
+    if let Some(raw) = &existing {
+        let existing: Entry = decode(raw)?;
         if existing.kind != 0 {
             return Ok(());
         }
     }
     let history_refs: Vec<Hash> = children(object, ClosureMode::History).into_iter().collect();
     let chunks = history_refs.as_slice();
+    // No page I/O separates a reference-free snapshot from its head read.
+    // Paged entries discard this snapshot and refresh their plan after staging.
+    let plan = chunks.is_empty().then_some((deadline, existing));
     let (canonical_len, logical_len) = match object {
         Object::Blob(b) => (
             (b.data.len() as u64).checked_add(10).ok_or_else(bad)?,
@@ -417,7 +422,7 @@ async fn stage_planned<S: NamespaceStore>(
         base,
         references,
     })?;
-    put_entry(store, pack, length, id, row, time).await
+    put_entry(store, pack, length, id, row, time, plan).await
 }
 async fn put_entry<S: NamespaceStore>(
     store: &S,
@@ -426,11 +431,16 @@ async fn put_entry<S: NamespaceStore>(
     id: &Hash,
     row: Value,
     time: PlanningTime<'_>,
+    plan: Option<(Precondition, Option<Value>)>,
 ) -> Result<(), StoreError> {
-    let deadline = time.deadline();
     let p = content_shard(pack);
     let key = entry_key(pack, id);
-    let existing = store.get(&p, &key).await?;
+    let (deadline, existing) = if let Some(plan) = plan {
+        plan
+    } else {
+        let deadline = time.deadline();
+        (deadline, store.get(&p, &key).await?)
+    };
     if let Some(old) = &existing {
         let prior: Entry = decode(old)?;
         let next: Entry = decode(&row)?;
@@ -509,6 +519,7 @@ pub async fn dependency<S: NamespaceStore>(
             references: refs,
         })?,
         PlanningTime::Fixed(now),
+        None,
     )
     .await
 }

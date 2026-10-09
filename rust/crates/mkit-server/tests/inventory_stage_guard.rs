@@ -242,6 +242,10 @@ fn tree_pack(count: u16, size: usize) -> (Vec<u8>, Hash) {
 #[derive(Default)]
 struct Ledger {
     calls: u64,
+    inventory_reads: u64,
+    inventory_applies: u64,
+    cas_retries: u64,
+    max_inventory_ops: usize,
     job_writes: u64,
     job_batches: u64,
     max_batch_ops: usize,
@@ -270,6 +274,14 @@ impl NamespaceStore for Slow {
     }
     async fn get(&self, partition: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
         self.pause().await;
+        if key
+            .as_bytes()
+            .windows(11)
+            .any(|bytes| bytes == b"\0inventory\0")
+            || key.as_bytes().ends_with(b"\0inventory-head")
+        {
+            self.ledger.lock().unwrap().inventory_reads += 1;
+        }
         let value = self.inner.get(partition, key).await?;
         if key.as_bytes().ends_with(b"\0inventory-head")
             && let Some(barrier) = &self.barrier
@@ -351,6 +363,13 @@ impl NamespaceStore for Slow {
             matches!(write, Write::Put(key, _) if key.as_bytes().windows(11)
                 .any(|bytes| bytes == b"\0inventory\0"))
         });
+        if staging {
+            let mut ledger = self.ledger.lock().unwrap();
+            ledger.inventory_applies += 1;
+            ledger.max_inventory_ops = ledger
+                .max_inventory_ops
+                .max(batch.writes.len() + batch.preconditions.len());
+        }
         if staging && (self.stages.fetch_add(1, Ordering::SeqCst) + 1).is_multiple_of(7) {
             match self.fault {
                 Some("cas_contention") => {
@@ -360,10 +379,21 @@ impl NamespaceStore for Slow {
                     });
                 }
                 Some("expired") => self.clock.advance(10_001),
+                Some("lost_reply") => {
+                    assert_eq!(
+                        self.inner.apply(partition, batch).await?,
+                        BatchOutcome::Committed
+                    );
+                    return Err(StoreError::Unavailable("lost inventory apply reply".into()));
+                }
                 _ => {}
             }
         }
-        self.inner.apply(partition, batch).await
+        let outcome = self.inner.apply(partition, batch).await?;
+        if matches!(outcome, BatchOutcome::PreconditionFailed { .. }) {
+            self.ledger.lock().unwrap().cas_retries += 1;
+        }
+        Ok(outcome)
     }
     async fn stats(&self, partition: &Partition) -> Result<PartitionStats, StoreError> {
         self.pause().await;
@@ -650,6 +680,13 @@ async fn verifies(objects: u16, fault: Option<&'static str>) {
                 ledger.max_batch_ops,
                 ledger.max_batch_bytes
             );
+            eprintln!(
+                "INVENTORY objects={objects} reads={} applies={} total={} max_ops={}",
+                ledger.inventory_reads,
+                ledger.inventory_applies,
+                ledger.inventory_reads + ledger.inventory_applies,
+                ledger.max_inventory_ops
+            );
             return;
         }
         let next = report
@@ -715,6 +752,7 @@ async fn concurrent_inventory_stagers_keep_cas_and_distinct_expiry() {
         }
     );
     assert_eq!(reads, 64);
+    assert_eq!(store.ledger.lock().unwrap().cas_retries, 1);
     assert_eq!(usize::from(left.is_ok()) + usize::from(right.is_ok()), 1);
     let failed = left.as_ref().err().or(right.as_ref().err()).unwrap();
     let StoreError::Unavailable(source) = failed else {
@@ -750,4 +788,110 @@ async fn concurrent_inventory_stagers_keep_cas_and_distinct_expiry() {
         source.downcast_ref::<StagingFailure>(),
         Some(StagingFailure::Expired { .. })
     ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn small_inventory_write_shapes_at_50ms() {
+    Box::pin(verifies(3, None)).await;
+    Box::pin(verifies(12, None)).await;
+}
+
+fn slow_store(clock: Arc<ManualClock>) -> Slow {
+    Slow {
+        inner: Arc::new(MemoryKv::with_clock(clock.clone())),
+        clock,
+        stages: Arc::default(),
+        fault: None,
+        barrier: None,
+        heads: Arc::default(),
+        ledger: Arc::default(),
+    }
+}
+
+async fn inventory_rows(store: &MemoryKv, pack: &Hash) -> Vec<(Key, Value)> {
+    store
+        .scan(
+            &mkit_server::store::content_shard(pack),
+            &Key::new(vec![]),
+            &Key::new(vec![255]),
+            None,
+            100,
+        )
+        .await
+        .unwrap()
+        .entries
+}
+
+#[tokio::test(start_paused = true)]
+async fn reference_free_staging_lost_reply_preserves_exact_inventory_and_first_occurrence() {
+    use mkit_server::takedown::inventory;
+    let pack = [11; 32];
+    // The entry row holds lengths, never these bytes: entry size cannot expand
+    // its apply or the three awaited storage calls inside its deadline.
+    let object = Object::Blob(Blob {
+        data: vec![1; 16 << 20],
+    });
+    let id = object.id().unwrap();
+    let clock = Arc::new(ManualClock::new(0));
+    let reference = slow_store(clock.clone());
+    inventory::stage(&reference, &pack, 100, &id, &object, None, 0)
+        .await
+        .unwrap();
+    assert_eq!(reference.ledger.lock().unwrap().calls, 3);
+    assert_eq!(clock.now_ms(), 150);
+    assert_eq!(reference.ledger.lock().unwrap().max_inventory_ops, 6);
+    inventory::complete(&reference, &pack, 100, 0)
+        .await
+        .unwrap();
+
+    let mut replay = slow_store(Arc::new(ManualClock::new(0)));
+    replay.fault = Some("lost_reply");
+    replay.stages.store(6, Ordering::SeqCst);
+    assert!(
+        inventory::stage(&replay, &pack, 100, &id, &object, None, 0)
+            .await
+            .is_err()
+    );
+    // Crash before the caller can checkpoint, then replay with a different
+    // occurrence's base. The committed first occurrence must still own the row.
+    let calls = replay.ledger.lock().unwrap().calls;
+    inventory::stage(&replay, &pack, 100, &id, &object, Some([12; 32]), 0)
+        .await
+        .unwrap();
+    assert_eq!(replay.ledger.lock().unwrap().calls - calls, 1);
+    inventory::complete(&replay, &pack, 100, 0).await.unwrap();
+    assert_eq!(
+        inventory_rows(&reference.inner, &pack).await,
+        inventory_rows(&replay.inner, &pack).await
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn concurrent_packs_sharing_reference_free_objects_do_not_contend() {
+    use mkit_server::takedown::inventory;
+    let store = slow_store(Arc::new(ManualClock::new(0)));
+    let object = Object::Blob(Blob { data: vec![1] });
+    let id = object.id().unwrap();
+    let a = [21; 32];
+    let b = [22; 32];
+    let (left, right) = tokio::join!(
+        inventory::stage(&store, &a, 100, &id, &object, None, 0),
+        inventory::stage(&store, &b, 100, &id, &object, None, 0)
+    );
+    left.unwrap();
+    right.unwrap();
+    assert_eq!(store.ledger.lock().unwrap().cas_retries, 0);
+    assert_eq!(store.ledger.lock().unwrap().calls, 6);
+    inventory::complete(&store, &a, 100, 0).await.unwrap();
+    inventory::complete(&store, &b, 100, 0).await.unwrap();
+    let left = inventory::entry(&store, &a, &id).await.unwrap().unwrap();
+    let right = inventory::entry(&store, &b, &id).await.unwrap().unwrap();
+    assert_eq!(
+        (left.kind, left.canonical_len, left.base),
+        (right.kind, right.canonical_len, right.base)
+    );
+    assert_eq!(left.references.action.id, id);
+    assert_eq!(right.references.action.id, id);
+    assert_eq!(left.references.action.takedown_id, a);
+    assert_eq!(right.references.action.takedown_id, b);
 }

@@ -1494,6 +1494,12 @@ business-clock timestamp before reading its guarded snapshot. Its 10-second
 Snapshot CAS preconditions MUST remain in the same atomic batch. Expiry and CAS
 contention MUST have distinct typed causes and telemetry labels.
 
+Informative: an entry without history references can reuse its preliminary
+inventory lookup in the guarded apply: no reference-page I/O separates that
+snapshot from the head read. Its planning deadline precedes the entry read.
+Entries with reference pages refresh the entry plan after staging those pages.
+The early replay exit and stored representation are unchanged.
+
 A scheduled Decode checkpoint MUST commit after, or atomically with, the completed
 entry's provisional writes and include its post-entry cursor, under the existing job and verification
 state guards. Retries resume that durable boundary. Interrupted entry writes may

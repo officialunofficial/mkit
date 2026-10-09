@@ -13,6 +13,13 @@ Combine tags when applicable; every breaking API entry states a replacement and
 every stored-format entry states whether a store reset is required. Embedders
 collect the applicable entries between their old and new immutable pins.
 
+### Changed
+
+- Inventory staging reuses the entry lookup for entries without history
+  references, retaining the fresh guarded entry/head apply, replay handling,
+  denial checks and durable verification cursors. No public API, wire, hook,
+  Outcome or stored-format change; no store reset is needed.
+
 ### Added
 
 - All-parent history continuations in canonical timestamp order. An embedder
