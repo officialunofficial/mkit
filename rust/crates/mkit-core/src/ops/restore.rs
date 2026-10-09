@@ -786,10 +786,7 @@ where
             let writer = scope.spawn(move || -> io::Result<u64> {
                 let mut written: u64 = 0;
                 for bufs in rx {
-                    for buf in &bufs {
-                        out.write_all(buf)?;
-                        written += buf.len() as u64;
-                    }
+                    written += write_batch_vectored(out, &bufs)?;
                 }
                 Ok(written)
             });
@@ -823,9 +820,31 @@ where
 
     let mut written: u64 = 0;
     for batch in chunks.chunks(batch_size) {
-        for buf in &read_batch(batch)? {
-            out.write_all(buf)?;
-            written += buf.len() as u64;
+        written += write_batch_vectored(out, &read_batch(batch)?)?;
+    }
+    Ok(written)
+}
+
+/// Writes every buffer in `bufs` with vectored I/O (`writev`), so a
+/// batch of up to [`RESTORE_CHUNK_BATCH`] chunks costs a handful of
+/// syscalls instead of one per chunk. Returns the bytes written.
+fn write_batch_vectored(out: &mut fs::File, bufs: &[Vec<u8>]) -> io::Result<u64> {
+    let mut slices: Vec<io::IoSlice<'_>> = bufs
+        .iter()
+        .filter(|b| !b.is_empty())
+        .map(|b| io::IoSlice::new(b))
+        .collect();
+    let mut rest: &mut [io::IoSlice<'_>] = &mut slices;
+    let mut written: u64 = 0;
+    while !rest.is_empty() {
+        match out.write_vectored(rest) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(n) => {
+                written += n as u64;
+                io::IoSlice::advance_slices(&mut rest, n);
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
         }
     }
     Ok(written)
