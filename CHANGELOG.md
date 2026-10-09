@@ -316,6 +316,11 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Changed
 
+- Inventory staging reuses the entry lookup for entries without history
+  references, retaining the fresh guarded entry/head apply, replay handling,
+  denial checks and durable verification cursors. No public API, wire, hook,
+  Outcome or stored-format change; no store reset is needed.
+
 - Core merge, revert and cherry-pick use `ObjectSource + ObjectSink`; merge-base,
   ancestry and ancestor-set walks use `ObjectSource`. CLI behavior is unchanged.
   `MemoryOverlay` provides immediately readable outputs with explicit aggregate

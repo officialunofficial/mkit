@@ -693,6 +693,7 @@ type Snapshot = (
     u64,
     Vec<(Key, Value)>,
     usize,
+    Vec<(Key, Value)>,
 );
 
 fn snapshot(rig: &Rig, pack: &Hash) -> Snapshot {
@@ -713,6 +714,15 @@ fn snapshot(rig: &Rig, pack: &Hash) -> Snapshot {
         job.external_bytes,
         rig.rows(pack, keys::VC_FRAME),
         rows,
+        block_on(rig.store.scan(
+            &crate::store::content_shard(pack),
+            &Key::new(vec![]),
+            &Key::new(vec![255]),
+            None,
+            10_000,
+        ))
+        .unwrap()
+        .entries,
     )
 }
 

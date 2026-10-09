@@ -60,6 +60,104 @@ fn assert_hint(error: &ServerError, seconds: u64) {
 }
 
 #[test]
+fn inventory_progress_attributes_only_staging_including_failed_calls() {
+    for fail in [false, true] {
+        let events = Events::default();
+        let _subscriber = tracing::subscriber::set_default(events.clone());
+        let (mut env, owner, identity) = environment_with(Sharding::D34, scheduled());
+        let (bytes, head) = pack();
+        let pack_id = hash(&bytes);
+        let content = crate::store::content_shard(&pack_id);
+        let clock = env.clock.clone();
+        let fail_apply = env.pipe.meta.fail_next_apply.clone();
+        env.pipe.meta.hook = Some(Box::new(move |_, partition, _| {
+            // Local checkpoint work also advances time, outside staging.
+            clock.advance(50);
+            if fail && partition == &content {
+                fail_apply.store(true, Ordering::SeqCst);
+            }
+        }));
+        let ticket = begin_and_upload(&env, &owner, &identity, &bytes, 920);
+        let request = signed(&owner, &identity, Procedure::AdvanceRefs, 921);
+        let repo = env.auth(&request).unwrap().repo().repo.clone();
+        let source = env.pipe.shards.ref_shard(&repo, HEAD);
+        assert_hint(
+            &advance(&env, &owner, &identity, 921, head, pack_id, vec![ticket]).unwrap_err(),
+            1,
+        );
+        let registry = TimerRegistry::new().register(verifier(&env));
+        let before = ms(env.clock.now_ms());
+        let report = block_on(run_due(
+            &env.pipe.meta,
+            &source,
+            &registry,
+            env.clock.as_ref(),
+            before,
+            &TickBudget::default(),
+        ))
+        .unwrap();
+        assert_eq!(report.failed, u32::from(fail));
+        let logs = events.0.lock().unwrap();
+        let event = logs
+            .iter()
+            .find(|event| {
+                event
+                    .get("event")
+                    .is_some_and(|s| s == "verification_inventory_progress")
+            })
+            .unwrap();
+        assert_eq!(event.len(), 10, "no new identifiers or per-call events");
+        let number = |key: &str| event[key].parse::<u64>().unwrap();
+        let start = number("staging_start_ms");
+        let end = number("staging_end_ms");
+        let duration = number("staging_duration_ms");
+        assert!(start >= before && end <= ms(env.clock.now_ms()));
+        assert_eq!(number("entries_staged"), if fail { 0 } else { 2 });
+        assert_eq!(number("remote_inventory_calls"), if fail { 3 } else { 9 });
+        assert_eq!(duration, if fail { 50 } else { 150 });
+        assert_eq!(
+            event["result"],
+            if fail { "unavailable" } else { "completed" }
+        );
+        if fail {
+            assert_eq!(end - start, duration);
+        } else {
+            assert!(end - start > duration, "exclude the entry checkpoint gap");
+            drop(logs);
+            env.clock.advance(1);
+            block_on(run_due(
+                &env.pipe.meta,
+                &source,
+                &registry,
+                env.clock.as_ref(),
+                ms(env.clock.now_ms()),
+                &TickBudget::default(),
+            ))
+            .unwrap();
+            let logs = events.0.lock().unwrap();
+            let event = logs
+                .iter()
+                .rev()
+                .find(|event| {
+                    event
+                        .get("event")
+                        .is_some_and(|s| s == "verification_inventory_progress")
+                })
+                .unwrap();
+            for field in [
+                "staging_start_ms",
+                "staging_end_ms",
+                "staging_duration_ms",
+                "remote_inventory_calls",
+                "entries_staged",
+            ] {
+                assert_eq!(event[field], "0", "no inventory work in closure resolution");
+            }
+        }
+    }
+}
+
+#[test]
 fn relay_delivery_resumes_promptly_and_a_lost_nudge_recovers_by_poll() {
     for missed in [false, true] {
         let events = Events::default();

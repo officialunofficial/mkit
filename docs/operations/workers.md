@@ -65,6 +65,19 @@ observation for the particular ticket, not the latest retry.
 | `verification_usable` | A committed job checkpoint became usable with a guarded Verified state. `ready_observed` is the later advance's observation. |
 | `final_cas` | The ref advance batch committed; replaying its nonce does not emit another CAS. |
 
+`verification_inventory_progress` also reports `staging_start_ms` and
+`staging_end_ms` from the pipeline clock: the first inventory operation's start
+and the last one's end in this slice. `staging_duration_ms` sums time spent in
+inventory staging and sealing, including reference pages, dependency entries,
+idempotent replays and failed operations. It excludes hashing, denial checks and
+local cursor checkpoints between those operations, so it can be smaller than
+end minus start. `remote_inventory_calls` counts the existing remote slice-budget
+charges during those operations, including failed calls, without extra reads or
+per-call logging. A slice with no inventory operation reports zero for all four
+fields. Compare summed staging duration with Decode slice elapsed time to assess
+inventory's share; keep failed attempts separate. These fields use the existing
+console channel and add no identifiers.
+
 `now_ms` is injected-clock time; relay and partition-dispatch events use the
 tick's business-time snapshot. For real elapsed I/O time, use the Worker log timestamps
 as well. Compare upload → advance, job due → physical alarm → first fire, each
@@ -85,6 +98,11 @@ The existing attempt marker and timer checkpoint remain. These writes consume no
 remote slice calls and preserve the portable 100-operation, 1 MiB apply bounds.
 Readers acquire no additional guard or lease: their reads cannot change the
 inventory head or job-generation CAS.
+
+Reference-free inventory entries use one fresh entry read, one head read and
+one guarded apply (three remote calls). Entries with reference pages retain an
+early replay lookup and refresh their plan after page staging. Inventory applies and durable cursor checkpoints are still
+per entry; the 10-second planning deadline and storage layout are unchanged.
 
 After relay delivery, at most sixteen future timer rows are inspected and eight
 waiting jobs are nudged with guarded timer moves. Only ordinary delivery polls
