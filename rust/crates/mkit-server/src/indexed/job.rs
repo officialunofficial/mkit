@@ -370,6 +370,10 @@ struct SliceState {
     decode_checkpoint: Option<VerifyJobV1>,
     entries_staged: u64,
     entries_checkpointed: u64,
+    staging_start_ms: Option<u64>,
+    staging_end_ms: u64,
+    staging_duration_ms: u64,
+    remote_inventory_calls: u32,
     cache: Lru,
     memo: MemberCache,
     visiting: BTreeSet<(Hash, Hash, u64)>,
@@ -416,6 +420,25 @@ where
 
     fn deadline(&self) -> u64 {
         now_ms(self.h.clock.as_ref()).saturating_add(10_000)
+    }
+
+    /// Attribute only serial inventory I/O, including failed and replayed calls.
+    async fn inventory_io(
+        &self,
+        st: &mut SliceState,
+        io: impl std::future::Future<Output = Result<(), StoreError>>,
+    ) -> Result<(), StoreError> {
+        let start = now_ms(self.h.clock.as_ref());
+        st.staging_start_ms.get_or_insert(start);
+        let calls = self.budget.used();
+        let result = io.await;
+        let end = now_ms(self.h.clock.as_ref());
+        st.staging_end_ms = end;
+        st.staging_duration_ms = st
+            .staging_duration_ms
+            .saturating_add(end.saturating_sub(start));
+        st.remote_inventory_calls += self.budget.used().saturating_sub(calls);
+        result
     }
 
     fn job_key(&self) -> Key {
@@ -549,6 +572,8 @@ where
         }
         tracing::info!(event = "verification_inventory_progress", result = inventory_result,
             pack = %mkit_core::hash::to_hex(&self.pack), source = ?self.source,
+            staging_start_ms = st.staging_start_ms.unwrap_or(0), staging_end_ms = st.staging_end_ms,
+            staging_duration_ms = st.staging_duration_ms, remote_inventory_calls = st.remote_inventory_calls,
             entries_staged = st.entries_staged, entries_checkpointed = st.entries_checkpointed);
         // Decode may have durably advanced before a later entry stopped this slice.
         raw = st.job_guard.clone().unwrap_or(raw);
@@ -1275,14 +1300,17 @@ where
             })?;
         let object = mkit_core::serialize::deserialize(&bytes)
             .map_err(|_| Stop::Reject("object hash mismatch"))?;
-        crate::takedown::inventory::stage_with_clock(
-            self.remote,
-            &self.pack,
-            job.pack_len,
-            &id,
-            &object,
-            base,
-            self.h.clock.as_ref(),
+        self.inventory_io(
+            st,
+            crate::takedown::inventory::stage_with_clock(
+                self.remote,
+                &self.pack,
+                job.pack_len,
+                &id,
+                &object,
+                base,
+                self.h.clock.as_ref(),
+            ),
         )
         .await?;
         st.entries_staged += 1;
@@ -1511,12 +1539,15 @@ where
             .map(|(location, (bytes, depth))| (*location, bytes.len() as u64, *depth))
             .collect();
         for ((id, pack, offset), size, depth) in fresh {
-            crate::takedown::inventory::dependency(
-                self.remote,
-                &self.pack,
-                job.pack_len,
-                &id,
-                now_ms(self.h.clock.as_ref()),
+            self.inventory_io(
+                st,
+                crate::takedown::inventory::dependency(
+                    self.remote,
+                    &self.pack,
+                    job.pack_len,
+                    &id,
+                    now_ms(self.h.clock.as_ref()),
+                ),
             )
             .await?;
             st.entries_staged += 1;
@@ -1781,13 +1812,16 @@ where
     ) -> Result<u64, Stop> {
         let now = now_ms(self.h.clock.as_ref());
         if job.kind == Kind::Packlist {
-            crate::takedown::inventory::stage_packlist(
-                self.remote,
-                &self.pack,
-                job.pack_len,
-                job.packlist_prev,
-                &job.packlist,
-                now,
+            self.inventory_io(
+                st,
+                crate::takedown::inventory::stage_packlist(
+                    self.remote,
+                    &self.pack,
+                    job.pack_len,
+                    job.packlist_prev,
+                    &job.packlist,
+                    now,
+                ),
             )
             .await?;
             // Verify owns scan after decoding; checkpoint its inventory position.
@@ -1806,12 +1840,15 @@ where
                 if self.budget.remaining() < ENTRY_RESERVE {
                     return Ok(1);
                 }
-                crate::takedown::inventory::dependency(
-                    self.remote,
-                    &self.pack,
-                    job.pack_len,
-                    child,
-                    now_ms(self.h.clock.as_ref()),
+                self.inventory_io(
+                    st,
+                    crate::takedown::inventory::dependency(
+                        self.remote,
+                        &self.pack,
+                        job.pack_len,
+                        child,
+                        now_ms(self.h.clock.as_ref()),
+                    ),
                 )
                 .await?;
                 st.entries_staged += 1;
@@ -1819,11 +1856,14 @@ where
                 job.scan = offset.to_be_bytes().to_vec();
             }
         }
-        crate::takedown::inventory::complete(
-            self.remote,
-            &self.pack,
-            job.pack_len,
-            now_ms(self.h.clock.as_ref()),
+        self.inventory_io(
+            st,
+            crate::takedown::inventory::complete(
+                self.remote,
+                &self.pack,
+                job.pack_len,
+                now_ms(self.h.clock.as_ref()),
+            ),
         )
         .await?;
         job.scan.clear();

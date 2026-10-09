@@ -65,6 +65,19 @@ observation for the particular ticket, not the latest retry.
 | `verification_usable` | A committed job checkpoint became usable with a guarded Verified state. `ready_observed` is the later advance's observation. |
 | `final_cas` | The ref advance batch committed; replaying its nonce does not emit another CAS. |
 
+`verification_inventory_progress` also reports `staging_start_ms` and
+`staging_end_ms` from the pipeline clock: the first inventory operation's start
+and the last one's end in this slice. `staging_duration_ms` sums time spent in
+inventory staging and sealing, including reference pages, dependency entries,
+idempotent replays and failed operations. It excludes hashing, denial checks and
+local cursor checkpoints between those operations, so it can be smaller than
+end minus start. `remote_inventory_calls` counts the existing remote slice-budget
+charges during those operations, including failed calls, without extra reads or
+per-call logging. A slice with no inventory operation reports zero for all four
+fields. Compare summed staging duration with Decode slice elapsed time to assess
+inventory's share; keep failed attempts separate. These fields use the existing
+console channel and add no identifiers.
+
 `now_ms` is injected-clock time; relay and partition-dispatch events use the
 tick's business-time snapshot. For real elapsed I/O time, use the Worker log timestamps
 as well. Compare upload → advance, job due → physical alarm → first fire, each
