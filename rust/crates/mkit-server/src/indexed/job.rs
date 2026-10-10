@@ -414,9 +414,10 @@ struct Prepared {
 
 /// Decoded entries admitted together: staged by one inventory apply.
 const ADMIT_ENTRIES: usize = crate::takedown::inventory::STAGE_BATCH_ENTRIES;
-/// Memory a batch may hold beyond its first entry: each entry's decoded bytes
-/// count twice, for the parsed object beside them. A batch adds this and one
-/// more entry to the slice's resident allowance.
+/// Memory a batch may hold while the next entry decodes: each entry's decoded
+/// bytes count twice, for the parsed object beside them. A batch settles as
+/// soon as it holds this much, so the slice's resident allowance sees this and
+/// one entry at a time, as it did before batching.
 const ADMIT_BYTES: usize = 1 << 20;
 /// Remote calls a batch's reads and apply take apart from its entries' own: one
 /// group, as long as the store reserves at most 17 of the 100 apply operations
@@ -1231,9 +1232,11 @@ where
                     job.windows_done = job.windows_done.saturating_add(1);
                 }
                 Step::Entry(entry) => {
-                    let frame = reader
-                        .last_frame()
-                        .ok_or_else(|| unavailable("window reader lost its frame"))?;
+                    let Some(frame) = reader.last_frame() else {
+                        self.settle(st, job, &mut pending, state, held.as_ref())
+                            .await?;
+                        return Err(unavailable("window reader lost its frame"));
+                    };
                     // A delta entry reads its base from the rows of earlier
                     // entries, so they are recorded first. It is never batched.
                     if matches!(entry, PackEntry::Delta { .. }) {
@@ -1294,12 +1297,18 @@ where
                             return Err(stop);
                         }
                     };
-                    item.cursor = reader
-                        .checkpoint()
-                        .ok_or_else(|| unavailable("decoded entry lost its boundary"))?
-                        .to_bytes();
-                    let held_bytes: usize = pending.iter().map(|p| 2 * p.bytes.len()).sum();
-                    if !pending.is_empty() && held_bytes + 2 * item.bytes.len() > ADMIT_BYTES {
+                    let Some(boundary) = reader.checkpoint() else {
+                        self.settle(st, job, &mut pending, state, held.as_ref())
+                            .await?;
+                        return Err(unavailable("decoded entry lost its boundary"));
+                    };
+                    item.cursor = boundary.to_bytes();
+                    let held_bytes = |pending: &[Prepared]| -> usize {
+                        pending.iter().map(|p| 2 * p.bytes.len()).sum()
+                    };
+                    if !pending.is_empty()
+                        && held_bytes(&pending) + 2 * item.bytes.len() > ADMIT_BYTES
+                    {
                         self.settle(st, job, &mut pending, state, held.as_ref())
                             .await?;
                     }
@@ -1311,8 +1320,11 @@ where
                     // The batch's worst-case calls stay inside the reserve, so
                     // admitting it never exhausts the slice's budget.
                     let owed = ADMIT_CALLS + pending.iter().map(|p| p.calls).sum::<u32>();
+                    // A batch that has reached its memory allowance settles now,
+                    // so no sizeable entry waits while the next one decodes.
                     if stop
                         || pending.len() >= ADMIT_ENTRIES
+                        || held_bytes(&pending) >= ADMIT_BYTES
                         || self.budget.remaining() < ENTRY_RESERVE.saturating_add(owed)
                     {
                         self.settle(st, job, &mut pending, state, held.as_ref())
