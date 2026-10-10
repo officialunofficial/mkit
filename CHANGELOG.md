@@ -267,8 +267,8 @@ collect the applicable entries between their old and new immutable pins.
   batch that outgrows a slice halves its persisted cap and retries, and a
   single id that cannot be answered in one slice still ends `ClosureCapped`.
   Closure semantics (open closure, lag window, capped answers) are unchanged.
-  A push whose tree names 500 existing files drops from 10,743 to 852 storage
-  calls (640 s to 46 s modeled); 3,000 files from 63,475 to 3,199. Stored
+  A push whose tree names 500 existing files drops from 10,735 to 427 storage
+  calls (639 s to 25 s modeled); 3,000 files from 63,450 to 1,438. Stored
   formats are unchanged (wipe: no); jobs written earlier keep their smaller
   cap.
 - Fewer sequential storage rounds per read, with no change to results, limits,

@@ -1684,6 +1684,7 @@ where
         if self.budget.remaining() < reserve {
             return Ok(false);
         }
+        let refused_before = self.budget.refused();
         let found = match resolve::locate_split(
             self.remote,
             self.h.shards.as_ref(),
@@ -1695,7 +1696,9 @@ where
         {
             Ok(found) => found,
             Err(_)
-                if wanted.len() > 1 && (self.budget.refused() || self.budget.remaining() == 0) =>
+                if wanted.len() > 1
+                    && (self.budget.remaining() == 0
+                        || (!refused_before && self.budget.refused())) =>
             {
                 // The batch outgrew one slice. Persist a strictly smaller cap
                 // (it only ever shrinks, and `wanted` is at most the cap) and
