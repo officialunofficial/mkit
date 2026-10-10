@@ -8,7 +8,10 @@
 
 use super::{ForkEnv, ForkError, ForkJobV1};
 use crate::pipeline::{PlanSnapshot as Snapshot, plan_charge};
-use crate::quota::{QuotaCharge, QuotaLimits, QuotaScope};
+use crate::quota::{
+    NamespaceCharge, QuotaCharge, QuotaLimits, QuotaScope, counter_key, namespace_window,
+    plan_namespace_charge,
+};
 use crate::replay::{ReplayRecord, ReplayState, StoredResult};
 use crate::store::codec::{self, AbortReason, ReservationV1, StoredProcedure};
 use crate::store::outbox::{OutboxBuilder, Terminal};
@@ -84,6 +87,10 @@ pub struct SettleV1 {
     /// refuses the fork before any work) and stores the job with this list
     /// emptied.
     pub charges: Vec<ChargeV1>,
+    /// Under the default admission, the per-namespace aggregate cap the
+    /// charges are also counted against (the first charge's limits and bytes,
+    /// as for an upload); applied and cleared with `charges`.
+    pub namespace_cap: Option<ChargeV1>,
     /// The inherited bytes admission charged for, an upper bound the plan
     /// must stay within: the fork fails if the pack set it resolves is larger.
     pub declared_bytes: u64,
@@ -119,7 +126,9 @@ fn append(batch: &mut Batch, pre: Vec<Precondition>, writes: Vec<Write>) {
 }
 
 fn quota_reason(message: &str) -> &'static str {
-    if message.contains("op quota") {
+    if message.starts_with("namespace") {
+        "namespace write op/byte quota exceeded for this window; try again later"
+    } else if message.contains("op quota") {
         "write op quota exceeded for this window; try again later"
     } else {
         "write byte quota exceeded for this window; try again later"
@@ -135,11 +144,25 @@ pub(crate) async fn charge<S: NamespaceStore>(
     settle: &SettleV1,
     now: u64,
 ) -> Result<(Vec<Precondition>, Vec<Write>), ForkError> {
-    let wanted: Vec<Key> = settle
+    let now_ms = i64::try_from(now).unwrap_or(i64::MAX);
+    // The namespace's exact counter lives in the coordinator, where the fork's
+    // job is created, so it is charged in the same batch.
+    let namespace = settle.namespace_cap.as_ref().map(|cap| {
+        let limits = QuotaLimits::new(cap.window_ms, cap.max_ops, cap.max_bytes);
+        NamespaceCharge {
+            limits,
+            window: namespace_window(now_ms, cap.window_ms),
+            bytes: cap.bytes,
+            rollup: false,
+        }
+    });
+    let mut wanted: Vec<Key> = settle
         .charges
         .iter()
         .map(|c| keys::quota(&c.charge().scope))
         .collect();
+    let counter = namespace.map(|n| counter_key(n, n.window));
+    wanted.extend(counter.clone());
     let mut snapshot = Snapshot::default();
     if !wanted.is_empty() {
         let rows = env.store.get_many(coordinator, &wanted).await?;
@@ -148,20 +171,24 @@ pub(crate) async fn charge<S: NamespaceStore>(
         }
     }
     let (mut pre, mut writes) = (Vec::new(), Vec::new());
+    let refused = |error: crate::ServerError| match error.code() {
+        crate::Code::ResourceExhausted => ForkError::Quota(quota_reason(error.public_message())),
+        _ => ForkError::from(error),
+    };
     for charge in &settle.charges {
-        plan_charge(
-            &charge.charge(),
-            &snapshot,
-            i64::try_from(now).unwrap_or(i64::MAX),
+        plan_charge(&charge.charge(), &snapshot, now_ms, &mut pre, &mut writes).map_err(refused)?;
+    }
+    if let (Some(charge), Some(key)) = (namespace, counter) {
+        plan_namespace_charge(
+            charge,
+            snapshot.get(&key),
+            None,
+            now_ms,
+            now,
             &mut pre,
             &mut writes,
         )
-        .map_err(|error| match error.code() {
-            crate::Code::ResourceExhausted => {
-                ForkError::Quota(quota_reason(error.public_message()))
-            }
-            _ => ForkError::from(error),
-        })?;
+        .map_err(refused)?;
     }
     Ok((pre, writes))
 }

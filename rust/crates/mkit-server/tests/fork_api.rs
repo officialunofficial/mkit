@@ -763,3 +763,28 @@ async fn a_source_that_changes_visibility_while_the_hooks_run_refuses_the_fork()
     );
     assert_eq!(quota_ops(&source, &dest.repo).await, None);
 }
+
+#[tokio::test]
+async fn the_default_admission_counts_a_fork_against_the_namespace_cap() {
+    use mkit_server::Clock as _;
+    let source = Source::build_with("source", 6, denial).await;
+    let mut dest = source.at("forked");
+    finish(source.pipe.as_ref(), &mut dest, &request(&source))
+        .await
+        .unwrap();
+    let window = mkit_server::quota::namespace_window(
+        source.clock.now_ms(),
+        mkit_server::quota::DEFAULT_WRITE_QUOTA.window_ms,
+    );
+    let usage = source
+        .store
+        .inner
+        .get(
+            &source.shards.coordinator(&dest.repo.namespace),
+            &keys::quota_total(window),
+        )
+        .await
+        .unwrap()
+        .expect("the namespace counter is charged by the fork");
+    assert!(codec::decode_namespace_usage(&usage).unwrap().ops >= 1);
+}

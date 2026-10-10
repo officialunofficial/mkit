@@ -903,6 +903,7 @@ mod settlement {
                 max_ops: 10,
                 max_bytes: 1 << 30,
             }],
+            namespace_cap: None,
             declared_bytes: 1 << 40,
         }
     }
@@ -2007,6 +2008,64 @@ async fn the_charge_is_replanned_three_times_and_then_the_start_is_refused() {
             assert_eq!(quota_ops(&source, &dest_id).await, Some(4));
         }
     }
+}
+
+#[tokio::test]
+async fn the_namespace_cap_binds_a_fork_with_the_signer_charge_or_not_at_all() {
+    use mkit_server::fork::{ChargeV1, ForkError};
+    let cap = |max_ops: u32| ChargeV1 {
+        scope: String::new(),
+        bytes: 0,
+        window_ms: 3_600_000,
+        max_ops,
+        max_bytes: 1 << 40,
+    };
+    let counter = |source: &Source, dest_id: &RepoId| {
+        let window = mkit_server::quota::namespace_window(source.clock.now_ms(), 3_600_000);
+        (
+            source.shards.coordinator(&dest_id.namespace),
+            keys::quota_total(window),
+        )
+    };
+    // A namespace window that cannot hold the fork refuses it before any row,
+    // and neither the namespace nor the signer is charged.
+    let source = Source::build("source", 6).await;
+    let dest_id = dest(&source, "forked");
+    let mut settle = settlement::admit(&source, &dest_id).await;
+    settle.namespace_cap = Some(cap(0));
+    assert_eq!(
+        mkit_server::fork::start(&env(&source), &spec(&source, "forked"), Some(settle))
+            .await
+            .unwrap_err(),
+        ForkError::Quota("namespace write op/byte quota exceeded for this window; try again later")
+    );
+    let (p, key) = counter(&source, &dest_id);
+    assert!(source.store.inner.get(&p, &key).await.unwrap().is_none());
+    assert_eq!(quota_ops(&source, &dest_id).await, None);
+    assert!(
+        mkit_server::fork::read_job(&source.store, source.shards.as_ref(), &dest_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // A window with room is charged once, with the job and the signer.
+    let source = Source::build("source", 6).await;
+    let dest_id = dest(&source, "forked");
+    let mut settle = settlement::admit(&source, &dest_id).await;
+    settle.namespace_cap = Some(cap(10));
+    mkit_server::fork::start(&env(&source), &spec(&source, "forked"), Some(settle))
+        .await
+        .unwrap();
+    assert_eq!(run(&source, "forked").await.phase, Phase::Done);
+    let (p, key) = counter(&source, &dest_id);
+    let usage = source.store.inner.get(&p, &key).await.unwrap().unwrap();
+    assert_eq!(
+        mkit_server::store::adapter_spi::codec::decode_namespace_usage(&usage)
+            .unwrap()
+            .ops,
+        1
+    );
+    assert_eq!(quota_ops(&source, &dest_id).await, Some(1));
 }
 
 #[tokio::test]

@@ -102,6 +102,7 @@ pub async fn start_with<S: NamespaceStore>(
         settle.clone().map(|mut s| {
             // The charges are applied by the creation batch, not carried.
             s.charges.clear();
+            s.namespace_cap = None;
             s
         }),
         fence,

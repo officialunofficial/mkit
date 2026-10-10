@@ -48,7 +48,12 @@ collect the applicable entries between their old and new immutable pins.
   kind 16 on a Paid deployment's namespace coordinators; an embedder that
   exposes `fork_repo` MUST give the timer the same `takedown_denial` and
   extraction threshold as its pipeline, and MUST apply the storage-lease
-  executor and lease-recovery modes before starting a fork.
+  executor and lease-recovery modes before starting a fork. Under the default
+  admission the fork is also counted against the namespace's aggregate cap, in
+  the job-creation batch. The pack-set plan runs once on the request, before
+  admission (up to 600 storage calls, whatever admission then decides), and an
+  abandoned job on a Workers plan without the kind-16 timer (Free) expires only
+  when a request polls it.
   New public items: `fork::{ForkRequest, binding}`, `pipeline::ForkAdmission`,
   `fork::SettleV1::declared_bytes`, `fork::ForkError::Quota` and
   `fork::Failure::OverAdmitted`. `OpKind::ForkRepo` gains

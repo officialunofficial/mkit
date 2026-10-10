@@ -295,6 +295,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 expires_at_ms: auth.expires_at_ms,
             }),
             charges: allowance.charges.iter().map(ChargeV1::of).collect(),
+            // As for an upload, the default admission also counts the fork
+            // against the namespace's aggregate cap.
+            namespace_cap: (matches!(self.cfg.addressing, Addressing::Multi(_))
+                && self.hooks.admission().is_default())
+            .then(|| allowance.charges.first().map(ChargeV1::of))
+            .flatten(),
             declared_bytes: inherited,
         };
         let fence = FenceV1 {

@@ -1905,9 +1905,11 @@ destination. The quota charges are applied once, in the
 batch that creates the job, so the quota is a hard bound: a window that cannot
 hold the fork refuses it with `resource_exhausted` before any work, and a
 charge is never applied at completion. The charge is the per-signer
-quota charge the admission decided; the per-namespace aggregate cap of the
-default admission is not applied to forks, and a deployment that needs one
-enforces it in its Admission hook, which sees the fork's bytes. A write by the same signer that lands while the job is created re-plans the
+quota charge the admission decided and, under the default admission in Multi
+addressing, the same bytes against the namespace's aggregate cap, as for an
+upload, in the same batch: either window being exhausted refuses the fork
+before any work, with nothing charged. A custom Admission decides its own
+limits and sees the fork's bytes. A write by the same signer that lands while the job is created re-plans the
 charge (three attempts), then the request answers `unavailable`. A failure before the destination is
 registered deletes the job so the request can be retried, and the retry is a new
 admission that pays again. A fork whose resolved pack set is larger
