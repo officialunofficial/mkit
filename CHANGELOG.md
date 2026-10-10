@@ -177,6 +177,14 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Fixed
 
+- Takedown discovery found no ticketed memberships. It accepted only an empty
+  `m` value (an immediate upload), but every membership written by a ticketed
+  advance carries a clearance witness, so a holder sweep failed with a
+  corrupt-membership error on any repository that tickets uploads and never
+  reached its blocked object. It now accepts a valid clearance witness as a
+  membership and still treats any other value as corrupt. No stored-format
+  change; no store reset.
+
 - Scheduled verification no longer asks clients to wait up to 60 s. The
   pending-verification `Retry-After` hint followed the verification timer's due
   time, which a failure backoff or lag wait pushes to 20-60 s while the job
