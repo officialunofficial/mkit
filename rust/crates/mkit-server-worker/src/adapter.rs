@@ -2982,6 +2982,12 @@ mod glue {
         } else {
             registry
         };
+        // Kind 16: the fork job, on the namespace coordinator.
+        let registry = if let Ok(cfg) = &cfg {
+            crate::fork::register_configured(registry, env, class, alarm_budget.clone(), cfg)
+        } else {
+            registry
+        };
         let registry = if let (Ok(cfg), Some(budget)) = (&cfg, &alarm_budget) {
             if let Some(custom) = &cfg.custom_purge {
                 registry.register(custom.delivery(budget.clone()))

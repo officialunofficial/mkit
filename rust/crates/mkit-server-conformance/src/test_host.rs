@@ -473,9 +473,24 @@ impl TestHost {
                 },
             )
             .register(mkit_server::timers::quota_rollup::QuotaRollup {
-                coordinator: target,
+                coordinator: target.clone(),
                 metrics: NoopMetrics,
             });
+        // Kind 16 (a fork job) exists only where indexed mode runs on leased
+        // sharding; its handler's settings must equal the pipeline's.
+        let registry = if self.profile.sharding_d34 && self.profile.has(Feature::IndexedMode) {
+            registry.register(mkit_server::fork::ForkTimer {
+                store: target,
+                shards: Arc::new(mkit_server::pipeline::D34Shards),
+                clock: self.clock.clone(),
+                takedown_denial: self.profile.has(Feature::Takedown),
+                extract_min_bytes: Some(
+                    mkit_server::indexed::IndexedConfig::default().extract_min_bytes,
+                ),
+            })
+        } else {
+            registry
+        };
         #[cfg(feature = "__test-faults")]
         let registry = registry.register(mkit_server::timers::test_kind::TestTimer);
         self.drain_timers(partition, &registry, budget).await

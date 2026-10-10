@@ -63,11 +63,45 @@ fn ref_change(update: &RefUpdate) -> pb::RefChange {
 /// The wire identity the hook sees: `<namespace>/<name>`, or the bare name in
 /// a single-repository deployment.
 fn repository(op: &Operation) -> String {
-    if op.repo.namespace == NamespaceKey::deployment_default() {
-        op.repo.name.as_str().to_owned()
+    identity(&op.repo)
+}
+
+fn identity(repo: &crate::repo::RepoId) -> String {
+    if repo.namespace == NamespaceKey::deployment_default() {
+        repo.name.as_str().to_owned()
     } else {
-        format!("{}/{}", op.repo.namespace.as_str(), op.repo.name.as_str())
+        format!("{}/{}", repo.namespace.as_str(), repo.name.as_str())
     }
+}
+
+fn visibility_name(visibility: mkit_attest::grant::Visibility) -> &'static str {
+    match visibility {
+        mkit_attest::grant::Visibility::Public => "public",
+        mkit_attest::grant::Visibility::Private => "private",
+    }
+}
+
+fn fork(op: &Operation) -> Option<pb::ForkOperation> {
+    let OpKind::ForkRepo {
+        source,
+        source_ref,
+        expected_tip,
+        source_visibility,
+        source_visibility_revision,
+        dest_visibility,
+    } = &op.kind
+    else {
+        return None;
+    };
+    Some(pb::ForkOperation {
+        source_repository: Some(identity(source)),
+        source_ref: Some(source_ref.clone()),
+        expected_tip: Some(expected_tip.to_vec()),
+        source_visibility: Some(source_visibility.map_or("", visibility_name).to_owned()),
+        source_visibility_revision: Some(*source_visibility_revision),
+        dest_visibility: Some(visibility_name(*dest_visibility).to_owned()),
+        ..Default::default()
+    })
 }
 
 fn operation(op: &Operation, audience: &str) -> pb::Operation {
@@ -100,6 +134,7 @@ fn operation(op: &Operation, audience: &str) -> pb::Operation {
                 ..Default::default()
             })
             .into(),
+        fork: fork(op).into(),
         ..Default::default()
     }
 }
@@ -128,6 +163,15 @@ pub(super) fn admit_request(input: &AdmissionInput<'_>, audience: &str) -> pb::A
                 ..Default::default()
             })
             .collect(),
+        fork: input
+            .fork
+            .as_ref()
+            .map(|fork| pb::ForkAdmission {
+                source_repository: Some(identity(fork.source)),
+                pack_bytes: Some(fork.pack_bytes),
+                ..Default::default()
+            })
+            .into(),
         ..Default::default()
     }
 }

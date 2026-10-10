@@ -408,6 +408,7 @@ requires; remote Allow does not bypass them.
 | `refs` | The intended ref changes, in decision order. |
 | `owner` | Whether the principal owns the namespace under STC §7.5 rule 1; set on both Authorize and Admit requests. |
 | `grant` | The write grant used under STC §7.5 rule 2, if any, and its checked epoch; set on both Authorize and Admit requests. |
+| `fork` | Present only for a fork (§9.9): the source repository, branch and expected tip, the source's visibility and visibility revision read in the same coordinator snapshot, and the requested destination visibility. `operation.repository` is the destination. |
 
 For `ListRepos`, `operation.repository` is an arbitrary caller-chosen selector
 within the requested namespace, and its repository name need not exist. The
@@ -728,6 +729,7 @@ admission-specific fields:
 | `creates_repo` | Whether the write creates its repository. |
 | `new_to_repo_bytes` | Bytes new to this repository: zero when the upload's pack is already counted for the repository (§6.5.1), else its declared size; absent for an operation that adds no pack and when no admission hook is installed. A pre-admission observation: racing writes MAY both see the pack as new, and the committed counter (§6.5.1) is the authoritative value. |
 | `credential_headers` | Admission credential request headers under the forwarding rules below; empty on a first attempt without credentials. |
+| `fork` | Present only for a fork (§9.9): the source repository and the bytes the charge covers. Then `declared_bytes` and `new_to_repo_bytes` equal that count. |
 
 Creation signals and admission input are supplied as STC §5.1 requires.
 In particular, `new_to_repo_bytes` does not mean bytes new to the whole
@@ -1752,10 +1754,10 @@ should split very large flat directories into smaller subdirectories.
 A deployment in indexed mode with Multi addressing MAY implement a
 server-side fork: the published tip of one source branch and its history
 become the published membership of an empty destination repository, without
-a ref. It is an embedder-facing operation (no Connect binding in this
-revision); authorization, admission and the API surface are specified where
-the operation is exposed. This section specifies what a completed fork
-guarantees and what a later publication may rely on.
+a ref. It is an embedder-facing operation, `Pipeline::fork_repo` (no Connect
+binding in this revision). This section specifies the request, its
+authorization and admission, what a completed fork guarantees and what a later
+publication may rely on.
 
 **What is forked.** Only the current published value of one source branch
 `refs/heads/<x>`: head `T` and its paired packmap head `M`. The pack set `F`
@@ -1864,30 +1866,74 @@ copied, and:
   rewritten chain that no longer contains the flagged head gets the full walk;
 - a repository that was never forked carries no flag and reads nothing extra.
 
-**Admission and quota.** The reservation of a fork is bound to the job, not
-to the apply window: it expires with the job (24 hours), after which the next
-step aborts it with the normal `Aborted` outcome. Admission MUST give the
-pending reservation a reconcile time after the job's expiry, or the
-reservation reconciler would abort it under the running job; starting a fork
-with an earlier one is refused. The authority facts a request was authorized
-under (the namespace authority generation, the grant epoch, and whether the
-fork may create the namespace; a job started without them may not) are
-recorded in the job and re-checked when the destination is registered, since
-the job may run long after the request; a change fails the fork before
-anything is written, with the refusal an ordinary write gets for it. A
-persisted authority fence requires a fence on the fork. The embedder that
-exposes the operation owns what the engine does not see (the storage-lease
-executor and lease-recovery modes of §12) and MUST apply them before it starts
-a fork. An abandoned fork therefore
-holds its admitted quota for at most that long. The job re-checks the pending
-row before every unit of work, and a reservation settled elsewhere fails the
-job. The final batch commits the `Committed` outcome, the replay record and the
-admission charges atomically. `Committed` carries no ref change. Admission
-decides the charge, and a fork's quota is therefore advisory: forks started
-together are all admitted while the window has room, and a charge that no
-longer fits when the fork has already been published is not applied, since the
-work cannot be undone. A deployment that needs a hard bound charges at
-admission.
+**Request.** `ForkRequest` names the source repository, the branch
+`refs/heads/<x>`, the `expected_tip` (required) and the destination
+visibility; the operation's repository is the destination. It has a canonical
+body of five `\n`-separated lines with no trailing newline (`mkit-fork:v1`,
+`<source namespace>/<source name>`, the branch, the tip in 64 lowercase hex
+digits, `public` or `private`), and the signed request's `body:` commitment
+MUST be the digest of exactly that body, so a signature binds what is forked.
+The request is signed (auth v2) for procedure `/mkit.server.v1/ForkRepo`;
+a grant never authorizes it. `Pipeline::fork_repo` requires multi-repository
+addressing, leased sharding and indexed mode, and answers `failed_precondition`
+otherwise.
+
+**Authorization.** In order: a finished fork of the same signed request
+returns its stored result (a replay); the caller MUST be able to read the
+source (the read allowance the source's `ReadRef` gets), and every refusal of
+that, including an absent source, is the uniform `not_found` `source not
+found`; the destination write is then authorized like any write of the
+namespace, with the source's visibility and visibility revision read in the
+same coordinator snapshot passed to the Authorize hook in the operation's
+`fork` field. mkit encodes no visibility policy: whether a private source may
+become a public destination is the hook's decision.
+
+**Admission and quota.** Admission sees `fork` with the bytes the charge
+covers: the source's counted bytes (§6.5.1), an upper bound of the inherited
+bytes (the pack set is a subset of the packs counted for the source), and
+`declared_bytes` and `new_to_repo_bytes` equal to it, since every inherited pack
+is new to the empty destination. The quota charges are applied once, in the
+batch that creates the job, so the quota is a hard bound: a window that cannot
+hold the fork refuses it with `resource_exhausted` before any work, and a
+charge is never applied at completion. A fork whose resolved pack set is larger
+than the bytes it was admitted for (the source gained packs between the
+admission and the plan) fails before the destination is registered with
+`resource_exhausted` `fork exceeds the bytes admitted; retry`; the charge stays
+spent for its window. An abandoned or failed fork keeps its charge, and a
+second request for the same fork (same binding, another nonce) joins the job
+and is not charged; it releases its own reservation as a replay race.
+
+The reservation of a fork is bound to the job, not to the apply window: it
+expires with the job (24 hours), after which the next step aborts it with the
+normal `Aborted` outcome. Admission MUST give the pending reservation a
+reconcile time after the job's expiry, or the reservation reconciler would
+abort it under the running job; starting a fork with an earlier one is
+refused. The authority facts a request was authorized under (the namespace
+authority generation, the grant epoch, and whether the fork may create the
+namespace; a job started without them may not) are recorded in the job and
+re-checked when the destination is registered, since the job may run long after
+the request; a change fails the fork before anything is written, with the
+refusal an ordinary write gets for it. A persisted authority fence requires a
+fence on the fork. The embedder that exposes the operation owns what the
+engine does not see (the storage-lease executor and lease-recovery modes of
+§12) and MUST apply them before it starts a fork, and MUST configure the fork
+timer (kind 16) with the same `takedown_denial` and extraction threshold as the
+pipeline. An abandoned fork therefore holds its reservation for at most that
+long. The job re-checks the pending row before every unit of work, and a
+reservation settled elsewhere fails the job. The final batch commits the
+`Committed` outcome (`bytes_stored` and `new_to_repo` equal the inherited
+bytes, no ref change) and the replay record atomically.
+
+**Result and replay.** While the job runs, the request answers `unavailable`
+`fork in progress` with a `Retry-After` hint, and the client repeats the same
+request (a fresh nonce attaches to the same job; the original nonce also works
+and returns the result once the job has finished). A finished fork returns the
+lineage anchor: the source, branch, tip, the source's publication sequence,
+the packmap head, the pack count and bytes, the number of index rows copied, a
+digest of the sorted pack ids and the membership generation. A terminal
+failure is replayed to later callers. The destination MUST NOT exist before the
+first request: the fork registers it, and a destination registered by anything
+else answers `destination not empty`.
 
 **Takedown reachability.** A destination holds members from its first
 membership write on, is registered before it, and carries an `i` row for every
@@ -4717,7 +4763,7 @@ client-visible error contract.
 
 | Version | Status | Change |
 |---|---|---|
-| 1 | draft | Server-side fork (§9.9): a durable, resumable job that gives an empty destination the published membership of one source branch (packmap chain, listed packs and external-base packs), the cleared set and the flagged packmap head that bound later publication walks, and admission bound to the job. Additive: witness boundary flag (`m`/`pm` value of 20 bytes), `fj` and `fo` rows, timer kind 16, `Procedure::Fork`. No wire change; no stored-row version change. |
+| 1 | draft | Server-side fork (§9.9): a durable, resumable job that gives an empty destination the published membership of one source branch (packmap chain, listed packs and external-base packs), the cleared set and the flagged packmap head that bound later publication walks, and admission bound to the job. Additive: witness boundary flag (`m`/`pm` value of 20 bytes), `fj` and `fo` rows, timer kind 16, `Procedure::Fork`; the embedder-facing `ForkRequest` with its canonical signed body, `Pipeline::fork_repo`, the source-read and destination-write authorization, a hard-bound admission charge, and additive hook fields (`Operation.fork`, `AdmitRequest.fork`). No Connect wire change; no stored-row version change. |
 | 1 | draft | Authority-generation setter and getter without a namespace record under `any`; authority-mode registration and the refusal of unregistered writes (§6.2.2); the `ag` guard on the fenced namespace-creation batch; one-batch replacement of a stale-generation upload ticket (§6.2.1). No wire change; no stored row changes. |
 | 1 | draft | Opt-in authority-owned namespace grammar and trust model (§6.2.2), wildcard generation-key scopes, refused owner statements, and hook writer authority for owner-view operations. Default self-certifying deployments retain their behavior. |
 | 1 | draft | Document retained local Workers wire connection-loss diagnostics (§18); no conformance, runtime or wire change. |
@@ -4775,6 +4821,8 @@ round-tripping only the decoded message can miss fields discarded at decode.
 | `authorize-deny.response.json` | Deliberate Authorize denial code and public message (§6.2). |
 | `admit.request.json` | BeginUpload pack id, declared bytes, authorization facts, repository-byte presence, and a fake admission credential header (§6.3). |
 | `admit-first-attempt.request.json` | First-attempt Admit input with no credential headers (§6.3). |
+| `authorize-fork.request.json` | A fork's operation: destination repository, source, branch, expected tip, source visibility and revision, and requested visibility (§6.2, §9.9). |
+| `admit-fork.request.json` | A fork's Admit input: the source and the bytes the charge covers (§6.3, §9.9). |
 | `admit-allow.response.json` | Reservation id and allowed receipt pass-through (§6.3, §6.6). |
 | `admit-allow-external-ref.response.json` | Optional implementer reference carried into a storage receipt (§6.3, §15). |
 | `admit-challenge.response.json` | Opaque challenge and example payment challenge header (§6.3, §6.6). |

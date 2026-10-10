@@ -632,10 +632,32 @@ impl Source {
             )
     }
 
+    /// The deployment's timers plus the fork job's.
+    pub fn fork_registry(&self, takedown_denial: bool) -> TimerRegistry<'static, Counting> {
+        self.registry().register(mkit_server::fork::ForkTimer {
+            store: self.store.clone(),
+            shards: self.shards.clone(),
+            clock: self.clock.clone(),
+            takedown_denial,
+            extract_min_bytes: Some(self.cfg.extract_min_bytes),
+        })
+    }
+
     pub fn authenticate(
         &self,
         procedure: mkit_server::Procedure,
         nonce: u32,
+    ) -> mkit_server::pipeline::Authenticated {
+        self.authenticate_body(procedure, nonce, b"fork-test")
+    }
+
+    /// [`Self::authenticate`] over a given unary body, as a request to this
+    /// repository signed by the namespace owner.
+    pub fn authenticate_body(
+        &self,
+        procedure: mkit_server::Procedure,
+        nonce: u32,
+        body: &[u8],
     ) -> mkit_server::pipeline::Authenticated {
         use ed25519_dalek::{Signer, SigningKey};
         use mkit_core::{
@@ -644,7 +666,7 @@ impl Source {
         };
         let owner = SigningKey::from_bytes(&[7; 32]);
         let identity = format!("{}/{}", self.namespace, self.name);
-        let digest = to_hex(&hash(b"fork-test"));
+        let digest = to_hex(&hash(body));
         let commitment = format!("body:{digest}");
         let nonce = format!("{nonce:064x}");
         let now = self.clock.now_ms();
@@ -683,7 +705,7 @@ impl Source {
                         .map(|(_, value)| value.clone())
                 },
                 header_values: None,
-                unary_body: Some(b"fork-test"),
+                unary_body: Some(body),
                 transport_principal: None,
             })
             .unwrap()

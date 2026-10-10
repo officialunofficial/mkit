@@ -35,6 +35,29 @@ message Operation {
   bool owner = 7;
   // Grant-rule result, if any, set for Authorize and Admit; SPEC-SERVER §6.2.
   GrantUsed grant = 8;
+  // Present only for a fork: the source and the facts it was read with;
+  // SPEC-SERVER §9.9.
+  ForkOperation fork = 9;
+}
+
+// What a fork reads and writes. The operation's repository is the
+// destination; the Authority hook decides on these facts and mkit encodes no
+// visibility policy of its own; SPEC-SERVER §9.9.
+message ForkOperation {
+  // Source repository identity, in the form of Operation.repository.
+  string source_repository = 1;
+  // Source branch, refs/heads/<name>.
+  string source_ref = 2;
+  // Raw 32-byte published tip the caller expects the source to have.
+  bytes expected_tip = 3;
+  // "public" or "private": the source's visibility, read in the same
+  // coordinator snapshot as the fork. Empty when the deployment keeps none.
+  string source_visibility = 4;
+  // The source's visibility revision (its fence counter) from the same
+  // snapshot; zero when none is stored.
+  uint64 source_visibility_revision = 5;
+  // "public" or "private": the destination visibility the caller asks for.
+  string dest_visibility = 6;
 }
 
 // Credential class and verified identity, without bearer secrets; SPEC-SERVER §6.2.
@@ -173,6 +196,18 @@ message AdmitRequest {
   uint64 new_to_repo_bytes = 6;
   // Admission credential headers the client attached; SPEC-SERVER §6.3.
   repeated Header credential_headers = 7;
+  // Present only for a fork: what its charge is for; SPEC-SERVER §9.9.
+  ForkAdmission fork = 8;
+}
+
+// The inherited bytes a fork is charged for, an upper bound read with the
+// fork (the source's stored-bytes counter); the destination is empty, so all
+// of it is new to the repository; SPEC-SERVER §9.9.
+message ForkAdmission {
+  // Source repository identity, in the form of Operation.repository.
+  string source_repository = 1;
+  // Bytes the admission charge covers; equals declared_bytes.
+  uint64 pack_bytes = 2;
 }
 
 // Admission decision with no internal quota charges on the wire; SPEC-SERVER §6.3.

@@ -23,6 +23,7 @@ pub mod __buffa {
     /// Register this package's `Any` type entries and extension entries.
     pub fn register_types(reg: &mut ::buffa::type_registry::TypeRegistry) {
         reg.register_json_any(super::__OPERATION_JSON_ANY);
+        reg.register_json_any(super::__FORK_OPERATION_JSON_ANY);
         reg.register_json_any(super::__PRINCIPAL_JSON_ANY);
         reg.register_json_any(super::__ANONYMOUS_JSON_ANY);
         reg.register_json_any(super::__SIGNER_JSON_ANY);
@@ -39,6 +40,7 @@ pub mod __buffa {
         reg.register_json_any(super::__AUTHORIZE_ALLOW_JSON_ANY);
         reg.register_json_any(super::__DENY_JSON_ANY);
         reg.register_json_any(super::__ADMIT_REQUEST_JSON_ANY);
+        reg.register_json_any(super::__FORK_ADMISSION_JSON_ANY);
         reg.register_json_any(super::__ADMIT_RESPONSE_JSON_ANY);
         reg.register_json_any(super::__ADMIT_ALLOW_JSON_ANY);
         reg.register_json_any(super::__ADMIT_CHALLENGE_JSON_ANY);

@@ -69,7 +69,8 @@ pub struct ReplayV1 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettleV1 {
-    /// Reservation id.
+    /// Reservation id; empty when admission granted no reservation (the
+    /// default admission), in which case there is no outcome to settle.
     pub rid: String,
     /// The exact pending reservation value, the arbiter every contender
     /// guards.
@@ -78,8 +79,14 @@ pub struct SettleV1 {
     pub repository: String,
     /// The replay record to commit with the outcome.
     pub replay: Option<ReplayV1>,
-    /// The admission charges.
+    /// The admission charges. [`super::start_with`] applies them in the batch
+    /// that creates the job (so quota is a hard bound: an exhausted window
+    /// refuses the fork before any work) and stores the job with this list
+    /// emptied.
     pub charges: Vec<ChargeV1>,
+    /// The inherited bytes admission charged for, an upper bound the plan
+    /// must stay within: the fork fails if the pack set it resolves is larger.
+    pub declared_bytes: u64,
 }
 
 async fn read_counters<S: NamespaceStore>(
@@ -111,8 +118,56 @@ fn append(batch: &mut Batch, pre: Vec<Precondition>, writes: Vec<Write>) {
     batch.writes.extend(writes);
 }
 
-/// The effects that commit the fork's outcome: `Committed`, the replay
-/// record and the admission charges, all in the caller's single batch.
+fn quota_reason(message: &str) -> &'static str {
+    if message.contains("op quota") {
+        "write op quota exceeded for this window; try again later"
+    } else {
+        "write byte quota exceeded for this window; try again later"
+    }
+}
+
+/// The charges of a new job, planned against the destination coordinator's
+/// quota rows. An exhausted window refuses the fork: this is where quota
+/// binds, once, before any work (the commit of the outcome charges nothing).
+pub(crate) async fn charge<S: NamespaceStore>(
+    env: &ForkEnv<'_, S>,
+    coordinator: &crate::store::Partition,
+    settle: &SettleV1,
+    now: u64,
+) -> Result<(Vec<Precondition>, Vec<Write>), ForkError> {
+    let wanted: Vec<Key> = settle
+        .charges
+        .iter()
+        .map(|c| keys::quota(&c.charge().scope))
+        .collect();
+    let mut snapshot = Snapshot::default();
+    if !wanted.is_empty() {
+        let rows = env.store.get_many(coordinator, &wanted).await?;
+        for (key, row) in wanted.iter().zip(rows) {
+            snapshot.insert(key.clone(), row);
+        }
+    }
+    let (mut pre, mut writes) = (Vec::new(), Vec::new());
+    for charge in &settle.charges {
+        plan_charge(
+            &charge.charge(),
+            &snapshot,
+            i64::try_from(now).unwrap_or(i64::MAX),
+            &mut pre,
+            &mut writes,
+        )
+        .map_err(|error| match error.code() {
+            crate::Code::ResourceExhausted => {
+                ForkError::Quota(quota_reason(error.public_message()))
+            }
+            _ => ForkError::from(error),
+        })?;
+    }
+    Ok((pre, writes))
+}
+
+/// The effects that commit the fork's outcome: `Committed` and the replay
+/// record, in the caller's single batch.
 pub(crate) async fn commit<S: NamespaceStore>(
     env: &ForkEnv<'_, S>,
     job: &ForkJobV1,
@@ -122,49 +177,28 @@ pub(crate) async fn commit<S: NamespaceStore>(
     let Some(settle) = &job.settle else {
         return Ok(batch);
     };
-    let charge_keys: Vec<Key> = settle
-        .charges
-        .iter()
-        .map(|c| keys::quota(&c.charge().scope))
-        .collect();
-    let (os, oc, snapshot) = read_counters(env, job, &charge_keys).await?;
-    for charge in &settle.charges {
+    if !settle.rid.is_empty() {
+        let (os, oc, _) = read_counters(env, job, &[]).await?;
+        let mut outbox = builder(os.as_ref(), oc.as_ref())?;
+        let pending = Value::new(settle.pending.clone());
+        outbox.outcome(
+            &settle.rid,
+            &pending,
+            Terminal::new(ReservationV1::Committed {
+                repository: settle.repository.clone(),
+                occurred_at_ms: now,
+                bytes_stored: job.pack_bytes(),
+                new_to_repo: job.pack_bytes(),
+                new_to_store: 0,
+                refs: Vec::new(),
+                procedure: StoredProcedure::Fork,
+            })?,
+        );
+        outbox.relay_at(now);
         let (mut pre, mut writes) = (Vec::new(), Vec::new());
-        // Admission decided this charge when it granted the request. A window
-        // that has filled up since then does not undo a fork that is already
-        // published, so an exhausted charge is not applied; a corrupt row
-        // still stops the commit.
-        match plan_charge(
-            &charge.charge(),
-            &snapshot,
-            i64::try_from(now).unwrap_or(i64::MAX),
-            &mut pre,
-            &mut writes,
-        ) {
-            Ok(()) => append(&mut batch, pre, writes),
-            Err(error) if error.code() == crate::Code::ResourceExhausted => {}
-            Err(error) => return Err(ForkError::from(error)),
-        }
+        outbox.try_finish(&mut pre, &mut writes)?;
+        append(&mut batch, pre, writes);
     }
-    let mut outbox = builder(os.as_ref(), oc.as_ref())?;
-    let pending = Value::new(settle.pending.clone());
-    outbox.outcome(
-        &settle.rid,
-        &pending,
-        Terminal::new(ReservationV1::Committed {
-            repository: settle.repository.clone(),
-            occurred_at_ms: now,
-            bytes_stored: job.pack_bytes(),
-            new_to_repo: job.pack_bytes(),
-            new_to_store: 0,
-            refs: Vec::new(),
-            procedure: StoredProcedure::Fork,
-        })?,
-    );
-    outbox.relay_at(now);
-    let (mut pre, mut writes) = (Vec::new(), Vec::new());
-    outbox.try_finish(&mut pre, &mut writes)?;
-    append(&mut batch, pre, writes);
     if let Some(replay) = &settle.replay {
         let key = keys::replay(&replay.scope);
         batch = batch
@@ -198,7 +232,7 @@ pub(crate) async fn abort<S: NamespaceStore>(
     reason: AbortReason,
 ) -> Result<Batch, ForkError> {
     let mut batch = Batch::new();
-    let Some(settle) = &job.settle else {
+    let Some(settle) = job.settle.as_ref().filter(|s| !s.rid.is_empty()) else {
         return Ok(batch);
     };
     let p = env.shards.coordinator(&job.dest()?.namespace);
@@ -238,7 +272,7 @@ pub(crate) async fn current<S: NamespaceStore>(
     env: &ForkEnv<'_, S>,
     job: &ForkJobV1,
 ) -> Result<bool, ForkError> {
-    let Some(settle) = &job.settle else {
+    let Some(settle) = job.settle.as_ref().filter(|s| !s.rid.is_empty()) else {
         return Ok(true);
     };
     let p = env.shards.coordinator(&job.dest()?.namespace);

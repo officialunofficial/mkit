@@ -903,6 +903,7 @@ mod settlement {
                 max_ops: 10,
                 max_bytes: 1 << 30,
             }],
+            declared_bytes: 1 << 40,
         }
     }
 
@@ -1814,36 +1815,109 @@ async fn an_already_registered_destination_is_not_a_fork_destination() {
     );
 }
 
+async fn quota_ops(source: &Source, dest_id: &RepoId) -> Option<u32> {
+    let scope = mkit_server::quota::QuotaScope::for_signer(&dest_id.namespace, &[1; 32]);
+    source
+        .store
+        .inner
+        .get(
+            &source.shards.coordinator(&dest_id.namespace),
+            &keys::quota(&scope),
+        )
+        .await
+        .unwrap()
+        .map(|raw| {
+            mkit_server::store::adapter_spi::codec::decode_quota_state(&raw)
+                .unwrap()
+                .ops
+        })
+}
+
 #[tokio::test]
-async fn a_quota_window_that_filled_up_does_not_undo_a_published_fork() {
-    use mkit_server::fork::{ChargeV1, ReplayV1, SettleV1};
+async fn quota_is_a_hard_bound_charged_once_with_the_job() {
+    use mkit_server::fork::{ForkError, StartOutcome};
     let source = Source::build("source", 6).await;
     let dest_id = dest(&source, "forked");
-    let mut settle: SettleV1 = settlement::admit(&source, &dest_id).await;
-    settle.charges = vec![ChargeV1 {
-        scope: mkit_server::quota::QuotaScope::for_signer(&dest_id.namespace, &[1; 32])
-            .as_str()
-            .to_owned(),
-        bytes: 0,
-        window_ms: 3_600_000,
-        // No operation fits: the window is full by the time the fork ends.
-        max_ops: 0,
-        max_bytes: 1 << 30,
-    }];
-    settle.replay = Some(ReplayV1 {
-        scope: [3; 32],
-        fingerprint: [4; 32],
-        expires_at_ms: source.clock.now_ms() + 300_000,
-    });
+    let settle = settlement::admit(&source, &dest_id).await;
+    let started = mkit_server::fork::start(
+        &env(&source),
+        &spec(&source, "forked"),
+        Some(settle.clone()),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(started, StartOutcome::Started(_)));
+    // The charge landed with the job, before any work.
+    assert_eq!(quota_ops(&source, &dest_id).await, Some(1));
+    assert!(
+        started.job().settle.as_ref().unwrap().charges.is_empty(),
+        "the stored row does not carry the applied charges"
+    );
+    // The same fork again is the same job and is not charged again.
+    let again = mkit_server::fork::start(&env(&source), &spec(&source, "forked"), Some(settle))
+        .await
+        .unwrap();
+    assert!(matches!(again, StartOutcome::Existing(_)));
+    assert_eq!(quota_ops(&source, &dest_id).await, Some(1));
+    // Running it charges nothing more.
+    assert_eq!(run(&source, "forked").await.phase, Phase::Done);
+    assert_eq!(quota_ops(&source, &dest_id).await, Some(1));
+
+    // A window that cannot hold the fork refuses it before any row is
+    // written: no job, no registered destination, the window untouched.
+    let source = Source::build("source", 6).await;
+    let dest_id = dest(&source, "forked");
+    let base = settlement::admit(&source, &dest_id).await;
+    let mut full = base.clone();
+    full.charges[0].max_ops = 0;
+    assert_eq!(
+        mkit_server::fork::start(&env(&source), &spec(&source, "forked"), Some(full))
+            .await
+            .unwrap_err(),
+        ForkError::Quota("write op quota exceeded for this window; try again later")
+    );
+    assert!(
+        mkit_server::fork::read_job(&source.store, source.shards.as_ref(), &dest_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(quota_ops(&source, &dest_id).await, None);
+    let mut bytes = base;
+    bytes.charges[0].bytes = 10;
+    bytes.charges[0].max_bytes = 5;
+    assert_eq!(
+        mkit_server::fork::start(&env(&source), &spec(&source, "forked"), Some(bytes))
+            .await
+            .unwrap_err(),
+        ForkError::Quota("write byte quota exceeded for this window; try again later")
+    );
+}
+
+#[tokio::test]
+async fn a_pack_set_larger_than_the_admitted_bytes_fails_the_fork_before_registration() {
+    use mkit_server::store::adapter_spi::codec::{AbortReason, ReservationV1};
+    let source = Source::build("source", 6).await;
+    let dest_id = dest(&source, "forked");
+    let mut settle = settlement::admit(&source, &dest_id).await;
+    settle.declared_bytes = 1;
     mkit_server::fork::start(&env(&source), &spec(&source, "forked"), Some(settle))
         .await
         .unwrap();
     let job = run(&source, "forked").await;
-    assert_eq!(job.phase, Phase::Done, "{:?}", job.failure);
+    assert_eq!(job.phase, Phase::Failed);
+    assert_eq!(
+        job.failure.unwrap().error().public_message(),
+        "fork exceeds the bytes admitted; retry"
+    );
     assert!(matches!(
         settlement::outcome(&source, &dest_id).await,
-        mkit_server::store::adapter_spi::codec::ReservationV1::Committed { .. }
+        ReservationV1::Aborted {
+            reason: AbortReason::Unspecified,
+            ..
+        }
     ));
+    assert!(dest_state(&source, &dest_id).await.is_empty());
 }
 
 #[tokio::test]

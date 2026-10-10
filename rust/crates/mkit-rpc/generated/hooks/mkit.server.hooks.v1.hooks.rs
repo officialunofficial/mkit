@@ -1448,6 +1448,15 @@ pub struct Operation {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
     )]
     pub grant: ::buffa::MessageField<GrantUsed, ::buffa::Inline<GrantUsed>>,
+    /// Present only for a fork: the source and the facts it was read with;
+    /// SPEC-SERVER §9.9.
+    ///
+    /// Field 9: `fork`
+    #[serde(
+        rename = "fork",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
+    )]
+    pub fork: ::buffa::MessageField<ForkOperation, ::buffa::Inline<ForkOperation>>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -1463,6 +1472,7 @@ impl ::core::fmt::Debug for Operation {
             .field("refs", &self.refs)
             .field("owner", &self.owner)
             .field("grant", &self.grant)
+            .field("fork", &self.fork)
             .finish()
     }
 }
@@ -1581,6 +1591,14 @@ impl ::buffa::Message for Operation {
                 += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
                     + inner_size as u64;
         }
+        if self.fork.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.fork.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -1629,6 +1647,14 @@ impl ::buffa::Message for Operation {
                 buf,
             );
             self.grant.write_to(__cache, buf);
+        }
+        if self.fork.is_set() {
+            ::buffa::types::put_len_delimited_header(
+                9u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            self.fork.write_to(__cache, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -1734,6 +1760,17 @@ impl ::buffa::Message for Operation {
                     ctx,
                 )?;
             }
+            9u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::Message::merge_length_delimited(
+                    self.fork.get_or_insert_default(),
+                    buf,
+                    ctx,
+                )?;
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -1750,6 +1787,7 @@ impl ::buffa::Message for Operation {
         self.refs.clear();
         self.owner = ::core::option::Option::None;
         self.grant = ::buffa::MessageField::none();
+        self.fork = ::buffa::MessageField::none();
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -1780,6 +1818,345 @@ pub const __OPERATION_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::
     type_url: "type.googleapis.com/mkit.server.hooks.v1.Operation",
     to_json: ::buffa::type_registry::any_to_json::<Operation>,
     from_json: ::buffa::type_registry::any_from_json::<Operation>,
+    is_wkt: false,
+};
+/// What a fork reads and writes. The operation's repository is the
+/// destination; the Authority hook decides on these facts and mkit encodes no
+/// visibility policy of its own; SPEC-SERVER §9.9.
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct ForkOperation {
+    /// Source repository identity, in the form of Operation.repository.
+    ///
+    /// Field 1: `source_repository`
+    #[serde(
+        rename = "sourceRepository",
+        alias = "source_repository",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub source_repository: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Source branch, refs/heads/\<name\>.
+    ///
+    /// Field 2: `source_ref`
+    #[serde(
+        rename = "sourceRef",
+        alias = "source_ref",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub source_ref: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Raw 32-byte published tip the caller expects the source to have.
+    ///
+    /// Field 3: `expected_tip`
+    #[serde(
+        rename = "expectedTip",
+        alias = "expected_tip",
+        with = "::buffa::json_helpers::opt_bytes",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub expected_tip: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
+    /// "public" or "private": the source's visibility, read in the same
+    /// coordinator snapshot as the fork. Empty when the deployment keeps none.
+    ///
+    /// Field 4: `source_visibility`
+    #[serde(
+        rename = "sourceVisibility",
+        alias = "source_visibility",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub source_visibility: ::core::option::Option<::buffa::alloc::string::String>,
+    /// The source's visibility revision (its fence counter) from the same
+    /// snapshot; zero when none is stored.
+    ///
+    /// Field 5: `source_visibility_revision`
+    #[serde(
+        rename = "sourceVisibilityRevision",
+        alias = "source_visibility_revision",
+        with = "::buffa::json_helpers::opt_uint64",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub source_visibility_revision: ::core::option::Option<u64>,
+    /// "public" or "private": the destination visibility the caller asks for.
+    ///
+    /// Field 6: `dest_visibility`
+    #[serde(
+        rename = "destVisibility",
+        alias = "dest_visibility",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub dest_visibility: ::core::option::Option<::buffa::alloc::string::String>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for ForkOperation {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("ForkOperation")
+            .field("source_repository", &self.source_repository)
+            .field("source_ref", &self.source_ref)
+            .field("expected_tip", &self.expected_tip)
+            .field("source_visibility", &self.source_visibility)
+            .field("source_visibility_revision", &self.source_visibility_revision)
+            .field("dest_visibility", &self.dest_visibility)
+            .finish()
+    }
+}
+impl ForkOperation {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.server.hooks.v1.ForkOperation";
+}
+impl ForkOperation {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::source_repository`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_source_repository(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.source_repository = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::source_ref`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_source_ref(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.source_ref = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::expected_tip`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_expected_tip(
+        mut self,
+        value: impl Into<::buffa::alloc::vec::Vec<u8>>,
+    ) -> Self {
+        self.expected_tip = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::source_visibility`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_source_visibility(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.source_visibility = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::source_visibility_revision`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_source_visibility_revision(mut self, value: u64) -> Self {
+        self.source_visibility_revision = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::dest_visibility`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_dest_visibility(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.dest_visibility = Some(value.into());
+        self
+    }
+}
+::buffa::impl_default_instance!(ForkOperation);
+impl ::buffa::MessageName for ForkOperation {
+    const PACKAGE: &'static str = "mkit.server.hooks.v1";
+    const NAME: &'static str = "ForkOperation";
+    const FULL_NAME: &'static str = "mkit.server.hooks.v1.ForkOperation";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.server.hooks.v1.ForkOperation";
+}
+impl ::buffa::Message for ForkOperation {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(ref v) = self.source_repository {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        if let Some(ref v) = self.source_ref {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        if let Some(ref v) = self.expected_tip {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
+        if let Some(ref v) = self.source_visibility {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        if let Some(v) = self.source_visibility_revision {
+            size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+        }
+        if let Some(ref v) = self.dest_visibility {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.source_repository {
+            ::buffa::types::put_string_field(1u32, v, buf);
+        }
+        if let Some(ref v) = self.source_ref {
+            ::buffa::types::put_string_field(2u32, v, buf);
+        }
+        if let Some(ref v) = self.expected_tip {
+            ::buffa::types::put_shared_bytes_field(3u32, v, buf);
+        }
+        if let Some(ref v) = self.source_visibility {
+            ::buffa::types::put_string_field(4u32, v, buf);
+        }
+        if let Some(v) = self.source_visibility_revision {
+            ::buffa::types::put_uint64_field(5u32, v, buf);
+        }
+        if let Some(ref v) = self.dest_visibility {
+            ::buffa::types::put_string_field(6u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self
+                        .source_repository
+                        .get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self
+                        .source_ref
+                        .get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_bytes(
+                    self.expected_tip.get_or_insert_with(::buffa::alloc::vec::Vec::new),
+                    buf,
+                )?;
+            }
+            4u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self
+                        .source_visibility
+                        .get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            5u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.source_visibility_revision = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint64(buf)?,
+                );
+            }
+            6u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self
+                        .dest_visibility
+                        .get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.source_repository = ::core::option::Option::None;
+        self.source_ref = ::core::option::Option::None;
+        self.expected_tip = ::core::option::Option::None;
+        self.source_visibility = ::core::option::Option::None;
+        self.source_visibility_revision = ::core::option::Option::None;
+        self.dest_visibility = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for ForkOperation {
+    const PROTO_FQN: &'static str = "mkit.server.hooks.v1.ForkOperation";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for ForkOperation {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __FORK_OPERATION_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/mkit.server.hooks.v1.ForkOperation",
+    to_json: ::buffa::type_registry::any_to_json::<ForkOperation>,
+    from_json: ::buffa::type_registry::any_from_json::<ForkOperation>,
     is_wkt: false,
 };
 /// Credential class and verified identity, without bearer secrets; SPEC-SERVER §6.2.
@@ -4754,6 +5131,14 @@ pub struct AdmitRequest {
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
     pub credential_headers: ::buffa::alloc::vec::Vec<Header>,
+    /// Present only for a fork: what its charge is for; SPEC-SERVER §9.9.
+    ///
+    /// Field 8: `fork`
+    #[serde(
+        rename = "fork",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
+    )]
+    pub fork: ::buffa::MessageField<ForkAdmission, ::buffa::Inline<ForkAdmission>>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -4768,6 +5153,7 @@ impl ::core::fmt::Debug for AdmitRequest {
             .field("creates_repo", &self.creates_repo)
             .field("new_to_repo_bytes", &self.new_to_repo_bytes)
             .field("credential_headers", &self.credential_headers)
+            .field("fork", &self.fork)
             .finish()
     }
 }
@@ -4869,6 +5255,14 @@ impl ::buffa::Message for AdmitRequest {
                 += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
                     + inner_size as u64;
         }
+        if self.fork.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.fork.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -4909,6 +5303,14 @@ impl ::buffa::Message for AdmitRequest {
                 buf,
             );
             v.write_to(__cache, buf);
+        }
+        if self.fork.is_set() {
+            ::buffa::types::put_len_delimited_header(
+                8u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            self.fork.write_to(__cache, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -4992,6 +5394,17 @@ impl ::buffa::Message for AdmitRequest {
                 ::buffa::Message::merge_length_delimited(&mut elem, buf, ctx)?;
                 self.credential_headers.push(elem);
             }
+            8u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::Message::merge_length_delimited(
+                    self.fork.get_or_insert_default(),
+                    buf,
+                    ctx,
+                )?;
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -5007,6 +5420,7 @@ impl ::buffa::Message for AdmitRequest {
         self.creates_repo = ::core::option::Option::None;
         self.new_to_repo_bytes = ::core::option::Option::None;
         self.credential_headers.clear();
+        self.fork = ::buffa::MessageField::none();
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -5037,6 +5451,188 @@ pub const __ADMIT_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buf
     type_url: "type.googleapis.com/mkit.server.hooks.v1.AdmitRequest",
     to_json: ::buffa::type_registry::any_to_json::<AdmitRequest>,
     from_json: ::buffa::type_registry::any_from_json::<AdmitRequest>,
+    is_wkt: false,
+};
+/// The inherited bytes a fork is charged for, an upper bound read with the
+/// fork (the source's stored-bytes counter); the destination is empty, so all
+/// of it is new to the repository; SPEC-SERVER §9.9.
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct ForkAdmission {
+    /// Source repository identity, in the form of Operation.repository.
+    ///
+    /// Field 1: `source_repository`
+    #[serde(
+        rename = "sourceRepository",
+        alias = "source_repository",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub source_repository: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Bytes the admission charge covers; equals declared_bytes.
+    ///
+    /// Field 2: `pack_bytes`
+    #[serde(
+        rename = "packBytes",
+        alias = "pack_bytes",
+        with = "::buffa::json_helpers::opt_uint64",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub pack_bytes: ::core::option::Option<u64>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for ForkAdmission {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("ForkAdmission")
+            .field("source_repository", &self.source_repository)
+            .field("pack_bytes", &self.pack_bytes)
+            .finish()
+    }
+}
+impl ForkAdmission {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.server.hooks.v1.ForkAdmission";
+}
+impl ForkAdmission {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::source_repository`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_source_repository(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.source_repository = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::pack_bytes`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_pack_bytes(mut self, value: u64) -> Self {
+        self.pack_bytes = Some(value);
+        self
+    }
+}
+::buffa::impl_default_instance!(ForkAdmission);
+impl ::buffa::MessageName for ForkAdmission {
+    const PACKAGE: &'static str = "mkit.server.hooks.v1";
+    const NAME: &'static str = "ForkAdmission";
+    const FULL_NAME: &'static str = "mkit.server.hooks.v1.ForkAdmission";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.server.hooks.v1.ForkAdmission";
+}
+impl ::buffa::Message for ForkAdmission {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(ref v) = self.source_repository {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        if let Some(v) = self.pack_bytes {
+            size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.source_repository {
+            ::buffa::types::put_string_field(1u32, v, buf);
+        }
+        if let Some(v) = self.pack_bytes {
+            ::buffa::types::put_uint64_field(2u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self
+                        .source_repository
+                        .get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.pack_bytes = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint64(buf)?,
+                );
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.source_repository = ::core::option::Option::None;
+        self.pack_bytes = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for ForkAdmission {
+    const PROTO_FQN: &'static str = "mkit.server.hooks.v1.ForkAdmission";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for ForkAdmission {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __FORK_ADMISSION_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/mkit.server.hooks.v1.ForkAdmission",
+    to_json: ::buffa::type_registry::any_to_json::<ForkAdmission>,
+    from_json: ::buffa::type_registry::any_from_json::<ForkAdmission>,
     is_wkt: false,
 };
 /// Admission decision with no internal quota charges on the wire; SPEC-SERVER §6.3.

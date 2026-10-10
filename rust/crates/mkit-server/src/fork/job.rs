@@ -95,6 +95,16 @@ pub async fn start_with<S: NamespaceStore>(
     require_unregistered(env, &spec.dest).await?;
     let now = env.now();
     check_request(env, &p, now, settle.as_ref(), fence.as_ref()).await?;
+    // Quota binds here, with the job: the charge commits in the batch that
+    // creates it, so a fork the window cannot hold is refused before any work.
+    let (charge_pre, charge_writes, settle) = match settle {
+        Some(mut settle) => {
+            let (pre, writes) = settle::charge(env, &p, &settle, now).await?;
+            settle.charges.clear();
+            (pre, writes, Some(settle))
+        }
+        None => (Vec::new(), Vec::new(), None),
+    };
     let job = ForkJobV1 {
         binding: wanted,
         dest_ns: spec.dest.namespace.as_str().to_owned(),
@@ -128,7 +138,10 @@ pub async fn start_with<S: NamespaceStore>(
         fence,
         result: None,
     };
-    let batch = Batch::new()
+    let mut batch = Batch::new();
+    batch.preconditions.extend(charge_pre);
+    batch.writes.extend(charge_writes);
+    let batch = batch
         .require(Precondition::NotAfter(now.saturating_add(CONTENT_WINDOW)))
         .require(Precondition::Absent(key.clone()))
         .put(key.clone(), encode_job(&job)?)
@@ -176,7 +189,7 @@ async fn check_request<S: NamespaceStore>(
     }
     // The reconciler aborts a pending reservation at its reconcile time: it
     // must outlive the job, or the job would be failed under its feet.
-    if let Some(settle) = settle {
+    if let Some(settle) = settle.filter(|s| !s.rid.is_empty()) {
         match crate::store::codec::decode_reservation(&Value::new(settle.pending.clone())) {
             Ok(crate::store::codec::ReservationV1::Pending {
                 reconcile_at_ms, ..
@@ -419,6 +432,15 @@ async fn advance<S: NamespaceStore>(
     match job.phase {
         Phase::Plan => {
             if plan::slice(env, job, budget).await? {
+                // The charge was an upper bound read at admission: a set that
+                // outgrew it is not covered.
+                if job
+                    .settle
+                    .as_ref()
+                    .is_some_and(|s| job.pack_bytes() > s.declared_bytes)
+                {
+                    return Err(ForkError::Quota(super::OVER_ADMITTED));
+                }
                 job.phase = Phase::Trees;
                 job.cursor = 0;
                 job.deps.clear();
