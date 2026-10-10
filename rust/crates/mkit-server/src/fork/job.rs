@@ -149,12 +149,43 @@ pub async fn start_with<S: NamespaceStore>(
             keys::timer(now, kinds::FORK.get(), key.as_bytes()),
             Value::default(),
         );
-    match env.store.apply(&p, batch).await? {
+    create(env, &p, &key, batch, job).await
+}
+
+/// Commit the job's creation batch and decide whose job it is.
+async fn create<S: NamespaceStore>(
+    env: &ForkEnv<'_, S>,
+    p: &Partition,
+    key: &crate::store::Key,
+    batch: Batch,
+    job: ForkJobV1,
+) -> Result<StartOutcome, ForkError> {
+    let applied = match env.store.apply(p, batch).await {
+        Ok(applied) => applied,
+        Err(error) => {
+            // A reply can be lost after the batch committed, and the charge
+            // and the reservation then belong to a job that exists: our own
+            // row, found again, is a start.
+            let ours = |existing: &ForkJobV1| {
+                existing.binding == job.binding
+                    && existing.created_ms == job.created_ms
+                    && existing.settle.as_ref().map(|s| &s.rid)
+                        == job.settle.as_ref().map(|s| &s.rid)
+            };
+            return match env.store.get(p, key).await {
+                Ok(Some(raw)) if decode_job(&raw).is_ok_and(|existing| ours(&existing)) => {
+                    Ok(StartOutcome::Started(Box::new(job)))
+                }
+                _ => Err(error.into()),
+            };
+        }
+    };
+    match applied {
         BatchOutcome::Committed => Ok(StartOutcome::Started(Box::new(job))),
         BatchOutcome::PreconditionFailed { .. } => {
             let raw = env
                 .store
-                .get(&p, &key)
+                .get(p, key)
                 .await?
                 .ok_or(ForkError::Unavailable("fork start contended"))?;
             let existing = decode_job(&raw)?;

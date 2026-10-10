@@ -408,7 +408,7 @@ requires; remote Allow does not bypass them.
 | `refs` | The intended ref changes, in decision order. |
 | `owner` | Whether the principal owns the namespace under STC §7.5 rule 1; set on both Authorize and Admit requests. |
 | `grant` | The write grant used under STC §7.5 rule 2, if any, and its checked epoch; set on both Authorize and Admit requests. |
-| `fork` | Present only for a fork (§9.9): the source repository, branch and expected tip, the source's visibility and visibility revision read in the same coordinator snapshot, and the requested destination visibility. `operation.repository` is the destination. |
+| `fork` | Present only for a fork (§9.9): the source repository, branch and expected tip, the source's visibility and visibility revision read together in one coordinator read (and checked again before the job starts), and the requested destination visibility. `operation.repository` is the destination. |
 
 For `ListRepos`, `operation.repository` is an arbitrary caller-chosen selector
 within the requested namespace, and its repository name need not exist. The
@@ -1883,10 +1883,15 @@ returns its stored result (a replay); the caller MUST be able to read the
 source (the read allowance the source's `ReadRef` gets), and every refusal of
 that, including an absent source, is the uniform `not_found` `source not
 found`; the destination write is then authorized like any write of the
-namespace, with the source's visibility and visibility revision read in the
-same coordinator snapshot passed to the Authorize hook in the operation's
-`fork` field. mkit encodes no visibility policy: whether a private source may
-become a public destination is the hook's decision.
+namespace, with the source's visibility and visibility revision, read together
+in one coordinator read, passed to the Authorize hook in the operation's `fork`
+field. mkit encodes no visibility policy: whether a private source may become a
+public destination is the hook's decision. Just before the job starts, after
+the hooks have answered, the server reads them again; if either changed it
+refuses the request with `unavailable` `source changed; retry` and releases the
+reservation. The hook's decision therefore holds for the visibility the job
+starts under, within one read; the fork does not track the source afterwards,
+and a later change to it does not alter the destination.
 
 **Admission and quota.** Admission sees `fork` with the bytes the charge
 covers: the source's counted bytes (§6.5.1), an upper bound of the inherited
@@ -1895,7 +1900,9 @@ bytes (the pack set is a subset of the packs counted for the source), and
 is new to the empty destination. The quota charges are applied once, in the
 batch that creates the job, so the quota is a hard bound: a window that cannot
 hold the fork refuses it with `resource_exhausted` before any work, and a
-charge is never applied at completion. A fork whose resolved pack set is larger
+charge is never applied at completion. A failure before the destination is
+registered deletes the job so the request can be retried, and the retry is a new
+admission that pays again. A fork whose resolved pack set is larger
 than the bytes it was admitted for (the source gained packs between the
 admission and the plan) fails before the destination is registered with
 `resource_exhausted` `fork exceeds the bytes admitted; retry`; the charge stays
@@ -1924,7 +1931,9 @@ reservation settled elsewhere fails the job. The final batch commits the
 `Committed` outcome (`bytes_stored` and `new_to_repo` equal the inherited
 bytes, no ref change) and the replay record atomically.
 
-**Result and replay.** While the job runs, the request answers `unavailable`
+**Result and replay.** The request advances the job by one slice (up to 600
+storage calls) before it answers, so the embedder MUST call it from a context
+that can make them. While the job runs, the request answers `unavailable`
 `fork in progress` with a `Retry-After` hint, and the client repeats the same
 request (a fresh nonce attaches to the same job; the original nonce also works
 and returns the result once the job has finished). A finished fork returns the

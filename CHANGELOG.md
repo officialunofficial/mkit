@@ -48,6 +48,8 @@ collect the applicable entries between their old and new immutable pins.
   exposes `fork_repo` MUST give the timer the same `takedown_denial` and
   extraction threshold as its pipeline, and MUST apply the storage-lease
   executor and lease-recovery modes before starting a fork.
+  New public items: `fork::{ForkRequest, binding}`, `pipeline::ForkAdmission`,
+  `fork::SettleV1::declared_bytes` and `fork::ForkError::Quota`.
 
 - All-parent history continuations in canonical timestamp order. An embedder
   drives page 1 with per-commit `read_canonical_in` on a selected-ref reader

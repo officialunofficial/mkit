@@ -496,7 +496,8 @@ fn encoded_requests_equal_the_golden_requests() {
 }
 
 fn fork_op() -> Operation {
-    granted_op(
+    // A fork is the owner's: no grant authorizes it, and its destination is new.
+    let mut op = granted_op(
         OpKind::ForkRepo {
             source: RepoId {
                 namespace: NamespaceKey::from_stored(NAMESPACE.to_owned()),
@@ -509,7 +510,11 @@ fn fork_op() -> Operation {
             dest_visibility: mkit_attest::grant::Visibility::Private,
         },
         "a3",
-    )
+    );
+    op.authz.grant = None;
+    op.authz.owner = true;
+    op.creation.repo = true;
+    op
 }
 
 #[test]

@@ -98,7 +98,9 @@ impl ForkRequest {
         }
     }
 
-    pub(crate) fn spec(&self, dest: RepoId) -> ForkSpec {
+    /// The engine's spec for forking into `dest`.
+    #[must_use]
+    pub fn spec_for(&self, dest: RepoId) -> ForkSpec {
         ForkSpec {
             source: self.source.clone(),
             source_ref: self.source_ref.clone(),

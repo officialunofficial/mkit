@@ -238,7 +238,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let (authz, _) = self.authorize(&op).await?;
         op.authz = authz;
         let env = self.fork_env();
-        let spec = request.spec(dest.clone());
+        let spec = request.spec_for(dest.clone());
         if let Some(job) = job {
             // The destination is a job's: the same fork joins it (nothing is
             // admitted, charged or reserved twice), any other is refused.
@@ -292,6 +292,21 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             grant_epoch: None,
             create_namespace: op.creation.namespace,
         };
+        // The source's facts were read before two hook round trips: a change
+        // since refuses the fork, so the hook's decision still stands for the
+        // visibility the job starts under.
+        let recheck = match self.fork_source_facts(&request.source).await {
+            Ok(now) if now.visibility == source.visibility && now.revision == source.revision => {
+                Ok(())
+            }
+            Ok(_) => Err(ServerError::unavailable("source changed; retry")),
+            Err(error) => Err(error),
+        };
+        if let Err(error) = recheck {
+            self.abort_fork_reservation(&p, pending.as_ref(), &error)
+                .await;
+            return Err(error);
+        }
         let started = match fork::start_with(&env, &spec, Some(settle), Some(fence)).await {
             Ok(started) => started,
             Err(error) => {

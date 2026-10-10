@@ -1855,8 +1855,9 @@ pub struct ForkOperation {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub expected_tip: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
-    /// "public" or "private": the source's visibility, read in the same
-    /// coordinator snapshot as the fork. Empty when the deployment keeps none.
+    /// "public" or "private": the source's visibility, read in one coordinator
+    /// read with its revision and checked again before the job starts. Empty when
+    /// the deployment keeps none.
     ///
     /// Field 4: `source_visibility`
     #[serde(
@@ -1865,8 +1866,8 @@ pub struct ForkOperation {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub source_visibility: ::core::option::Option<::buffa::alloc::string::String>,
-    /// The source's visibility revision (its fence counter) from the same
-    /// snapshot; zero when none is stored.
+    /// The source's visibility revision (its fence counter) from the same read;
+    /// zero when none is stored.
     ///
     /// Field 5: `source_visibility_revision`
     #[serde(

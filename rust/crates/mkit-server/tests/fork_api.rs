@@ -6,6 +6,7 @@ mod fork_support;
 use fork_support::*;
 use mkit_attest::grant::Visibility;
 use mkit_server::fork::{ForkRequest, ForkResult};
+use mkit_server::pipeline::ShardMap as _;
 use mkit_server::pipeline::{
     Admission, AdmissionDecision, AdmissionInput, Authenticated, Authorizer, HookSet, Hooks,
     NoOutcomes, NoPreReceive, NoReceipts, Pipeline,
@@ -42,6 +43,8 @@ type Admitted = (u64, Option<u64>, Option<(String, u64)>);
 /// What the hooks saw.
 #[derive(Default)]
 struct Seen {
+    /// Refuse the destination write of a fork.
+    refuse_forks: std::sync::atomic::AtomicBool,
     ops: Mutex<Vec<Operation>>,
     admissions: Mutex<Vec<Admitted>>,
 }
@@ -62,7 +65,12 @@ impl Authorizer for Spy {
         let refuse = self
             .refuse_reads_of
             .as_deref()
-            .is_some_and(|name| op.repo.name.as_str() == name && !op.procedure().is_write());
+            .is_some_and(|name| op.repo.name.as_str() == name && !op.procedure().is_write())
+            || (op.procedure() == Procedure::Fork
+                && self
+                    .seen
+                    .refuse_forks
+                    .load(std::sync::atomic::Ordering::SeqCst));
         async move {
             if refuse {
                 Err(ServerError::permission_denied("not for you"))
@@ -565,4 +573,187 @@ async fn measures_3000_objects_through_the_pipeline() {
 #[ignore = "large fork fixture; exercised by the ignored-lane CI profile"]
 async fn measures_10000_objects_through_the_pipeline() {
     measure(2_996, 7_000).await;
+}
+
+fn plain_limits() -> QuotaLimits {
+    QuotaLimits::new(3_600_000, 10, 1 << 40)
+}
+
+async fn quota_ops(source: &Source, dest: &RepoId) -> Option<u32> {
+    let signer = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+    let scope = QuotaScope::for_signer(&dest.namespace, signer.verifying_key().as_bytes());
+    source
+        .store
+        .inner
+        .get(
+            &source.shards.coordinator(&dest.namespace),
+            &keys::quota(&scope),
+        )
+        .await
+        .unwrap()
+        .map(|raw| codec::decode_quota_state(&raw).unwrap().ops)
+}
+
+#[tokio::test]
+async fn a_request_that_loses_the_race_to_start_the_job_releases_its_reservation() {
+    use mkit_server::fork::{ForkEnv, ForkLimits};
+    let source = Source::build_with("source", 6, denial).await;
+    let mut dest = source.at("forked");
+    let (pipe, _) = hooked(&source, None, plain_limits(), Some("race"));
+    let req = request(&source);
+    // A competing request creates the same job just before this one's batch.
+    let (store, clock) = (source.store.clone(), source.clock.clone());
+    let spec = req.spec_for(dest.repo.clone());
+    let hook: Hook = Arc::new(move || {
+        let (store, clock, spec) = (store.clone(), clock.clone(), spec.clone());
+        Box::pin(async move {
+            let shards = mkit_server::pipeline::D34Shards;
+            let env = ForkEnv {
+                store: &store,
+                shards: &shards,
+                clock: clock.as_ref(),
+                takedown_denial: true,
+                extract_min_bytes: None,
+                limits: ForkLimits::default(),
+            };
+            mkit_server::fork::start(&env, &spec, None).await.unwrap();
+        })
+    });
+    *source.store.trigger.lock().unwrap() = Some(("fj", hook));
+    let result = finish(&pipe, &mut dest, &req).await.unwrap();
+    assert!(result.pack_count > 0);
+    // The loser's reservation is released as a replay race and its charge
+    // went with its failed batch.
+    assert!(matches!(
+        reservation(&source, &dest.repo, "race-1").await,
+        Some(ReservationV1::Aborted {
+            reason: mkit_server::store::adapter_spi::codec::AbortReason::ReplayRace,
+            ..
+        })
+    ));
+    assert_eq!(quota_ops(&source, &dest.repo).await, None);
+}
+
+#[tokio::test]
+async fn a_lost_reply_on_the_job_batch_is_a_start_not_a_failure() {
+    let source = Source::build_with("source", 6, denial).await;
+    let mut dest = source.at("forked");
+    let (pipe, _) = hooked(&source, None, plain_limits(), Some("lost"));
+    // Applies of the request: the reservation, then the job batch, whose
+    // reply is lost after it committed.
+    source.store.crash_after(2, true);
+    let result = finish(&pipe, &mut dest, &request(&source)).await.unwrap();
+    assert!(result.pack_count > 0);
+    assert!(matches!(
+        reservation(&source, &dest.repo, "lost-1").await,
+        Some(ReservationV1::Committed { .. })
+    ));
+    assert_eq!(quota_ops(&source, &dest.repo).await, Some(1));
+}
+
+#[tokio::test]
+async fn a_destination_the_hook_refuses_or_that_exists_is_refused_before_admission() {
+    let source = Source::build_with("source", 6, denial).await;
+    let mut dest = source.at("forked");
+    let (pipe, seen) = hooked(&source, None, plain_limits(), Some("early"));
+    let req = request(&source);
+    // The Authorize hook refuses the destination write.
+    seen.refuse_forks
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let n = dest.next_nonce();
+    let error = call(&pipe, &dest, n, &req).await.unwrap_err();
+    assert_eq!(error.code(), Code::PermissionDenied);
+    seen.refuse_forks
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    // A destination registered by anything else is not empty.
+    source
+        .store
+        .inner
+        .apply(
+            &source.shards.coordinator(&dest.repo.namespace),
+            mkit_server::Batch::new().put(
+                keys::repo_record(&dest.repo.name),
+                codec::encode_repo_record(&codec::RepoRecord { created_at_ms: 1 }),
+            ),
+        )
+        .await
+        .unwrap();
+    let n = dest.next_nonce();
+    let error = call(&pipe, &dest, n, &req).await.unwrap_err();
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    assert_eq!(error.public_message(), "destination not empty");
+    // Neither reached admission: no reservation, no charge.
+    assert!(seen.admissions.lock().unwrap().is_empty());
+    assert!(reservation(&source, &dest.repo, "early-1").await.is_none());
+    assert_eq!(quota_ops(&source, &dest.repo).await, None);
+}
+
+#[tokio::test]
+async fn blocked_content_is_the_same_not_found_as_an_absent_source() {
+    use mkit_server::Clock as _;
+    use mkit_server::store::{BlockEntry, ContentIndex};
+    let source = Source::build_with("source", 6, denial).await;
+    let mut dest = source.at("forked");
+    let (pipe, _) = hooked(&source, None, plain_limits(), None);
+    let mut absent = request(&source);
+    absent.source.name = mkit_server::RepoName::new("nowhere").unwrap();
+    let n = dest.next_nonce();
+    let missing = call(&pipe, &dest, n, &absent).await.unwrap_err();
+    let now = u64::try_from(source.clock.now_ms()).unwrap();
+    ContentIndex::new(source.store.inner.clone())
+        .block(&blob(1, 8).0, &BlockEntry::new("takedown", now), now)
+        .await
+        .unwrap();
+    let n = dest.next_nonce();
+    let blocked = call(&pipe, &dest, n, &request(&source)).await.unwrap_err();
+    assert_eq!(format!("{blocked:?}"), format!("{missing:?}"));
+    assert_eq!(blocked.public_message(), "source not found");
+}
+
+#[tokio::test]
+async fn a_source_that_changes_visibility_while_the_hooks_run_refuses_the_fork() {
+    let source = Source::build_with("source", 6, denial).await;
+    let mut dest = source.at("forked");
+    let (pipe, _) = hooked(&source, None, plain_limits(), Some("flip"));
+    // The owner makes the source private after the Authorize hook decided on a
+    // public one, just before the reservation is recorded.
+    let (store, repo) = (source.store.clone(), source.repo.clone());
+    let hook: Hook = Arc::new(move || {
+        let (store, repo) = (store.clone(), repo.clone());
+        Box::pin(async move {
+            let shards = mkit_server::pipeline::D34Shards;
+            store
+                .inner
+                .apply(
+                    &shards.coordinator(&repo.namespace),
+                    mkit_server::Batch::new().put(
+                        keys::repo_visibility(&repo.name),
+                        codec::encode_repo_visibility(&codec::RepoVisibilityV1 {
+                            visibility: codec::StoredVisibility::Private,
+                            last_created_ms: 0,
+                            last_statement_id: None,
+                            changed_ms: 0,
+                        }),
+                    ),
+                )
+                .await
+                .unwrap();
+        })
+    });
+    *source.store.trigger.lock().unwrap() = Some(("o", hook));
+    let n = dest.next_nonce();
+    let error = call(&pipe, &dest, n, &request(&source)).await.unwrap_err();
+    assert_eq!(error.code(), Code::Unavailable);
+    assert_eq!(error.public_message(), "source changed; retry");
+    assert!(matches!(
+        reservation(&source, &dest.repo, "flip-1").await,
+        Some(ReservationV1::Aborted { .. })
+    ));
+    assert!(
+        mkit_server::fork::read_job(&source.store, source.shards.as_ref(), &dest.repo)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(quota_ops(&source, &dest.repo).await, None);
 }

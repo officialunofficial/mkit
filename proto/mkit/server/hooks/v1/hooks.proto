@@ -50,11 +50,12 @@ message ForkOperation {
   string source_ref = 2;
   // Raw 32-byte published tip the caller expects the source to have.
   bytes expected_tip = 3;
-  // "public" or "private": the source's visibility, read in the same
-  // coordinator snapshot as the fork. Empty when the deployment keeps none.
+  // "public" or "private": the source's visibility, read in one coordinator
+  // read with its revision and checked again before the job starts. Empty when
+  // the deployment keeps none.
   string source_visibility = 4;
-  // The source's visibility revision (its fence counter) from the same
-  // snapshot; zero when none is stored.
+  // The source's visibility revision (its fence counter) from the same read;
+  // zero when none is stored.
   uint64 source_visibility_revision = 5;
   // "public" or "private": the destination visibility the caller asks for.
   string dest_visibility = 6;
