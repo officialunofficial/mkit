@@ -8308,7 +8308,7 @@ pub struct GetServerInfoResponseView<'a> {
     ///
     /// Field 14: `namespace_policy`
     pub namespace_policy: ::core::option::Option<&'a str>,
-    /// Fixed index prefix fan-out; default 4096 (SPEC-TRANSPORT-CONNECT §2.1, §7.9).
+    /// Fixed index prefix fan-out; default 16 (SPEC-TRANSPORT-CONNECT §2.1, §7.9).
     ///
     /// Field 15: `index_fanout`
     pub index_fanout: ::core::option::Option<u32>,
@@ -8992,7 +8992,7 @@ impl GetServerInfoResponseOwnedView {
     pub fn namespace_policy(&self) -> ::core::option::Option<&'_ str> {
         self.0.reborrow().namespace_policy
     }
-    /// Fixed index prefix fan-out; default 4096 (SPEC-TRANSPORT-CONNECT §2.1, §7.9).
+    /// Fixed index prefix fan-out; default 16 (SPEC-TRANSPORT-CONNECT §2.1, §7.9).
     ///
     /// Field 15: `index_fanout`
     #[must_use]

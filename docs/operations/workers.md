@@ -583,12 +583,12 @@ touches. Expected counts for a public reader with takedown denial off:
 
 | Shape | Distinct objects | Coordinator | Ref index | Repo index | Content | Ref |
 | --- | --- | --- | --- | --- | --- | --- |
-| Show with sizes (8 files, 1 nested dir) | 43 | 1 | 16 | 10 | 13 | 0 |
+| Show with sizes (8 files, 1 nested dir) | 40 | 1 | 16 | 10 | 13 | 0 |
 | Show without sizes | 25 | 1 | 16 | 4 | 4 | 0 |
-| Cat via `read_commit_path_in` | 12 | 1 | 0 | 4 | 5 | 1 |
-| Log of 5 (52-commit history) | 22 | 1 | 0 | 9 | 10 | 1 |
-| Log of 10 (52-commit history) | 42 | 1 | 0 | 14 | 20 | 1 |
-| Log of 50 (52-commit history) | 200 | 1 | 0 | 16 | 99 | 1 |
+| Cat via `read_commit_path_in` | 11 | 1 | 0 | 4 | 5 | 1 |
+| Log of 5 (52-commit history) | 21 | 1 | 0 | 9 | 10 | 1 |
+| Log of 10 (52-commit history) | 36 | 1 | 0 | 14 | 20 | 1 |
+| Log of 50 (52-commit history) | 117 | 1 | 0 | 16 | 99 | 1 |
 
 These are upper-bound expectations for a tiny repository: object ids are
 uniform, so content shard counts grow roughly with the number of objects read,

@@ -175,10 +175,10 @@ fn inspect(
                 max_relay_sequence = max_relay_sequence.max(seq);
             }
             Some(ParsedKey::LayoutVersion)
-                if codec::decode_u32(&record.value)? > keys::LAYOUT_VERSION =>
+                if codec::decode_u32(&record.value)? != keys::LAYOUT_VERSION =>
             {
                 return Err(StoreError::Unsupported(
-                    "snapshot layout is newer than this binary".into(),
+                    "snapshot layout differs from this binary".into(),
                 ));
             }
             Some(ParsedKey::RelayHighWater(source)) => {
@@ -1343,6 +1343,29 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(codec::decode_lease_recovery(&lr).unwrap().resumed_at_ms, 44);
+    }
+
+    #[test]
+    fn restore_refuses_a_snapshot_from_another_layout_version() {
+        for version in [keys::LAYOUT_VERSION - 1, keys::LAYOUT_VERSION + 1] {
+            let snap = snapshot(
+                &source(),
+                vec![(keys::layout_version(), codec::encode_u32(version))],
+            );
+            let store = MemoryKv::default();
+            let result = block_on(restore(
+                &[snap],
+                &store,
+                RestoreOptions {
+                    allow_incomplete: true,
+                    ..RestoreOptions::default()
+                },
+            ));
+            assert!(
+                matches!(result, Err(StoreError::Unsupported(_))),
+                "{version}"
+            );
+        }
     }
 
     #[test]

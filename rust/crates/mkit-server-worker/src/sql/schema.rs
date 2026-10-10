@@ -29,7 +29,7 @@ const STORE_OBJECTS: &str = "SELECT 1 FROM sqlite_master WHERE \
     (type = 'table' AND name IN ('mkit_schema', 'kv')) OR (type = 'index' AND name = 'kv_timers')";
 
 /// The schema version this binary requires.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// The version recorded in the database: 0 if the marker row is missing.
 fn stored_version<C: SqlConn>(conn: &C) -> Result<u32, SqlError> {

@@ -993,7 +993,7 @@ fn sql_bootstrap_is_atomic_and_current_reopen_writes_nothing() {
 #[test]
 fn sql_reopen_refuses_wrong_versions_and_incomplete_schema_without_repair() {
     use mkit_server_worker::sql::schema::{SCHEMA_VERSION, initialize};
-    for version in [0, 1, SCHEMA_VERSION + 1] {
+    for version in [0, 1, 2, SCHEMA_VERSION + 1] {
         let conn = BootstrapConn::new(None);
         initialize(&conn).unwrap();
         conn.inner

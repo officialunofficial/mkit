@@ -408,9 +408,9 @@ collect the applicable entries between their old and new immutable pins.
   pack id) instead of 4,096, so a repository's rows, copies and sweeps touch at
   most sixteen partitions. Content shards (4,096, global), the coordinator and
   the ref and ref-index partitions are unchanged. `store::keys::LAYOUT_VERSION`
-  is now 2, and a store at any other layout version is refused (pipeline
-  construction for implicit-layout stores, the first write elsewhere, and
-  export import). `GetServerInfo.index_fanout` now advertises 16 and
+  is now 2 and the Workers SQL schema version 3; a store at any other version
+  is refused (store open, pipeline construction for implicit-layout stores,
+  the first write elsewhere, snapshot restore and export import). `GetServerInfo.index_fanout` now advertises 16 and
   `store::REPO_INDEX_FANOUT` is new; `store::INDEX_FANOUT` keeps meaning the
   content-shard fan-out. Migration: reset the store; there is no in-place
   upgrade. Per-Durable-Object scaling limits are in `docs/operations/workers.md`.
