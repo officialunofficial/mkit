@@ -2358,7 +2358,7 @@ fn interrupted_closure_and_recheck_slices_shrink_then_end_terminal() {
             panic!("verification timer key");
         };
         rig.clock.set(i64::try_from(due_at_ms).unwrap());
-        for _ in 0..12 {
+        for _ in 0..30 {
             // Commit the attempt marker, then interrupt before progress commits.
             faulty
                 .fail_at
@@ -2376,7 +2376,7 @@ fn interrupted_closure_and_recheck_slices_shrink_then_end_terminal() {
                 break;
             }
         }
-        assert_eq!(caps, BTreeSet::from([1, 2, 4]));
+        assert_eq!(caps, BTreeSet::from([1, 2, 5, 11, 22, 45, 90]));
         assert_eq!(
             rig.job(&ticket.pack_id).unwrap().outcome,
             Some(checkpoint::Outcome::ClosureCapped)
@@ -2541,15 +2541,28 @@ fn hot_closure_candidates_checkpoint_progress_instead_of_livelock() {
         rig.job(&ticket.pack_id).unwrap().phase,
         Phase::ClosureResolve
     );
-    // Each full lookup saves its id before another expensive lookup starts.
-    let mut checkpoints = BTreeSet::new();
-    for _ in 0..3 {
-        rig.clock.advance(1_000);
-        assert_eq!(rig.tick().failed, 0);
+    // Every slice leaves a durable mark of progress, and the job finishes in a
+    // bounded number of slices however the hot ids are batched.
+    let mut last = {
         let job = rig.job(&ticket.pack_id).unwrap();
-        assert_eq!(job.phase, Phase::ClosureResolve);
-        assert!(!job.scan.is_empty());
-        assert!(checkpoints.insert(job.scan));
+        (job.phase, job.scan, job.owed, job.closure_cap)
+    };
+    let mut slices = 0;
+    while !rig.finished(&ticket.pack_id) {
+        slices += 1;
+        assert!(slices < 200, "closure of nine hot ids must finish");
+        let now = u64::try_from(rig.clock.now_ms()).unwrap();
+        let report = rig.tick();
+        assert_eq!(report.failed, 0);
+        let next = report.next_wake_ms.unwrap_or(now + 1_000).max(now + 1);
+        rig.clock.set(i64::try_from(next).unwrap());
+        let job = rig.job(&ticket.pack_id).unwrap();
+        let now = (job.phase, job.scan, job.owed, job.closure_cap);
+        if report.fired > 0 && now.0 == Phase::ClosureResolve {
+            assert_ne!(now, last, "a closure slice must change durable state");
+            assert!(now.3 <= last.3, "the cap never grows");
+        }
+        last = now;
     }
     let slices = rig.drive(|r| r.finished(&ticket.pack_id));
     assert!(slices < 200);
@@ -3133,4 +3146,229 @@ fn mixed_member_and_in_pack_deltas_charge_one_external_base_across_cold_slices()
     assert!(job.usable());
     let spent = rig.recorder.slices.lock().unwrap().clone();
     assert!(spent.iter().all(|used| *used <= 256.0), "{spent:?}");
+}
+
+// -- batched owed-closure lookups -------------------------------------------
+
+/// A commit on a tree that names `in_pack` blobs held by the pack itself and
+/// `external` blobs it does not hold. Returns the pack and its head.
+fn external_children_pack(in_pack: u16, external: &[Hash]) -> (Vec<u8>, Hash) {
+    let mut writer = PackWriter::new_raw_only();
+    let mut entries = Vec::new();
+    for n in 0..in_pack {
+        let (id, raw) = blob(n, 64);
+        writer.push_raw(id, &raw).unwrap();
+        entries.push(id);
+    }
+    entries.extend_from_slice(external);
+    let tree = Object::Tree(Tree {
+        entries: entries
+            .into_iter()
+            .enumerate()
+            .map(|(n, object_hash)| TreeEntry {
+                name: format!("f{n:05}").into_bytes(),
+                mode: EntryMode::Blob,
+                object_hash,
+            })
+            .collect(),
+    });
+    writer
+        .push_raw(tree.id().unwrap(), &serialize(&tree).unwrap())
+        .unwrap();
+    let (commit, head) = signed_commit(tree.id().unwrap(), Vec::new(), 7, b"head");
+    writer.push_raw(head, &serialize(&commit).unwrap()).unwrap();
+    (writer.finish().unwrap(), head)
+}
+
+/// `members` seeded as separate member packs, then `missing` ids nobody holds.
+fn seeded_children(rig: &Rig, members: u16, missing: u16) -> Vec<Hash> {
+    let mut children = Vec::new();
+    for n in 0..members {
+        let (id, raw) = blob(1_000 + n, 80);
+        seed_member(rig, id, &raw);
+        children.push(id);
+    }
+    children.extend((0..missing).map(|n| hash(&n.to_be_bytes())));
+    children
+}
+
+fn owed_rows(rig: &Rig, pack: &Hash) -> usize {
+    rig.rows(pack, keys::VC_CHILD).len()
+}
+
+#[test]
+fn owed_children_are_looked_up_together_and_each_keeps_its_own_answer() {
+    let rig = Rig::new();
+    // Present members, ids nobody holds, and blobs the pack holds itself.
+    let children = seeded_children(&rig, 6, 5);
+    let (pack, head) = external_children_pack(3, &children);
+    let (ticket, id) = rig.add(&pack);
+    rig.create(&ticket, id);
+    let mut closure_slices = 0;
+    while phase(&rig, &ticket.pack_id) != Phase::Recheck {
+        if phase(&rig, &ticket.pack_id) == Phase::ClosureResolve {
+            closure_slices += 1;
+        }
+        rig.clock.advance(1_000);
+        assert_eq!(rig.tick().failed, 0);
+        assert!(closure_slices < 4, "eleven owed children share lookups");
+    }
+    let job = rig.job(&ticket.pack_id).unwrap();
+    assert_eq!((job.owed, job.satisfying.len()), (5, 6));
+    // Only what no visible pack holds stays owed.
+    assert_eq!(owed_rows(&rig, &ticket.pack_id), 5);
+    // Inside the lag window those five may still arrive.
+    assert_eq!(
+        rig.check(&[(&ticket, id)], head)
+            .unwrap_err()
+            .public_message(),
+        "repository membership not yet visible"
+    );
+    rig.drive(|rig| rig.finished(&ticket.pack_id));
+    let job = rig.job(&ticket.pack_id).unwrap();
+    assert_eq!((job.owed, job.satisfying.len()), (5, 6));
+    assert!(job.outcome.is_none());
+    assert_eq!(owed_rows(&rig, &ticket.pack_id), 5);
+    rig.clock
+        .advance(i64::try_from(rig.cfg.relay_lag_bound_ms).unwrap());
+    let error = rig.check(&[(&ticket, id)], head).unwrap_err();
+    assert_eq!(error.code(), crate::error::Code::InvalidArgument);
+    assert_eq!(error.public_message(), "open closure");
+}
+
+#[test]
+fn one_capped_child_in_a_batch_ends_the_job_terminal_not_rejected() {
+    let rig = Rig::new();
+    let mut children = seeded_children(&rig, 4, 3);
+    let capped = hash(b"capped child");
+    super::tests::seed_capped_index(&rig.store, &rig.repo, capped);
+    children.insert(2, capped);
+    let (pack, _) = external_children_pack(2, &children);
+    let (ticket, id) = rig.add(&pack);
+    rig.create(&ticket, id);
+    rig.drive(|rig| rig.finished(&ticket.pack_id));
+    assert_eq!(
+        rig.job(&ticket.pack_id).unwrap().outcome,
+        Some(checkpoint::Outcome::ClosureCapped)
+    );
+    assert!(rejected(&rig, &ticket.pack_id).is_none());
+}
+
+#[test]
+fn a_crash_inside_a_batch_cannot_lose_a_dependency_or_settle_an_open_child() {
+    for fail_at in 1..60 {
+        let rig = Rig::new();
+        let children = seeded_children(&rig, 6, 4);
+        let (pack, _) = external_children_pack(2, &children);
+        let (ticket, id) = rig.add(&pack);
+        rig.create(&ticket, id);
+        let faulty = Faulty {
+            inner: rig.store.clone(),
+            applies: AtomicU32::new(0),
+            fail_at: AtomicU32::new(fail_at),
+            inventory_guard: None,
+        };
+        rig.drive_on(&faulty, |rig| rig.finished(&ticket.pack_id));
+        let job = rig.job(&ticket.pack_id).unwrap();
+        assert_eq!(job.satisfying.len(), 6, "crash at apply {fail_at}");
+        assert_eq!(job.owed, 4, "crash at apply {fail_at}");
+        assert_eq!(
+            owed_rows(&rig, &ticket.pack_id),
+            4,
+            "crash at apply {fail_at}"
+        );
+        if faulty.applies.load(Ordering::SeqCst) < fail_at {
+            break;
+        }
+    }
+}
+
+/// Pages of 16 rows, so a batch of hot ids costs more calls than one slice has.
+fn small_pages_tick(rig: &Rig) -> RunReport {
+    let h = rig.handler();
+    let registry = TimerRegistry::new().register(VerifyTimer {
+        remote: SmallPages(h.remote),
+        blobs: h.blobs,
+        windows: h.windows,
+        shards: h.shards,
+        cfg: h.cfg,
+        limits: h.limits,
+        lease: h.lease,
+        clock: h.clock,
+        metrics: h.metrics,
+        extension: h.extension,
+    });
+    block_on(run_due(
+        rig.store.as_ref(),
+        &rig.source(),
+        &registry,
+        rig.clock.as_ref(),
+        u64::try_from(rig.clock.now_ms()).unwrap(),
+        &TickBudget::default(),
+    ))
+    .unwrap()
+}
+
+#[test]
+fn a_batch_that_outgrows_one_slice_shrinks_instead_of_ending_terminal() {
+    let rig = Rig::named("one", Arc::new(D34Shards));
+    let value = crate::store::index::IndexValue {
+        frame_offset: 12,
+        frame_length: 64,
+        wire_type: 0,
+        decoded_size: 4,
+        chain_depth: 0,
+        delta_base: None,
+    };
+    // Each child has hundreds of candidates in 16-row pages, none a member.
+    let children: Vec<Hash> = (0..90u16).map(|n| hash(&n.to_be_bytes())).collect();
+    for child in &children {
+        let partition = rig.shards.object_index(&rig.repo, child);
+        for chunk in (0..300u32).collect::<Vec<_>>().chunks(90) {
+            let mut batch = Batch::new();
+            for n in chunk {
+                let mut candidate = [0u8; 32];
+                candidate[28..].copy_from_slice(&n.to_be_bytes());
+                batch = batch.put(
+                    keys::object_index(&rig.repo.name, child, &candidate),
+                    codec::encode_object_index(child, &value).unwrap(),
+                );
+            }
+            block_on(rig.store.apply(&partition, batch)).unwrap();
+        }
+    }
+    let (pack, _) = external_children_pack(0, &children);
+    let (ticket, id) = rig.add(&pack);
+    rig.create(&ticket, id);
+    let mut smallest = u32::MAX;
+    let mut previous_cap = u32::MAX;
+    let mut slices = 0;
+    while !matches!(
+        phase(&rig, &ticket.pack_id),
+        Phase::AwaitDelivery | Phase::Recheck | Phase::Watch
+    ) {
+        slices += 1;
+        assert!(slices < 400, "a shrinking batch must finish");
+        let now = u64::try_from(rig.clock.now_ms()).unwrap();
+        let report = small_pages_tick(&rig);
+        assert_eq!(report.failed, 0);
+        let next = report.next_wake_ms.unwrap_or(now + 1_000).max(now + 1);
+        rig.clock.set(i64::try_from(next).unwrap());
+        let job = rig.job(&ticket.pack_id).unwrap();
+        assert!(job.closure_cap <= previous_cap, "the cap never grows back");
+        previous_cap = job.closure_cap;
+        smallest = smallest.min(job.closure_cap);
+    }
+    let job = rig.job(&ticket.pack_id).unwrap();
+    assert_eq!(job.outcome, None, "a batch over a slice is retried smaller");
+    assert_eq!(job.owed, 90);
+    assert!(smallest < 90, "the batch shrank to {smallest}");
+    assert!(
+        rig.recorder
+            .slices
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|calls| *calls <= 256.0)
+    );
 }

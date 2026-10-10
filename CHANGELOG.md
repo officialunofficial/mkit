@@ -261,6 +261,16 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Performance
 
+- Scheduled pack verification looks owed closure children up in batches
+  instead of one child per alarm fire. Up to 90 owed ids share one
+  `locate_split` per slice, with the per-slice reserve applied per batch; a
+  batch that outgrows a slice halves its persisted cap and retries, and a
+  single id that cannot be answered in one slice still ends `ClosureCapped`.
+  Closure semantics (open closure, lag window, capped answers) are unchanged.
+  A push whose tree names 500 existing files drops from 10,743 to 852 storage
+  calls (640 s to 46 s modeled); 3,000 files from 63,475 to 3,199. Stored
+  formats are unchanged (wipe: no); jobs written earlier keep their smaller
+  cap.
 - Fewer sequential storage rounds per read, with no change to results, limits,
   guards. Backend R2 calls drop; KV calls and ledger charges drop only by the removed publish-time block read (one per proof-expanding decoded object; a nine-file show with sizes goes from 72 to 69 KV calls, with fewer for a no-sizes show and a six-file show). A rare failure path, where the pack prefix exceeds the decode budget before the frame read, can now send and charge the frame read. The Workers R2 adapter serves a bounded blob range with
   one ranged GET instead of a HEAD followed by a GET (a missing object is still

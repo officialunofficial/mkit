@@ -182,7 +182,7 @@ pub struct VerifyJobV1 {
     pub attempts: u32,
     /// Entries one slice may decode; halved after repeated failures.
     pub entry_cap: u32,
-    /// Closure ids per slice; repeated interrupted passes shrink this to one.
+    /// Closure ids per slice; repeated interrupted passes, or a lookup that outgrows a slice, shrink this to one.
     pub closure_cap: u32,
     /// Times a source change restarted the job.
     pub restarts: u8,
@@ -318,7 +318,7 @@ impl VerifyJobV1 {
             created_at_ms,
             pack_len,
             entry_cap,
-            closure_cap: 4,
+            closure_cap: super::job::CLOSURE_IDS_PER_SLICE,
             members_loaded: true,
             ..Self::default()
         }
