@@ -227,7 +227,7 @@ fn published_source_cross_partition_move_after_fence_copies_exact_pair() {
     let arm = armed.clone();
     w.env.pipe.meta.hook = Some(Box::new(move |kv, p, batch| {
         if *p == destination && batch.writes.iter().any(|write| matches!(write, Write::Put(k, _) if *k == keys::ref_key(&repo.name, "refs/heads/copy"))) && arm.swap(false, Ordering::SeqCst) {
-            block_on(kv.apply(&source, Batch::new()
+            now(kv.apply(&source, Batch::new()
                 .put(keys::publication(&repo.name, HEAD), moved.encode().unwrap())
                 .put(keys::ref_key(&repo.name, HEAD), codec::encode_ref_id(&moved.value.head.unwrap()))
                 .put(keys::ref_key(&repo.name, PACKMAP), codec::encode_ref_id(&moved.value.packmap.unwrap())))).unwrap();
@@ -339,9 +339,9 @@ fn published_source_replans_refence_the_source() {
     let arm = armed.clone();
     w.env.pipe.meta.hook = Some(Box::new(move |kv, p, batch| {
         if *p == destination && batch.writes.iter().any(|write| matches!(write, Write::Put(k, _) if *k == keys::ref_key(&repo.name, "refs/heads/copy"))) && arm.swap(false, Ordering::SeqCst) {
-            block_on(kv.apply(&source, Batch::new().put(keys::publication(&repo.name, HEAD), moved.encode().unwrap()))).unwrap();
+            now(kv.apply(&source, Batch::new().put(keys::publication(&repo.name, HEAD), moved.encode().unwrap()))).unwrap();
             // Break a destination planner guard so the first apply cannot commit.
-            block_on(kv.apply(p, Batch::new().put(keys::outbox_sequence(), codec::encode_u64(100)))).unwrap();
+            now(kv.apply(p, Batch::new().put(keys::outbox_sequence(), codec::encode_u64(100)))).unwrap();
         }
     }));
     let error = copy(&w, HEAD, "refs/heads/copy", current.head).unwrap_err();
