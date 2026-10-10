@@ -177,6 +177,10 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Fixed
 
+- Scheduled verification no longer asks clients to wait up to 60 s. The
+  pending-verification `Retry-After` hint followed the verification timer's due
+  time, which a failure backoff or lag wait pushes to 20-60 s while the job
+  progresses. Every unfinished state now answers 1-3 s.
 - Scheduled pack verification plans a fresh 10-second deadline for each bounded
   inventory write and checkpoints every completed Decode entry. Slow stores and
   retries retain durable progress; the final bounded facts and cursor share one

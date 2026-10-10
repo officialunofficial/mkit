@@ -1515,7 +1515,10 @@ requires. This answer MUST NOT be stored as a replay result, under
 STC §7.1; a retry must be able to observe verification progress.
 
 `PendingVerification.retry_after_ms` is the server's suggested poll
-interval in milliseconds. The server SHOULD send at least 1,000.
+interval in milliseconds. The server SHOULD send at least 1,000 and,
+while verification is progressing, SHOULD NOT send much more than a few
+seconds: the hint is not a completion estimate, and a client honours it in
+full up to the 60,000 clamp.
 STC §7.6 requires the client to clamp it to 1,000–60,000 milliseconds;
 a missing or zero value means 1,000. The client polls until ticket
 expiry, using that polling interval instead of its normal backoff
