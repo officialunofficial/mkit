@@ -409,12 +409,15 @@ collect the applicable entries between their old and new immutable pins.
   most sixteen partitions. Content shards (4,096, global), the coordinator and
   the ref and ref-index partitions are unchanged. `store::keys::LAYOUT_VERSION`
   is now 2 and the Workers SQL schema version 3; a store at any other version
-  is refused (store open, pipeline construction for implicit-layout stores,
-  the first write elsewhere, snapshot restore and export import; refs-only stores report the new
-  version, so their earlier exports are refused too). `GetServerInfo.index_fanout`
-  now advertises 16 and `store::REPO_INDEX_FANOUT` is new; `store::INDEX_FANOUT` keeps meaning the
-  content-shard fan-out. Migration: reset the store; there is no in-place
-  upgrade. Per-Durable-Object scaling limits are in `docs/operations/workers.md`.
+  is refused at store open (Workers SQL), pipeline construction (implicit-layout
+  stores), the first write, snapshot restore and export import. A custom store
+  that keeps an explicit `v` row is not checked on reads before its first
+  write, so a reset is mandatory. Refs-only stores report the new version, so
+  their earlier exports are refused too. `GetServerInfo.index_fanout` now
+  advertises 16 and `store::REPO_INDEX_FANOUT` is new; `store::INDEX_FANOUT`
+  keeps meaning the content-shard fan-out. Migration: reset the store; there
+  is no in-place upgrade. Per-Durable-Object scaling limits are in
+  `docs/operations/workers.md`.
   The same layout change gives sealed pack inventories a separate dependency
   range (external delta-base placeholders, with a count and digest in the
   inventory head), read through the new `takedown::inventory::visit_dependencies`

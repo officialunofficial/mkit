@@ -442,7 +442,7 @@ impl<'a, S: NamespaceStore> Importer<'a, S> {
     /// changes partition or would overflow it.
     ///
     /// # Errors
-    /// [`StoreError::Unsupported`] for a `v` row newer than this binary's
+    /// [`StoreError::Unsupported`] for a `v` row that differs from this binary's
     /// layout; [`StoreError::Invalid`] for a non-empty partition under
     /// [`ImportMode::Fresh`]; any error of the store's `apply`.
     pub async fn push(&mut self, record: ExportRecord) -> Result<(), StoreError> {

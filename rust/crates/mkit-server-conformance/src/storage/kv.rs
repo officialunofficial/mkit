@@ -743,8 +743,8 @@ pub async fn kv_refs_only_reports_implicit_layout_version<H: KvHarness>(h: H) ->
     ensure_eq!(caps.implicit_layout_version.is_some(), refs_only);
     if let Some(version) = caps.implicit_layout_version {
         ensure!(
-            version <= keys::LAYOUT_VERSION,
-            "implicit version {version} is newer"
+            version == keys::LAYOUT_VERSION,
+            "implicit version {version} is not this server's"
         );
         ensure_eq!(ok!(export_header(&s, &p, 0).await).layout_version, version);
     }
