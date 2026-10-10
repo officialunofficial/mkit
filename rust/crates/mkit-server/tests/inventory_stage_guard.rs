@@ -378,7 +378,8 @@ async fn verifies_with(objects: u16, fault: Option<&'static str>, shape: Shape) 
             );
             if shape.blob_bytes.is_some() {
                 // Each 200 KiB blob counts 400 KiB: two per group, so ten blobs
-                // take five applies where sixteen tiny ones take one (4 total).
+                // take five applies where tiny ones take one. The plain 12-object
+                // shape applies 4 times in all; this one applies 8.
                 assert_eq!(ledger.inventory_applies, 8);
             }
             return;

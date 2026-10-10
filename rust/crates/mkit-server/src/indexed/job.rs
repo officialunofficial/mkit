@@ -418,7 +418,10 @@ const ADMIT_ENTRIES: usize = crate::takedown::inventory::STAGE_BATCH_ENTRIES;
 /// count twice, for the parsed object beside them. A batch adds this and one
 /// more entry to the slice's resident allowance.
 const ADMIT_BYTES: usize = 1 << 20;
-/// Remote calls a batch's reads and apply take apart from its entries' own.
+/// Remote calls a batch's reads and apply take apart from its entries' own: one
+/// group, as long as the store reserves at most 17 of the 100 apply operations
+/// (a larger reservation splits a batch into more groups; the entry reserve
+/// absorbs a few).
 const ADMIT_CALLS: u32 = 2;
 
 struct Run<'a, S, R, B, W, X> {
@@ -1197,10 +1200,16 @@ where
         let (mut fed, mut processed) = (0_u32, 0_u32);
         let mut pending: Vec<Prepared> = Vec::new();
         loop {
-            match reader
-                .step()
-                .map_err(|e| Self::reader_error(resumed, restarts, &e))?
-            {
+            let next = match reader.step() {
+                Ok(next) => next,
+                Err(error) => {
+                    // The frames before a malformed one keep their checkpoints.
+                    self.settle(st, job, &mut pending, state, held.as_ref())
+                        .await?;
+                    return Err(Self::reader_error(resumed, restarts, &error));
+                }
+            };
+            match next {
                 Step::NeedWindow(request) => {
                     self.settle(st, job, &mut pending, state, held.as_ref())
                         .await?;
@@ -1467,7 +1476,9 @@ where
     /// Denial is read after the staging apply, not before it, so a block that
     /// lands while the batch is in flight is seen by these reads. Reads before
     /// the apply would leave every earlier object of a batch a longer window
-    /// than one entry.
+    /// than one entry. Denial still precedes any frame, candidate or index row.
+    /// An object that is both malformed and blocked reports the malformed
+    /// hash, because staging needs it parsed first.
     /// The denial reads are one call each: content shards partition objects,
     /// so ids of one batch share no shard.
     async fn admit(

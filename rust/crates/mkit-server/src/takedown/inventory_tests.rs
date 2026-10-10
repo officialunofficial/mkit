@@ -223,6 +223,18 @@ mod batched {
     }
 
     #[tokio::test]
+    async fn a_repeated_object_in_one_group_is_staged_once() {
+        let (a, b) = (blob(1), blob(2));
+        let items = vec![a.clone(), b.clone(), a.clone(), b, a];
+        let reference = store();
+        one_by_one(&reference, &items).await;
+        let candidate = store();
+        batched(&candidate, &items).await.unwrap();
+        assert_eq!(rows(&candidate).await, rows(&reference).await);
+        assert_eq!(sealed_ids(&candidate).await.len(), 2);
+    }
+
+    #[tokio::test]
     async fn a_replayed_or_partly_staged_batch_changes_nothing() {
         let items = objects(20);
         let reference = store();
@@ -248,9 +260,11 @@ mod batched {
     }
 
     #[tokio::test]
-    async fn the_worst_batch_fits_the_apply_limits() {
+    async fn sixteen_placeholder_upgrades_fit_one_apply() {
         // Sixteen placeholders upgrade in one apply: guard, row, marker and
-        // dependency delete each, plus the head.
+        // dependency delete each, plus the head. The five-operation worst case
+        // (a parent descriptor too) is held by `STAGE_BATCH_ENTRIES`'s const
+        // assertion; reference-free objects are almost all blobs.
         let items: Vec<_> = (0..16).map(blob).collect();
         let store = store();
         for (id, _) in &items {
