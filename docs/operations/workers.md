@@ -78,6 +78,16 @@ fields. Compare summed staging duration with Decode slice elapsed time to assess
 inventory's share; keep failed attempts separate. These fields use the existing
 console channel and add no identifiers.
 
+The same event splits a slice's Decode time by stage, all from the pipeline
+clock, so a Worker's CPU time between awaits is not visible in them:
+`window_read_ms` (pack range reads), `decode_ms` (decoding and parsing, plus any
+base reads), `denial_ms` and `denial_calls` (the per-object denial reads that
+follow staging), `write_ms` (recording an entry's rows, including the local
+frame lookup) and `checkpoint_ms` (the guarded cursor commits).
+`inventory_batches` counts staging applies and `slice_calls` the slice's total
+remote-budget charges. Time not covered by these fields and `staging_duration_ms`
+is the slice's own timer, job and ticket bookkeeping and CPU.
+
 `now_ms` is injected-clock time; relay and partition-dispatch events use the
 tick's business-time snapshot. For real elapsed I/O time, use the Worker log timestamps
 as well. Compare upload → advance, job due → physical alarm → first fire, each
@@ -99,10 +109,16 @@ remote slice calls and preserve the portable 100-operation, 1 MiB apply bounds.
 Readers acquire no additional guard or lease: their reads cannot change the
 inventory head or job-generation CAS.
 
-Reference-free inventory entries use one fresh entry read, one head read and
-one guarded apply (three remote calls). Entries with reference pages retain an
-early replay lookup and refresh their plan after page staging. Inventory applies and durable cursor checkpoints are still
-per entry; the 10-second planning deadline and storage layout are unchanged.
+Up to sixteen decoded reference-free entries share one inventory read (the head
+and their entry rows) and one guarded apply (at most 83 of the 100 operations:
+five per entry plus the head's three); the per-object denial reads follow the
+apply, so a block that lands while the batch is in flight is refused; a
+store that reserves operations gets a smaller batch. Rows already staged are
+skipped, so a replay after a lost reply or a crash writes nothing twice. The
+head guard keeps stagers of one pack serial. Entries with reference pages retain
+an early replay lookup, refresh their plan after page staging, and stage alone.
+Durable cursor checkpoints are still per entry; the 10-second planning deadline
+and storage layout are unchanged.
 
 After relay delivery, at most sixteen future timer rows are inspected and eight
 waiting jobs are nudged with guarded timer moves. Only ordinary delivery polls

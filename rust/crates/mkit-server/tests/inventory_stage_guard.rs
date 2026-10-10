@@ -47,8 +47,16 @@ fn tree_pack(count: u16, size: usize) -> (Vec<u8>, Hash) {
     (writer.finish().unwrap(), head)
 }
 
-#[allow(clippy::too_many_lines)] // Keep the full alarm-driven fixture and progress assertions together.
 async fn verifies(objects: u16, fault: Option<&'static str>) {
+    Box::pin(verifies_with(objects, fault, false)).await;
+}
+
+/// With `race`, a takedown of one object lands just before the first batch's
+/// inventory apply, after the batch was decoded.
+#[allow(clippy::too_many_lines)] // Keep the full alarm-driven fixture and progress assertions together.
+async fn verifies_with(objects: u16, fault: Option<&'static str>, race: bool) {
+    let events = Events::default();
+    let _subscriber = tracing::subscriber::set_default(events.clone());
     let clock = Arc::new(ManualClock::new(1_700_000_000_000));
     let inner = Arc::new(MemoryKv::with_clock(clock.clone()));
     let store = Slow {
@@ -59,6 +67,7 @@ async fn verifies(objects: u16, fault: Option<&'static str>) {
         barrier: None,
         heads: Arc::default(),
         ledger: Arc::default(),
+        race_block: Arc::new(std::sync::Mutex::new(race.then(|| blob(5, 8).0))),
     };
     let blobs = Shared(Arc::new(MemoryBlobStore::default()), clock.clone());
     let (bytes, head) = tree_pack(objects - 2, 8);
@@ -190,6 +199,24 @@ async fn verifies(objects: u16, fault: Option<&'static str>) {
             .unwrap()
             .0
             .is_some_and(|(job, _)| job.usable());
+        if race && job.phase == Phase::Watch {
+            // The takedown landed after the batch's decode and before its
+            // apply: the denial reads that follow the apply refuse it.
+            assert_eq!(job.outcome, Some(indexed::checkpoint::Outcome::Blocked));
+            assert!(!job.usable());
+            assert!(store.race_block.lock().unwrap().is_none());
+            let auth = authenticate(&pipe, &clock, mkit_server::Procedure::AdvanceRefs, 4);
+            let refused = pipe
+                .advance_refs_with_tickets(
+                    &auth,
+                    advance("refs/heads/main", head),
+                    advance("refs/mkit/packmap/main", map),
+                    tickets.clone(),
+                )
+                .await;
+            assert!(refused.is_err(), "a blocked pack must not publish");
+            return;
+        }
         if job.phase == Phase::Watch && map_ready {
             assert!(job.usable(), "verification outcome: {:?}", job.outcome);
             assert!(matches!(
@@ -281,6 +308,10 @@ async fn verifies(objects: u16, fault: Option<&'static str>) {
                 ledger.max_batch_ops,
                 ledger.max_batch_bytes
             );
+            if fault.is_none() {
+                let sums = attribution(&events, objects);
+                eprintln!("{sums}");
+            }
             eprintln!(
                 "INVENTORY objects={objects} reads={} applies={} total={} max_ops={}",
                 ledger.inventory_reads,
@@ -303,6 +334,55 @@ async fn verifies(objects: u16, fault: Option<&'static str>) {
     }
     panic!("{objects} objects exceeded 1024 alarm ticks");
 }
+/// Sum the per-slice Decode attribution; assert it accounts for every object.
+fn attribution(events: &Events, objects: u16) -> String {
+    let logs = events.0.lock().unwrap();
+    let mut sum = std::collections::BTreeMap::<&str, u64>::new();
+    let mut decode_slices = 0_u64;
+    for event in logs.iter().filter(|e| {
+        e.get("event")
+            .is_some_and(|v| v == "verification_inventory_progress")
+    }) {
+        assert_eq!(event.len(), 18, "fixed fields only: {event:?}");
+        let staged = event["entries_staged"].parse::<u64>().unwrap();
+        decode_slices += u64::from(event["entries_checkpointed"] != "0");
+        let _ = staged;
+        for key in [
+            "entries_staged",
+            "entries_checkpointed",
+            "remote_inventory_calls",
+            "inventory_batches",
+            "denial_calls",
+            "window_read_ms",
+            "decode_ms",
+            "denial_ms",
+            "staging_duration_ms",
+            "write_ms",
+            "checkpoint_ms",
+        ] {
+            *sum.entry(key).or_default() += event[key].parse::<u64>().unwrap();
+        }
+    }
+    let objects = u64::from(objects);
+    // The packmap's own MKPL facts are staged by its Decode slice too.
+    assert_eq!(sum["entries_staged"], objects + 1);
+    assert_eq!(sum["entries_checkpointed"], objects);
+    assert_eq!(sum["denial_calls"], objects, "one denial read per object");
+    // Hundredths of a remote call per object: denial plus staging.
+    let per_entry = (sum["remote_inventory_calls"] + sum["denial_calls"]) * 100 / objects;
+    // Main spent four calls per object and ended a slice after 48 objects.
+    // Small packs are dominated by their paged tree and commit.
+    if objects >= 100 {
+        assert!(per_entry <= 125, "remote calls per entry x100: {per_entry}");
+        assert!(
+            decode_slices <= objects.div_ceil(150),
+            "{decode_slices} Decode slices for {objects} objects"
+        );
+    }
+    format!(
+        "ATTRIBUTION objects={objects} decode_slices={decode_slices} remote_calls_per_entry_x100={per_entry} {sum:?}"
+    )
+}
 #[tokio::test(start_paused = true)]
 async fn decode_inventory_500_objects_at_50ms() {
     Box::pin(verifies(500, None)).await;
@@ -314,12 +394,17 @@ async fn decode_inventory_3000_objects_at_50ms() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_takedown_landing_before_a_batch_apply_still_blocks_the_pack() {
+    Box::pin(verifies_with(60, None, true)).await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn decode_retries_checkpoint_strict_progress_after_cas_contention() {
-    Box::pin(verifies(50, Some("cas_contention"))).await;
+    Box::pin(verifies(400, Some("cas_contention"))).await;
 }
 #[tokio::test(start_paused = true)]
 async fn decode_retries_checkpoint_strict_progress_after_expiry() {
-    Box::pin(verifies(50, Some("expired"))).await;
+    Box::pin(verifies(400, Some("expired"))).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -335,6 +420,7 @@ async fn concurrent_inventory_stagers_keep_cas_and_distinct_expiry() {
         barrier: Some(Arc::new(tokio::sync::Barrier::new(2))),
         heads: Arc::default(),
         ledger: Arc::default(),
+        race_block: Arc::default(),
     };
     let pack = [7; 32];
     let a = Object::Blob(Blob { data: vec![1] });
@@ -406,6 +492,7 @@ fn slow_store(clock: Arc<ManualClock>) -> Slow {
         barrier: None,
         heads: Arc::default(),
         ledger: Arc::default(),
+        race_block: Arc::default(),
     }
 }
 

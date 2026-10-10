@@ -151,6 +151,21 @@ pub(super) async fn stage_references_planned<S: NamespaceStore>(
             }
         }
     }
+    Ok(stored_action(
+        object,
+        action,
+        sorted_pages,
+        pages,
+        *digest.finalize().as_bytes(),
+    ))
+}
+fn stored_action(
+    object: &Hash,
+    action: &BlockAction,
+    sorted_pages: bool,
+    pages: Vec<ChunkPage>,
+    chunk_digest: Hash,
+) -> StoredAction {
     let header = BlockAction {
         id: action.id,
         takedown_id: action.takedown_id,
@@ -158,17 +173,35 @@ pub(super) async fn stage_references_planned<S: NamespaceStore>(
         blocked_at_ms: action.blocked_at_ms,
         chunk_ids: Vec::new(),
     };
-    Ok(StoredAction {
+    StoredAction {
         action: header,
         sorted_pages,
         chunk_count: pages.iter().map(|p| u64::from(p.count)).sum(),
-        chunk_digest: *digest.finalize().as_bytes(),
+        chunk_digest,
         pages,
         page_owner: *object,
         page_action: action.id,
         pack_scope: None,
         pack_digest: None,
-    })
+    }
+}
+/// The inventory reference row of an object that names no history references:
+/// exactly what [`stage_references_planned`] stores for an empty id list,
+/// without any page I/O.
+pub(super) fn reference_free(pack: &Hash, id: &Hash) -> StoredAction {
+    stored_action(
+        pack,
+        &BlockAction {
+            id: *id,
+            takedown_id: *pack,
+            reason: "inventory".into(),
+            blocked_at_ms: 0,
+            chunk_ids: Vec::new(),
+        },
+        false,
+        Vec::new(),
+        *blake3::Hasher::new().finalize().as_bytes(),
+    )
 }
 pub(crate) async fn page<S: NamespaceStore>(
     store: &S,

@@ -392,25 +392,7 @@ async fn stage_planned<S: NamespaceStore>(
     // No page I/O separates a reference-free snapshot from its head read.
     // Paged entries discard this snapshot and refresh their plan after staging.
     let plan = chunks.is_empty().then_some((deadline, existing));
-    let (canonical_len, logical_len) = match object {
-        Object::Blob(b) => (
-            (b.data.len() as u64).checked_add(10).ok_or_else(bad)?,
-            Some(b.data.len() as u64),
-        ),
-        Object::ChunkedBlob(cb) => (
-            (cb.chunks.len() as u64)
-                .checked_mul(32)
-                .and_then(|n| n.checked_add(22))
-                .ok_or_else(bad)?,
-            Some(cb.total_size),
-        ),
-        _ => (
-            mkit_core::serialize::serialize(object)
-                .map_err(|_| bad())?
-                .len() as u64,
-            None,
-        ),
-    };
+    let (canonical_len, logical_len) = lengths(object)?;
     let references = denial::stage_references_planned(
         store,
         pack,
@@ -436,6 +418,117 @@ async fn stage_planned<S: NamespaceStore>(
     })?;
     put_entry(store, pack, length, id, row, time, plan).await
 }
+/// Decoded objects staged by one guarded apply, at most.
+///
+/// Each entry adds at most five guard and write operations (its guard, row,
+/// marker, parent descriptor and dependency delete), and the head adds three
+/// (guard, deadline, write): 83 of `MAX_BATCH_OPS`. A store that reserves
+/// operations for itself gets a smaller batch, never a larger limit.
+pub(crate) const STAGE_BATCH_ENTRIES: usize = 16;
+const OPS_PER_ENTRY: usize = 5;
+const HEAD_OPS: usize = 3;
+const _: () =
+    assert!(OPS_PER_ENTRY * STAGE_BATCH_ENTRIES + HEAD_OPS <= crate::store::MAX_BATCH_OPS);
+
+/// One decoded object of a [`stage_many_with_clock`] batch.
+pub(crate) struct Staged<'a> {
+    pub id: Hash,
+    pub object: &'a Object,
+    pub base: Option<Hash>,
+}
+
+/// Stage `items` like repeated [`stage_with_clock`] calls, but a reference-free
+/// object shares one read of its inventory rows and one guarded apply with the
+/// others. The head is read once and guarded once, so two stagers of one pack
+/// still conflict on it. Objects with paged references stage one by one.
+pub(crate) async fn stage_many_with_clock<S: NamespaceStore>(
+    store: &S,
+    pack: &Hash,
+    length: u64,
+    items: &[Staged<'_>],
+    clock: &dyn crate::Clock,
+) -> Result<(), StoreError> {
+    let time = PlanningTime::Clock(clock);
+    let mut flat = Vec::new();
+    for item in items {
+        if children(item.object, ClosureMode::History).is_empty() {
+            flat.push(item);
+        } else {
+            stage_planned(store, pack, length, &item.id, item.object, item.base, time).await?;
+        }
+    }
+    let ops = crate::store::MAX_BATCH_OPS.saturating_sub(store.capabilities().reserved_batch_ops);
+    let per_apply = (ops.saturating_sub(HEAD_OPS) / OPS_PER_ENTRY).clamp(1, STAGE_BATCH_ENTRIES);
+    for group in flat.chunks(per_apply) {
+        stage_flat(store, pack, length, group, time).await?;
+    }
+    Ok(())
+}
+async fn stage_flat<S: NamespaceStore>(
+    store: &S,
+    pack: &Hash,
+    length: u64,
+    items: &[&Staged<'_>],
+    time: PlanningTime<'_>,
+) -> Result<(), StoreError> {
+    let p = content_shard(pack);
+    let deadline = time.deadline();
+    let hk = head_key(pack);
+    let mut ids = BTreeSet::new();
+    let items: Vec<_> = items.iter().filter(|item| ids.insert(item.id)).collect();
+    let mut keys = vec![hk.clone()];
+    keys.extend(items.iter().map(|item| entry_key(pack, &item.id)));
+    let mut rows = store.get_many(&p, &keys).await?.into_iter();
+    let old = rows.next().ok_or_else(bad)?;
+    let mut head = open_head(old.as_ref(), length)?;
+    let mut batch = Batch::new().require(guard(hk.clone(), old));
+    let mut staged = false;
+    for item in items {
+        let existing = rows.next().ok_or_else(bad)?;
+        let (canonical_len, logical_len) = lengths(item.object)?;
+        let row = encode(&Entry {
+            version: 1,
+            kind: item.object.object_type() as u8,
+            canonical_len,
+            logical_len,
+            base: item.base,
+            references: denial::reference_free(pack, &item.id),
+        })?;
+        if skips_row(existing.as_ref(), &row)? {
+            continue;
+        }
+        stage_row(&mut batch, &mut head, pack, &item.id, row, existing)?;
+        staged = true;
+    }
+    if !staged {
+        return Ok(());
+    }
+    let batch = batch.require(deadline).put(hk, encode(&head)?);
+    committed(&store.apply(&p, batch).await?)?;
+    Ok(())
+}
+/// Canonical and logical lengths recorded for `object`.
+fn lengths(object: &Object) -> Result<(u64, Option<u64>), StoreError> {
+    Ok(match object {
+        Object::Blob(b) => (
+            (b.data.len() as u64).checked_add(10).ok_or_else(bad)?,
+            Some(b.data.len() as u64),
+        ),
+        Object::ChunkedBlob(cb) => (
+            (cb.chunks.len() as u64)
+                .checked_mul(32)
+                .and_then(|n| n.checked_add(22))
+                .ok_or_else(bad)?,
+            Some(cb.total_size),
+        ),
+        _ => (
+            mkit_core::serialize::serialize(object)
+                .map_err(|_| bad())?
+                .len() as u64,
+            None,
+        ),
+    })
+}
 async fn put_entry<S: NamespaceStore>(
     store: &S,
     pack: &Hash,
@@ -453,19 +546,21 @@ async fn put_entry<S: NamespaceStore>(
         let deadline = time.deadline();
         (deadline, store.get(&p, &key).await?)
     };
-    if let Some(old) = &existing {
-        let prior: Entry = decode(old)?;
-        let next: Entry = decode(&row)?;
-        if prior.kind != 0 || next.kind == 0 {
-            return Ok(());
-        }
+    if skips_row(existing.as_ref(), &row)? {
+        return Ok(());
     }
-    // An upgraded placeholder leaves the dependency range, so that range
-    // lists exactly the external delta bases the pack still lacks.
-    let upgraded = existing.is_some();
     let hk = head_key(pack);
     let old = store.get(&p, &hk).await?;
-    let mut head: Head = old.as_ref().map(decode).transpose()?.unwrap_or(Head {
+    let mut head = open_head(old.as_ref(), length)?;
+    let mut batch = Batch::new().require(guard(hk.clone(), old));
+    stage_row(&mut batch, &mut head, pack, id, row, existing)?;
+    let batch = batch.require(deadline).put(hk, encode(&head)?);
+    committed(&store.apply(&p, batch).await?)?;
+    Ok(())
+}
+/// The head of an open inventory, created empty on first use.
+fn open_head(raw: Option<&Value>, length: u64) -> Result<Head, StoreError> {
+    let head: Head = raw.map(decode).transpose()?.unwrap_or(Head {
         version: 1,
         length,
         ..Head::default()
@@ -473,6 +568,30 @@ async fn put_entry<S: NamespaceStore>(
     if head.version != 1 || head.length != length || head.complete {
         return Err(bad());
     }
+    Ok(head)
+}
+/// A staged row is first-occurrence: only a placeholder gives way to a real row.
+fn skips_row(existing: Option<&Value>, row: &Value) -> Result<bool, StoreError> {
+    let Some(old) = existing else {
+        return Ok(false);
+    };
+    let prior: Entry = decode(old)?;
+    let next: Entry = decode(row)?;
+    Ok(prior.kind != 0 || next.kind == 0)
+}
+/// Add one entry's guarded writes to `batch` and its effect to `head`.
+fn stage_row(
+    batch: &mut Batch,
+    head: &mut Head,
+    pack: &Hash,
+    id: &Hash,
+    row: Value,
+    existing: Option<Value>,
+) -> Result<(), StoreError> {
+    let key = entry_key(pack, id);
+    // An upgraded placeholder leaves the dependency range, so that range
+    // lists exactly the external delta bases the pack still lacks.
+    let upgraded = existing.is_some();
     if let Some(old) = &existing {
         add_digest(&mut head.digest, id, old);
     } else {
@@ -485,7 +604,7 @@ async fn put_entry<S: NamespaceStore>(
         add_digest(&mut head.parent_digest, id, &row);
     }
     if upgraded {
-        // `existing` was a placeholder: the checks above returned otherwise.
+        // `existing` was a placeholder: `skips_row` returned otherwise.
         head.dependencies = head.dependencies.checked_sub(1).ok_or_else(bad)?;
         if let Some(old) = &existing {
             add_digest(&mut head.dependency_digest, id, old);
@@ -494,25 +613,22 @@ async fn put_entry<S: NamespaceStore>(
         head.dependencies = head.dependencies.checked_add(1).ok_or_else(bad)?;
         add_digest(&mut head.dependency_digest, id, &row);
     }
-    let mut batch = Batch::new()
-        .require(guard(hk.clone(), old))
+    let mut next = std::mem::take(batch)
         .require(guard(key.clone(), existing))
-        .require(deadline)
-        .put(hk, encode(&head)?)
         .put(key, row.clone())
         .put(
             marker_key(pack, id),
             Value::new(entry_digest(id, &row).to_vec()),
         );
     if matches!(parent.kind, 2 | 5) {
-        batch = batch.put(parent_key(pack, id), row.clone());
+        next = next.put(parent_key(pack, id), row.clone());
     }
     if upgraded {
-        batch = batch.delete(dependency_key(pack, id));
+        next = next.delete(dependency_key(pack, id));
     } else if parent.kind == 0 {
-        batch = batch.put(dependency_key(pack, id), row);
+        next = next.put(dependency_key(pack, id), row);
     }
-    committed(&store.apply(&p, batch).await?)?;
+    *batch = next;
     Ok(())
 }
 pub async fn dependency<S: NamespaceStore>(

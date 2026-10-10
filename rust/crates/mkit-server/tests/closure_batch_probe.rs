@@ -86,6 +86,7 @@ async fn probe(objects: u16, full_tree: bool) -> (u64, i64, u32) {
         barrier: None,
         heads: Arc::default(),
         ledger: Arc::default(),
+        race_block: Arc::default(),
     };
     let blobs = Shared(Arc::new(MemoryBlobStore::default()), clock.clone());
     let (bytes, head, _) = tree_pack_ids(objects - 2, 8);
