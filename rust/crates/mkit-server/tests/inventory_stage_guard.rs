@@ -47,14 +47,52 @@ fn tree_pack(count: u16, size: usize) -> (Vec<u8>, Hash) {
     (writer.finish().unwrap(), head)
 }
 
-async fn verifies(objects: u16, fault: Option<&'static str>) {
-    Box::pin(verifies_with(objects, fault, false)).await;
+/// A pack of `count` blobs and a tree naming each, then a signed commit on the
+/// last tree: every tree stages with its own reference page.
+fn tree_heavy_pack(count: u16) -> (Vec<u8>, Hash) {
+    let mut writer = PackWriter::new_raw_only();
+    let mut last = None;
+    // Blobs first: the trees then arrive as one run of paged entries.
+    for n in 0..count {
+        writer.push_raw(blob(n, 8).0, &blob(n, 8).1).unwrap();
+    }
+    for n in 0..count {
+        let tree = Object::Tree(Tree {
+            entries: vec![TreeEntry {
+                name: format!("f{n:05}").into_bytes(),
+                mode: EntryMode::Blob,
+                object_hash: blob(n, 8).0,
+            }],
+        });
+        writer
+            .push_raw(tree.id().unwrap(), &serialize(&tree).unwrap())
+            .unwrap();
+        last = Some(tree.id().unwrap());
+    }
+    let (commit, head) = signed_commit(last.unwrap(), Vec::new(), 7, b"head");
+    writer.push_raw(head, &serialize(&commit).unwrap()).unwrap();
+    (writer.finish().unwrap(), head)
 }
 
-/// With `race`, a takedown of one object lands just before the first batch's
-/// inventory apply, after the batch was decoded.
+/// What the pack under test looks like.
+#[derive(Clone, Copy, Default)]
+struct Shape {
+    /// A takedown of one object lands just before the first batch's inventory
+    /// apply, after the batch was decoded.
+    race: bool,
+    /// Every object is a one-entry tree beside its blob, or a commit.
+    tree_heavy: bool,
+    /// Bytes per blob when set.
+    blob_bytes: Option<usize>,
+}
+
+async fn verifies(objects: u16, fault: Option<&'static str>) {
+    Box::pin(verifies_with(objects, fault, Shape::default())).await;
+}
+
 #[allow(clippy::too_many_lines)] // Keep the full alarm-driven fixture and progress assertions together.
-async fn verifies_with(objects: u16, fault: Option<&'static str>, race: bool) {
+async fn verifies_with(objects: u16, fault: Option<&'static str>, shape: Shape) {
+    let race = shape.race;
     let events = Events::default();
     let _subscriber = tracing::subscriber::set_default(events.clone());
     let clock = Arc::new(ManualClock::new(1_700_000_000_000));
@@ -70,7 +108,11 @@ async fn verifies_with(objects: u16, fault: Option<&'static str>, race: bool) {
         race_block: Arc::new(std::sync::Mutex::new(race.then(|| blob(5, 8).0))),
     };
     let blobs = Shared(Arc::new(MemoryBlobStore::default()), clock.clone());
-    let (bytes, head) = tree_pack(objects - 2, 8);
+    let (bytes, head) = if shape.tree_heavy {
+        tree_heavy_pack((objects - 1) / 2)
+    } else {
+        tree_pack(objects - 2, shape.blob_bytes.unwrap_or(8))
+    };
     let pack = hash(&bytes);
     let owner = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
     let namespace = mkit_core::repo_identity::Namespace::Ed25519(*owner.verifying_key().as_bytes());
@@ -80,7 +122,11 @@ async fn verifies_with(objects: u16, fault: Option<&'static str>, race: bool) {
     };
     let shards: Arc<dyn ShardMap> = Arc::new(D34Shards);
     let source = shards.ref_shard(&repo, "refs/heads/main");
-    let cfg = IndexedConfig::scheduled(1 << 30);
+    let mut cfg = IndexedConfig::scheduled(1 << 30);
+    if shape.blob_bytes.is_some() {
+        // Large blobs are the point; they need no extraction here.
+        cfg.extract_min_bytes = 8 << 20;
+    }
     let recorder = Arc::new(Recorder::default());
     let mut pipeline_cfg = mkit_server::pipeline::PipelineConfig::new(
         mkit_server::Addressing::Multi(mkit_server::MultiAddressing::new().with_namespace_policy(
@@ -141,7 +187,14 @@ async fn verifies_with(objects: u16, fault: Option<&'static str>, race: bool) {
         },
         shards,
         cfg,
-        limits: SliceLimits::default(),
+        limits: if shape.tree_heavy {
+            // A slice that ends mid-run of paged entries, between batches.
+            let mut limits = SliceLimits::default();
+            limits.max_subrequests = 200;
+            limits
+        } else {
+            SliceLimits::default()
+        },
         lease: LeaseParams::default(),
         clock: clock.clone(),
         metrics: recorder.clone(),
@@ -309,7 +362,11 @@ async fn verifies_with(objects: u16, fault: Option<&'static str>, race: bool) {
                 ledger.max_batch_bytes
             );
             if fault.is_none() {
-                let sums = attribution(&events, objects);
+                let sums = attribution(
+                    &events,
+                    objects,
+                    !shape.tree_heavy && shape.blob_bytes.is_none(),
+                );
                 eprintln!("{sums}");
             }
             eprintln!(
@@ -319,6 +376,11 @@ async fn verifies_with(objects: u16, fault: Option<&'static str>, race: bool) {
                 ledger.inventory_reads + ledger.inventory_applies,
                 ledger.max_inventory_ops
             );
+            if shape.blob_bytes.is_some() {
+                // Each 200 KiB blob counts 400 KiB: two per group, so ten blobs
+                // take five applies where sixteen tiny ones take one (4 total).
+                assert_eq!(ledger.inventory_applies, 8);
+            }
             return;
         }
         let next = report
@@ -335,7 +397,7 @@ async fn verifies_with(objects: u16, fault: Option<&'static str>, race: bool) {
     panic!("{objects} objects exceeded 1024 alarm ticks");
 }
 /// Sum the per-slice Decode attribution; assert it accounts for every object.
-fn attribution(events: &Events, objects: u16) -> String {
+fn attribution(events: &Events, objects: u16, plain: bool) -> String {
     let logs = events.0.lock().unwrap();
     let mut sum = std::collections::BTreeMap::<&str, u64>::new();
     let mut decode_slices = 0_u64;
@@ -344,9 +406,7 @@ fn attribution(events: &Events, objects: u16) -> String {
             .is_some_and(|v| v == "verification_inventory_progress")
     }) {
         assert_eq!(event.len(), 18, "fixed fields only: {event:?}");
-        let staged = event["entries_staged"].parse::<u64>().unwrap();
         decode_slices += u64::from(event["entries_checkpointed"] != "0");
-        let _ = staged;
         for key in [
             "entries_staged",
             "entries_checkpointed",
@@ -372,10 +432,10 @@ fn attribution(events: &Events, objects: u16) -> String {
     let per_entry = (sum["remote_inventory_calls"] + sum["denial_calls"]) * 100 / objects;
     // Main spent four calls per object and ended a slice after 48 objects.
     // Small packs are dominated by their paged tree and commit.
-    if objects >= 100 {
+    if objects >= 100 && plain {
         assert!(per_entry <= 125, "remote calls per entry x100: {per_entry}");
         assert!(
-            decode_slices <= objects.div_ceil(150),
+            decode_slices <= objects.div_ceil(170),
             "{decode_slices} Decode slices for {objects} objects"
         );
     }
@@ -393,9 +453,46 @@ async fn decode_inventory_3000_objects_at_50ms() {
     Box::pin(verifies(3000, None)).await;
 }
 
+/// Two hundred trees, each staged alone with a reference page, must neither
+/// exhaust a slice's subrequest budget (a failed fire) nor skip an entry.
+#[tokio::test(start_paused = true)]
+async fn tree_heavy_batches_settle_inside_the_slice_budget() {
+    Box::pin(verifies_with(
+        401,
+        None,
+        Shape {
+            tree_heavy: true,
+            ..Shape::default()
+        },
+    ))
+    .await;
+}
+
+/// Decoded entries over the batch's memory allowance settle in smaller groups.
+#[tokio::test(start_paused = true)]
+async fn large_entries_settle_in_groups_under_the_batch_memory_bound() {
+    Box::pin(verifies_with(
+        12,
+        None,
+        Shape {
+            blob_bytes: Some(200 << 10),
+            ..Shape::default()
+        },
+    ))
+    .await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_takedown_landing_before_a_batch_apply_still_blocks_the_pack() {
-    Box::pin(verifies_with(60, None, true)).await;
+    Box::pin(verifies_with(
+        60,
+        None,
+        Shape {
+            race: true,
+            ..Shape::default()
+        },
+    ))
+    .await;
 }
 
 #[tokio::test(start_paused = true)]

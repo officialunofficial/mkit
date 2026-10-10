@@ -269,9 +269,9 @@ collect the applicable entries between their old and new immutable pins.
   batch never share a read) but now follow the batch's apply instead of
   preceding each entry's: a block that lands while a batch is in flight is
   refused (`Blocked`), where reads taken first would have left every earlier
-  object of a batch a wider window than one entry, and a block that lands later
-  finds the staged rows. The only visible difference is that a blocked pack's
-  inventory rows are written before the pack is refused. Remote calls per
+  object of a batch a wider window than one entry. The only visible difference
+  is that a blocked pack's inventory rows are written before the pack is
+  refused. Remote calls per
   entry fall from 4 to about 1.2, so a slice reaches about 177 entries instead
   of 48: a 500-object push needs 3 Decode slices instead of 11 and a
   3,000-object push 17 instead of 63 (slow-store model: 177.7 s to 103.0 s and

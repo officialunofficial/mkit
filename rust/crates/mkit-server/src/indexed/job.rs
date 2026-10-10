@@ -407,13 +407,19 @@ struct Prepared {
     hops: u32,
     external: Option<Hash>,
     cursor: Vec<u8>,
+    /// Most remote calls admitting it can take: its denial read, plus staging
+    /// beyond its share of the batch's two calls.
+    calls: u32,
 }
 
 /// Decoded entries admitted together: staged by one inventory apply.
 const ADMIT_ENTRIES: usize = crate::takedown::inventory::STAGE_BATCH_ENTRIES;
-/// Decoded bytes a batch holds beyond its first entry. It keeps the
-/// batch's share of the slice's resident allowance small.
+/// Memory a batch may hold beyond its first entry: each entry's decoded bytes
+/// count twice, for the parsed object beside them. A batch adds this and one
+/// more entry to the slice's resident allowance.
 const ADMIT_BYTES: usize = 1 << 20;
+/// Remote calls a batch's reads and apply take apart from its entries' own.
+const ADMIT_CALLS: u32 = 2;
 
 struct Run<'a, S, R, B, W, X> {
     h: &'a VerifyTimer<R, B, W, X>,
@@ -1269,15 +1275,22 @@ where
                             continue;
                         }
                     }
-                    let mut item = self.prepare(st, job, frame, entry).await?;
+                    // A failed entry follows the ones before it, as when each
+                    // was admitted before the next was decoded.
+                    let mut item = match self.prepare(st, job, frame, entry).await {
+                        Ok(item) => item,
+                        Err(stop) => {
+                            self.settle(st, job, &mut pending, state, held.as_ref())
+                                .await?;
+                            return Err(stop);
+                        }
+                    };
                     item.cursor = reader
                         .checkpoint()
                         .ok_or_else(|| unavailable("decoded entry lost its boundary"))?
                         .to_bytes();
-                    if !pending.is_empty()
-                        && pending.iter().map(|p| p.bytes.len()).sum::<usize>() + item.bytes.len()
-                            > ADMIT_BYTES
-                    {
+                    let held_bytes: usize = pending.iter().map(|p| 2 * p.bytes.len()).sum();
+                    if !pending.is_empty() && held_bytes + 2 * item.bytes.len() > ADMIT_BYTES {
                         self.settle(st, job, &mut pending, state, held.as_ref())
                             .await?;
                     }
@@ -1285,14 +1298,18 @@ where
                     processed += 1;
                     // One window of progress per slice: the resumed window
                     // and the next. Only an entry boundary can be saved.
-                    let stop = fed >= 2
-                        || processed >= job.entry_cap
-                        || self.budget.remaining() < ENTRY_RESERVE;
-                    if stop || pending.len() >= ADMIT_ENTRIES {
+                    let stop = fed >= 2 || processed >= job.entry_cap;
+                    // The batch's worst-case calls stay inside the reserve, so
+                    // admitting it never exhausts the slice's budget.
+                    let owed = ADMIT_CALLS + pending.iter().map(|p| p.calls).sum::<u32>();
+                    if stop
+                        || pending.len() >= ADMIT_ENTRIES
+                        || self.budget.remaining() < ENTRY_RESERVE.saturating_add(owed)
+                    {
                         self.settle(st, job, &mut pending, state, held.as_ref())
                             .await?;
                     }
-                    if stop {
+                    if stop || self.budget.remaining() < ENTRY_RESERVE {
                         return Ok(0);
                     }
                 }
@@ -1435,6 +1452,7 @@ where
         Ok(Prepared {
             frame,
             id,
+            calls: 1 + crate::takedown::inventory::staging_calls(&object),
             bytes,
             object,
             base,
@@ -1446,10 +1464,10 @@ where
 
     /// Stage the inventory rows of `batch`, then refuse a blocked object.
     ///
-    /// Denial is read after the staging apply, not before it: a block that
-    /// lands while the batch is in flight is seen by these reads, and a block
-    /// that lands later finds the staged rows. Reads before the apply would
-    /// leave every earlier object of a batch a longer window than one entry.
+    /// Denial is read after the staging apply, not before it, so a block that
+    /// lands while the batch is in flight is seen by these reads. Reads before
+    /// the apply would leave every earlier object of a batch a longer window
+    /// than one entry.
     /// The denial reads are one call each: content shards partition objects,
     /// so ids of one batch share no shard.
     async fn admit(

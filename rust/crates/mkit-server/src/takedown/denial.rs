@@ -57,7 +57,7 @@ pub(crate) fn descriptor_key(object: &Hash) -> Key {
     bytes.extend_from_slice(object);
     Key::new(bytes)
 }
-const PAGE_HASHES: usize = crate::store::MAX_VALUE_BYTES / 32;
+pub(super) const PAGE_HASHES: usize = crate::store::MAX_VALUE_BYTES / 32;
 #[cfg(test)]
 static STAGED_PAGE_PEAK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 pub(super) fn chunk_page_key(object: &Hash, action: &Hash, page: u32) -> Key {

@@ -430,6 +430,19 @@ const HEAD_OPS: usize = 3;
 const _: () =
     assert!(OPS_PER_ENTRY * STAGE_BATCH_ENTRIES + HEAD_OPS <= crate::store::MAX_BATCH_OPS);
 
+/// Most remote calls staging `object` can add beyond its share of a batch's two
+/// (one read, one apply): none for a reference-free object, and for one with
+/// paged references its own entry read, a read and an apply per page, then the
+/// head read and apply.
+pub(crate) fn staging_calls(object: &Object) -> u32 {
+    let references = children(object, ClosureMode::History).len();
+    if references == 0 {
+        return 0;
+    }
+    let pages = references.div_ceil(denial::PAGE_HASHES);
+    4 + 2 * u32::try_from(pages).unwrap_or(u32::MAX / 2)
+}
+
 /// One decoded object of a [`stage_many_with_clock`] batch.
 pub(crate) struct Staged<'a> {
     pub id: Hash,
@@ -480,9 +493,9 @@ async fn stage_flat<S: NamespaceStore>(
     keys.extend(items.iter().map(|item| entry_key(pack, &item.id)));
     let mut rows = store.get_many(&p, &keys).await?.into_iter();
     let old = rows.next().ok_or_else(bad)?;
-    let mut head = open_head(old.as_ref(), length)?;
-    let mut batch = Batch::new().require(guard(hk.clone(), old));
-    let mut staged = false;
+    // Rows that are already staged are skipped before the head is checked, as
+    // a replay of one staged entry always was.
+    let mut todo = Vec::new();
     for item in items {
         let existing = rows.next().ok_or_else(bad)?;
         let (canonical_len, logical_len) = lengths(item.object)?;
@@ -494,14 +507,17 @@ async fn stage_flat<S: NamespaceStore>(
             base: item.base,
             references: denial::reference_free(pack, &item.id),
         })?;
-        if skips_row(existing.as_ref(), &row)? {
-            continue;
+        if !skips_row(existing.as_ref(), &row)? {
+            todo.push((item.id, row, existing));
         }
-        stage_row(&mut batch, &mut head, pack, &item.id, row, existing)?;
-        staged = true;
     }
-    if !staged {
+    if todo.is_empty() {
         return Ok(());
+    }
+    let mut head = open_head(old.as_ref(), length)?;
+    let mut batch = Batch::new().require(guard(hk.clone(), old));
+    for (id, row, existing) in todo {
+        stage_row(&mut batch, &mut head, pack, &id, row, existing)?;
     }
     let batch = batch.require(deadline).put(hk, encode(&head)?);
     committed(&store.apply(&p, batch).await?)?;
