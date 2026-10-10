@@ -52,6 +52,7 @@ fn progress(a: &Advance) -> Progress {
         missing: false,
         missing_base: false,
         complete: false,
+        boundary: None,
     }
 }
 async fn facts(kv: &MemoryKv, id: Hash, prev: Option<Hash>) {
@@ -1074,5 +1075,206 @@ fn limit_counter_counts_only_committed_capacity_stops_once() {
             };
             assert_eq!(*metrics.0.lock().unwrap(), expected);
         }
+    });
+}
+
+#[test]
+fn a_failing_cleared_set_load_is_charged_and_a_corrupt_one_ends_the_proof() {
+    use crate::store::publication::Witness;
+    block_on(async {
+        let flagged = Witness {
+            generation: 0,
+            sequence: 0,
+            published: true,
+            held: false,
+            boundary: true,
+        }
+        .encode();
+        let repo = repo();
+        let root = [1; 32];
+        let fixture = |bytes: Option<Vec<u8>>| {
+            let repo = repo.clone();
+            let flagged = flagged.clone();
+            async move {
+                let kv = MemoryKv::with_clock(std::sync::Arc::new(crate::rt::ManualClock::new(0)));
+                facts(&kv, root, None).await;
+                verified(&kv, &repo, root).await;
+                kv.apply(
+                    &SinglePartition.membership(&repo, &crate::BlobKey::pack(root)),
+                    Batch::new().put(keys::membership(&repo.name, &root), flagged),
+                )
+                .await
+                .unwrap();
+                if let Some(bytes) = bytes {
+                    kv.apply(
+                        &SinglePartition.coordinator(&repo.namespace),
+                        Batch::new().put(keys::fork_set(&repo.name, 0), Value::new(bytes)),
+                    )
+                    .await
+                    .unwrap();
+                }
+                kv
+            }
+        };
+        let mut a = advance(root);
+        a.additions.clear();
+        let source = SinglePartition.ref_shard(&repo, "refs/heads/main");
+        let cfg = IndexedConfig::default();
+        // A corrupt row ends the verification at once.
+        let kv = fixture(Some(vec![1, 2, 3])).await;
+        prepare(
+            &kv,
+            &source,
+            &SinglePartition,
+            &repo,
+            &mut a,
+            cfg,
+            0,
+            &crate::telemetry::NoopMetrics,
+            0,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            read_progress(&kv, &repo, root).await.failure,
+            Some(Exhaustion::Traversal)
+        );
+        // A failing read is retried, its calls kept, and the proof completes.
+        let kv = fixture(None).await;
+        let failing = FailingMembership {
+            store: &kv,
+            key: keys::fork_set(&repo.name, 0),
+            armed: std::sync::atomic::AtomicBool::new(true),
+        };
+        let error = prepare(
+            &failing,
+            &source,
+            &SinglePartition,
+            &repo,
+            &mut a,
+            cfg,
+            0,
+            &crate::telemetry::NoopMetrics,
+            0,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), Code::Unavailable);
+        let first = read_progress(&kv, &repo, root).await;
+        assert_eq!(first.failure, None);
+        assert!(first.calls > 0, "the failed load was charged");
+        // The timer's continuation reads the set again and completes.
+        let mut done = first.clone();
+        slice(
+            &kv,
+            &SinglePartition,
+            &repo,
+            &mut done,
+            &crate::telemetry::NoopMetrics,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(done.complete);
+        assert!(done.calls > first.calls);
+        assert_eq!(done.boundary, Some(root));
+    });
+}
+
+#[test]
+fn a_cleared_tree_is_never_skipped_as_the_head_of_a_pair() {
+    use crate::store::publication::Witness;
+    use mkit_core::object::Tree;
+    block_on(async {
+        let kv = MemoryKv::with_clock(std::sync::Arc::new(crate::rt::ManualClock::new(0)));
+        let repo = repo();
+        let (root, pack) = ([1; 32], [2; 32]);
+        // A packmap node listing one pack that holds one (empty) tree.
+        inventory::stage_packlist(&kv, &root, 100, None, &[pack], 0)
+            .await
+            .unwrap();
+        inventory::complete(&kv, &root, 100, 0).await.unwrap();
+        let tree = Object::Tree(Tree { entries: vec![] });
+        let id = tree.id().unwrap();
+        let length = mkit_core::serialize::serialize(&tree).unwrap().len() as u64;
+        inventory::stage(&kv, &pack, 10_000, &id, &tree, None, 0)
+            .await
+            .unwrap();
+        inventory::complete(&kv, &pack, 10_000, 0).await.unwrap();
+        let source = SinglePartition.ref_shard(&repo, "refs/heads/main");
+        let entry = IndexEntry {
+            object: id,
+            value: IndexValue {
+                frame_offset: 0,
+                frame_length: 20,
+                wire_type: 0,
+                decoded_size: length,
+                chain_depth: 0,
+                delta_base: None,
+            },
+        };
+        for batch in plan_index_rows_direct(&SinglePartition, &repo, &source, &pack, &[entry], 0)
+            .unwrap()
+            .direct
+        {
+            let mut writes = Batch::new();
+            for (k, v) in batch.puts {
+                writes = writes.put(k, v);
+            }
+            kv.apply(&batch.target, writes).await.unwrap();
+        }
+        let flagged = Witness {
+            generation: 0,
+            sequence: 0,
+            published: true,
+            held: false,
+            boundary: true,
+        }
+        .encode();
+        kv.apply(
+            &SinglePartition.membership(&repo, &crate::BlobKey::pack(root)),
+            Batch::new()
+                .put(keys::membership(&repo.name, &root), flagged)
+                .put(keys::membership(&repo.name, &pack), Value::default())
+                .put(keys::fork_set(&repo.name, 0), Value::new(id.to_vec())),
+        )
+        .await
+        .unwrap();
+        // `put` of the set landed in the same (single) partition as everything.
+        verified(&kv, &repo, root).await;
+        let mut a = advance(root);
+        a.additions.clear();
+        a.value.head = Some(id);
+        let cfg = IndexedConfig::default();
+        let _ = prepare(
+            &kv,
+            &source,
+            &SinglePartition,
+            &repo,
+            &mut a,
+            cfg,
+            0,
+            &crate::telemetry::NoopMetrics,
+            0,
+        )
+        .await;
+        let mut progress = read_progress(&kv, &repo, root).await;
+        for _ in 0..4 {
+            slice(
+                &kv,
+                &SinglePartition,
+                &repo,
+                &mut progress,
+                &crate::telemetry::NoopMetrics,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        // The set names the tree, yet the head's kind is still checked: a tree
+        // is not a commit, remix or tag.
+        assert_eq!(progress.boundary, Some(root));
+        assert_eq!(progress.terminal, Some(TerminalFailure::OpenClosure));
+        assert!(!progress.complete);
     });
 }

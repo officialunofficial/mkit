@@ -32,7 +32,7 @@ pub struct RepoPage {
 }
 
 /// Append the listing projection to the very apply that writes registration/visibility.
-pub(super) fn index_writes(
+pub(crate) fn index_writes(
     batch: &mut Batch,
     repo: &RepoName,
     registered: bool,

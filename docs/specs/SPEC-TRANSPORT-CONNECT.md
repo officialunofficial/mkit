@@ -1544,7 +1544,9 @@ policy.
 | `AdvanceRefs` | No; it consumes tickets | In the same ref shard: the head and the packmap, the ref's membership additions, which the server propagates to the repository index shards at least once, and one `Committed` outcome for each ticket it consumes. Tickets are local to the ref shard, so there is no cross-shard handoff. |
 
 - **Membership.** A pack becomes a member of the repository only at the
-  apply of the `AdvanceRefs` that consumes its ticket. Until then,
+  apply of the `AdvanceRefs` that consumes its ticket, or at the completion
+  by the final phase of a server-side fork into an empty repository
+  (SPEC-SERVER §9.9). Until then,
   `BeginUpload` for the same signer, ref, and pack returns the existing
   ticket, never `AlreadyPresent` (§7.6). A `BeginUpload` that finds such
   a live ticket returns it after authorization and before admission: it

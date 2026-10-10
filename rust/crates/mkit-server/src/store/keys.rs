@@ -43,6 +43,8 @@
 //! | repo-known marker (ref shard) | `rk 00 <repo>` | empty |
 //! | repository stored-bytes counter (`Coordinator`) | `rb 00 <repo>` | codec `RepoStorageV1` (absolute pack bytes, version) |
 //! | counted pack marker (`Coordinator`) | `rn 00 <repo> 00 <pack:32>` | be64 pack bytes |
+//! | fork job (`Coordinator`) | `fj 00 <repo>` | v1 `ForkJobV1` |
+//! | fork working set or cleared set (`Coordinator`) | `fo 00 <repo> 00 <set:u8>` | binary id list; set 0 cleared commits and trees, 1 tree ids, 2 queue, 3 inherited base packs, 4 chunked-blob manifests |
 //! | grant epoch | `e 00` | be64; absent means 0, never written as 0 |
 //! | epoch lease (ref shard) | `el 00` | codec `EpochLease` |
 //! | leased shard (`Coordinator`) | `ls 00 <repo> 00 <shard_ref>` | codec `LeasedShard` |
@@ -215,6 +217,10 @@ pub const TAG_TICKETS_PER_SIGNER: &str = "tu";
 pub const TAG_REPO_STORAGE: &str = "rb";
 /// Counted-pack marker tag: a pack already added to its repository's counter.
 pub const TAG_REPO_STORAGE_PACK: &str = "rn";
+/// Repository fork job tag (`Coordinator`).
+pub const TAG_FORK_JOB: &str = "fj";
+/// Repository fork id-set tag (`Coordinator`).
+pub const TAG_FORK_SET: &str = "fo";
 /// Local repository membership tag.
 pub const TAG_MEMBERSHIP: &str = "m";
 /// Per-(repository, pack) verification state in the ref shard.
@@ -326,6 +332,10 @@ pub enum ParsedKey {
     NamespaceRecord,
     /// `rr 00 <repo>`.
     RepoRecord(RepoName),
+    /// `fj 00 <repo>`.
+    ForkJob(RepoName),
+    /// `fo 00 <repo> 00 <set>`.
+    ForkSet { repo: RepoName, set: u8 },
     /// `rl 00 p/d 00 <repo>`; index values are empty.
     RepoListing {
         explicit_public: bool,
@@ -961,10 +971,30 @@ pub fn tickets_per_signer(repo: &RepoName, name: &str, signer: &Hash) -> Result<
     )
 }
 
+/// `fj 00 <repo>`: the destination's fork job.
+#[must_use]
+pub fn fork_job(repo: &RepoName) -> Key {
+    key(TAG_FORK_JOB, &[repo.as_str().as_bytes()])
+}
+
+/// `fo 00 <repo> 00 <set>`: one binary id set of the destination's fork.
+#[must_use]
+pub fn fork_set(repo: &RepoName, set: u8) -> Key {
+    key(TAG_FORK_SET, &[repo.as_str().as_bytes(), b"\0", &[set]])
+}
+
 /// `m 00 <repo> 00 <pack>`; bounded by `RepoName` and the fixed hash size.
 #[must_use]
 pub fn membership(repo: &RepoName, pack: &Hash) -> Key {
     key(TAG_MEMBERSHIP, &[repo.as_str().as_bytes(), b"\0", pack])
+}
+
+/// Every membership row of one repository: `[m 00 <repo> 00, m 00 <repo> 01)`.
+#[must_use]
+pub fn membership_repo_range(repo: &RepoName) -> (Key, Key) {
+    let start = key(TAG_MEMBERSHIP, &[repo.as_str().as_bytes(), b"\0"]);
+    let end = successor(&start);
+    (start, end)
 }
 
 /// `vs 00 <repo> 00 <pack>`; the ref shard holding the ticket owns it.
@@ -1014,6 +1044,14 @@ pub fn object_index(repo: &RepoName, object: &Hash, pack: &Hash) -> Key {
         TAG_OBJECT_INDEX,
         &[repo.as_str().as_bytes(), b"\0", object, pack],
     )
+}
+
+/// Every index row of one repository: `[i 00 <repo> 00, i 00 <repo> 01)`.
+#[must_use]
+pub fn object_index_repo_range(repo: &RepoName) -> (Key, Key) {
+    let start = key(TAG_OBJECT_INDEX, &[repo.as_str().as_bytes(), b"\0"]);
+    let end = successor(&start);
+    (start, end)
 }
 
 /// The exact range of index rows for one repository and object.
@@ -1417,6 +1455,15 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
         b"ls" => parse_leased_shard(body)?,
         b"nr" if body.is_empty() => ParsedKey::NamespaceRecord,
         b"rr" => ParsedKey::RepoRecord(RepoName::new(text(body)?).ok()?),
+        b"fj" => ParsedKey::ForkJob(RepoName::new(text(body)?).ok()?),
+        b"fo" => {
+            let (name, set) = body.split_at(body.len().checked_sub(2)?);
+            (set[0] == 0).then_some(())?;
+            ParsedKey::ForkSet {
+                repo: RepoName::new(text(name)?).ok()?,
+                set: set[1],
+            }
+        }
         b"rl" if body.starts_with(b"p\0") || body.starts_with(b"d\0") => ParsedKey::RepoListing {
             explicit_public: body[0] == b'p',
             repo: RepoName::new(text(&body[2..])?).ok()?,
@@ -1678,6 +1725,8 @@ mod tests {
             TAG_REPO_KNOWN,
             TAG_REPO_STORAGE,
             TAG_REPO_STORAGE_PACK,
+            TAG_FORK_JOB,
+            TAG_FORK_SET,
             TAG_RELAY_HIGH_WATER,
             TAG_RELAY_SCAN,
             TAG_TICKET,
@@ -1863,6 +1912,8 @@ mod tests {
             (repo_record(&repo("room-a")), b"rr\0room-a".to_vec()),
             (repo_visibility(&repo("room-a")), b"rv\0room-a".to_vec()),
             (repo_known(&repo("room-a")), b"rk\0room-a".to_vec()),
+            (fork_job(&repo("room-a")), b"fj\0room-a".to_vec()),
+            (fork_set(&repo("room-a"), 3), b"fo\0room-a\0\x03".to_vec()),
             (repo_storage(&repo("room-a")), b"rb\0room-a".to_vec()),
             (
                 verification(&repo("room-a"), &s),
@@ -2291,6 +2342,14 @@ mod tests {
             (namespace_record(), ParsedKey::NamespaceRecord),
             (repo_record(&repo("a")), ParsedKey::RepoRecord(repo("a"))),
             (repo_known(&repo("a")), ParsedKey::RepoKnown(repo("a"))),
+            (fork_job(&repo("a")), ParsedKey::ForkJob(repo("a"))),
+            (
+                fork_set(&repo("a"), 2),
+                ParsedKey::ForkSet {
+                    repo: repo("a"),
+                    set: 2,
+                },
+            ),
             (repo_storage(&repo("a")), ParsedKey::RepoStorage(repo("a"))),
             (
                 repo_storage_pack(&repo("a"), &[0x11; 32]),

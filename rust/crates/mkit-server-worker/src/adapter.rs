@@ -3382,6 +3382,7 @@ mod tests {
                     sequence: 1,
                     published: true,
                     held: false,
+                    boundary: false,
                 };
                 kv.apply(
                     &target,

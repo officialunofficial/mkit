@@ -167,6 +167,9 @@ pub struct Witness {
     pub published: bool,
     /// Serving stop; applies to writers too.
     pub held: bool,
+    /// The packmap node a completed fork inherited: it names a cleared set
+    /// that publication verification may skip (SPEC-SERVER §9.9).
+    pub boundary: bool,
 }
 impl Witness {
     /// Fixed-width versioned encoding; no unchecked optional fields.
@@ -175,6 +178,9 @@ impl Witness {
         let mut bytes = vec![1, u8::from(self.published), u8::from(self.held)];
         bytes.extend_from_slice(&self.generation.to_be_bytes());
         bytes.extend_from_slice(&self.sequence.to_be_bytes());
+        if self.boundary {
+            bytes.push(1);
+        }
         Value::new(bytes)
     }
     /// Decode a witness. Empty membership is the explicitly immediate upload form.
@@ -186,9 +192,15 @@ impl Witness {
                 sequence: 0,
                 published: true,
                 held: false,
+                boundary: false,
             });
         }
-        if bytes.len() != 19 || bytes[0] != 1 || bytes[1] > 1 || bytes[2] > 1 {
+        let boundary = match bytes.len() {
+            19 => false,
+            20 if bytes[19] == 1 => true,
+            _ => return Err(StoreError::Corrupt("invalid clearance witness".into())),
+        };
+        if bytes[0] != 1 || bytes[1] > 1 || bytes[2] > 1 {
             return Err(StoreError::Corrupt("invalid clearance witness".into()));
         }
         let number = |offset| -> Result<u64, StoreError> {
@@ -203,6 +215,7 @@ impl Witness {
             sequence: number(11)?,
             published: bytes[1] != 0,
             held: bytes[2] != 0,
+            boundary,
         })
     }
     /// Whether the caller may use this membership in its chosen view.
@@ -363,6 +376,7 @@ fn project_members(
             sequence: advance.sequence,
             published: advance.state.publishable(),
             held: matches!(advance.state, Clearance::Held | Clearance::Hit),
+            boundary: false,
         };
         let key = keys::membership(&repo.name, pack);
         // Replace the live membership fragment rather than spending another per-ticket put.

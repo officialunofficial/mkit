@@ -60,6 +60,12 @@ impl QuotaScope {
         Self(format!("{}\n{}", ns.as_str(), to_hex(signer)))
     }
 
+    /// A scope read back from a durable row (a fork's settlement data).
+    #[must_use]
+    pub(crate) fn from_stored(scope: String) -> Self {
+        Self(scope)
+    }
+
     /// The scope key as a string.
     #[must_use]
     pub fn as_str(&self) -> &str {

@@ -42,7 +42,8 @@ impl TimerKind {
 /// | 13 | CONTENT_TAKEDOWN_REQUEST (WP-4.10b, R-186) |
 /// | 14 | INSPECTION (reserved for WP-5.5a, R-198) |
 /// | 15 | TAKEDOWN_WORK (WP-5.6a, R-190) |
-/// | 16..=0xEF | Production, unallocated |
+/// | 16 | FORK (repository fork job) |
+/// | 17..=0xEF | Production, unallocated |
 /// | 0xF0..=0xFE | Reserved for tests |
 /// | 0xFF | TEST (`__test-faults` only) |
 pub mod kinds {
@@ -70,6 +71,8 @@ pub mod kinds {
     pub const PUBLICATION_RECHECK: super::TimerKind = super::TimerKind::new(12);
     /// Preservation acquisition, holder discovery and audited retention purge.
     pub const TAKEDOWN_WORK: super::TimerKind = super::TimerKind::new(15);
+    /// Repository fork job slices.
+    pub const FORK: super::TimerKind = super::TimerKind::new(16);
     /// Ref deletion used only by test drivers and directives.
     #[cfg(feature = "__test-faults")]
     pub const TEST: super::TimerKind = super::TimerKind::new(0xFF);

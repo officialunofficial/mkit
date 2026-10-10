@@ -31,6 +31,7 @@ pub mod budget;
 pub mod connect;
 pub(crate) mod download;
 mod error;
+pub mod fork;
 #[cfg(all(feature = "fs", not(target_arch = "wasm32")))]
 pub mod fs;
 pub mod history_token;

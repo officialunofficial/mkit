@@ -179,6 +179,40 @@ pub(crate) async fn packlist_facts<S: NamespaceStore>(
     }
     Ok((head.length, facts.prev, facts.packs))
 }
+/// Immutable facts of a sealed pack inventory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SealedFacts {
+    /// Pack length in bytes.
+    pub length: u64,
+    /// Rows, including the external-base placeholders still missing
+    /// ([`Self::dependencies`] of them).
+    pub count: u64,
+    /// External delta-base placeholders the pack still lacks.
+    pub dependencies: u64,
+    /// MKPL facts, when the pack is a packmap node: `prev` and listed packs.
+    pub packlist: Option<(Option<Hash>, Vec<Hash>)>,
+}
+/// Read a sealed inventory's head: one call, no row scan. An absent or
+/// unsealed inventory is an error, so a caller never trusts partial facts.
+pub async fn sealed_facts<S: NamespaceStore>(
+    store: &S,
+    pack: &Hash,
+) -> Result<SealedFacts, StoreError> {
+    let raw = store
+        .get(&content_shard(pack), &head_key(pack))
+        .await?
+        .ok_or_else(bad)?;
+    let head: Head = decode(&raw)?;
+    if head.version != 1 || !head.complete {
+        return Err(bad());
+    }
+    Ok(SealedFacts {
+        length: head.length,
+        count: head.count,
+        dependencies: head.dependencies,
+        packlist: head.packlist.map(|f| (f.prev, f.packs)),
+    })
+}
 #[must_use]
 pub fn entry_key(pack: &Hash, id: &Hash) -> Key {
     Key::new([keys::block(pack).as_bytes(), b"\0inventory\0", id].concat())
@@ -781,6 +815,64 @@ where
     Fut: std::future::Future<Output = Result<bool, StoreError>>,
 {
     visit_rows(store, pack, Rows::Dependencies, f).await
+}
+
+/// One page (at most [`SCAN_ROWS`]) of a sealed inventory's parent rows (trees
+/// and chunk manifests) after `after`, each verified against its marker. The
+/// caller has already checked the seal (`sealed_facts`); unlike [`visit`] this
+/// makes no pass over the whole range, so it can resume across slices. Returns
+/// the rows and the key to resume from, `None` at the end.
+pub async fn parent_page<S: NamespaceStore>(
+    store: &S,
+    pack: &Hash,
+    after: Option<Vec<u8>>,
+) -> Result<(Vec<(Hash, Entry)>, Option<Vec<u8>>), StoreError> {
+    let prefix = Key::new([keys::block(pack).as_bytes(), b"\0inventory-parent\0"].concat());
+    let mut end = prefix.as_bytes().to_vec();
+    *end.last_mut().ok_or_else(bad)? = 1;
+    let after = after.map(crate::Cursor::new);
+    let page = store
+        .scan(
+            &content_shard(pack),
+            &prefix,
+            &Key::new(end),
+            after.as_ref(),
+            SCAN_ROWS,
+        )
+        .await?;
+    let markers: Result<Vec<Key>, StoreError> = page
+        .entries
+        .iter()
+        .map(|(key, _)| {
+            let id: Hash = key
+                .as_bytes()
+                .strip_prefix(prefix.as_bytes())
+                .ok_or_else(bad)?
+                .try_into()
+                .map_err(|_| bad())?;
+            Ok(marker_key(pack, &id))
+        })
+        .collect();
+    let markers = store.get_many(&content_shard(pack), &markers?).await?;
+    if markers.len() != page.entries.len() {
+        return Err(bad());
+    }
+    let mut rows = Vec::with_capacity(markers.len());
+    for ((key, raw), marker) in page.entries.into_iter().zip(markers) {
+        let id: Hash = key
+            .as_bytes()
+            .strip_prefix(prefix.as_bytes())
+            .ok_or_else(bad)?
+            .try_into()
+            .map_err(|_| bad())?;
+        if marker.as_ref().map(Value::as_bytes) != Some(entry_digest(&id, &raw).as_slice()) {
+            return Err(bad());
+        }
+        let row: Entry = decode(&raw)?;
+        row.validate()?;
+        rows.push((id, row));
+    }
+    Ok((rows, page.next.map(|next| next.as_bytes().to_vec())))
 }
 
 #[derive(Clone, Copy)]

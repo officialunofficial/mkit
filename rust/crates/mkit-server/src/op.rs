@@ -47,6 +47,10 @@ pub enum Procedure {
     GetReceipt,
     /// `SetRepoVisibility` (envelope mode is replay-protected like a write).
     SetRepoVisibility,
+    /// `ForkRepo`: a server-side fork of a published branch into an empty
+    /// repository (SPEC-SERVER §9.9). Never a `TransportService` method: only
+    /// the signed procedure name and the hook procedure name.
+    Fork,
     /// `IssueObjectUrl`.
     IssueObjectUrl,
     /// An HTTP object read by id (`/mkit.http.v1/GetObject`, SPEC-HTTP-OBJECTS
@@ -75,6 +79,7 @@ impl Procedure {
             Self::DownloadPack => "/mkit.transport.v1.TransportService/DownloadPack",
             Self::GetReceipt => "/mkit.transport.v1.TransportService/GetReceipt",
             Self::SetRepoVisibility => "/mkit.transport.v1.TransportService/SetRepoVisibility",
+            Self::Fork => "/mkit.server.v1/ForkRepo",
             Self::IssueObjectUrl => "/mkit.transport.v1.TransportService/IssueObjectUrl",
             Self::HttpGetObject => "/mkit.http.v1/GetObject",
             Self::HttpGetRefPath => "/mkit.http.v1/GetRefPath",
@@ -117,7 +122,8 @@ impl Procedure {
             | Self::UploadPack
             | Self::UploadPart
             | Self::CompleteUpload
-            | Self::SetRepoVisibility => true,
+            | Self::SetRepoVisibility
+            | Self::Fork => true,
             Self::ListRepos
             | Self::ListRefs
             | Self::ReadRef
@@ -345,6 +351,22 @@ pub enum OpKind {
         /// The visibility to store.
         visibility: mkit_attest::grant::Visibility,
     },
+    /// Fork the published tip of `source_ref` of `source` into the operation's
+    /// repository, which must be empty (SPEC-SERVER §9.9). The operation's
+    /// repository is the destination.
+    ForkRepo {
+        /// The source repository.
+        source: RepoId,
+        /// The source branch.
+        source_ref: String,
+        /// The tip the caller expects the source to have published.
+        expected_tip: Hash,
+        /// The source's visibility, read in the same plan step as the fork;
+        /// `None` when the deployment keeps no repository visibility.
+        source_visibility: Option<mkit_attest::grant::Visibility>,
+        /// The destination's requested visibility.
+        dest_visibility: mkit_attest::grant::Visibility,
+    },
     /// Mint a signed URL token for an object or ref path
     /// (SPEC-WRITE-GRANTS §9.4). The server does not resolve the target.
     IssueObjectUrl {
@@ -377,6 +399,7 @@ impl OpKind {
             Self::UploadPack { .. } => Procedure::UploadPack,
             Self::DownloadPack { .. } => Procedure::DownloadPack,
             Self::SetRepoVisibility { .. } => Procedure::SetRepoVisibility,
+            Self::ForkRepo { .. } => Procedure::Fork,
             Self::IssueObjectUrl { .. } => Procedure::IssueObjectUrl,
             Self::HttpGet { ref_name: None } => Procedure::HttpGetObject,
             Self::HttpGet { ref_name: Some(_) } => Procedure::HttpGetRefPath,

@@ -259,6 +259,7 @@ fn witness_codec_golden_and_fail_closed() {
         sequence: 3,
         published: true,
         held: false,
+        boundary: false,
     };
     assert_eq!(
         w.encode().as_bytes(),
@@ -271,6 +272,24 @@ fn witness_codec_golden_and_fail_closed() {
     for bytes in [vec![2; 19], vec![1; 18], vec![1, 2, 0]] {
         assert!(Witness::decode(&Value::new(bytes)).is_err());
     }
+    // A fork flags its inherited packmap head with one trailing byte; no
+    // other length or trailing value decodes.
+    let flagged = Witness {
+        boundary: true,
+        ..w
+    };
+    let mut expected = w.encode().as_bytes().to_vec();
+    expected.push(1);
+    assert_eq!(flagged.encode().as_bytes(), expected.as_slice());
+    assert_eq!(Witness::decode(&flagged.encode()).unwrap(), flagged);
+    for trailing in [0_u8, 2] {
+        let mut bytes = w.encode().as_bytes().to_vec();
+        bytes.push(trailing);
+        assert!(Witness::decode(&Value::new(bytes)).is_err());
+    }
+    let mut long = expected.clone();
+    long.push(1);
+    assert!(Witness::decode(&Value::new(long)).is_err());
 }
 
 #[test]

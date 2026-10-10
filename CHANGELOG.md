@@ -15,6 +15,21 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Added
 
+- Server-side repository fork engine (`mkit_server::fork`, SPEC-SERVER §9.9): a
+  crash-safe job that gives an empty destination the published membership of one
+  source branch without a ref. It copies the packmap chain, the packs it lists
+  and the packs that supply their external delta bases, proves each pack with a
+  seal-and-descriptor proof whose cost does not grow with the pack, registers
+  the destination first and publishes membership last, counts each pack once
+  and records a cleared set of the inherited commits and trees. With pack-level
+  takedown denial on, a later publication walk skips a cleared object (never a
+  denial check) when the packmap chain contains the flagged inherited head, so a remix commit on an
+  inherited tree no longer walks inherited history. Measured at 50 ms per
+  call: 500 objects in 274 storage calls, 3,000 in 296 and 10,000 in 400, one
+  slice each. `ForkTimer` is the kind-16 handler; `fork::start` and
+  `fork::step` drive a job. The `Pipeline` API, admission, the hook procedure
+  and the Workers wiring follow in a separate change.
+
 - All-parent history continuations in canonical timestamp order. An embedder
   drives page 1 with per-commit `read_canonical_in` on a selected-ref reader
   and session, feeding `mkit_core::history_order::TimestampDiscovery`, then
@@ -424,6 +439,25 @@ collect the applicable entries between their old and new immutable pins.
   URL-token reads, supplied hooks, cold outcome retry and injected slice recovery.
 
 ### Breaking (toward 0.6)
+
+- [embedder: breaking API] [embedder: stored-format change] A completed fork
+  flags the membership witness of the packmap head it inherits.
+  `store::publication::Witness` has a new `boundary: bool` field (a
+  twenty-byte encoding when set; the nineteen-byte encoding of every other
+  witness is unchanged and existing rows keep decoding). Migration: add
+  `boundary: false` to any `Witness { .. }` literal. A packmap node whose
+  membership value is not a valid clearance witness now fails publication
+  verification as unavailable (it was accepted as present). New coordinator rows `fj`
+  (fork job) and `fo` (fork id sets) and timer kind 16 are additive; no store
+  reset. `Procedure::Fork`, `OpKind::ForkRepo` and `StoredProcedure::Fork`
+  are additive on non-exhaustive enums. `StoredResult` is exhaustive, so its
+  new `Fork` variant is `[embedder: breaking API]`. Migration: add a `Fork`
+  (or wildcard) arm to any `match` on `StoredResult`.
+  New public items: `mkit_server::fork`, `takedown::inventory::{SealedFacts,
+  sealed_facts, parent_page}` and `takedown::denial::require_pack_clear_sealed`.
+  `pipeline::ShardMap` gains a defaulted `object_index_partitions` (empty by
+  default); a custom map that serves forks must list its repository index
+  shards.
 
 - [embedder: stored-format change] [embedder: store reset required] Each
   repository's index is now sixteen shards (the top four bits of the object or
