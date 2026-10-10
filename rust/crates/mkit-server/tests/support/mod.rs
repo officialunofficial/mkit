@@ -228,6 +228,8 @@ pub struct Slow {
     pub barrier: Option<Arc<tokio::sync::Barrier>>,
     pub heads: Arc<AtomicU32>,
     pub ledger: Arc<Mutex<Ledger>>,
+    /// Blocked by the first inventory apply, after the denial reads before it.
+    pub race_block: Arc<Mutex<Option<Hash>>>,
 }
 impl Slow {
     pub async fn pause_p(&self, p: Option<&Partition>) {
@@ -344,6 +346,16 @@ impl NamespaceStore for Slow {
                 .max_inventory_ops
                 .max(batch.writes.len() + batch.preconditions.len());
         }
+        if staging {
+            let raced = self.race_block.lock().unwrap().take();
+            if let Some(id) = raced {
+                let now = u64::try_from(self.clock.now_ms()).unwrap();
+                mkit_server::ContentIndex::new(self.inner.clone())
+                    .block(&id, &mkit_server::store::BlockEntry::new("race", now), now)
+                    .await
+                    .unwrap();
+            }
+        }
         if staging && (self.stages.fetch_add(1, Ordering::SeqCst) + 1).is_multiple_of(7) {
             match self.fault {
                 Some("cas_contention") => {
@@ -418,5 +430,37 @@ impl Metrics for Recorder {
                 .unwrap()
                 .push((get("result"), get("progress"), value));
         }
+    }
+}
+
+/// Fields of the structured events a test captures.
+pub type EventFields = std::collections::BTreeMap<String, String>;
+/// Collects every tracing event of the current thread.
+#[derive(Clone, Default)]
+pub struct Events(pub Arc<Mutex<Vec<EventFields>>>);
+impl tracing::Subscriber for Events {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Fields(EventFields);
+        impl tracing::field::Visit for Fields {
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                self.0.insert(field.name().to_owned(), value.to_owned());
+            }
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0.insert(field.name().to_owned(), format!("{value:?}"));
+            }
+        }
+        let mut fields = Fields(EventFields::new());
+        event.record(&mut fields);
+        self.0.lock().unwrap().push(fields.0);
     }
 }

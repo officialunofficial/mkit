@@ -8,6 +8,7 @@ use mkit_core::{
     pack::PackWriter,
     serialize::serialize,
 };
+use mkit_server::takedown::inventory;
 use mkit_server::{
     Clock, Key, ManualClock, MemoryBlobStore, MemoryKv, NamespaceKey, NamespaceStore, RepoId,
     RepoName, StoreError, Value,
@@ -47,8 +48,54 @@ fn tree_pack(count: u16, size: usize) -> (Vec<u8>, Hash) {
     (writer.finish().unwrap(), head)
 }
 
-#[allow(clippy::too_many_lines)] // Keep the full alarm-driven fixture and progress assertions together.
+/// A pack of `count` blobs and a tree naming each, then a signed commit on the
+/// last tree: every tree stages with its own reference page.
+fn tree_heavy_pack(count: u16) -> (Vec<u8>, Hash) {
+    let mut writer = PackWriter::new_raw_only();
+    let mut last = None;
+    // Blobs first: the trees then arrive as one run of paged entries.
+    for n in 0..count {
+        writer.push_raw(blob(n, 8).0, &blob(n, 8).1).unwrap();
+    }
+    for n in 0..count {
+        let tree = Object::Tree(Tree {
+            entries: vec![TreeEntry {
+                name: format!("f{n:05}").into_bytes(),
+                mode: EntryMode::Blob,
+                object_hash: blob(n, 8).0,
+            }],
+        });
+        writer
+            .push_raw(tree.id().unwrap(), &serialize(&tree).unwrap())
+            .unwrap();
+        last = Some(tree.id().unwrap());
+    }
+    let (commit, head) = signed_commit(last.unwrap(), Vec::new(), 7, b"head");
+    writer.push_raw(head, &serialize(&commit).unwrap()).unwrap();
+    (writer.finish().unwrap(), head)
+}
+
+/// What the pack under test looks like.
+#[derive(Clone, Copy, Default)]
+struct Shape {
+    /// A takedown of one object lands just before the first batch's inventory
+    /// apply, after the batch was decoded.
+    race: bool,
+    /// Every object is a one-entry tree beside its blob, or a commit.
+    tree_heavy: bool,
+    /// Bytes per blob when set.
+    blob_bytes: Option<usize>,
+}
+
 async fn verifies(objects: u16, fault: Option<&'static str>) {
+    Box::pin(verifies_with(objects, fault, Shape::default())).await;
+}
+
+#[allow(clippy::too_many_lines)] // Keep the full alarm-driven fixture and progress assertions together.
+async fn verifies_with(objects: u16, fault: Option<&'static str>, shape: Shape) {
+    let race = shape.race;
+    let events = Events::default();
+    let _subscriber = tracing::subscriber::set_default(events.clone());
     let clock = Arc::new(ManualClock::new(1_700_000_000_000));
     let inner = Arc::new(MemoryKv::with_clock(clock.clone()));
     let store = Slow {
@@ -59,9 +106,14 @@ async fn verifies(objects: u16, fault: Option<&'static str>) {
         barrier: None,
         heads: Arc::default(),
         ledger: Arc::default(),
+        race_block: Arc::new(std::sync::Mutex::new(race.then(|| blob(5, 8).0))),
     };
     let blobs = Shared(Arc::new(MemoryBlobStore::default()), clock.clone());
-    let (bytes, head) = tree_pack(objects - 2, 8);
+    let (bytes, head) = if shape.tree_heavy {
+        tree_heavy_pack((objects - 1) / 2)
+    } else {
+        tree_pack(objects - 2, shape.blob_bytes.unwrap_or(8))
+    };
     let pack = hash(&bytes);
     let owner = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
     let namespace = mkit_core::repo_identity::Namespace::Ed25519(*owner.verifying_key().as_bytes());
@@ -71,7 +123,11 @@ async fn verifies(objects: u16, fault: Option<&'static str>) {
     };
     let shards: Arc<dyn ShardMap> = Arc::new(D34Shards);
     let source = shards.ref_shard(&repo, "refs/heads/main");
-    let cfg = IndexedConfig::scheduled(1 << 30);
+    let mut cfg = IndexedConfig::scheduled(1 << 30);
+    if shape.blob_bytes.is_some() {
+        // Large blobs are the point; they need no extraction here.
+        cfg.extract_min_bytes = 8 << 20;
+    }
     let recorder = Arc::new(Recorder::default());
     let mut pipeline_cfg = mkit_server::pipeline::PipelineConfig::new(
         mkit_server::Addressing::Multi(mkit_server::MultiAddressing::new().with_namespace_policy(
@@ -132,7 +188,14 @@ async fn verifies(objects: u16, fault: Option<&'static str>) {
         },
         shards,
         cfg,
-        limits: SliceLimits::default(),
+        limits: if shape.tree_heavy {
+            // A slice that ends mid-run of paged entries, between batches.
+            let mut limits = SliceLimits::default();
+            limits.max_subrequests = 200;
+            limits
+        } else {
+            SliceLimits::default()
+        },
         lease: LeaseParams::default(),
         clock: clock.clone(),
         metrics: recorder.clone(),
@@ -190,6 +253,112 @@ async fn verifies(objects: u16, fault: Option<&'static str>) {
             .unwrap()
             .0
             .is_some_and(|(job, _)| job.usable());
+        if race && job.phase == Phase::Watch {
+            // The takedown landed after the batch's decode and before its
+            // apply: the denial reads that follow the apply refuse it.
+            assert_eq!(job.outcome, Some(indexed::checkpoint::Outcome::Blocked));
+            assert!(!job.usable());
+            assert!(store.race_block.lock().unwrap().is_none());
+            let auth = authenticate(&pipe, &clock, mkit_server::Procedure::AdvanceRefs, 4);
+            let refused = pipe
+                .advance_refs_with_tickets(
+                    &auth,
+                    advance("refs/heads/main", head),
+                    advance("refs/mkit/packmap/main", map),
+                    tickets.clone(),
+                )
+                .await;
+            assert!(refused.is_err(), "a blocked pack must not publish");
+            // Its staged rows are not an inventory: never sealed, so seal-head
+            // proofs and every traversal refuse it.
+            assert!(inventory::seal(inner.as_ref(), &pack).await.is_err());
+            assert!(
+                inventory::visit(inner.as_ref(), &pack, false, |_, _| async { Ok(false) })
+                    .await
+                    .is_err()
+            );
+            // The block is lifted and the same pack is uploaded again: it
+            // re-stages over the leftover rows and seals one exact inventory.
+            let now = u64::try_from(clock.now_ms()).unwrap();
+            mkit_server::ContentIndex::new(inner.clone())
+                .unblock(&blob(5, 8).0, now)
+                .await
+                .unwrap();
+            // The refused ticket expires and its job is cleaned up first.
+            clock.advance(30 * 24 * 3_600_000);
+            for _ in 0..50 {
+                let now = u64::try_from(clock.now_ms()).unwrap();
+                let report = run_due(
+                    &store,
+                    &source,
+                    &registry,
+                    clock.as_ref(),
+                    now,
+                    &TickBudget::default(),
+                )
+                .await
+                .unwrap();
+                let (job, _) = checkpoint::read_job(inner.as_ref(), &source, &repo.name, &pack)
+                    .await
+                    .unwrap();
+                if job.is_none() {
+                    break;
+                }
+                let next = report.next_wake_ms.unwrap_or(now + 1_000).max(now + 1);
+                clock.set(i64::try_from(next).unwrap());
+            }
+            let again = vec![
+                upload(&pipe, &blobs, &clock, tree_pack(objects - 2, 8).0, 11).await,
+                upload(
+                    &pipe,
+                    &blobs,
+                    &clock,
+                    mkit_core::transfer::encode_packlist(None, &[pack]).unwrap(),
+                    12,
+                )
+                .await,
+            ];
+            let auth = authenticate(&pipe, &clock, mkit_server::Procedure::AdvanceRefs, 13);
+            let _ = pipe
+                .advance_refs_with_tickets(
+                    &auth,
+                    advance("refs/heads/main", head),
+                    advance("refs/mkit/packmap/main", map),
+                    again,
+                )
+                .await;
+            for _ in 0..200 {
+                let now = u64::try_from(clock.now_ms()).unwrap();
+                let report = run_due(
+                    &store,
+                    &source,
+                    &registry,
+                    clock.as_ref(),
+                    now,
+                    &TickBudget::default(),
+                )
+                .await
+                .unwrap();
+                let (job, _) = checkpoint::read_job(inner.as_ref(), &source, &repo.name, &pack)
+                    .await
+                    .unwrap();
+                if job.is_some_and(|(job, _)| job.usable()) {
+                    break;
+                }
+                let next = report.next_wake_ms.unwrap_or(now + 1_000).max(now + 1);
+                clock.set(i64::try_from(next).unwrap());
+            }
+            let count = std::sync::atomic::AtomicU64::new(0);
+            let counted = &count;
+            inventory::visit(inner.as_ref(), &pack, false, |_, _| async move {
+                counted.fetch_add(1, Ordering::SeqCst);
+                Ok(false)
+            })
+            .await
+            .expect("the retried inventory seals and its count and digest verify");
+            assert_eq!(count.load(Ordering::SeqCst), u64::from(objects));
+            return;
+        }
         if job.phase == Phase::Watch && map_ready {
             assert!(job.usable(), "verification outcome: {:?}", job.outcome);
             assert!(matches!(
@@ -281,6 +450,14 @@ async fn verifies(objects: u16, fault: Option<&'static str>) {
                 ledger.max_batch_ops,
                 ledger.max_batch_bytes
             );
+            if fault.is_none() {
+                let sums = attribution(
+                    &events,
+                    objects,
+                    !shape.tree_heavy && shape.blob_bytes.is_none(),
+                );
+                eprintln!("{sums}");
+            }
             eprintln!(
                 "INVENTORY objects={objects} reads={} applies={} total={} max_ops={}",
                 ledger.inventory_reads,
@@ -288,6 +465,12 @@ async fn verifies(objects: u16, fault: Option<&'static str>) {
                 ledger.inventory_reads + ledger.inventory_applies,
                 ledger.max_inventory_ops
             );
+            if shape.blob_bytes.is_some() {
+                // Each 200 KiB blob counts 400 KiB: two per group, so ten blobs
+                // take five applies where tiny ones take one. The plain 12-object
+                // shape applies 4 times in all; this one applies 8.
+                assert_eq!(ledger.inventory_applies, 8);
+            }
             return;
         }
         let next = report
@@ -303,6 +486,53 @@ async fn verifies(objects: u16, fault: Option<&'static str>) {
     }
     panic!("{objects} objects exceeded 1024 alarm ticks");
 }
+/// Sum the per-slice Decode attribution; assert it accounts for every object.
+fn attribution(events: &Events, objects: u16, plain: bool) -> String {
+    let logs = events.0.lock().unwrap();
+    let mut sum = std::collections::BTreeMap::<&str, u64>::new();
+    let mut decode_slices = 0_u64;
+    for event in logs.iter().filter(|e| {
+        e.get("event")
+            .is_some_and(|v| v == "verification_inventory_progress")
+    }) {
+        assert_eq!(event.len(), 18, "fixed fields only: {event:?}");
+        decode_slices += u64::from(event["entries_checkpointed"] != "0");
+        for key in [
+            "entries_staged",
+            "entries_checkpointed",
+            "remote_inventory_calls",
+            "inventory_batches",
+            "denial_calls",
+            "window_read_ms",
+            "decode_ms",
+            "denial_ms",
+            "staging_duration_ms",
+            "write_ms",
+            "checkpoint_ms",
+        ] {
+            *sum.entry(key).or_default() += event[key].parse::<u64>().unwrap();
+        }
+    }
+    let objects = u64::from(objects);
+    // The packmap's own MKPL facts are staged by its Decode slice too.
+    assert_eq!(sum["entries_staged"], objects + 1);
+    assert_eq!(sum["entries_checkpointed"], objects);
+    assert_eq!(sum["denial_calls"], objects, "one denial read per object");
+    // Hundredths of a remote call per object: denial plus staging.
+    let per_entry = (sum["remote_inventory_calls"] + sum["denial_calls"]) * 100 / objects;
+    // Main spent four calls per object and ended a slice after 48 objects.
+    // Small packs are dominated by their paged tree and commit.
+    if objects >= 100 && plain {
+        assert!(per_entry <= 125, "remote calls per entry x100: {per_entry}");
+        assert!(
+            decode_slices <= objects.div_ceil(170),
+            "{decode_slices} Decode slices for {objects} objects"
+        );
+    }
+    format!(
+        "ATTRIBUTION objects={objects} decode_slices={decode_slices} remote_calls_per_entry_x100={per_entry} {sum:?}"
+    )
+}
 #[tokio::test(start_paused = true)]
 async fn decode_inventory_500_objects_at_50ms() {
     Box::pin(verifies(500, None)).await;
@@ -313,13 +543,55 @@ async fn decode_inventory_3000_objects_at_50ms() {
     Box::pin(verifies(3000, None)).await;
 }
 
+/// Two hundred trees, each staged alone with a reference page, must neither
+/// exhaust a slice's subrequest budget (a failed fire) nor skip an entry.
+#[tokio::test(start_paused = true)]
+async fn tree_heavy_batches_settle_inside_the_slice_budget() {
+    Box::pin(verifies_with(
+        401,
+        None,
+        Shape {
+            tree_heavy: true,
+            ..Shape::default()
+        },
+    ))
+    .await;
+}
+
+/// Decoded entries over the batch's memory allowance settle in smaller groups.
+#[tokio::test(start_paused = true)]
+async fn large_entries_settle_in_groups_under_the_batch_memory_bound() {
+    Box::pin(verifies_with(
+        12,
+        None,
+        Shape {
+            blob_bytes: Some(200 << 10),
+            ..Shape::default()
+        },
+    ))
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_takedown_landing_before_a_batch_apply_still_blocks_the_pack() {
+    Box::pin(verifies_with(
+        60,
+        None,
+        Shape {
+            race: true,
+            ..Shape::default()
+        },
+    ))
+    .await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn decode_retries_checkpoint_strict_progress_after_cas_contention() {
-    Box::pin(verifies(50, Some("cas_contention"))).await;
+    Box::pin(verifies(400, Some("cas_contention"))).await;
 }
 #[tokio::test(start_paused = true)]
 async fn decode_retries_checkpoint_strict_progress_after_expiry() {
-    Box::pin(verifies(50, Some("expired"))).await;
+    Box::pin(verifies(400, Some("expired"))).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -335,6 +607,7 @@ async fn concurrent_inventory_stagers_keep_cas_and_distinct_expiry() {
         barrier: Some(Arc::new(tokio::sync::Barrier::new(2))),
         heads: Arc::default(),
         ledger: Arc::default(),
+        race_block: Arc::default(),
     };
     let pack = [7; 32];
     let a = Object::Blob(Blob { data: vec![1] });
@@ -406,6 +679,7 @@ fn slow_store(clock: Arc<ManualClock>) -> Slow {
         barrier: None,
         heads: Arc::default(),
         ledger: Arc::default(),
+        race_block: Arc::default(),
     }
 }
 

@@ -377,6 +377,15 @@ struct SliceState {
     staging_end_ms: u64,
     staging_duration_ms: u64,
     remote_inventory_calls: u32,
+    inventory_batches: u64,
+    /// Clock-observed time per Decode stage. A Worker's clock does not move
+    /// during CPU work, so these are waits: reads, storage calls, commits.
+    window_read_ms: u64,
+    decode_ms: u64,
+    denial_ms: u64,
+    denial_calls: u32,
+    write_ms: u64,
+    checkpoint_ms: u64,
     cache: Lru,
     memo: MemberCache,
     visiting: BTreeSet<(Hash, Hash, u64)>,
@@ -387,6 +396,34 @@ struct SliceState {
     settled: Vec<Write>,
     entry_idx: u64,
 }
+
+/// A decoded entry awaiting admission, with the reader boundary after it.
+struct Prepared {
+    frame: mkit_core::pack::window::FrameInfo,
+    id: Hash,
+    bytes: Vec<u8>,
+    object: Object,
+    base: Option<Hash>,
+    hops: u32,
+    external: Option<Hash>,
+    cursor: Vec<u8>,
+    /// Most remote calls admitting it can take: its denial read, plus staging
+    /// beyond its share of the batch's two calls.
+    calls: u32,
+}
+
+/// Decoded entries admitted together: staged by one inventory apply.
+const ADMIT_ENTRIES: usize = crate::takedown::inventory::STAGE_BATCH_ENTRIES;
+/// Memory a batch may hold while the next entry decodes: each entry's decoded
+/// bytes count twice, for the parsed object beside them. A batch settles as
+/// soon as it holds this much, so the slice's resident allowance sees this and
+/// one entry at a time, as it did before batching.
+const ADMIT_BYTES: usize = 1 << 20;
+/// Remote calls a batch's reads and apply take apart from its entries' own: one
+/// group, as long as the store reserves at most 17 of the 100 apply operations
+/// (a larger reservation splits a batch into more groups; the entry reserve
+/// absorbs a few).
+const ADMIT_CALLS: u32 = 2;
 
 struct Run<'a, S, R, B, W, X> {
     h: &'a VerifyTimer<R, B, W, X>,
@@ -577,7 +614,11 @@ where
             pack = %mkit_core::hash::to_hex(&self.pack), source = ?self.source,
             staging_start_ms = st.staging_start_ms.unwrap_or(0), staging_end_ms = st.staging_end_ms,
             staging_duration_ms = st.staging_duration_ms, remote_inventory_calls = st.remote_inventory_calls,
-            entries_staged = st.entries_staged, entries_checkpointed = st.entries_checkpointed);
+            entries_staged = st.entries_staged, entries_checkpointed = st.entries_checkpointed,
+            slice_calls = self.budget.used(), inventory_batches = st.inventory_batches,
+            window_read_ms = st.window_read_ms, decode_ms = st.decode_ms,
+            denial_ms = st.denial_ms, denial_calls = st.denial_calls,
+            write_ms = st.write_ms, checkpoint_ms = st.checkpoint_ms);
         // Decode may have durably advanced before a later entry stopped this slice.
         raw = st.job_guard.clone().unwrap_or(raw);
         let delay = match result {
@@ -783,6 +824,7 @@ where
     ) -> Result<(), StoreError> {
         // Earlier chunks are idempotent; the final chunk and cursor commit
         // together. Leave room for the job header/body and three guards.
+        let started = now_ms(self.h.clock.as_ref());
         let tail = st
             .writes
             .split_off(st.writes.len().saturating_sub(WRITE_BATCH));
@@ -807,6 +849,9 @@ where
         st.job_guard = Some(encode_job(job));
         st.decode_checkpoint = Some(job.clone());
         st.entries_checkpointed += 1;
+        st.checkpoint_ms = st
+            .checkpoint_ms
+            .saturating_add(now_ms(self.h.clock.as_ref()).saturating_sub(started));
         Ok(())
     }
 
@@ -972,6 +1017,22 @@ where
         }
     }
 
+    /// [`Self::read`], attributed to the slice's window reads.
+    async fn timed_read(
+        &self,
+        st: &mut SliceState,
+        job: &mut VerifyJobV1,
+        offset: u64,
+        len: u64,
+    ) -> Result<Window, Stop> {
+        let started = now_ms(self.h.clock.as_ref());
+        let window = self.read(job, offset, len).await;
+        st.window_read_ms = st
+            .window_read_ms
+            .saturating_add(now_ms(self.h.clock.as_ref()).saturating_sub(started));
+        window
+    }
+
     /// One bounded read of the pack, bound to the job's etag.
     async fn read(&self, job: &mut VerifyJobV1, offset: u64, len: u64) -> Result<Window, Stop> {
         let etag = super::etag::resolve(
@@ -1108,7 +1169,9 @@ where
         let window_bytes = self.h.limits.window_bytes;
         let mut preloaded = None;
         if job.kind == Kind::Unknown {
-            let window = self.read(job, 0, job.pack_len.min(window_bytes)).await?;
+            let window = self
+                .timed_read(st, job, 0, job.pack_len.min(window_bytes))
+                .await?;
             match classify::classify(&window.bytes) {
                 Ok(UploadType::Packlist) => return Self::packlist(job, &window, &self.pack),
                 Ok(UploadType::Pack) => {
@@ -1136,19 +1199,31 @@ where
         }
         .map_err(|e| Self::reader_error(resumed, restarts, &e))?;
         let (mut fed, mut processed) = (0_u32, 0_u32);
+        let mut pending: Vec<Prepared> = Vec::new();
         loop {
-            match reader
-                .step()
-                .map_err(|e| Self::reader_error(resumed, restarts, &e))?
-            {
+            let next = match reader.step() {
+                Ok(next) => next,
+                Err(error) => {
+                    // The frames before a malformed one keep their checkpoints.
+                    self.settle(st, job, &mut pending, state, held.as_ref())
+                        .await?;
+                    return Err(Self::reader_error(resumed, restarts, &error));
+                }
+            };
+            match next {
                 Step::NeedWindow(request) => {
+                    self.settle(st, job, &mut pending, state, held.as_ref())
+                        .await?;
                     let window = match preloaded.take() {
                         Some(window)
                             if request.offset == 0 && window.bytes.len() as u64 == request.len =>
                         {
                             window
                         }
-                        _ => self.read(job, request.offset, request.len).await?,
+                        _ => {
+                            self.timed_read(st, job, request.offset, request.len)
+                                .await?
+                        }
                     };
                     reader
                         .feed_owned(request.offset, window.bytes)
@@ -1157,41 +1232,111 @@ where
                     job.windows_done = job.windows_done.saturating_add(1);
                 }
                 Step::Entry(entry) => {
-                    let frame = reader
-                        .last_frame()
-                        .ok_or_else(|| unavailable("window reader lost its frame"))?;
-                    // Nested base decoding must not retain an idle pack window
-                    // alongside the acquired source frame and decoder scratch.
-                    // Save the same post-entry boundary; this slice commits only
-                    // after `entry` succeeds, as on every other checkpoint.
-                    #[cfg(feature = "pack-ruzstd")]
-                    if matches!(entry, PackEntry::Delta { .. }) {
-                        let cursor = reader
-                            .checkpoint()
-                            .ok_or_else(|| unavailable("delta entry lost its boundary"))?;
-                        drop(reader);
-                        self.entry(st, job, frame, entry).await?;
-                        self.checkpoint_decode(st, job, cursor.to_bytes(), state, held.as_ref())
+                    let Some(frame) = reader.last_frame() else {
+                        self.settle(st, job, &mut pending, state, held.as_ref())
                             .await?;
-                        return Ok(0);
+                        return Err(unavailable("window reader lost its frame"));
+                    };
+                    // A delta entry reads its base from the rows of earlier
+                    // entries, so they are recorded first. It is never batched.
+                    if matches!(entry, PackEntry::Delta { .. }) {
+                        self.settle(st, job, &mut pending, state, held.as_ref())
+                            .await?;
+                        // Nested base decoding must not retain an idle pack window
+                        // alongside the acquired source frame and decoder scratch.
+                        // Save the same post-entry boundary; this slice commits only
+                        // after `entry` succeeds, as on every other checkpoint.
+                        #[cfg(feature = "pack-ruzstd")]
+                        {
+                            let cursor = reader
+                                .checkpoint()
+                                .ok_or_else(|| unavailable("delta entry lost its boundary"))?;
+                            drop(reader);
+                            Box::pin(self.entry(st, job, frame, entry)).await?;
+                            self.checkpoint_decode(
+                                st,
+                                job,
+                                cursor.to_bytes(),
+                                state,
+                                held.as_ref(),
+                            )
+                            .await?;
+                            return Ok(0);
+                        }
+                        #[cfg(not(feature = "pack-ruzstd"))]
+                        {
+                            Box::pin(self.entry(st, job, frame, entry)).await?;
+                            let cursor = reader
+                                .checkpoint()
+                                .ok_or_else(|| unavailable("decoded entry lost its boundary"))?;
+                            self.checkpoint_decode(
+                                st,
+                                job,
+                                cursor.to_bytes(),
+                                state,
+                                held.as_ref(),
+                            )
+                            .await?;
+                            processed += 1;
+                            if fed >= 2
+                                || processed >= job.entry_cap
+                                || self.budget.remaining() < ENTRY_RESERVE
+                            {
+                                return Ok(0);
+                            }
+                            continue;
+                        }
                     }
-                    self.entry(st, job, frame, entry).await?;
-                    let cursor = reader
-                        .checkpoint()
-                        .ok_or_else(|| unavailable("decoded entry lost its boundary"))?;
-                    self.checkpoint_decode(st, job, cursor.to_bytes(), state, held.as_ref())
-                        .await?;
+                    // A failed entry follows the ones before it, as when each
+                    // was admitted before the next was decoded.
+                    let mut item = match Box::pin(self.prepare(st, job, frame, entry)).await {
+                        Ok(item) => item,
+                        Err(stop) => {
+                            self.settle(st, job, &mut pending, state, held.as_ref())
+                                .await?;
+                            return Err(stop);
+                        }
+                    };
+                    let Some(boundary) = reader.checkpoint() else {
+                        self.settle(st, job, &mut pending, state, held.as_ref())
+                            .await?;
+                        return Err(unavailable("decoded entry lost its boundary"));
+                    };
+                    item.cursor = boundary.to_bytes();
+                    let held_bytes = |pending: &[Prepared]| -> usize {
+                        pending.iter().map(|p| 2 * p.bytes.len()).sum()
+                    };
+                    if !pending.is_empty()
+                        && held_bytes(&pending) + 2 * item.bytes.len() > ADMIT_BYTES
+                    {
+                        self.settle(st, job, &mut pending, state, held.as_ref())
+                            .await?;
+                    }
+                    pending.push(item);
                     processed += 1;
                     // One window of progress per slice: the resumed window
                     // and the next. Only an entry boundary can be saved.
-                    if fed >= 2
-                        || processed >= job.entry_cap
-                        || self.budget.remaining() < ENTRY_RESERVE
+                    let stop = fed >= 2 || processed >= job.entry_cap;
+                    // The batch's worst-case calls stay inside the reserve, so
+                    // admitting it never exhausts the slice's budget.
+                    let owed = ADMIT_CALLS + pending.iter().map(|p| p.calls).sum::<u32>();
+                    // A batch that has reached its memory allowance settles now,
+                    // so no sizeable entry waits while the next one decodes.
+                    if stop
+                        || pending.len() >= ADMIT_ENTRIES
+                        || held_bytes(&pending) >= ADMIT_BYTES
+                        || self.budget.remaining() < ENTRY_RESERVE.saturating_add(owed)
                     {
+                        self.settle(st, job, &mut pending, state, held.as_ref())
+                            .await?;
+                    }
+                    if stop || self.budget.remaining() < ENTRY_RESERVE {
                         return Ok(0);
                     }
                 }
                 Step::Done(summary) => {
+                    self.settle(st, job, &mut pending, state, held.as_ref())
+                        .await?;
                     if u64::from(summary.entry_count) != job.entries {
                         return Err(Stop::Reject("object hash mismatch"));
                     }
@@ -1208,6 +1353,39 @@ where
                 _ => return Err(unavailable("unexpected window reader step")),
             }
         }
+    }
+
+    /// Admit the pending entries together, then record and checkpoint each in
+    /// order. A crash before a checkpoint replays that entry: staging keeps its
+    /// first occurrence and every row is a pure function of the pack.
+    ///
+    /// Boxed: the batch's admission and recording futures stay out of the
+    /// decode loop's own state, so the loop's stack depth is what it was.
+    fn settle<'x>(
+        &'x self,
+        st: &'x mut SliceState,
+        job: &'x mut VerifyJobV1,
+        pending: &'x mut Vec<Prepared>,
+        state: Option<&'x (VerificationV1, Value)>,
+        held: Option<&'x Value>,
+    ) -> BoxFuture<'x, Result<(), Stop>> {
+        Box::pin(async move {
+            if pending.is_empty() {
+                return Ok(());
+            }
+            self.admit(st, job, pending).await?;
+            for mut item in std::mem::take(pending) {
+                let cursor = std::mem::take(&mut item.cursor);
+                let started = now_ms(self.h.clock.as_ref());
+                let recorded = self.record(st, job, item).await;
+                st.write_ms = st
+                    .write_ms
+                    .saturating_add(now_ms(self.h.clock.as_ref()).saturating_sub(started));
+                recorded?;
+                self.checkpoint_decode(st, job, cursor, state, held).await?;
+            }
+            Ok(())
+        })
     }
 
     async fn frame_row(&self, st: &mut SliceState, id: &Hash) -> Result<Option<FrameRow>, Stop> {
@@ -1242,15 +1420,15 @@ where
         Ok(depth)
     }
 
-    /// Verify and record one decoded entry.
-    #[allow(clippy::too_many_lines)] // Depth, budget, rows and checks share one entry's state.
-    async fn entry(
+    /// Decode and parse one entry; no object is admitted or recorded yet.
+    async fn prepare(
         &self,
         st: &mut SliceState,
         job: &mut VerifyJobV1,
         frame: mkit_core::pack::window::FrameInfo,
         entry: PackEntry<'static>,
-    ) -> Result<(), Stop> {
+    ) -> Result<Prepared, Stop> {
+        let started = now_ms(self.h.clock.as_ref());
         let cap = self.h.cfg.max_delta_chain_depth;
         st.entry_idx = job.entries;
         st.memo = MemberCache::default();
@@ -1292,31 +1470,111 @@ where
                     Stop::Reject("object hash mismatch")
                 }
             })?;
-        crate::takedown::denial::require_clear(self.remote, &id)
-            .await
-            .map_err(|error| {
+        let object = mkit_core::serialize::deserialize(&bytes)
+            .map_err(|_| Stop::Reject("object hash mismatch"))?;
+        st.decode_ms = st
+            .decode_ms
+            .saturating_add(now_ms(self.h.clock.as_ref()).saturating_sub(started));
+        Ok(Prepared {
+            frame,
+            id,
+            calls: 1 + crate::takedown::inventory::staging_calls(&object),
+            bytes,
+            object,
+            base,
+            hops,
+            external,
+            cursor: Vec::new(),
+        })
+    }
+
+    /// Stage the inventory rows of `batch`, then refuse a blocked object.
+    ///
+    /// Denial is read after the staging apply, not before it, so a block that
+    /// lands while the batch is in flight is seen by these reads. Reads before
+    /// the apply would leave every earlier object of a batch a longer window
+    /// than one entry. Denial still precedes any frame, candidate or index row.
+    /// An object that is both malformed and blocked reports the malformed
+    /// hash, because staging needs it parsed first.
+    /// The denial reads are one call each: content shards partition objects,
+    /// so ids of one batch share no shard.
+    async fn admit(
+        &self,
+        st: &mut SliceState,
+        job: &VerifyJobV1,
+        batch: &[Prepared],
+    ) -> Result<(), Stop> {
+        let items: Vec<_> = batch
+            .iter()
+            .map(|item| crate::takedown::inventory::Staged {
+                id: item.id,
+                object: &item.object,
+                base: item.base,
+            })
+            .collect();
+        self.inventory_io(
+            st,
+            crate::takedown::inventory::stage_many_with_clock(
+                self.remote,
+                &self.pack,
+                job.pack_len,
+                &items,
+                self.h.clock.as_ref(),
+            ),
+        )
+        .await?;
+        st.inventory_batches += 1;
+        st.entries_staged += batch.len() as u64;
+        for item in batch {
+            let started = now_ms(self.h.clock.as_ref());
+            let calls = self.budget.used();
+            let clear = crate::takedown::denial::require_clear(self.remote, &item.id).await;
+            st.denial_ms = st
+                .denial_ms
+                .saturating_add(now_ms(self.h.clock.as_ref()).saturating_sub(started));
+            st.denial_calls += self.budget.used().saturating_sub(calls);
+            clear.map_err(|error| {
                 if error.code() == crate::Code::PermissionDenied {
                     Stop::Outcome(Outcome::Blocked)
                 } else {
                     unavailable("decoded object unavailable")
                 }
             })?;
-        let object = mkit_core::serialize::deserialize(&bytes)
-            .map_err(|_| Stop::Reject("object hash mismatch"))?;
-        self.inventory_io(
-            st,
-            crate::takedown::inventory::stage_with_clock(
-                self.remote,
-                &self.pack,
-                job.pack_len,
-                &id,
-                &object,
-                base,
-                self.h.clock.as_ref(),
-            ),
-        )
-        .await?;
-        st.entries_staged += 1;
+        }
+        Ok(())
+    }
+
+    /// Verify and record one decoded entry.
+    async fn entry(
+        &self,
+        st: &mut SliceState,
+        job: &mut VerifyJobV1,
+        frame: mkit_core::pack::window::FrameInfo,
+        entry: PackEntry<'static>,
+    ) -> Result<(), Stop> {
+        let prepared = self.prepare(st, job, frame, entry).await?;
+        self.admit(st, job, std::slice::from_ref(&prepared)).await?;
+        self.record(st, job, prepared).await
+    }
+
+    /// Record the rows of one admitted entry.
+    #[allow(clippy::too_many_lines)] // Depth, budget, rows and checks share one entry's state.
+    async fn record(
+        &self,
+        st: &mut SliceState,
+        job: &mut VerifyJobV1,
+        prepared: Prepared,
+    ) -> Result<(), Stop> {
+        let Prepared {
+            frame,
+            id,
+            bytes,
+            object,
+            base,
+            hops,
+            external,
+            ..
+        } = prepared;
         let size = bytes.len() as u64;
         let existing = self.frame_row(st, &id).await?;
         // A replayed entry meets its own row; a real duplicate meets an

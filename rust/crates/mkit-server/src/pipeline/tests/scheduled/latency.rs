@@ -106,14 +106,14 @@ fn inventory_progress_attributes_only_staging_including_failed_calls() {
                     .is_some_and(|s| s == "verification_inventory_progress")
             })
             .unwrap();
-        assert_eq!(event.len(), 10, "no new identifiers or per-call events");
+        assert_eq!(event.len(), 18, "no new identifiers or per-call events");
         let number = |key: &str| event[key].parse::<u64>().unwrap();
         let start = number("staging_start_ms");
         let end = number("staging_end_ms");
         let duration = number("staging_duration_ms");
         assert!(start >= before && end <= ms(env.clock.now_ms()));
         assert_eq!(number("entries_staged"), if fail { 0 } else { 2 });
-        assert_eq!(number("remote_inventory_calls"), if fail { 3 } else { 9 });
+        assert_eq!(number("remote_inventory_calls"), if fail { 3 } else { 8 });
         assert_eq!(duration, if fail { 50 } else { 150 });
         assert_eq!(
             event["result"],
@@ -122,7 +122,13 @@ fn inventory_progress_attributes_only_staging_including_failed_calls() {
         if fail {
             assert_eq!(end - start, duration);
         } else {
-            assert!(end - start > duration, "exclude the entry checkpoint gap");
+            // Both entries stage in one batch; checkpoints follow it and are
+            // attributed to their own field, never to staging.
+            assert_eq!(end - start, duration);
+            assert_eq!(number("inventory_batches"), 1);
+            assert_eq!(number("denial_calls"), 2);
+            assert_eq!(number("checkpoint_ms"), 100, "one local commit per entry");
+            assert!(number("window_read_ms") > 0);
             drop(logs);
             env.clock.advance(1);
             block_on(run_due(

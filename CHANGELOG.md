@@ -288,6 +288,28 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Performance
 
+- Scheduled pack verification stages Decode inventory in batches. Up to 16
+  decoded entries share one inventory read (head and entry rows together) and
+  one guarded apply (at most 83 of the 100 operations), instead of three remote
+  calls per entry; an entry with paged references still stages alone. Denial
+  reads stay one per object (content shards partition objects, so ids of one
+  batch never share a read) but now follow the batch's apply instead of
+  preceding each entry's: a block that lands while a batch is in flight is
+  refused (`Blocked`), where reads taken first would have left every earlier
+  object of a batch a wider window than one entry. The only visible difference
+  is that a blocked pack's inventory rows are written before the pack is
+  refused. Remote calls per
+  entry fall from 4 to about 1.2, so a slice reaches about 177 entries instead
+  of 48: a 500-object push needs 3 Decode slices instead of 11 and a
+  3,000-object push 17 instead of 63 (slow-store model: 177.7 s to 103.0 s and
+  1,007.7 s to 559.8 s). Per-entry checkpoints, restart cursors, per-apply
+  deadlines and first-occurrence inventory digests are unchanged; a crash
+  between a batch's apply and its checkpoints replays the entries and finds
+  their rows already staged. `verification_inventory_progress` gains fixed
+  per-slice attribution fields (`slice_calls`, `inventory_batches`,
+  `window_read_ms`, `decode_ms`, `denial_ms`, `denial_calls`, `write_ms`,
+  `checkpoint_ms`) on the existing console channel. Stored formats are unchanged
+  (wipe: no).
 - Scheduled pack verification looks owed closure children up in batches
   instead of one child per alarm fire. Up to 90 owed ids share one
   `locate_split` per slice, with the per-slice reserve applied per batch; a
