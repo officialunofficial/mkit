@@ -40,13 +40,13 @@ pub(super) async fn from_published(ctx: Ctx) -> CaseResult {
         ..Default::default()
     };
     let signer = ctx.v2_signer("repository-a")?;
-    let signed = sign_unary(&signer, Rpc::AdvanceRefs, &request, |env| {
-        repository.clone_into(&mut env.repository)
+    let advance = sign_unary(&signer, Rpc::AdvanceRefs, &request, |env| {
+        repository.clone_into(&mut env.repository);
     });
     let response: AdvanceRefsResponse = eventually_listed(
         "published-source membership readiness",
         || async {
-            let response = ctx.send::<AdvanceRefsResponse>(&signed).await?;
+            let response = ctx.send::<AdvanceRefsResponse>(&advance).await?;
             if let Err(error) = &response {
                 ensure!(error.code == "unavailable", "copy refused: {error}");
             }
@@ -66,7 +66,7 @@ pub(super) async fn from_published(ctx: Ctx) -> CaseResult {
             ..Default::default()
         };
         let read = sign_unary(&signer, Rpc::ReadRef, &read, |env| {
-            repository.clone_into(&mut env.repository)
+            repository.clone_into(&mut env.repository);
         });
         let value: ReadRefResponse = want_ok(ctx.send(&read).await?, "copied ref")?;
         ensure!(
@@ -74,7 +74,7 @@ pub(super) async fn from_published(ctx: Ctx) -> CaseResult {
             "copied pair differs"
         );
     }
-    let replay: AdvanceRefsResponse = want_ok(ctx.send(&signed).await?, "copy replay")?;
+    let replay: AdvanceRefsResponse = want_ok(ctx.send(&advance).await?, "copy replay")?;
     want_outcome(
         Ok(replay.outcome.map_or(0, |o| o.to_i32())),
         AdvanceOutcome::ADVANCE_OUTCOME_COMMITTED,
