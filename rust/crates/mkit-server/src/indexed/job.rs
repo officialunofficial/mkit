@@ -1252,7 +1252,7 @@ where
                                 .checkpoint()
                                 .ok_or_else(|| unavailable("delta entry lost its boundary"))?;
                             drop(reader);
-                            self.entry(st, job, frame, entry).await?;
+                            Box::pin(self.entry(st, job, frame, entry)).await?;
                             self.checkpoint_decode(
                                 st,
                                 job,
@@ -1265,7 +1265,7 @@ where
                         }
                         #[cfg(not(feature = "pack-ruzstd"))]
                         {
-                            self.entry(st, job, frame, entry).await?;
+                            Box::pin(self.entry(st, job, frame, entry)).await?;
                             let cursor = reader
                                 .checkpoint()
                                 .ok_or_else(|| unavailable("decoded entry lost its boundary"))?;
@@ -1289,7 +1289,7 @@ where
                     }
                     // A failed entry follows the ones before it, as when each
                     // was admitted before the next was decoded.
-                    let mut item = match self.prepare(st, job, frame, entry).await {
+                    let mut item = match Box::pin(self.prepare(st, job, frame, entry)).await {
                         Ok(item) => item,
                         Err(stop) => {
                             self.settle(st, job, &mut pending, state, held.as_ref())
@@ -1358,29 +1358,34 @@ where
     /// Admit the pending entries together, then record and checkpoint each in
     /// order. A crash before a checkpoint replays that entry: staging keeps its
     /// first occurrence and every row is a pure function of the pack.
-    async fn settle(
-        &self,
-        st: &mut SliceState,
-        job: &mut VerifyJobV1,
-        pending: &mut Vec<Prepared>,
-        state: Option<&(VerificationV1, Value)>,
-        held: Option<&Value>,
-    ) -> Result<(), Stop> {
-        if pending.is_empty() {
-            return Ok(());
-        }
-        self.admit(st, job, pending).await?;
-        for mut item in std::mem::take(pending) {
-            let cursor = std::mem::take(&mut item.cursor);
-            let started = now_ms(self.h.clock.as_ref());
-            let recorded = self.record(st, job, item).await;
-            st.write_ms = st
-                .write_ms
-                .saturating_add(now_ms(self.h.clock.as_ref()).saturating_sub(started));
-            recorded?;
-            self.checkpoint_decode(st, job, cursor, state, held).await?;
-        }
-        Ok(())
+    ///
+    /// Boxed: the batch's admission and recording futures stay out of the
+    /// decode loop's own state, so the loop's stack depth is what it was.
+    fn settle<'x>(
+        &'x self,
+        st: &'x mut SliceState,
+        job: &'x mut VerifyJobV1,
+        pending: &'x mut Vec<Prepared>,
+        state: Option<&'x (VerificationV1, Value)>,
+        held: Option<&'x Value>,
+    ) -> BoxFuture<'x, Result<(), Stop>> {
+        Box::pin(async move {
+            if pending.is_empty() {
+                return Ok(());
+            }
+            self.admit(st, job, pending).await?;
+            for mut item in std::mem::take(pending) {
+                let cursor = std::mem::take(&mut item.cursor);
+                let started = now_ms(self.h.clock.as_ref());
+                let recorded = self.record(st, job, item).await;
+                st.write_ms = st
+                    .write_ms
+                    .saturating_add(now_ms(self.h.clock.as_ref()).saturating_sub(started));
+                recorded?;
+                self.checkpoint_decode(st, job, cursor, state, held).await?;
+            }
+            Ok(())
+        })
     }
 
     async fn frame_row(&self, st: &mut SliceState, id: &Hash) -> Result<Option<FrameRow>, Stop> {
