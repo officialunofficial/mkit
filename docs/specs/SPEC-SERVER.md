@@ -1515,10 +1515,10 @@ requires. This answer MUST NOT be stored as a replay result, under
 STC §7.1; a retry must be able to observe verification progress.
 
 `PendingVerification.retry_after_ms` is the server's suggested poll
-interval in milliseconds. The server SHOULD send at least 1,000 and,
-while verification is progressing, SHOULD NOT send more than 5,000
-while verification is progressing: the hint is not a completion estimate, and a client honours it in
-full up to the 60,000 clamp.
+interval in milliseconds. The server SHOULD send at least 1,000. For a
+verification that is still progressing it SHOULD NOT send more than 5,000:
+the hint is a poll interval, not a completion estimate, and a client
+honours it in full up to the 60,000 clamp.
 STC §7.6 requires the client to clamp it to 1,000–60,000 milliseconds;
 a missing or zero value means 1,000. The client polls until ticket
 expiry, using that polling interval instead of its normal backoff
@@ -1552,8 +1552,8 @@ misses found when the advance checks the consumed set, and a base that is
 still absent after the window is the permanent §9.4 answer, as inline.
 
 Informative. Scheduled verification polling hints use the consumed job's
-persisted timer, including retry backoff, rounded up to whole seconds and
-bounded to 1–60 seconds. A missing job or a wake not found within bounded
+persisted timer, rounded up to whole seconds and bounded to 1–3 seconds;
+retry backoff and lag waits are not exposed. A missing job or a wake not found within bounded
 inspection uses the one-second floor. The header and typed pending detail
 agree; neither promises completion at that time. Relay delivery may move an
 awaiting job's existing guarded timer earlier, retaining the delivery poll as
