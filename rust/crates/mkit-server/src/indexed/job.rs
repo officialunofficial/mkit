@@ -114,8 +114,11 @@ const CACHE_BYTES: u64 = super::geometry::ENTRY_CACHE_BYTES;
 const ATTEMPTS_PER_CAP: u32 = 3;
 /// Subrequests kept back when a slice decides to fetch its next entry.
 const ENTRY_RESERVE: u32 = 64;
-/// Each closure lookup has its own durable id boundary.
-const CLOSURE_CHUNK: u32 = 1;
+/// Owed closure ids one slice may settle, and the ceiling of a job's
+/// `closure_cap`. They share one guarded batch, so the cap is the buffered
+/// write batch.
+pub(super) const CLOSURE_IDS_PER_SLICE: u32 = 90;
+const _: () = assert!(CLOSURE_IDS_PER_SLICE as usize == WRITE_BATCH);
 /// Frame rows per index emission slice.
 const EMIT_PAGE: u32 = 64;
 /// Rows per cleanup batch.
@@ -686,7 +689,7 @@ where
             job.entry_cap = job.entry_cap.min(self.h.limits.max_entries).max(1);
             (&mut job.entry_cap, Outcome::DecodeBudget)
         } else {
-            job.closure_cap = job.closure_cap.clamp(1, 4);
+            job.closure_cap = job.closure_cap.clamp(1, CLOSURE_IDS_PER_SLICE);
             (&mut job.closure_cap, Outcome::ClosureCapped)
         };
         if job.attempts >= ATTEMPTS_PER_CAP {
@@ -1611,17 +1614,24 @@ where
     /// recheck read.
     async fn closure(&self, st: &mut SliceState, job: &mut VerifyJobV1) -> Result<bool, Stop> {
         let (start, end) = keys::verify_range(&self.repo.name, &self.pack, Some(keys::VC_CHILD));
-        for _ in 0..job.closure_cap {
-            if self.budget.remaining() < ENTRY_RESERVE
-                || st.settled.len() + CLOSURE_CHUNK as usize > WRITE_BATCH
-            {
+        // `closure_cap` ids per slice, looked up together: one `locate_split`
+        // per page, however many ids it names.
+        let mut quota = job.closure_cap.min(CLOSURE_IDS_PER_SLICE);
+        while quota > 0 {
+            if self.budget.remaining() < ENTRY_RESERVE || st.settled.len() >= WRITE_BATCH {
                 return Ok(false);
             }
+            // Each id settles at most one deletion in this slice's guarded batch.
+            let room = u32::try_from(WRITE_BATCH - st.settled.len()).unwrap_or(u32::MAX);
+            let take = quota.min(room);
             let cursor = (!job.scan.is_empty()).then(|| Cursor::new(job.scan.clone()));
             let page = self
                 .local
-                .scan(self.source, &start, &end, cursor.as_ref(), CLOSURE_CHUNK)
+                .scan(self.source, &start, &end, cursor.as_ref(), take)
                 .await?;
+            quota -= u32::try_from(page.entries.len())
+                .unwrap_or(u32::MAX)
+                .clamp(1, take);
             let mut ids = Vec::new();
             for (key, _) in &page.entries {
                 let Some(keys::ParsedKey::VerifyCursor { id: Some(id), .. }) = keys::parse(key)
@@ -1644,47 +1654,8 @@ where
                         wanted.push(*id);
                     }
                 }
-                if !wanted.is_empty() {
-                    // Reserve the lesser of the lookup's worst case and a full
-                    // slice. A larger single-id lookup is a terminal cap.
-                    let reserve = self.h.limits.max_subrequests.min(
-                        u32::try_from(index::MAX_LOOKUP_PAGES + index::MAX_LOOKUP_MEMBERSHIP_READS)
-                            .unwrap_or(u32::MAX),
-                    );
-                    if self.budget.remaining() < reserve {
-                        return Ok(false);
-                    }
-                    let found = resolve::locate_split(
-                        self.remote,
-                        self.h.shards.as_ref(),
-                        &self.repo,
-                        &wanted,
-                        self.h.metrics.as_ref(),
-                    )
-                    .await
-                    .map_err(|_| {
-                        if self.budget.remaining() == 0 {
-                            Stop::Outcome(Outcome::ClosureCapped)
-                        } else {
-                            unavailable("index lookup failed")
-                        }
-                    })?;
-                    for id in wanted {
-                        match found.get(&id) {
-                            Some(Ok(Some(located))) => {
-                                if !job.satisfying.contains(&located.pack) {
-                                    if job.satisfying.len() >= MAX_SATISFYING {
-                                        return Err(Stop::Outcome(Outcome::ClosureCapped));
-                                    }
-                                    job.satisfying.push(located.pack);
-                                }
-                                st.settled
-                                    .push(Write::Delete(self.row(keys::VC_CHILD, &id)));
-                            }
-                            Some(Err(_)) => return Err(Stop::Outcome(Outcome::ClosureCapped)),
-                            _ => job.owed += 1,
-                        }
-                    }
+                if !wanted.is_empty() && !self.locate_owed(st, job, &wanted).await? {
+                    return Ok(false);
                 }
             }
             let Some(next) = page.next else {
@@ -1694,6 +1665,68 @@ where
             job.scan = next.into_bytes().to_vec();
         }
         Ok(false)
+    }
+
+    /// Look one page of owed children up together. `Ok(false)` leaves the page
+    /// unconsumed for a later slice.
+    async fn locate_owed(
+        &self,
+        st: &mut SliceState,
+        job: &mut VerifyJobV1,
+        wanted: &[Hash],
+    ) -> Result<bool, Stop> {
+        // Reserve the lesser of the lookup's worst case and a full slice. A
+        // larger single-id lookup is a terminal cap.
+        let reserve = self.h.limits.max_subrequests.min(
+            u32::try_from(index::MAX_LOOKUP_PAGES + index::MAX_LOOKUP_MEMBERSHIP_READS)
+                .unwrap_or(u32::MAX),
+        );
+        if self.budget.remaining() < reserve {
+            return Ok(false);
+        }
+        let refused_before = self.budget.refused();
+        let found = match resolve::locate_split(
+            self.remote,
+            self.h.shards.as_ref(),
+            &self.repo,
+            wanted,
+            self.h.metrics.as_ref(),
+        )
+        .await
+        {
+            Ok(found) => found,
+            Err(_)
+                if wanted.len() > 1
+                    && (self.budget.remaining() == 0
+                        || (!refused_before && self.budget.refused())) =>
+            {
+                // The batch outgrew one slice. Persist a strictly smaller cap
+                // (it only ever shrinks, and `wanted` is at most the cap) and
+                // leave the page unconsumed; at one id the cases below apply.
+                job.closure_cap = u32::try_from(wanted.len() / 2).unwrap_or(1).max(1);
+                return Ok(false);
+            }
+            Err(_) if self.budget.remaining() == 0 => {
+                return Err(Stop::Outcome(Outcome::ClosureCapped));
+            }
+            Err(_) => return Err(unavailable("index lookup failed")),
+        };
+        for id in wanted {
+            match found.get(id) {
+                Some(Ok(Some(located))) => {
+                    if !job.satisfying.contains(&located.pack) {
+                        if job.satisfying.len() >= MAX_SATISFYING {
+                            return Err(Stop::Outcome(Outcome::ClosureCapped));
+                        }
+                        job.satisfying.push(located.pack);
+                    }
+                    st.settled.push(Write::Delete(self.row(keys::VC_CHILD, id)));
+                }
+                Some(Err(_)) => return Err(Stop::Outcome(Outcome::ClosureCapped)),
+                _ => job.owed += 1,
+            }
+        }
+        Ok(true)
     }
 
     /// Relay this pack's index rows, one page of frames per slice, after the
