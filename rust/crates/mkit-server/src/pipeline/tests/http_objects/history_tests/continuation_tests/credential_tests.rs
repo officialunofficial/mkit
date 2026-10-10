@@ -61,6 +61,58 @@ fn scope_grant(fx: &ScopeFx, signer: &SigningKey, number: u8) -> String {
     })
 }
 
+#[test]
+fn continuation_fixed_expiry_is_capped_by_envelope_and_grant() {
+    for grant_caps in [false, true] {
+        let (fx, head, cursor) = scope_fixture(false);
+        let signer = key(56);
+        let credential_expiry = T0 + 300_000;
+        let grant_expiry = T0 + 120_000;
+        let grant = crate::pipeline::tests::grants::grant(&fx.owner, &signer, |grant| {
+            grant.scope = RepoScope::Repository(
+                mkit_core::repo_identity::RepositoryIdentity::parse(&fx.identity("room")).unwrap(),
+            );
+            grant.expiry_ms = grant_expiry;
+        });
+        let req = if grant_caps {
+            envelope(&fx, &signer, AUDIENCE, T0).header("x-write-grant", &grant)
+        } else {
+            envelope(&fx, &fx.owner, AUDIENCE, T0)
+        };
+        let token = issue(&fx, Some(&req));
+        let expires = if grant_caps {
+            grant_expiry
+        } else {
+            credential_expiry
+        };
+        assert_eq!(token.expires_at_ms, u64::try_from(expires).unwrap());
+        // Fresh envelopes have later expiry but cannot extend the token's original cap.
+        let fresh = if grant_caps {
+            envelope(&fx, &signer, AUDIENCE, expires - 2).header("x-write-grant", &grant)
+        } else {
+            envelope(&fx, &fx.owner, AUDIENCE, expires - 2)
+        };
+        fx.clock.set(expires - 2);
+        accepts_fresh(&fx, Some(&fresh), &token, head, cursor);
+        with_request(&fx, Some(&fresh), |reader| {
+            // Construct while the grant is live; redemption observes its expiry.
+            fx.clock.set(expires);
+            for _ in 0..2 {
+                assert!(
+                    block_on(reader.walk_history_page_in(
+                        &mut ReaderSession::default(),
+                        HEAD,
+                        Some(token.token.expose()),
+                        1,
+                    ))
+                    .unwrap()
+                    .is_none()
+                );
+            }
+        });
+    }
+}
+
 fn envelope(fx: &ScopeFx, signer: &SigningKey, audience: &str, created: i64) -> Req {
     let mut req = signed(
         signer,

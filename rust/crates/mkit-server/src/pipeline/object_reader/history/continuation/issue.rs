@@ -41,8 +41,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
     /// memo's decoded commit/remix rows against `state.walk`, the fresh
     /// credential and the ref/publication/security fence, then MACs the
     /// sealed reducer snapshot with a provenance witness rooted at the
-    /// checkpoint tip. The token expires at the minimum of the token TTL, the
-    /// session proof expiry and the credential expiry, and is never extended.
+    /// checkpoint tip. The token expires at the minimum of the token TTL and
+    /// credential/grant expiry, and is never extended. Each page's proofs
+    /// retain their request-local expiry independently of the token lifetime.
     /// A complete walk returns `Ok(None)` — no continuation exists to mint.
     /// # Errors
     /// `invalid_argument` for caller misuse: an unselected reader, a walk that
@@ -176,10 +177,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             return Ok(None);
         }
         let now = ms(self.pipe.clock.now_ms());
-        let expires = now
-            .saturating_add(config.ttl_ms())
-            .min(session.proofs.expiry())
-            .min(credential_expiry);
+        let expires = now.saturating_add(config.ttl_ms()).min(credential_expiry);
         if now >= expires {
             return Ok(None);
         }

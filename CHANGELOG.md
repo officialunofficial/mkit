@@ -228,6 +228,12 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Fixed
 
+- History continuation lifetimes use the configured token TTL and credential
+  and grant expiry without the request-local proof cap. Walks may span longer
+  than the proof window while each page retains bounded proofs and fresh live
+  security checks. Successors keep the original absolute expiry. No API, wire,
+  stored-format change, or store reset.
+
 - Takedown discovery found no ticketed memberships. It accepted only an empty
   `m` value (an immediate upload), but every membership written by a ticketed
   advance carries a clearance witness, so a holder sweep failed with a

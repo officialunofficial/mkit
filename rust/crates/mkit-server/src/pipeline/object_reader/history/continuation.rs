@@ -375,11 +375,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         };
         let now = ms(self.pipe.clock.now_ms());
         let expires = carried.map_or_else(
-            || {
-                now.saturating_add(config.ttl_ms())
-                    .min(session.proofs.expiry())
-                    .min(credential_expiry)
-            },
+            || now.saturating_add(config.ttl_ms()).min(credential_expiry),
             |(_, expires)| expires,
         );
         if now >= expires || !session.proofs.current(now) {

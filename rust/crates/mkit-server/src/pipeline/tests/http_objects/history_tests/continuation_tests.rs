@@ -1,4 +1,5 @@
 mod credential_tests;
+mod lifetime_tests;
 mod timestamp_tests;
 use super::*;
 use crate::history_token::HistoryTokenConfig;
