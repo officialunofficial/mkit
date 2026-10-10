@@ -114,8 +114,10 @@ async fn member_context<S: NamespaceStore>(
         )
         .await?
     {
+        // An immediate upload's membership is empty; a ticketed one carries a
+        // clearance witness. Either is a member; anything else is corrupt.
         if !member.as_bytes().is_empty() {
-            return Err(bad());
+            crate::store::publication::Witness::decode(&member).map_err(|_| bad())?;
         }
         let identity = format!("{}\0{}\0", repo.namespace.as_str(), repo.name.as_str());
         let key = Key::new(

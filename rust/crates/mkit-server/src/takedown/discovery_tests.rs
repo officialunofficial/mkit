@@ -560,3 +560,97 @@ async fn any_streams_one_namespace_candidate_and_never_claims_discovery_complete
     assert!(finite.traversed());
     assert!(finite.next_candidate(&holder.namespace).is_err());
 }
+
+#[tokio::test]
+async fn ticketed_memberships_are_discovered() {
+    use crate::store::publication::Witness;
+    let store = MemoryKv::default();
+    let shards = SinglePartition;
+    let first = repo("0x4444444444444444444444444444444444444444", "first");
+    let other = repo("0x5555555555555555555555555555555555555555", "other");
+    let root = Partition::Namespace(NamespaceKey::deployment_default());
+    // What a ticketed advance writes for a published member.
+    let witness = Witness {
+        generation: 0,
+        sequence: 1,
+        published: true,
+        held: false,
+    }
+    .encode();
+    for r in [&first, &other] {
+        index(&store, &shards, r).await;
+        apply(
+            &store,
+            &shards.coordinator(&r.namespace),
+            Batch::new()
+                .put(
+                    keys::repo_record(&r.name),
+                    codec::encode_repo_record(&codec::RepoRecord { created_at_ms: 1 }),
+                )
+                .put(keys::membership(&r.name, &PACK), witness.clone()),
+        )
+        .await;
+    }
+    let mut state =
+        DiscoveryState::new(&multi(&[&first, &other]), &first.namespace, 1, 5000).unwrap();
+    let (mut writes, mut complete) = (0, false);
+    for _ in 0..24 {
+        let result = advance(&store, &shards, &root, state).await;
+        writes += result.batch.writes.len();
+        complete = result.complete;
+        state = result.state;
+        if complete {
+            break;
+        }
+    }
+    assert!(complete);
+    assert_eq!(writes, 2, "both repositories holding the object are found");
+}
+
+#[tokio::test]
+async fn a_clearance_witness_is_a_membership_and_garbage_is_corrupt() {
+    use crate::store::publication::Witness;
+    let store = MemoryKv::default();
+    let shards = D34Shards;
+    let repo = repo("0x1111111111111111111111111111111111111111", "forked");
+    let target = shards.membership(&repo, &BlobKey::pack(PACK));
+    for value in [
+        Witness {
+            generation: 0,
+            sequence: 0,
+            published: true,
+            held: false,
+        }
+        .encode(),
+        Value::default(),
+    ] {
+        apply(
+            &store,
+            &target,
+            Batch::new().put(keys::membership(&repo.name, &PACK), value),
+        )
+        .await;
+        let found = member_context(&store, &shards, &repo, &ACTION, &OBJECT, &PACK)
+            .await
+            .unwrap();
+        assert!(found.is_some());
+    }
+    apply(
+        &store,
+        &target,
+        Batch::new().put(
+            keys::membership(&repo.name, &PACK),
+            Value::new(vec![9, 9, 9]),
+        ),
+    )
+    .await;
+    assert!(
+        member_context(&store, &shards, &repo, &ACTION, &OBJECT, &PACK)
+            .await
+            .is_err()
+    );
+    let absent = member_context(&store, &shards, &repo, &ACTION, &OBJECT, &[5; 32])
+        .await
+        .unwrap();
+    assert!(absent.is_none());
+}
