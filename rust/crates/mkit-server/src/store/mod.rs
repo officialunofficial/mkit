@@ -58,7 +58,7 @@ pub(crate) use content_index::BorrowedStore;
 pub use content_index::{
     BlockEntry, CONTENT_APPLY_WINDOW_MS, ContentIndex, GcPlan, HoldOutcome, Holder, HolderOutcome,
     HolderPage, HolderRecord, INDEX_FANOUT, MAX_BLOCK_REASON_BYTES, MAX_HOLD_TTL_MS, ObjectState,
-    REF_INDEX_FANOUT, content_shard, content_shards,
+    REF_INDEX_FANOUT, REPO_INDEX_FANOUT, content_shard, content_shards,
 };
 pub use error::{BoxError, StoreError};
 pub use kv::{

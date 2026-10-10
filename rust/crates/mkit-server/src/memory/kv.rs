@@ -424,7 +424,10 @@ mod tests {
         let caps = StoreCapabilities::refs_only();
         let kv = MemoryKv::with_clock(clock).with_capabilities(caps);
         assert_eq!(kv.capabilities().key_classes, KeyClasses::RefsOnly);
-        assert_eq!(kv.capabilities().implicit_layout_version, Some(1));
+        assert_eq!(
+            kv.capabilities().implicit_layout_version,
+            Some(keys::LAYOUT_VERSION)
+        );
         let repo = RepoName::new("r").unwrap();
         let main = keys::ref_key(&repo, "refs/heads/main");
         let dev = keys::ref_key(&repo, "refs/heads/dev");

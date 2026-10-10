@@ -430,7 +430,7 @@ fn add_ref_index_relays(req: &WriteRequest<'_>, outbox: &mut OutboxBuilder) {
 /// # Errors
 /// `resource_exhausted` when a quota charge is over budget (nothing is
 /// written), `permission_denied` when the grant epoch moved, and `internal`
-/// for an undecodable stored value or a newer layout version.
+/// for an undecodable stored value or a different layout version.
 #[allow(clippy::too_many_lines)] // The ref, ticket, replay and prune fragments form one atomic plan.
 pub(crate) fn plan_write(
     req: &WriteRequest<'_>,
@@ -553,7 +553,7 @@ pub(crate) fn plan_write(
         match snap.get(&key).map(codec::decode_u32).transpose() {
             Ok(None) => puts.push(Write::Put(key.clone(), codec::encode_u32(LAYOUT_VERSION))),
             Ok(Some(LAYOUT_VERSION)) => {}
-            Ok(Some(newer)) => return Err(corrupt(format!("layout version {newer}"))),
+            Ok(Some(other)) => return Err(corrupt(format!("layout version {other}"))),
             Err(e) => return Err(corrupt(e)),
         }
         pre.push(guard(key, snap));

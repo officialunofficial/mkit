@@ -109,9 +109,10 @@ const _: () = assert!(3 + 1 + 72 + MAX_REPO_NAME_BYTES + MAX_REF_NAME_BYTES + 3 
 // The longest ref key (`r 00 <repo> 00 <refname>`) fits a key.
 const _: () = assert!(2 + MAX_REPO_NAME_BYTES + 1 + MAX_REF_NAME_BYTES <= MAX_KEY_BYTES);
 
-/// The key-layout version this binary writes. A binary that reads a newer
-/// version refuses to serve the partition.
-pub const LAYOUT_VERSION: u32 = 1;
+/// The key-layout version this binary writes. A binary that reads any other
+/// version refuses to serve the partition: layout 2 moved the repository
+/// index to sixteen shards per repository, so earlier stores must be reset.
+pub const LAYOUT_VERSION: u32 = 2;
 
 /// Layout version tag.
 pub const TAG_LAYOUT_VERSION: &str = "v";
@@ -1980,7 +1981,7 @@ mod tests {
         ] {
             assert_eq!(parse(&Key::new(bad)), None);
         }
-        assert_eq!(LAYOUT_VERSION, 1);
+        assert_eq!(LAYOUT_VERSION, 2);
         assert!(!RESERVED_TAGS.contains(&TAG_VERIFY_CURSOR));
         assert!(!RESERVED_TAGS.contains(&TAG_OBJECT_INDEX));
         assert!(!RESERVED_TAGS.contains(&TAG_VERIFICATION));

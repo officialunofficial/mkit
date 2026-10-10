@@ -394,9 +394,9 @@ pub struct Importer<'a, S> {
 }
 
 fn check_layout(version: u32) -> Result<(), StoreError> {
-    if version > keys::LAYOUT_VERSION {
+    if version != keys::LAYOUT_VERSION {
         return Err(StoreError::Unsupported(
-            "export has a newer layout version than this binary".into(),
+            "export has a different layout version than this binary".into(),
         ));
     }
     Ok(())
@@ -406,8 +406,8 @@ impl<'a, S: NamespaceStore> Importer<'a, S> {
     /// An importer for an export with `header`.
     ///
     /// # Errors
-    /// [`StoreError::Unsupported`] if the export's layout version is newer
-    /// than [`keys::LAYOUT_VERSION`], or differs from the implicit layout
+    /// [`StoreError::Unsupported`] if the export's layout version differs
+    /// from [`keys::LAYOUT_VERSION`], or differs from the implicit layout
     /// version of a store that cannot hold `v`.
     pub fn new(store: &'a S, header: &ExportHeader, mode: ImportMode) -> Result<Self, StoreError> {
         check_layout(header.layout_version)?;
@@ -753,8 +753,16 @@ mod tests {
     }
 
     #[test]
-    fn import_refuses_newer_layout_version() {
+    fn import_refuses_other_layout_versions() {
         let kv = MemoryKv::default();
+        let older = ExportHeader {
+            layout_version: keys::LAYOUT_VERSION - 1,
+            exported_at_ms: 0,
+        };
+        assert!(matches!(
+            Importer::new(&kv, &older, ImportMode::Fresh),
+            Err(StoreError::Unsupported(_))
+        ));
         let newer = ExportHeader {
             layout_version: keys::LAYOUT_VERSION + 1,
             exported_at_ms: 0,

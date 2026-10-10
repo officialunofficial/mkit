@@ -48,10 +48,18 @@ use super::kv::{Batch, BatchOutcome, Cursor, Key, NamespaceStore, Precondition, 
 use super::partition::Partition;
 use crate::repo::{NamespaceKey, RepoName};
 
-/// Object-id prefix fan-out of the content shards (and repo index shards):
-/// a fixed deployment constant, never resharded (PRD §5.3, D34).
+/// Object-id prefix fan-out of the global content shards: a fixed deployment
+/// constant, never resharded (PRD §5.3, D34).
 pub const INDEX_FANOUT: u16 = 4096;
 const _: () = assert!(INDEX_FANOUT == 1 << 12);
+
+/// Object-id prefix fan-out of each repository's index shards: the top four
+/// bits of the id. A fixed deployment constant, never resharded. It is small
+/// on purpose: the shards are per repository, so a repository's rows spread
+/// over few partitions and a whole-repository copy or sweep touches at most
+/// sixteen of them.
+pub const REPO_INDEX_FANOUT: u16 = 16;
+const _: () = assert!(REPO_INDEX_FANOUT == 1 << 4);
 
 /// Ref-name hash fan-out: a fixed deployment constant, never resharded
 /// (PRD §5.3, D34).
@@ -257,16 +265,16 @@ fn refuse_while_deleting(state: &ObjectState) -> Result<(), StoreError> {
 }
 
 /// Guard the layout version `v` read: `Absent` plus a put of this binary's
-/// version, or `Equals`; refuse a newer version.
+/// version, or `Equals`; refuse any other version.
 fn guard_layout(batch: Batch, v: Option<&Value>) -> Result<Batch, StoreError> {
     let key = keys::layout_version();
     Ok(match v {
         None => batch
             .require(Precondition::Absent(key.clone()))
             .put(key, codec::encode_u32(keys::LAYOUT_VERSION)),
-        Some(v) if codec::decode_u32(v)? > keys::LAYOUT_VERSION => {
+        Some(v) if codec::decode_u32(v)? != keys::LAYOUT_VERSION => {
             return Err(StoreError::Unsupported(
-                "content shard has a newer layout version".into(),
+                "content shard has a different layout version".into(),
             ));
         }
         Some(v) => batch.require(Precondition::Equals(key, v.clone())),

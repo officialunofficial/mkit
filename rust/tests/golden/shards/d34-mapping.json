@@ -1,6 +1,6 @@
 {
   "ref_index_fanout": 16,
-  "membership_fanout": 4096,
+  "membership_fanout": 16,
   "refs": [
     {
       "namespace": "root",
@@ -72,17 +72,33 @@
       "namespace": "root",
       "repo": "a",
       "pack_id": "ffff000000000000000000000000000000000000000000000000000000000000",
-      "prefix": 4095,
-      "membership_partition_hex": "69726f6f740061003430393500",
-      "object_index_partition_hex": "69726f6f740061003430393500"
+      "prefix": 15,
+      "membership_partition_hex": "69726f6f74006100313500",
+      "object_index_partition_hex": "69726f6f74006100313500"
     },
     {
       "namespace": "root",
       "repo": "a",
       "pack_id": "123f000000000000000000000000000000000000000000000000000000000000",
-      "prefix": 291,
-      "membership_partition_hex": "69726f6f7400610032393100",
-      "object_index_partition_hex": "69726f6f7400610032393100"
+      "prefix": 1,
+      "membership_partition_hex": "69726f6f740061003100",
+      "object_index_partition_hex": "69726f6f740061003100"
+    },
+    {
+      "namespace": "root",
+      "repo": "a",
+      "pack_id": "1fff000000000000000000000000000000000000000000000000000000000000",
+      "prefix": 1,
+      "membership_partition_hex": "69726f6f740061003100",
+      "object_index_partition_hex": "69726f6f740061003100"
+    },
+    {
+      "namespace": "root",
+      "repo": "a",
+      "pack_id": "2000000000000000000000000000000000000000000000000000000000000000",
+      "prefix": 2,
+      "membership_partition_hex": "69726f6f740061003200",
+      "object_index_partition_hex": "69726f6f740061003200"
     }
   ],
   "coordinator_partition_hex": "63726f6f7400",

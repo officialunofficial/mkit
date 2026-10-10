@@ -58,7 +58,7 @@ fn server_info_defaults_and_custom_limits_read_no_store() {
     assert_eq!(info.max_list_refs_page_size, 1000);
     assert_eq!(info.begin_upload_threshold_bytes, u64::MAX);
     assert_eq!(info.namespace_policy, "single-repository");
-    assert_eq!(info.index_fanout, 4096);
+    assert_eq!(info.index_fanout, 16);
     assert_eq!(info.max_delta_chain_depth, 0);
     assert!(info.atomic_advance);
     assert!(!info.indexed_mode && !info.admission);
@@ -310,4 +310,44 @@ fn server_info_limits_are_validated_at_startup() {
             build(c, Spy::new(store(&clock())), Hooks::new(), clock());
         }
     }
+}
+
+#[test]
+fn startup_refuses_a_store_with_another_layout_version() {
+    let open = |version| {
+        let mut caps = StoreCapabilities::refs_only();
+        caps.implicit_layout_version = Some(version);
+        Pipeline::new(
+            MemoryBlobStore::default(),
+            Spy::new(store(&clock()).with_capabilities(caps)),
+            Hooks::new(),
+            cfg(AuthMode::Open),
+            clock(),
+            Arc::new(SpyMetrics::default()),
+        )
+    };
+    assert!(open(LAYOUT_VERSION).is_ok());
+    for stale in [LAYOUT_VERSION - 1, LAYOUT_VERSION + 1] {
+        let Err(error) = open(stale) else {
+            panic!("layout version {stale} unexpectedly accepted");
+        };
+        assert_eq!(error.code(), Code::InvalidArgument);
+    }
+}
+
+#[test]
+fn a_write_refuses_a_stored_earlier_layout_version() {
+    let clock = clock();
+    let kv = store(&clock);
+    now(kv.apply(
+        &ns(),
+        Batch::new().put(
+            keys::layout_version(),
+            codec::encode_u32(LAYOUT_VERSION - 1),
+        ),
+    ))
+    .unwrap();
+    let env = build(cfg(AuthMode::Open), Spy::new(kv), Hooks::new(), clock);
+    let request = Req::unsigned(Procedure::UpdateRef);
+    assert!(env.update(&request, &upd(HEAD, Missing, A)).is_err());
 }
