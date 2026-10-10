@@ -7,6 +7,23 @@ profile; storage-only groundwork is labeled explicitly. The
 [SPEC-SERVER profile map](specs/SPEC-SERVER.md#1-scope-and-relation-to-spec-transport-connect)
 distinguishes current enforcement from future integration.
 
+## Production verification retry telemetry exposes only fixed failure classes
+
+**Always:** failed and raced verification timer fires emit only a typed,
+fixed error class plus the proposed retry delay and attempt. Metric labels
+contain only outcome and class; the event adds no identifiers or raw errors.
+The existing guarded timer move, retry formula, and test-faults payload stay
+unchanged.
+
+**Because:** operators need to diagnose delayed verification without exposing
+backend credentials or changing retry behavior.
+
+**If violated:** backend error text could leak private data, or observations
+could disagree with the timer's persisted retry plan.
+
+**Enforced by:** `timers::failure_class`, the shared `timers::retry_plan`, and
+`timers::telemetry_tests::verification_failures_emit_redacted_classes_and_retry_plan`.
+
 ## In-process object reads retain id-route authority and bounded proofs
 
 **Always:** canonical prefetch binds a repository and a verified view. Public

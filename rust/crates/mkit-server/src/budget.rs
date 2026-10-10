@@ -6,6 +6,12 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 pub(crate) const EXHAUSTED_MESSAGE: &str = "verification slice subrequest budget exhausted";
 
+// Preserve the existing error text and exhaustion detector while allowing
+// telemetry to recognize a refusal without inspecting backend messages.
+#[derive(Debug, thiserror::Error)]
+#[error("{EXHAUSTED_MESSAGE}")]
+pub(crate) struct BudgetExhausted;
+
 /// A shared call counter with a fixed limit.
 ///
 /// A [`Self::child`] draws from its parent too, so a nested slice can never
@@ -144,7 +150,7 @@ impl SliceBudget {
             return Ok(());
         }
         self.refused.store(true, Ordering::SeqCst);
-        Err(StoreError::Unavailable(EXHAUSTED_MESSAGE.into()))
+        Err(StoreError::unavailable(BudgetExhausted))
     }
 }
 

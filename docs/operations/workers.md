@@ -65,6 +65,31 @@ observation for the particular ticket, not the latest retry.
 | `verification_usable` | A committed job checkpoint became usable with a guarded Verified state. `ready_observed` is the later advance's observation. |
 | `final_cas` | The ref advance batch committed; replaying its nonce does not emit another CAS. |
 
+In production builds (without `__test-faults`), failed and raced
+`verification_timer_result` events add `error_class`, `next_delay_ms`, and
+`next_attempt`. The delay and attempt describe the proposed infrastructure
+retry, even if its guarded timer move subsequently fails. The delay is
+`5,000 × 2^(next_attempt - 1)` ms, capped at 600,000 ms; attempts saturate
+at the existing timer retry cap. A race keeps `outcome = raced` and uses
+`guard_conflict`.
+
+Classes come from typed failures, never backend message text:
+
+| `error_class` | Meaning |
+| --- | --- |
+| `storage_unavailable` | Storage unavailable or partition full. |
+| `deadline` | A batch deadline passed, including a typed inventory staging expiry. |
+| `budget_exhausted` | The shared subrequest budget refused a charge. |
+| `guard_conflict` | A fire commit lost a precondition, or typed inventory staging reported CAS contention. The latter remains a failed fire. |
+| `decode_error` | A stored value failed to decode (`StoreError::Corrupt`). Content rejection that commits is still `committed`. |
+| `other` | Other storage errors, explicit retry, or a reschedule that leaves the timer key unchanged. |
+
+`mkit_server_verification_timer_failures_total{outcome,class}` counts each
+failed or raced fire once, before its backoff move. Its labels contain only
+the fixed outcome and class values above. The event adds no identifiers or
+raw errors; existing pack and source fields still correlate it. Committed
+fires and test-faults builds retain their existing timer result payloads.
+
 `verification_inventory_progress` also reports `staging_start_ms` and
 `staging_end_ms` from the pipeline clock: the first inventory operation's start
 and the last one's end in this slice. `staging_duration_ms` sums time spent in
