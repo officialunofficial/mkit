@@ -194,7 +194,14 @@ fn parent_key(pack: &Hash, id: &Hash) -> Key {
     Key::new([keys::block(pack).as_bytes(), b"\0inventory-parent\0", id].concat())
 }
 fn dependency_key(pack: &Hash, id: &Hash) -> Key {
-    Key::new([keys::block(pack).as_bytes(), b"\0inventory-dependency\0", id].concat())
+    Key::new(
+        [
+            keys::block(pack).as_bytes(),
+            b"\0inventory-dependency\0",
+            id,
+        ]
+        .concat(),
+    )
 }
 fn bad() -> StoreError {
     StoreError::Corrupt("invalid verified pack inventory".into())
