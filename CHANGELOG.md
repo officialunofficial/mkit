@@ -55,7 +55,7 @@ collect the applicable entries between their old and new immutable pins.
   abandoned job on a Workers plan without the kind-16 timer (Free) expires only
   when a request polls it.
   New public items: `fork::{ForkRequest, binding}`, `pipeline::ForkAdmission`,
-  `fork::SettleV1::declared_bytes`, `fork::ForkError::Quota` and
+  `fork::SettleV1::{declared_bytes, namespace_cap}`, `fork::ForkError::Quota` and
   `fork::Failure::OverAdmitted`. `OpKind::ForkRepo` gains
   `source_visibility_revision`; a job row written by an earlier build without
   `SettleV1::declared_bytes` does not decode (pre-release rows only).
