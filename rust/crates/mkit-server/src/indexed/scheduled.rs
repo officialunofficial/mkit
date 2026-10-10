@@ -50,8 +50,16 @@ fn storage_failed() -> ServerError {
     ServerError::unavailable("object storage request failed")
 }
 
+/// Longest poll hint, in seconds, for a verification that has not finished.
+/// A slice runs about every 0.1-2 s while progressing, and a failed or
+/// contended fire backs its timer off for 5 s and up (`timers::backoff`), so the
+/// timer's due time can be far later than the work is. Polling is cheap, so a
+/// pending answer never asks a client to wait longer than this.
+const MAX_PENDING_HINT_SECS: u64 = 3;
+
 /// A polling hint from this consumed job's persisted timer, not a completion ETA.
-/// Bound inspection to four pages; an unobserved wake has the one-second floor.
+/// Bound inspection to four pages; an unobserved wake has the one-second floor,
+/// and a distant one is capped at [`MAX_PENDING_HINT_SECS`].
 async fn retry_after<N: NamespaceStore>(
     store: &N,
     source: &Partition,
@@ -77,7 +85,11 @@ async fn retry_after<N: NamespaceStore>(
                 && found.as_ref() == reference.as_slice()
             {
                 let now = u64::try_from(clock.now_ms()).unwrap_or(0);
-                return Ok(due_at_ms.saturating_sub(now).div_ceil(1_000).clamp(1, 60) * 1_000);
+                return Ok(due_at_ms
+                    .saturating_sub(now)
+                    .div_ceil(1_000)
+                    .clamp(1, MAX_PENDING_HINT_SECS)
+                    * 1_000);
             }
         }
         match page.next {

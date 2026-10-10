@@ -116,7 +116,8 @@ inserted behind the current scan cursor.
 
 `Retry-After` is a polling hint, not an ETA. For the authorized consumed job it
 uses the earliest persisted verification timer found in at most four 64-row
-pages, including failure backoff, rounded up and bounded to 1–60 seconds. Due,
+pages, rounded up and bounded to 1–3 seconds: a failure backoff or lag wait can
+push the timer later than the work, and polling is cheap. Due,
 missing or unobserved timers use one second. Foreign group ownership also uses
 the uniform one-second floor without revealing another ticket's schedule. The
 typed pending detail carries the same whole-second delay in milliseconds.

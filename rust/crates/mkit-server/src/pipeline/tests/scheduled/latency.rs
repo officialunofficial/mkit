@@ -362,7 +362,7 @@ fn retry_hints_follow_decode_delivery_and_failure_timers_and_missing_jobs() {
     let reference = timer_reference(&repo.name, &pack_id);
     let now = ms(env.clock.now_ms());
     let mut old = keys::timer(now, kinds::VERIFY.get(), &reference);
-    for (delay, expected) in [(1_001, 2), (15_001, 16), (90_000, 60), (0, 1)] {
+    for (delay, expected) in [(1_001, 2), (15_001, 3), (90_000, 3), (0, 1)] {
         let next = keys::timer_retry(now + delay, kinds::VERIFY.get(), &reference, now, 1);
         block_on(env.pipe.meta.apply(
             &source,
@@ -374,6 +374,63 @@ fn retry_hints_follow_decode_delivery_and_failure_timers_and_missing_jobs() {
     }
     block_on(env.pipe.meta.apply(&source, Batch::new().delete(old))).unwrap();
     assert_hint(&attempt().unwrap_err(), 1); // Missing timer has no known wake.
+}
+
+#[test]
+fn retry_hint_is_capped_for_a_backed_off_timer_in_every_unfinished_phase() {
+    let (env, owner, identity) = environment_with(Sharding::D34, scheduled());
+    let (bytes, head) = pack();
+    let pack_id = hash(&bytes);
+    let ticket = begin_and_upload(&env, &owner, &identity, &bytes, 920);
+    let request = signed(&owner, &identity, Procedure::AdvanceRefs, 921);
+    let repo = env.auth(&request).unwrap().repo().repo.clone();
+    let source = env.pipe.shards.ref_shard(&repo, HEAD);
+    let attempt = || advance(&env, &owner, &identity, 921, head, pack_id, vec![ticket]);
+    assert_hint(&attempt().unwrap_err(), 1);
+    let reference = timer_reference(&repo.name, &pack_id);
+    let job_key = keys::verify_job(&repo.name, &pack_id);
+    let now = ms(env.clock.now_ms());
+    let mut old = keys::timer(now, kinds::VERIFY.get(), &reference);
+    // The hint does not depend on the phase; each is checked anyway.
+    // A fifth consecutive failure backs the timer off by 5 s * 2^4 = 80 s.
+    let backoff = 80_000;
+    for phase in [
+        Phase::Decode,
+        Phase::ClosureResolve,
+        Phase::EmitIndex,
+        Phase::AwaitDelivery,
+        Phase::Extract,
+    ] {
+        let raw = block_on(env.pipe.meta.get(&source, &job_key))
+            .unwrap()
+            .unwrap();
+        let mut job = decode_job(&raw).unwrap();
+        job.phase = phase;
+        let next = keys::timer_retry(now + backoff, kinds::VERIFY.get(), &reference, now, 5);
+        block_on(
+            env.pipe.meta.apply(
+                &source,
+                Batch::new()
+                    .put(
+                        job_key.clone(),
+                        crate::indexed::checkpoint::encode_job(&job),
+                    )
+                    .delete(old)
+                    .put(next.clone(), Value::default()),
+            ),
+        )
+        .unwrap();
+        assert_hint(&attempt().unwrap_err(), 3);
+        old = next;
+    }
+    // Boundary: a timer just under the cap rounds up to whole seconds.
+    let next = keys::timer_retry(now + 2_001, kinds::VERIFY.get(), &reference, now, 1);
+    block_on(env.pipe.meta.apply(
+        &source,
+        Batch::new().delete(old).put(next, Value::default()),
+    ))
+    .unwrap();
+    assert_hint(&attempt().unwrap_err(), 3);
 }
 
 type EventFields = std::collections::BTreeMap<String, String>;
