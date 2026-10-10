@@ -365,7 +365,7 @@ collect the applicable entries between their old and new immutable pins.
 - Scheduled verification of small packs finishes in roughly half the time at
   50 ms per storage call. The Extract phase runs its selection steps
   (scan, closure, dependencies, members, head, select, choose) back to back in
-  one slice and one guarded commit, bounded by 64 steps, 64 remaining remote
+  one slice and one guarded commit, bounded by 16 steps, 64 remaining remote
   calls, a commit batch within the apply limit, and 2 s of slice time; effect
   stages (upload, completion, holder enqueue, delivery) still end their slice.
   A step that fails after earlier steps in the slice keeps those steps and
