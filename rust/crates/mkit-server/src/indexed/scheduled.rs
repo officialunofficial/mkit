@@ -55,7 +55,7 @@ fn storage_failed() -> ServerError {
 /// contended fire backs its timer off for 5 s and up (`timers::backoff`), so the
 /// timer's due time can be far later than the work is. Polling is cheap, so a
 /// pending answer never asks a client to wait longer than this.
-pub(crate) const MAX_PENDING_HINT_SECS: u64 = 3;
+const MAX_PENDING_HINT_SECS: u64 = 3;
 
 /// A polling hint from this consumed job's persisted timer, not a completion ETA.
 /// Bound inspection to four pages; an unobserved wake has the one-second floor,

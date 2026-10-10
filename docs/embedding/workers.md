@@ -249,7 +249,7 @@ are not a wasm execution deadline. See the
 [dispatch safety contract](../../rust/crates/mkit-server/src/connect/mod.rs) and
 [operations guide](../operations/workers.md#embedding).
 
-Pending verification responses carry `Retry-After` rounded to **1–60 seconds**
+Pending verification responses carry `Retry-After` rounded to **1–3 seconds**
 from the earliest observed persisted timer, with matching typed retry details;
 this is a retry hint, not a completion ETA. Retain retry polling even when relay
 wake succeeds. Correlate upload ID, job ID, alarm attempt, phase, delivery,
