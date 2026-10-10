@@ -252,6 +252,8 @@ pub enum StoredProcedure {
     HttpGetObject,
     /// An HTTP object read by ref path.
     HttpGetRefPath,
+    /// `ForkRepo`.
+    Fork,
 }
 
 impl StoredProcedure {
@@ -274,6 +276,7 @@ impl StoredProcedure {
             ),
             Self::HttpGetObject => (Procedure::HttpGetObject, None),
             Self::HttpGetRefPath => (Procedure::HttpGetRefPath, None),
+            Self::Fork => (Procedure::Fork, None),
         }
     }
 }
@@ -734,6 +737,7 @@ enum ResultV1 {
     AdvancePackmapConflict,
     UploadPack,
     RepoVisibility,
+    Fork,
     BeginUploadAlreadyPresent,
     BeginUploadTicket {
         id: String,
@@ -1290,6 +1294,7 @@ pub fn encode_replay_record(record: &ReplayRecord) -> Value {
                 },
                 StoredResult::UploadPack => ResultV1::UploadPack,
                 StoredResult::RepoVisibility => ResultV1::RepoVisibility,
+                StoredResult::Fork => ResultV1::Fork,
                 StoredResult::Rejected(r) => ResultV1::Rejected {
                     code: r.code().as_str().to_owned(),
                     message: r.message().to_owned(),
@@ -1347,6 +1352,7 @@ pub fn decode_replay_record(value: &Value) -> Result<ReplayRecord, StoreError> {
             }
             ResultV1::UploadPack => StoredResult::UploadPack,
             ResultV1::RepoVisibility => StoredResult::RepoVisibility,
+            ResultV1::Fork => StoredResult::Fork,
             ResultV1::Rejected { code, message } => {
                 let code = CODES
                     .into_iter()

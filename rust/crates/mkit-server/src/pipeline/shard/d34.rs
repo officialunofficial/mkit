@@ -67,6 +67,16 @@ impl ShardMap for D34Shards {
             prefix: u16::from(object[0] >> 4),
         }
     }
+
+    fn object_index_partitions(&self, repo: &RepoId) -> Vec<Partition> {
+        (0..crate::store::REPO_INDEX_FANOUT)
+            .map(|prefix| Partition::RepoIndex {
+                ns: repo.namespace.clone(),
+                repo: repo.name.clone(),
+                prefix,
+            })
+            .collect()
+    }
 }
 
 /// Test-only shard map with the pre-16 twelve-bit repository index routing

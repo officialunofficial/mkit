@@ -575,6 +575,7 @@ async fn ticketed_memberships_are_discovered() {
         sequence: 1,
         published: true,
         held: false,
+        boundary: false,
     }
     .encode();
     for r in [&first, &other] {
@@ -620,6 +621,7 @@ async fn a_clearance_witness_is_a_membership_and_garbage_is_corrupt() {
             sequence: 0,
             published: true,
             held: false,
+            boundary: false,
         }
         .encode(),
         Value::default(),

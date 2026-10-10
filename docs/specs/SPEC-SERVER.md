@@ -1747,6 +1747,160 @@ framing. An oversized entry is refused at indexed verification with the
 unchanged. Very large trees and chunk manifests can exceed it, so clients
 should split very large flat directories into smaller subdirectories.
 
+### 9.9 Fork
+
+A deployment in indexed mode with Multi addressing MAY implement a
+server-side fork: the published tip of one source branch and its history
+become the published membership of an empty destination repository, without
+a ref. It is an embedder-facing operation (no Connect binding in this
+revision); authorization, admission and the API surface are specified where
+the operation is exposed. This section specifies what a completed fork
+guarantees and what a later publication may rely on.
+
+**What is forked.** Only the current published value of one source branch
+`refs/heads/<x>`: head `T` and its paired packmap head `M`. The pack set `F`
+is the packmap chain from `M` (every MKPL node through `prev`), the packs those
+nodes list, and, transitively, the packs that supply the external delta bases
+of any pack in the set (read from the sealed inventories' dependency rows and
+mapped to source packs by the object index). No tags, other branches or
+other packs of the source are copied. A pack in `F` is copied whole,
+including entries outside the closure of `T` (§9.3 verifies every entry).
+
+**Refusal.** A source that cannot be forked answers `not_found`
+`source not found`, byte-identically, whether the source or ref is absent, the
+caller may not read it, `M` or any pack of `F` is not a published unheld
+member of the source's current generation, a sealed inventory is missing, or
+any pack or object of `F` is blocked or superseded (§14.2). The only
+source-side answer that differs is `failed_precondition` `source tip changed`
+when the published head is not the caller's `expected_tip`, which reveals
+nothing the authorized reader does not see. `resource_exhausted`
+`fork too large` appears only after read authorization: a bound of the
+implementation (1,024 packs, 16,384 index rows, 8,000 ids in a working set,
+2,048 unresolved external-base ids and 1,800 per pack, 262,144 source index
+rows scanned) was exceeded. A refusal found before the destination is
+registered (planning, the cleared-set walk, the emptiness and scan-size checks
+that precede registration, a proof too large for one slice) deletes the job, leaves nothing
+else behind (a timer already scheduled ends on its next fire) and lets the
+same request be retried; one found later (a takedown after planning, a moved
+source) is recorded in the job, which then abandons the destination: the
+registered repository, copied index rows, holder rows, counted bytes and any
+membership already published remain until the embedder deletes the
+destination (mkit has no repository deletion today), and no other fork may
+use it. A published member whose sealed inventory is missing is refused like a
+blocked pack. The scan bound counts every index row of the source repository,
+so a small branch of a very large repository can be refused as too large.
+
+**Destination.** The destination MUST be unregistered and have no refs and no
+members, or be the same fork (same request binding). Otherwise
+`failed_precondition` `destination not empty`. A fork creates its destination
+with the requested visibility (it is listed as explicitly set); it never
+adopts a registered repository's,
+and a visibility the owner declared for the name before it existed stands
+(a request for another is refused).
+
+**Job.** The fork is a durable job in the destination's coordinator, advanced
+in slices of at most 600 storage calls by the request that started it and
+then by the fork timer (timer kind 16). Every effect is repeatable (a put of
+the same value, or a holder write that only raises a sequence), so a crash or
+a lost reply at any write resumes by repeating the state's slice. Order of effects: the destination is registered first (a
+takedown sweep enumerates the registry, so every destination that holds
+members is discoverable); the source's index rows for `F` are copied under the
+destination's repository; the packs are counted once (`rn` markers and `rb`,
+at most 45 packs per batch, one `RepoStorageChanged` outcome per batch);
+extracted objects the source holds are held by the destination; and published
+membership is written last, packmap head last of all. Membership of a forked
+pack is published, generation 0, sequence 0. No ref is written. Each pack is two units, the write
+(proof, rows) and the check after it, so a unit costs one proof; a pack whose
+proof cannot fit a slice is refused during planning. The write's deadline is
+stamped when it is made: the check after it, not the age of the proof, is what
+closes the window between proof and write. Before each
+membership write the server re-reads the source's published value and
+re-proves the pack, writes the pair of membership rows only where both are
+absent (an identical pair is a replay; anything else, such as a hold a
+takedown set or a membership a writer created, fails the fork and is never
+overwritten), and proves the pack again after the write. A destination that
+gained a ref since the job began fails the fork before registration and
+before the first membership write.
+
+**Pack proof.** The proof of a pack is: its id is not blocked; its inventory
+is sealed; and no active descriptor intersects it. It does not re-read the
+inventory rows. This is sound because a sealed inventory is immutable
+(`put_entry` refuses a sealed head) and its sealing batch bound count and
+digest, and because a descriptor intersects a pack by exact marker lookup of
+the descriptor's own object in that pack's inventory plus, for a blocked
+chunked file, a pass over the pack's tree and manifest rows; neither needs
+the whole-inventory row scan of §14.2's pack-reuse proof, which only
+re-verifies a digest the seal already binds. With no active descriptor the
+cost of the proof does not depend on the pack's size; with descriptors it
+grows with the pack's tree and manifest rows per descriptor, as in the full
+proof.
+
+**Cleared set and publication boundary.** The fork records, in the
+destination's coordinator, the commits and trees of the closure of `T`
+(cleared set) and the inherited external-base packs, and flags the
+destination's membership witness for `M` (a twentieth byte equal to 1 after
+the nineteen-byte witness; every other witness is unchanged). A publication
+walk (§10.2) that reads the flag while walking the packmap chain, on a
+deployment with pack-level takedown denial (§14.2), MUST load the cleared set
+and MAY skip an object in it: it neither locates nor expands it, and a skipped
+tree skips its subtree, so blobs are never listed. This waives only the
+structural re-walk of objects the source already proved and the fork already
+copied, and:
+
+- it applies only to a pair whose packmap chain contains the flagged head, so
+  the published chain always lists the inherited packs and a clone of the
+  destination receives them;
+- it never waives denial: the skipped objects' packs stay in the advance's
+  dependencies (the chain is still walked), the inherited external-base packs
+  are added to the advance's external bases, and the advance-time denial proof
+  (§14.2) covers every dependency pack and external base. A takedown of an
+  inherited object or pack therefore stops the advance exactly as it does in
+  an ordinary repository, and read-time denial stops serving it. A deployment
+  without pack-level denial runs no such proof, so it does not honor the
+  cleared set: the walk visits every object, as its own per-object block check
+  requires;
+- a takedown that supersedes or blocks a pack of the chain stops every pair
+  that lists it, so the cleared set cannot outlive the packs it describes; a
+  rewritten chain that no longer contains the flagged head gets the full walk;
+- a repository that was never forked carries no flag and reads nothing extra.
+
+**Admission and quota.** The reservation of a fork is bound to the job, not
+to the apply window: it expires with the job (24 hours), after which the next
+step aborts it with the normal `Aborted` outcome. Admission MUST give the
+pending reservation a reconcile time after the job's expiry, or the
+reservation reconciler would abort it under the running job; starting a fork
+with an earlier one is refused. The authority facts a request was authorized
+under (the namespace authority generation, the grant epoch, and whether the
+fork may create the namespace; a job started without them may not) are
+recorded in the job and re-checked when the destination is registered, since
+the job may run long after the request; a change fails the fork before
+anything is written, with the refusal an ordinary write gets for it. A
+persisted authority fence requires a fence on the fork. The embedder that
+exposes the operation owns what the engine does not see (the storage-lease
+executor and lease-recovery modes of §12) and MUST apply them before it starts
+a fork. An abandoned fork therefore
+holds its admitted quota for at most that long. The job re-checks the pending
+row before every unit of work, and a reservation settled elsewhere fails the
+job. The final batch commits the `Committed` outcome, the replay record and the
+admission charges atomically. `Committed` carries no ref change. Admission
+decides the charge, and a fork's quota is therefore advisory: forks started
+together are all admitted while the window has room, and a charge that no
+longer fits when the fork has already been published is not applied, since the
+work cannot be undone. A deployment that needs a hard bound charges at
+admission.
+
+**Takedown reachability.** A destination holds members from its first
+membership write on, is registered before it, and carries an `i` row for every
+member entry; the takedown holder sweep reads the registry, those index rows
+and the clearance witness of each membership (empty for an immediate upload).
+
+**Non-effects.** The fork does not re-run signer, allowed-signer, fast-forward
+or inspection policy on inherited objects, copies no acceptance metadata, and
+creates no link between source and destination: later changes to the source
+do not alter the destination, and mkit cannot revoke a completed fork.
+Packs have no holders today (§13.4); when pack holders are produced the fork
+MUST record them through the same helper as an advance.
+
 ## 10. Published view
 
 ### 10.1 Caller's view
@@ -4563,6 +4717,7 @@ client-visible error contract.
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | Server-side fork (§9.9): a durable, resumable job that gives an empty destination the published membership of one source branch (packmap chain, listed packs and external-base packs), the cleared set and the flagged packmap head that bound later publication walks, and admission bound to the job. Additive: witness boundary flag (`m`/`pm` value of 20 bytes), `fj` and `fo` rows, timer kind 16, `Procedure::Fork`. No wire change; no stored-row version change. |
 | 1 | draft | Authority-generation setter and getter without a namespace record under `any`; authority-mode registration and the refusal of unregistered writes (§6.2.2); the `ag` guard on the fenced namespace-creation batch; one-batch replacement of a stale-generation upload ticket (§6.2.1). No wire change; no stored row changes. |
 | 1 | draft | Opt-in authority-owned namespace grammar and trust model (§6.2.2), wildcard generation-key scopes, refused owner statements, and hook writer authority for owner-view operations. Default self-certifying deployments retain their behavior. |
 | 1 | draft | Document retained local Workers wire connection-loss diagnostics (§18); no conformance, runtime or wire change. |

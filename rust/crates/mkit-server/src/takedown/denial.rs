@@ -758,6 +758,52 @@ pub async fn require_pack_clear<S: NamespaceStore>(
     require_pack_clear_with_concurrency(store, shards, repo, pack, 1).await
 }
 
+/// The fork's per-pack proof: the pack id is not blocked, its inventory is
+/// sealed, and no active descriptor intersects it. Unlike
+/// [`require_pack_clear`] it does not re-read the inventory rows, so its cost
+/// is independent of the pack's object count.
+///
+/// Soundness: the inventory is immutable once its head says `complete` (the
+/// sealing batch verified count and digest, and `put_entry` refuses a sealed
+/// head). Every descriptor check decides intersection by exact marker lookups
+/// (`Target::intersects`) in the pack's own inventory, never by scanning the
+/// rows, so the row scan in [`require_pack_clear`] only re-verifies a digest
+/// the seal already bound.
+///
+/// # Errors
+/// A block or any failed, corrupt, or budget-exhausted proof fails closed.
+pub async fn require_pack_clear_sealed<S: NamespaceStore>(
+    store: &S,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    pack: &Hash,
+) -> Result<(), ServerError> {
+    let budget = SliceBudget::new(crate::limits::REQUEST_CALLS);
+    let remote = Budgeted::new(store, &budget);
+    require_clear(&remote, pack).await?;
+    // A published member whose inventory is missing or unsealed is
+    // inconsistent, not transient: it is refused like a blocked pack.
+    match super::inventory::has_seal(&remote, pack).await {
+        Ok(true) => {}
+        Ok(false) | Err(StoreError::Corrupt(_)) => return Err(blocked()),
+        Err(_) => return Err(unavailable()),
+    }
+    let start = Key::new(INDEX_PREFIX.to_vec());
+    let mut end = INDEX_PREFIX.to_vec();
+    *end.last_mut().ok_or_else(unavailable)? = 1;
+    let end = Key::new(end);
+    let target = Target {
+        ids: &BTreeSet::from([*pack]),
+        manifests: &[],
+        packs: vec![*pack],
+    };
+    prove_shards(&remote, shards, repo, &target, &start, &end, 1).await?;
+    for id in target.ids {
+        require_clear(&remote, id).await?;
+    }
+    Ok(())
+}
+
 /// The scanner's strong global proof, with at most eight first-page reads.
 /// Every shard and page is still checked under the same shared call budget.
 ///

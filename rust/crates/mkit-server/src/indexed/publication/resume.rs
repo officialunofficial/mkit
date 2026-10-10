@@ -89,6 +89,9 @@ pub struct Progress {
     missing: bool,
     missing_base: bool,
     complete: bool,
+    /// The fork's flagged packmap head the chain contains: its cleared set applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    boundary: Option<Hash>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -299,6 +302,7 @@ pub(crate) async fn prepare_with<S: NamespaceStore>(
             missing: false,
             missing_base: false,
             complete: false,
+            boundary: None,
         }
     };
     // A retryable read failure still spent work. Persist its safe checkpoint
@@ -387,12 +391,36 @@ fn missing() -> ServerError {
     ServerError::unavailable("publication membership missing")
 }
 
+/// A packmap node must be a live member; the witness is the row `is_member`
+/// reads, and a fork flags its inherited head in it. `true` for the flag.
+async fn chain_member<S: NamespaceStore>(
+    live: &PairStore<'_, S>,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    id: &Hash,
+) -> Result<bool, Step> {
+    let row = live
+        .get(
+            &shards.membership(repo, &crate::store::BlobKey::pack(*id)),
+            &keys::membership(&repo.name, id),
+        )
+        .await
+        .map_err(|_| unavailable())?;
+    let Some(raw) = row else {
+        return Err(missing().into());
+    };
+    Ok(crate::store::publication::Witness::decode(&raw)
+        .map_err(|_| unavailable())?
+        .boundary)
+}
+
 async fn one<S: NamespaceStore>(
     store: &S,
     shards: &dyn ShardMap,
     repo: &RepoId,
     progress: &mut Progress,
     metrics: &dyn crate::Metrics,
+    cleared: Option<&crate::fork::boundary::Cleared>,
 ) -> Result<u64, Step> {
     let additions = progress.additions.clone();
     let live = PairStore {
@@ -409,12 +437,8 @@ async fn one<S: NamespaceStore>(
         if !progress.chain.insert(id) {
             return Err(Step::Lookup);
         }
-        if !progress.additions.contains(&id)
-            && !crate::store::read::is_member(&live, shards, repo, &id, None)
-                .await
-                .map_err(|_| unavailable())?
-        {
-            return Err(missing().into());
+        if !progress.additions.contains(&id) && chain_member(&live, shards, repo, &id).await? {
+            progress.boundary = Some(id);
         }
         let (length, prev, packs) = inventory::packlist_facts(store, &id)
             .await
@@ -426,10 +450,18 @@ async fn one<S: NamespaceStore>(
         return Ok(length);
     }
     let Some(id) = progress.queue.pop_front() else {
+        if let Some(cleared) = cleared {
+            // Inherited external-base packs stay dependencies of the pair.
+            progress.bases.extend(cleared.bases.iter().copied());
+        }
         progress.complete = true;
         return Ok(0);
     };
     if !progress.visited.insert(id) {
+        return Ok(0);
+    }
+    // The head is always read: its kind is checked below.
+    if Some(id) != progress.value.head && cleared.is_some_and(|cleared| cleared.ids.contains(&id)) {
         return Ok(0);
     }
     let closure = PairStore {
@@ -612,11 +644,37 @@ async fn slice_with<S: NamespaceStore>(
         stopped: std::sync::atomic::AtomicBool::new(false),
     };
     let mut bytes = 0u64;
+    let mut cleared = None;
     while !progress.complete && bytes < SLICE_BYTES {
         // A rollback retains only immutable metadata, never decoded content.
         let before = progress.clone();
         let start = budget.used();
-        let result = one(&remote, shards, repo, progress, metrics).await;
+        // The resumable walk is only reached on a deployment with pack-level
+        // takedown denial (`Pipeline::verify_publication`), the condition the
+        // cleared set is honored under.
+        if progress.boundary.is_some() && cleared.is_none() {
+            let started = budget.used();
+            match crate::fork::boundary::load(&remote, shards, repo).await {
+                Ok(loaded) => cleared = Some(loaded),
+                Err(error) => {
+                    // The load's calls count toward the pair's total, so a
+                    // load that keeps failing ends the verification; a
+                    // corrupt row ends it at once.
+                    let calls = progress
+                        .calls
+                        .saturating_add(u64::from(budget.used() - started));
+                    *progress = before;
+                    progress.calls = calls;
+                    if matches!(error, StoreError::Corrupt(_)) {
+                        progress.failure = Some(Exhaustion::Traversal);
+                    } else if calls > TOTAL_CALLS {
+                        progress.failure = Some(Exhaustion::IndexCalls);
+                    }
+                    break;
+                }
+            }
+        }
+        let result = one(&remote, shards, repo, progress, metrics, cleared.as_ref()).await;
         let used = budget.used() - start;
         progress.calls = before.calls.saturating_add(u64::from(used));
         if progress.calls > TOTAL_CALLS {

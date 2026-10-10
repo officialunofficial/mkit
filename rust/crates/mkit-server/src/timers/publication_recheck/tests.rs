@@ -197,6 +197,7 @@ impl Fixture {
             sequence: 1,
             published: visible,
             held: false,
+            boundary: false,
         };
         assert_eq!(
             self.kv
@@ -573,6 +574,7 @@ fn valid_d34_packmap_at_its_maximum_completes_across_bounded_fires() {
                         sequence: 1,
                         published: true,
                         held: false,
+                        boundary: false,
                     }
                     .encode(),
                 );
@@ -813,6 +815,7 @@ fn single_partition_rechecks_mutable_membership_instead_of_caching_a_prior_pass(
                         sequence: 1,
                         published,
                         held: false,
+                        boundary: false,
                     }
                     .encode(),
                 );

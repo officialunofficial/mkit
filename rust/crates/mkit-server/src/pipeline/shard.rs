@@ -35,6 +35,17 @@ pub trait ShardMap: MaybeSend + MaybeSync {
 
     /// The repository-scoped index shard for an object id.
     fn object_index(&self, repo: &RepoId, object: &Hash) -> Partition;
+
+    /// Every shard that can hold `repo`'s object index rows, for a full
+    /// scan of the repository (a fork copies them). The list MUST also cover
+    /// every shard that holds the repository's membership rows (as it does
+    /// where membership and object index shards coincide), since a fork checks
+    /// that a destination has no members there. The default is empty: a map
+    /// that does not enumerate its shards cannot be forked from, and the fork
+    /// fails closed.
+    fn object_index_partitions(&self, _repo: &RepoId) -> Vec<Partition> {
+        Vec::new()
+    }
 }
 
 /// Every row of a namespace in one partition: M0, and the fs-layout and
@@ -65,5 +76,9 @@ impl ShardMap for SinglePartition {
 
     fn object_index(&self, repo: &RepoId, _object: &Hash) -> Partition {
         Partition::Namespace(repo.namespace.clone())
+    }
+
+    fn object_index_partitions(&self, repo: &RepoId) -> Vec<Partition> {
+        vec![Partition::Namespace(repo.namespace.clone())]
     }
 }

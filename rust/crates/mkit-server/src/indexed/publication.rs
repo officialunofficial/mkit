@@ -128,13 +128,26 @@ async fn packlist<B: BlobStore, S: NamespaceStore>(
     id: Hash,
     additions: &[Hash],
     remaining: &mut u64,
-) -> Result<mkit_core::transfer::PackListNode, ServerError> {
-    if !additions.contains(&id)
-        && !store::read::is_member(store, shards, repo, &id, None)
+) -> Result<(mkit_core::transfer::PackListNode, bool), ServerError> {
+    let mut boundary = false;
+    if !additions.contains(&id) {
+        // The membership witness is the one read `is_member` makes; a
+        // completed fork flags its inherited packmap head in it.
+        let row = store
+            .get(
+                &shards.membership(repo, &BlobKey::pack(id)),
+                &keys::membership(&repo.name, &id),
+            )
             .await
-            .map_err(|_| unavailable())?
-    {
-        return Err(closed());
+            .map_err(|_| unavailable())?;
+        match row {
+            None => return Err(closed()),
+            Some(raw) => {
+                boundary = store::publication::Witness::decode(&raw)
+                    .map_err(|_| unavailable())?
+                    .boundary;
+            }
+        }
     }
     let info = blobs
         .head(&BlobKey::pack(id))
@@ -175,7 +188,8 @@ async fn packlist<B: BlobStore, S: NamespaceStore>(
     if bytes.len() as u64 != length || hash(&bytes) != id {
         return Err(closed());
     }
-    mkit_core::transfer::decode_packlist(&bytes).map_err(|_| closed())
+    let node = mkit_core::transfer::decode_packlist(&bytes).map_err(|_| closed())?;
+    Ok((node, boundary))
 }
 
 /// The server fills dependencies from verified content; policy-supplied lists
@@ -192,6 +206,7 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
     policy: &dyn PublicationPolicy,
     cfg: IndexedConfig,
     metrics: &dyn Metrics,
+    honor_cleared: bool,
 ) -> Result<(), ServerError> {
     if branch && value.head.is_some() && value.packmap.is_none() {
         return Err(closed());
@@ -205,6 +220,7 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
     };
     let mut chain = BTreeSet::new();
     let mut packs = BTreeSet::new();
+    let mut inherited = false;
     let mut next = value.packmap;
     let mut remaining = cfg.decode_budget;
     while let Some(id) = next {
@@ -214,7 +230,7 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
         if !chain.insert(id) {
             return Err(capped());
         }
-        let node = packlist(
+        let (node, flagged) = packlist(
             blobs,
             &live,
             shards,
@@ -224,6 +240,7 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
             &mut remaining,
         )
         .await?;
+        inherited |= flagged;
         packs.extend(node.packs);
         if chain.len() + packs.len() > MAX_ADVANCE_ITEMS {
             return Err(item_capacity());
@@ -246,8 +263,25 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
     let mut dependencies = chain;
     dependencies.extend(packs.iter().copied());
     let mut bases = BTreeSet::new();
+    // A fork's cleared set is consulted only when the chain contains the
+    // flagged inherited head, so a skipped object's packs are listed here.
+    // The skip leans on the advance-time pack proof, which runs only with
+    // pack-level takedown denial; without it every object is walked, as the
+    // walk's own per-object block check needs.
+    let cleared = if inherited && honor_cleared {
+        crate::fork::boundary::load(store, shards, repo)
+            .await
+            .map_err(|_| unavailable())?
+    } else {
+        crate::fork::boundary::Cleared::default()
+    };
+    bases.extend(cleared.bases.iter().copied());
     while let Some(id) = queue.pop_front() {
         if !visited.insert(id) {
+            continue;
+        }
+        // The head is always read: its kind is checked below.
+        if cleared.ids.contains(&id) && Some(id) != value.head {
             continue;
         }
         if visited.len() > MAX_ADVANCE_ITEMS {
@@ -319,12 +353,23 @@ pub(crate) async fn verify_within<B: BlobStore, S: NamespaceStore>(
     policy: &dyn PublicationPolicy,
     cfg: IndexedConfig,
     metrics: &dyn Metrics,
+    honor_cleared: bool,
     slice: &super::budget::SliceBudget,
 ) -> Result<(), ServerError> {
     let blobs = super::budget::Budgeted::new(blobs, slice);
     let store = super::budget::Budgeted::new(store, slice);
     let result = verify_inner(
-        &blobs, &store, shards, repo, value, branch, advance, policy, cfg, metrics,
+        &blobs,
+        &store,
+        shards,
+        repo,
+        value,
+        branch,
+        advance,
+        policy,
+        cfg,
+        metrics,
+        honor_cleared,
     )
     .await;
     crate::pipeline::publication_budget::PublicationBudget::settle(slice, result)
@@ -345,6 +390,7 @@ pub(crate) async fn verify_inspected_within<B: BlobStore, S: NamespaceStore>(
     policy: &dyn PublicationPolicy,
     cfg: IndexedConfig,
     metrics: &dyn Metrics,
+    honor_cleared: bool,
     inspection: &mut super::inspection::InspectionSet,
     slice: &super::budget::SliceBudget,
 ) -> Result<(), ServerError> {
@@ -352,7 +398,17 @@ pub(crate) async fn verify_inspected_within<B: BlobStore, S: NamespaceStore>(
     let store = super::budget::Budgeted::new(store, slice);
     let result = async {
         verify_inner(
-            &blobs, &store, shards, repo, value, branch, advance, policy, cfg, metrics,
+            &blobs,
+            &store,
+            shards,
+            repo,
+            value,
+            branch,
+            advance,
+            policy,
+            cfg,
+            metrics,
+            honor_cleared,
         )
         .await?;
         inspection.complete_added(&store, repo).await

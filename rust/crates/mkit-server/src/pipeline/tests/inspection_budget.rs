@@ -75,6 +75,7 @@ fn fixture(inspecting: bool) -> (Env, Operation, Hash, Arc<Scanner>) {
         sequence: 1,
         published: true,
         held: false,
+        boundary: false,
     }
     .encode();
     for pack in packs.iter().chain(std::iter::once(&node_id)) {

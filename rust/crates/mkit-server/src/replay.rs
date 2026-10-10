@@ -56,6 +56,8 @@ pub enum StoredResult {
     UploadPack,
     /// `SetRepoVisibility` committed.
     RepoVisibility,
+    /// `ForkRepo` finished; the lineage anchor is the destination's job row.
+    Fork,
     /// A final rejection after the reservation, e.g. a policy denial.
     Rejected(StoredRejection),
 }
@@ -234,7 +236,8 @@ mod tests {
                 | StoredResult::AdvanceRefs(_)
                 | StoredResult::BeginUpload(_)
                 | StoredResult::UploadPack
-                | StoredResult::RepoVisibility => true,
+                | StoredResult::RepoVisibility
+                | StoredResult::Fork => true,
                 StoredResult::Rejected(r) => StoredRejection::is_storable(r.code()),
             }
         }

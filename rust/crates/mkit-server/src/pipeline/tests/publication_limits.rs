@@ -594,6 +594,7 @@ fn inspected_long_packmap_chain_fails_closed_before_scanning() {
         sequence: 1,
         published: true,
         held: false,
+        boundary: false,
     }
     .encode();
     // 40 chained nodes of 110 member packs each, with no content: a chain that

@@ -69,10 +69,12 @@ pub mod inspection;
 mod lease;
 pub mod list;
 mod list_repos;
+pub(crate) use list_repos::index_writes as list_repos_index_writes;
 pub use list_repos::{RepoEntry, RepoPage};
 mod outcome;
 mod parts;
 mod plan;
+pub(crate) use plan::{Snapshot as PlanSnapshot, epoch_moved, plan_charge};
 pub(crate) mod publication_budget;
 mod purge;
 mod ref_policy;
@@ -4067,6 +4069,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 policy,
                 indexed,
                 self.metrics.as_ref(),
+                self.cfg.takedown_denial,
                 set,
                 &slice,
             )
@@ -4083,6 +4086,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 policy,
                 indexed,
                 self.metrics.as_ref(),
+                self.cfg.takedown_denial,
                 &slice,
             )
             .await?;
