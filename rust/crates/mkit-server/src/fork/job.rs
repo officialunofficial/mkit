@@ -95,16 +95,6 @@ pub async fn start_with<S: NamespaceStore>(
     require_unregistered(env, &spec.dest).await?;
     let now = env.now();
     check_request(env, &p, now, settle.as_ref(), fence.as_ref()).await?;
-    // Quota binds here, with the job: the charge commits in the batch that
-    // creates it, so a fork the window cannot hold is refused before any work.
-    let (charge_pre, charge_writes, settle) = match settle {
-        Some(mut settle) => {
-            let (pre, writes) = settle::charge(env, &p, &settle, now).await?;
-            settle.charges.clear();
-            (pre, writes, Some(settle))
-        }
-        None => (Vec::new(), Vec::new(), None),
-    };
     let job = ForkJobV1 {
         binding: wanted,
         dest_ns: spec.dest.namespace.as_str().to_owned(),
@@ -134,23 +124,58 @@ pub async fn start_with<S: NamespaceStore>(
         scanned: 0,
         copied: 0,
         failure: None,
-        settle,
+        // The charges are applied by the creation batch below, not carried.
+        settle: settle.clone().map(|mut s| {
+            s.charges.clear();
+            s
+        }),
         fence,
         result: None,
     };
-    let mut batch = Batch::new();
-    batch.preconditions.extend(charge_pre);
-    batch.writes.extend(charge_writes);
-    let batch = batch
-        .require(Precondition::NotAfter(now.saturating_add(CONTENT_WINDOW)))
-        .require(Precondition::Absent(key.clone()))
-        .put(key.clone(), encode_job(&job)?)
-        .put(
-            keys::timer(now, kinds::FORK.get(), key.as_bytes()),
-            Value::default(),
-        );
-    create(env, &p, &key, batch, job).await
+    launch(env, &p, job, settle.as_ref()).await
 }
+
+/// Creation attempts: the charge is planned against the quota rows as they
+/// were read, so a concurrent write by the same signer loses the batch and
+/// the charge is planned again.
+const CREATE_ATTEMPTS: usize = 3;
+
+/// Quota binds here, with the job: the charge commits in the batch that
+/// creates it, so a fork the window cannot hold is refused before any work.
+async fn launch<S: NamespaceStore>(
+    env: &ForkEnv<'_, S>,
+    p: &Partition,
+    job: ForkJobV1,
+    charged: Option<&SettleV1>,
+) -> Result<StartOutcome, ForkError> {
+    let key = keys::fork_job(&job.dest()?.name);
+    for attempt in 1..=CREATE_ATTEMPTS {
+        let (pre, writes) = match charged {
+            Some(settle) => settle::charge(env, p, settle, job.created_ms).await?,
+            None => (Vec::new(), Vec::new()),
+        };
+        let mut batch = Batch::new();
+        batch.preconditions.extend(pre);
+        batch.writes.extend(writes);
+        let batch = batch
+            .require(Precondition::NotAfter(
+                job.created_ms.saturating_add(CONTENT_WINDOW),
+            ))
+            .require(Precondition::Absent(key.clone()))
+            .put(key.clone(), encode_job(&job)?)
+            .put(
+                keys::timer(job.created_ms, kinds::FORK.get(), key.as_bytes()),
+                Value::default(),
+            );
+        match create(env, p, &key, batch, job.clone()).await {
+            Err(ForkError::Unavailable(CONTENDED)) if attempt < CREATE_ATTEMPTS => {}
+            other => return other,
+        }
+    }
+    Err(ForkError::Unavailable(CONTENDED))
+}
+
+const CONTENDED: &str = "fork start contended";
 
 /// Commit the job's creation batch and decide whose job it is.
 async fn create<S: NamespaceStore>(
@@ -187,7 +212,7 @@ async fn create<S: NamespaceStore>(
                 .store
                 .get(p, key)
                 .await?
-                .ok_or(ForkError::Unavailable("fork start contended"))?;
+                .ok_or(ForkError::Unavailable(CONTENDED))?;
             let existing = decode_job(&raw)?;
             if existing.binding == job.binding {
                 Ok(StartOutcome::Existing(Box::new(existing)))

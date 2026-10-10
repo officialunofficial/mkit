@@ -1900,7 +1900,14 @@ bytes (the pack set is a subset of the packs counted for the source), and
 is new to the empty destination. The quota charges are applied once, in the
 batch that creates the job, so the quota is a hard bound: a window that cannot
 hold the fork refuses it with `resource_exhausted` before any work, and a
-charge is never applied at completion. A failure before the destination is
+charge is never applied at completion. The charge is the per-signer
+quota charge the admission decided; the per-namespace aggregate cap of the
+default admission is not applied to forks, and a deployment that needs one
+enforces it in its Admission hook, which sees the fork's bytes. Because the
+charge is the source's whole counter, a caller who can read the source can
+learn from a quota refusal that the repository is larger than the window holds.
+A write by the same signer that lands while the job is created re-plans the
+charge (three attempts), then the request answers `unavailable`. A failure before the destination is
 registered deletes the job so the request can be retried, and the retry is a new
 admission that pays again. A fork whose resolved pack set is larger
 than the bytes it was admitted for (the source gained packs between the
@@ -1926,7 +1933,9 @@ engine does not see (the storage-lease executor and lease-recovery modes of
 §12) and MUST apply them before it starts a fork, and MUST configure the fork
 timer (kind 16) with the same `takedown_denial` and extraction threshold as the
 pipeline. An abandoned fork therefore holds its reservation for at most that
-long. The job re-checks the pending row before every unit of work, and a
+long, as does a reservation whose request ended between its recording and the
+job's creation; a deployment without the kind-16 timer (the Free Workers plan)
+never expires an abandoned job until a request polls it. The job re-checks the pending row before every unit of work, and a
 reservation settled elsewhere fails the job. The final batch commits the
 `Committed` outcome (`bytes_stored` and `new_to_repo` equal the inherited
 bytes, no ref change) and the replay record atomically.

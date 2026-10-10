@@ -1895,6 +1895,48 @@ async fn quota_is_a_hard_bound_charged_once_with_the_job() {
 }
 
 #[tokio::test]
+async fn a_write_by_the_same_signer_during_the_start_replans_the_charge() {
+    use mkit_server::store::adapter_spi::codec;
+    let source = Source::build("source", 6).await;
+    let dest_id = dest(&source, "forked");
+    let settle = settlement::admit(&source, &dest_id).await;
+    // Another write of the signer moves the quota row just before the job
+    // batch, once: the batch loses its guard and the charge is planned again.
+    let (store, clock, ns) = (
+        source.store.clone(),
+        source.clock.clone(),
+        dest_id.namespace.clone(),
+    );
+    let hook: Hook = Arc::new(move || {
+        let (store, clock, ns) = (store.clone(), clock.clone(), ns.clone());
+        Box::pin(async move {
+            let scope = mkit_server::quota::QuotaScope::for_signer(&ns, &[1; 32]);
+            let state = mkit_server::quota::QuotaState {
+                window_start: clock.now_ms(),
+                ops: 4,
+                bytes: 0,
+            };
+            store
+                .inner
+                .apply(
+                    &mkit_server::Partition::Coordinator(ns.clone()),
+                    mkit_server::Batch::new()
+                        .put(keys::quota(&scope), codec::encode_quota_state(&state)),
+                )
+                .await
+                .unwrap();
+        })
+    });
+    *source.store.trigger.lock().unwrap() = Some(("q", hook));
+    let started = mkit_server::fork::start(&env(&source), &spec(&source, "forked"), Some(settle))
+        .await
+        .unwrap();
+    assert!(matches!(started, StartOutcome::Started(_)));
+    // The concurrent write counted, and this fork was charged on top of it.
+    assert_eq!(quota_ops(&source, &dest_id).await, Some(5));
+}
+
+#[tokio::test]
 async fn a_pack_set_larger_than_the_admitted_bytes_fails_the_fork_before_registration() {
     use mkit_server::store::adapter_spi::codec::{AbortReason, ReservationV1};
     let source = Source::build("source", 6).await;
