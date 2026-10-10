@@ -103,7 +103,7 @@ fn bootstrap_has_current_table_timer_index_and_marker() {
     assert!(BOOTSTRAP[0].starts_with("CREATE TABLE mkit_schema"));
     assert!(BOOTSTRAP[1].starts_with("CREATE TABLE kv"));
     assert!(BOOTSTRAP[2].starts_with("CREATE INDEX kv_timers"));
-    assert_eq!(SCHEMA_VERSION, 2);
+    assert_eq!(SCHEMA_VERSION, 3);
     for sql in BOOTSTRAP {
         for banned in ["PRAGMA", "ATTACH"] {
             assert!(!sql.to_uppercase().contains(banned), "{banned} in {sql}");

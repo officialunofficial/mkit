@@ -5995,7 +5995,7 @@ pub struct GetServerInfoResponse {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub namespace_policy: ::core::option::Option<::buffa::alloc::string::String>,
-    /// Fixed index prefix fan-out; default 4096 (SPEC-TRANSPORT-CONNECT §2.1, §7.9).
+    /// Fixed index prefix fan-out; default 16 (SPEC-TRANSPORT-CONNECT §2.1, §7.9).
     ///
     /// Field 15: `index_fanout`
     #[serde(

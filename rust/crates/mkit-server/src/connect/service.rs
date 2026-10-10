@@ -910,7 +910,7 @@ mod proto_roundtrip {
             receipt_key_id: Some("receipt-key".into()),
             grant_schemes: vec!["ed25519".into(), "secp256k1-eip191".into()],
             namespace_policy: Some("allowlist".into()),
-            index_fanout: Some(4096),
+            index_fanout: Some(16),
             inspection_max_objects: Some(10_000),
             ..Default::default()
         });
@@ -938,7 +938,7 @@ mod proto_roundtrip {
                 receipt_key_id: String::new(),
                 grant_schemes: Vec::new(),
                 namespace_policy: "allowlist",
-                index_fanout: 4096,
+                index_fanout: 16,
                 max_delta_chain_depth: if indexed_mode { 50 } else { 0 },
                 inspection_max_objects: None,
             });

@@ -70,7 +70,7 @@ pub(super) async fn shape_and_policy(ctx: Ctx) -> CaseResult {
         (1..=10_000).contains(&page_size),
         "invalid page size: {page_size}"
     );
-    ensure!(info.index_fanout == Some(4096), "incorrect index_fanout");
+    ensure!(info.index_fanout == Some(16), "incorrect index_fanout");
     let depth = info
         .max_delta_chain_depth
         .ok_or("missing max_delta_chain_depth")?;

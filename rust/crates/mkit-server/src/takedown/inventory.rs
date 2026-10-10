@@ -97,6 +97,8 @@ struct Head {
     count: u64,
     parents: u64,
     parent_digest: Hash,
+    dependencies: u64,
+    dependency_digest: Hash,
     digest: Hash,
     complete: bool,
     packlist: Option<PacklistFacts>,
@@ -190,6 +192,16 @@ fn head_key(pack: &Hash) -> Key {
 }
 fn parent_key(pack: &Hash, id: &Hash) -> Key {
     Key::new([keys::block(pack).as_bytes(), b"\0inventory-parent\0", id].concat())
+}
+fn dependency_key(pack: &Hash, id: &Hash) -> Key {
+    Key::new(
+        [
+            keys::block(pack).as_bytes(),
+            b"\0inventory-dependency\0",
+            id,
+        ]
+        .concat(),
+    )
 }
 fn bad() -> StoreError {
     StoreError::Corrupt("invalid verified pack inventory".into())
@@ -448,6 +460,9 @@ async fn put_entry<S: NamespaceStore>(
             return Ok(());
         }
     }
+    // An upgraded placeholder leaves the dependency range, so that range
+    // lists exactly the external delta bases the pack still lacks.
+    let upgraded = existing.is_some();
     let hk = head_key(pack);
     let old = store.get(&p, &hk).await?;
     let mut head: Head = old.as_ref().map(decode).transpose()?.unwrap_or(Head {
@@ -469,6 +484,16 @@ async fn put_entry<S: NamespaceStore>(
         head.parents = head.parents.checked_add(1).ok_or_else(bad)?;
         add_digest(&mut head.parent_digest, id, &row);
     }
+    if upgraded {
+        // `existing` was a placeholder: the checks above returned otherwise.
+        head.dependencies = head.dependencies.checked_sub(1).ok_or_else(bad)?;
+        if let Some(old) = &existing {
+            add_digest(&mut head.dependency_digest, id, old);
+        }
+    } else if parent.kind == 0 {
+        head.dependencies = head.dependencies.checked_add(1).ok_or_else(bad)?;
+        add_digest(&mut head.dependency_digest, id, &row);
+    }
     let mut batch = Batch::new()
         .require(guard(hk.clone(), old))
         .require(guard(key.clone(), existing))
@@ -480,7 +505,12 @@ async fn put_entry<S: NamespaceStore>(
             Value::new(entry_digest(id, &row).to_vec()),
         );
     if matches!(parent.kind, 2 | 5) {
-        batch = batch.put(parent_key(pack, id), row);
+        batch = batch.put(parent_key(pack, id), row.clone());
+    }
+    if upgraded {
+        batch = batch.delete(dependency_key(pack, id));
+    } else if parent.kind == 0 {
+        batch = batch.put(dependency_key(pack, id), row);
     }
     committed(&store.apply(&p, batch).await?)?;
     Ok(())
@@ -728,6 +758,42 @@ pub async fn visit<S: NamespaceStore, F, Fut>(
     store: &S,
     pack: &Hash,
     parents: bool,
+    f: F,
+) -> Result<bool, StoreError>
+where
+    F: FnMut(Hash, Entry) -> Fut,
+    Fut: std::future::Future<Output = Result<bool, StoreError>>,
+{
+    let rows = if parents { Rows::Parents } else { Rows::All };
+    visit_rows(store, pack, rows, f).await
+}
+
+/// Stream only the external delta-base placeholders (`kind` 0) still missing
+/// from the pack, with the same seal check as [`visit`]. The scan costs
+/// `ceil(dependencies / SCAN_ROWS) + 1` calls, not a pass over every entry.
+pub async fn visit_dependencies<S: NamespaceStore, F, Fut>(
+    store: &S,
+    pack: &Hash,
+    f: F,
+) -> Result<bool, StoreError>
+where
+    F: FnMut(Hash, Entry) -> Fut,
+    Fut: std::future::Future<Output = Result<bool, StoreError>>,
+{
+    visit_rows(store, pack, Rows::Dependencies, f).await
+}
+
+#[derive(Clone, Copy)]
+enum Rows {
+    All,
+    Parents,
+    Dependencies,
+}
+
+async fn visit_rows<S: NamespaceStore, F, Fut>(
+    store: &S,
+    pack: &Hash,
+    rows: Rows,
     mut f: F,
 ) -> Result<bool, StoreError>
 where
@@ -742,10 +808,10 @@ where
     if head.version != 1 || !head.complete {
         return Err(bad());
     }
-    let prefix = if parents {
-        b"\0inventory-parent\0".as_slice()
-    } else {
-        b"\0inventory\0".as_slice()
+    let prefix = match rows {
+        Rows::Parents => b"\0inventory-parent\0".as_slice(),
+        Rows::Dependencies => b"\0inventory-dependency\0".as_slice(),
+        Rows::All => b"\0inventory\0".as_slice(),
     };
     let start = Key::new([keys::block(pack).as_bytes(), prefix].concat());
     let mut end = start.as_bytes().to_vec();
@@ -805,10 +871,10 @@ where
             None => break,
         }
     }
-    let expected = if parents {
-        (head.parents, head.parent_digest)
-    } else {
-        (head.count, head.digest)
+    let expected = match rows {
+        Rows::Parents => (head.parents, head.parent_digest),
+        Rows::Dependencies => (head.dependencies, head.dependency_digest),
+        Rows::All => (head.count, head.digest),
     };
     if (count, digest) != expected {
         return Err(bad());

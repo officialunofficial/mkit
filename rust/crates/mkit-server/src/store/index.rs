@@ -638,7 +638,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    use crate::pipeline::{D34Shards, SinglePartition};
+    use crate::pipeline::{D34Shards, SinglePartition, WideRepoIndexShards};
     use crate::repo::{NamespaceKey, RepoName};
     use crate::{
         Batch, BatchOutcome, Cursor, MemoryKv, PartitionStats, ScanPage, StoreCapabilities,
@@ -918,8 +918,12 @@ mod tests {
             })
             .collect();
         let plan = plan_index_rows(&D34Shards, &r, &source(), &[8; 32], &entries, 7).unwrap();
-        assert_eq!(plan.relay.len(), 4096);
-        assert!(plan.relay.iter().all(|row| row.puts.len() == 1));
+        // 256 rows per shard are split into 96-put relay rows: 96 + 96 + 64.
+        assert_eq!(plan.relay.len(), 16 * 3);
+        assert_eq!(
+            plan.relay.iter().map(|row| row.puts.len()).sum::<usize>(),
+            4096
+        );
         assert_eq!(
             plan,
             plan_index_rows(&D34Shards, &r, &source(), &[8; 32], &entries, 7).unwrap()
@@ -930,7 +934,7 @@ mod tests {
                 .map(|row| &row.target)
                 .collect::<BTreeSet<_>>()
                 .len(),
-            4096
+            usize::from(crate::store::REPO_INDEX_FANOUT)
         );
     }
 
@@ -1278,7 +1282,17 @@ mod tests {
     }
 
     async fn put_rows(store: &MemoryKv, r: &RepoId, object: &Hash, packs: &[Hash]) {
-        let target = D34Shards.object_index(r, object);
+        put_rows_in(&D34Shards, store, r, object, packs).await;
+    }
+
+    async fn put_rows_in(
+        shards: &dyn ShardMap,
+        store: &MemoryKv,
+        r: &RepoId,
+        object: &Hash,
+        packs: &[Hash],
+    ) {
+        let target = shards.object_index(r, object);
         for chunk in packs.chunks(100) {
             let mut batch = Batch::new();
             for pack in chunk {
@@ -1295,10 +1309,14 @@ mod tests {
     }
 
     async fn make_member(store: &MemoryKv, r: &RepoId, pack: &Hash) {
+        make_member_in(&D34Shards, store, r, pack).await;
+    }
+
+    async fn make_member_in(shards: &dyn ShardMap, store: &MemoryKv, r: &RepoId, pack: &Hash) {
         assert_eq!(
             store
                 .apply(
-                    &D34Shards.membership(r, &BlobKey::pack(*pack)),
+                    &shards.membership(r, &BlobKey::pack(*pack)),
                     Batch::new().put(keys::membership(&r.name, pack), Value::default()),
                 )
                 .await
@@ -1485,19 +1503,19 @@ mod tests {
         packs.sort_unstable();
         let partitions: BTreeSet<_> = packs
             .iter()
-            .map(|pack| D34Shards.membership(&r, &BlobKey::pack(*pack)))
+            .map(|pack| WideRepoIndexShards.membership(&r, &BlobKey::pack(*pack)))
             .collect();
         assert!(partitions.len() > MAX_LOOKUP_MEMBERSHIP_READS);
-        put_rows(&store, &r, &object, &packs).await;
+        put_rows_in(&WideRepoIndexShards, &store, &r, &object, &packs).await;
         assert_eq!(
-            locate_many(&store, &D34Shards, &r, &[object])
+            locate_many(&store, &WideRepoIndexShards, &r, &[object])
                 .await
                 .unwrap(),
             [Err(LookupError::TooManyMembershipReads)]
         );
-        make_member(&store, &r, &packs[3]).await;
+        make_member_in(&WideRepoIndexShards, &store, &r, &packs[3]).await;
         assert_eq!(
-            locate_many(&store, &D34Shards, &r, &[object])
+            locate_many(&store, &WideRepoIndexShards, &r, &[object])
                 .await
                 .unwrap(),
             [Ok(Some(LocatedObject {

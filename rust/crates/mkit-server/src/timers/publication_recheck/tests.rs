@@ -117,17 +117,21 @@ impl Fixture {
             name: RepoName::new("resumable").unwrap(),
         };
         let source = D34Shards.ref_shard(&repo, NAME);
-        // D34 routes on twelve hash bits: these exercise genuinely distinct
-        // membership partitions, so get_many cannot hide the >1,000 call case.
-        let dependencies = (0..count)
-            .map(|prefix| {
+        // D34 routes a repository's index over sixteen shards by the top four
+        // bits of the pack id. Spread the packs evenly over all sixteen, so
+        // a position is one key and every eight positions of a shard are one
+        // routed page. Pack order is then shard-major, which is also the order
+        // the recheck walks its dependencies in.
+        let mut dependencies = (0..count)
+            .map(|n| {
                 let mut pack = [0; 32];
-                pack[0] = u8::try_from(prefix >> 4).unwrap();
-                pack[1] = u8::try_from((prefix & 15) << 4).unwrap();
+                pack[0] = u8::try_from(n & 15).unwrap() << 4;
+                pack[1] = u8::try_from(n >> 4).unwrap();
                 pack[31] = 1;
                 pack
             })
             .collect::<Vec<_>>();
+        dependencies.sort_unstable();
         let packmap = mkit_core::transfer::encode_packlist(None, &dependencies).unwrap();
         assert_eq!(
             mkit_core::transfer::decode_packlist(&packmap)
@@ -288,13 +292,14 @@ impl Fixture {
 #[test]
 fn late_witness_resumes_at_the_blocked_page_instead_of_restarting() {
     block_on(async {
-        let fixture = Fixture::new(350).await;
+        let fixture = Fixture::new(2_560).await;
         fixture.populate(0).await;
-        fixture.remove_witness(150).await;
+        fixture.remove_witness(1_100).await;
         assert_eq!(fixture.fire(0).await.fired, 1);
         assert_eq!(fixture.target.calls(), MAX_RECHECK_CALLS);
         assert_eq!(fixture.fire(5_000).await.fired, 1);
-        assert_eq!(fixture.target.calls(), 23);
+        // Positions 1,024..=1,103 are ten routed pages; the tenth holds the gap.
+        assert_eq!(fixture.target.calls(), 10);
         assert_eq!(fixture.published().await, 0);
         let blocked = fixture.timer().await;
         assert_eq!(fixture.fire(10_000).await.fired, 1);
@@ -304,11 +309,12 @@ fn late_witness_resumes_at_the_blocked_page_instead_of_restarting() {
             blocked.1,
             "an absent witness cannot waive work"
         );
-        fixture.witness(150, 0, true).await;
+        fixture.witness(1_100, 0, true).await;
         assert_eq!(fixture.fire(15_000).await.fired, 1);
         assert_eq!(fixture.target.calls(), MAX_RECHECK_CALLS);
         assert_eq!(fixture.fire(20_000).await.fired, 1);
-        assert_eq!(fixture.target.calls(), 72);
+        // 183 pages remain from position 1,100; 128 were read in the fire before.
+        assert_eq!(fixture.target.calls(), 55);
         assert_eq!(fixture.published().await, 1);
     });
 }
@@ -316,7 +322,7 @@ fn late_witness_resumes_at_the_blocked_page_instead_of_restarting() {
 #[test]
 fn restart_mid_recheck_reads_the_next_witness_from_the_durable_timer() {
     block_on(async {
-        let fixture = Fixture::new(300).await;
+        let fixture = Fixture::new(2_560).await;
         fixture.populate(0).await;
         assert_eq!(fixture.fire(0).await.fired, 1);
         let (key, value) = fixture.timer().await;
@@ -327,7 +333,7 @@ fn restart_mid_recheck_reads_the_next_witness_from_the_durable_timer() {
         assert_eq!(fixture.target.calls(), MAX_RECHECK_CALLS);
         assert_eq!(
             fixture.target.reads.lock().unwrap().first(),
-            Some(&D34Shards.membership(&fixture.repo, &BlobKey::pack(fixture.dependencies[128])))
+            Some(&D34Shards.membership(&fixture.repo, &BlobKey::pack(fixture.dependencies[1_024])))
         );
         assert!(
             fixture
@@ -339,7 +345,7 @@ fn restart_mid_recheck_reads_the_next_witness_from_the_durable_timer() {
         );
         assert_ne!(fixture.timer().await.1, value);
         assert_eq!(fixture.fire(10_000).await.fired, 1);
-        assert_eq!(fixture.target.calls(), 44);
+        assert_eq!(fixture.target.calls(), 64);
         assert_eq!(fixture.published().await, 1);
     });
 }
@@ -347,7 +353,7 @@ fn restart_mid_recheck_reads_the_next_witness_from_the_durable_timer() {
 #[test]
 fn generation_change_invalidates_already_checked_witnesses() {
     block_on(async {
-        let fixture = Fixture::new(300).await;
+        let fixture = Fixture::new(2_560).await;
         fixture.populate(0).await;
         assert_eq!(fixture.fire(0).await.fired, 1);
         assert_eq!(fixture.target.calls(), MAX_RECHECK_CALLS);
@@ -394,7 +400,7 @@ fn generation_change_invalidates_already_checked_witnesses() {
 #[test]
 fn dependency_change_invalidates_the_cursor_before_an_earlier_missing_witness() {
     block_on(async {
-        let fixture = Fixture::new(300).await;
+        let fixture = Fixture::new(2_560).await;
         fixture.populate(0).await;
         assert_eq!(fixture.fire(0).await.fired, 1);
         let mut advance = fixture.advance().await;
@@ -425,7 +431,7 @@ fn dependency_change_invalidates_the_cursor_before_an_earlier_missing_witness() 
 #[test]
 fn replaced_obligation_invalidates_the_cursor_and_pending_obligations_never_waive_work() {
     block_on(async {
-        let fixture = Fixture::new(300).await;
+        let fixture = Fixture::new(2_560).await;
         fixture.populate(0).await;
         assert_eq!(fixture.fire(0).await.fired, 1);
         let mut advance = fixture.advance().await;
@@ -475,7 +481,7 @@ fn replaced_obligation_invalidates_the_cursor_and_pending_obligations_never_waiv
 fn checkpoint_cas_rejects_concurrent_obligation_and_generation_changes() {
     block_on(async {
         for generation_change in [false, true] {
-            let fixture = Fixture::new(300).await;
+            let fixture = Fixture::new(2_560).await;
             fixture.populate(0).await;
             let before = fixture.timer().await;
             let change = if generation_change {
@@ -546,18 +552,18 @@ fn completion_cas_cannot_publish_after_a_concurrent_obligation_change() {
 }
 
 #[test]
-fn valid_d34_packmap_over_whole_alarm_allowance_completes_across_fires() {
+fn valid_d34_packmap_at_its_maximum_completes_across_bounded_fires() {
     block_on(async {
         let fixture = Fixture::new(4_096).await;
         fixture.populate(0).await;
-        // Exercise all 4,096 prefixes plus 2,048 external bases: 256 prefixes
-        // need two pages each. The audit's 8,192-ID structural maximum
+        // Exercise 4,096 packs plus 2,048 external bases over the sixteen
+        // shards: 384 keys, or 48 pages, per shard. The audit's 8,192-ID structural maximum
         // exceeds the existing 512 KiB advance codec limit.
         let mut advance = fixture.advance().await;
         for prefix in 0..256 {
             let mut batch = Batch::new();
             for suffix in 2..=9 {
-                let mut pack = fixture.dependencies[prefix];
+                let mut pack = fixture.dependencies[prefix * 16];
                 pack[31] = suffix;
                 advance.external_bases.push(pack);
                 batch = batch.put(
@@ -571,8 +577,10 @@ fn valid_d34_packmap_over_whole_alarm_allowance_completes_across_fires() {
                     .encode(),
                 );
             }
-            let partition =
-                D34Shards.membership(&fixture.repo, &BlobKey::pack(fixture.dependencies[prefix]));
+            let partition = D34Shards.membership(
+                &fixture.repo,
+                &BlobKey::pack(fixture.dependencies[prefix * 16]),
+            );
             fixture.kv.apply(&partition, batch).await.unwrap();
         }
         fixture
@@ -595,9 +603,9 @@ fn valid_d34_packmap_over_whole_alarm_allowance_completes_across_fires() {
             assert!(fixture.target.calls() <= MAX_RECHECK_CALLS);
             total_calls += fixture.target.calls();
             if fixture.published().await == 1 {
-                assert!(fire > 0, "more than one alarm's routed allowance is needed");
-                assert_eq!(fire, 33, "4,352 calls need exactly 34 bounded fires");
-                assert_eq!(total_calls, 4_352, "already-checked witnesses were reread");
+                assert!(fire > 0, "more than one bounded fire is needed");
+                assert_eq!(fire, 5, "768 calls need exactly 6 bounded fires");
+                assert_eq!(total_calls, 768, "already-checked witnesses were reread");
                 return;
             }
         }
@@ -608,7 +616,7 @@ fn valid_d34_packmap_over_whole_alarm_allowance_completes_across_fires() {
 #[test]
 fn shared_whole_alarm_allowance_checkpoints_before_exceeding_the_remaining_share() {
     block_on(async {
-        let fixture = Fixture::new(160).await;
+        let fixture = Fixture::new(1_280).await;
         fixture.populate(0).await;
         let shared = crate::purge::SliceBudget::new(WHOLE_ALARM_CALLS);
         let mut total_calls = 0;
@@ -725,12 +733,12 @@ fn missing_witness_inside_one_routed_page_resumes_at_that_witness() {
 #[test]
 fn matching_binding_cannot_skip_beyond_the_actual_dependency_set() {
     block_on(async {
-        let fixture = Fixture::new(160).await;
+        let fixture = Fixture::new(2_560).await;
         fixture.populate(0).await;
         fixture.fire(0).await;
         let (key, raw) = fixture.timer().await;
         let mut progress = Progress::decode(&raw).unwrap();
-        progress.position = 161;
+        progress.position = 2_561;
         let invalid = progress.encode();
         fixture
             .kv

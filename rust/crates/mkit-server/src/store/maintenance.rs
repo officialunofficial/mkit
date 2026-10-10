@@ -394,9 +394,9 @@ pub struct Importer<'a, S> {
 }
 
 fn check_layout(version: u32) -> Result<(), StoreError> {
-    if version > keys::LAYOUT_VERSION {
+    if version != keys::LAYOUT_VERSION {
         return Err(StoreError::Unsupported(
-            "export has a newer layout version than this binary".into(),
+            "export has a different layout version than this binary".into(),
         ));
     }
     Ok(())
@@ -406,8 +406,8 @@ impl<'a, S: NamespaceStore> Importer<'a, S> {
     /// An importer for an export with `header`.
     ///
     /// # Errors
-    /// [`StoreError::Unsupported`] if the export's layout version is newer
-    /// than [`keys::LAYOUT_VERSION`], or differs from the implicit layout
+    /// [`StoreError::Unsupported`] if the export's layout version differs
+    /// from [`keys::LAYOUT_VERSION`], or differs from the implicit layout
     /// version of a store that cannot hold `v`.
     pub fn new(store: &'a S, header: &ExportHeader, mode: ImportMode) -> Result<Self, StoreError> {
         check_layout(header.layout_version)?;
@@ -442,7 +442,7 @@ impl<'a, S: NamespaceStore> Importer<'a, S> {
     /// changes partition or would overflow it.
     ///
     /// # Errors
-    /// [`StoreError::Unsupported`] for a `v` row newer than this binary's
+    /// [`StoreError::Unsupported`] for a `v` row that differs from this binary's
     /// layout; [`StoreError::Invalid`] for a non-empty partition under
     /// [`ImportMode::Fresh`]; any error of the store's `apply`.
     pub async fn push(&mut self, record: ExportRecord) -> Result<(), StoreError> {
@@ -660,7 +660,10 @@ mod tests {
             let entry = BlockEntry::new("r", 3);
             idx.block(&b, &entry, 3).await.unwrap();
             let mut batch = Batch::new()
-                .put(keys::layout_version(), codec::encode_u32(1))
+                .put(
+                    keys::layout_version(),
+                    codec::encode_u32(keys::LAYOUT_VERSION),
+                )
                 .put(keys::grant_epoch(), codec::encode_u64(4));
             for i in 0..7_u8 {
                 let name = format!("refs/heads/b{i}");
@@ -753,8 +756,16 @@ mod tests {
     }
 
     #[test]
-    fn import_refuses_newer_layout_version() {
+    fn import_refuses_other_layout_versions() {
         let kv = MemoryKv::default();
+        let older = ExportHeader {
+            layout_version: keys::LAYOUT_VERSION - 1,
+            exported_at_ms: 0,
+        };
+        assert!(matches!(
+            Importer::new(&kv, &older, ImportMode::Fresh),
+            Err(StoreError::Unsupported(_))
+        ));
         let newer = ExportHeader {
             layout_version: keys::LAYOUT_VERSION + 1,
             exported_at_ms: 0,
@@ -926,7 +937,10 @@ mod tests {
     fn import_refuses_a_non_empty_target_unless_merging() {
         let src = MemoryKv::default();
         let rows = Batch::new()
-            .put(keys::layout_version(), codec::encode_u32(1))
+            .put(
+                keys::layout_version(),
+                codec::encode_u32(keys::LAYOUT_VERSION),
+            )
             .put(keys::grant_epoch(), codec::encode_u64(9));
         block_on(src.apply(&ns(), rows)).unwrap();
         let bytes = export_bytes(&src, &ns());

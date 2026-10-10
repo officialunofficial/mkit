@@ -8,6 +8,8 @@ pub(crate) mod directory;
 pub mod discovery;
 mod intent;
 pub mod inventory;
+#[cfg(test)]
+mod inventory_tests;
 pub mod late;
 pub mod late_owner;
 mod local;

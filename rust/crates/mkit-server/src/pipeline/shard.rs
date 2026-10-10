@@ -7,6 +7,8 @@ mod d34;
 use mkit_core::hash::Hash;
 
 pub use d34::D34Shards;
+#[cfg(test)]
+pub(crate) use d34::WideRepoIndexShards;
 
 use crate::repo::{NamespaceKey, RepoId};
 use crate::rt::{MaybeSend, MaybeSync};

@@ -1,3 +1,3 @@
 # WP-1.22 D34 shard mapping. <file> <blake3>
 # Regenerate: UPDATE_GOLDEN=1 cargo test -p mkit-server d34_mapping_golden
-d34-mapping.json 490cca15a204bb1788e04221daf75794f856f68337b129858432c19be65ae687
+d34-mapping.json 3fccaa07d9f1dca001c41a9b7b4d5399191eea778bde8b83acfdf6fb92a39540

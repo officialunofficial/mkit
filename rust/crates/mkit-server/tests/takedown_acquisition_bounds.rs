@@ -22,6 +22,45 @@ use mkit_server::{
     NoopMetrics, PackSink, RepoId, RepoName, Value,
 };
 
+/// D34 routing with the earlier twelve-bit repository index (4,096 partitions
+/// per repository). D34 now uses sixteen, which cannot reach the worst-case
+/// partition spread these bound tests exercise; the lookup caps themselves
+/// are unchanged and still apply to any shard map.
+struct WideShards;
+impl WideShards {
+    fn wide(id: &Hash) -> u16 {
+        (u16::from(id[0]) << 4) | u16::from(id[1] >> 4)
+    }
+}
+impl ShardMap for WideShards {
+    fn ref_shard(&self, repo: &RepoId, ref_name: &str) -> mkit_server::Partition {
+        D34Shards.ref_shard(repo, ref_name)
+    }
+    fn coordinator(&self, ns: &NamespaceKey) -> mkit_server::Partition {
+        D34Shards.coordinator(ns)
+    }
+    fn ref_index(&self, repo: &RepoId, ref_name: &str) -> mkit_server::Partition {
+        D34Shards.ref_index(repo, ref_name)
+    }
+    fn ref_index_partitions(&self, repo: &RepoId) -> Vec<mkit_server::Partition> {
+        D34Shards.ref_index_partitions(repo)
+    }
+    fn membership(&self, repo: &RepoId, pack: &BlobKey) -> mkit_server::Partition {
+        mkit_server::Partition::RepoIndex {
+            ns: repo.namespace.clone(),
+            repo: repo.name.clone(),
+            prefix: Self::wide(pack.hash()),
+        }
+    }
+    fn object_index(&self, repo: &RepoId, object: &Hash) -> mkit_server::Partition {
+        mkit_server::Partition::RepoIndex {
+            ns: repo.namespace.clone(),
+            repo: repo.name.clone(),
+            prefix: Self::wide(object),
+        }
+    }
+}
+
 struct Latest(Vec<(Hash, Vec<u8>)>);
 impl DeltaBaseSource for Latest {
     const VERIFIED: bool = true;
@@ -183,7 +222,7 @@ async fn dense_candidates(store: &MemoryKv, repo: &RepoId, pack: Hash, entry: In
     rows.push(pack);
     assert_eq!(
         rows.iter()
-            .map(|id| D34Shards.membership(repo, &BlobKey::pack(*id)))
+            .map(|id| WideShards.membership(repo, &BlobKey::pack(*id)))
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
         487
@@ -198,13 +237,13 @@ async fn dense_candidates(store: &MemoryKv, repo: &RepoId, pack: Hash, entry: In
             );
         }
         store
-            .apply(&D34Shards.object_index(repo, &entry.object), batch)
+            .apply(&WideShards.object_index(repo, &entry.object), batch)
             .await
             .unwrap();
     }
     store
         .apply(
-            &D34Shards.membership(repo, &BlobKey::pack(pack)),
+            &WideShards.membership(repo, &BlobKey::pack(pack)),
             Batch::new().put(keys::membership(&repo.name, &pack), Value::default()),
         )
         .await
@@ -292,7 +331,7 @@ async fn dense_chain(external: bool) -> (MemoryBlobStore, MemoryKv, RepoId, Hash
             } else {
                 store
                     .apply(
-                        &D34Shards.object_index(&repo, &entry.object),
+                        &WideShards.object_index(&repo, &entry.object),
                         Batch::new().put(
                             keys::object_index(&repo.name, &entry.object, &pack_id),
                             codec::encode_object_index(&entry.object, &entry.value).unwrap(),
@@ -317,7 +356,7 @@ async fn dense_same_pack_max_chain_exceeds_alarm_budget_without_source_checkpoin
             resolve(
                 &Budgeted::new(&blobs, &budget),
                 &Budgeted::new(&store, &budget),
-                &D34Shards,
+                &WideShards,
                 &repo,
                 id,
                 &Profile::scheduled(),
@@ -337,7 +376,7 @@ async fn dense_same_pack_max_chain_exceeds_alarm_budget_without_source_checkpoin
         let result = resolve(
             &Budgeted::new(&blobs, &budget),
             &Budgeted::new(&store, &budget),
-            &D34Shards,
+            &WideShards,
             &repo,
             id,
             &Profile::scheduled(),
@@ -363,7 +402,7 @@ async fn dense_external_max_chain_repeats_candidate_lookup_for_every_base() {
             resolve(
                 &Budgeted::new(&blobs, &budget),
                 &Budgeted::new(&store, &budget),
-                &D34Shards,
+                &WideShards,
                 &repo,
                 id,
                 &Profile::scheduled(),
@@ -378,7 +417,7 @@ async fn dense_external_max_chain_repeats_candidate_lookup_for_every_base() {
     let result = resolve(
         &Budgeted::new(&blobs, &budget),
         &Budgeted::new(&store, &budget),
-        &D34Shards,
+        &WideShards,
         &repo,
         id,
         &Profile::scheduled(),

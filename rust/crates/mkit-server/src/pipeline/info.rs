@@ -5,7 +5,7 @@ use mkit_core::upload_parts::MIN_PART_SIZE;
 use super::{Admission, HookSet, Pipeline, PipelineConfig};
 use crate::ServerError;
 use crate::repo::Addressing;
-use crate::store::{BlobStore, INDEX_FANOUT, MultipartBlobStore, NamespaceStore};
+use crate::store::{BlobStore, MultipartBlobStore, NamespaceStore, REPO_INDEX_FANOUT};
 
 /// Deployment capabilities and limits, independent of any repository.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,7 +126,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 })
             },
             namespace_policy: self.cfg.advertised_namespace_policy(),
-            index_fanout: u32::from(INDEX_FANOUT),
+            index_fanout: u32::from(REPO_INDEX_FANOUT),
             max_delta_chain_depth: self
                 .cfg
                 .indexed

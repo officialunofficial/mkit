@@ -574,27 +574,47 @@ Filter logs by that field to follow one object across requests.
 
 **Why one read touches many objects.** Every mkit storage partition is its own
 Durable Object, routed by `id_from_name(partition)` in the Workers adapter: the
-namespace coordinator, 16 ref-index buckets, 4096 repository index shards and
-4096 content shards keyed by object-id prefix, plus one object per ref. A read
-therefore fans out across the objects its ids hash to. The test probe
+namespace coordinator, 16 ref-index buckets, 16 repository index shards per
+repository and 4096 global content shards keyed by object-id prefix, plus one
+object per ref. A read therefore fans out across the objects its ids hash to.
+The test probe
 `embedder_read_shapes` (`cargo test -p mkit-server --features http-objects --lib
 embedder_read_shapes -- --nocapture`) counts the distinct partitions a read
 touches. Expected counts for a public reader with takedown denial off:
 
 | Shape | Distinct objects | Coordinator | Ref index | Repo index | Content | Ref |
 | --- | --- | --- | --- | --- | --- | --- |
-| Show with sizes (8 files, 1 nested dir) | 43 | 1 | 16 | 13 | 13 | 0 |
+| Show with sizes (8 files, 1 nested dir) | 40 | 1 | 16 | 10 | 13 | 0 |
 | Show without sizes | 25 | 1 | 16 | 4 | 4 | 0 |
-| Cat via `read_commit_path_in` | 12 | 1 | 0 | 5 | 5 | 1 |
-| Log of 5 (52-commit history) | 22 | 1 | 0 | 10 | 10 | 1 |
-| Log of 10 (52-commit history) | 42 | 1 | 0 | 20 | 20 | 1 |
-| Log of 50 (52-commit history) | 200 | 1 | 0 | 99 | 99 | 1 |
+| Cat via `read_commit_path_in` | 11 | 1 | 0 | 4 | 5 | 1 |
+| Log of 5 (52-commit history) | 21 | 1 | 0 | 9 | 10 | 1 |
+| Log of 10 (52-commit history) | 36 | 1 | 0 | 14 | 20 | 1 |
+| Log of 50 (52-commit history) | 117 | 1 | 0 | 16 | 99 | 1 |
 
 These are upper-bound expectations for a tiny repository: object ids are
-uniform, so repo-index and content shard counts grow roughly with the number of
-objects read. Enabling takedown denial adds content-shard lookups (for example
-Cat 28 and Log of 50 215). A trace far above these numbers for the same shape
-is worth investigating.
+uniform, so content shard counts grow roughly with the number of objects read,
+while repo-index counts saturate at 16 per repository. Enabling takedown
+denial adds content-shard lookups (for example Cat 27 and Log of 50 132
+distinct partitions in total). A trace far above these numbers for the same
+shape is worth investigating.
+
+**Repository index scaling envelope.** A repository's object and membership
+rows live in 16 Durable Objects, routed by the top four bits of the object or
+pack id; the layout is a fixed constant, not a setting. Cloudflare documents
+up to 10 GB of storage per SQLite-backed Durable Object and roughly 500-1,000
+requests per second per object for simple operations
+(<https://developers.cloudflare.com/durable-objects/best-practices/rules-of-durable-objects/>,
+<https://developers.cloudflare.com/durable-objects/platform/limits/>). With
+ids spread uniformly, a repository can use up to 160 GB of index storage and
+about 8,000-16,000 index requests per second across its 16 shards; one shard
+bounds the rest. At an estimated 100-200 bytes per object row including
+SQLite overhead, one shard holds several tens of millions of rows, so a
+repository reaches the order of 10^8 objects before the storage cap binds
+(an estimate, not a measured limit). Hot-repository request rate is the nearer
+limit: all index traffic of one repository shares 16 objects, where the
+previous layout spread it over up to 4,096. An embedder that expects a single
+repository to sustain more than a few thousand index requests per second needs
+a larger fan-out, which is a layout change that resets the store.
 
 **Quiet periods.** An idle, non-hibernating Durable Object is evicted from
 memory after roughly 70-140 seconds without requests

@@ -159,6 +159,8 @@ use plan::{
     WriteRequest, plan_write, prune_sampled,
 };
 pub use revocation::{MAX_EPOCH_STEP, RevokeBudget, RevokeProgress};
+#[cfg(test)]
+pub(crate) use shard::WideRepoIndexShards;
 pub use shard::{D34Shards, ShardMap, SinglePartition};
 pub use upload::{UploadMode, UploadSession};
 

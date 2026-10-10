@@ -57,8 +57,8 @@ pub enum Partition {
         shard_ref: String,
     },
     /// D34 (M1): repo membership by object-id prefix over the fixed
-    /// `INDEX_FANOUT` (default 4096). Never resharded; eventually
-    /// consistent.
+    /// `REPO_INDEX_FANOUT` (16, the top four bits). Never resharded;
+    /// eventually consistent.
     RepoIndex {
         /// Namespace.
         ns: NamespaceKey,

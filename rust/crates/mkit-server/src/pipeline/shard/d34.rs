@@ -1,5 +1,6 @@
 //! Fixed D34 routing: one branch shard, a namespace coordinator, and
-//! enumerable membership and ref-name index shards.
+//! enumerable membership and ref-name index shards. Each repository's object
+//! and membership rows spread over [`REPO_INDEX_FANOUT`] shards.
 
 use mkit_core::hash::Hash;
 use mkit_core::hash::hash;
@@ -55,7 +56,7 @@ impl ShardMap for D34Shards {
         Partition::RepoIndex {
             ns: repo.namespace.clone(),
             repo: repo.name.clone(),
-            prefix: (u16::from(p[0]) << 4) | u16::from(p[1] >> 4),
+            prefix: u16::from(p[0] >> 4),
         }
     }
 
@@ -63,7 +64,57 @@ impl ShardMap for D34Shards {
         Partition::RepoIndex {
             ns: repo.namespace.clone(),
             repo: repo.name.clone(),
-            prefix: (u16::from(object[0]) << 4) | u16::from(object[1] >> 4),
+            prefix: u16::from(object[0] >> 4),
+        }
+    }
+}
+
+/// Test-only shard map with the pre-16 twelve-bit repository index routing
+/// (4,096 partitions per repository). It keeps the bound-enforcement stress
+/// tests (membership-read caps, page budgets) on their worst-case partition
+/// spread, which D34's sixteen shards can no longer reach.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct WideRepoIndexShards;
+
+#[cfg(test)]
+impl WideRepoIndexShards {
+    fn wide(id: &Hash) -> u16 {
+        (u16::from(id[0]) << 4) | u16::from(id[1] >> 4)
+    }
+}
+
+#[cfg(test)]
+impl ShardMap for WideRepoIndexShards {
+    fn ref_shard(&self, repo: &RepoId, ref_name: &str) -> Partition {
+        D34Shards.ref_shard(repo, ref_name)
+    }
+
+    fn coordinator(&self, ns: &NamespaceKey) -> Partition {
+        D34Shards.coordinator(ns)
+    }
+
+    fn ref_index(&self, repo: &RepoId, ref_name: &str) -> Partition {
+        D34Shards.ref_index(repo, ref_name)
+    }
+
+    fn ref_index_partitions(&self, repo: &RepoId) -> Vec<Partition> {
+        D34Shards.ref_index_partitions(repo)
+    }
+
+    fn membership(&self, repo: &RepoId, pack: &BlobKey) -> Partition {
+        Partition::RepoIndex {
+            ns: repo.namespace.clone(),
+            repo: repo.name.clone(),
+            prefix: Self::wide(pack.hash()),
+        }
+    }
+
+    fn object_index(&self, repo: &RepoId, object: &Hash) -> Partition {
+        Partition::RepoIndex {
+            ns: repo.namespace.clone(),
+            repo: repo.name.clone(),
+            prefix: Self::wide(object),
         }
     }
 }
@@ -79,7 +130,7 @@ mod tests {
 
     use super::*;
     use crate::repo::RepoName;
-    use crate::store::INDEX_FANOUT;
+    use crate::store::REPO_INDEX_FANOUT;
 
     fn repo(ns: &str, name: &str) -> RepoId {
         RepoId {
@@ -148,9 +199,11 @@ mod tests {
         .collect();
         let r = repo("root", "a");
         let packs = [
-            (0x00, 0x00, 0x000),
-            (0xff, 0xff, 0xfff),
-            (0x12, 0x3f, 0x123),
+            (0x00, 0x00, 0x0),
+            (0xff, 0xff, 0xf),
+            (0x12, 0x3f, 0x1),
+            (0x1f, 0xff, 0x1),
+            (0x20, 0x00, 0x2),
         ]
         .into_iter()
         .map(|(first, second, prefix)| {
@@ -169,7 +222,7 @@ mod tests {
         .collect();
         let mapping = Mapping {
             ref_index_fanout: REF_INDEX_FANOUT,
-            membership_fanout: INDEX_FANOUT,
+            membership_fanout: REPO_INDEX_FANOUT,
             refs,
             packs,
             coordinator_partition_hex: encoded(&D34Shards.coordinator(&r.namespace)),
@@ -253,8 +306,8 @@ mod tests {
                 unreachable!("D34 membership index is a RepoIndex");
             };
             prop_assert!(bucket < REF_INDEX_FANOUT);
-            prop_assert!(prefix < INDEX_FANOUT);
-            prop_assert_eq!(prefix, u16::from_be_bytes([id[0], id[1]]) >> 4);
+            prop_assert!(prefix < REPO_INDEX_FANOUT);
+            prop_assert_eq!(prefix, u16::from(id[0] >> 4));
             prop_assert_eq!(D34Shards.object_index(&r, &id), D34Shards.membership(&r, &BlobKey::pack(id)));
         }
     }

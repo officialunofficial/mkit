@@ -55,13 +55,18 @@ fn fixture(inspecting: bool) -> (Env, Operation, Hash, Arc<Scanner>) {
     let request = indexed::signed(&owner, &identity, Procedure::UpdateRef, 30_000);
     let authenticated = env.auth(&request).unwrap();
     let repo = authenticated.repo().repo.clone();
-    let packs: Vec<_> = (0_u16..1001)
-        .map(|prefix| {
+    // Spread over the repository's sixteen index shards; enough packs that
+    // reading every dependency's visibility needs more calls than the shared
+    // verification allocation.
+    let mut packs: Vec<_> = (0_u16..3000)
+        .map(|n| {
             let mut id = [0; 32];
-            id[..2].copy_from_slice(&(prefix << 4).to_be_bytes());
+            id[0] = u8::try_from(n & 15).unwrap() << 4;
+            id[1] = u8::try_from(n >> 4).unwrap();
             id
         })
         .collect();
+    packs.sort_unstable();
     let node = mkit_core::transfer::encode_packlist(None, &packs).unwrap();
     let node_id = hash(&node);
     indexed::upload(&env, &node, [8; 32]);
@@ -168,9 +173,11 @@ fn inspection_pair_budget_includes_dependency_visibility_before_hooks() {
                     packmap: Some(node_id)
                 }
             );
-            assert_eq!(prepared.dependencies.len(), 1002);
-            assert!(
-                calls > 1000,
+            assert_eq!(prepared.dependencies.len(), 3001);
+            // 3,000 packs over 16 shards is 24 routed pages of 8 keys per shard
+            // (384), plus the node read and the publication read.
+            assert_eq!(
+                calls, 386,
                 "disabled behavior retains the original dependency reads"
             );
         }
