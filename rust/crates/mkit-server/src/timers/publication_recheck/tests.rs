@@ -552,7 +552,7 @@ fn completion_cas_cannot_publish_after_a_concurrent_obligation_change() {
 }
 
 #[test]
-fn valid_d34_packmap_over_whole_alarm_allowance_completes_across_fires() {
+fn valid_d34_packmap_at_its_maximum_completes_across_bounded_fires() {
     block_on(async {
         let fixture = Fixture::new(4_096).await;
         fixture.populate(0).await;
@@ -603,7 +603,7 @@ fn valid_d34_packmap_over_whole_alarm_allowance_completes_across_fires() {
             assert!(fixture.target.calls() <= MAX_RECHECK_CALLS);
             total_calls += fixture.target.calls();
             if fixture.published().await == 1 {
-                assert!(fire > 0, "more than one alarm's routed allowance is needed");
+                assert!(fire > 0, "more than one bounded fire is needed");
                 assert_eq!(fire, 5, "768 calls need exactly 6 bounded fires");
                 assert_eq!(total_calls, 768, "already-checked witnesses were reread");
                 return;

@@ -49,7 +49,8 @@ enum Slot<'k> {
 /// A [`NamespaceStore`] holding the ref class (`r 00 <repo> 00 <name>`) of
 /// one repo, in one partition, as files under the served root. Its
 /// capabilities are [`StoreCapabilities::refs_only`]: one key per batch,
-/// no layout-version row (the `.mkit` on-disk format is layout version 1).
+/// no layout-version row (it reports the server's current layout version
+/// implicitly).
 ///
 /// A ref (a `refs/` name) is exactly `FileTransport`'s ref file: reads are
 /// [`FileTransport`]'s strict reads, and every write is its CAS (`Missing`

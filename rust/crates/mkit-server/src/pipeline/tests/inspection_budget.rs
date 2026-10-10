@@ -174,8 +174,10 @@ fn inspection_pair_budget_includes_dependency_visibility_before_hooks() {
                 }
             );
             assert_eq!(prepared.dependencies.len(), 3001);
-            assert!(
-                calls > 256,
+            // 3,000 packs over 16 shards is 24 routed pages of 8 keys per shard
+            // (384), plus the node read and the publication read.
+            assert_eq!(
+                calls, 386,
                 "disabled behavior retains the original dependency reads"
             );
         }

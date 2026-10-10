@@ -576,7 +576,8 @@ Filter logs by that field to follow one object across requests.
 Durable Object, routed by `id_from_name(partition)` in the Workers adapter: the
 namespace coordinator, 16 ref-index buckets, 16 repository index shards per
 repository and 4096 global content shards keyed by object-id prefix, plus one
-object per ref. A read therefore fans out across the objects its ids hash to. The test probe
+object per ref. A read therefore fans out across the objects its ids hash to.
+The test probe
 `embedder_read_shapes` (`cargo test -p mkit-server --features http-objects --lib
 embedder_read_shapes -- --nocapture`) counts the distinct partitions a read
 touches. Expected counts for a public reader with takedown denial off:

@@ -83,3 +83,40 @@ async fn a_pack_without_dependencies_scans_an_empty_range() {
     inventory::complete(&store, &pack, 3, 1).await.unwrap();
     assert!(dependencies(&store, &pack).await.is_empty());
 }
+
+#[tokio::test]
+async fn dependency_range_is_refused_when_unsealed_or_tampered() {
+    use crate::store::{Batch, Key, NamespaceStore, content_shard, keys};
+    let store = store();
+    let pack = [9; 32];
+    let (base, _) = blob(6);
+    inventory::dependency(&store, &pack, 4, &base, 1)
+        .await
+        .unwrap();
+    // Not sealed yet.
+    assert!(
+        inventory::visit_dependencies(&store, &pack, |_, _| async { Ok(false) })
+            .await
+            .is_err()
+    );
+    inventory::complete(&store, &pack, 4, 1).await.unwrap();
+    assert_eq!(dependencies(&store, &pack).await, BTreeSet::from([base]));
+    // Removing a dependency row without the head no longer matches its count.
+    let row = Key::new(
+        [
+            keys::block(&pack).as_bytes(),
+            b"\0inventory-dependency\0",
+            &base,
+        ]
+        .concat(),
+    );
+    store
+        .apply(&content_shard(&pack), Batch::new().delete(row))
+        .await
+        .unwrap();
+    assert!(
+        inventory::visit_dependencies(&store, &pack, |_, _| async { Ok(false) })
+            .await
+            .is_err()
+    );
+}

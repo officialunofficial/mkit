@@ -1367,13 +1367,16 @@ mod tests {
     }
 
     #[test]
-    fn content_index_refuses_newer_layout_version() {
+    fn content_index_refuses_other_layout_versions() {
+        for version in [keys::LAYOUT_VERSION - 1, keys::LAYOUT_VERSION + 1] {
+            refuses_layout_version(version);
+        }
+    }
+
+    fn refuses_layout_version(version: u32) {
         let idx = ContentIndex::new(kv());
         let obj = [3; 32];
-        let newer = Batch::new().put(
-            keys::layout_version(),
-            codec::encode_u32(keys::LAYOUT_VERSION + 1),
-        );
+        let newer = Batch::new().put(keys::layout_version(), codec::encode_u32(version));
         block_on(idx.store().apply(&content_shard(&obj), newer)).unwrap();
         assert!(matches!(
             block_on(idx.add_holder(&obj, &holder("a"), &OP, None, 1)),
