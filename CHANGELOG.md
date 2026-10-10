@@ -190,6 +190,12 @@ collect the applicable entries between their old and new immutable pins.
   the server's BFS `HistoryMode::AllParents` and the CLI's date-order log —
   are unchanged.
 
+- Production verification timer failures and races report a redacted error
+  class, proposed next delay, and next attempt through existing telemetry.
+  `mkit_server_verification_timer_failures_total` counts fires by outcome and
+  class. Backoff, timer outcomes, and test-faults telemetry remain unchanged;
+  wipe: no.
+
 ### Fixed
 
 - Takedown discovery found no ticketed memberships. It accepted only an empty

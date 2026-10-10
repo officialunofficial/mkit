@@ -9,6 +9,8 @@ pub mod publication_recheck;
 pub mod quota_rollup;
 pub mod registry;
 pub mod reservation_reconcile;
+#[cfg(all(test, not(feature = "__test-faults")))]
+mod telemetry_tests;
 #[cfg(feature = "__test-faults")]
 pub mod test_kind;
 #[cfg(test)]
@@ -159,7 +161,7 @@ fn time_prefix(now: u64) -> Key {
 enum FireOutcome {
     Committed(Option<u64>),
     Raced,
-    Failed,
+    Failed(&'static str),
 }
 
 async fn fire_timer<S: NamespaceStore>(
@@ -180,7 +182,7 @@ async fn fire_timer<S: NamespaceStore>(
         }) => {
             let new_key = keys::timer(due_at_ms, timer.kind.get(), &timer.reference);
             if due_at_ms == timer.due_at_ms || new_key == key {
-                return FireOutcome::Failed;
+                return FireOutcome::Failed("other");
             }
             batch
                 .require(Precondition::Equals(key.clone(), timer.value.clone()))
@@ -191,14 +193,12 @@ async fn fire_timer<S: NamespaceStore>(
         Ok(Fired::Retry) => {
             #[cfg(feature = "__test-faults")]
             tracing::warn!(kind = timer.kind.get(), "test timer requested retry");
-            return FireOutcome::Failed;
+            return FireOutcome::Failed("other");
         }
         Err(error) => {
             #[cfg(feature = "__test-faults")]
             tracing::warn!(kind = timer.kind.get(), %error, "test timer handler failed");
-            #[cfg(not(feature = "__test-faults"))]
-            let _ = error;
-            return FireOutcome::Failed;
+            return FireOutcome::Failed(failure_class(&error));
         }
     };
     let put_due = earliest_timer_put(&batch);
@@ -244,14 +244,12 @@ async fn fire_timer<S: NamespaceStore>(
         Ok(BatchOutcome::DeadlinePassed { .. }) => {
             #[cfg(feature = "__test-faults")]
             tracing::warn!(kind = timer.kind.get(), "test timer deadline passed");
-            FireOutcome::Failed
+            FireOutcome::Failed("deadline")
         }
         Err(error) => {
             #[cfg(feature = "__test-faults")]
             tracing::warn!(kind = timer.kind.get(), %error, "test timer apply failed");
-            #[cfg(not(feature = "__test-faults"))]
-            let _ = error;
-            FireOutcome::Failed
+            FireOutcome::Failed(failure_class(&error))
         }
     }
 }
@@ -419,7 +417,7 @@ async fn process_row<S: NamespaceStore>(
                 run.report.raced += 1;
                 run.retained_due = true;
             }
-            FireOutcome::Failed => {
+            FireOutcome::Failed(_) => {
                 run.report.failed += 1;
                 run.retained_due = true;
             }
@@ -433,16 +431,7 @@ async fn process_row<S: NamespaceStore>(
     }
     observe_verify_entry(handler, ctx, &timer, attempt, clock);
     let outcome = fire_timer(handler, ctx, &timer, key.clone(), clock).await;
-    if timer.kind == registry::kinds::VERIFY {
-        tracing::info!(event = "verification_timer_result", now_ms = u64::try_from(clock.now_ms()).unwrap_or(ctx.now_ms),
-            source = ?ctx.partition, attempt,
-            pack = crate::indexed::checkpoint::parse_reference(&timer.reference)
-                .map(|(_, pack)| mkit_core::hash::to_hex(&pack)).as_deref(),
-            scheduled_ms = keys::parse(&key).and_then(|k| match k {
-                keys::ParsedKey::Timer { due_at_ms, .. } => Some(due_at_ms), _ => None }),
-            outcome = match &outcome { FireOutcome::Committed(_) => "committed",
-                FireOutcome::Raced => "raced", FireOutcome::Failed => "failed" });
-    }
+    observe_verify_result(handler, ctx, &timer, &key, attempt, &outcome, clock);
     match outcome {
         FireOutcome::Committed(put_due) => {
             state.committed();
@@ -460,10 +449,10 @@ async fn process_row<S: NamespaceStore>(
                     run.progress = true;
                     run.committed_due = min_due(run.committed_due, due);
                 }
-                FireOutcome::Raced | FireOutcome::Failed => run.retained_due = true,
+                FireOutcome::Raced | FireOutcome::Failed(_) => run.retained_due = true,
             }
         }
-        FireOutcome::Failed => {
+        FireOutcome::Failed(_) => {
             run.report.failed += 1;
             // Failed handler effects are discarded; only its timer moves.
             match backoff(ctx, &timer, key, attempt).await {
@@ -476,9 +465,89 @@ async fn process_row<S: NamespaceStore>(
                     run.report.raced += 1;
                     run.retained_due = true;
                 }
-                FireOutcome::Failed => run.retained_due = true,
+                FireOutcome::Failed(_) => run.retained_due = true,
             }
         }
+    }
+}
+
+// Only typed categories cross the telemetry boundary. Never format a source.
+fn failure_class(error: &StoreError) -> &'static str {
+    match error {
+        StoreError::Unavailable(source) => {
+            if source.is::<crate::budget::BudgetExhausted>() {
+                "budget_exhausted"
+            } else if let Some(failure) =
+                source.downcast_ref::<crate::takedown::inventory::StagingFailure>()
+            {
+                match failure {
+                    crate::takedown::inventory::StagingFailure::Expired { .. } => "deadline",
+                    crate::takedown::inventory::StagingFailure::CasContention { .. } => {
+                        "guard_conflict"
+                    }
+                }
+            } else {
+                "storage_unavailable"
+            }
+        }
+        StoreError::Full => "storage_unavailable",
+        StoreError::Corrupt(_) => "decode_error",
+        _ => "other",
+    }
+}
+
+fn observe_verify_result<S: NamespaceStore>(
+    handler: &dyn TimerHandler<S>,
+    ctx: &TimerCtx<'_, S>,
+    timer: &DueTimer,
+    key: &Key,
+    attempt: u8,
+    outcome: &FireOutcome,
+    clock: &dyn Clock,
+) {
+    if timer.kind != registry::kinds::VERIFY {
+        return;
+    }
+    let result = match outcome {
+        FireOutcome::Committed(_) => "committed",
+        FireOutcome::Raced => "raced",
+        FireOutcome::Failed(_class) => "failed",
+    };
+    let now_ms = u64::try_from(clock.now_ms()).unwrap_or(ctx.now_ms);
+    let pack = crate::indexed::checkpoint::parse_reference(&timer.reference)
+        .map(|(_, pack)| mkit_core::hash::to_hex(&pack));
+    let scheduled_ms = keys::parse(key).and_then(|k| match k {
+        keys::ParsedKey::Timer { due_at_ms, .. } => Some(due_at_ms),
+        _ => None,
+    });
+    #[cfg(not(feature = "__test-faults"))]
+    {
+        let class = match outcome {
+            FireOutcome::Committed(_) => None,
+            FireOutcome::Raced => Some("guard_conflict"),
+            FireOutcome::Failed(class) => Some(*class),
+        };
+        let retry = class.map(|_| retry_plan(attempt));
+        if let Some(class) = class {
+            handler
+                .metrics()
+                .unwrap_or(&crate::telemetry::NoopMetrics)
+                .incr(
+                    crate::telemetry::METRIC_VERIFICATION_TIMER_FAILURES,
+                    &[("outcome", result), ("class", class)],
+                    1,
+                );
+        }
+        tracing::info!(event = "verification_timer_result", now_ms,
+            source = ?ctx.partition, attempt, pack = pack.as_deref(), scheduled_ms,
+            outcome = result, error_class = class,
+            next_delay_ms = retry.map(|(_, delay)| delay), next_attempt = retry.map(|(next, _)| next));
+    }
+    #[cfg(feature = "__test-faults")]
+    {
+        let _ = handler;
+        tracing::info!(event = "verification_timer_result", now_ms,
+            source = ?ctx.partition, attempt, pack = pack.as_deref(), scheduled_ms, outcome = result);
     }
 }
 
@@ -504,16 +573,21 @@ fn observe_verify_entry<S: NamespaceStore>(
     }
 }
 
+fn retry_plan(attempt: u8) -> (u8, u64) {
+    let next_attempt = attempt.saturating_add(1).min(keys::MAX_TIMER_RETRY_ATTEMPT);
+    let delay = RETRY_BACKOFF_MS
+        .saturating_mul(1_u64 << (next_attempt - 1))
+        .min(MAX_RETRY_BACKOFF_MS);
+    (next_attempt, delay)
+}
+
 async fn backoff<S: NamespaceStore>(
     ctx: &TimerCtx<'_, S>,
     timer: &DueTimer,
     key: Key,
     attempt: u8,
 ) -> FireOutcome {
-    let next_attempt = attempt.saturating_add(1).min(keys::MAX_TIMER_RETRY_ATTEMPT);
-    let delay = RETRY_BACKOFF_MS
-        .saturating_mul(1_u64 << (next_attempt - 1))
-        .min(MAX_RETRY_BACKOFF_MS);
+    let (next_attempt, delay) = retry_plan(attempt);
     let due = ctx.now_ms.saturating_add(delay);
     let next_key = keys::timer_retry(
         due,
@@ -523,7 +597,7 @@ async fn backoff<S: NamespaceStore>(
         next_attempt,
     );
     if next_key == key {
-        return FireOutcome::Failed;
+        return FireOutcome::Failed("other");
     }
     let batch = Batch::new()
         .require(Precondition::Equals(key.clone(), timer.value.clone()))
@@ -533,6 +607,7 @@ async fn backoff<S: NamespaceStore>(
     match ctx.store.apply(ctx.partition, batch).await {
         Ok(BatchOutcome::Committed) => FireOutcome::Committed(Some(due)),
         Ok(BatchOutcome::PreconditionFailed { .. }) => FireOutcome::Raced,
-        Ok(BatchOutcome::DeadlinePassed { .. }) | Err(_) => FireOutcome::Failed,
+        Ok(BatchOutcome::DeadlinePassed { .. }) => FireOutcome::Failed("deadline"),
+        Err(error) => FireOutcome::Failed(failure_class(&error)),
     }
 }

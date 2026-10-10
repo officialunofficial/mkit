@@ -167,6 +167,10 @@ impl Metrics for NoopMetrics {
 /// Counter for commit verification timeline observations. Label: `stage`.
 pub const METRIC_VERIFICATION_PROGRESS: &str = "mkit_server_verification_progress_total";
 
+/// Counter for failed or raced verification timer fires. Labels: `outcome`, `class`.
+pub const METRIC_VERIFICATION_TIMER_FAILURES: &str =
+    "mkit_server_verification_timer_failures_total";
+
 /// IDs belong in logs, never metric labels. Repeated observations are intentional.
 pub(crate) fn verification_progress(
     metrics: &dyn Metrics,
