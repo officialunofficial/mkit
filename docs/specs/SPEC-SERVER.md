@@ -2248,7 +2248,9 @@ strings or headers — and MUST NOT be logged. The host enforces its separately
 streamed request-body cap rather than trusting Content-Length alone.
 
 Successors MUST inherit the original expiry. Initial expiry is bounded by the
-configured token TTL, root-proof lag/deadline and credential/grant expiry.
+configured token TTL and credential/grant expiry. The request-local proof lag
+and deadline MUST NOT cap the token's lifetime. Each page's own proofs MUST
+still expire within its reachability lag, request deadline and token expiry.
 Imported proofs MUST be confined to the paging operation and discarded on
 success, failure or cancellation, preserving spent allowances and the original
 request deadline; they MUST NOT authorize a later shared-session operation.
