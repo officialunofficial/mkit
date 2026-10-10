@@ -75,6 +75,7 @@ async fn measure(objects: u16, chain: u32) -> Run {
         barrier: None,
         heads: Arc::default(),
         ledger: Arc::default(),
+        race_block: Arc::default(),
     };
     let blobs = Shared(Arc::new(MemoryBlobStore::default()), clock.clone());
     let (bytes, head) = tree_pack(objects.saturating_sub(2), 8);
@@ -163,7 +164,7 @@ async fn measure(objects: u16, chain: u32) -> Run {
                 hook: mkit_server::relay::NoHook,
                 budget: mkit_server::relay::RelayBudget::default(),
             });
-    for _ in 0..4096 {
+    for _ in 0..16_384 {
         let now = u64::try_from(clock.now_ms()).unwrap();
         let report = run_due(
             &store,
@@ -202,7 +203,7 @@ async fn measure(objects: u16, chain: u32) -> Run {
             .max(u64::try_from(clock.now_ms()).unwrap() + 1);
         clock.set(i64::try_from(next).unwrap());
     }
-    panic!("{objects} objects exceeded 4096 alarm ticks");
+    panic!("{objects} objects exceeded 16384 alarm ticks");
 }
 
 #[tokio::test(start_paused = true)]
@@ -224,5 +225,25 @@ async fn chained_extract_steps_cut_small_pack_slices_and_time_at_50ms() {
         assert!(chained.elapsed_ms < unchained.elapsed_ms);
         // Selection no longer takes a slice per frame, row and stage.
         assert!(chained.slices <= 8 + u32::from(objects) / 2);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn chained_extract_steps_do_not_slow_large_packs_at_50ms() {
+    for objects in [500_u16, 3_000] {
+        let unchained = measure(objects, 1).await;
+        let chained = measure(objects, SliceLimits::default().extract_chain_steps).await;
+        eprintln!(
+            "SP1 objects={objects} unchained: {} ms, {} slices, {} calls; chained: {} ms, {} slices, {} calls",
+            unchained.elapsed_ms,
+            unchained.slices,
+            unchained.calls,
+            chained.elapsed_ms,
+            chained.slices,
+            chained.calls
+        );
+        assert!(chained.slices <= unchained.slices);
+        assert!(chained.calls <= unchained.calls);
+        assert!(chained.elapsed_ms <= unchained.elapsed_ms);
     }
 }

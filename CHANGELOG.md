@@ -363,7 +363,7 @@ collect the applicable entries between their old and new immutable pins.
   formats are unchanged (wipe: no); jobs written earlier keep their smaller
   cap.
 - Scheduled verification of small packs finishes in roughly half the time at
-  50 ms per storage call. The Extract phase runs its read-only selection steps
+  50 ms per storage call. The Extract phase runs its selection steps
   (scan, closure, dependencies, members, head, select, choose) back to back in
   one slice and one guarded commit, bounded by 64 steps, 64 remaining remote
   calls, a commit batch within the apply limit, and 2 s of slice time; effect
@@ -519,6 +519,11 @@ collect the applicable entries between their old and new immutable pins.
   URL-token reads, supplied hooks, cold outcome retry and injected slice recovery.
 
 ### Breaking (toward 0.6)
+
+- [embedder: breaking API] `SliceLimits` gains `extract_chain_steps` (default
+  64). Migration: add `extract_chain_steps: SliceLimits::default().extract_chain_steps`
+  to struct literals, or construct with `SliceLimits::default()` and the
+  `with_extract_chain_steps` setter. No stored-format change; wipe: no.
 
 - [embedder: breaking API] [embedder: stored-format change] A completed fork
   flags the membership witness of the packmap head it inherits.

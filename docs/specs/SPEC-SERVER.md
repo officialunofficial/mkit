@@ -1562,6 +1562,12 @@ awaiting job's existing guarded timer earlier, retaining the delivery poll as
 recovery. This does not perform verification in the advance or make a pack
 Verified before its required index delivery.
 
+Informative. The scheduled implementation may run several Extract selection
+steps within one bounded slice and guarded checkpoint. An external effect still
+starts in a later slice. On entering the index-delivery wait, it checks after
+300 ms and then once per second until delivery; the client-facing poll hint
+still has its one-second floor.
+
 Verification state is per `(repository, pack)`. A pack verified for
 one repository is not thereby verified for another. Global byte
 reuse does not carry repository membership or verification authority

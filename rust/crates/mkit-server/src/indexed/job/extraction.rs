@@ -1208,7 +1208,7 @@ fn may_chain(
         && elapsed_ms < CHAIN_MAX_MS
 }
 
-/// Only the read-only selection stages chain; every stage with a durable
+/// Only selection stages without external effects chain; every stage with a durable
 /// external effect (upload, completion, holders, delivery) ends the slice.
 fn chains(stage: u8) -> bool {
     matches!(
