@@ -49,7 +49,7 @@ impl ShardMap for WideShards {
         mkit_server::Partition::RepoIndex {
             ns: repo.namespace.clone(),
             repo: repo.name.clone(),
-            prefix: Self::wide(&pack.hash()),
+            prefix: Self::wide(pack.hash()),
         }
     }
     fn object_index(&self, repo: &RepoId, object: &Hash) -> mkit_server::Partition {

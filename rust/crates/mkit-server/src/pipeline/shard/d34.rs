@@ -106,7 +106,7 @@ impl ShardMap for WideRepoIndexShards {
         Partition::RepoIndex {
             ns: repo.namespace.clone(),
             repo: repo.name.clone(),
-            prefix: Self::wide(&pack.hash()),
+            prefix: Self::wide(pack.hash()),
         }
     }
 
