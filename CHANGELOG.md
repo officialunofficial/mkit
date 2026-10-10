@@ -372,7 +372,7 @@ collect the applicable entries between their old and new immutable pins.
   reruns first in the next slice, so every verification outcome, error and
   persisted state is unchanged. The relay-delivery wait polls after 300 ms and
   then every second instead of every two seconds (the relay's wake nudge is
-  unchanged). `SliceLimits::extract_chain_steps` (default 64; 1 restores one
+  unchanged). `SliceLimits::extract_chain_steps` (default 16; 1 restores one
   step per slice) and `with_extract_chain_steps` are new. No stored-format
   change: wipe not required.
 - Fewer sequential storage rounds per read, with no change to results, limits,
@@ -521,7 +521,7 @@ collect the applicable entries between their old and new immutable pins.
 ### Breaking (toward 0.6)
 
 - [embedder: breaking API] `SliceLimits` gains `extract_chain_steps` (default
-  64). Migration: add `extract_chain_steps: SliceLimits::default().extract_chain_steps`
+  16). Migration: add `extract_chain_steps: SliceLimits::default().extract_chain_steps`
   to struct literals, or construct with `SliceLimits::default()` and the
   `with_extract_chain_steps` setter. No stored-format change; wipe: no.
 

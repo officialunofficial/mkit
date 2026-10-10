@@ -101,7 +101,7 @@ impl Default for SliceLimits {
             resident_bytes: super::geometry::RESIDENT_BYTES,
             max_subrequests: crate::limits::VERIFY_SLICE_CALLS,
             max_entries: checkpoint::DEFAULT_ENTRY_CAP,
-            extract_chain_steps: 64,
+            extract_chain_steps: 16,
         }
     }
 }

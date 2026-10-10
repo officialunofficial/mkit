@@ -13,7 +13,9 @@ distinguishes current enforcement from future integration.
 guarded checkpoint commits their progress once; effect stages begin in a later
 slice. Chaining stops before the call, operation, step, or time budget is
 exhausted. A failed later selection step leaves the preceding progress
-checkpointable and retries that step on the next slice.
+checkpointable and retries that step on the next slice. A hard ceiling of 16
+steps applies even when the Worker clock is frozen during synchronous CPU work;
+the two-second elapsed check is a further limit across I/O.
 
 **Because:** cutting alarm waits for small packs must preserve the durable
 verification order and the Worker's per-invocation bounds.

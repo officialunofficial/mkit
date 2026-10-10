@@ -82,7 +82,9 @@ fn the_step_cap_bounds_the_steps_of_a_slice() {
         );
         assert!(ticks < one, "cap {cap} must chain: {ticks} vs {one}");
     }
-    let chained = selection_ticks(&fixture(64, |_| {}));
+    // ManualClock is frozen while each tick runs, like a Worker CPU segment.
+    let chained = selection_ticks(&fixture(16, |_| {}));
+    assert_eq!(selection_ticks(&fixture(u32::MAX, |_| {})), chained);
     assert!(
         chained <= 2,
         "default chaining finishes selection: {chained}"
@@ -136,9 +138,9 @@ impl NamespaceStore for Ticking<'_> {
 
 #[test]
 fn a_slow_slice_stops_chaining_at_the_time_cap() {
-    let fast = fixture(64, |_| {});
+    let fast = fixture(16, |_| {});
     let fast_ticks = selection_ticks(&fast);
-    let slow = fixture(64, |_| {});
+    let slow = fixture(16, |_| {});
     let mut ticks = 0;
     let mut longest = 0;
     for _ in 0..400 {

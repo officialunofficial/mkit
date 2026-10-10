@@ -1183,6 +1183,9 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
 
 /// Remote calls that must remain before another selection step starts.
 const CHAIN_MIN_CALLS: u32 = super::ENTRY_RESERVE;
+// Worker clocks freeze during synchronous CPU work. This independent step
+// ceiling bounds the work even when the elapsed-time check cannot advance.
+const CHAIN_MAX_STEPS: u32 = 16;
 /// Guards plus settled writes a chained slice may carry, after the next step.
 /// The commit adds at most five more (deadline, job, state, header, body), so
 /// the batch stays within `MAX_BATCH_OPS` (100).
@@ -1201,7 +1204,7 @@ fn may_chain(
     ops: usize,
     elapsed_ms: u64,
 ) -> bool {
-    steps < step_cap
+    steps < step_cap.min(CHAIN_MAX_STEPS)
         && chains(stage)
         && remaining_calls >= CHAIN_MIN_CALLS
         && ops + step_ops(stage) <= CHAIN_MAX_OPS
@@ -1232,11 +1235,21 @@ mod chain_bounds {
 
     #[test]
     fn every_bound_holds_at_its_boundary() {
-        let ok = |steps, stage, calls, ops, ms| may_chain(64, steps, stage, calls, ops, ms);
+        let ok =
+            |steps, stage, calls, ops, ms| may_chain(CHAIN_MAX_STEPS, steps, stage, calls, ops, ms);
         assert!(ok(1, SCAN, CHAIN_MIN_CALLS, 0, 0));
         // Step cap: the last allowed step is the one that makes `cap`.
-        assert!(ok(63, SCAN, CHAIN_MIN_CALLS, 0, 0));
-        assert!(!ok(64, SCAN, CHAIN_MIN_CALLS, 0, 0));
+        assert!(ok(CHAIN_MAX_STEPS - 1, SCAN, CHAIN_MIN_CALLS, 0, 0));
+        assert!(!ok(CHAIN_MAX_STEPS, SCAN, CHAIN_MIN_CALLS, 0, 0));
+        // A caller cannot raise the cap, even with a frozen Worker clock.
+        assert!(!may_chain(
+            u32::MAX,
+            CHAIN_MAX_STEPS,
+            SCAN,
+            CHAIN_MIN_CALLS,
+            0,
+            0
+        ));
         assert!(!may_chain(1, 1, SCAN, CHAIN_MIN_CALLS, 0, 0));
         // Remote calls left.
         assert!(!ok(1, SCAN, CHAIN_MIN_CALLS - 1, 0, 0));
