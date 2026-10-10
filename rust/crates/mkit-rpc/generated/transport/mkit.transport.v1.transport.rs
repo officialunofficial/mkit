@@ -2980,6 +2980,27 @@ pub struct AdvanceRefsRequest {
     /// Field 10: `delete`
     #[serde(rename = "delete", skip_serializing_if = "::core::option::Option::is_none")]
     pub delete: ::core::option::Option<bool>,
+    /// Copy this repository's authoritative published branch pair. When set,
+    /// head_ref is the destination; all other explicit update fields, tickets
+    /// and delete must be absent. Both destination refs use MISSING.
+    ///
+    /// Field 11: `source_ref`
+    #[serde(
+        rename = "sourceRef",
+        alias = "source_ref",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub source_ref: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Optional source-tip CAS, meaningful only with source_ref (32 bytes).
+    ///
+    /// Field 12: `expected_tip`
+    #[serde(
+        rename = "expectedTip",
+        alias = "expected_tip",
+        with = "::buffa::json_helpers::opt_bytes",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub expected_tip: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -2997,6 +3018,8 @@ impl ::core::fmt::Debug for AdvanceRefsRequest {
             .field("packmap_new_id", &self.packmap_new_id)
             .field("ticket_ids", &self.ticket_ids)
             .field("delete", &self.delete)
+            .field("source_ref", &self.source_ref)
+            .field("expected_tip", &self.expected_tip)
             .finish()
     }
 }
@@ -3095,6 +3118,26 @@ impl AdvanceRefsRequest {
         self.delete = Some(value);
         self
     }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::source_ref`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_source_ref(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.source_ref = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::expected_tip`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_expected_tip(
+        mut self,
+        value: impl Into<::buffa::alloc::vec::Vec<u8>>,
+    ) -> Self {
+        self.expected_tip = Some(value.into());
+        self
+    }
 }
 ::buffa::impl_default_instance!(AdvanceRefsRequest);
 impl ::buffa::MessageName for AdvanceRefsRequest {
@@ -3146,6 +3189,12 @@ impl ::buffa::Message for AdvanceRefsRequest {
         if self.delete.is_some() {
             size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
         }
+        if let Some(ref v) = self.source_ref {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        if let Some(ref v) = self.expected_tip {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -3185,6 +3234,12 @@ impl ::buffa::Message for AdvanceRefsRequest {
         }
         if let Some(v) = self.delete {
             ::buffa::types::put_bool_field(10u32, v, buf);
+        }
+        if let Some(ref v) = self.source_ref {
+            ::buffa::types::put_string_field(11u32, v, buf);
+        }
+        if let Some(ref v) = self.expected_tip {
+            ::buffa::types::put_shared_bytes_field(12u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -3307,6 +3362,28 @@ impl ::buffa::Message for AdvanceRefsRequest {
                     ::buffa::types::decode_bool(buf)?,
                 );
             }
+            11u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self
+                        .source_ref
+                        .get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            12u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_bytes(
+                    self.expected_tip.get_or_insert_with(::buffa::alloc::vec::Vec::new),
+                    buf,
+                )?;
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -3325,6 +3402,8 @@ impl ::buffa::Message for AdvanceRefsRequest {
         self.packmap_new_id = ::core::option::Option::None;
         self.ticket_ids.clear();
         self.delete = ::core::option::Option::None;
+        self.source_ref = ::core::option::Option::None;
+        self.expected_tip = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }

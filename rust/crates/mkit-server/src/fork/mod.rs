@@ -21,6 +21,8 @@ mod request;
 mod sets;
 mod settle;
 
+pub(crate) use plan::read_published;
+
 pub(crate) use crate::store::CONTENT_APPLY_WINDOW_MS as CONTENT_WINDOW;
 pub use job::{ForkTimer, StartOutcome, StepReport, plan_bytes, start, start_with, step};
 pub use request::ForkRequest;

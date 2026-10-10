@@ -38,6 +38,12 @@ message Operation {
   // Present only for a fork: the source and the facts it was read with;
   // SPEC-SERVER §9.9.
   ForkOperation fork = 9;
+  // Captured source facts for same-repository published-pair branch creation.
+  string source_ref = 10;
+  bytes source_head = 11;
+  bytes source_packmap = 12;
+  uint64 source_generation = 13;
+  uint64 source_publication_sequence = 14;
 }
 
 // What a fork reads and writes. The operation's repository is the

@@ -409,6 +409,7 @@ requires; remote Allow does not bypass them.
 | `owner` | Whether the principal owns the namespace under STC §7.5 rule 1; set on both Authorize and Admit requests. |
 | `grant` | The write grant used under STC §7.5 rule 2, if any, and its checked epoch; set on both Authorize and Admit requests. |
 | `fork` | Present only for a fork (§9.9): the source repository, branch and expected tip, the source's visibility and visibility revision read together in one coordinator read (and checked again before the job starts), and the requested destination visibility. `operation.repository` is the destination. |
+| `source_ref`, `source_head`, `source_packmap`, `source_generation`, `source_publication_sequence` | Present only for published-source `AdvanceRefs` (§9.3): the source branch and the pair, generation and published prefix captured from its authoritative row, in `operation.repository`. Intended destination writes still appear in `refs`; admission declares zero bytes. |
 
 For `ListRepos`, `operation.repository` is an arbitrary caller-chosen selector
 within the requested namespace, and its repository name need not exist. The
@@ -1372,6 +1373,36 @@ delta-base rules. Opaque mode does not check the head. An indexed server
 also requires a ticketless `AdvanceRefs` to pair `refs/heads/<x>` with
 `refs/mkit/packmap/<x>`.
 
+On the immediate path without inspectors, takedown or custom publication
+verification, the server does not verify that the resulting packmap covers
+the head's closure (§10.2). The publisher is responsible for coverage of
+client-built pairs. Clients MUST NOT compose a branch-creation pair from
+separate head and packmap reads; they SHOULD use the published-source form of
+`AdvanceRefs` (STC §4) to branch from an existing published pair.
+
+The published-source form creates both destination refs under `Missing`, in
+the same repository, from one authoritative source publication row. The
+server MUST bind the source ref, published head and packmap, membership
+generation and publication sequence to the operation. It MUST authorize a
+current source read before exposing its tip, including an expected-tip
+mismatch. An absent, unpublished, unpaired or unreadable source MUST return
+`not_found` with `source not found`; a readable source whose published head
+differs from `expected_tip` MUST return `failed_precondition` with
+`source tip changed`. Destination write authorization, ref policy, live
+membership, denial, admission, quota, replay, receipts and outcomes follow
+ordinary ticketless advances. The operation adds no bytes.
+
+Source and destination branches can occupy different partitions. Before
+EVERY destination apply attempt, the server MUST reauthorize the source and
+compare its complete authoritative publication row with the captured row,
+including the committed sequence and deletion boundary. A difference MUST
+refuse apply (`source tip changed` when the expected-tip comparison fails;
+otherwise retryable `unavailable`). A source change after this fence is
+concurrent with creation: success MUST copy exactly the captured published
+pair, never values selected by separate reads. This fence is not a
+cross-partition atomic source CAS. A completed replay returns its stored
+advance result without selecting a new source pair.
+
 Object identity is checked on the reconstructed object, not on an
 unverified claim in an entry. A transport-level pack commitment does
 not replace the object identity or signature checks.
@@ -2288,6 +2319,14 @@ opaque mode or without inspectors, where the published view equals the live
 view. Configured takedown or custom-policy verification and delayed
 dependency publication still retain their applicable rules, including pair
 coverage and published-membership dependencies.
+
+An exact copy of a source's published pair introduces no new pair
+inconsistency: on the immediate path its destination coverage is exactly
+the source's. The published-source form of `AdvanceRefs` MUST NOT add a
+pair-coverage walk on that path. Existing published pairs are not universally
+coverage-verified. Where inspectors, takedown or custom publication
+verification are configured, the destination retains the normal publication
+checks in this section, including coverage and their existing limits.
 
 Evidence computed against a publication state MUST be bound to that state. The
 server MUST compare the publication state (its membership generation, sequence
@@ -4843,6 +4882,7 @@ round-tripping only the decoded message can miss fields discarded at decode.
 | `admit.request.json` | BeginUpload pack id, declared bytes, authorization facts, repository-byte presence, and a fake admission credential header (§6.3). |
 | `admit-first-attempt.request.json` | First-attempt Admit input with no credential headers (§6.3). |
 | `authorize-fork.request.json` | A fork's operation: destination repository, source, branch, expected tip, source visibility and revision, and requested visibility (§6.2, §9.9). |
+| `authorize-published-source.request.json` | A same-repository branch creation: destination Missing updates and captured source ref, pair, generation and published sequence (§6.2, §9.3). |
 | `admit-fork.request.json` | A fork's Admit input: the source and the bytes the charge covers (§6.3, §9.9). |
 | `admit-allow.response.json` | Reservation id and allowed receipt pass-through (§6.3, §6.6). |
 | `admit-allow-external-ref.response.json` | Optional implementer reference carried into a storage receipt (§6.3, §15). |

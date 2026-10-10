@@ -135,6 +135,17 @@ fn operation(op: &Operation, audience: &str) -> pb::Operation {
             })
             .into(),
         fork: fork(op).into(),
+        source_ref: op.published_source.as_ref().map(|s| s.ref_name.clone()),
+        source_head: op
+            .published_source
+            .as_ref()
+            .and_then(|s| s.pair.head.map(|id| id.to_vec())),
+        source_packmap: op
+            .published_source
+            .as_ref()
+            .and_then(|s| s.pair.packmap.map(|id| id.to_vec())),
+        source_generation: op.published_source.as_ref().map(|s| s.generation),
+        source_publication_sequence: op.published_source.as_ref().map(|s| s.publication_sequence),
         ..Default::default()
     }
 }

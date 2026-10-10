@@ -33,6 +33,52 @@ pub(super) async fn committed(ctx: Ctx) -> CaseResult {
     ctx.expect_ref(&ctx.packmap("main"), Some(&C)).await
 }
 
+pub(super) async fn from_published(ctx: Ctx) -> CaseResult {
+    want_outcome(
+        ctx.advance(&advance_req(
+            (&ctx.head("main"), Exp::Missing, &A),
+            (&ctx.packmap("main"), Exp::Missing, &B),
+        ))
+        .await?,
+        AdvanceOutcome::ADVANCE_OUTCOME_COMMITTED,
+    )?;
+    let request = mkit_transport_connect::generated::AdvanceRefsRequest {
+        head_ref: Some(ctx.head("copy")),
+        source_ref: Some(ctx.head("main")),
+        expected_tip: Some(A.to_vec()),
+        ..Default::default()
+    };
+    want_outcome(
+        ctx.advance(&request).await?,
+        AdvanceOutcome::ADVANCE_OUTCOME_COMMITTED,
+    )?;
+    ctx.expect_ref(&ctx.head("copy"), Some(&A)).await?;
+    ctx.expect_ref(&ctx.packmap("copy"), Some(&B)).await?;
+    want_outcome(
+        ctx.advance(&request).await?,
+        AdvanceOutcome::ADVANCE_OUTCOME_PACKMAP_CONFLICT,
+    )?;
+    let mut bad = request.clone();
+    bad.head_ref = Some(ctx.head("changed"));
+    bad.expected_tip = Some(C.to_vec());
+    want_code(
+        ctx.advance(&bad).await?,
+        "failed_precondition",
+        "source tip CAS",
+    )?;
+    bad.expected_tip = None;
+    bad.source_ref = Some(ctx.head("absent"));
+    want_code(ctx.advance(&bad).await?, "not_found", "source absence")?;
+    bad.source_ref = request.source_ref;
+    bad.head_new_id = Some(A.to_vec());
+    want_code(
+        ctx.advance(&bad).await?,
+        "invalid_argument",
+        "mixed source form",
+    )?;
+    ctx.expect_ref(&ctx.head("changed"), None).await
+}
+
 /// The head precondition fails, the packmap's holds.
 fn head_conflict(ctx: &Ctx) -> mkit_transport_connect::generated::AdvanceRefsRequest {
     advance_req(

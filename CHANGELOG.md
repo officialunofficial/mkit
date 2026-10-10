@@ -15,6 +15,20 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Added
 
+- Ticketless same-repository branch creation from an authoritative published
+  pair: `AdvanceRefsRequest.source_ref` (field 11), optional `expected_tip`
+  (field 12), and `Pipeline::advance_refs_from_published{,_with_meta}`.
+  Both destination refs use `Missing`; the server reauthorizes and compares
+  the source publication row before every destination apply. A later source
+  move is concurrent and success copies exactly the captured pair. The
+  immediate path adds no coverage walk, upload or stored bytes; configured
+  publication checks retain their limits. Embedders can replace closure
+  re-uploads or separately read head/packmap pairs with this operation.
+  `Operation::published_source` exposes the captured ref, pair, generation
+  and published sequence to hooks; remote hook `Operation` gains source
+  fields 10–14. Existing operation hook bytes are unchanged. These APIs and
+  wire fields are additive; no stored-format change or store reset is required.
+
 - Server-side repository fork engine (`mkit_server::fork`, SPEC-SERVER §9.9): a
   crash-safe job that gives an empty destination the published membership of one
   source branch without a ref. It copies the packmap chain, the packs it lists
@@ -497,6 +511,12 @@ collect the applicable entries between their old and new immutable pins.
   URL-token reads, supplied hooks, cold outcome retry and injected slice recovery.
 
 ### Breaking (toward 0.6)
+
+- [embedder: breaking API] Generated `AdvanceRefsRequest` and remote-hook
+  `Operation` Rust records gain the published-source fields. Migration: build
+  generated messages with `..Default::default()`; keep the new fields absent
+  for existing calls, or select the source form described above. No store
+  reset is required.
 
 - [embedder: breaking API] [embedder: stored-format change] A completed fork
   flags the membership witness of the packmap head it inherits.

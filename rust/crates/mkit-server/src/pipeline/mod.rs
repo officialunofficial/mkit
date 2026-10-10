@@ -42,6 +42,7 @@ mod http_admission;
 mod http_tokens;
 #[cfg(feature = "http-objects")]
 mod object_reader;
+mod published_source;
 #[cfg(feature = "http-objects")]
 mod read_limits;
 #[cfg(feature = "http-objects")]
@@ -2446,7 +2447,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         kind: OpKind,
         implicit: Option<&'a [PendingPack]>,
     ) -> crate::rt::BoxFuture<'a, Result<(StoredResult, ResponseMeta), ServerError>> {
-        Box::pin(self.write_inner(a, kind, implicit))
+        Box::pin(self.write_inner(a, kind, implicit, None))
     }
 
     #[allow(clippy::too_many_lines)] // Stage order and multipart session cleanup share this entry point.
@@ -2455,6 +2456,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         a: &Authenticated,
         kind: OpKind,
         implicit: Option<&[PendingPack]>,
+        source: Option<(&str, Option<Hash>)>,
     ) -> Result<(StoredResult, ResponseMeta), ServerError> {
         let mut op = self.identify(a, kind)?;
         fault!(self, AfterAuthenticate, &op, a);
@@ -2462,6 +2464,18 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let mut ahead = self.read_ahead(&op, &p, &refs, a.business_skew_ms).await?;
         if let Some(stored) = Self::replay_lookup(&op, ahead.as_ref())? {
             return Ok((stored, ResponseMeta::default()));
+        }
+        if let Some((source_ref, expected_tip)) = source {
+            let captured = self
+                .capture_published_source(&op, source_ref, expected_tip, &self.meta)
+                .await?;
+            refs[0].new = captured.pair.packmap;
+            refs[1].new = captured.pair.head;
+            if let OpKind::AdvanceRefs { head, packmap, .. } = &mut op.kind {
+                head.new = captured.pair.head;
+                packmap.new = captured.pair.packmap;
+            }
+            op.published_source = Some(captured);
         }
         let lease = if self.cfg.sharding == Sharding::D34 {
             let observed = self.observe_lease(&op, &p, ahead.as_ref(), None).await?;
@@ -4304,6 +4318,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 }
             }
             tracing::debug!(stage = "apply", replans);
+            if req.rejection.is_none() && op.published_source.is_some() {
+                let source_store = crate::indexed::budget::Budgeted::new(&self.meta, &meter);
+                publication_budget::PublicationBudget::settle(
+                    settlement,
+                    self.fence_published_source(op, a, &source_store).await,
+                )?;
+            }
             let applied = crate::indexed::budget::Budgeted::new(&self.meta, &meter)
                 .apply(p, batch)
                 .await;

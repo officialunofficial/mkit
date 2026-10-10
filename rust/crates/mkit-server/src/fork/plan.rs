@@ -37,19 +37,33 @@ pub(crate) async fn read_source<S: NamespaceStore>(
     source_ref: &str,
     expected: &Hash,
 ) -> Result<SourceView, ForkError> {
+    let row = read_published(store, shards, source, source_ref).await?;
+    if row.value.head != Some(*expected) {
+        return Err(ForkError::TipChanged);
+    }
+    Ok(SourceView {
+        packmap: row.value.packmap.ok_or(ForkError::NotFound)?,
+        sequence: row.sequence,
+        generation: row.generation,
+    })
+}
+
+/// Read one authoritative published branch pair, without traversing its history.
+pub(crate) async fn read_published<S: NamespaceStore>(
+    store: &S,
+    shards: &dyn crate::pipeline::ShardMap,
+    source: &RepoId,
+    source_ref: &str,
+) -> Result<publication::Publication, ForkError> {
     if !source_ref.starts_with("refs/heads/") || !crate::refs::validate_ref_name(source_ref) {
         return Err(ForkError::NotFound);
     }
     let p = shards.ref_shard(source, source_ref);
     let row = publication::read(store, &p, &source.name, source_ref).await?;
-    match (row.value.head, row.value.packmap) {
-        (Some(head), Some(packmap)) if head == *expected => Ok(SourceView {
-            packmap,
-            sequence: row.sequence,
-            generation: row.generation,
-        }),
-        (Some(_), Some(_)) => Err(ForkError::TipChanged),
-        _ => Err(ForkError::NotFound),
+    if row.value.head.is_some() && row.value.packmap.is_some() {
+        Ok(row)
+    } else {
+        Err(ForkError::NotFound)
     }
 }
 

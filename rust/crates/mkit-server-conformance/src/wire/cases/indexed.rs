@@ -25,6 +25,62 @@ fn pack() -> Result<(Vec<u8>, Hash), Failure> {
     pack_with_blob(None)
 }
 
+pub(super) async fn from_published(ctx: Ctx) -> CaseResult {
+    let (pack, head) = pack()?;
+    let map = hash(
+        &mkit_core::transfer::encode_packlist(None, &[hash(&pack)])
+            .map_err(|e| format!("packlist: {e}"))?,
+    );
+    let (repository, _) =
+        super::portable_reads::publish_named(&ctx, &pack, head, "published-copy", None).await?;
+    let request = super::AdvanceRefsRequest {
+        head_ref: Some(ctx.head("copy")),
+        source_ref: Some(ctx.head("async")),
+        expected_tip: Some(head.to_vec()),
+        ..Default::default()
+    };
+    let signer = ctx.v2_signer("repository-a")?;
+    let signed = sign_unary(&signer, Rpc::AdvanceRefs, &request, |env| {
+        repository.clone_into(&mut env.repository)
+    });
+    let response: AdvanceRefsResponse = eventually_listed(
+        "published-source membership readiness",
+        || async {
+            let response = ctx.send::<AdvanceRefsResponse>(&signed).await?;
+            if let Err(error) = &response {
+                ensure!(error.code == "unavailable", "copy refused: {error}");
+            }
+            Ok(response)
+        },
+        Result::is_ok,
+    )
+    .await?
+    .map_err(|e| format!("copy: {e}"))?;
+    want_outcome(
+        Ok(response.outcome.map_or(0, |o| o.to_i32())),
+        AdvanceOutcome::ADVANCE_OUTCOME_COMMITTED,
+    )?;
+    for (name, id) in [(ctx.head("copy"), head), (ctx.packmap("copy"), map)] {
+        let read = ReadRefRequest {
+            name: Some(name),
+            ..Default::default()
+        };
+        let read = sign_unary(&signer, Rpc::ReadRef, &read, |env| {
+            repository.clone_into(&mut env.repository)
+        });
+        let value: ReadRefResponse = want_ok(ctx.send(&read).await?, "copied ref")?;
+        ensure!(
+            value.object_id.as_deref() == Some(id.as_slice()),
+            "copied pair differs"
+        );
+    }
+    let replay: AdvanceRefsResponse = want_ok(ctx.send(&signed).await?, "copy replay")?;
+    want_outcome(
+        Ok(replay.outcome.map_or(0, |o| o.to_i32())),
+        AdvanceOutcome::ADVANCE_OUTCOME_COMMITTED,
+    )
+}
+
 fn pack_with_blob(data: Option<&[u8]>) -> Result<(Vec<u8>, Hash), Failure> {
     let mut writer = PackWriter::new_raw_only();
     let mut entries = Vec::new();

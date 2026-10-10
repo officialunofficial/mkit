@@ -20,6 +20,8 @@ use std::cell::Cell;
 /// The publication verifier a deployment selected.
 #[derive(Clone, Copy, Debug)]
 enum Path {
+    /// No publication verifier: copy the pair without a history walk.
+    Immediate,
     /// Takedown denial only: resumable metadata path for branch pairs.
     Takedown,
     /// Takedown plus a custom publication policy: canonical proof.
@@ -156,13 +158,18 @@ struct Effects {
 
 impl World {
     fn new(path: Path) -> Self {
+        Self::with_sharding(path, Sharding::Single)
+    }
+
+    fn with_sharding(path: Path, sharding: Sharding) -> Self {
         let (mut env, owner, identity) =
-            environment_with(Sharding::Single, crate::indexed::IndexedConfig::default());
+            environment_with(sharding, crate::indexed::IndexedConfig::default());
         env.pipe.cfg.begin_upload_threshold_bytes = 0;
         env.pipe.cfg.takedown_denial = true;
         #[cfg(feature = "remote-hooks")]
         let scanner = Arc::new(Scanner(AtomicU32::new(0)));
         match path {
+            Path::Immediate => env.pipe.cfg.takedown_denial = false,
             Path::Takedown => {}
             Path::Custom => env.pipe.publication_policy = Some(Arc::new(clearance::Immediate)),
             #[cfg(feature = "remote-hooks")]
@@ -393,6 +400,9 @@ impl World {
         .unwrap();
     }
 }
+
+#[path = "published_source.rs"]
+mod published_source;
 
 /// A small published history: `c1 <- c2` on `refs/heads/main`, with the file
 /// `b1` and tree `t1` in the first pack and the second pack holding one commit.

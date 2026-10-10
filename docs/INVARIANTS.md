@@ -24,6 +24,25 @@ could disagree with the timer's persisted retry plan.
 **Enforced by:** `timers::failure_class`, the shared `timers::retry_plan`, and
 `timers::telemetry_tests::verification_failures_emit_redacted_classes_and_retry_plan`.
 
+## Published-source branch creation never composes separately read values
+
+**Always:** a same-repository branch creation copies the head and packmap from
+one authoritative published row. Before every destination apply it reauthorizes
+the source and compares the complete captured row. A move after that fence is
+concurrent; success still copies both original values. Both destination refs use
+Missing. A committed replay returns the stored result without recapturing.
+
+**Because:** source and destination branches can occupy different partitions,
+and independently read head/packmap values can race. The immediate path preserves
+the source's existing coverage without introducing a history walk; configured
+publication checks retain their normal limits.
+
+**If violated:** a branch can publish a mixed pair or a revoked source can be
+read through an earlier authorization.
+
+**Enforced by:** `pipeline::published_source`, the final `apply_loop` source
+fence, and published-source copy, interleaving, replay and uniform-absence tests.
+
 ## In-process object reads retain id-route authority and bounded proofs
 
 **Always:** canonical prefetch binds a repository and a verified view. Public
