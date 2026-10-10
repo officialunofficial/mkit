@@ -542,7 +542,7 @@ fn seven_distinct_signers_and_relay_targets_fit_with_twenty_six_shared_operation
     for i in 0..MAX_TICKETS_PER_ADVANCE {
         spec.reservation_id = format!("reservation-{i}");
         spec.signer = hash(spec.reservation_id.as_bytes());
-        spec.pack_id = [u8::try_from(i).unwrap(); 32];
+        spec.pack_id = [u8::try_from(i).unwrap() << 4; 32];
         let ticket = spec.record();
         let id = ticket_id(&spec.reservation_id);
         plan_ticket_close(

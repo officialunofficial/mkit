@@ -3348,7 +3348,7 @@ mod tests {
                 generation: 0,
                 value: Pair::default(),
                 additions: vec![],
-                dependencies: vec![[1; 32], [2; 32]],
+                dependencies: vec![[0x10; 32], [0x20; 32]],
                 external_bases: vec![],
                 obligations: vec![],
                 state: Clearance::Pending,

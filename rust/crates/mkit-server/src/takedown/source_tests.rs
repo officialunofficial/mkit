@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used)]
 use super::*;
 use crate::indexed::budget::{Budgeted, SliceBudget};
-use crate::pipeline::{D34Shards, ShardMap};
+use crate::pipeline::{ShardMap, WideRepoIndexShards};
 use crate::store::{
     codec,
     index::{IndexEntry, IndexValue},
@@ -106,7 +106,7 @@ async fn dense_candidates(store: &MemoryKv, repo: &RepoId, pack: Hash, entry: In
     rows.push(pack);
     assert_eq!(
         rows.iter()
-            .map(|id| D34Shards.membership(repo, &BlobKey::pack(*id)))
+            .map(|id| WideRepoIndexShards.membership(repo, &BlobKey::pack(*id)))
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
         487
@@ -121,13 +121,16 @@ async fn dense_candidates(store: &MemoryKv, repo: &RepoId, pack: Hash, entry: In
             );
         }
         store
-            .apply(&D34Shards.object_index(repo, &entry.object), batch)
+            .apply(
+                &WideRepoIndexShards.object_index(repo, &entry.object),
+                batch,
+            )
             .await
             .unwrap();
     }
     store
         .apply(
-            &D34Shards.membership(repo, &BlobKey::pack(pack)),
+            &WideRepoIndexShards.membership(repo, &BlobKey::pack(pack)),
             Batch::new().put(keys::membership(&repo.name, &pack), Value::default()),
         )
         .await
@@ -216,7 +219,7 @@ async fn dense_chain(external: bool) -> (MemoryBlobStore, MemoryKv, RepoId, Hash
             } else {
                 store
                     .apply(
-                        &D34Shards.object_index(&repo, &entry.object),
+                        &WideRepoIndexShards.object_index(&repo, &entry.object),
                         Batch::new().put(
                             keys::object_index(&repo.name, &entry.object, &pack_id),
                             codec::encode_object_index(&entry.object, &entry.value).unwrap(),
@@ -237,7 +240,7 @@ async fn preflight(
     repo: &RepoId,
     target: Hash,
 ) -> (crate::Partition, crate::Key, usize) {
-    let root = D34Shards.coordinator(&NamespaceKey::deployment_default());
+    let root = WideRepoIndexShards.coordinator(&NamespaceKey::deployment_default());
     let prefix = crate::Key::new([b"b\0\xffsource-frame\0".as_slice(), &[9; 32], &target].concat());
     let mut checkpoint = Checkpoint::new(target);
     for tick in 1..30_000 {
@@ -247,7 +250,7 @@ async fn preflight(
         let bounded = Budgeted::new(store, &budget);
         let result = step(
             &bounded,
-            &D34Shards,
+            &WideRepoIndexShards,
             repo,
             &prefix,
             &crate::takedown::acquisition::Profile::scheduled(),
@@ -383,13 +386,13 @@ async fn virtual_page_cap_allows_511_empty_continuations_and_the_last_128_row_gr
             );
         }
         inner
-            .apply(&D34Shards.object_index(&repo, &target), batch)
+            .apply(&WideRepoIndexShards.object_index(&repo, &target), batch)
             .await
             .unwrap();
     }
     inner
         .apply(
-            &D34Shards.membership(&repo, &BlobKey::pack(pack_id)),
+            &WideRepoIndexShards.membership(&repo, &BlobKey::pack(pack_id)),
             Batch::new().put(keys::membership(&repo.name, &pack_id), Value::default()),
         )
         .await
@@ -406,7 +409,7 @@ async fn virtual_page_cap_allows_511_empty_continuations_and_the_last_128_row_gr
     sink.write(Bytes::from(packed)).await.unwrap();
     sink.commit().await.unwrap();
     // This exact geometry is accepted by the original 128-row locator.
-    let old = crate::store::index::locate_many(&store, &D34Shards, &repo, &[target])
+    let old = crate::store::index::locate_many(&store, &WideRepoIndexShards, &repo, &[target])
         .await
         .unwrap();
     assert!(matches!(old.as_slice(), [Ok(Some(_))]));
@@ -416,7 +419,7 @@ async fn virtual_page_cap_allows_511_empty_continuations_and_the_last_128_row_gr
     let verified = crate::takedown::acquisition::resolve_selected(
         &Budgeted::new(&blobs, &budget),
         &Budgeted::new(&store, &budget),
-        &D34Shards,
+        &WideRepoIndexShards,
         &repo,
         target,
         &crate::takedown::acquisition::Profile::scheduled(),
@@ -443,7 +446,7 @@ async fn corrupt_lookup_counters_and_selected_rows_refuse_completion() {
     assert!(
         step(
             &Budgeted::new(&store, &budget),
-            &D34Shards,
+            &WideRepoIndexShards,
             &repo,
             &prefix,
             &crate::takedown::acquisition::Profile::scheduled(),
@@ -518,7 +521,7 @@ async fn dense_same_pack_fifty_hops_complete_across_serialized_ticks() {
     let verified = crate::takedown::acquisition::resolve_selected(
         &Budgeted::new(&blobs, &budget),
         &Budgeted::new(&store, &budget),
-        &D34Shards,
+        &WideRepoIndexShards,
         &repo,
         target,
         &crate::takedown::acquisition::Profile::scheduled(),
@@ -551,7 +554,7 @@ async fn dense_same_pack_fifty_hops_complete_across_serialized_ticks() {
             crate::takedown::acquisition::resolve_selected(
                 &Budgeted::new(&blobs, &retry),
                 &Budgeted::new(&store, &retry),
-                &D34Shards,
+                &WideRepoIndexShards,
                 &repo,
                 target,
                 &crate::takedown::acquisition::Profile::scheduled(),
@@ -578,7 +581,7 @@ async fn dense_external_fifty_hops_complete_and_final_decode_rechecks_membership
     let verified = crate::takedown::acquisition::resolve_selected(
         &Budgeted::new(&blobs, &budget),
         &Budgeted::new(&store, &budget),
-        &D34Shards,
+        &WideRepoIndexShards,
         &repo,
         target,
         &crate::takedown::acquisition::Profile::scheduled(),
@@ -606,7 +609,7 @@ async fn dense_external_fifty_hops_complete_and_final_decode_rechecks_membership
     let (_, terminal) = decode_frame(&raw).unwrap();
     store
         .apply(
-            &D34Shards.membership(&repo, &BlobKey::pack(terminal.pack)),
+            &WideRepoIndexShards.membership(&repo, &BlobKey::pack(terminal.pack)),
             Batch::new().delete(keys::membership(&repo.name, &terminal.pack)),
         )
         .await
@@ -616,7 +619,7 @@ async fn dense_external_fifty_hops_complete_and_final_decode_rechecks_membership
         crate::takedown::acquisition::resolve_selected(
             &Budgeted::new(&blobs, &retry),
             &Budgeted::new(&store, &retry),
-            &D34Shards,
+            &WideRepoIndexShards,
             &repo,
             target,
             &crate::takedown::acquisition::Profile::scheduled(),

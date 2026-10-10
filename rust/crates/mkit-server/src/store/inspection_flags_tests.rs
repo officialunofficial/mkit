@@ -114,7 +114,7 @@ async fn idempotent_install_release_and_new_inspection_on_single_and_d34() {
                 .is_some()
         );
         if matches!(expected, Partition::RepoIndex { .. }) {
-            let ordinary = shards.object_index(&repo, &[1; 32]);
+            let ordinary = shards.object_index(&repo, &[0x10; 32]);
             assert_ne!(ordinary, expected);
             assert!(
                 store

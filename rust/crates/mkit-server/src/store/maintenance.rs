@@ -660,7 +660,10 @@ mod tests {
             let entry = BlockEntry::new("r", 3);
             idx.block(&b, &entry, 3).await.unwrap();
             let mut batch = Batch::new()
-                .put(keys::layout_version(), codec::encode_u32(1))
+                .put(
+                    keys::layout_version(),
+                    codec::encode_u32(keys::LAYOUT_VERSION),
+                )
                 .put(keys::grant_epoch(), codec::encode_u64(4));
             for i in 0..7_u8 {
                 let name = format!("refs/heads/b{i}");
@@ -934,7 +937,10 @@ mod tests {
     fn import_refuses_a_non_empty_target_unless_merging() {
         let src = MemoryKv::default();
         let rows = Batch::new()
-            .put(keys::layout_version(), codec::encode_u32(1))
+            .put(
+                keys::layout_version(),
+                codec::encode_u32(keys::LAYOUT_VERSION),
+            )
             .put(keys::grant_epoch(), codec::encode_u64(9));
         block_on(src.apply(&ns(), rows)).unwrap();
         let bytes = export_bytes(&src, &ns());

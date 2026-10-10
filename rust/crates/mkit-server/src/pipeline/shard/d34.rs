@@ -69,6 +69,56 @@ impl ShardMap for D34Shards {
     }
 }
 
+/// Test-only shard map with the pre-16 twelve-bit repository index routing
+/// (4,096 partitions per repository). It keeps the bound-enforcement stress
+/// tests (membership-read caps, page budgets) on their worst-case partition
+/// spread, which D34's sixteen shards can no longer reach.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct WideRepoIndexShards;
+
+#[cfg(test)]
+impl WideRepoIndexShards {
+    fn wide(id: &Hash) -> u16 {
+        (u16::from(id[0]) << 4) | u16::from(id[1] >> 4)
+    }
+}
+
+#[cfg(test)]
+impl ShardMap for WideRepoIndexShards {
+    fn ref_shard(&self, repo: &RepoId, ref_name: &str) -> Partition {
+        D34Shards.ref_shard(repo, ref_name)
+    }
+
+    fn coordinator(&self, ns: &NamespaceKey) -> Partition {
+        D34Shards.coordinator(ns)
+    }
+
+    fn ref_index(&self, repo: &RepoId, ref_name: &str) -> Partition {
+        D34Shards.ref_index(repo, ref_name)
+    }
+
+    fn ref_index_partitions(&self, repo: &RepoId) -> Vec<Partition> {
+        D34Shards.ref_index_partitions(repo)
+    }
+
+    fn membership(&self, repo: &RepoId, pack: &BlobKey) -> Partition {
+        Partition::RepoIndex {
+            ns: repo.namespace.clone(),
+            repo: repo.name.clone(),
+            prefix: Self::wide(&pack.hash()),
+        }
+    }
+
+    fn object_index(&self, repo: &RepoId, object: &Hash) -> Partition {
+        Partition::RepoIndex {
+            ns: repo.namespace.clone(),
+            repo: repo.name.clone(),
+            prefix: Self::wide(object),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
