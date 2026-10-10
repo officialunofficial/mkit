@@ -201,9 +201,10 @@ message AdmitRequest {
   ForkAdmission fork = 8;
 }
 
-// The inherited bytes a fork is charged for, an upper bound read with the
-// fork (the source's stored-bytes counter); the destination is empty, so all
-// of it is new to the repository; SPEC-SERVER §9.9.
+// The inherited bytes a fork is charged for: the summed length of the packs
+// it inherits (or, when their plan does not fit one slice, the source's
+// stored-bytes counter, an upper bound). The destination is empty, so all of
+// it is new to the repository; SPEC-SERVER §9.9.
 message ForkAdmission {
   // Source repository identity, in the form of Operation.repository.
   string source_repository = 1;

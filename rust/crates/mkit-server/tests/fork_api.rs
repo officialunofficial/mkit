@@ -338,7 +338,8 @@ async fn the_hooks_see_the_source_facts_and_the_charge_settles_once() {
     assert_eq!(fork.4, 0);
     assert_eq!(fork.5, Visibility::Public);
     assert_eq!(fork.6, dest.repo);
-    // Admission was charged the source's counted bytes, as an upper bound.
+    // Admission was charged the exact bytes the fork inherits, which the
+    // source's counter bounds.
     let stored = codec::decode_repo_storage(
         &source
             .store
@@ -355,9 +356,9 @@ async fn the_hooks_see_the_source_facts_and_the_charge_settles_once() {
     .stored_bytes;
     let admissions = seen.admissions.lock().unwrap().clone();
     let forked: Vec<_> = admissions.iter().filter(|a| a.2.is_some()).collect();
-    assert_eq!(forked[0].0, stored);
-    assert_eq!(forked[0].1, Some(stored));
-    assert_eq!(forked[0].2, Some(("source".to_owned(), stored)));
+    assert_eq!(forked[0].0, result.pack_bytes);
+    assert_eq!(forked[0].1, Some(result.pack_bytes));
+    assert_eq!(forked[0].2, Some(("source".to_owned(), result.pack_bytes)));
     assert!(result.pack_bytes <= stored);
     // The reservation committed with the exact inherited bytes, once.
     let Some(ReservationV1::Committed {
@@ -387,7 +388,10 @@ async fn an_exhausted_quota_window_refuses_the_fork_before_any_work() {
         QuotaLimits::new(3_600_000, 0, 1 << 40),
         Some("fork-rid-2"),
     );
-    let before = source.store.calls();
+    source
+        .store
+        .record
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     let error = finish(&pipe, &mut dest, &request(&source))
         .await
         .unwrap_err();
@@ -414,10 +418,9 @@ async fn an_exhausted_quota_window_refuses_the_fork_before_any_work() {
         reservation(&source, &dest.repo, "fork-rid-2-1").await,
         Some(ReservationV1::Aborted { .. })
     ));
-    assert!(
-        source.store.calls() - before < 60,
-        "refused before any copy"
-    );
+    // Only the reservation was written, then released: no row of the fork.
+    let writes = source.store.log.lock().unwrap().len();
+    assert!(writes <= 2, "{writes} batches before the refusal");
 }
 
 #[tokio::test]
@@ -694,7 +697,7 @@ async fn blocked_content_is_the_same_not_found_as_an_absent_source() {
     use mkit_server::store::{BlockEntry, ContentIndex};
     let source = Source::build_with("source", 6, denial).await;
     let mut dest = source.at("forked");
-    let (pipe, _) = hooked(&source, None, plain_limits(), None);
+    let (pipe, seen) = hooked(&source, None, plain_limits(), Some("blk"));
     let mut absent = request(&source);
     absent.source.name = mkit_server::RepoName::new("nowhere").unwrap();
     let n = dest.next_nonce();
@@ -708,6 +711,9 @@ async fn blocked_content_is_the_same_not_found_as_an_absent_source() {
     let blocked = call(&pipe, &dest, n, &request(&source)).await.unwrap_err();
     assert_eq!(format!("{blocked:?}"), format!("{missing:?}"));
     assert_eq!(blocked.public_message(), "source not found");
+    // The source was refused before anything was admitted or reserved.
+    assert!(seen.admissions.lock().unwrap().is_empty());
+    assert!(reservation(&source, &dest.repo, "blk-1").await.is_none());
 }
 
 #[tokio::test]

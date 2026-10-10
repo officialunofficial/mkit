@@ -1894,19 +1894,20 @@ starts under, within one read; the fork does not track the source afterwards,
 and a later change to it does not alter the destination.
 
 **Admission and quota.** Admission sees `fork` with the bytes the charge
-covers: the source's counted bytes (§6.5.1), an upper bound of the inherited
-bytes (the pack set is a subset of the packs counted for the source), and
-`declared_bytes` and `new_to_repo_bytes` equal to it, since every inherited pack
-is new to the empty destination. The quota charges are applied once, in the
+covers: the summed length of the packs the fork inherits, computed from the
+sealed inventories of the pack set the pinned tip fixes (so it is exact, and a
+source the fork would refuse is refused before anything is admitted or
+reserved). When that plan does not fit one slice, the source's counted bytes
+(§6.5.1) stand in: an upper bound that can trail by the relay lag, in which case
+a pack set larger than it fails the fork as below. `declared_bytes` and
+`new_to_repo_bytes` equal it, since every inherited pack is new to the empty
+destination. The quota charges are applied once, in the
 batch that creates the job, so the quota is a hard bound: a window that cannot
 hold the fork refuses it with `resource_exhausted` before any work, and a
 charge is never applied at completion. The charge is the per-signer
 quota charge the admission decided; the per-namespace aggregate cap of the
 default admission is not applied to forks, and a deployment that needs one
-enforces it in its Admission hook, which sees the fork's bytes. Because the
-charge is the source's whole counter, a caller who can read the source can
-learn from a quota refusal that the repository is larger than the window holds.
-A write by the same signer that lands while the job is created re-plans the
+enforces it in its Admission hook, which sees the fork's bytes. A write by the same signer that lands while the job is created re-plans the
 charge (three attempts), then the request answers `unavailable`. A failure before the destination is
 registered deletes the job so the request can be retried, and the retry is a new
 admission that pays again. A fork whose resolved pack set is larger

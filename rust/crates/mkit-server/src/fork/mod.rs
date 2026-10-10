@@ -22,7 +22,7 @@ mod sets;
 mod settle;
 
 pub(crate) use crate::store::CONTENT_APPLY_WINDOW_MS as CONTENT_WINDOW;
-pub use job::{ForkTimer, StartOutcome, StepReport, start, start_with, step};
+pub use job::{ForkTimer, StartOutcome, StepReport, plan_bytes, start, start_with, step};
 pub use request::ForkRequest;
 pub use settle::SettleV1;
 pub use settle::{ChargeV1, ReplayV1};

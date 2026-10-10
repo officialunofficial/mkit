@@ -99,7 +99,9 @@ pub struct AdmissionInput<'a> {
 pub struct ForkAdmission<'a> {
     /// The repository the fork reads.
     pub source: &'a crate::repo::RepoId,
-    /// The bytes the charge covers: the source's stored-bytes counter.
+    /// The bytes the charge covers: the summed length of the packs the fork
+    /// inherits, or, when their plan does not fit one slice, the source's
+    /// stored-bytes counter (an upper bound).
     pub pack_bytes: u64,
 }
 

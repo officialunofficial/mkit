@@ -1936,6 +1936,79 @@ async fn a_write_by_the_same_signer_during_the_start_replans_the_charge() {
     assert_eq!(quota_ops(&source, &dest_id).await, Some(5));
 }
 
+/// Make the next job batch lose its quota guard `left` times in a row: each
+/// firing is another write of the signer, and arms the next.
+fn contend(
+    store: Counting,
+    clock: Arc<mkit_server::ManualClock>,
+    ns: mkit_server::NamespaceKey,
+    left: u32,
+) {
+    use mkit_server::store::adapter_spi::codec;
+    if left == 0 {
+        return;
+    }
+    let armed = store.clone();
+    let hook: Hook = Arc::new(move || {
+        let (store, clock, ns) = (store.clone(), clock.clone(), ns.clone());
+        Box::pin(async move {
+            let scope = mkit_server::quota::QuotaScope::for_signer(&ns, &[1; 32]);
+            let state = mkit_server::quota::QuotaState {
+                window_start: clock.now_ms(),
+                ops: 3 + left,
+                bytes: 0,
+            };
+            store
+                .inner
+                .apply(
+                    &mkit_server::Partition::Coordinator(ns.clone()),
+                    mkit_server::Batch::new()
+                        .put(keys::quota(&scope), codec::encode_quota_state(&state)),
+                )
+                .await
+                .unwrap();
+            contend(store, clock, ns, left - 1);
+        })
+    });
+    *armed.trigger.lock().unwrap() = Some(("q", hook));
+}
+
+#[tokio::test]
+async fn the_charge_is_replanned_three_times_and_then_the_start_is_refused() {
+    use mkit_server::fork::ForkError;
+    for (losses, started) in [(2, true), (3, false)] {
+        let source = Source::build("source", 6).await;
+        let dest_id = dest(&source, "forked");
+        let settle = settlement::admit(&source, &dest_id).await;
+        contend(
+            source.store.clone(),
+            source.clock.clone(),
+            dest_id.namespace.clone(),
+            losses,
+        );
+        let outcome =
+            mkit_server::fork::start(&env(&source), &spec(&source, "forked"), Some(settle)).await;
+        if started {
+            assert!(matches!(outcome, Ok(StartOutcome::Started(_))));
+            // The last competing write counted too, and the fork on top of it.
+            assert_eq!(quota_ops(&source, &dest_id).await, Some(5));
+        } else {
+            assert_eq!(
+                outcome.unwrap_err(),
+                ForkError::Unavailable("fork start contended")
+            );
+            // No job and no charge: only the competing writes.
+            assert!(
+                mkit_server::fork::read_job(&source.store, source.shards.as_ref(), &dest_id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(quota_ops(&source, &dest_id).await, Some(4));
+        }
+    }
+}
+
 #[tokio::test]
 async fn a_pack_set_larger_than_the_admitted_bytes_fails_the_fork_before_registration() {
     use mkit_server::store::adapter_spi::codec::{AbortReason, ReservationV1};

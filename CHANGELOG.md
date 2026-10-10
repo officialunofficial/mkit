@@ -35,10 +35,10 @@ collect the applicable entries between their old and new immutable pins.
   `/mkit.server.v1/ForkRepo`) is authorized by the caller's read of the source
   (every refusal is the uniform `not_found` `source not found`) and then by the
   destination write, with the source's visibility and visibility revision, read
-  in one coordinator snapshot, handed to the Authorize hook. Admission sees
-  `AdmissionInput::fork` (`ForkAdmission`) and is charged the source's counted
-  bytes, an upper bound of the inherited bytes, once and in the batch that
-  creates the job, so quota is a hard bound: an exhausted window refuses the
+  read together in one coordinator read and checked again before the job starts, handed to the Authorize hook. Admission sees
+  `AdmissionInput::fork` (`ForkAdmission`) and is charged the exact bytes of
+  the packs the fork inherits (a source it would refuse is refused before
+  admission), once and in the batch that creates the job, so quota is a hard bound: an exhausted window refuses the
   fork before any work. The reservation lives as long as the job (24 hours);
   the final batch commits the `Committed` outcome and the replay record. The
   destination must not exist beforehand: the fork registers it. The remote hook

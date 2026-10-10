@@ -254,6 +254,16 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             return Err(ForkError::NotEmpty.error());
         }
 
+        // What admission charges for: the bytes of the pack set the tip pins
+        // (exact, and the source is refused here before anything is admitted
+        // or reserved), or, when the plan does not fit one slice, the source's
+        // counted bytes, an upper bound that can trail by the relay lag.
+        let inherited = match fork::plan_bytes(&env, &spec).await {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => source.stored_bytes,
+            Err(error) => return Err(error.error()),
+        };
+
         // Admission, then the reservation that lives as long as the job.
         if !self.hooks.admission().is_default() {
             self.check_outbox_backpressure(&p, None).await?;
@@ -261,9 +271,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let credentials = admission::validate_credentials(&a.credential_capture)?;
         let mut input = AdmissionInput::new(&op);
         input.credential_headers = &credentials;
-        input.declared_bytes = source.stored_bytes;
-        input.new_to_repo_bytes = Some(source.stored_bytes);
-        input.fork = Some(ForkAdmission::new(&request.source, source.stored_bytes));
+        input.declared_bytes = inherited;
+        input.new_to_repo_bytes = Some(inherited);
+        input.fork = Some(ForkAdmission::new(&request.source, inherited));
         let allowance = self.admit(input).await?;
         let pending = match allowance.reservation.as_deref() {
             Some(rid) => Some(
@@ -285,7 +295,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 expires_at_ms: auth.expires_at_ms,
             }),
             charges: allowance.charges.iter().map(ChargeV1::of).collect(),
-            declared_bytes: source.stored_bytes,
+            declared_bytes: inherited,
         };
         let fence = FenceV1 {
             authority_generation: op.authz.authority_generation,

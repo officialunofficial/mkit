@@ -95,8 +95,30 @@ pub async fn start_with<S: NamespaceStore>(
     require_unregistered(env, &spec.dest).await?;
     let now = env.now();
     check_request(env, &p, now, settle.as_ref(), fence.as_ref()).await?;
-    let job = ForkJobV1 {
-        binding: wanted,
+    let job = new_job(
+        spec,
+        &view,
+        now,
+        settle.clone().map(|mut s| {
+            // The charges are applied by the creation batch, not carried.
+            s.charges.clear();
+            s
+        }),
+        fence,
+    );
+    launch(env, &p, job, settle.as_ref()).await
+}
+
+/// The job a fork request starts, before its first step.
+fn new_job(
+    spec: &ForkSpec,
+    view: &plan::SourceView,
+    now: u64,
+    settle: Option<SettleV1>,
+    fence: Option<FenceV1>,
+) -> ForkJobV1 {
+    ForkJobV1 {
+        binding: binding(spec),
         dest_ns: spec.dest.namespace.as_str().to_owned(),
         dest_repo: spec.dest.name.as_str().to_owned(),
         source_ns: spec.source.namespace.as_str().to_owned(),
@@ -124,15 +146,37 @@ pub async fn start_with<S: NamespaceStore>(
         scanned: 0,
         copied: 0,
         failure: None,
-        // The charges are applied by the creation batch below, not carried.
-        settle: settle.clone().map(|mut s| {
-            s.charges.clear();
-            s
-        }),
+        settle,
         fence,
         result: None,
-    };
-    launch(env, &p, job, settle.as_ref()).await
+    }
+}
+
+/// The bytes a fork of `spec` would inherit, summed from the pack set of the
+/// source's published value: what admission is charged for. The pack set
+/// is fixed by the tip the request pins (sealed inventories are immutable), so
+/// this is the number the job's own plan reaches. `None` when the plan does
+/// not fit one slice, in which case the caller falls back to an upper bound.
+///
+/// # Errors
+/// The refusals of [`start`] that concern the source.
+pub async fn plan_bytes<S: NamespaceStore>(
+    env: &ForkEnv<'_, S>,
+    spec: &ForkSpec,
+) -> Result<Option<u64>, ForkError> {
+    let view = plan::read_source(
+        env.store,
+        env.shards,
+        &spec.source,
+        &spec.source_ref,
+        &spec.expected_tip,
+    )
+    .await?;
+    let mut scratch = new_job(spec, &view, env.now(), None, None);
+    let budget = SliceBudget::new(SLICE_CALLS);
+    Ok(plan::slice(env, &mut scratch, &budget)
+        .await?
+        .then(|| scratch.pack_bytes()))
 }
 
 /// Creation attempts: the charge is planned against the quota rows as they
@@ -194,8 +238,8 @@ async fn create<S: NamespaceStore>(
             let ours = |existing: &ForkJobV1| {
                 existing.binding == job.binding
                     && existing.created_ms == job.created_ms
-                    && existing.settle.as_ref().map(|s| &s.rid)
-                        == job.settle.as_ref().map(|s| &s.rid)
+                    && existing.settle.as_ref().map(|s| (&s.rid, &s.replay))
+                        == job.settle.as_ref().map(|s| (&s.rid, &s.replay))
             };
             return match env.store.get(p, key).await {
                 Ok(Some(raw)) if decode_job(&raw).is_ok_and(|existing| ours(&existing)) => {

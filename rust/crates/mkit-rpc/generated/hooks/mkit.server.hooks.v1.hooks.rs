@@ -5454,9 +5454,10 @@ pub const __ADMIT_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buf
     from_json: ::buffa::type_registry::any_from_json::<AdmitRequest>,
     is_wkt: false,
 };
-/// The inherited bytes a fork is charged for, an upper bound read with the
-/// fork (the source's stored-bytes counter); the destination is empty, so all
-/// of it is new to the repository; SPEC-SERVER §9.9.
+/// The inherited bytes a fork is charged for: the summed length of the packs
+/// it inherits (or, when their plan does not fit one slice, the source's
+/// stored-bytes counter, an upper bound). The destination is empty, so all of
+/// it is new to the repository; SPEC-SERVER §9.9.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
