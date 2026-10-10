@@ -63,6 +63,7 @@ struct Run {
     calls: u64,
 }
 
+#[allow(clippy::too_many_lines)] // One alarm-driven fixture, kept together.
 async fn measure(objects: u16, chain: u32) -> Run {
     let clock = Arc::new(ManualClock::new(1_700_000_000_000));
     let inner = Arc::new(MemoryKv::with_clock(clock.clone()));
