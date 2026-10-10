@@ -340,6 +340,12 @@ impl Rig {
             },
             limits: SliceLimits {
                 window_bytes: WINDOW,
+                // The suite also runs with one step per slice (set the
+                // variable to 1): the same assertions must hold unchained.
+                extract_chain_steps: std::env::var("MKIT_TEST_EXTRACT_CHAIN")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(SliceLimits::default().extract_chain_steps),
                 ..SliceLimits::default()
             },
             tickets: Mutex::new(0),

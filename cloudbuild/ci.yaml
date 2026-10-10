@@ -179,6 +179,8 @@ steps:
         # ── rust/ workspace: tests ──────────────────────────────────────────
         ( cd rust
           cargo nextest run --locked --workspace --all-features
+          # Indexed verification with one Extract step per slice (default chains).
+          MKIT_TEST_EXTRACT_CHAIN=1 cargo nextest run --locked -p mkit-server --all-features -E 'test(~indexed::)'
 
           # nextest doesn't run doctests; gate them separately.
           cargo test --manifest-path fuzz/Cargo.toml

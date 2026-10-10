@@ -1,4 +1,6 @@
 //! Scheduled extraction acceptance, using the same native verifier as the oracle.
+#[path = "extraction_chain_tests.rs"]
+mod extraction_chain_tests;
 #[path = "extraction_count_tests.rs"]
 mod extraction_count_tests;
 #[path = "member_lookup_tests.rs"]
@@ -455,9 +457,15 @@ fn a_terminal_block_retains_progress_that_prevents_preeffect_reclaim() {
     assert_eq!(progress.stage, 8);
 }
 
-#[test]
-fn a_missing_delta_dependency_uses_its_older_owner_lag() {
-    let rig = Rig::new();
+/// `pinned` stops the job at CLOSURE (stage 10) with one step per slice, then
+/// removes the base. Chained, one slice passes every selection stage, so the
+/// base is removed before the slice that would run CLOSURE. Both must end in
+/// the same capped state and message.
+fn missing_delta_dependency_uses_its_older_owner_lag(pinned: bool) {
+    let mut rig = Rig::new();
+    if pinned {
+        rig.limits.extract_chain_steps = 1;
+    }
     let (base, base_raw) = blob(77, 400);
     let (_, target_raw) = blob(78, 70_000);
     seed_member(&rig, base, &base_raw);
@@ -472,22 +480,24 @@ fn a_missing_delta_dependency_uses_its_older_owner_lag() {
         fire_pack(&rig, &extension, first.0.pack_id);
     }
     for _ in 0..100 {
-        if rig
-            .job(&second.0.pack_id)
-            .is_some_and(|j| j.extraction.as_ref().is_some_and(|x| x.stage == 10))
-        {
+        let job = rig.job(&second.0.pack_id).unwrap();
+        let ready = if pinned {
+            job.extraction.as_ref().is_some_and(|x| x.stage == 10)
+        } else {
+            job.phase == crate::indexed::checkpoint::Phase::Extract && job.extraction.is_none()
+        };
+        if ready {
             break;
         }
         fire_pack(&rig, &extension, second.0.pack_id);
     }
-    assert_eq!(
-        rig.job(&second.0.pack_id)
-            .unwrap()
-            .extraction
-            .unwrap()
-            .stage,
-        10
-    );
+    let job = rig.job(&second.0.pack_id).unwrap();
+    if pinned {
+        assert_eq!(job.extraction.unwrap().stage, 10);
+    } else {
+        assert_eq!(job.phase, crate::indexed::checkpoint::Phase::Extract);
+        assert!(job.extraction.is_none(), "no selection step ran yet");
+    }
     let (start, end) =
         keys::verify_range(&rig.repo.name, &first.0.pack_id, Some(keys::VC_DEPENDENCY));
     let page = block_on(rig.store.scan(&rig.source(), &start, &end, None, 1)).unwrap();
@@ -515,6 +525,16 @@ fn a_missing_delta_dependency_uses_its_older_owner_lag() {
         rig.check(&tickets, head).unwrap_err().public_message(),
         "delta base not available in this repository"
     );
+}
+
+#[test]
+fn a_missing_delta_dependency_uses_its_older_owner_lag() {
+    missing_delta_dependency_uses_its_older_owner_lag(true);
+}
+
+#[test]
+fn a_missing_delta_dependency_uses_its_older_owner_lag_chained() {
+    missing_delta_dependency_uses_its_older_owner_lag(false);
 }
 
 #[test]
@@ -1044,10 +1064,20 @@ fn empty_chunks_and_empty_manifests_match_native_content_and_offsets() {
     }
 }
 
-#[test]
-fn every_extraction_checkpoint_boundary_replays_without_losing_protection() {
-    for stage in (0..=13).filter(|stage| *stage != 5) {
+/// `chained` runs the default chaining: the selection stages are not slice
+/// boundaries then, so only the effect stages (3 to 9) are crashed at; they
+/// must all still be boundaries, since effect stages never chain.
+fn extraction_checkpoint_boundaries_replay(chained: bool) {
+    let stages: Vec<u8> = if chained {
+        vec![3, 4, 6, 7, 8, 9]
+    } else {
+        (0..=13).filter(|stage| *stage != 5).collect()
+    };
+    for stage in stages {
         let mut rig = Rig::new();
+        if !chained {
+            rig.limits.extract_chain_steps = 1;
+        }
         let chunk = Object::Blob(Blob {
             data: vec![92; 500],
         });
@@ -1120,6 +1150,16 @@ fn every_extraction_checkpoint_boundary_replays_without_losing_protection() {
         );
         assert_holder(&rig, id);
     }
+}
+
+#[test]
+fn every_extraction_checkpoint_boundary_replays_without_losing_protection() {
+    extraction_checkpoint_boundaries_replay(false);
+}
+
+#[test]
+fn every_chained_extraction_boundary_replays_without_losing_protection() {
+    extraction_checkpoint_boundaries_replay(true);
 }
 
 #[test]

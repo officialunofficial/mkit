@@ -226,6 +226,18 @@ jobs:
           MKIT_TEST_STRICT: "1"
         run: cargo nextest run --locked --workspace --all-features
 
+      # The indexed verification suite again with one Extract step per slice
+      # (the default chains selection steps): every outcome assertion must
+      # hold in both modes.
+      - name: Test (nextest, indexed verification unchained)
+        if: env.SHOULD_RUN == 'true'
+        working-directory: rust
+        env:
+          MKIT_TEST_EXTRACT_CHAIN: "1"
+        run: >-
+          cargo nextest run --locked -p mkit-server --all-features
+          -E 'test(~indexed::)'
+
       # #505 PR 5/5: a handful of irreducibly-real tests (subprocess
       # sleeps, real localhost TCP, the ~5s worktree-lock wait, a real
       # `ssh` connect attempt to 127.0.0.1:22) were quarantined behind
