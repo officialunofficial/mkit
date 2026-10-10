@@ -879,6 +879,24 @@ fn issuance_makes_no_object_or_storage_proof_calls() {
 }
 
 #[test]
+fn issued_timestamp_continuation_outlives_its_capture_proof_window() {
+    for writer in [false, true] {
+        let (mut fx, by_id, ..) = commits_graph(false);
+        enable(&mut fx);
+        let token = issue_after(&fx, writer, 10, &[], |_, _, _, _| {})
+            .unwrap()
+            .unwrap();
+        let lifetime = if writer { 300_000 } else { 900_000 };
+        assert_eq!(token.expires_at_ms, u64::try_from(T0 + lifetime).unwrap());
+        fx.clock.advance(60_001);
+        let (page, _) = redeem_page(&fx, writer, HEAD, &token, 10, None, &by_id);
+        let page = page.unwrap();
+        assert_eq!(page.commits.len(), 10);
+        assert_eq!(page.next.unwrap().expires_at_ms, token.expires_at_ms);
+    }
+}
+
+#[test]
 #[allow(clippy::too_many_lines)] // Every refusal variant shares the harness.
 fn issuance_refusals() {
     for writer in [false, true] {

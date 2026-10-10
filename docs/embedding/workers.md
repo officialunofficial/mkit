@@ -186,8 +186,9 @@ and session for every request. The stable signer, grant, captured credential
 headers, and trusted audience must match; envelope nonce and timestamps may
 change. Public requests remain public.
 Successors inherit the original expiry, bounded at issuance by the configured
-TTL, proof lag/deadline, and credential/grant expiry. Live authorization and
-source/denial checks run again on every redemption.
+TTL and credential/grant expiry. The request-local proof lag and deadline bound
+each page's proofs independently of the token's lifetime. Live authorization
+and source/denial checks run again on every redemption.
 
 For cross-request all-parent paging in canonical timestamp order, the embedder
 drives page 1 itself on one selected reader and session: capture with

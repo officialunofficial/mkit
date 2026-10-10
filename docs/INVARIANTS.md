@@ -102,6 +102,9 @@ server-verified priority keys plus a bounded witness of pending lineage. A
 redeemed token confers no permission: every served object is re-read live with
 current membership, denial and authorizer checks, a carried key is rechecked
 against the object at emission, and imported proofs die with the request.
+The token's fixed lifetime is the minimum of its configured TTL and credential
+and grant expiry; successors inherit its absolute expiry. The request-local
+proof window still bounds each page's evidence without capping the token.
 History state caps — frontier, emitted set, witness, payload — fail as typed
 `HistoryStateLimit` errors in both views, never as truncated output or
 uniform absence.
@@ -111,6 +114,7 @@ priority state across requests; if issuance re-read objects it would re-walk
 page 1, if a token conferred permission a replayed or stale credential would
 serve objects, and if a cap truncated silently the caller would lose history
 entries without any signal to restart.
+The fixed token lifetime lets a walk span multiple request-local proof windows.
 
 **If violated:** issuance could re-walk page 1 per request, a forged or stale
 token could widen visibility or skip denial, or a reducer cap could drop
@@ -121,7 +125,8 @@ memo-only validation and fences, `history_token` bounded v2 codec and
 `HistoryStateLimit` mint/verify mapping, `read_proofs::restore_witness`
 isolated proof scope; `timestamp_tests` no-object-I/O issuance, replay,
 seed-window, cancellation, refusal and cap tests plus the `history_token`
-codec bounds.
+codec bounds; continuation lifetime tests for advancing clocks and exact TTL,
+credential and grant expiry.
 
 ## Private scanner retrieval requires current ticket and global-denial checks
 
