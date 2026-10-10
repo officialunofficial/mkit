@@ -1895,9 +1895,9 @@ and a later change to it does not alter the destination.
 
 **Admission and quota.** Admission sees `fork` with the bytes the charge
 covers: the summed length of the packs the fork inherits, computed from the
-sealed inventories of the pack set the pinned tip fixes (so it is exact, and a
+sealed inventories of the pack set of the published pair the request pins (so it is exact, and a
 source the fork would refuse is refused before anything is admitted or
-reserved). When that plan does not fit one slice, the source's counted bytes
+reserved). The plan costs up to one slice (600 storage calls) before admission, whatever admission then decides. When that plan does not fit one slice, the source's counted bytes
 (§6.5.1) stand in: an upper bound that can trail by the relay lag, in which case
 a pack set larger than it fails the fork as below. `declared_bytes` and
 `new_to_repo_bytes` equal it, since every inherited pack is new to the empty

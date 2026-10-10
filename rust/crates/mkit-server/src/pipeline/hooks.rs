@@ -87,9 +87,9 @@ pub struct AdmissionInput<'a> {
     /// Selected payment credentials; values never appear in debug output.
     pub credential_headers: &'a [CredentialHeader],
     /// Set only for a fork: where its bytes come from. Then `declared_bytes`
-    /// and `new_to_repo_bytes` equal [`ForkAdmission::pack_bytes`], an upper
-    /// bound of the inherited bytes (the destination is empty, so all of them
-    /// are new to it), and the admitted charge binds the fork as a hard bound.
+    /// and `new_to_repo_bytes` equal [`ForkAdmission::pack_bytes`] (the
+    /// destination is empty, so all of the inherited bytes are new to it), and
+    /// the admitted charge binds the fork as a hard bound.
     pub fork: Option<ForkAdmission<'a>>,
 }
 
