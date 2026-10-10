@@ -95,8 +95,31 @@ pub async fn start_with<S: NamespaceStore>(
     require_unregistered(env, &spec.dest).await?;
     let now = env.now();
     check_request(env, &p, now, settle.as_ref(), fence.as_ref()).await?;
-    let job = ForkJobV1 {
-        binding: wanted,
+    let job = new_job(
+        spec,
+        &view,
+        now,
+        settle.clone().map(|mut s| {
+            // The charges are applied by the creation batch, not carried.
+            s.charges.clear();
+            s.namespace_cap = None;
+            s
+        }),
+        fence,
+    );
+    launch(env, &p, job, settle.as_ref()).await
+}
+
+/// The job a fork request starts, before its first step.
+fn new_job(
+    spec: &ForkSpec,
+    view: &plan::SourceView,
+    now: u64,
+    settle: Option<SettleV1>,
+    fence: Option<FenceV1>,
+) -> ForkJobV1 {
+    ForkJobV1 {
+        binding: binding(spec),
         dest_ns: spec.dest.namespace.as_str().to_owned(),
         dest_repo: spec.dest.name.as_str().to_owned(),
         source_ns: spec.source.namespace.as_str().to_owned(),
@@ -127,23 +150,114 @@ pub async fn start_with<S: NamespaceStore>(
         settle,
         fence,
         result: None,
+    }
+}
+
+/// The bytes a fork of `spec` would inherit, summed from the pack set of the
+/// source's published value: what admission is charged for. The pack set
+/// is fixed by the tip the request pins (sealed inventories are immutable), so
+/// this is the number the job's own plan reaches. `None` when the plan does
+/// not fit one slice, in which case the caller falls back to an upper bound.
+///
+/// # Errors
+/// The refusals of [`start`] that concern the source.
+pub async fn plan_bytes<S: NamespaceStore>(
+    env: &ForkEnv<'_, S>,
+    spec: &ForkSpec,
+) -> Result<Option<u64>, ForkError> {
+    let view = plan::read_source(
+        env.store,
+        env.shards,
+        &spec.source,
+        &spec.source_ref,
+        &spec.expected_tip,
+    )
+    .await?;
+    let mut scratch = new_job(spec, &view, env.now(), None, None);
+    let budget = SliceBudget::new(SLICE_CALLS);
+    Ok(plan::slice(env, &mut scratch, &budget)
+        .await?
+        .then(|| scratch.pack_bytes()))
+}
+
+/// Creation attempts: the charge is planned against the quota rows as they
+/// were read, so a concurrent write by the same signer loses the batch and
+/// the charge is planned again.
+const CREATE_ATTEMPTS: usize = 3;
+
+/// Quota binds here, with the job: the charge commits in the batch that
+/// creates it, so a fork the window cannot hold is refused before any work.
+async fn launch<S: NamespaceStore>(
+    env: &ForkEnv<'_, S>,
+    p: &Partition,
+    job: ForkJobV1,
+    charged: Option<&SettleV1>,
+) -> Result<StartOutcome, ForkError> {
+    let key = keys::fork_job(&job.dest()?.name);
+    for attempt in 1..=CREATE_ATTEMPTS {
+        let (pre, writes) = match charged {
+            Some(settle) => settle::charge(env, p, settle, job.created_ms).await?,
+            None => (Vec::new(), Vec::new()),
+        };
+        let mut batch = Batch::new();
+        batch.preconditions.extend(pre);
+        batch.writes.extend(writes);
+        let batch = batch
+            .require(Precondition::NotAfter(
+                job.created_ms.saturating_add(CONTENT_WINDOW),
+            ))
+            .require(Precondition::Absent(key.clone()))
+            .put(key.clone(), encode_job(&job)?)
+            .put(
+                keys::timer(job.created_ms, kinds::FORK.get(), key.as_bytes()),
+                Value::default(),
+            );
+        match create(env, p, &key, batch, job.clone()).await {
+            Err(ForkError::Unavailable(CONTENDED)) if attempt < CREATE_ATTEMPTS => {}
+            other => return other,
+        }
+    }
+    Err(ForkError::Unavailable(CONTENDED))
+}
+
+const CONTENDED: &str = "fork start contended";
+
+/// Commit the job's creation batch and decide whose job it is.
+async fn create<S: NamespaceStore>(
+    env: &ForkEnv<'_, S>,
+    p: &Partition,
+    key: &crate::store::Key,
+    batch: Batch,
+    job: ForkJobV1,
+) -> Result<StartOutcome, ForkError> {
+    let applied = match env.store.apply(p, batch).await {
+        Ok(applied) => applied,
+        Err(error) => {
+            // A reply can be lost after the batch committed, and the charge
+            // and the reservation then belong to a job that exists: our own
+            // row, found again, is a start.
+            let ours = |existing: &ForkJobV1| {
+                existing.binding == job.binding
+                    && existing.created_ms == job.created_ms
+                    && existing.settle.as_ref().map(|s| (&s.rid, &s.replay))
+                        == job.settle.as_ref().map(|s| (&s.rid, &s.replay))
+            };
+            return match env.store.get(p, key).await {
+                Ok(Some(raw)) if decode_job(&raw).is_ok_and(|existing| ours(&existing)) => {
+                    Ok(StartOutcome::Started(Box::new(job)))
+                }
+                _ => Err(error.into()),
+            };
+        }
     };
-    let batch = Batch::new()
-        .require(Precondition::NotAfter(now.saturating_add(CONTENT_WINDOW)))
-        .require(Precondition::Absent(key.clone()))
-        .put(key.clone(), encode_job(&job)?)
-        .put(
-            keys::timer(now, kinds::FORK.get(), key.as_bytes()),
-            Value::default(),
-        );
-    match env.store.apply(&p, batch).await? {
+    match applied {
         BatchOutcome::Committed => Ok(StartOutcome::Started(Box::new(job))),
         BatchOutcome::PreconditionFailed { .. } => {
             let raw = env
                 .store
-                .get(&p, &key)
+                .get(p, key)
                 .await?
-                .ok_or(ForkError::Unavailable("fork start contended"))?;
+                .ok_or(ForkError::Unavailable(CONTENDED))?;
             let existing = decode_job(&raw)?;
             if existing.binding == job.binding {
                 Ok(StartOutcome::Existing(Box::new(existing)))
@@ -176,7 +290,7 @@ async fn check_request<S: NamespaceStore>(
     }
     // The reconciler aborts a pending reservation at its reconcile time: it
     // must outlive the job, or the job would be failed under its feet.
-    if let Some(settle) = settle {
+    if let Some(settle) = settle.filter(|s| !s.rid.is_empty()) {
         match crate::store::codec::decode_reservation(&Value::new(settle.pending.clone())) {
             Ok(crate::store::codec::ReservationV1::Pending {
                 reconcile_at_ms, ..
@@ -419,6 +533,15 @@ async fn advance<S: NamespaceStore>(
     match job.phase {
         Phase::Plan => {
             if plan::slice(env, job, budget).await? {
+                // The charge was an upper bound read at admission: a set that
+                // outgrew it is not covered.
+                if job
+                    .settle
+                    .as_ref()
+                    .is_some_and(|s| job.pack_bytes() > s.declared_bytes)
+                {
+                    return Err(ForkError::Quota(super::OVER_ADMITTED));
+                }
                 job.phase = Phase::Trees;
                 job.cursor = 0;
                 job.deps.clear();

@@ -495,6 +495,55 @@ fn encoded_requests_equal_the_golden_requests() {
     assert!(first == decode::<pb::AdmitRequest>("admit-first-attempt.request.json"));
 }
 
+fn fork_op() -> Operation {
+    // A fork is the owner's: no grant authorizes it, and its destination is new.
+    let mut op = granted_op(
+        OpKind::ForkRepo {
+            source: RepoId {
+                namespace: NamespaceKey::from_stored(NAMESPACE.to_owned()),
+                name: RepoName::new("origin").unwrap(),
+            },
+            source_ref: "refs/heads/main".into(),
+            expected_tip: [0x66; 32],
+            source_visibility: Some(mkit_attest::grant::Visibility::Public),
+            source_visibility_revision: 3,
+            dest_visibility: mkit_attest::grant::Visibility::Private,
+        },
+        "a3",
+    );
+    op.authz.grant = None;
+    op.authz.owner = true;
+    op.creation.repo = true;
+    op
+}
+
+#[test]
+fn a_fork_carries_its_source_and_the_admission_its_charge() {
+    let op = fork_op();
+    let authorize = map::authorize_request(&op, SERVER_ORIGIN);
+    assert_eq!(
+        value_of(&authorize),
+        golden_value("authorize-fork.request.json")
+    );
+    assert!(authorize == decode::<pb::AuthorizeRequest>("authorize-fork.request.json"));
+    let source = RepoId {
+        namespace: NamespaceKey::from_stored(NAMESPACE.to_owned()),
+        name: RepoName::new("origin").unwrap(),
+    };
+    let creds = credentials();
+    let mut input = AdmissionInput::new(&op);
+    input.declared_bytes = 65_536;
+    input.new_to_repo_bytes = Some(65_536);
+    input.credential_headers = &creds;
+    input.fork = Some(crate::pipeline::ForkAdmission::new(&source, 65_536));
+    let admit = map::admit_request(&input, SERVER_ORIGIN);
+    assert_eq!(value_of(&admit), golden_value("admit-fork.request.json"));
+    assert!(admit == decode::<pb::AdmitRequest>("admit-fork.request.json"));
+    // Every other operation leaves both fields absent.
+    let plain = map::authorize_request(&update_op(), SERVER_ORIGIN);
+    assert!(value_of(&plain)["operation"].get("fork").is_none());
+}
+
 #[test]
 fn encoded_outcomes_equal_the_golden_outcomes() {
     let committed = outcome(

@@ -1,0 +1,36 @@
+{
+  "operation": {
+    "audience": "https://vcs.example.test",
+    "repository": "ed25519-a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0/payments-demo",
+    "procedure": "/mkit.server.v1/ForkRepo",
+    "principal": {
+      "signer": {
+        "ed25519PublicKey": "0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc="
+      }
+    },
+    "idempotencyKey": "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3",
+    "owner": true,
+    "fork": {
+      "sourceRepository": "ed25519-a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0/origin",
+      "sourceRef": "refs/heads/main",
+      "expectedTip": "ZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmY=",
+      "sourceVisibility": "public",
+      "sourceVisibilityRevision": "3",
+      "destVisibility": "private"
+    }
+  },
+  "declaredBytes": "65536",
+  "createsNamespace": false,
+  "createsRepo": true,
+  "newToRepoBytes": "65536",
+  "credentialHeaders": [
+    {
+      "name": "Payment-Authorization",
+      "value": "Payment fake-example-credential-not-valid"
+    }
+  ],
+  "fork": {
+    "sourceRepository": "ed25519-a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0/origin",
+    "packBytes": "65536"
+  }
+}

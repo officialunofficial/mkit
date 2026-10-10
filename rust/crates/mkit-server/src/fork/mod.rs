@@ -17,11 +17,13 @@ mod copy;
 mod job;
 mod plan;
 mod publish;
+mod request;
 mod sets;
 mod settle;
 
 pub(crate) use crate::store::CONTENT_APPLY_WINDOW_MS as CONTENT_WINDOW;
-pub use job::{ForkTimer, StartOutcome, StepReport, start, start_with, step};
+pub use job::{ForkTimer, StartOutcome, StepReport, plan_bytes, start, start_with, step};
+pub use request::ForkRequest;
 pub use settle::SettleV1;
 pub use settle::{ChargeV1, ReplayV1};
 
@@ -102,6 +104,9 @@ pub(crate) mod set {
     pub(crate) const MANIFESTS: u8 = 4;
 }
 
+/// The refusal of a pack set larger than the bytes admission charged for.
+pub(crate) const OVER_ADMITTED: &str = "fork exceeds the bytes admitted; retry";
+
 /// Why a fork step stopped. Mapped to the public answers by [`Self::error`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -125,6 +130,10 @@ pub enum ForkError {
     /// The authority generation (`"authority"`) or grant epoch (`"epoch"`)
     /// the request was authorized under moved.
     Moved(&'static str),
+    /// The admission quota refuses the fork's charge (the reason is the
+    /// client-safe text of the quota decision), or the pack set outgrew the
+    /// bytes admission charged for.
+    Quota(&'static str),
     /// The slice's call budget ended; progress so far is kept. Never public.
     Slice,
 }
@@ -144,6 +153,7 @@ impl ForkError {
             Self::Denied => ServerError::permission_denied("namespace not registered"),
             Self::Moved("authority") => crate::authority::moved(),
             Self::Moved(_) => crate::pipeline::epoch_moved(),
+            Self::Quota(reason) => ServerError::resource_exhausted(*reason),
             Self::Slice => ServerError::unavailable("fork in progress"),
         }
     }
@@ -356,6 +366,8 @@ pub enum Failure {
     AuthorityMoved,
     /// The grant epoch moved.
     EpochMoved,
+    /// The pack set outgrew the bytes admission charged for.
+    OverAdmitted,
 }
 
 impl Failure {
@@ -369,6 +381,7 @@ impl Failure {
             ForkError::Denied => Some(Self::Denied),
             ForkError::Moved("authority") => Some(Self::AuthorityMoved),
             ForkError::Moved(_) => Some(Self::EpochMoved),
+            ForkError::Quota(_) => Some(Self::OverAdmitted),
             ForkError::Unavailable(_) | ForkError::Slice => None,
         }
     }
@@ -384,6 +397,7 @@ impl Failure {
             Self::Denied => ForkError::Denied.error(),
             Self::AuthorityMoved => ForkError::Moved("authority").error(),
             Self::EpochMoved => ForkError::Moved("epoch").error(),
+            Self::OverAdmitted => ForkError::Quota(OVER_ADMITTED).error(),
         }
     }
 }
@@ -525,7 +539,10 @@ pub async fn read_job<S: NamespaceStore>(
         .transpose()
 }
 
-pub(crate) fn binding(spec: &ForkSpec) -> Hash {
+/// The hash of everything a fork request binds: two requests with the same
+/// binding are the same fork.
+#[must_use]
+pub fn binding(spec: &ForkSpec) -> Hash {
     let mut bytes = Vec::new();
     for part in [
         spec.source.namespace.as_str().as_bytes(),

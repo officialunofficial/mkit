@@ -136,6 +136,21 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         rid: &str,
         procedure: StoredProcedure,
     ) -> Result<PendingGuard, ServerError> {
+        self.record_pending_for(a, partition, rid, procedure, 0)
+            .await
+    }
+
+    /// [`Self::record_pending`] for a durable job that settles the reservation
+    /// itself: the reconciler may not abort it before `job_ttl_ms` after the
+    /// request (plus the usual clock-lead margin), the lifetime of the job.
+    pub(super) async fn record_pending_for(
+        &self,
+        a: &Authenticated,
+        partition: &Partition,
+        rid: &str,
+        procedure: StoredProcedure,
+        job_ttl_ms: u64,
+    ) -> Result<PendingGuard, ServerError> {
         let now = ms(self.clock.now_ms());
         let apply_deadline_ms = now
             .saturating_add(
@@ -145,6 +160,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 ms(auth.expires_at_ms).saturating_add(MAX_CLOCK_LEAD_MS.unsigned_abs())
             }));
         let reconcile_at_ms = apply_deadline_ms
+            .max(now.saturating_add(job_ttl_ms))
             .saturating_add(MAX_CLOCK_LEAD_MS.unsigned_abs())
             .saturating_add(RECONCILE_MARGIN_MS);
         let pending = ReservationV1::Pending {

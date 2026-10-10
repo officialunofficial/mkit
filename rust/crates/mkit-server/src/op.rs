@@ -364,6 +364,9 @@ pub enum OpKind {
         /// The source's visibility, read in the same plan step as the fork;
         /// `None` when the deployment keeps no repository visibility.
         source_visibility: Option<mkit_attest::grant::Visibility>,
+        /// The source's visibility revision from the same snapshot (zero when
+        /// none is stored).
+        source_visibility_revision: u64,
         /// The destination's requested visibility.
         dest_visibility: mkit_attest::grant::Visibility,
     },

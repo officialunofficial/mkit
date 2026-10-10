@@ -27,8 +27,38 @@ collect the applicable entries between their old and new immutable pins.
   inherited tree no longer walks inherited history. Measured at 50 ms per
   call: 500 objects in 274 storage calls, 3,000 in 296 and 10,000 in 400, one
   slice each. `ForkTimer` is the kind-16 handler; `fork::start` and
-  `fork::step` drive a job. The `Pipeline` API, admission, the hook procedure
-  and the Workers wiring follow in a separate change.
+  `fork::step` drive a job.
+
+- `Pipeline::fork_repo` (SPEC-SERVER §9.9): the embedder-facing fork. A signed
+  `ForkRequest` (source, branch, required `expected_tip`, destination
+  visibility; its canonical body is the signed `body:` commitment, procedure
+  `/mkit.server.v1/ForkRepo`) is authorized by the caller's read of the source
+  (every refusal is the uniform `not_found` `source not found`) and then by the
+  destination write, with the source's visibility and visibility revision, read
+  together in one coordinator read and checked again before the job starts,
+  handed to the Authorize hook. Admission sees
+  `AdmissionInput::fork` (`ForkAdmission`) and is charged the exact bytes of
+  the packs the fork inherits (a source it would refuse is refused before
+  admission), once and in the batch that creates the job, so quota is a hard bound: an exhausted window refuses the
+  fork before any work. The reservation lives as long as the job (24 hours);
+  the final batch commits the `Committed` outcome and the replay record. The
+  destination must not exist beforehand: the fork registers it. The remote hook
+  schema gains `Operation.fork` (field 9) and `AdmitRequest.fork` (field 8),
+  additive. On Workers, `mkit_server_worker::fork::with_fork_timer` registers
+  kind 16 on a Paid deployment's namespace coordinators; an embedder that
+  exposes `fork_repo` MUST give the timer the same `takedown_denial` and
+  extraction threshold as its pipeline, and MUST apply the storage-lease
+  executor and lease-recovery modes before starting a fork. Under the default
+  admission the fork is also counted against the namespace's aggregate cap, in
+  the job-creation batch. The pack-set plan runs once on the request, before
+  admission (up to 600 storage calls, whatever admission then decides), and an
+  abandoned job on a Workers plan without the kind-16 timer (Free) expires only
+  when a request polls it.
+  New public items: `fork::{ForkRequest, binding}`, `pipeline::ForkAdmission`,
+  `fork::SettleV1::{declared_bytes, namespace_cap}`, `fork::ForkError::Quota` and
+  `fork::Failure::OverAdmitted`. `OpKind::ForkRepo` gains
+  `source_visibility_revision`; a job row written by an earlier build without
+  `SettleV1::declared_bytes` does not decode (pre-release rows only).
 
 - All-parent history continuations in canonical timestamp order. An embedder
   drives page 1 with per-commit `read_canonical_in` on a selected-ref reader

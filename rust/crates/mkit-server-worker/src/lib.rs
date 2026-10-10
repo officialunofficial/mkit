@@ -76,6 +76,7 @@ pub mod durable_objects;
 pub mod embedding;
 #[cfg(feature = "__test-faults")]
 pub mod faults;
+pub mod fork;
 pub mod hooks;
 #[cfg(feature = "http-objects")]
 pub mod http_mount;

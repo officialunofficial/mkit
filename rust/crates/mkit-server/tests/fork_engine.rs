@@ -903,6 +903,8 @@ mod settlement {
                 max_ops: 10,
                 max_bytes: 1 << 30,
             }],
+            namespace_cap: None,
+            declared_bytes: 1 << 40,
         }
     }
 
@@ -1814,36 +1816,282 @@ async fn an_already_registered_destination_is_not_a_fork_destination() {
     );
 }
 
+async fn quota_ops(source: &Source, dest_id: &RepoId) -> Option<u32> {
+    let scope = mkit_server::quota::QuotaScope::for_signer(&dest_id.namespace, &[1; 32]);
+    source
+        .store
+        .inner
+        .get(
+            &source.shards.coordinator(&dest_id.namespace),
+            &keys::quota(&scope),
+        )
+        .await
+        .unwrap()
+        .map(|raw| {
+            mkit_server::store::adapter_spi::codec::decode_quota_state(&raw)
+                .unwrap()
+                .ops
+        })
+}
+
 #[tokio::test]
-async fn a_quota_window_that_filled_up_does_not_undo_a_published_fork() {
-    use mkit_server::fork::{ChargeV1, ReplayV1, SettleV1};
+async fn quota_is_a_hard_bound_charged_once_with_the_job() {
+    use mkit_server::fork::{ForkError, StartOutcome};
     let source = Source::build("source", 6).await;
     let dest_id = dest(&source, "forked");
-    let mut settle: SettleV1 = settlement::admit(&source, &dest_id).await;
-    settle.charges = vec![ChargeV1 {
-        scope: mkit_server::quota::QuotaScope::for_signer(&dest_id.namespace, &[1; 32])
-            .as_str()
-            .to_owned(),
+    let settle = settlement::admit(&source, &dest_id).await;
+    let started = mkit_server::fork::start(
+        &env(&source),
+        &spec(&source, "forked"),
+        Some(settle.clone()),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(started, StartOutcome::Started(_)));
+    // The charge landed with the job, before any work.
+    assert_eq!(quota_ops(&source, &dest_id).await, Some(1));
+    assert!(
+        started.job().settle.as_ref().unwrap().charges.is_empty(),
+        "the stored row does not carry the applied charges"
+    );
+    // The same fork again is the same job and is not charged again.
+    let again = mkit_server::fork::start(&env(&source), &spec(&source, "forked"), Some(settle))
+        .await
+        .unwrap();
+    assert!(matches!(again, StartOutcome::Existing(_)));
+    assert_eq!(quota_ops(&source, &dest_id).await, Some(1));
+    // Running it charges nothing more.
+    assert_eq!(run(&source, "forked").await.phase, Phase::Done);
+    assert_eq!(quota_ops(&source, &dest_id).await, Some(1));
+
+    // A window that cannot hold the fork refuses it before any row is
+    // written: no job, no registered destination, the window untouched.
+    let source = Source::build("source", 6).await;
+    let dest_id = dest(&source, "forked");
+    let base = settlement::admit(&source, &dest_id).await;
+    let mut full = base.clone();
+    full.charges[0].max_ops = 0;
+    assert_eq!(
+        mkit_server::fork::start(&env(&source), &spec(&source, "forked"), Some(full))
+            .await
+            .unwrap_err(),
+        ForkError::Quota("write op quota exceeded for this window; try again later")
+    );
+    assert!(
+        mkit_server::fork::read_job(&source.store, source.shards.as_ref(), &dest_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(quota_ops(&source, &dest_id).await, None);
+    let mut bytes = base;
+    bytes.charges[0].bytes = 10;
+    bytes.charges[0].max_bytes = 5;
+    assert_eq!(
+        mkit_server::fork::start(&env(&source), &spec(&source, "forked"), Some(bytes))
+            .await
+            .unwrap_err(),
+        ForkError::Quota("write byte quota exceeded for this window; try again later")
+    );
+}
+
+#[tokio::test]
+async fn a_write_by_the_same_signer_during_the_start_replans_the_charge() {
+    use mkit_server::store::adapter_spi::codec;
+    let source = Source::build("source", 6).await;
+    let dest_id = dest(&source, "forked");
+    let settle = settlement::admit(&source, &dest_id).await;
+    // Another write of the signer moves the quota row just before the job
+    // batch, once: the batch loses its guard and the charge is planned again.
+    let (store, clock, ns) = (
+        source.store.clone(),
+        source.clock.clone(),
+        dest_id.namespace.clone(),
+    );
+    let hook: Hook = Arc::new(move || {
+        let (store, clock, ns) = (store.clone(), clock.clone(), ns.clone());
+        Box::pin(async move {
+            let scope = mkit_server::quota::QuotaScope::for_signer(&ns, &[1; 32]);
+            let state = mkit_server::quota::QuotaState {
+                window_start: clock.now_ms(),
+                ops: 4,
+                bytes: 0,
+            };
+            store
+                .inner
+                .apply(
+                    &mkit_server::Partition::Coordinator(ns.clone()),
+                    mkit_server::Batch::new()
+                        .put(keys::quota(&scope), codec::encode_quota_state(&state)),
+                )
+                .await
+                .unwrap();
+        })
+    });
+    *source.store.trigger.lock().unwrap() = Some(("q", hook));
+    let started = mkit_server::fork::start(&env(&source), &spec(&source, "forked"), Some(settle))
+        .await
+        .unwrap();
+    assert!(matches!(started, StartOutcome::Started(_)));
+    // The concurrent write counted, and this fork was charged on top of it.
+    assert_eq!(quota_ops(&source, &dest_id).await, Some(5));
+}
+
+/// Make the next job batch lose its quota guard `left` times in a row: each
+/// firing is another write of the signer, and arms the next.
+fn contend(
+    store: Counting,
+    clock: Arc<mkit_server::ManualClock>,
+    ns: mkit_server::NamespaceKey,
+    left: u32,
+) {
+    use mkit_server::store::adapter_spi::codec;
+    if left == 0 {
+        return;
+    }
+    let armed = store.clone();
+    let hook: Hook = Arc::new(move || {
+        let (store, clock, ns) = (store.clone(), clock.clone(), ns.clone());
+        Box::pin(async move {
+            let scope = mkit_server::quota::QuotaScope::for_signer(&ns, &[1; 32]);
+            let state = mkit_server::quota::QuotaState {
+                window_start: clock.now_ms(),
+                ops: 3 + left,
+                bytes: 0,
+            };
+            store
+                .inner
+                .apply(
+                    &mkit_server::Partition::Coordinator(ns.clone()),
+                    mkit_server::Batch::new()
+                        .put(keys::quota(&scope), codec::encode_quota_state(&state)),
+                )
+                .await
+                .unwrap();
+            contend(store, clock, ns, left - 1);
+        })
+    });
+    *armed.trigger.lock().unwrap() = Some(("q", hook));
+}
+
+#[tokio::test]
+async fn the_charge_is_replanned_three_times_and_then_the_start_is_refused() {
+    use mkit_server::fork::ForkError;
+    for (losses, started) in [(2, true), (3, false)] {
+        let source = Source::build("source", 6).await;
+        let dest_id = dest(&source, "forked");
+        let settle = settlement::admit(&source, &dest_id).await;
+        contend(
+            source.store.clone(),
+            source.clock.clone(),
+            dest_id.namespace.clone(),
+            losses,
+        );
+        let outcome =
+            mkit_server::fork::start(&env(&source), &spec(&source, "forked"), Some(settle)).await;
+        if started {
+            assert!(matches!(outcome, Ok(StartOutcome::Started(_))));
+            // The last competing write counted too, and the fork on top of it.
+            assert_eq!(quota_ops(&source, &dest_id).await, Some(5));
+        } else {
+            assert_eq!(
+                outcome.unwrap_err(),
+                ForkError::Unavailable("fork start contended")
+            );
+            // No job and no charge: only the competing writes.
+            assert!(
+                mkit_server::fork::read_job(&source.store, source.shards.as_ref(), &dest_id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(quota_ops(&source, &dest_id).await, Some(4));
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_namespace_cap_binds_a_fork_with_the_signer_charge_or_not_at_all() {
+    use mkit_server::fork::{ChargeV1, ForkError};
+    let cap = |max_ops: u32| ChargeV1 {
+        scope: String::new(),
         bytes: 0,
         window_ms: 3_600_000,
-        // No operation fits: the window is full by the time the fork ends.
-        max_ops: 0,
-        max_bytes: 1 << 30,
-    }];
-    settle.replay = Some(ReplayV1 {
-        scope: [3; 32],
-        fingerprint: [4; 32],
-        expires_at_ms: source.clock.now_ms() + 300_000,
-    });
+        max_ops,
+        max_bytes: 1 << 40,
+    };
+    let counter = |source: &Source, dest_id: &RepoId| {
+        let window = mkit_server::quota::namespace_window(source.clock.now_ms(), 3_600_000);
+        (
+            source.shards.coordinator(&dest_id.namespace),
+            keys::quota_total(window),
+        )
+    };
+    // A namespace window that cannot hold the fork refuses it before any row,
+    // and neither the namespace nor the signer is charged.
+    let source = Source::build("source", 6).await;
+    let dest_id = dest(&source, "forked");
+    let mut settle = settlement::admit(&source, &dest_id).await;
+    settle.namespace_cap = Some(cap(0));
+    assert_eq!(
+        mkit_server::fork::start(&env(&source), &spec(&source, "forked"), Some(settle))
+            .await
+            .unwrap_err(),
+        ForkError::Quota("namespace write op/byte quota exceeded for this window; try again later")
+    );
+    let (p, key) = counter(&source, &dest_id);
+    assert!(source.store.inner.get(&p, &key).await.unwrap().is_none());
+    assert_eq!(quota_ops(&source, &dest_id).await, None);
+    assert!(
+        mkit_server::fork::read_job(&source.store, source.shards.as_ref(), &dest_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // A window with room is charged once, with the job and the signer.
+    let source = Source::build("source", 6).await;
+    let dest_id = dest(&source, "forked");
+    let mut settle = settlement::admit(&source, &dest_id).await;
+    settle.namespace_cap = Some(cap(10));
+    mkit_server::fork::start(&env(&source), &spec(&source, "forked"), Some(settle))
+        .await
+        .unwrap();
+    assert_eq!(run(&source, "forked").await.phase, Phase::Done);
+    let (p, key) = counter(&source, &dest_id);
+    let usage = source.store.inner.get(&p, &key).await.unwrap().unwrap();
+    assert_eq!(
+        mkit_server::store::adapter_spi::codec::decode_namespace_usage(&usage)
+            .unwrap()
+            .ops,
+        1
+    );
+    assert_eq!(quota_ops(&source, &dest_id).await, Some(1));
+}
+
+#[tokio::test]
+async fn a_pack_set_larger_than_the_admitted_bytes_fails_the_fork_before_registration() {
+    use mkit_server::store::adapter_spi::codec::{AbortReason, ReservationV1};
+    let source = Source::build("source", 6).await;
+    let dest_id = dest(&source, "forked");
+    let mut settle = settlement::admit(&source, &dest_id).await;
+    settle.declared_bytes = 1;
     mkit_server::fork::start(&env(&source), &spec(&source, "forked"), Some(settle))
         .await
         .unwrap();
     let job = run(&source, "forked").await;
-    assert_eq!(job.phase, Phase::Done, "{:?}", job.failure);
+    assert_eq!(job.phase, Phase::Failed);
+    assert_eq!(
+        job.failure.unwrap().error().public_message(),
+        "fork exceeds the bytes admitted; retry"
+    );
     assert!(matches!(
         settlement::outcome(&source, &dest_id).await,
-        mkit_server::store::adapter_spi::codec::ReservationV1::Committed { .. }
+        ReservationV1::Aborted {
+            reason: AbortReason::Unspecified,
+            ..
+        }
     ));
+    assert!(dest_state(&source, &dest_id).await.is_empty());
 }
 
 #[tokio::test]

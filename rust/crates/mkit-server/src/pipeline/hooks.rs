@@ -86,6 +86,31 @@ pub struct AdmissionInput<'a> {
     pub audience: Option<&'a str>,
     /// Selected payment credentials; values never appear in debug output.
     pub credential_headers: &'a [CredentialHeader],
+    /// Set only for a fork: where its bytes come from. Then `declared_bytes`
+    /// and `new_to_repo_bytes` equal [`ForkAdmission::pack_bytes`] (the
+    /// destination is empty, so all of the inherited bytes are new to it), and
+    /// the admitted charge binds the fork as a hard bound.
+    pub fork: Option<ForkAdmission<'a>>,
+}
+
+/// What a fork's admission charge is for (SPEC-SERVER §9.9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ForkAdmission<'a> {
+    /// The repository the fork reads.
+    pub source: &'a crate::repo::RepoId,
+    /// The bytes the charge covers: the summed length of the packs the fork
+    /// inherits, or, when their plan does not fit one slice, the source's
+    /// stored-bytes counter (an upper bound).
+    pub pack_bytes: u64,
+}
+
+impl<'a> ForkAdmission<'a> {
+    /// A fork of `source` charged for `pack_bytes`.
+    #[must_use]
+    pub const fn new(source: &'a crate::repo::RepoId, pack_bytes: u64) -> Self {
+        Self { source, pack_bytes }
+    }
 }
 
 impl core::fmt::Debug for AdmissionInput<'_> {
@@ -143,6 +168,7 @@ impl<'a> AdmissionInput<'a> {
             write_quota: None,
             audience: None,
             credential_headers: &[],
+            fork: None,
         }
     }
 }

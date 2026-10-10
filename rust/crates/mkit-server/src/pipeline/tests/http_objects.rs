@@ -363,9 +363,23 @@ impl<H: HookSet> Fx<H> {
         &self,
         name: &str,
         pack: &[u8],
+        refs: (&str, &str),
+        head: Hash,
+        conditions: (RefWriteCondition, RefWriteCondition),
+    ) -> (AdvanceOutcome, Hash) {
+        self.push_pack_on(name, pack, refs, head, conditions, None)
+    }
+
+    /// [`Self::push_pack`] with its packmap node chained to `prev`, as a
+    /// push on top of an inherited packmap is.
+    fn push_pack_on(
+        &self,
+        name: &str,
+        pack: &[u8],
         (head_ref, packmap_ref): (&str, &str),
         head: Hash,
         conditions: (RefWriteCondition, RefWriteCondition),
+        prev: Option<Hash>,
     ) -> (AdvanceOutcome, Hash) {
         let identity = self.identity(name);
         let pack_id = hash(pack);
@@ -408,7 +422,7 @@ impl<H: HookSet> Fx<H> {
             };
         let mut tickets = vec![upload(pack)];
         let (map_id, map_condition) = if self.pipe.cfg.takedown_denial {
-            let map = mkit_core::transfer::encode_packlist(None, &[pack_id]).unwrap();
+            let map = mkit_core::transfer::encode_packlist(prev, &[pack_id]).unwrap();
             tickets.push(upload(&map));
             let condition = match conditions.1 {
                 Match(old_pack) => Match(hash(
@@ -2509,6 +2523,7 @@ fn held_serving_stop_overrides_warm_reachability_extracted_bytes_and_proofs() {
     );
 }
 
+mod fork_tests;
 mod takedown_denial;
 
 mod object_reader_tests;
