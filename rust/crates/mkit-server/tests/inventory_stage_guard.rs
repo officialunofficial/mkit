@@ -8,6 +8,7 @@ use mkit_core::{
     pack::PackWriter,
     serialize::serialize,
 };
+use mkit_server::takedown::inventory;
 use mkit_server::{
     Clock, Key, ManualClock, MemoryBlobStore, MemoryKv, NamespaceKey, NamespaceStore, RepoId,
     RepoName, StoreError, Value,
@@ -268,6 +269,94 @@ async fn verifies_with(objects: u16, fault: Option<&'static str>, shape: Shape) 
                 )
                 .await;
             assert!(refused.is_err(), "a blocked pack must not publish");
+            // Its staged rows are not an inventory: never sealed, so seal-head
+            // proofs and every traversal refuse it.
+            assert!(inventory::seal(inner.as_ref(), &pack).await.is_err());
+            assert!(
+                inventory::visit(inner.as_ref(), &pack, false, |_, _| async { Ok(false) })
+                    .await
+                    .is_err()
+            );
+            // The block is lifted and the same pack is uploaded again: it
+            // re-stages over the leftover rows and seals one exact inventory.
+            let now = u64::try_from(clock.now_ms()).unwrap();
+            mkit_server::ContentIndex::new(inner.clone())
+                .unblock(&blob(5, 8).0, now)
+                .await
+                .unwrap();
+            // The refused ticket expires and its job is cleaned up first.
+            clock.advance(30 * 24 * 3_600_000);
+            for _ in 0..50 {
+                let now = u64::try_from(clock.now_ms()).unwrap();
+                let report = run_due(
+                    &store,
+                    &source,
+                    &registry,
+                    clock.as_ref(),
+                    now,
+                    &TickBudget::default(),
+                )
+                .await
+                .unwrap();
+                let (job, _) = checkpoint::read_job(inner.as_ref(), &source, &repo.name, &pack)
+                    .await
+                    .unwrap();
+                if job.is_none() {
+                    break;
+                }
+                let next = report.next_wake_ms.unwrap_or(now + 1_000).max(now + 1);
+                clock.set(i64::try_from(next).unwrap());
+            }
+            let again = vec![
+                upload(&pipe, &blobs, &clock, tree_pack(objects - 2, 8).0, 11).await,
+                upload(
+                    &pipe,
+                    &blobs,
+                    &clock,
+                    mkit_core::transfer::encode_packlist(None, &[pack]).unwrap(),
+                    12,
+                )
+                .await,
+            ];
+            let auth = authenticate(&pipe, &clock, mkit_server::Procedure::AdvanceRefs, 13);
+            let _ = pipe
+                .advance_refs_with_tickets(
+                    &auth,
+                    advance("refs/heads/main", head),
+                    advance("refs/mkit/packmap/main", map),
+                    again,
+                )
+                .await;
+            for _ in 0..200 {
+                let now = u64::try_from(clock.now_ms()).unwrap();
+                let report = run_due(
+                    &store,
+                    &source,
+                    &registry,
+                    clock.as_ref(),
+                    now,
+                    &TickBudget::default(),
+                )
+                .await
+                .unwrap();
+                let (job, _) = checkpoint::read_job(inner.as_ref(), &source, &repo.name, &pack)
+                    .await
+                    .unwrap();
+                if job.is_some_and(|(job, _)| job.usable()) {
+                    break;
+                }
+                let next = report.next_wake_ms.unwrap_or(now + 1_000).max(now + 1);
+                clock.set(i64::try_from(next).unwrap());
+            }
+            let count = std::sync::atomic::AtomicU64::new(0);
+            let counted = &count;
+            inventory::visit(inner.as_ref(), &pack, false, |_, _| async move {
+                counted.fetch_add(1, Ordering::SeqCst);
+                Ok(false)
+            })
+            .await
+            .expect("the retried inventory seals and its count and digest verify");
+            assert_eq!(count.load(Ordering::SeqCst), u64::from(objects));
             return;
         }
         if job.phase == Phase::Watch && map_ready {
