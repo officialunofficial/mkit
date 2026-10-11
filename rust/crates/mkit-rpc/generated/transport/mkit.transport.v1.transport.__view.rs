@@ -3710,6 +3710,16 @@ pub struct AdvanceRefsRequestView<'a> {
     ///
     /// Field 10: `delete`
     pub delete: ::core::option::Option<bool>,
+    /// Copy this repository's authoritative published branch pair. When set,
+    /// head_ref is the destination; all other explicit update fields, tickets
+    /// and delete must be absent. Both destination refs use MISSING.
+    ///
+    /// Field 11: `source_ref`
+    pub source_ref: ::core::option::Option<&'a str>,
+    /// Optional source-tip CAS, meaningful only with source_ref (32 bytes).
+    ///
+    /// Field 12: `expected_tip`
+    pub expected_tip: ::core::option::Option<&'a [u8]>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> ::buffa::MessageView<'a> for AdvanceRefsRequestView<'a> {
@@ -3807,6 +3817,20 @@ impl<'a> ::buffa::MessageView<'a> for AdvanceRefsRequestView<'a> {
                 )?;
                 view.delete = Some(::buffa::types::decode_bool(&mut cur)?);
             }
+            11u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                view.source_ref = Some(::buffa::types::borrow_str(&mut cur)?);
+            }
+            12u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                view.expected_tip = Some(::buffa::types::borrow_bytes(&mut cur)?);
+            }
             9u32 => {
                 ::buffa::encoding::check_wire_type(
                     tag,
@@ -3850,6 +3874,8 @@ impl<'a> ::buffa::MessageView<'a> for AdvanceRefsRequestView<'a> {
             packmap_new_id: self.packmap_new_id.map(|b| (b).to_vec()),
             ticket_ids: self.ticket_ids.iter().map(|b| (b).to_vec()).collect(),
             delete: self.delete,
+            source_ref: self.source_ref.map(|s| s.to_string()),
+            expected_tip: self.expected_tip.map(|b| (b).to_vec()),
             __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
             ..::core::default::Default::default()
         })
@@ -3891,6 +3917,12 @@ impl<'a> ::buffa::ViewEncode<'a> for AdvanceRefsRequestView<'a> {
         if self.delete.is_some() {
             size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
         }
+        if let Some(ref v) = self.source_ref {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        if let Some(ref v) = self.expected_tip {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -3931,6 +3963,12 @@ impl<'a> ::buffa::ViewEncode<'a> for AdvanceRefsRequestView<'a> {
         }
         if let Some(v) = self.delete {
             ::buffa::types::put_bool_field(10u32, v, buf);
+        }
+        if let Some(ref v) = self.source_ref {
+            ::buffa::types::put_string_field(11u32, v, buf);
+        }
+        if let Some(ref v) = self.expected_tip {
+            ::buffa::types::put_shared_bytes_field(12u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -3998,6 +4036,13 @@ impl<'__a> ::serde::Serialize for AdvanceRefsRequestView<'__a> {
         }
         if let ::core::option::Option::Some(__v) = self.delete {
             __map.serialize_entry("delete", &__v)?;
+        }
+        if let ::core::option::Option::Some(__v) = self.source_ref {
+            __map.serialize_entry("sourceRef", __v)?;
+        }
+        if let ::core::option::Option::Some(__v) = self.expected_tip {
+            __map
+                .serialize_entry("expectedTip", &::buffa::json_helpers::BytesJson(__v))?;
         }
         __map.end()
     }
@@ -4151,6 +4196,22 @@ impl AdvanceRefsRequestOwnedView {
     #[must_use]
     pub fn delete(&self) -> ::core::option::Option<bool> {
         self.0.reborrow().delete
+    }
+    /// Copy this repository's authoritative published branch pair. When set,
+    /// head_ref is the destination; all other explicit update fields, tickets
+    /// and delete must be absent. Both destination refs use MISSING.
+    ///
+    /// Field 11: `source_ref`
+    #[must_use]
+    pub fn source_ref(&self) -> ::core::option::Option<&'_ str> {
+        self.0.reborrow().source_ref
+    }
+    /// Optional source-tip CAS, meaningful only with source_ref (32 bytes).
+    ///
+    /// Field 12: `expected_tip`
+    #[must_use]
+    pub fn expected_tip(&self) -> ::core::option::Option<&'_ [u8]> {
+        self.0.reborrow().expected_tip
     }
 }
 impl ::core::convert::From<::buffa::OwnedView<AdvanceRefsRequestView<'static>>>

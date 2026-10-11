@@ -259,6 +259,12 @@ message AdvanceRefsRequest {
   repeated bytes ticket_ids = 9;
   // Delete both refs under their CAS preconditions (SPEC-TRANSPORT-CONNECT §7.8).
   bool delete = 10;
+  // Copy this repository's authoritative published branch pair. When set,
+  // head_ref is the destination; all other explicit update fields, tickets
+  // and delete must be absent. Both destination refs use MISSING.
+  string source_ref = 11;
+  // Optional source-tip CAS, meaningful only with source_ref (32 bytes).
+  bytes expected_tip = 12;
 }
 
 message AdvanceRefsResponse {

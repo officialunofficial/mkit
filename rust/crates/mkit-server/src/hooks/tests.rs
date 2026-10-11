@@ -545,6 +545,62 @@ fn a_fork_carries_its_source_and_the_admission_its_charge() {
 }
 
 #[test]
+fn published_source_hook_facts_bind_the_pair_and_declare_no_bytes() {
+    let mut op = update_op();
+    op.kind = OpKind::AdvanceRefs {
+        head: crate::op::RefUpdate {
+            name: "refs/heads/copy".into(),
+            condition: mkit_core::protocol::RefWriteCondition::Missing,
+            new: Some([0x66; 32]),
+        },
+        packmap: crate::op::RefUpdate {
+            name: "refs/mkit/packmap/copy".into(),
+            condition: mkit_core::protocol::RefWriteCondition::Missing,
+            new: Some([0x77; 32]),
+        },
+        tickets: vec![],
+    };
+    let row = crate::store::publication::Publication {
+        sequence: 12,
+        published: 11,
+        boundary: 2,
+        generation: 3,
+        value: crate::store::publication::Pair {
+            head: Some([0x66; 32]),
+            packmap: Some([0x77; 32]),
+        },
+    };
+    op.published_source = Some(crate::op::PublishedRefSource {
+        ref_name: "refs/heads/main".into(),
+        pair: row.value.clone(),
+        generation: row.generation,
+        publication_sequence: row.published,
+        observed: row,
+        expected_tip: None,
+    });
+    let input = AdmissionInput::new(&op);
+    let authorize = map::authorize_request(&op, SERVER_ORIGIN);
+    assert_eq!(
+        value_of(&authorize),
+        golden_value("authorize-published-source.request.json")
+    );
+    let encoded = map::admit_request(&input, SERVER_ORIGIN);
+    let operation = &encoded.operation;
+    assert_eq!(operation.source_ref.as_deref(), Some("refs/heads/main"));
+    assert_eq!(
+        operation.source_head.as_deref(),
+        Some([0x66; 32].as_slice())
+    );
+    assert_eq!(
+        operation.source_packmap.as_deref(),
+        Some([0x77; 32].as_slice())
+    );
+    assert_eq!(operation.source_generation, Some(3));
+    assert_eq!(operation.source_publication_sequence, Some(11));
+    assert_eq!(encoded.declared_bytes, Some(0));
+}
+
+#[test]
 fn encoded_outcomes_equal_the_golden_outcomes() {
     let committed = outcome(
         "demo:upload-20260926-001",

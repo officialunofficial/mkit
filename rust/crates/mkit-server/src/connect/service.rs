@@ -74,6 +74,44 @@ impl<B, N, H> ConnectTransport<B, N, H> {
     }
 }
 
+/// Select the source form, rejecting any mixture with explicit updates.
+fn published_source(
+    m: &mut AdvanceRefsRequest,
+) -> Result<Option<(String, Option<Hash>)>, ServerError> {
+    let source = m.source_ref.take();
+    let expected_tip = m
+        .expected_tip
+        .take()
+        .map(|bytes| {
+            bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| ServerError::invalid_argument("expected_tip must be 32 bytes"))
+        })
+        .transpose()?;
+    if source.is_some() {
+        if m.head_expectation.is_some()
+            || m.head_expected_id.is_some()
+            || m.head_new_id.is_some()
+            || m.packmap_ref.is_some()
+            || m.packmap_expectation.is_some()
+            || m.packmap_expected_id.is_some()
+            || m.packmap_new_id.is_some()
+            || !m.ticket_ids.is_empty()
+            || m.delete.is_some()
+        {
+            return Err(ServerError::invalid_argument(
+                "source_ref cannot be combined with explicit updates, tickets or delete",
+            ));
+        }
+    } else if expected_tip.is_some() {
+        return Err(ServerError::invalid_argument(
+            "expected_tip requires source_ref",
+        ));
+    }
+    Ok(source.map(|source| (source, expected_tip)))
+}
+
 /// A wire `(name, expectation, expected_id, new_id)` as a [`RefUpdate`].
 /// The name is checked by the pipeline.
 fn ref_update(
@@ -436,7 +474,9 @@ where
         request: ServiceRequest<'_, AdvanceRefsRequest>,
     ) -> ServiceResult<AdvanceRefsResponse> {
         let a = authenticated(&ctx)?;
-        let m = request.to_owned_message();
+        let mut m = request.to_owned_message();
+        let source = published_source(&mut m)?;
+        let destination = m.head_ref.clone().unwrap_or_default();
         let delete = m.delete.unwrap_or(false);
         if delete && !m.ticket_ids.is_empty() {
             return Err(ServerError::invalid_argument("delete consumes no tickets").into());
@@ -455,26 +495,38 @@ where
             }
             tickets.push(id);
         }
-        let head = ref_update(
-            m.head_ref,
-            m.head_expectation,
-            m.head_expected_id.as_deref(),
-            m.head_new_id.as_deref(),
-            delete,
-        )?;
-        let packmap = ref_update(
-            m.packmap_ref,
-            m.packmap_expectation,
-            m.packmap_expected_id.as_deref(),
-            m.packmap_new_id.as_deref(),
-            delete,
-        )?;
+        let explicit = if source.is_none() {
+            Some((
+                ref_update(
+                    m.head_ref,
+                    m.head_expectation,
+                    m.head_expected_id.as_deref(),
+                    m.head_new_id.as_deref(),
+                    delete,
+                )?,
+                ref_update(
+                    m.packmap_ref,
+                    m.packmap_expectation,
+                    m.packmap_expected_id.as_deref(),
+                    m.packmap_new_id.as_deref(),
+                    delete,
+                )?,
+            ))
+        } else {
+            None
+        };
         let pipe = self.pipe.arc();
         send_wrap(async move {
             // A conflict is a typed outcome, never an error (§4).
-            let (outcome, meta) = pipe
-                .advance_refs_with_tickets_with_meta(&a, head, packmap, tickets)
-                .await?;
+            let (outcome, meta) = if let Some((source, expected_tip)) = source {
+                pipe.advance_refs_from_published_with_meta(&a, source, destination, expected_tip)
+                    .await?
+            } else {
+                let (head, packmap) =
+                    explicit.ok_or_else(|| ServerError::invalid_argument("missing ref updates"))?;
+                pipe.advance_refs_with_tickets_with_meta(&a, head, packmap, tickets)
+                    .await?
+            };
             let outcome = match outcome {
                 AdvanceOutcome::Committed => WireOutcome::ADVANCE_OUTCOME_COMMITTED,
                 AdvanceOutcome::HeadConflict => WireOutcome::ADVANCE_OUTCOME_HEAD_CONFLICT,

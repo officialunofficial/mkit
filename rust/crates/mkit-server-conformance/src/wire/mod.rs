@@ -194,6 +194,7 @@
 //! | `refs.concurrent_match_one_winner` | | the same for `MATCH` |
 //! | `refs.many_refs_one_repository` | excludes `multi-repo` | 64 refs of one repository are written at once, read back, listed in order and advanced under `MATCH` |
 //! | `advance.committed` | | both refs move |
+//! | `advance.from_published` | `atomic-advance` | copies a published pair, enforces destination absence and source tip CAS, and rejects mixed source/explicit forms |
 //! | `advance.head_conflict_typed` | | `HEAD_CONFLICT` is a response, not an error; head unchanged |
 //! | `advance.packmap_conflict_typed` | | `PACKMAP_CONFLICT`; neither ref moved |
 //! | `advance.atomic_both_untouched` | `atomic-advance` | a head conflict leaves the packmap unchanged too |
@@ -267,6 +268,7 @@
 //! | `tickets.advance_expired_ticket` | `tickets`, `auth-v2`, `test-faults` | an expired ticket fails with its exact error |
 //! | `indexed.pending_verification_unavailable` | `indexed-mode`, `multi-repo`, `tickets`, `auth-v2`, `test-faults` | HTTP 503, `Retry-After: 5`, one golden `PendingVerification` detail, and a successful same-nonce retry without replay |
 //! | `indexed.async_verification_commits` | `indexed-async`, `multi-repo`, `tickets`, `auth-v2`, `test-faults` | a push of three 16 MiB windows answers `PendingVerification` until its scheduled slices finish (the Worker fails one mid-pack slice on purpose), then the same signed advance commits |
+//! | `indexed.from_published` | `indexed-mode`, `atomic-advance`, `multi-repo`, `tickets`, `auth-v2` | creates a branch from a verified published pair without uploading bytes and safely replays the same signed request |
 //! | `launch.indexed_verification_commits` | `indexed-async`, `multi-repo`, `tickets`, `auth-v2`; excludes `test-faults` | production-only >33 MiB ticketed push answers pending, then commits and publishes both refs with exact public pack bytes; the HTTP opt-in checks a 128 KiB extracted Blob, filename media policy and unsupported Worker proofs |
 //! | `launch.takedown_nine_mib_publish` | `indexed-async`, `multi-repo`, `tickets`, `auth-v2`; excludes `test-faults` | ticketed canonical MKPL and more than 9 MiB of reachable Blob payload publish both paired refs with takedown on; report pending polls and whole-push wall time |
 //! | `launch.takedown_chunked_publish` | `indexed-async`, `multi-repo`, `tickets`, `auth-v2`; excludes `test-faults` | valid 32-chunk file and canonical MKPL publish both paired refs with takedown on; report pending polls and whole-push wall time |

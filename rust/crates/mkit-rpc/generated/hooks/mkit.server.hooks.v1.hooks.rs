@@ -1457,6 +1457,47 @@ pub struct Operation {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
     )]
     pub fork: ::buffa::MessageField<ForkOperation, ::buffa::Inline<ForkOperation>>,
+    /// Captured source facts for same-repository published-pair branch creation.
+    ///
+    /// Field 10: `source_ref`
+    #[serde(
+        rename = "sourceRef",
+        alias = "source_ref",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub source_ref: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Field 11: `source_head`
+    #[serde(
+        rename = "sourceHead",
+        alias = "source_head",
+        with = "::buffa::json_helpers::opt_bytes",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub source_head: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
+    /// Field 12: `source_packmap`
+    #[serde(
+        rename = "sourcePackmap",
+        alias = "source_packmap",
+        with = "::buffa::json_helpers::opt_bytes",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub source_packmap: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
+    /// Field 13: `source_generation`
+    #[serde(
+        rename = "sourceGeneration",
+        alias = "source_generation",
+        with = "::buffa::json_helpers::opt_uint64",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub source_generation: ::core::option::Option<u64>,
+    /// Field 14: `source_publication_sequence`
+    #[serde(
+        rename = "sourcePublicationSequence",
+        alias = "source_publication_sequence",
+        with = "::buffa::json_helpers::opt_uint64",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub source_publication_sequence: ::core::option::Option<u64>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -1473,6 +1514,11 @@ impl ::core::fmt::Debug for Operation {
             .field("owner", &self.owner)
             .field("grant", &self.grant)
             .field("fork", &self.fork)
+            .field("source_ref", &self.source_ref)
+            .field("source_head", &self.source_head)
+            .field("source_packmap", &self.source_packmap)
+            .field("source_generation", &self.source_generation)
+            .field("source_publication_sequence", &self.source_publication_sequence)
             .finish()
     }
 }
@@ -1529,6 +1575,50 @@ impl Operation {
     ///Sets [`Self::owner`] to `Some(value)`, consuming and returning `self`.
     pub fn with_owner(mut self, value: bool) -> Self {
         self.owner = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::source_ref`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_source_ref(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.source_ref = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::source_head`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_source_head(
+        mut self,
+        value: impl Into<::buffa::alloc::vec::Vec<u8>>,
+    ) -> Self {
+        self.source_head = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::source_packmap`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_source_packmap(
+        mut self,
+        value: impl Into<::buffa::alloc::vec::Vec<u8>>,
+    ) -> Self {
+        self.source_packmap = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::source_generation`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_source_generation(mut self, value: u64) -> Self {
+        self.source_generation = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::source_publication_sequence`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_source_publication_sequence(mut self, value: u64) -> Self {
+        self.source_publication_sequence = Some(value);
         self
     }
 }
@@ -1599,6 +1689,21 @@ impl ::buffa::Message for Operation {
                 += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
                     + inner_size as u64;
         }
+        if let Some(ref v) = self.source_ref {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        if let Some(ref v) = self.source_head {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
+        if let Some(ref v) = self.source_packmap {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
+        if let Some(v) = self.source_generation {
+            size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+        }
+        if let Some(v) = self.source_publication_sequence {
+            size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -1655,6 +1760,21 @@ impl ::buffa::Message for Operation {
                 buf,
             );
             self.fork.write_to(__cache, buf);
+        }
+        if let Some(ref v) = self.source_ref {
+            ::buffa::types::put_string_field(10u32, v, buf);
+        }
+        if let Some(ref v) = self.source_head {
+            ::buffa::types::put_shared_bytes_field(11u32, v, buf);
+        }
+        if let Some(ref v) = self.source_packmap {
+            ::buffa::types::put_shared_bytes_field(12u32, v, buf);
+        }
+        if let Some(v) = self.source_generation {
+            ::buffa::types::put_uint64_field(13u32, v, buf);
+        }
+        if let Some(v) = self.source_publication_sequence {
+            ::buffa::types::put_uint64_field(14u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -1771,6 +1891,58 @@ impl ::buffa::Message for Operation {
                     ctx,
                 )?;
             }
+            10u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self
+                        .source_ref
+                        .get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            11u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_bytes(
+                    self.source_head.get_or_insert_with(::buffa::alloc::vec::Vec::new),
+                    buf,
+                )?;
+            }
+            12u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_bytes(
+                    self
+                        .source_packmap
+                        .get_or_insert_with(::buffa::alloc::vec::Vec::new),
+                    buf,
+                )?;
+            }
+            13u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.source_generation = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint64(buf)?,
+                );
+            }
+            14u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.source_publication_sequence = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint64(buf)?,
+                );
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -1788,6 +1960,11 @@ impl ::buffa::Message for Operation {
         self.owner = ::core::option::Option::None;
         self.grant = ::buffa::MessageField::none();
         self.fork = ::buffa::MessageField::none();
+        self.source_ref = ::core::option::Option::None;
+        self.source_head = ::core::option::Option::None;
+        self.source_packmap = ::core::option::Option::None;
+        self.source_generation = ::core::option::Option::None;
+        self.source_publication_sequence = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }

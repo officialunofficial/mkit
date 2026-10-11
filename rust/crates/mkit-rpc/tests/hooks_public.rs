@@ -48,8 +48,8 @@ fn decode_every_golden_request() {
         count += 1;
     }
     // SPEC-SERVER §20 includes visibility and repository-storage outcomes and
-    // the two fork requests.
-    assert_eq!(count, 20);
+    // the two fork requests and the published-source authorization request.
+    assert_eq!(count, 21);
 }
 fn header(name: &str, value: &str) -> Header {
     Header {

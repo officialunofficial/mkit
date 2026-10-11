@@ -476,6 +476,23 @@ pub struct Creation {
     pub repo: bool,
 }
 
+/// The authoritative published source of a ticketless branch creation.
+/// Captured by the pipeline; hooks may inspect these facts but cannot select them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PublishedRefSource {
+    /// Source branch in the operation's repository.
+    pub ref_name: String,
+    /// Published head and packmap, read together.
+    pub pair: crate::store::publication::Pair,
+    /// Source membership incarnation.
+    pub generation: u64,
+    /// Source's published prefix, which supplied the pair.
+    pub publication_sequence: u64,
+    pub(crate) observed: crate::store::publication::Publication,
+    pub(crate) expected_tip: Option<Hash>,
+}
+
 /// A decoded request, ready for policy and storage.
 ///
 /// Non-exhaustive: build it with [`Operation::new`].
@@ -492,6 +509,8 @@ pub struct Operation {
     pub write_grant: Option<crate::Redacted>,
     /// What the request does.
     pub kind: OpKind,
+    /// Set only when an `AdvanceRefs` creates a branch from a published pair.
+    pub published_source: Option<PublishedRefSource>,
     /// Epoch leased for this D34 write; `None` under Single.
     pub leased_epoch: Option<u64>,
     /// Epoch observed in the Single-sharding read-ahead; `Some(0)` for an absent `e` key.
@@ -521,6 +540,7 @@ impl Operation {
             auth,
             write_grant: None,
             kind,
+            published_source: None,
             leased_epoch: None,
             observed_epoch: None,
             business_now_ms: None,

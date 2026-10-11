@@ -370,6 +370,28 @@ A server whose ref state is sharded per branch (§7.9) MAY require `packmap_ref`
 `refs/mkit/packmap/<x>` when `head_ref` is `refs/heads/<x>` (SPEC-REFS §2), and answer any other pairing with
 `invalid_argument`; every mkit client already sends that pairing.
 
+### 4.1 Create a branch from a published source
+
+The additive `AdvanceRefsRequest.source_ref = 11` form selects a published
+source branch in the same repository. `head_ref = 1` names the destination
+branch; the server derives its matching packmap ref and applies `MISSING`
+to both. `expected_tip = 12` optionally contains a 32-byte published-head
+CAS. All explicit update fields except `head_ref` MUST be absent.
+`ticket_ids` MUST be empty, and `delete` MUST be absent, including an
+explicit `false`. The server MUST reject a mixed form or
+`expected_tip` without `source_ref` with `invalid_argument`.
+
+This form requires atomic metadata; a server without it MUST return
+`failed_precondition`. It reads one authoritative published pair and
+retains ordinary ticketless advance conflict outcomes, replay, admission,
+quota, receipt and outcome semantics. SPEC-SERVER §9.3 specifies uniform
+source absence, optional expected-tip errors and the fence before each
+destination apply. A source move after that fence may precede the
+destination commit; success still copies exactly the captured pair.
+No upload, membership addition or stored-byte charge is introduced.
+The immediate path copies the source's coverage as it stands; configured
+publication verification still checks the destination (SPEC-SERVER §10.2).
+
 ---
 
 ## 5. Error taxonomy &mdash; `TransportError` to Connect code

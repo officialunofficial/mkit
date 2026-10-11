@@ -337,6 +337,7 @@ cases! {
     "tickets.advance_expired_ticket" => tickets::advance_expired_ticket, M1, [Tickets, AuthV2, TestFaults], [];
     "indexed.pending_verification_unavailable" => indexed::pending_verification_unavailable, M4, [IndexedMode, MultiRepo, Tickets, AuthV2, TestFaults], [];
     "indexed.async_verification_commits" => indexed::async_verification_commits, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2, TestFaults], [];
+    "indexed.from_published" => indexed::from_published, M4, [IndexedMode, AtomicAdvance, MultiRepo, Tickets, AuthV2], [];
     "launch.takedown_nine_mib_publish" => indexed::takedown_nine_mib_publish, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2], [TestFaults];
     "launch.takedown_chunked_publish" => indexed::takedown_chunked_publish, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2], [TestFaults];
     "launch.indexed_verification_commits" => indexed::launch_verification_commits, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2], [TestFaults];
@@ -392,6 +393,7 @@ cases! {
     "refs.concurrent_match_one_winner" => concurrent::match_one_winner, M0, [], [];
     "refs.many_refs_one_repository" => concurrent::many_refs, M1, [], [MultiRepo];
     "advance.committed" => advance::committed, M0, [], [];
+    "advance.from_published" => advance::from_published, M0, [AtomicAdvance], [];
     "advance.head_conflict_typed" => advance::head_conflict_typed, M0, [], [];
     "advance.packmap_conflict_typed" => advance::packmap_conflict_typed, M0, [], [];
     "advance.atomic_both_untouched" => advance::atomic_both_untouched, M0, [AtomicAdvance], [];
