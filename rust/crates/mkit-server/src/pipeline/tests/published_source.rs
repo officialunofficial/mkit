@@ -396,6 +396,68 @@ fn published_source_keeps_configured_coverage_denial_policy_and_quota_checks() {
     assert_eq!(w.pair(&branch("copy")), (None, None));
 }
 
+struct RecordSourceRead(Arc<AtomicBool>);
+impl Authorizer for RecordSourceRead {
+    async fn authorize(&self, op: &Operation) -> Result<AuthzFacts, ServerError> {
+        if matches!(op.kind, OpKind::ReadRef { .. }) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+        Ok(AuthzFacts::default())
+    }
+}
+
+#[test]
+fn published_source_bounds_names_before_authorization() {
+    let w = World::new(Path::Immediate);
+    history(&w);
+    let a = auth(&w);
+    let read = Arc::new(AtomicBool::new(false));
+    let defaults = Hooks::new();
+    let hooks = Hooks {
+        authorizer: RecordSourceRead(read.clone()),
+        admission: defaults.admission,
+        pre_receive: defaults.pre_receive,
+        receipts: defaults.receipts,
+        outcomes: defaults.outcomes,
+    };
+    let pipe = Pipeline::new(
+        w.env.pipe.blobs,
+        w.env.pipe.meta,
+        hooks,
+        w.env.pipe.cfg,
+        w.env.clock,
+        w.env.metrics,
+    )
+    .unwrap();
+    for source in [
+        String::new(),
+        "refs/tags/tag".into(),
+        "refs/heads/bad\0name".into(),
+        format!("refs/heads/{}", "x".repeat(1 << 20)),
+    ] {
+        let error =
+            block_on(pipe.advance_refs_from_published(&a, source, "refs/heads/copy".into(), None))
+                .unwrap_err();
+        assert_eq!(
+            (error.code(), error.public_message()),
+            (Code::NotFound, "source not found")
+        );
+        assert!(!read.load(Ordering::SeqCst));
+    }
+    let error = block_on(pipe.advance_refs_from_published(
+        &a,
+        "refs/heads/absent".into(),
+        "refs/heads/copy".into(),
+        None,
+    ))
+    .unwrap_err();
+    assert_eq!(
+        (error.code(), error.public_message()),
+        (Code::NotFound, "source not found")
+    );
+    assert!(read.load(Ordering::SeqCst));
+}
+
 struct RevokeRead(Arc<AtomicBool>);
 impl Authorizer for RevokeRead {
     async fn authorize(&self, op: &Operation) -> Result<AuthzFacts, ServerError> {

@@ -84,6 +84,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         expected_tip: Option<Hash>,
         meta: &S,
     ) -> Result<PublishedRefSource, ServerError> {
+        // Bound hook input before constructing the read operation.
+        if !source_ref.starts_with("refs/heads/") || !crate::refs::validate_ref_name(source_ref) {
+            return Err(crate::fork::ForkError::NotFound.error());
+        }
         let mut read = op.clone();
         read.kind = OpKind::ReadRef {
             name: source_ref.to_owned(),
