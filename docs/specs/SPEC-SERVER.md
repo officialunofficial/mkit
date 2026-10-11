@@ -4793,6 +4793,7 @@ client-visible error contract.
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | Document scoped heavy extraction regression scheduling in §20; no runtime, wire, or conformance requirement change. |
 | 1 | draft | Server-side fork (§9.9): a durable, resumable job that gives an empty destination the published membership of one source branch (packmap chain, listed packs and external-base packs), the cleared set and the flagged packmap head that bound later publication walks, and admission bound to the job. Additive: witness boundary flag (`m`/`pm` value of 20 bytes), `fj` and `fo` rows, timer kind 16, `Procedure::Fork`; the embedder-facing `ForkRequest` with its canonical signed body, `Pipeline::fork_repo`, the source-read and destination-write authorization, a hard-bound admission charge, and additive hook fields (`Operation.fork`, `AdmitRequest.fork`). No Connect wire change; no stored-row version change. |
 | 1 | draft | Authority-generation setter and getter without a namespace record under `any`; authority-mode registration and the refusal of unregistered writes (§6.2.2); the `ag` guard on the fenced namespace-creation batch; one-batch replacement of a stale-generation upload ticket (§6.2.1). No wire change; no stored row changes. |
 | 1 | draft | Opt-in authority-owned namespace grammar and trust model (§6.2.2), wildcard generation-key scopes, refused owner statements, and hook writer authority for owner-view operations. Default self-certifying deployments retain their behavior. |
@@ -4832,6 +4833,15 @@ client-visible error contract.
 | 1 | draft | Initial M3 pipeline, durable outcome and remote-hook contract; M5 sections reserved. Admission credential headers (§6.3); indexed mode (§9). HTTP read reservations and procedure strings (WP-4.11), amended with `read_reconcile_grace = 60 s` default and `ReadServed` priority within grace (fix round 1). |
 
 ## 20. Test anchors
+
+Informative: the heavy native indexed extraction regressions retain their
+full fixtures and assertions in default and unchained CI runs. Exact-name
+[nextest overrides](../../rust/.config/nextest.toml) serialize the 64 MiB
+multipart threshold, compressed read-window, multipart lost-reply, and
+fifty-delta cold-slice tests with a 300-second test ceiling. The
+[contributor guide](../../CONTRIBUTING.md#scoped-slow-tests) explains the scope.
+These test allowances do not change server runtime limits or conformance
+requirements.
 
 The fixtures under `rust/tests/golden/server-hooks/` are the authoritative
 pinned bytes, as [SPEC-CONVENTIONS §5](SPEC-CONVENTIONS.md#5-golden-vectors-and-conformance-tests)
