@@ -152,7 +152,8 @@ pub(super) async fn backpressure_hook_down(ctx: Ctx) -> CaseResult {
     .await?;
     let (_, reply) = paid(&ctx, "main", Rpc::AdvanceRefs, &ticketed).await?;
     super::want_outcome(
-        crate::wire::client::decode_unary(&reply)?,
+        crate::wire::client::decode_unary::<mkit_transport_connect::generated::AdvanceRefsResponse>(&reply)?
+            .map(|response| response.outcome.map_or(0, |outcome| outcome.to_i32())),
         mkit_transport_connect::generated::AdvanceOutcome::ADVANCE_OUTCOME_COMMITTED,
     )?;
     ensure!(

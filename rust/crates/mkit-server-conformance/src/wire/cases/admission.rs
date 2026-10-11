@@ -192,7 +192,8 @@ pub(super) async fn helper_flow_commit(ctx: Ctx) -> CaseResult {
     let signed = signed.with_header("Authorization", credential(&challenge)?);
     let reply = post(&ctx, &signed).await?;
     want_outcome(
-        decode_unary(&reply)?,
+        decode_unary::<mkit_transport_connect::generated::AdvanceRefsResponse>(&reply)?
+            .map(|response| response.outcome.map_or(0, |outcome| outcome.to_i32())),
         mkit_transport_connect::generated::AdvanceOutcome::ADVANCE_OUTCOME_COMMITTED,
     )?;
     ensure!(
@@ -229,9 +230,9 @@ pub(super) async fn helper_flow_commit(ctx: Ctx) -> CaseResult {
         "pack charged twice"
     );
     let count = calls(&ctx).await?;
-    let replay = post(&ctx, &signed).await?;
+    let repeated = post(&ctx, &signed).await?;
     ensure!(
-        replay.status == 200 && replay.body == reply.body,
+        repeated.status == 200 && repeated.body == reply.body,
         "advance replay differs"
     );
     ensure!(calls(&ctx).await? == count, "advance replay reached Admit");
