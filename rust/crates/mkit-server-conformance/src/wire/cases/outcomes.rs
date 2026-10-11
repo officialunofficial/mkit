@@ -144,12 +144,17 @@ pub(super) async fn backpressure_hook_down(ctx: Ctx) -> CaseResult {
     ctx.expect_ref(&ctx.head("ticketed"), None).await?;
     ctx.expect_ref(&ctx.packmap("ticketed"), None).await?;
     mode(&ctx, "normal", "normal").await?;
-    wait_new(
+    let drained = wait_new(
         &ctx,
         &before,
-        usize::try_from(cap).map_err(|_| "cap too large")? + 1,
+        usize::try_from(cap).map_err(|_| "cap too large")? + 2,
     )
     .await?;
+    ensure!(
+        drained.iter().any(|row| row["kind"] == "expired"),
+        "backlog retry must settle the expired blocked ticket"
+    );
+    let (ticketed, _) = super::admission::prepare_ticket(&ctx, "recovered-ticket").await?;
     let (_, reply) = paid(&ctx, "main", Rpc::AdvanceRefs, &ticketed).await?;
     super::want_outcome(
         crate::wire::client::decode_unary::<mkit_transport_connect::generated::AdvanceRefsResponse>(&reply)?
@@ -160,11 +165,11 @@ pub(super) async fn backpressure_hook_down(ctx: Ctx) -> CaseResult {
         wait_new(
             &ctx,
             &before,
-            usize::try_from(cap).map_err(|_| "cap too large")? + 3
+            usize::try_from(cap).map_err(|_| "cap too large")? + 4
         )
         .await?
         .len()
-            == usize::try_from(cap).map_err(|_| "cap too large")? + 3,
+            == usize::try_from(cap).map_err(|_| "cap too large")? + 4,
         "backlog reservation count"
     );
     let (_, reply) = paid(
@@ -178,7 +183,7 @@ pub(super) async fn backpressure_hook_down(ctx: Ctx) -> CaseResult {
     wait_new(
         &ctx,
         &before,
-        usize::try_from(cap).map_err(|_| "cap too large")? + 4,
+        usize::try_from(cap).map_err(|_| "cap too large")? + 5,
     )
     .await?;
     Ok(())
