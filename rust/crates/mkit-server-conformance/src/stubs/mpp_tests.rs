@@ -65,7 +65,7 @@ fn every_fingerprint_field_is_bound() {
             _ => changed.resolved_ref_updates.push(proto::ResolvedRefUpdate {
                 name: Some("refs/heads/main".into()),
                 new: Some(vec![1; 32]),
-                effect: Some(proto::RefEffect::REF_EFFECT_CREATE),
+                effect: Some(proto::RefEffect::REF_EFFECT_CREATE.into()),
                 ..Default::default()
             }),
         }
