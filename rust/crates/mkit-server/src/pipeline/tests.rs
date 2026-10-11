@@ -110,7 +110,7 @@ fn try_planned_ticket_publication(
     bound: clearance::PreparedAt,
     count_storage: bool,
 ) -> Result<Batch, ServerError> {
-    try_planned_ticket_publication_admitted(count, d34, retained, bound, count_storage, false)
+    try_planned_ticket_publication_admitted(count, d34, retained, bound, count_storage, None)
 }
 
 #[allow(clippy::too_many_lines)] // The same maximal snapshot also admits a ref reservation.
@@ -120,9 +120,11 @@ fn try_planned_ticket_publication_admitted(
     retained: bool,
     bound: clearance::PreparedAt,
     count_storage: bool,
-    admitted: bool,
+    reservation_id: Option<&str>,
 ) -> Result<Batch, ServerError> {
     use crate::store::codec::{ReservationV1, TicketV1};
+    let admitted = reservation_id.is_some();
+    let reservation_id = reservation_id.unwrap_or("ref-only");
     let repo = RepoId {
         namespace: NamespaceKey::deployment_default(),
         name: repo_name(),
@@ -183,8 +185,8 @@ fn try_planned_ticket_publication_admitted(
         procedure: codec::StoredProcedure::AdvanceRefs,
     });
     let pending = reservation::PendingGuard {
-        rid: "ref-only".into(),
-        key: keys::reservation("ref-only").unwrap(),
+        rid: reservation_id.into(),
+        key: keys::reservation(reservation_id).unwrap(),
         value: pending_value,
         apply_deadline_ms: ms(T0) + 10_000,
         repository: REPO.into(),
@@ -378,7 +380,7 @@ fn maximal_ticket_publication_with_ref_admission_stays_within_existing_batch_bou
             true,
             ZERO_ROW,
             true,
-            true,
+            Some("ref-only"),
         )
         .unwrap();
         assert_eq!(batch.preconditions.len() + batch.writes.len(), expected);

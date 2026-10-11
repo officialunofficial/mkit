@@ -687,7 +687,7 @@ fn outcome_delivery_settles_committed_create_aborted_create_and_committed_delete
             (OutcomeKind::Aborted { .. }, RefEffect::Create) => {}
             _ => panic!("unexpected settlement"),
         }
-        assert_eq!(count, if i == 2 { 0 } else { 1 });
+        assert_eq!(count, i32::from(i != 2));
     }
 }
 
