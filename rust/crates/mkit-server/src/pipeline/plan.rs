@@ -959,6 +959,10 @@ fn decide_refs(
         let key = keys::ref_key(req.repo, &update.name);
         let current = snap.get(&key).map(codec::decode_ref_id).transpose();
         let current = current.map_err(corrupt)?;
+        let resolved = req
+            .resolved_ref_updates
+            .iter()
+            .find(|resolved| resolved.name == update.name);
         if let Some(requirement) = req
             .grant
             .as_ref()
@@ -975,20 +979,22 @@ fn decide_refs(
                         "write grant rejected: ref scope",
                     ));
                 }
-                pre.push(if required {
-                    Precondition::Present(key.clone())
-                } else {
-                    Precondition::Absent(key.clone())
-                });
+                // Custom admission supplies a presence guard for Any; CAS
+                // success/conflict guards the observed row otherwise. Both
+                // fence this same scope check without a duplicate batch op.
+                // Preserve the default's original guard shape.
+                if resolved.is_none() {
+                    pre.push(if required {
+                        Precondition::Present(key.clone())
+                    } else {
+                        Precondition::Absent(key.clone())
+                    });
+                }
             }
         }
         match evaluate_condition(current.as_ref(), &update.condition) {
             CasDecision::Committed => {
-                if let Some(resolved) = req
-                    .resolved_ref_updates
-                    .iter()
-                    .find(|resolved| resolved.name == update.name)
-                {
+                if let Some(resolved) = resolved {
                     if resolved.new != update.new || resolved.prior_present() != current.is_some() {
                         return Err(ServerError::aborted_retryable(
                             "ref changed after admission; retry",

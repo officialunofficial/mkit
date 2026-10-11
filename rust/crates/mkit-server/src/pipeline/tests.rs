@@ -210,7 +210,8 @@ fn try_planned_ticket_publication_admitted(
         grant: Some(crate::op::GrantRef {
             id: [9; 32],
             epoch: u64::from(d34),
-            presence_requirement: None,
+            presence_requirement: admitted
+                .then(|| crate::op::PresenceRequirement::Absent(HEAD.into())),
         }),
         lease: d34.then_some(lease::LeaseWrite {
             value: codec::EpochLease {
@@ -382,6 +383,16 @@ fn maximal_ticket_publication_with_ref_admission_stays_within_existing_batch_bou
         .unwrap();
         assert_eq!(batch.preconditions.len() + batch.writes.len(), expected);
         batch.validate(&StoreCapabilities::full()).unwrap();
+        let head = keys::ref_key(&repo_name(), HEAD);
+        assert_eq!(
+            batch
+                .preconditions
+                .iter()
+                .filter(|guard| matches!(guard, Precondition::Absent(key) if *key == head))
+                .count(),
+            1,
+            "the applying guard fences both ref admission and grant scope",
+        );
         assert_eq!(
             batch.writes.iter().filter(|write| matches!(write,
                 Write::Put(key, value) if *key == keys::reservation("ref-only").unwrap()

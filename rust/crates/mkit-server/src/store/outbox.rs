@@ -31,7 +31,8 @@ use super::{
 /// row: 97 ops for seven tickets with a retained obligation.
 /// A separate ref admission reservation adds three ops (guard, terminal row,
 /// pending-outcome index): 98 on D34 and 100 on Single with storage counting
-/// and a retained obligation. Custom quota charges must fit the same bound.
+/// and a retained obligation. Its ref guard also fences a grant's presence
+/// requirement on that ref. Custom quota charges must fit the same bound.
 ///
 /// The same constant caps an implicit transport-identity session's pending
 /// packs (WP-1.15 B9): a D34 packmap write consuming all seven — one
