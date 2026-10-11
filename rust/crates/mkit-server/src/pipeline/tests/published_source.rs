@@ -2,6 +2,173 @@
 use super::*;
 use crate::store::publication::{Pair, Publication};
 
+struct PairAdmission {
+    seen: Mutex<Vec<(u64, Vec<ResolvedRefUpdate>)>>,
+    refusal: Option<AdmissionDecision>,
+}
+impl Admission for PairAdmission {
+    async fn admit(&self, input: &AdmissionInput<'_>) -> Result<AdmissionDecision, ServerError> {
+        assert_eq!(input.op.procedure(), Procedure::AdvanceRefs);
+        assert!(input.op.published_source.is_some());
+        let mut seen = self.seen.lock().unwrap();
+        let rid = format!("pair-copy-{}", seen.len());
+        seen.push((input.declared_bytes, input.resolved_ref_updates.clone()));
+        Ok(self
+            .refusal
+            .clone()
+            .unwrap_or_else(|| AdmissionDecision::allow(Vec::new()).with_reservation(rid)))
+    }
+}
+
+fn admitted_pipe(
+    w: World,
+    refusal: Option<AdmissionDecision>,
+) -> Pipeline<MemoryBlobStore, Spy, Hooks<OpenAuthorizer, PairAdmission>> {
+    Pipeline::new(
+        w.env.pipe.blobs,
+        w.env.pipe.meta,
+        with_admission(PairAdmission {
+            seen: Mutex::new(Vec::new()),
+            refusal,
+        }),
+        w.env.pipe.cfg,
+        w.env.clock,
+        w.env.metrics,
+    )
+    .unwrap()
+}
+
+fn expected_copy_effects(pair: &Pair) -> Vec<ResolvedRefUpdate> {
+    vec![
+        ResolvedRefUpdate {
+            name: "refs/mkit/packmap/copy".into(),
+            new: pair.packmap,
+            effect: RefEffect::Create,
+        },
+        ResolvedRefUpdate {
+            name: "refs/heads/copy".into(),
+            new: pair.head,
+            effect: RefEffect::Create,
+        },
+    ]
+}
+
+#[test]
+fn published_source_admits_exact_create_effects_and_settles_commit_and_conflict() {
+    let w = World::new(Path::Immediate);
+    history(&w);
+    let pair = published(&w, HEAD).value;
+    let first = auth(&w);
+    let second = auth(&w);
+    let repo = w.repo.clone();
+    let pipe = admitted_pipe(w, None);
+    for (a, expected) in [
+        (&first, AdvanceOutcome::Committed),
+        (&second, AdvanceOutcome::PackmapConflict),
+    ] {
+        assert_eq!(
+            block_on(pipe.advance_refs_from_published(
+                a,
+                HEAD.into(),
+                "refs/heads/copy".into(),
+                pair.head,
+            ))
+            .unwrap(),
+            expected
+        );
+    }
+    assert_eq!(
+        *pipe.hooks.admission.seen.lock().unwrap(),
+        vec![(0, expected_copy_effects(&pair)); 2]
+    );
+    let partition = pipe.shards.ref_shard(&repo, "refs/heads/copy");
+    assert_eq!(
+        block_on(crate::store::publication::read(
+            &pipe.meta,
+            &partition,
+            &repo.name,
+            "refs/heads/copy",
+        ))
+        .unwrap()
+        .value,
+        pair
+    );
+    let reservation = |rid| {
+        codec::decode_reservation(
+            &block_on(pipe.meta.get(&partition, &keys::reservation(rid).unwrap()))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    assert!(matches!(
+        reservation("pair-copy-0"),
+        codec::ReservationV1::Committed { .. }
+    ));
+    assert!(matches!(
+        reservation("pair-copy-1"),
+        codec::ReservationV1::Aborted {
+            reason: codec::AbortReason::RefConflict,
+            ..
+        }
+    ));
+    assert!(pipe.meta.batches.lock().unwrap().iter().any(|batch| {
+        ["refs/heads/copy", "refs/mkit/packmap/copy"].iter().all(|name| batch.writes.iter().any(|write| matches!(write, Write::Put(key, _) if *key == keys::ref_key(&repo.name, name))))
+            && batch.writes.iter().any(|write| matches!(write, Write::Put(key, value) if *key == keys::reservation("pair-copy-0").unwrap() && matches!(codec::decode_reservation(value), Ok(codec::ReservationV1::Committed { .. }))))
+    }));
+}
+
+#[test]
+fn published_source_refusal_and_challenge_leave_both_destinations_absent() {
+    for refusal in [
+        AdmissionDecision::Deny(ServerError::permission_denied("ref cap")),
+        AdmissionDecision::challenge(
+            vec![Challenge {
+                scheme: "mpp".into(),
+                value: "ref-slot".into(),
+            }],
+            "ref slot required",
+        ),
+    ] {
+        let w = World::new(Path::Immediate);
+        history(&w);
+        let pair = published(&w, HEAD).value;
+        let a = auth(&w);
+        let repo = w.repo.clone();
+        let pipe = admitted_pipe(w, Some(refusal));
+        let before_batches = pipe.meta.batches.lock().unwrap().len();
+        let error = block_on(pipe.advance_refs_from_published(
+            &a,
+            HEAD.into(),
+            "refs/heads/copy".into(),
+            pair.head,
+        ))
+        .unwrap_err();
+        assert_eq!(error.code(), Code::PermissionDenied);
+        assert_eq!(pipe.meta.batches.lock().unwrap().len(), before_batches);
+        assert_eq!(
+            *pipe.hooks.admission.seen.lock().unwrap(),
+            vec![(0, expected_copy_effects(&pair))]
+        );
+        for name in ["refs/heads/copy", "refs/mkit/packmap/copy"] {
+            let partition = pipe.shards.ref_shard(&repo, name);
+            assert!(
+                block_on(pipe.meta.get(&partition, &keys::ref_key(&repo.name, name)))
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                block_on(
+                    pipe.meta
+                        .get(&partition, &keys::reservation("pair-copy-0").unwrap())
+                )
+                .unwrap()
+                .is_none()
+            );
+        }
+    }
+}
+
 fn auth(w: &World) -> Authenticated {
     w.env
         .auth(&signed(

@@ -749,7 +749,8 @@ removes a present ref, and `NO_CHANGE` deletes an already absent ref. The
 server MUST fence each admitted effect in the same batch that applies it.
 The public deletion API still requires `MATCH`; deleting an absent ref there
 conflicts. `NO_CHANGE` represents the planner's absent-deletion case without
-widening that request validation.
+widening that request validation. Published-pair branch creation supplies both
+destination refs as `CREATE`, with the captured head and packmap targets.
 `MISSING` and `MATCH` bind presence through their CAS conditions; an update
 whose CAS fails does not commit the advertised effect. For `ANY`, the
 server observes presence before Admission and MUST retain that observation

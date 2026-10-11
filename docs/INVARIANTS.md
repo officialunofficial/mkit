@@ -10,7 +10,7 @@ distinguishes current enforcement from future integration.
 ## Custom ref admission fences the committed presence delta
 
 **Always:** a configured custom Admission sees every ref write's resolved
-effect before mutation, including ticketed advances and implicit pack
+effect before mutation, including ticketed advances, published-pair creation, and implicit pack
 consumption. CAS conditions bind conditional writes. Unconditional writes
 carry the same presence observation across retries and guard it in the applying
 batch; a changed presence aborts the write. Deleting an absent ref is

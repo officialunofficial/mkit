@@ -37,7 +37,9 @@ collect the applicable entries between their old and new immutable pins.
   Successful applies fence these effects in their ref batch: conditional
   writes use CAS; unconditional writes retain the pre-admission presence
   through retries and abort if it changes. Present-to-present target changes
-  remain allowed. Fork creates membership without refs and reports no effects.
+  remain allowed. Creating from a published pair reports both destination refs
+  as `Create`, with their captured targets. Fork creates membership without
+  refs and reports no effects.
   The remote-hook schema adds `AdmitRequest.resolved_ref_updates` (field 9).
   Migration: configured custom Admission now runs on ticketed `AdvanceRefs`
   and implicit consuming `UpdateRef`, with zero declared bytes and no pack.
