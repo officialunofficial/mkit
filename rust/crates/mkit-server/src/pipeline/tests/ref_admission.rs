@@ -274,7 +274,7 @@ impl Admission for CapOne {
         assert_eq!(input.resolved_ref_updates.len(), 1);
         assert_eq!(input.resolved_ref_updates[0].effect, RefEffect::Create);
         if self.0.swap(true, Ordering::SeqCst) {
-            return Ok(AdmissionDecision::Deny(ServerError::resource_exhausted(
+            return Ok(AdmissionDecision::Deny(ServerError::permission_denied(
                 "ref cap",
             )));
         }
@@ -297,8 +297,9 @@ fn concurrent_different_ref_creates_reserve_only_one_slot() {
     let two = upd("refs/heads/two", Missing, B);
     let a = env.auth(&Req::update(&key(7), 1, &one, T0)).unwrap();
     let b = env.auth(&Req::update(&key(7), 2, &two, T0)).unwrap();
-    let (one_result, two_result) =
-        now(async { futures::join!(env.pipe.update_ref(&a, one), env.pipe.update_ref(&b, two)) });
+    let (one_result, two_result) = block_on(async {
+        futures::join!(env.pipe.update_ref(&a, one), env.pipe.update_ref(&b, two))
+    });
     let results = [one_result, two_result];
     assert_eq!(
         results
@@ -312,7 +313,7 @@ fn concurrent_different_ref_creates_reserve_only_one_slot() {
             .iter()
             .filter(|r| r
                 .as_ref()
-                .is_err_and(|e| e.code() == Code::ResourceExhausted))
+                .is_err_and(|e| e.code() == Code::PermissionDenied))
             .count(),
         1
     );
