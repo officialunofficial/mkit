@@ -376,6 +376,19 @@ collect the applicable entries between their old and new immutable pins.
   calls (639 s to 25 s modeled); 3,000 files from 63,450 to 1,438. Stored
   formats are unchanged (wipe: no); jobs written earlier keep their smaller
   cap.
+- Scheduled verification of small packs finishes in roughly half the time at
+  50 ms per storage call. The Extract phase runs its selection steps
+  (scan, closure, dependencies, members, head, select, choose) back to back in
+  one slice and one guarded commit, bounded by 16 steps, 64 remaining remote
+  calls, a commit batch within the apply limit, and 2 s of slice time; effect
+  stages (upload, completion, holder enqueue, delivery) still end their slice.
+  A step that fails after earlier steps in the slice keeps those steps and
+  reruns first in the next slice, so every verification outcome, error and
+  persisted state is unchanged. The relay-delivery wait polls after 300 ms and
+  then every second instead of every two seconds (the relay's wake nudge is
+  unchanged). `SliceLimits::extract_chain_steps` (default 16; 1 restores one
+  step per slice) and `with_extract_chain_steps` are new. No stored-format
+  change: wipe not required.
 - Fewer sequential storage rounds per read, with no change to results, limits,
   guards. Backend R2 calls drop; KV calls and ledger charges drop only by the removed publish-time block read (one per proof-expanding decoded object; a nine-file show with sizes goes from 72 to 69 KV calls, with fewer for a no-sizes show and a six-file show). A rare failure path, where the pack prefix exceeds the decode budget before the frame read, can now send and charge the frame read. The Workers R2 adapter serves a bounded blob range with
   one ranged GET instead of a HEAD followed by a GET (a missing object is still
@@ -511,6 +524,9 @@ collect the applicable entries between their old and new immutable pins.
 
 ### CI
 
+- The indexed verification suite runs a second time with one Extract step per
+  slice (`MKIT_TEST_EXTRACT_CHAIN=1`), so every outcome assertion holds both
+  chained and unchained.
 - Hosted Linux gates run the isolated pure-Rust scheduled decoder heap bound.
   Workers CI builds the locked embedding wasm fixture, checks both patched launch
   graphs, runs wasm decoder regressions, and requires paid indexed publication,
@@ -523,6 +539,11 @@ collect the applicable entries between their old and new immutable pins.
   generated messages with `..Default::default()`; keep the new fields absent
   for existing calls, or select the source form described above. No store
   reset is required.
+
+- [embedder: breaking API] `SliceLimits` gains `extract_chain_steps` (default
+  16). Migration: add `extract_chain_steps: SliceLimits::default().extract_chain_steps`
+  to struct literals, or construct with `SliceLimits::default()` and the
+  `with_extract_chain_steps` setter. No stored-format change; wipe: no.
 
 - [embedder: breaking API] [embedder: stored-format change] A completed fork
   flags the membership witness of the packmap head it inherits.

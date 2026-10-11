@@ -27,6 +27,19 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 # can render failure annotations inline on PR diffs.
 path = "junit.xml"
 
+# The 3,000-object scheduled latency comparison drives over 9,000 modeled
+# alarm slices in its one-step baseline. Keep the full regression in both
+# profiles with a ceiling that covers the measured ~235 s debug run.
+[[profile.default.overrides]]
+filter = 'package(mkit-server) and test(=chained_extract_steps_do_not_slow_large_packs_at_50ms)'
+threads-required = "num-test-threads"
+slow-timeout = { period = "600s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = 'package(mkit-server) and test(=chained_extract_steps_do_not_slow_large_packs_at_50ms)'
+threads-required = "num-test-threads"
+slow-timeout = { period = "600s", terminate-after = 1 }
+
 # The bounded PR run of the stateful suite (tests/state_machine.rs, 32 cases)
 # is ~12s locally, but it spawns the `mkit` binary per op, so a slow/loaded
 # (especially macOS) runner could drift toward the default 60s / ci 120s kill

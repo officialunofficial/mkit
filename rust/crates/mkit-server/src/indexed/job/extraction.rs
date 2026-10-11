@@ -1113,23 +1113,189 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
                 return Ok(1_000);
             }
         }
-        let result = match x.stage {
-            SCAN => self.scan_group(st, &mut x).await,
-            CLOSURE | DEPENDENCIES => self.closure_rows(st, &mut x).await,
-            MEMBERS => self.closure_members(&mut x).await,
-            HEAD => self.closure_head(st, &mut x, job).await,
-            SELECT => self.select_group(st, &mut x).await,
-            CHOOSE => self.choose_object(&mut x, job).await,
-            PREFLIGHT | UPLOAD => self.walk_source(st, job, &mut x).await,
-            START => self.start_object(job, &mut x).await,
-            COMPLETE => self.complete_object(job, &mut x).await,
-            OFFSETS => self.offsets(job, &mut x).await,
-            ENQUEUE => self.enqueue_holder(st, job, &mut x).await,
-            DELIVERY => self.delivery(st, job, &mut x).await,
-            _ => return Err(corrupt()),
-        };
+        // The first step is the unchained step: its result, error included,
+        // is returned exactly as before.
+        let started = now_ms(self.h.clock.as_ref());
+        let mut result = self.stage(st, job, &mut x).await;
+        let mut steps = 1;
+        // Selection steps only read, write deterministic rows guarded by this
+        // job, or queue guarded settled writes: they run back to back inside
+        // the slice's one guarded commit. Effect stages never chain.
+        while result.is_ok()
+            && job.phase == Phase::Extract
+            && may_chain(
+                self.h.limits.extract_chain_steps,
+                steps,
+                x.stage,
+                self.budget.remaining(),
+                st.guards.len() + st.settled.len(),
+                now_ms(self.h.clock.as_ref()).saturating_sub(started),
+            )
+        {
+            let before = (x.clone(), job.phase, job.outcome);
+            let (guards, settled) = (st.guards.len(), st.settled.len());
+            let next = self.stage(st, job, &mut x).await;
+            steps += 1;
+            if next.is_err() {
+                // Keep the steps already taken. The failed step reruns first
+                // in the next slice, which reports its error unchanged.
+                (x, job.phase, job.outcome) = before;
+                st.guards.truncate(guards);
+                st.settled.truncate(settled);
+                break;
+            }
+            // A step that left its cursor in place has progress that is
+            // durable only at the commit (a paged member lookup): stop.
+            let stalled = x == before.0;
+            result = next;
+            if stalled {
+                break;
+            }
+        }
         job.extraction = Some(x);
         result?;
         Ok(0)
+    }
+
+    async fn stage(
+        &self,
+        st: &mut SliceState,
+        job: &mut VerifyJobV1,
+        x: &mut ExtractionV1,
+    ) -> Result<(), Stop> {
+        match x.stage {
+            SCAN => self.scan_group(st, x).await,
+            CLOSURE | DEPENDENCIES => self.closure_rows(st, x).await,
+            MEMBERS => self.closure_members(x).await,
+            HEAD => self.closure_head(st, x, job).await,
+            SELECT => self.select_group(st, x).await,
+            CHOOSE => self.choose_object(x, job).await,
+            PREFLIGHT | UPLOAD => self.walk_source(st, job, x).await,
+            START => self.start_object(job, x).await,
+            COMPLETE => self.complete_object(job, x).await,
+            OFFSETS => self.offsets(job, x).await,
+            ENQUEUE => self.enqueue_holder(st, job, x).await,
+            DELIVERY => self.delivery(st, job, x).await,
+            _ => Err(corrupt()),
+        }
+    }
+}
+
+/// Remote calls that must remain before another selection step starts.
+const CHAIN_MIN_CALLS: u32 = super::ENTRY_RESERVE;
+// Worker clocks freeze during synchronous CPU work. This independent step
+// ceiling bounds the work even when the elapsed-time check cannot advance.
+const CHAIN_MAX_STEPS: u32 = 16;
+/// Guards plus settled writes a chained slice may carry, after the next step.
+/// The commit adds at most five more (deadline, job, state, header, body), so
+/// the batch stays within `MAX_BATCH_OPS` (100).
+const CHAIN_MAX_OPS: usize = 80;
+/// Business-clock milliseconds one chained slice may run.
+const CHAIN_MAX_MS: u64 = 2_000;
+
+/// Whether another selection step may run in this slice: below the step cap,
+/// a chainable stage, enough remote calls left, the commit batch within the
+/// apply limit after the step, and under the slice's time cap.
+fn may_chain(
+    step_cap: u32,
+    steps: u32,
+    stage: u8,
+    remaining_calls: u32,
+    ops: usize,
+    elapsed_ms: u64,
+) -> bool {
+    steps < step_cap.min(CHAIN_MAX_STEPS)
+        && chains(stage)
+        && remaining_calls >= CHAIN_MIN_CALLS
+        && ops + step_ops(stage) <= CHAIN_MAX_OPS
+        && elapsed_ms < CHAIN_MAX_MS
+}
+
+/// Only selection stages without external effects chain; every stage with a durable
+/// external effect (upload, completion, holders, delivery) ends the slice.
+fn chains(stage: u8) -> bool {
+    matches!(
+        stage,
+        SCAN | CLOSURE | DEPENDENCIES | MEMBERS | HEAD | SELECT | CHOOSE
+    )
+}
+/// Most guards plus settled writes one step of `stage` adds. A head
+/// reconstruction deletes up to one part of member-byte fragments.
+fn step_ops(stage: u8) -> usize {
+    if stage == HEAD { 70 } else { 4 }
+}
+
+// A chained slice's one commit stays within the apply limits: the cap, the
+// widest single step (a head reconstruction) and the five fixed operations.
+const _: () = assert!(CHAIN_MAX_OPS + 5 <= crate::store::MAX_BATCH_OPS);
+
+#[cfg(test)]
+mod chain_bounds {
+    use super::*;
+
+    #[test]
+    fn every_bound_holds_at_its_boundary() {
+        let ok =
+            |steps, stage, calls, ops, ms| may_chain(CHAIN_MAX_STEPS, steps, stage, calls, ops, ms);
+        assert!(ok(1, SCAN, CHAIN_MIN_CALLS, 0, 0));
+        // Step cap: the last allowed step is the one that makes `cap`.
+        assert!(ok(CHAIN_MAX_STEPS - 1, SCAN, CHAIN_MIN_CALLS, 0, 0));
+        assert!(!ok(CHAIN_MAX_STEPS, SCAN, CHAIN_MIN_CALLS, 0, 0));
+        // A caller cannot raise the cap, even with a frozen Worker clock.
+        assert!(!may_chain(
+            u32::MAX,
+            CHAIN_MAX_STEPS,
+            SCAN,
+            CHAIN_MIN_CALLS,
+            0,
+            0
+        ));
+        assert!(!may_chain(1, 1, SCAN, CHAIN_MIN_CALLS, 0, 0));
+        // Remote calls left.
+        assert!(!ok(1, SCAN, CHAIN_MIN_CALLS - 1, 0, 0));
+        // Guards plus settled writes, after the step's worst case.
+        assert!(ok(
+            1,
+            SCAN,
+            CHAIN_MIN_CALLS,
+            CHAIN_MAX_OPS - step_ops(SCAN),
+            0
+        ));
+        assert!(!ok(
+            1,
+            SCAN,
+            CHAIN_MIN_CALLS,
+            CHAIN_MAX_OPS - step_ops(SCAN) + 1,
+            0
+        ));
+        assert!(ok(
+            1,
+            HEAD,
+            CHAIN_MIN_CALLS,
+            CHAIN_MAX_OPS - step_ops(HEAD),
+            0
+        ));
+        assert!(!ok(
+            1,
+            HEAD,
+            CHAIN_MIN_CALLS,
+            CHAIN_MAX_OPS - step_ops(HEAD) + 1,
+            0
+        ));
+        // Time.
+        assert!(ok(1, SCAN, CHAIN_MIN_CALLS, 0, CHAIN_MAX_MS - 1));
+        assert!(!ok(1, SCAN, CHAIN_MIN_CALLS, 0, CHAIN_MAX_MS));
+        // Effect stages never chain, at any budget.
+        for stage in [
+            PREFLIGHT, START, UPLOAD, COMPLETE, OFFSETS, ENQUEUE, DELIVERY,
+        ] {
+            assert!(!ok(1, stage, u32::MAX, 0, 0), "stage {stage} chained");
+        }
+        for stage in [SCAN, CLOSURE, DEPENDENCIES, MEMBERS, HEAD, SELECT, CHOOSE] {
+            assert!(
+                ok(1, stage, CHAIN_MIN_CALLS, 0, 0),
+                "stage {stage} must chain"
+            );
+        }
     }
 }
