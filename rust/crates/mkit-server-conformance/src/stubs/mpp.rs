@@ -265,23 +265,24 @@ impl Logic {
             ..Default::default()
         }
     }
+    fn credential_denial() -> Reply {
+        json(&AdmitResponse {
+            decision: Some(Decision::Deny(
+                proto::Deny {
+                    code: Some("permission_denied".into()),
+                    message: Some("stub credential refused".into()),
+                    ..Default::default()
+                }
+                .into(),
+            )),
+            ..Default::default()
+        })
+    }
     fn admit(&self, req: AdmitRequest, state: &mut State) -> Reply {
         if state.admit == Mode::Down {
             return Reply::status(503);
         }
-        let deny = || {
-            json(&AdmitResponse {
-                decision: Some(Decision::Deny(
-                    proto::Deny {
-                        code: Some("permission_denied".into()),
-                        message: Some("stub credential refused".into()),
-                        ..Default::default()
-                    }
-                    .into(),
-                )),
-                ..Default::default()
-            })
-        };
+        let deny = Self::credential_denial;
         if state.admit == Mode::Deny {
             return deny();
         }
