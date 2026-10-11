@@ -205,6 +205,37 @@ message AdmitRequest {
   repeated Header credential_headers = 7;
   // Present only for a fork: what its charge is for; SPEC-SERVER §9.9.
   ForkAdmission fork = 8;
+  // Ref effects admitted for the guarded apply, in operation ref order.
+  // Empty when this operation applies no refs; SPEC-SERVER §6.3.
+  repeated ResolvedRefUpdate resolved_ref_updates = 9;
+}
+
+// A ref's effect on successful apply, fenced by that apply's guards.
+// Unconditional updates retain the admitted presence across retries; if the
+// effect changes, the advance aborts rather than applying an unadmitted effect.
+message ResolvedRefUpdate {
+  // Full ref name.
+  string name = 1;
+  // New raw 32-byte target; empty when delete is true.
+  bytes new = 2;
+  // True when the request deletes the ref, including an absent deletion.
+  bool delete = 3;
+  // The actual effect of a successful guarded apply.
+  RefEffect effect = 4;
+}
+
+// Presence effects used by admission to reserve and settle ref slots.
+enum RefEffect {
+  // Invalid for emitted resolved updates.
+  REF_EFFECT_UNSPECIFIED = 0;
+  // An absent ref becomes present.
+  REF_EFFECT_CREATE = 1;
+  // A present ref receives a target, even when the target is unchanged.
+  REF_EFFECT_REPLACE = 2;
+  // A present ref is removed.
+  REF_EFFECT_DELETE = 3;
+  // Deleting an absent ref leaves it absent.
+  REF_EFFECT_NO_CHANGE = 4;
 }
 
 // The inherited bytes a fork is charged for: the summed length of the packs

@@ -165,6 +165,8 @@ pub(crate) struct WriteRequest<'a> {
     /// Ref writes in decision order: `[update]`, or `[packmap, head]`, so a
     /// packmap conflict takes precedence (`refstore.rs` parity).
     pub(crate) refs: &'a [RefUpdate],
+    /// Immutable effects seen by custom admission, retained across replans.
+    pub(crate) resolved_ref_updates: &'a [super::ResolvedRefUpdate],
     /// D34 index routing for a ref write; absent on Single and non-ref writes.
     pub(crate) ref_index: Option<(&'a RepoId, &'a Partition, &'a dyn ShardMap)>,
     /// The replay record to commit, for signed writes.
@@ -982,7 +984,29 @@ fn decide_refs(
         }
         match evaluate_condition(current.as_ref(), &update.condition) {
             CasDecision::Committed => {
-                // `Any` commits whatever the ref holds: nothing to guard.
+                if let Some(resolved) = req
+                    .resolved_ref_updates
+                    .iter()
+                    .find(|resolved| resolved.name == update.name)
+                {
+                    if resolved.new != update.new || resolved.prior_present() != current.is_some() {
+                        return Err(ServerError::aborted_retryable(
+                            "ref changed after admission; retry",
+                        )
+                        .with_abort_cause(AbortCause::RefConflict));
+                    }
+                    // Presence, not the target, is the unconditional admission
+                    // fence. Retain it even when a later policy adds exact CAS.
+                    if update.condition == RefWriteCondition::Any {
+                        pre.push(if resolved.prior_present() {
+                            Precondition::Present(key.clone())
+                        } else {
+                            Precondition::Absent(key.clone())
+                        });
+                    }
+                }
+                // Conditional requests guard the exact target. The built-in
+                // default's `Any` path retains its unguarded overwrite.
                 if update.condition != RefWriteCondition::Any {
                     pre.push(guard(key.clone(), snap));
                 }

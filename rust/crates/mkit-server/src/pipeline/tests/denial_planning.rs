@@ -106,6 +106,7 @@ fn run_proved_ticket(
             WriteKind::UpdateRef
         },
         refs: &refs,
+        resolved_ref_updates: &[],
         ref_index: None,
         replay: None,
         charges: &[],

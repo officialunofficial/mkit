@@ -49,6 +49,7 @@ pub(crate) fn read_pending(
 pub(crate) fn abort_reason(err: &ServerError) -> (AbortReason, String) {
     let message = err.public_message();
     match err.abort_cause() {
+        Some(AbortCause::RefConflict) => return (AbortReason::RefConflict, String::new()),
         Some(AbortCause::EpochMismatch) => return (AbortReason::EpochMismatch, String::new()),
         Some(AbortCause::ReplayRace) => return (AbortReason::ReplayRace, String::new()),
         Some(AbortCause::QuotaWindow) => return (AbortReason::Unspecified, message.to_owned()),

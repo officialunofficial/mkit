@@ -115,6 +115,7 @@ fn inspection_pair_budget_includes_dependency_visibility_before_hooks() {
             repo: &repo.name,
             kind: WriteKind::UpdateRef,
             refs: &refs,
+            resolved_ref_updates: &[],
             ref_index: None,
             replay: None,
             charges: &[],

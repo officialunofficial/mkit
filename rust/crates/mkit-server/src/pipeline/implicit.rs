@@ -1,7 +1,9 @@
 //! Implicit session tickets (WP-1.15, B9/B10): packs an ssh or enc
 //! session uploaded and verified earn repository membership when the
 //! session's next packmap `UpdateRef` consumes them, without upload
-//! tickets, admission or outcome rows.
+//! tickets. Custom admission covers the ref effects with zero bytes and
+//! settles its separate reservation in the consuming batch. The default
+//! keeps its existing admission-free consumption path.
 //!
 //! The write itself stays an ordinary [`OpKind::UpdateRef`]: hooks see no
 //! new operation kind, and the session's pending set arrives out of band.

@@ -135,24 +135,35 @@ pub(super) async fn backpressure_hook_down(ctx: Ctx) -> CaseResult {
         calls(&ctx).await? == count,
         "committed replay reached Admit"
     );
-    super::want_outcome(
-        ctx.advance(&ticketed).await?,
-        mkit_transport_connect::generated::AdvanceOutcome::ADVANCE_OUTCOME_COMMITTED,
-    )?;
+    let advance = sign_unary(&ctx.v2_signer("main")?, Rpc::AdvanceRefs, &ticketed, |_| {});
+    want_error(&post(&ctx, &advance).await?, 503, "unavailable")?;
     ensure!(
         calls(&ctx).await? == count,
-        "ticketed advance reached Admit"
+        "backpressured ticketed advance reached Admit"
     );
+    ctx.expect_ref(&ctx.head("ticketed"), None).await?;
+    ctx.expect_ref(&ctx.packmap("ticketed"), None).await?;
     mode(&ctx, "normal", "normal").await?;
+    wait_new(
+        &ctx,
+        &before,
+        usize::try_from(cap).map_err(|_| "cap too large")? + 1,
+    )
+    .await?;
+    let (_, reply) = paid(&ctx, "main", Rpc::AdvanceRefs, &ticketed).await?;
+    super::want_outcome(
+        crate::wire::client::decode_unary(&reply)?,
+        mkit_transport_connect::generated::AdvanceOutcome::ADVANCE_OUTCOME_COMMITTED,
+    )?;
     ensure!(
         wait_new(
             &ctx,
             &before,
-            usize::try_from(cap).map_err(|_| "cap too large")? + 2
+            usize::try_from(cap).map_err(|_| "cap too large")? + 3
         )
         .await?
         .len()
-            == usize::try_from(cap).map_err(|_| "cap too large")? + 2,
+            == usize::try_from(cap).map_err(|_| "cap too large")? + 3,
         "backlog reservation count"
     );
     let (_, reply) = paid(
@@ -166,7 +177,7 @@ pub(super) async fn backpressure_hook_down(ctx: Ctx) -> CaseResult {
     wait_new(
         &ctx,
         &before,
-        usize::try_from(cap).map_err(|_| "cap too large")? + 3,
+        usize::try_from(cap).map_err(|_| "cap too large")? + 4,
     )
     .await?;
     Ok(())

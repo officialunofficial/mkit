@@ -47,7 +47,7 @@ fn every_fingerprint_field_is_bound() {
     let logic = logic();
     let mut request = req();
     credential(&logic, &mut request);
-    for field in 0..6 {
+    for field in 0..7 {
         let mut changed = request.clone();
         match field {
             0 => {
@@ -61,7 +61,13 @@ fn every_fingerprint_field_is_bound() {
                     proto::Principal::default().into();
             }
             4 => changed.pack_id = Some(vec![10; 32]),
-            _ => changed.declared_bytes = Some(101),
+            5 => changed.declared_bytes = Some(101),
+            _ => changed.resolved_ref_updates.push(proto::ResolvedRefUpdate {
+                name: Some("refs/heads/main".into()),
+                new: Some(vec![1; 32]),
+                effect: Some(proto::RefEffect::REF_EFFECT_CREATE),
+                ..Default::default()
+            }),
         }
         assert!(matches!(
             result(&logic.admit(changed, &mut State::default())).decision,
@@ -123,6 +129,7 @@ fn bearer_challenge_and_ledger_terminal_arbiter() {
         ..Default::default()
     };
     let mut state = State::default();
+    state.admitted.insert("stub:1".into(), (0, vec![]));
     assert_eq!(Logic::outcome(request.clone(), &mut state).status, 200);
     assert_eq!(Logic::outcome(request, &mut state).status, 200);
     let changed = proto::Outcome {

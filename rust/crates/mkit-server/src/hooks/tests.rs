@@ -24,7 +24,7 @@ use crate::error::{Code, Redacted, ServerError};
 use crate::op::{AuthzFacts, Commitment, GrantRef, OpKind, Operation, RefUpdate, VerifiedAuth};
 use crate::pipeline::{
     Admission, AdmissionDecision, AdmissionInput, Authorizer, CredentialHeader, Outcome,
-    OutcomeKind, OutcomeSink,
+    OutcomeKind, OutcomeSink, RefEffect, ResolvedRefUpdate,
 };
 use crate::principal::Principal;
 use crate::repo::{NamespaceKey, RepoId, RepoName};
@@ -493,6 +493,63 @@ fn encoded_requests_equal_the_golden_requests() {
         golden_value("admit-first-attempt.request.json")
     );
     assert!(first == decode::<pb::AdmitRequest>("admit-first-attempt.request.json"));
+}
+
+#[test]
+fn resolved_ref_effects_preserve_request_conditions_in_hook_goldens() {
+    for (name, head, packmap, effects) in [
+        (
+            "admit-ref-writes.request.json",
+            RefUpdate {
+                name: "refs/heads/main".into(),
+                condition: RefWriteCondition::Missing,
+                new: Some([0x33; 32]),
+            },
+            RefUpdate {
+                name: "refs/packmaps/main".into(),
+                condition: RefWriteCondition::Match([0x22; 32]),
+                new: Some([0x44; 32]),
+            },
+            [RefEffect::Create, RefEffect::Replace],
+        ),
+        (
+            "admit-ref-deletions.request.json",
+            RefUpdate {
+                name: "refs/heads/main".into(),
+                condition: RefWriteCondition::Any,
+                new: None,
+            },
+            RefUpdate {
+                name: "refs/packmaps/main".into(),
+                condition: RefWriteCondition::Missing,
+                new: None,
+            },
+            [RefEffect::Delete, RefEffect::NoChange],
+        ),
+    ] {
+        let resolved_ref_updates = [&head, &packmap]
+            .into_iter()
+            .zip(effects)
+            .map(|(update, effect)| ResolvedRefUpdate {
+                name: update.name.clone(),
+                new: update.new,
+                effect,
+            })
+            .collect();
+        let op = granted_op(
+            OpKind::AdvanceRefs {
+                head,
+                packmap,
+                tickets: Vec::new(),
+            },
+            "a2",
+        );
+        let mut input = AdmissionInput::new(&op);
+        input.resolved_ref_updates = resolved_ref_updates;
+        let request = map::admit_request(&input, SERVER_ORIGIN);
+        assert_eq!(value_of(&request), golden_value(name), "{name}");
+        assert_eq!(request, decode::<pb::AdmitRequest>(name), "{name}");
+    }
 }
 
 fn fork_op() -> Operation {

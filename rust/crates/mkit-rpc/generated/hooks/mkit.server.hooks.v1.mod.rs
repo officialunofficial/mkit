@@ -40,6 +40,7 @@ pub mod __buffa {
         reg.register_json_any(super::__AUTHORIZE_ALLOW_JSON_ANY);
         reg.register_json_any(super::__DENY_JSON_ANY);
         reg.register_json_any(super::__ADMIT_REQUEST_JSON_ANY);
+        reg.register_json_any(super::__RESOLVED_REF_UPDATE_JSON_ANY);
         reg.register_json_any(super::__FORK_ADMISSION_JSON_ANY);
         reg.register_json_any(super::__ADMIT_RESPONSE_JSON_ANY);
         reg.register_json_any(super::__ADMIT_ALLOW_JSON_ANY);

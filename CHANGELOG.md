@@ -30,6 +30,29 @@ collect the applicable entries between their old and new immutable pins.
   fields 10–14. Existing operation hook bytes are unchanged. These APIs and
   wire fields are additive; no stored-format change or store reset is required.
 
+- Ref admission exposes additive `AdmissionInput::resolved_ref_updates` and
+  `pipeline::{ResolvedRefUpdate, RefEffect}`. Each ref has its name, new target
+  or deletion, and `Create`, `Replace`, `Delete`, or `NoChange` (deletion of an
+  absent ref). Original request CAS conditions remain in `Operation`.
+  Successful applies fence these effects in their ref batch: conditional
+  writes use CAS; unconditional writes retain the pre-admission presence
+  through retries and abort if it changes. Present-to-present target changes
+  remain allowed. Fork creates membership without refs and reports no effects.
+  The remote-hook schema adds `AdmitRequest.resolved_ref_updates` (field 9).
+  Migration: configured custom Admission now runs on ticketed `AdvanceRefs`
+  and implicit consuming `UpdateRef`, with zero declared bytes and no pack.
+  Reserve ref effects separately from upload bytes, retain them by reservation
+  id, and settle once from the outcome with that id; pack outcomes also name
+  refs and must not settle a ref reservation again. The ref reservation commits
+  atomically with the advance and pack outcomes, or aborts on conflict/failure.
+  These paths add one awaited hook call and, when reserved, pending-row and
+  settlement storage work. Custom ref admission precedes mutating inline
+  verification, whose failures settle the reservation within the existing
+  apply deadline. Scheduled readiness polling remains admission-free until
+  verification is ready. Default Admission calls, quota accounting, and
+  unconditional semantics are unchanged. API and hook additions require no
+  stored-format change or store reset.
+
 - Server-side repository fork engine (`mkit_server::fork`, SPEC-SERVER §9.9): a
   crash-safe job that gives an empty destination the published membership of one
   source branch without a ref. It copies the packmap chain, the packs it lists

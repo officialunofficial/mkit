@@ -45,6 +45,10 @@ pub struct Settings {
 /// complete protobuf outcome, not merely the same terminal kind.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Delivery {
+    /// Declared bytes for this reservation, excluding every other reservation.
+    pub declared_bytes: u64,
+    /// Ref effects carried by the admitted request; contains no credentials.
+    pub resolved_ref_updates: Vec<proto::ResolvedRefUpdate>,
     /// One distinct terminal kind.
     pub kind: String,
     /// BLAKE3 of the canonical protobuf outcome (no credentials).
@@ -67,6 +71,7 @@ struct State {
     bearer: bool,
     spent: HashSet<String>,
     reservations: u64,
+    admitted: BTreeMap<String, (u64, Vec<proto::ResolvedRefUpdate>)>,
     calls: BTreeMap<String, u64>,
     outcomes: BTreeMap<String, Delivery>,
     gate: Option<Arc<tokio::sync::Semaphore>>,
@@ -194,6 +199,7 @@ impl Logic {
             operation: op.into(),
             pack_id: req.pack_id.clone(),
             declared_bytes: req.declared_bytes,
+            resolved_ref_updates: req.resolved_ref_updates.clone(),
             ..Default::default()
         };
         let mut mac =
@@ -327,6 +333,13 @@ impl Logic {
         }
         state.reservations += 1;
         let rid = format!("stub:{}", state.reservations);
+        state.admitted.insert(
+            rid.clone(),
+            (
+                req.declared_bytes.unwrap_or_default(),
+                req.resolved_ref_updates,
+            ),
+        );
         let receipt = B64.encode(
             serde_json::to_vec(
                 &serde_json::json!({"challengeId":id,"reference":rid,"status":"success"}),
@@ -374,10 +387,17 @@ impl Logic {
             _ => return Reply::status(400),
         };
         let digest = mkit_core::hash::to_hex(&mkit_core::hash::hash(&outcome.encode_to_vec()));
+        let Some((declared_bytes, resolved_ref_updates)) = state.admitted.get(id) else {
+            return Reply::status(400);
+        };
+        let declared_bytes = *declared_bytes;
+        let resolved_ref_updates = resolved_ref_updates.clone();
         let d = state
             .outcomes
             .entry(id.clone())
             .or_insert_with(|| Delivery {
+                declared_bytes,
+                resolved_ref_updates,
                 kind: kind.into(),
                 digest: digest.clone(),
                 reason,

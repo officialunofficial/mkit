@@ -151,9 +151,11 @@ they do not reproduce its lifecycle table.
 - For an `AdvanceRefs` that consumes tickets, the head, packmap,
   membership additions, and one `Committed` outcome per consumed ticket
   MUST commit in one atomic unit in the target ref's shard, as STC §7.7
-  requires.
+  requires. A configured non-default Admission also admits the ref effects
+  with zero bytes. Its separate reservation, when granted, MUST settle in
+  that same unit, with zero byte totals. Pack reservations remain independent.
 - For a directly admitted unary write, meaning `UpdateRef` including
-  deletion or `AdvanceRefs` consuming no ticket, when admission grants
+  deletion and implicit pack consumption, or any `AdvanceRefs`, when admission grants
   a reservation the ref write and its
   `Committed` outcome MUST commit in one atomic unit. The successful
   apply replaces its pending reservation with that outcome.
@@ -191,8 +193,10 @@ they do not reproduce its lifecycle table.
 - An `Aborted` outcome MUST be written in a separate atomic unit after
   a failed apply, as STC §7.7 requires. That unit replaces the pending
   reservation with `Aborted` when a pending reservation exists.
-- An `AdvanceRefs` typed conflict consumes no ticket and records no
+- An `AdvanceRefs` typed conflict consumes no ticket and records no ticket
   outcome; its tickets remain usable until expiry, as STC §7.7 requires.
+  It MUST settle a separately granted ref reservation as `Aborted` with
+  `REF_CONFLICT`, in the guarded conflict batch.
 - A pack becomes a repository member only at the `AdvanceRefs` apply
   that consumes its ticket, as STC §7.7 requires.
 
@@ -731,10 +735,51 @@ admission-specific fields:
 | `new_to_repo_bytes` | Bytes new to this repository: zero when the upload's pack is already counted for the repository (§6.5.1), else its declared size; absent for an operation that adds no pack and when no admission hook is installed. A pre-admission observation: racing writes MAY both see the pack as new, and the committed counter (§6.5.1) is the authoritative value. |
 | `credential_headers` | Admission credential request headers under the forwarding rules below; empty on a first attempt without credentials. |
 | `fork` | Present only for a fork (§9.9): the source repository and the bytes the charge covers. Then `declared_bytes` and `new_to_repo_bytes` equal that count. |
+| `resolved_ref_updates` | The effects a successful ref apply commits: each full name, new target or deletion, and `CREATE`, `REPLACE`, `DELETE`, or `NO_CHANGE`. Empty for operations without ref writes, including fork, and for the built-in default Admission. |
 
 Creation signals and admission input are supplied as STC §5.1 requires.
 In particular, `new_to_repo_bytes` does not mean bytes new to the whole
 store. Presence MUST preserve the distinction between unknown and zero.
+
+**Resolved ref effects.** The original request conditions remain in
+`operation.refs`. `resolved_ref_updates` describes each working update in
+planner order (packmap before head for an advance). `CREATE` adds an absent
+ref, `REPLACE` sets a present ref (including the same target), `DELETE`
+removes a present ref, and `NO_CHANGE` deletes an already absent ref. The
+server MUST fence each admitted effect in the same batch that applies it.
+The public deletion API still requires `MATCH`; deleting an absent ref there
+conflicts. `NO_CHANGE` represents the planner's absent-deletion case without
+widening that request validation.
+`MISSING` and `MATCH` bind presence through their CAS conditions; an update
+whose CAS fails does not commit the advertised effect. For `ANY`, the
+server observes presence before Admission and MUST retain that observation
+through every planning retry. It guards presence, not the previous target.
+Present-to-present target changes are permitted; a presence change MUST
+abort the write and settle its granted ref reservation as `Aborted`, rather
+than commit an effect Admission did not see. This fence does not detect an
+absent-to-present-to-absent or present-to-absent-to-present cycle; the
+successful batch still guarantees the admitted presence delta.
+
+A configured non-default Admission MUST run for ticketed `AdvanceRefs` and
+implicit consuming `UpdateRef`. Their ref admission has `declared_bytes = 0`,
+no `pack_id`, and no `new_to_repo_bytes`; uploads retain their own byte
+admission. A refusal or challenge MUST leave refs, tickets, membership, quota,
+replay, and inline verification state unchanged. Custom ref Admission runs
+after ticket binding and read-only scheduled readiness checks, but before
+mutating inline verification. A pending scheduled answer runs no ref Admission
+and allocates no ref reservation. A granted inline reservation uses the existing
+apply deadline; a failed or late proof MUST abort it. The built-in default keeps its existing skipped
+paths and quota accounting, and adds no presence fence or operation charge.
+Replay and existing-ticket answers continue to skip Admission.
+
+Embedders MUST correlate resolved effects with their own reservation id and
+deduplicate terminal deliveries by that id. Pack outcomes also carry ref
+names; they do not constitute another ref reservation. `Aborted` has no ref
+list, so the embedder retains its admitted effects until settlement.
+
+Informative: the two newly admitted paths add one awaited hook call per
+operation. A granted reservation also adds the existing pending-row atomic
+unit and settlement reads/outbox work. Default Admission pays neither cost.
 
 **Credential headers.** The server MUST forward in `credential_headers`
 the request headers permitted from a client's admission helper by STC
@@ -4908,6 +4953,8 @@ round-tripping only the decoded message can miss fields discarded at decode.
 | `authorize-fork.request.json` | A fork's operation: destination repository, source, branch, expected tip, source visibility and revision, and requested visibility (§6.2, §9.9). |
 | `authorize-published-source.request.json` | A same-repository branch creation: destination Missing updates and captured source ref, pair, generation and published sequence (§6.2, §9.3). |
 | `admit-fork.request.json` | A fork's Admit input: the source and the bytes the charge covers (§6.3, §9.9). |
+| `admit-ref-writes.request.json` | Ref admission with CAS-bound create and replace effects (§6.3). |
+| `admit-ref-deletions.request.json` | Ref admission with delete and absent-deletion effects (§6.3). |
 | `admit-allow.response.json` | Reservation id and allowed receipt pass-through (§6.3, §6.6). |
 | `admit-allow-external-ref.response.json` | Optional implementer reference carried into a storage receipt (§6.3, §15). |
 | `admit-challenge.response.json` | Opaque challenge and example payment challenge header (§6.3, §6.6). |

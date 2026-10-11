@@ -7,6 +7,24 @@ profile; storage-only groundwork is labeled explicitly. The
 [SPEC-SERVER profile map](specs/SPEC-SERVER.md#1-scope-and-relation-to-spec-transport-connect)
 distinguishes current enforcement from future integration.
 
+## Custom ref admission fences the committed presence delta
+
+**Always:** a configured custom Admission sees every ref write's resolved
+effect before mutation, including ticketed advances and implicit pack
+consumption. CAS conditions bind conditional writes. Unconditional writes
+carry the same presence observation across retries and guard it in the applying
+batch; a changed presence aborts the write. Deleting an absent ref is
+`NoChange`. Default Admission retains its existing accounting and paths.
+
+**Because:** an embedder may reserve ref capacity separately from pack bytes.
+The admitted presence delta must describe the successful apply exactly.
+
+**If violated:** a ref could escape admission, a retry could commit an
+unreserved create, or absent deletion could decrement a counter incorrectly.
+
+**Enforced by:** `pipeline::resolve_ref_updates`, `plan::decide_refs`, the
+shared pending-reservation outbox planner, and `pipeline::tests::ref_admission`.
+
 ## Chained Extract selection preserves guarded slice boundaries
 
 **Always:** only Extract selection stages run together inside a slice, and
