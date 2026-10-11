@@ -376,8 +376,9 @@ The additive `AdvanceRefsRequest.source_ref = 11` form selects a published
 source branch in the same repository. `head_ref = 1` names the destination
 branch; the server derives its matching packmap ref and applies `MISSING`
 to both. `expected_tip = 12` optionally contains a 32-byte published-head
-CAS. All explicit update fields other than `head_ref`, `ticket_ids` and
-`delete` MUST be absent/empty. The server MUST reject a mixed form or
+CAS. All explicit update fields except `head_ref` MUST be absent.
+`ticket_ids` MUST be empty, and `delete` MUST be absent, including an
+explicit `false`. The server MUST reject a mixed form or
 `expected_tip` without `source_ref` with `invalid_argument`.
 
 This form requires atomic metadata; a server without it MUST return
