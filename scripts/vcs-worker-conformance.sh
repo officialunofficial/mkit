@@ -625,7 +625,7 @@ if [ "${indexed}" -eq 1 ]; then
     # pack read once (`MidPackCrash`), the second slice of a three-window pack.
     indexed_seed="5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e"
     indexed_run_id="worker-indexed"
-    indexed_features="health,strict-gzip-auth,tickets,multi-repo,namespace-policy,indexed-async,test-faults,timers"
+    indexed_features="health,strict-gzip-auth,tickets,multi-repo,namespace-policy,indexed-mode,indexed-async,test-faults,timers"
     indexed_allowlist="$("${runner}" allowlist --auth auth-v2 --audience "${ORIGIN}" \
         --repository "${REPOSITORY}" --signer-seed-hex "${indexed_seed}" \
         --run-id "${indexed_run_id}")"
@@ -654,6 +654,20 @@ if [ "${indexed}" -eq 1 ]; then
         exit 1
     fi
     echo ">> indexed phase passed: pending until verified, the failed slice resumed, then committed"
+    echo ">> running indexed branch creation from a published pair"
+    capture "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
+        --repository "${REPOSITORY}" --signer-seed-hex "${indexed_seed}" \
+        --run-id "${indexed_run_id}" --atomic-advance --fresh-target --milestone M4 \
+        --max-pack-bytes "${MAX_PACK_BYTES}" --features "${indexed_features}" \
+        --sharding d34 --filter indexed.from_published \
+        ${runner_args[@]+"${runner_args[@]}"}
+    if [ "${status}" -ne 0 ]; then
+        echo "indexed published-source case failed (exit ${status}); wrangler log tail:" >&2
+        tail -n 80 "${log}" >&2
+        exit "${status}"
+    fi
+    require_pass indexed.from_published
+    cp "${work}/last.tap" "${work}/indexed/published-source.tap"
     stop_server
 fi
 if [ "${hooks}" -eq 1 ]; then bash scripts/vcs-worker-hooks.sh; fi
