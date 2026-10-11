@@ -220,8 +220,9 @@ fn relay_delivery_resumes_promptly_and_a_lost_nudge_recovers_by_poll() {
         tick(&registry);
         assert_eq!(job().phase, Phase::AwaitDelivery);
         assert!(!job().usable());
-        assert_hint(&attempt().unwrap_err(), 2);
-        let poll_at = ms(env.clock.now_ms()) + 2_000;
+        // The first delivery poll is 300 ms away; the hint keeps its 1 s floor.
+        assert_hint(&attempt().unwrap_err(), 1);
+        let poll_at = ms(env.clock.now_ms()) + 300;
         // Lose only the optional timer move after durable relay delivery.
         // Its failure must preserve both the recovery poll and relay progress.
         miss_nudge.store(missed, Ordering::SeqCst);
@@ -240,11 +241,11 @@ fn relay_delivery_resumes_promptly_and_a_lost_nudge_recovers_by_poll() {
             .unwrap()
         );
         assert!(!job().usable(), "delivery alone cannot verify the pack");
-        assert_hint(&attempt().unwrap_err(), if missed { 2 } else { 1 });
+        assert_hint(&attempt().unwrap_err(), 1);
         tick(&registry);
         if missed {
             assert_eq!(job().phase, Phase::AwaitDelivery);
-            env.clock.advance(2_000);
+            env.clock.advance(300);
             tick(&registry);
         }
         assert_eq!(job().phase, Phase::Extract);

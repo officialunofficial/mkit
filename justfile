@@ -64,6 +64,8 @@ ci-linux:
     ( cd contrib/signers && cargo build --locked --all-features )
     ( cd contrib/signers && cargo nextest run --locked --all-features )
     ( cd rust && cargo nextest run --locked --workspace --all-features )
+    # Indexed verification with one Extract step per slice (default chains).
+    ( cd rust && MKIT_TEST_EXTRACT_CHAIN=1 cargo nextest run --locked -p mkit-server --all-features -E 'test(~indexed::)' )
     just ci-server-allocator
     # --all-features decodes through C zstd; this is the pure-Rust path.
     ( cd rust && cargo nextest run --locked -p mkit-core --no-default-features --features pack-ruzstd )
@@ -94,6 +96,8 @@ ci-macos:
     # git-dependent tests fail loudly instead of silently skipping if it's
     # missing here too. See rust.yml's "Test (nextest)" step comment.
     ( cd rust && MKIT_TEST_STRICT=1 cargo nextest run --locked --workspace --all-features )
+    # Indexed verification with one Extract step per slice (default chains).
+    ( cd rust && MKIT_TEST_EXTRACT_CHAIN=1 cargo nextest run --locked -p mkit-server --all-features -E 'test(~indexed::)' )
     just ci-server-allocator
     # --all-features decodes through C zstd; this is the pure-Rust path.
     ( cd rust && cargo nextest run --locked -p mkit-core --no-default-features --features pack-ruzstd )

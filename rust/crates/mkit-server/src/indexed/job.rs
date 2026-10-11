@@ -73,9 +73,19 @@ pub struct SliceLimits {
     pub max_subrequests: u32,
     /// Entries one slice may decode before its next checkpoint.
     pub max_entries: u32,
+    /// Selection steps one Extract slice may run back to back before its
+    /// one guarded commit; `1` runs one step per slice.
+    pub extract_chain_steps: u32,
 }
 
 impl SliceLimits {
+    /// Set how many Extract selection steps one slice may chain.
+    #[must_use]
+    pub const fn with_extract_chain_steps(mut self, steps: u32) -> Self {
+        self.extract_chain_steps = steps;
+        self
+    }
+
     /// Set the resumable read window while retaining other slice limits.
     #[must_use]
     pub const fn with_window_bytes(mut self, bytes: u64) -> Self {
@@ -91,6 +101,7 @@ impl Default for SliceLimits {
             resident_bytes: super::geometry::RESIDENT_BYTES,
             max_subrequests: crate::limits::VERIFY_SLICE_CALLS,
             max_entries: checkpoint::DEFAULT_ENTRY_CAP,
+            extract_chain_steps: 16,
         }
     }
 }
@@ -119,6 +130,10 @@ const ENTRY_RESERVE: u32 = 64;
 /// write batch.
 pub(super) const CLOSURE_IDS_PER_SLICE: u32 = 90;
 const _: () = assert!(CLOSURE_IDS_PER_SLICE as usize == WRITE_BATCH);
+/// First look at relay delivery, right after the emit committed its rows.
+const AWAIT_FIRST_POLL_MS: u64 = 300;
+/// Durable fallback poll while the relay has not delivered.
+const AWAIT_POLL_MS: u64 = 1_000;
 /// Frame rows per index emission slice.
 const EMIT_PAGE: u32 = 64;
 /// Rows per cleanup batch.
@@ -395,6 +410,8 @@ struct SliceState {
     writes: Vec<Write>,
     settled: Vec<Write>,
     entry_idx: u64,
+    /// This slice moved the job into `AwaitDelivery` itself.
+    await_entered: bool,
 }
 
 /// A decoded entry awaiting admission, with the reader boundary after it.
@@ -584,6 +601,7 @@ where
         {
             chained += 1;
             ran = job.phase;
+            st.await_entered = old_phase != Phase::AwaitDelivery;
             result = self
                 .step(&mut st, &mut job, state.as_ref(), &mut held)
                 .await;
@@ -1000,7 +1018,7 @@ where
                 Ok(0)
             }
             Phase::EmitIndex => self.emit(job).await,
-            Phase::AwaitDelivery => self.await_delivery(job).await,
+            Phase::AwaitDelivery => self.await_delivery(job, st.await_entered).await,
             Phase::Extract => {
                 if self.h.extension.extraction_enabled() {
                     return self.extraction(st, job).await;
@@ -2081,7 +2099,11 @@ where
     }
 
     /// R-130: `Verified` only once the relay delivered every index row.
-    async fn await_delivery(&self, job: &mut VerifyJobV1) -> Result<u64, Stop> {
+    ///
+    /// Not yet delivered: the relay normally nudges this timer when it
+    /// delivers, so the first look after the emit is short and later
+    /// durable polls are the one-second fallback.
+    async fn await_delivery(&self, job: &mut VerifyJobV1, entered: bool) -> Result<u64, Stop> {
         let delivered = match job.last_relay_seq {
             Some(seq) => relay_delivered_through(self.local, self.source, seq).await?,
             None => true,
@@ -2090,7 +2112,11 @@ where
             job.phase = Phase::Extract;
             return Ok(0);
         }
-        Ok(2_000)
+        Ok(if entered {
+            AWAIT_FIRST_POLL_MS
+        } else {
+            AWAIT_POLL_MS
+        })
     }
 
     /// The guarded `Pending` to `Verified` transition, monotone.
