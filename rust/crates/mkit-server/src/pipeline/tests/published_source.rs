@@ -458,6 +458,90 @@ fn published_source_bounds_names_before_authorization() {
     assert!(read.load(Ordering::SeqCst));
 }
 
+#[test]
+fn published_source_bounds_the_derived_packmap_before_hooks_or_writes() {
+    let mut w = World::new(Path::Immediate);
+    history(&w);
+    let invalid_auth = auth(&w);
+    let valid_auth = auth(&w);
+    let expected = published(&w, HEAD).value;
+    let read = Arc::new(AtomicBool::new(false));
+    let writes = Arc::new(AtomicBool::new(false));
+    let observed_writes = writes.clone();
+    w.env.pipe.meta.hook = Some(Box::new(move |_, _, _| {
+        observed_writes.store(true, Ordering::SeqCst);
+    }));
+    let defaults = Hooks::new();
+    let hooks = Hooks {
+        authorizer: RecordSourceRead(read.clone()),
+        admission: defaults.admission,
+        pre_receive: defaults.pre_receive,
+        receipts: defaults.receipts,
+        outcomes: defaults.outcomes,
+    };
+    let pipe = Pipeline::new(
+        w.env.pipe.blobs,
+        w.env.pipe.meta,
+        hooks,
+        w.env.pipe.cfg,
+        w.env.clock,
+        w.env.metrics,
+    )
+    .unwrap();
+    let valid = format!(
+        "refs/heads/{}",
+        "x".repeat(crate::refs::MAX_REF_NAME_BYTES - "refs/mkit/packmap/".len())
+    );
+    let invalid = format!("{valid}x");
+    let valid_map = mkit_attest::grant::head_packmap(&valid).unwrap();
+    let invalid_map = mkit_attest::grant::head_packmap(&invalid).unwrap();
+    assert_eq!(valid.len(), 505);
+    assert_eq!(valid_map.len(), crate::refs::MAX_REF_NAME_BYTES);
+    assert_eq!(invalid.len(), 506);
+    assert_eq!(invalid_map.len(), crate::refs::MAX_REF_NAME_BYTES + 1);
+    let error = block_on(pipe.advance_refs_from_published(
+        &invalid_auth,
+        HEAD.into(),
+        invalid.clone(),
+        None,
+    ))
+    .unwrap_err();
+    assert_eq!(
+        (error.code(), error.public_message()),
+        (Code::InvalidArgument, crate::refs::REF_NAME_TOO_LONG)
+    );
+    assert!(!read.load(Ordering::SeqCst));
+    assert!(!writes.load(Ordering::SeqCst));
+    for name in [&invalid, &invalid_map] {
+        let partition = pipe.shards.ref_shard(&w.repo, name);
+        assert!(
+            block_on(
+                pipe.meta
+                    .get(&partition, &keys::ref_key(&w.repo.name, name))
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+    assert_eq!(
+        block_on(pipe.advance_refs_from_published(&valid_auth, HEAD.into(), valid.clone(), None,))
+            .unwrap(),
+        AdvanceOutcome::Committed
+    );
+    let partition = pipe.shards.ref_shard(&w.repo, &valid);
+    assert_eq!(
+        block_on(crate::store::publication::read(
+            &pipe.meta,
+            &partition,
+            &w.repo.name,
+            &valid,
+        ))
+        .unwrap()
+        .value,
+        expected
+    );
+}
+
 struct RevokeRead(Arc<AtomicBool>);
 impl Authorizer for RevokeRead {
     async fn authorize(&self, op: &Operation) -> Result<AuthzFacts, ServerError> {

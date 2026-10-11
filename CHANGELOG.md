@@ -18,7 +18,8 @@ collect the applicable entries between their old and new immutable pins.
 - Ticketless same-repository branch creation from an authoritative published
   pair: `AdvanceRefsRequest.source_ref` (field 11), optional `expected_tip`
   (field 12), and `Pipeline::advance_refs_from_published{,_with_meta}`.
-  Both destination refs use `Missing`; the server reauthorizes and compares
+  Both destination names are validated before hooks or writes. Both refs use
+  `Missing`; the server reauthorizes and compares
   the source publication row before every destination apply. A later source
   move is concurrent and success copies exactly the captured pair. The
   immediate path adds no coverage walk, upload or stored bytes; configured

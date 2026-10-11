@@ -47,6 +47,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             check_ref_name(&destination_ref)?;
             let packmap = mkit_attest::grant::head_packmap(&destination_ref)
                 .ok_or_else(|| ServerError::invalid_argument("destination must be a branch"))?;
+            check_ref_name(&packmap)?;
             if !self.meta.capabilities().atomic_multi_key {
                 return Err(ServerError::failed_precondition(
                     "published branch creation requires atomic metadata",
