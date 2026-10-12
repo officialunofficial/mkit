@@ -400,8 +400,9 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Client<'_, T, S, C, O> 
     /// One `AdvanceRefs`. A pending verification returns
     /// [`Error::PendingVerification`] and a membership lag
     /// [`Error::MembershipNotVisible`], both resumable by replaying the same
-    /// identity while it is valid. The request's ids and expectations must be
-    /// well formed: the observer is told the exact ref moves it carries.
+    /// identity while it is valid (each replay builds an envelope, so the observer
+    /// and signer run again with the same nonce and number 1). The request's ids
+    /// and expectations must be well formed: the observer is told the exact ref moves it carries.
     ///
     /// # Errors
     /// An anonymous client, a malformed request, an observer veto, a signer

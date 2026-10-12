@@ -82,8 +82,9 @@ default observer does nothing, and a signer that implements only
   part index and, for a whole push whose pack holds only raw entries, the ids
   of the objects it introduces (`new_objects`, reported on each RPC of that
   pack's upload, ticketed or not; `None` when unknown, as for a pack with a
-  delta entry, the packmap node and every per-RPC upload). Intents are built from the request being sent, so the observer sees exactly what the
-  server receives; an `advance_refs` request whose ids or expectations are
+  delta entry, the packmap node and every per-RPC upload). Intents are built
+  from the request being sent, so the observer sees exactly what the server
+  receives; an `advance_refs` request whose ids or expectations are
   malformed is `Error::Invalid` before any seam runs, with or without an
   observer. A branch copy (`source_ref`) names only the destination head; the
   server also writes its packmap twin (`RefTarget::CopyFrom`).
@@ -118,7 +119,8 @@ default observer does nothing, and a signer that implements only
   procedure through its own binding. A write procedure requires an `intent` naming that
   procedure (`Error::Invalid` otherwise), so the observer cannot be skipped; the
   attempt number is 1. The observer sees the intent the host passes, so build it
-  from the body that will be sent. The caller supplies a body that matches the commitment. The headers verify with `mkit_core::write_auth::verify_headers`.
+  from the body that will be sent. The caller supplies a body that matches the
+  commitment. The headers verify with `mkit_core::write_auth::verify_headers`.
 
 Objects the client signs itself: none. It verifies commits, remixes and tags in
 `unpack` and signs only auth envelopes, so the signer seam covers envelopes.

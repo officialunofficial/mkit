@@ -263,7 +263,9 @@ impl<'a> WriteIntent<'a> {
     }
 }
 
-/// Extra request headers for one attempt, not signed. Names are checked
+/// Extra request headers for one attempt, not signed. A header that is not
+/// reserved replaces a transport default of the same name (for example
+/// `accept-encoding`), so choose names accordingly. Names are checked
 /// against the hard-reserved list of SPEC-TRANSPORT-CONNECT section 5.1 before
 /// anything is signed.
 #[derive(Clone, Debug, Default)]

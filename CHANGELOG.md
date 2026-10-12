@@ -15,12 +15,6 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Changed
 
-- `mkit-client`: `Client::advance_refs` now returns `Error::Invalid` before
-  sending when the request is malformed (an id that is not 32 bytes, an
-  unspecified expectation, a missing new id), with or without an observer, so
-  the ref moves reported to the observer are exactly the ones sent. Such a
-  request used to reach the server and fail there. Well-formed requests are
-  unaffected.
 - Scheduled Decode, EmitIndex, and inline index writes share per-object takedown
   denial waves of at most six, after inventory staging and before provisional
   rows or the direct index apply. The first failing object in batch order still
@@ -44,7 +38,12 @@ collect the applicable entries between their old and new immutable pins.
   5.1 reserved list. Order: observer, signer, deadline check, dispatch; once per
   signed attempt. `Client::sign_envelope` builds signed auth v2 headers for a
   host-dispatched procedure through the same pipeline. New `Error` variants:
-  `Vetoed`, `SignerRefused`, `ReservedHeader`, `EnvelopeExpired`. An
+  `Vetoed`, `SignerRefused`, `ReservedHeader`, `EnvelopeExpired`. An envelope
+  whose window has ended is never sent. `Client::advance_refs` returns
+  `Error::Invalid` before sending when the request is malformed (an id that is
+  not 32 bytes, an unspecified expectation, a missing new id), with or without an
+  observer, so the ref moves reported to the observer are exactly the ones sent;
+  well-formed requests are unaffected.
 - `mkit-client`: the runtime-independent async protocol client for reads and
   writes, on native and wasm32-unknown-unknown with no tokio, hyper or C
   compression in its dependency graph. The earlier `mkit-push` (never published) is renamed to it, with its code unchanged in
