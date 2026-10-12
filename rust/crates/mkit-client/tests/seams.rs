@@ -1268,7 +1268,18 @@ fn a_ticketed_multipart_push_reports_tickets_and_new_objects_on_each_rpc() {
     });
     let limits = Limits::from_server_info(&ticket_info(), 16 << 20, 64 << 20).unwrap();
     let bytes = serialize(&Object::Blob(Blob {
-        data: vec![1; (8 << 20) + 1000],
+        // Incompressible, so the pack exceeds one part with or without zstd.
+        data: {
+            let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+            (0..(8 << 20) + 1000)
+                .map(|_| {
+                    state = state
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    (state >> 56) as u8
+                })
+                .collect()
+        },
     }))
     .unwrap();
     let id = hash(&bytes);
