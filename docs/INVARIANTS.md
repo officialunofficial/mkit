@@ -2587,7 +2587,7 @@ split-vs-single-run equivalence.
 
 ## Denial waves preserve admission order
 
-**Always:** every batch's inventory staging completes before its denial reads.
+**Always:** a Decode batch's inventory staging completes before its denial reads.
 At most six reads run together. Admitted readers reserve each wave's calls;
 ordinary mutation stores keep dispatch-time charging, so later budget exhaustion
 cannot mask an earlier object's denial.

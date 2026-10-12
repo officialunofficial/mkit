@@ -354,6 +354,40 @@ fn good_push_indexes_before_membership_and_reuses_verified_state() {
 }
 
 #[test]
+fn a_blocked_object_refuses_inline_verification_before_any_index_row() {
+    let (pack, head) = good_pack();
+    let blobs = MemoryBlobStore::default();
+    let repo = repo("blocked");
+    let clock = Arc::new(ManualClock::new(NOW));
+    let store = Arc::new(MemoryKv::with_clock(clock.clone()));
+    upload(&blobs, &pack);
+    let ticket = ticket(&repo, &pack, NOW as u64);
+    block_on(crate::ContentIndex::new(store.clone()).block(
+        &head,
+        &crate::store::BlockEntry::new("test", NOW as u64),
+        NOW as u64,
+    ))
+    .unwrap();
+    let error = verify(
+        &blobs,
+        &store,
+        &repo,
+        std::slice::from_ref(&ticket),
+        head,
+        IndexedConfig::default(),
+        &clock,
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), crate::Code::PermissionDenied);
+    let index = keys::object_index(&repo.name, &head, &ticket.pack_id);
+    assert!(
+        block_on(store.get(&source(&repo), &index))
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
 fn bad_signature_and_dangling_object_are_rejected() {
     let (pack, head) = good_pack();
     let mut bad = pack.clone();

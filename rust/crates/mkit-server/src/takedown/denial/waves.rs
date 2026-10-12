@@ -9,7 +9,7 @@ pub(crate) async fn require_clear_many<S: NamespaceStore>(
     loop {
         let wave: Vec<_> = ids
             .by_ref()
-            .take(crate::store::read_io::parallelism())
+            .take(crate::store::read_io::parallelism().max(1))
             .collect();
         if wave.is_empty() {
             return Ok(());
