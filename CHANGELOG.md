@@ -17,7 +17,7 @@ collect the applicable entries between their old and new immutable pins.
 
 - `mkit-client`: the runtime-independent async protocol client for reads and
   writes, on native and wasm32-unknown-unknown with no tokio, hyper or C
-  compression in its dependency graph. `mkit-push` moves into it unchanged in
+  compression in its dependency graph. the earlier `mkit-push` (never published) is renamed to it, with its code unchanged in
   behaviour (`Push`, `Plan`, `HttpTransport`, `Signer`, `Clock`). New: `Client`
   with a typed call per RPC (`server_info`, `list_refs` / `list_all_refs`,
   `read_ref`, `pack_exists`, `download_pack` with a caller size cap, `update_ref`
@@ -210,7 +210,7 @@ collect the applicable entries between their old and new immutable pins.
   path witnesses supply output-budgeted commit/tree bytes for local proofs.
   Existing reader APIs and URL target grammar are unchanged.
 
-- `mkit-push`: a bounded async ticketed push primitive for native and wasm
+- `mkit-client` (formerly `mkit-push`): a bounded async ticketed push primitive for native and wasm
   clients, with injectable HTTP transport, signer and clock. It shares
   canonical transport messages, uploads parts where necessary, polls pending
   verification and exposes conflict/replan outcomes. Staging, persistence,
@@ -614,13 +614,12 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Breaking (toward 0.6)
 
-- [embedder: breaking API] `mkit-push` (never published to crates.io, so only
-  embedders pinning a git revision are affected) is deprecated and now only
-  re-exports `mkit-client`; it is removed after one release. Migration: depend on
+- [embedder: breaking API] `mkit-push` (never published to crates.io) is
+  renamed to `mkit-client`; there is no shim. Migration: depend on
   `mkit-client` and rename `mkit_push` to `mkit_client`. The old names
   (`Push`, `Plan`, `Entry`, `Limits`, `Destination`, `HttpTransport`, `Signer`,
-  `Clock`, `Error`, `proto`) are unchanged. `Error` is now `#[non_exhaustive]`
-  and gains `PaymentRequired`, `PendingVerification`, `MembershipNotVisible`,
+  `Clock`, `Error`, `proto`) are unchanged. `Outcome`, `PackmapMode` and `Error` are now
+  `#[non_exhaustive]`, and `Error` gains `PaymentRequired`, `PendingVerification`, `MembershipNotVisible`,
   `RetryAfter`, `Sink` and `Signature`: add a wildcard arm to any exhaustive
   `match`. An HTTP 402 (or `permission_denied` with an admission challenge) was
   `Error::Remote`; it is now `Error::PaymentRequired`, and a body that is not a

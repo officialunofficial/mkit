@@ -1941,7 +1941,7 @@ platform clock and timer.
 
 ## Runtime-independent client (informative)
 
-`mkit-client` (which absorbs the earlier `mkit-push`) implements the client side
+`mkit-client` implements the client side
 of this protocol from public code, on native and wasm32 with no async runtime or
 C compression in its dependency graph. It shares the `mkit-rpc/transport-messages`
 types and exposes one typed call per RPC: `GetServerInfo`, `ListRefs` (paged,
