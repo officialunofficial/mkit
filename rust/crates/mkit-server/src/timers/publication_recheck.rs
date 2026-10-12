@@ -149,13 +149,67 @@ pub async fn dependencies<S: NamespaceStore, T: NamespaceStore>(
     advance: &Advance,
 ) -> Result<bool, StoreError> {
     let groups = dependency_groups(source, shards, repo, advance);
-    for (p, keys) in groups {
-        for page in keys.chunks(8) {
-            let rows = if p == *source {
-                local.get_many(&p, page).await?
+    let pages = groups
+        .iter()
+        .flat_map(|(partition, keys)| keys.chunks(8).map(move |page| (partition, page)))
+        .collect::<Vec<_>>();
+    let mut offset = 0;
+    while offset < pages.len() {
+        // Keep local and routed reservations separate. A locality boundary
+        // also ends the wave, so failed admission cannot strand other credits.
+        let is_local = *pages[offset].0 == *source;
+        let width = pages[offset..]
+            .iter()
+            .take(crate::store::read_io::parallelism())
+            .take_while(|(partition, _)| (**partition == *source) == is_local)
+            .count();
+        let wave = &pages[offset..offset + width];
+        let allowance = if is_local {
+            local.read_call_allowance()
+        } else {
+            target.read_call_allowance()
+        };
+        let replies =
+            if allowance.is_some_and(|calls| calls >= u32::try_from(width).unwrap_or(u32::MAX)) {
+                let reservation = if is_local {
+                    local.reserve_read_calls(u32::try_from(width).unwrap_or(u32::MAX))?
+                } else {
+                    target.reserve_read_calls(u32::try_from(width).unwrap_or(u32::MAX))?
+                };
+                crate::store::ReadReservation::scope(
+                    &[reservation],
+                    futures::future::join_all(wave.iter().map(|(partition, page)| async move {
+                        if is_local {
+                            local.get_many(partition, page).await
+                        } else {
+                            target.get_many(partition, page).await
+                        }
+                    })),
+                )
+                .await
             } else {
-                target.get_many(&p, page).await?
+                // Unknown or tight budgets retain the original serial path. Do
+                // not attempt a failed wave reservation: it can mark a ledger
+                // exhausted before an earlier missing witness returns false.
+                let (partition, page) = wave[0];
+                let reservation = if is_local {
+                    local.reserve_read_calls(1)?
+                } else {
+                    target.reserve_read_calls(1)?
+                };
+                let rows = crate::store::ReadReservation::scope(&[reservation], async {
+                    if is_local {
+                        local.get_many(partition, page).await
+                    } else {
+                        target.get_many(partition, page).await
+                    }
+                })
+                .await;
+                vec![rows]
             };
+        let consumed = replies.len();
+        for ((_, page), rows) in wave.iter().zip(replies) {
+            let rows = rows?;
             if rows.len() != page.len() {
                 return Err(StoreError::Corrupt(
                     "short publication dependency read".into(),
@@ -168,6 +222,7 @@ pub async fn dependencies<S: NamespaceStore, T: NamespaceStore>(
                 }
             }
         }
+        offset += consumed;
     }
     Ok(true)
 }

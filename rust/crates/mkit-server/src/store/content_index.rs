@@ -302,6 +302,9 @@ fn bumped(mut state: ObjectState, now_ms: u64) -> ObjectState {
 pub(crate) struct BorrowedStore<'a, S>(pub(crate) &'a S);
 
 impl<S: NamespaceStore> NamespaceStore for BorrowedStore<'_, S> {
+    fn read_call_allowance(&self) -> Option<u32> {
+        self.0.read_call_allowance()
+    }
     fn capabilities(&self) -> super::kv::StoreCapabilities {
         self.0.capabilities()
     }

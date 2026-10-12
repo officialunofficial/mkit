@@ -188,6 +188,9 @@ fn guard_failure() -> StoreError {
     StoreError::unavailable("denial guard read failed")
 }
 impl<S: NamespaceStore> NamespaceStore for Checks<'_, S> {
+    fn read_call_allowance(&self) -> Option<u32> {
+        self.store.read_call_allowance()
+    }
     fn capabilities(&self) -> StoreCapabilities {
         self.store.capabilities()
     }

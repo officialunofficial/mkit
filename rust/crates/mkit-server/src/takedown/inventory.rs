@@ -800,7 +800,7 @@ pub(crate) async fn located_entries<S: NamespaceStore>(
             .or_default()
             .push((id, location));
     }
-    let mut facts = BTreeMap::new();
+    let mut jobs = Vec::new();
     for (partition, entries) in groups {
         for chunk in entries.chunks(16) {
             let packs: BTreeSet<_> = chunk.iter().map(|(_, loc)| loc.pack).collect();
@@ -809,17 +809,49 @@ pub(crate) async fn located_entries<S: NamespaceStore>(
                 keys.push(entry_key(&loc.pack, id));
                 keys.push(marker_key(&loc.pack, id));
             }
-            let values = store.get_many(&partition, &keys).await?;
+            jobs.push((partition.clone(), chunk.to_vec(), packs.len(), keys));
+        }
+    }
+    let mut facts = BTreeMap::new();
+    let mut pending = jobs.as_slice();
+    while !pending.is_empty() {
+        let width = pending.len().min(crate::store::read_io::parallelism());
+        // An unproven or tight allowance retains serial error precedence:
+        // validate the earlier chunk before attempting the next reservation.
+        let width = if store
+            .read_call_allowance()
+            .is_some_and(|left| left >= u32::try_from(width).unwrap_or(u32::MAX))
+        {
+            width
+        } else {
+            1
+        };
+        let (wave, rest) = pending.split_at(width);
+        pending = rest;
+        // Six chunks hold at most 288 keys, within the shared row allowance.
+        let reservation = if store.reader_admission() {
+            store.reserve_read_calls(u32::try_from(wave.len()).unwrap_or(u32::MAX))?
+        } else {
+            None
+        };
+        let replies = crate::store::ReadReservation::scope(
+            &[reservation],
+            futures::future::join_all(wave.iter().map(|(p, _, _, keys)| store.get_many(p, keys))),
+        )
+        .await;
+        // Consume transport and validation errors in the original partition/chunk order.
+        for ((_, chunk, pack_count, keys), reply) in wave.iter().zip(replies) {
+            let values = reply?;
             if values.len() != keys.len() {
                 return Err(bad());
             }
-            for raw in &values[..packs.len()] {
+            for raw in &values[..*pack_count] {
                 let head: Head = decode(raw.as_ref().ok_or_else(bad)?)?;
                 if head.version != 1 || !head.complete {
                     return Err(bad());
                 }
             }
-            for ((id, loc), pair) in chunk.iter().zip(values[packs.len()..].chunks_exact(2)) {
+            for ((id, loc), pair) in chunk.iter().zip(values[*pack_count..].chunks_exact(2)) {
                 let raw = pair[0].as_ref().ok_or_else(bad)?;
                 if pair[1].as_ref().map(Value::as_bytes) != Some(entry_digest(id, raw).as_slice()) {
                     return Err(bad());
@@ -1142,3 +1174,7 @@ pub async fn is_file<S: NamespaceStore>(
     })
     .await
 }
+
+#[cfg(all(test, feature = "http-objects"))]
+#[path = "inventory/located_tests.rs"]
+mod located_tests;

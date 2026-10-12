@@ -153,6 +153,9 @@ fn check(rows: &Rows, index: usize, pre: &Precondition, now: u64) -> Option<Batc
 }
 
 impl NamespaceStore for MemoryKv {
+    fn read_call_allowance(&self) -> Option<u32> {
+        Some(u32::MAX)
+    }
     fn capabilities(&self) -> StoreCapabilities {
         self.caps
     }

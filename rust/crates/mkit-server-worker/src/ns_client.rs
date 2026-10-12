@@ -197,6 +197,18 @@ impl<T: NsTransport> DoNamespaceStore<T> {
 }
 
 impl<T: NsTransport> NamespaceStore for DoNamespaceStore<T> {
+    fn read_call_allowance(&self) -> Option<u32> {
+        Some(
+            self.request_budget
+                .as_ref()
+                .map_or(u32::MAX, SliceBudget::remaining)
+                .min(
+                    self.alarm_budget
+                        .as_ref()
+                        .map_or(u32::MAX, SliceBudget::remaining),
+                ),
+        )
+    }
     fn reserve_read_calls(
         &self,
         calls: u32,

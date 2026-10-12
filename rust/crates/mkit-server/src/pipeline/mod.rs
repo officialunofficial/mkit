@@ -1339,7 +1339,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     store: &view,
                     partition: &partitions[0],
                 };
-                list::page(
+                list::page_in_waves(
+                    &view,
                     &[bucket],
                     &op.repo,
                     &scan,
@@ -1356,7 +1357,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                         partition,
                     })
                     .collect::<Vec<_>>();
-                list::page(
+                list::page_in_waves(
+                    &view,
                     &buckets,
                     &op.repo,
                     &scan,

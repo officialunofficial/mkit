@@ -1,4 +1,5 @@
 mod credential_tests;
+mod joined_reads_tests;
 mod lifetime_tests;
 mod timestamp_tests;
 use super::*;

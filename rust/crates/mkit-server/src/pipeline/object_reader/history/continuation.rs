@@ -280,20 +280,40 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         session
             .proofs
             .bind(&self.identity, authority, now, self.cfg)?;
-        let anchor = {
-            let meta = Budgeted::new(&self.pipe.meta, calls)
-                .with_session(&session.io.calls)
-                .flagging(capped)
-                .with_io(admission);
-            self.continuation_anchor(&meta, reference).await?
-        };
-        let security = {
-            let meta = Budgeted::new(&self.pipe.meta, calls)
-                .with_session(&session.io.calls)
-                .flagging(capped)
-                .with_io(admission);
-            self.history_security(&meta, claims.is_none()).await?
-        };
+        let meta = Budgeted::new(&self.pipe.meta, calls)
+            .with_session(&session.io.calls)
+            .flagging(capped)
+            .with_io(admission);
+        // Activation may write and keeps its original position. Only resumed
+        // pages overlap the two pure reads, consuming the anchor first.
+        let (anchor, security) =
+            if claims.is_some() && meta.read_call_allowance().is_some_and(|left| left >= 2) {
+                let anchor_reservation = meta.reserve_read_calls(1).map_err(failure)?;
+                let security_capped = AtomicBool::new(false);
+                let security_meta = meta.unflagged().flagging(&security_capped);
+                let security_reservation = security_meta.reserve_read_calls(1);
+                let (anchor, security) = futures::future::join(
+                    crate::store::ReadReservation::scope(
+                        &[anchor_reservation],
+                        self.continuation_anchor(&meta, reference),
+                    ),
+                    async {
+                        let reservation = security_reservation.map_err(failure)?;
+                        crate::store::ReadReservation::scope(
+                            &[reservation],
+                            self.history_security(&security_meta, false),
+                        )
+                        .await
+                    },
+                )
+                .await;
+                let anchor = anchor?;
+                (anchor, settle(security, &security_capped)?)
+            } else {
+                let anchor = self.continuation_anchor(&meta, reference).await?;
+                let security = self.history_security(&meta, claims.is_none()).await?;
+                (anchor, security)
+            };
         if let Some(c) = &claims {
             if c.anchor != anchor.tip
                 || c.publication != anchor.publication
@@ -339,7 +359,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             let mut tags = BTreeSet::new();
             let first = loop {
                 let node = self
-                    .proved_node(session, tip, role, calls, admission, &mut decode)
+                    .proved_node_with_successor_wake(
+                        session,
+                        tip,
+                        role,
+                        calls,
+                        admission,
+                        &mut decode,
+                        order == ContinuedHistoryOrder::FirstParent && limit > 1,
+                    )
                     .await?
                     .ok_or_else(absent)?;
                 if let Object::Tag(tag) = &node.object {
@@ -492,7 +520,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
     #[allow(clippy::too_many_arguments)] // One ordered write-free validation cut.
     async fn closing_fence(
         &self,
-        meta: &impl NamespaceStore,
+        meta: &Budgeted<'_, N>,
         reference: &str,
         raw: &[Option<Value>],
         publication: &Publication,
@@ -520,10 +548,36 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         }
         // The write-free guard is the ref validation cut. Closing reads
         // reject subsequently observed boundary changes before serving.
-        if self.history_security(meta, false).await? != security {
-            return Err(absent());
-        }
-        let final_anchor = self.continuation_anchor(meta, reference).await?;
+        let final_anchor = if meta.read_call_allowance().is_some_and(|left| left >= 2) {
+            let security_reservation = meta.reserve_read_calls(1).map_err(failure)?;
+            let anchor_capped = AtomicBool::new(false);
+            let anchor_meta = meta.unflagged().flagging(&anchor_capped);
+            let anchor_reservation = anchor_meta.reserve_read_calls(1);
+            let (live_security, anchor) = futures::future::join(
+                crate::store::ReadReservation::scope(
+                    &[security_reservation],
+                    self.history_security(meta, false),
+                ),
+                async {
+                    let reservation = anchor_reservation.map_err(failure)?;
+                    crate::store::ReadReservation::scope(
+                        &[reservation],
+                        self.continuation_anchor(&anchor_meta, reference),
+                    )
+                    .await
+                },
+            )
+            .await;
+            if live_security? != security {
+                return Err(absent());
+            }
+            settle(anchor, &anchor_capped)?
+        } else {
+            if self.history_security(meta, false).await? != security {
+                return Err(absent());
+            }
+            self.continuation_anchor(meta, reference).await?
+        };
         if final_anchor.raw != raw
             || final_anchor.publication != *publication
             || final_anchor.tip != tip
@@ -694,9 +748,17 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             let node = if let Some(node) = first.take() {
                 node
             } else {
-                self.proved_node(session, current, Role::Commit, calls, admission, decode)
-                    .await?
-                    .ok_or_else(absent)?
+                self.proved_node_with_successor_wake(
+                    session,
+                    current,
+                    Role::Commit,
+                    calls,
+                    admission,
+                    decode,
+                    output.len() + 1 < limit,
+                )
+                .await?
+                .ok_or_else(absent)?
             };
             let parent = node.parents().and_then(|p| p.first()).copied();
             let next = parent.filter(|_| !self.seams.takedown.stops_descent(&self.repo, &node.id));

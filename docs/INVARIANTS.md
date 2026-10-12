@@ -27,6 +27,33 @@ unreserved create, or absent deletion could decrement a counter incorrectly.
 **Enforced by:** `pipeline::resolve_ref_updates`, `plan::decide_refs`, the
 shared pending-reservation outbox planner, and `pipeline::tests::ref_admission`.
 
+## Request read scheduling retains ordered boundaries and exact reservations
+
+**Always:** independent reads consume results in their original semantic order.
+Every dispatched wave reserves its backend calls first and shares the existing
+six-call admission envelope. Unknown or insufficient allowance keeps the serial
+path. Delta members stay serial between contiguous raw runs. Continuation
+activation stays after authorization and anchor validation; closing reads stay
+after the guarded apply. Final denial and membership checks stay after all
+seam callbacks, with fresh per-phase state.
+
+First-parent history can join two pure reads of an eligible successor's index
+and content partitions with its predecessor's validation tail. Only slots that
+need another commit enable this hint. Failed speculation grants no proof,
+retains no guard reply, and cannot replace an earlier validation error. If the
+reservation does not fit, the hint dispatches nothing and charges nothing.
+
+**Because:** fewer serial rounds must preserve the same authority, live serving
+stop, response absence, and invocation resource bounds.
+
+**If violated:** a budget refusal could mask an earlier error, a cached guard
+could serve revoked content, or concurrent reads could exceed backend bounds.
+
+**Enforced by:** reservation and precedence tests for inventory, dependency
+reads, raw runs, lease reads, implicit packmap prologues, and continuations;
+`successor_wake_tests` and the round probe pin exact warming overhead and the
+shared concurrency limit. Warming introduces no durable state or restart step.
+
 ## Chained Extract selection preserves guarded slice boundaries
 
 **Always:** only Extract selection stages run together inside a slice, and

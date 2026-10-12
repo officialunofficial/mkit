@@ -63,6 +63,12 @@ struct SpyBlobs {
 }
 
 impl BlobStore for SpyBlobs {
+    fn read_call_allowance(&self) -> Option<u32> {
+        self.inner.read_call_allowance()
+    }
+    fn read_byte_allowance(&self) -> Option<u64> {
+        self.inner.read_byte_allowance()
+    }
     type Sink = <MemoryBlobStore as BlobStore>::Sink;
 
     async fn begin(&self, key: BlobKey, len: u64) -> Result<Self::Sink, StoreError> {

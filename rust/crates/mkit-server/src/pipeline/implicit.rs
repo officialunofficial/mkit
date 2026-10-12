@@ -147,6 +147,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// induction the `prev` chain is exactly the ref's accepted history
     /// and one level suffices. Nothing is written here and the check
     /// never grants membership — it only refuses.
+    #[allow(clippy::too_many_lines)] // One ordered prologue with its serial fallback.
     pub(super) async fn check_implicit_packmap(
         &self,
         op: &Operation,
@@ -160,18 +161,61 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let node = upd
             .new
             .ok_or_else(|| internal("implicit packmap write deletes"))?;
-        let bytes = self.read_node(&node).await?;
-        let listed = mkit_core::transfer::decode_packlist(&bytes).map_err(|_| refuse())?;
+        // Each branch reserves immediately before dispatch. Unknown or tight
+        // inherited budgets use the ordered path, so speculation cannot spend
+        // the allowance needed by an earlier refusal.
+        let known_pending = pending.iter().any(|p| p.pack == node);
+        let multi = matches!(self.cfg.addressing, Addressing::Multi(_));
+        let current_read = matches!(upd.condition, RefWriteCondition::Any)
+            && ahead.is_none_or(|snapshot| {
+                !snapshot.contains(&keys::ref_key(&op.repo.name, &upd.name))
+            });
+        let meta_calls = u32::from(current_read) + if multi && !known_pending { 2 } else { 0 };
+        let blob_calls = 1 + u32::from(!multi && !known_pending);
+        let overlap = self
+            .blobs
+            .read_call_allowance()
+            .is_some_and(|left| left >= blob_calls + meta_calls)
+            && (meta_calls == 0
+                || self
+                    .meta
+                    .read_call_allowance()
+                    .is_some_and(|left| left >= blob_calls + meta_calls));
+        let (bytes, known, current) = if overlap {
+            let (bytes, known, current) = futures::future::join3(
+                self.read_node(&node),
+                self.pack_known(op, &upd.name, node, pending),
+                async {
+                    match upd.condition {
+                        RefWriteCondition::Match(expected) => Ok(Some(expected)),
+                        RefWriteCondition::Missing => Ok(None),
+                        RefWriteCondition::Any => self.current_ref(op, &upd.name, ahead).await,
+                    }
+                },
+            )
+            .await;
+            (bytes, Some(known), Some(current))
+        } else {
+            (self.read_node(&node).await, None, None)
+        };
+        let listed = mkit_core::transfer::decode_packlist(&bytes?).map_err(|_| refuse())?;
         if listed.packs.len() > MAX_IMPLICIT_LISTED_PACKS {
             return Err(refuse());
         }
-        if !self.pack_known(op, &upd.name, node, pending).await? {
+        let known = match known {
+            Some(known) => known?,
+            None => self.pack_known(op, &upd.name, node, pending).await?,
+        };
+        if !known {
             return Err(refuse());
         }
-        let current = match upd.condition {
-            RefWriteCondition::Match(expected) => Some(expected),
-            RefWriteCondition::Missing => None,
-            RefWriteCondition::Any => self.current_ref(op, &upd.name, ahead).await?,
+        let current = match current {
+            Some(current) => current?,
+            None => match upd.condition {
+                RefWriteCondition::Match(expected) => Some(expected),
+                RefWriteCondition::Missing => None,
+                RefWriteCondition::Any => self.current_ref(op, &upd.name, ahead).await?,
+            },
         };
         if listed.prev.is_some() && listed.prev != current {
             return Err(refuse());
@@ -244,18 +288,25 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .map_err(meta_error);
         }
         let p = self.shards.ref_shard(&op.repo, ref_name);
-        read::read_ref(&self.meta, &p, &op.repo.name, ref_name)
-            .await
-            .map_err(meta_error)
+        let reservation = self.meta.reserve_read_calls(1).map_err(meta_error)?;
+        crate::store::ReadReservation::scope(
+            &[reservation],
+            read::read_ref(&self.meta, &p, &op.repo.name, ref_name),
+        )
+        .await
+        .map_err(meta_error)
     }
 
     /// The node's bytes, bounded by [`MAX_IMPLICIT_PACKLIST_BYTES`]: the
     /// reported length is checked before the body is read, and every read
     /// chunk is checked too, so an unbounded body is never buffered.
     async fn read_node(&self, node: &Hash) -> Result<Vec<u8>, ServerError> {
-        let body = self
+        let reservation = self
             .blobs
-            .get(&BlobKey::pack(*node), None)
+            .reserve_read_calls(1)
+            .map_err(|e| store_error(StorageOp::BlobGet, e))?;
+        let key = BlobKey::pack(*node);
+        let body = crate::store::ReadReservation::scope(&[reservation], self.blobs.get(&key, None))
             .await
             .map_err(|e| store_error(StorageOp::BlobGet, e))?;
         let Some(body) = body else {
@@ -299,21 +350,36 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             return Ok(true);
         }
         match &self.cfg.addressing {
-            Addressing::Single { .. } => Ok(self
-                .blobs
-                .head(&BlobKey::pack(pack))
+            Addressing::Single { .. } => {
+                let reservation = self
+                    .blobs
+                    .reserve_read_calls(1)
+                    .map_err(|e| store_error(StorageOp::BlobHead, e))?;
+                let key = BlobKey::pack(pack);
+                Ok(
+                    crate::store::ReadReservation::scope(&[reservation], self.blobs.head(&key))
+                        .await
+                        .map_err(|e| store_error(StorageOp::BlobHead, e))?
+                        .is_some(),
+                )
+            }
+            Addressing::Multi(_) => {
+                // The fallback stays dependency-serial and charges only when
+                // it is needed; reserve the independent first read for a wave.
+                let reservation = self.meta.reserve_read_calls(1).map_err(meta_error)?;
+                crate::store::ReadReservation::scope(
+                    &[reservation],
+                    read::is_member(
+                        &self.meta,
+                        self.shards.as_ref(),
+                        &op.repo,
+                        &pack,
+                        Some(ref_name),
+                    ),
+                )
                 .await
-                .map_err(|e| store_error(StorageOp::BlobHead, e))?
-                .is_some()),
-            Addressing::Multi(_) => read::is_member(
-                &self.meta,
-                self.shards.as_ref(),
-                &op.repo,
-                &pack,
-                Some(ref_name),
-            )
-            .await
-            .map_err(meta_error),
+                .map_err(meta_error)
+            }
         }
     }
 }
@@ -360,6 +426,9 @@ mod concurrency_tests {
     }
     impl BlobStore for PendingMembership {
         type Sink = <MemoryBlobStore as BlobStore>::Sink;
+        fn read_call_allowance(&self) -> Option<u32> {
+            Some(u32::MAX)
+        }
         async fn begin(&self, _: BlobKey, _: u64) -> Result<Self::Sink, StoreError> {
             unreachable!()
         }
@@ -452,3 +521,6 @@ mod concurrency_tests {
         assert_eq!(upd.new, Some(node));
     }
 }
+
+#[cfg(test)]
+mod prologue_tests;

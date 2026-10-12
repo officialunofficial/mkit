@@ -355,6 +355,12 @@ impl PartSink for MemoryPartSink {
 }
 
 impl BlobStore for MemoryBlobStore {
+    fn read_call_allowance(&self) -> Option<u32> {
+        Some(u32::MAX)
+    }
+    fn read_byte_allowance(&self) -> Option<u64> {
+        Some(u64::MAX)
+    }
     type Sink = MemoryPackSink;
 
     async fn begin(&self, key: BlobKey, len: u64) -> Result<MemoryPackSink, StoreError> {

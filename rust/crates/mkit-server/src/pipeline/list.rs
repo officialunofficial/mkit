@@ -217,7 +217,9 @@ fn continued_boundary(scan: &Scan) -> Result<Option<&str>, StoreError> {
 }
 
 /// Read one bounded page. Every source is scanned once, sequentially.
+/// Tests also use it as the serial reference for [`page_in_waves`].
 /// A failed source fails the entire page; no partial merge is exposed.
+#[cfg(any(test, feature = "http-objects"))]
 pub(super) async fn page<S: BucketSource>(
     sources: &[S],
     repo: &RepoId,
@@ -237,7 +239,6 @@ pub(super) async fn page<S: BucketSource>(
     merge(repo, prefix, scans, page_size, byte_budget)
 }
 
-#[cfg(feature = "http-objects")]
 /// [`page`] for a read operation: the sources are independent scans, so each
 /// wave of up to [`crate::store::read_io::parallelism`] of them is reserved
 /// against the operation's call ledger and dispatched together. The page is
@@ -255,12 +256,21 @@ pub(super) async fn page_in_waves<S: BucketSource, N: NamespaceStore>(
     assert!(!sources.is_empty() && page_size > 0);
     let per_source = per_source(page_size, sources.len());
     let mut scans = Vec::with_capacity(sources.len());
-    for wave in sources.chunks(crate::store::read_io::parallelism()) {
-        let reservation = if store.reader_admission() {
-            store.reserve_read_calls(u32::try_from(wave.len()).unwrap_or(u32::MAX))?
+    let mut offset = 0;
+    while offset < sources.len() {
+        let width = (sources.len() - offset).min(crate::store::read_io::parallelism());
+        let width = if store
+            .read_call_allowance()
+            .is_some_and(|calls| calls >= u32::try_from(width).unwrap_or(u32::MAX))
+        {
+            width
         } else {
-            None
+            1
         };
+        let wave = &sources[offset..offset + width];
+        // RPC stores can reserve inherited invocation calls even without an
+        // object-reader admission facade. Unknown/tight allowances stay serial.
+        let reservation = store.reserve_read_calls(u32::try_from(width).unwrap_or(u32::MAX))?;
         let replies = crate::store::ReadReservation::scope(
             &[reservation],
             futures::future::join_all(
@@ -274,6 +284,7 @@ pub(super) async fn page_in_waves<S: BucketSource, N: NamespaceStore>(
             continued_boundary(&scan)?;
             scans.push(scan);
         }
+        offset += width;
     }
     merge(repo, prefix, scans, page_size, byte_budget)
 }
@@ -368,6 +379,144 @@ mod tests {
                 rows: rows.into_iter().take(limit as usize).collect(),
                 more,
             })
+        }
+    }
+
+    struct OrderedFailureBucket {
+        index: usize,
+        completed: Arc<Mutex<Vec<usize>>>,
+        boundary_error: bool,
+    }
+
+    impl BucketSource for OrderedFailureBucket {
+        async fn scan(
+            &self,
+            _repo: &RepoId,
+            _prefix: &str,
+            _last: Option<&str>,
+            _limit: u32,
+        ) -> Result<Scan, StoreError> {
+            // Make the first source finish after the later failing source.
+            if self.index == 0 {
+                let mut yielded = false;
+                futures::future::poll_fn(|cx| {
+                    if yielded {
+                        std::task::Poll::Ready(())
+                    } else {
+                        yielded = true;
+                        cx.waker().wake_by_ref();
+                        std::task::Poll::Pending
+                    }
+                })
+                .await;
+            }
+            self.completed.lock().unwrap().push(self.index);
+            if self.index == 0 && self.boundary_error {
+                Ok(Scan {
+                    rows: Vec::new(),
+                    more: true,
+                })
+            } else if self.index <= 1 {
+                Err(StoreError::Corrupt(format!("bucket {}", self.index).into()))
+            } else {
+                Ok(Scan {
+                    rows: Vec::new(),
+                    more: false,
+                })
+            }
+        }
+    }
+
+    #[test]
+    fn waved_page_consumes_first_source_error_and_drains_only_dispatched_wave() {
+        for boundary_error in [false, true] {
+            let completed = Arc::new(Mutex::new(Vec::new()));
+            let sources = (0..16)
+                .map(|index| OrderedFailureBucket {
+                    index,
+                    completed: completed.clone(),
+                    boundary_error,
+                })
+                .collect::<Vec<_>>();
+            let error = block_on(page_in_waves(
+                &crate::MemoryKv::default(),
+                &sources,
+                &repo("a"),
+                "",
+                None,
+                10,
+                2048,
+            ))
+            .err()
+            .unwrap();
+            assert!(matches!(error, StoreError::Corrupt(_)));
+            let expected = if boundary_error {
+                "empty continued ref scan"
+            } else {
+                "bucket 0"
+            };
+            assert!(error.to_string().contains(expected), "{error}");
+            let completed = completed.lock().unwrap();
+            assert_eq!(completed.len(), crate::store::read_io::parallelism());
+            assert_eq!(completed.last(), Some(&0));
+            assert!(completed.iter().all(|index| *index < 6));
+        }
+    }
+
+    #[test]
+    fn waved_page_tight_budget_preserves_first_source_error() {
+        let completed = Arc::new(Mutex::new(Vec::new()));
+        let sources = (0..16)
+            .map(|index| OrderedFailureBucket {
+                index,
+                completed: completed.clone(),
+                boundary_error: false,
+            })
+            .collect::<Vec<_>>();
+        let backend = crate::MemoryKv::default();
+        let calls = crate::budget::SliceBudget::new(1);
+        let store = crate::indexed::budget::Budgeted::new(&backend, &calls);
+        let error = block_on(page_in_waves(
+            &store,
+            &sources,
+            &repo("a"),
+            "",
+            None,
+            10,
+            2048,
+        ))
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("bucket 0"));
+        assert_eq!(*completed.lock().unwrap(), vec![0]);
+        assert_eq!(calls.used(), 1);
+        assert!(
+            !calls.refused(),
+            "unused later sources cannot refuse a reservation"
+        );
+    }
+
+    #[test]
+    fn waved_page_matches_serial_page_for_empty_and_mixed_buckets() {
+        let names = ["refs/heads/a", "refs/heads/b", "refs/tags/a"].map(str::to_owned);
+        for prefix in ["", "refs/heads/", "absent/"] {
+            for count in [1, 16] {
+                let sources = buckets(&names, count);
+                let repo = repo("a");
+                let serial = block_on(page(&sources, &repo, prefix, None, 1, 2048)).unwrap();
+                let waved = block_on(page_in_waves(
+                    &crate::MemoryKv::default(),
+                    &sources,
+                    &repo,
+                    prefix,
+                    None,
+                    1,
+                    2048,
+                ))
+                .unwrap();
+                assert_eq!(waved.refs, serial.refs);
+                assert_eq!(waved.next, serial.next);
+            }
         }
     }
 

@@ -123,6 +123,21 @@ impl<'a, S> Budgeted<'a, S> {
             None => Ok(None),
         }
     }
+    /// A speculative sibling with the same ledgers and admission, whose
+    /// failures cannot reclassify an earlier branch's result.
+    #[cfg_attr(not(feature = "http-objects"), allow(dead_code))]
+    pub(crate) fn unflagged(&self) -> Budgeted<'_, S> {
+        Budgeted {
+            inner: self.inner,
+            budget: self.budget,
+            session: self.session,
+            encoded: self.encoded,
+            hit: None,
+            io: self.io,
+            credits: crate::store::ReadCredits::default(),
+        }
+    }
+
     fn note<T>(&self, result: Result<T, StoreError>) -> Result<T, StoreError> {
         if let Some(hit) = self.hit
             && result.as_ref().is_err_and(is_exhausted)
@@ -164,6 +179,14 @@ impl<'a, S> Budgeted<'a, S> {
 }
 
 impl<S: NamespaceStore> NamespaceStore for Budgeted<'_, S> {
+    fn read_call_allowance(&self) -> Option<u32> {
+        Some(
+            self.inner
+                .read_call_allowance()?
+                .min(self.budget.map_or(u32::MAX, SliceBudget::remaining))
+                .min(self.session.map_or(u32::MAX, SliceBudget::remaining)),
+        )
+    }
     fn reader_admission(&self) -> bool {
         self.io.is_some() || self.inner.reader_admission()
     }
@@ -270,6 +293,23 @@ impl<S: NamespaceStore> NamespaceStore for Budgeted<'_, S> {
 
 /// Blob reads use the same counter as namespace calls.
 impl<B: BlobStore> BlobStore for Budgeted<'_, B> {
+    fn read_call_allowance(&self) -> Option<u32> {
+        Some(
+            self.inner
+                .read_call_allowance()?
+                .min(self.budget.map_or(u32::MAX, SliceBudget::remaining))
+                .min(self.session.map_or(u32::MAX, SliceBudget::remaining)),
+        )
+    }
+    fn read_byte_allowance(&self) -> Option<u64> {
+        Some(
+            self.inner
+                .read_byte_allowance()?
+                .min(self.encoded.map_or(u64::MAX, |b| {
+                    b.limit.saturating_sub(b.used.load(Ordering::SeqCst))
+                })),
+        )
+    }
     type Sink = B::Sink;
 
     fn reserve_read_calls(
@@ -473,6 +513,32 @@ mod tests {
         assert_eq!(sibling.remaining(), 0);
         assert!(parent.charge_many(2).is_err());
         assert_eq!(parent.used(), 3);
+    }
+
+    #[test]
+    fn read_allowance_hints_include_every_ledger_without_charging() {
+        use crate::{MemoryBlobStore, MemoryKv};
+        let inherited = SliceBudget::new(9);
+        let calls = SliceBudget::with_parent(10, inherited.clone());
+        let session = SliceBudget::new(8);
+        let encoded = EncodedBudget::new(100);
+        let kv = MemoryKv::default();
+        let blobs = MemoryBlobStore::default();
+        let meta = Budgeted::new(&kv, &calls).with_session(&session);
+        let blobs = Budgeted::new(&blobs, &calls)
+            .with_session(&session)
+            .with_encoded(&encoded);
+        assert_eq!(meta.read_call_allowance(), Some(8));
+        assert_eq!(blobs.read_call_allowance(), Some(8));
+        assert_eq!(blobs.read_byte_allowance(), Some(100));
+        assert_eq!((calls.used(), session.used(), inherited.used()), (0, 0, 0));
+        calls.charge_many(3).unwrap();
+        session.charge_many(4).unwrap();
+        encoded.charge(25).unwrap();
+        assert_eq!(meta.read_call_allowance(), Some(4));
+        assert_eq!(blobs.read_call_allowance(), Some(4));
+        assert_eq!(blobs.read_byte_allowance(), Some(75));
+        assert!(!calls.refused() && !session.refused() && !inherited.refused());
     }
 
     #[test]
