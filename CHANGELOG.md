@@ -348,7 +348,8 @@ collect the applicable entries between their old and new immutable pins.
   `Namespace`/`Name` variants that name the offending segment and the accepted grammars. The CLI
   prints those clearer URL/identity errors, and a plain `https://` URL is
   refused with guidance pointing at `mkit+https://` and explaining that plain
-  HTTP serves objects by repository path (SPEC-HTTP-OBJECTS). Grants, grant
+  HTTP serves objects by repository path (SPEC-HTTP-OBJECTS). `mkit-client`'s
+  push `Destination` accepts the same union. Grants, grant
   epochs and visibility statements keep the self-certifying grammar and are
   never built for an opaque namespace: `mkit grant`, `mkit epoch` and
   `mkit visibility set --statement` refuse such a URL with an error naming
