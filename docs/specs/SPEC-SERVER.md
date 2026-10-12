@@ -1585,6 +1585,16 @@ snapshot from the head read. Its planning deadline precedes the entry read.
 Entries with reference pages refresh the entry plan after staging those pages.
 The early replay exit and stored representation are unchanged.
 
+Scheduled Decode denial reads MUST follow completion of the batch's inventory
+staging and precede all of its frame, candidate, and index rows. Reads MAY run
+in bounded concurrent waves. A failed wave MUST report the first failing object
+in batch order among the reads it issued, whether blocked or unavailable, and
+MUST NOT admit the batch. A wave whose all-or-nothing read reservation is
+refused issues no reads and reports unavailable.
+Informative: scheduled and inline direct index writes use the same bounded
+waves, preserving ObjectIndex put order and rechecking denial before each apply.
+The earlier inline pre-staging check uses the same waves at its existing boundary.
+
 A scheduled Decode checkpoint MUST commit after, or atomically with, the completed
 entry's provisional writes and include its post-entry cursor, under the existing job and verification
 state guards. Retries resume that durable boundary. Interrupted entry writes may
@@ -2343,7 +2353,10 @@ strings or headers — and MUST NOT be logged. The host enforces its separately
 streamed request-body cap rather than trusting Content-Length alone.
 
 Successors MUST inherit the original expiry. Initial expiry is bounded by the
-configured token TTL and credential/grant expiry. The request-local proof lag
+configured token TTL and, when present, the write-grant expiry. The issuing
+request envelope's expiry MUST NOT cap the token lifetime: every authenticated
+page MUST supply a currently valid signed request envelope and repeat live
+authorization and credential-scope checks. The request-local proof lag
 and deadline MUST NOT cap the token's lifetime. Each page's own proofs MUST
 still expire within its reachability lag, request deadline and token expiry.
 Imported proofs MUST be confined to the paging operation and discarded on

@@ -13,6 +13,19 @@ Combine tags when applicable; every breaking API entry states a replacement and
 every stored-format entry states whether a store reset is required. Embedders
 collect the applicable entries between their old and new immutable pins.
 
+### Changed
+
+- Scheduled Decode, EmitIndex, and inline index writes share per-object takedown
+  denial waves of at most six, after inventory staging and before provisional
+  rows or the direct index apply. The first failing object in batch order still
+  selects blocked or unavailable. Successful batches keep
+  one call per object; a failed wave completes already-issued reads and skips
+  later waves. The inline verifier's pre-staging check uses the same waves at its
+  existing boundary; per-chunk and per-frame extraction checks stay serial.
+  `verification_inventory_progress.denial_ms` now reports wave
+  wall time rather than summed per-call time. No API, wire, hook, stored-format,
+  project-limit, or store-reset change is required.
+
 ### Added
 
 - `mkit-client`: the runtime-independent async protocol client for reads and
@@ -304,10 +317,14 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Fixed
 
-- History continuation lifetimes use the configured token TTL and credential
-  and grant expiry without the request-local proof cap. Walks may span longer
-  than the proof window while each page retains bounded proofs and fresh live
-  security checks. Successors keep the original absolute expiry. No API, wire,
+- History continuation tokens outlive the issuing signed request envelope.
+  Their fixed lifetime is the minimum of the configured token TTL and any
+  write-grant expiry, without the request-local proof cap or the envelope's
+  expiry; successors retain the original absolute expiry. Both first-parent
+  and selected-ref timestamp issuance follow this rule. Each authenticated page
+  still verifies its own currently valid signed envelope, current authority and
+  credential scope, and keeps bounded proofs and fresh live security checks.
+  Embedders may use short request envelopes for history walks. No API, wire,
   stored-format change, or store reset.
 
 - Takedown discovery found no ticketed memberships. It accepted only an empty

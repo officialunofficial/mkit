@@ -1,6 +1,8 @@
 //! Cross-request scope checks using independently authenticated requests.
 use super::*;
+use crate::pipeline::{ContinuedHistoryOptions, ContinuedHistoryOrder, HistoryContinuationState};
 use mkit_attest::grant::{AcceptedSchemes, OwnerScheme, RepoScope};
+use mkit_core::history_order::{ParentEdge, PendingCandidate, TimestampDiscovery, WalkStep};
 
 struct ScopeAuthority;
 impl Authorizer for ScopeAuthority {
@@ -62,48 +64,135 @@ fn scope_grant(fx: &ScopeFx, signer: &SigningKey, number: u8) -> String {
 }
 
 #[test]
-fn continuation_fixed_expiry_is_capped_by_envelope_and_grant() {
-    for grant_caps in [false, true] {
+fn continuation_fixed_expiry_is_capped_by_ttl_and_grant() {
+    for order in [
+        ContinuedHistoryOrder::FirstParent,
+        ContinuedHistoryOrder::TimestampDiscovery,
+    ] {
+        // No grant, a grant shorter than the TTL, and a grant outliving it.
+        for grant_offset in [None, Some(120_000), Some(2_000_000)] {
+            let grant_caps = grant_offset.is_some_and(|offset| offset < 900_000);
+            let granted = grant_offset.is_some();
+            let (fx, head, cursor) = scope_fixture(false);
+            let signer = key(56);
+            let ttl_expiry = T0 + 900_000;
+            let grant_expiry = T0 + grant_offset.unwrap_or(0);
+            let grant = crate::pipeline::tests::grants::grant(&fx.owner, &signer, |grant| {
+                grant.scope = RepoScope::Repository(
+                    mkit_core::repo_identity::RepositoryIdentity::parse(&fx.identity("room"))
+                        .unwrap(),
+                );
+                grant.expiry_ms = grant_expiry;
+            });
+            let req = if granted {
+                envelope_with_ttl(&fx, &signer, AUDIENCE, T0, 10_000)
+                    .header("x-write-grant", &grant)
+            } else {
+                envelope_with_ttl(&fx, &fx.owner, AUDIENCE, T0, 10_000)
+            };
+            let token = issue_order(&fx, &req, order);
+            let expires = if grant_caps { grant_expiry } else { ttl_expiry };
+            assert_eq!(token.expires_at_ms, u64::try_from(expires).unwrap());
+            // Fresh envelopes have later expiry but cannot extend the token's original cap.
+            let fresh = if granted {
+                envelope(&fx, &signer, AUDIENCE, expires - 2).header("x-write-grant", &grant)
+            } else {
+                envelope(&fx, &fx.owner, AUDIENCE, expires - 2)
+            };
+            fx.clock.set(expires - 2);
+            accepts_fresh_order(&fx, Some(&fresh), &token, head, cursor, order);
+            with_request(&fx, Some(&fresh), |reader| {
+                // Construct while the grant is live; redemption observes its expiry.
+                fx.clock.set(expires);
+                for _ in 0..2 {
+                    assert!(
+                        block_on(reader.walk_history_page_with_options_in(
+                            &mut ReaderSession::default(),
+                            HEAD,
+                            Some(token.token.expose()),
+                            1,
+                            ContinuedHistoryOptions { order },
+                        ))
+                        .unwrap()
+                        .is_none()
+                    );
+                }
+            });
+        }
+    }
+}
+
+#[test]
+fn continuation_short_envelope_outlives_issuance_but_each_page_reauthenticates() {
+    for order in [
+        ContinuedHistoryOrder::FirstParent,
+        ContinuedHistoryOrder::TimestampDiscovery,
+    ] {
         let (fx, head, cursor) = scope_fixture(false);
-        let signer = key(56);
-        let credential_expiry = T0 + 300_000;
-        let grant_expiry = T0 + 120_000;
-        let grant = crate::pipeline::tests::grants::grant(&fx.owner, &signer, |grant| {
-            grant.scope = RepoScope::Repository(
-                mkit_core::repo_identity::RepositoryIdentity::parse(&fx.identity("room")).unwrap(),
+        let req = envelope_with_ttl(&fx, &fx.owner, AUDIENCE, T0, 10_000);
+        let token = issue_order(&fx, &req, order);
+        assert_eq!(token.expires_at_ms, u64::try_from(T0 + 900_000).unwrap());
+        // A reader constructed under a valid envelope must refuse when that
+        // same envelope expires, even though the token remains live.
+        with_request(&fx, Some(&req), |reader| {
+            fx.clock.set(T0 + 10_001);
+            assert!(
+                block_on(reader.walk_history_page_with_options_in(
+                    &mut ReaderSession::default(),
+                    HEAD,
+                    Some(token.token.expose()),
+                    1,
+                    ContinuedHistoryOptions { order },
+                ))
+                .unwrap()
+                .is_none()
             );
-            grant.expiry_ms = grant_expiry;
         });
-        let req = if grant_caps {
-            envelope(&fx, &signer, AUDIENCE, T0).header("x-write-grant", &grant)
-        } else {
-            envelope(&fx, &fx.owner, AUDIENCE, T0)
-        };
-        let token = issue(&fx, Some(&req));
-        let expires = if grant_caps {
-            grant_expiry
-        } else {
-            credential_expiry
-        };
-        assert_eq!(token.expires_at_ms, u64::try_from(expires).unwrap());
-        // Fresh envelopes have later expiry but cannot extend the token's original cap.
-        let fresh = if grant_caps {
-            envelope(&fx, &signer, AUDIENCE, expires - 2).header("x-write-grant", &grant)
-        } else {
-            envelope(&fx, &fx.owner, AUDIENCE, expires - 2)
-        };
-        fx.clock.set(expires - 2);
-        accepts_fresh(&fx, Some(&fresh), &token, head, cursor);
+        for now in [T0 + 10_001, T0 + 300_001, T0 + 899_998] {
+            fx.clock.set(now);
+            let fresh = envelope_with_ttl(&fx, &fx.owner, AUDIENCE, now, 10_000);
+            accepts_fresh_order(&fx, Some(&fresh), &token, head, cursor, order);
+        }
+        let now = fx.clock.now_ms();
+        let fresh = envelope_with_ttl(&fx, &fx.owner, AUDIENCE, now, 10_000);
         with_request(&fx, Some(&fresh), |reader| {
-            // Construct while the grant is live; redemption observes its expiry.
-            fx.clock.set(expires);
-            for _ in 0..2 {
+            let page = block_on(reader.walk_history_page_with_options_in(
+                &mut ReaderSession::default(),
+                HEAD,
+                Some(token.token.expose()),
+                1,
+                ContinuedHistoryOptions { order },
+            ))
+            .unwrap()
+            .unwrap();
+            let successor = page.next.unwrap();
+            assert_eq!(successor.expires_at_ms, token.expires_at_ms);
+            let Object::Commit(commit) =
+                mkit_core::serialize::deserialize(&page.commits[0].canonical).unwrap()
+            else {
+                panic!("fixture cursor is a commit");
+            };
+            let last = block_on(reader.walk_history_page_with_options_in(
+                &mut ReaderSession::default(),
+                HEAD,
+                Some(successor.token.expose()),
+                1,
+                ContinuedHistoryOptions { order },
+            ))
+            .unwrap()
+            .unwrap();
+            assert_eq!(last.commits.len(), 1);
+            assert_eq!(last.commits[0].id, commit.parents[0]);
+            assert!(last.next.is_none());
+            fx.clock.set(T0 + 900_000);
+            for expired in [&token, &successor] {
                 assert!(
-                    block_on(reader.walk_history_page_in(
+                    block_on(reader.walk_history_page_with_options_in(
                         &mut ReaderSession::default(),
                         HEAD,
-                        Some(token.token.expose()),
+                        Some(expired.token.expose()),
                         1,
+                        ContinuedHistoryOptions { order },
                     ))
                     .unwrap()
                     .is_none()
@@ -113,7 +202,63 @@ fn continuation_fixed_expiry_is_capped_by_envelope_and_grant() {
     }
 }
 
+fn issue_order(fx: &ScopeFx, req: &Req, order: ContinuedHistoryOrder) -> HistoryContinuation {
+    if order == ContinuedHistoryOrder::FirstParent {
+        return issue(fx, Some(req));
+    }
+    let mut token = None;
+    with_request(fx, Some(req), |reader| {
+        let reader = reader.with_selected_ref(HEAD).unwrap();
+        let mut session = ReaderSession::default();
+        let checkpoint = block_on(reader.selected_capture_in(&mut session))
+            .unwrap()
+            .unwrap();
+        let head = checkpoint.tip();
+        let bytes = block_on(reader.read_canonical_in(&mut session, &[head]))
+            .unwrap()
+            .pop()
+            .flatten()
+            .unwrap();
+        let Object::Commit(commit) = mkit_core::serialize::deserialize(&bytes).unwrap() else {
+            panic!("fixture tip is a commit");
+        };
+        let mut walk = TimestampDiscovery::new();
+        walk.push(PendingCandidate {
+            id: head,
+            timestamp: Some(commit.timestamp),
+        })
+        .unwrap();
+        assert_eq!(walk.step().unwrap(), WalkStep::Emit(head));
+        let edges = commit
+            .parents
+            .iter()
+            .map(|id| ParentEdge {
+                id: *id,
+                timestamp: None,
+                enqueue: true,
+            })
+            .collect::<Vec<_>>();
+        walk.emit(&edges).unwrap();
+        token = block_on(reader.issue_history_continuation_in(
+            &mut session,
+            &HistoryContinuationState { checkpoint, walk },
+        ))
+        .unwrap();
+    });
+    token.unwrap()
+}
+
 fn envelope(fx: &ScopeFx, signer: &SigningKey, audience: &str, created: i64) -> Req {
+    envelope_with_ttl(fx, signer, audience, created, 300_000)
+}
+
+fn envelope_with_ttl(
+    fx: &ScopeFx,
+    signer: &SigningKey,
+    audience: &str,
+    created: i64,
+    ttl: i64,
+) -> Req {
     let mut req = signed(
         signer,
         &fx.identity("room"),
@@ -131,14 +276,14 @@ fn envelope(fx: &ScopeFx, signer: &SigningKey, audience: &str, created: i64) -> 
         procedure: Procedure::ListRefs.connect_path(),
         commitment: &commitment,
         created_at: created,
-        expires_at: created + 300_000,
+        expires_at: created + ttl,
         nonce: &nonce,
     };
     let signature = signer.sign(&op.digest().unwrap());
     req = req
         .header("x-audience", audience)
         .header("x-created-at", &created.to_string())
-        .header("x-expires-at", &(created + 300_000).to_string())
+        .header("x-expires-at", &(created + ttl).to_string())
         .header("idempotency-key", &nonce)
         .header("x-signature", &to_hex_bytes(&signature.to_bytes()));
     req
@@ -187,15 +332,34 @@ fn accepts_fresh(
     head: Hash,
     cursor: Hash,
 ) {
+    accepts_fresh_order(
+        fx,
+        req,
+        token,
+        head,
+        cursor,
+        ContinuedHistoryOrder::FirstParent,
+    );
+}
+
+fn accepts_fresh_order(
+    fx: &ScopeFx,
+    req: Option<&Req>,
+    token: &HistoryContinuation,
+    head: Hash,
+    cursor: Hash,
+    order: ContinuedHistoryOrder,
+) {
     // Verification time also changes between requests; it is not stable scope.
     fx.clock.set(fx.clock.now_ms() + 1);
     with_request(fx, req, |reader| {
         let mut session = ReaderSession::default();
-        let page = block_on(reader.walk_history_page_in(
+        let page = block_on(reader.walk_history_page_with_options_in(
             &mut session,
             HEAD,
             Some(token.token.expose()),
             1,
+            ContinuedHistoryOptions { order },
         ))
         .unwrap()
         .unwrap();

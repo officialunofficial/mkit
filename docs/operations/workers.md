@@ -109,6 +109,12 @@ clock, so a Worker's CPU time between awaits is not visible in them:
 base reads), `denial_ms` and `denial_calls` (the per-object denial reads that
 follow staging), `write_ms` (recording an entry's rows, including the local
 frame lookup) and `checkpoint_ms` (the guarded cursor commits).
+`denial_ms` measures the wall time of bounded denial waves, including failed
+waves; it does not sum overlapping per-call durations. Each wave awaits all
+responses before inspecting failures in input order. Decode, EmitIndex, and
+the inline verifier's post-staging index writes share this helper. Successful batches still
+issue one denial call per object. A failing wave finishes its already-issued
+calls, then stops without issuing later waves or recording that batch's entries.
 `inventory_batches` counts staging applies and `slice_calls` the slice's total
 remote-budget charges. Time not covered by these fields and `staging_duration_ms`
 is the slice's own timer, job and ticket bookkeeping and CPU.
@@ -138,12 +144,33 @@ Up to sixteen decoded reference-free entries share one inventory read (the head
 and their entry rows) and one guarded apply (at most 83 of the 100 operations:
 five per entry plus the head's three); the per-object denial reads follow the
 apply, so a block that lands while the batch is in flight is refused; a
-store that reserves operations gets a smaller batch. Rows already staged are
+store that reserves operations gets a smaller batch. Decode issues those denial
+reads in waves of at most six, using the shared read parallelism. Admitted
+readers reserve each wave before dispatch; ordinary mutation stores retain
+dispatch-time charging, so a later budget failure cannot mask an earlier
+object's block. A wave whose all-or-nothing reservation fails reports
+unavailable, even if an earlier object in it was blocked; the slice retries.
+First-in-batch failure precedence is otherwise preserved. A failing wave may
+have issued up to five reads past the failing object. No pack range, staging
+apply, or provisional write overlaps a denial wave.
+EmitIndex and inline index writes recheck their ObjectIndex puts in the existing
+put order before each direct apply. Their per-batch planning deadlines are
+created at the same boundary as before. The earlier inline denial precheck uses
+the same waves before signature and closure validation. Extract retains a fresh
+denial before each chunk's frame read and each member frame's subjects;
+prefetching would move later checks ahead of earlier I/O and effects. Rows already staged are
 skipped, so a replay after a lost reply or a crash writes nothing twice. The
 head guard keeps stagers of one pack serial. Entries with reference pages retain
 an early replay lookup, refresh their plan after page staging, and stage alone.
 Durable cursor checkpoints are still per entry; the 10-second planning deadline
-and storage layout are unchanged.
+and storage layout are unchanged. Slice bounds cover work, calls, and memory;
+there is no total elapsed-time cap. The deadline limits each stale write plan.
+
+Progress events use console telemetry, not a transactionally retained slice row.
+The durable cursor is one mutable job row per repository and pack. Each guarded
+entry checkpoint overwrites it, and later slices overwrite it again. Termination
+after a checkpoint but before event emission can leave durable advancement
+without that slice's progress event; console retention belongs to the embedder.
 
 After relay delivery, at most sixteen future timer rows are inspected and eight
 waiting jobs are nudged with guarded timer moves. Only ordinary delivery polls
@@ -340,7 +367,7 @@ Never substitute another role's key to satisfy a failed startup check.
 | `MKIT_HOOK_KEY` | Secret: `<key-id> <64 hex Ed25519 seed>`; outgoing signed hooks, including purge |
 | `URL_TOKEN_KEYS` | Secret: `active <64 hex seed>` plus `retired <64 hex public key> <retired_at_ms>` lines; HTTP bearer URL tokens |
 | `HISTORY_TOKEN_KEYS` | Optional dedicated MAC secret: one `active <64 hex secret>` line; scoped first-parent and timestamp-discovery history continuations |
-| `HISTORY_TOKEN_TTL` | Fixed maximum lifetime in seconds, 1–900 (default 900); bounded further by credential and grant expiry. Each page's proofs retain their request-local lag/deadline |
+| `HISTORY_TOKEN_TTL` | Fixed maximum lifetime in seconds, 1–900 (default 900); bounded further by any write-grant expiry, independently of the issuing request envelope. Each page's proofs retain their request-local lag/deadline |
 | `SCANNER_KEYS` | Secret configuration containing 1–32 distinct non-weak Ed25519 public keys, one 64-hex key per line; incoming scanner signatures |
 | `SCANNER_RETRIEVAL_KEYS` | Secret: exactly one `active <id> <64 hex MAC secret>` plus up to 15 `retained <id> <64 hex MAC secret> <retired_at_ms>` lines; assigned-pack capabilities |
 | `ADMIN_KEYS` | Secret containing §16.3 version-1 key-list JSON: `keyId`, `alg=ed25519`, `publicKey`, optional validity bounds and required `roles` |

@@ -186,7 +186,9 @@ and session for every request. The stable signer, grant, captured credential
 headers, and trusted audience must match; envelope nonce and timestamps may
 change. Public requests remain public.
 Successors inherit the original expiry, bounded at issuance by the configured
-TTL and credential/grant expiry. The request-local proof lag and deadline bound
+TTL and any write-grant expiry. The issuing request envelope does not cap the
+token lifetime; every owner page still requires its own valid signed envelope.
+The request-local proof lag and deadline bound
 each page's proofs independently of the token's lifetime. Live authorization
 and source/denial checks run again on every redemption.
 

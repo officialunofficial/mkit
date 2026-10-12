@@ -1517,8 +1517,8 @@ where
     /// than one entry. Denial still precedes any frame, candidate or index row.
     /// An object that is both malformed and blocked reports the malformed
     /// hash, because staging needs it parsed first.
-    /// The denial reads are one call each: content shards partition objects,
-    /// so ids of one batch share no shard.
+    /// Denial reads run in bounded waves, one call per object. Results are
+    /// checked in batch order, preserving sequential failure precedence.
     async fn admit(
         &self,
         st: &mut SliceState,
@@ -1546,22 +1546,26 @@ where
         .await?;
         st.inventory_batches += 1;
         st.entries_staged += batch.len() as u64;
-        for item in batch {
-            let started = now_ms(self.h.clock.as_ref());
-            let calls = self.budget.used();
-            let clear = crate::takedown::denial::require_clear(self.remote, &item.id).await;
-            st.denial_ms = st
-                .denial_ms
-                .saturating_add(now_ms(self.h.clock.as_ref()).saturating_sub(started));
-            st.denial_calls += self.budget.used().saturating_sub(calls);
-            clear.map_err(|error| {
-                if error.code() == crate::Code::PermissionDenied {
-                    Stop::Outcome(Outcome::Blocked)
-                } else {
-                    unavailable("decoded object unavailable")
-                }
-            })?;
-        }
+        let started = now_ms(self.h.clock.as_ref());
+        let calls = self.budget.used();
+        let clear = crate::takedown::denial::require_clear_many(
+            self.remote,
+            batch.iter().map(|item| item.id),
+        )
+        .await;
+        // Wall time of the bounded waves, including failed reads, rather than
+        // the sum of overlapping per-object durations.
+        st.denial_ms = st
+            .denial_ms
+            .saturating_add(now_ms(self.h.clock.as_ref()).saturating_sub(started));
+        st.denial_calls += self.budget.used().saturating_sub(calls);
+        clear.map_err(|error| {
+            if error.code() == crate::Code::PermissionDenied {
+                Stop::Outcome(Outcome::Blocked)
+            } else {
+                unavailable("decoded object unavailable")
+            }
+        })?;
         Ok(())
     }
 
@@ -2035,18 +2039,25 @@ where
         )?;
         for direct in plan.direct {
             let mut batch = Batch::new().require(Precondition::NotAfter(self.deadline()));
-            for (key, value) in direct.puts {
-                if let Some(keys::ParsedKey::ObjectIndex { object, .. }) = keys::parse(&key) {
-                    crate::takedown::denial::require_clear(self.remote, &object)
-                        .await
-                        .map_err(|error| {
-                            if error.code() == crate::Code::PermissionDenied {
-                                Stop::Outcome(Outcome::Blocked)
-                            } else {
-                                unavailable("index object unavailable")
-                            }
-                        })?;
+            crate::takedown::denial::require_clear_many(
+                self.remote,
+                direct
+                    .puts
+                    .iter()
+                    .filter_map(|(key, _)| match keys::parse(key) {
+                        Some(keys::ParsedKey::ObjectIndex { object, .. }) => Some(object),
+                        _ => None,
+                    }),
+            )
+            .await
+            .map_err(|error| {
+                if error.code() == crate::Code::PermissionDenied {
+                    Stop::Outcome(Outcome::Blocked)
+                } else {
+                    unavailable("index object unavailable")
                 }
+            })?;
+            for (key, value) in direct.puts {
                 batch = batch.put(key, value);
             }
             if !matches!(

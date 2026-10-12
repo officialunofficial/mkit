@@ -886,7 +886,7 @@ fn issued_timestamp_continuation_outlives_its_capture_proof_window() {
         let token = issue_after(&fx, writer, 10, &[], |_, _, _, _| {})
             .unwrap()
             .unwrap();
-        let lifetime = if writer { 300_000 } else { 900_000 };
+        let lifetime = 900_000;
         assert_eq!(token.expires_at_ms, u64::try_from(T0 + lifetime).unwrap());
         fx.clock.advance(60_001);
         let (page, _) = redeem_page(&fx, writer, HEAD, &token, 10, None, &by_id);
