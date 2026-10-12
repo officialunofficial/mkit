@@ -1,3 +1,4 @@
+// Fixture setup must fail immediately; node ids are small test indexes.
 #![allow(clippy::unwrap_used, clippy::cast_possible_truncation)]
 //! Ordered, reserved dependency waves and independent directory reads.
 use super::*;

@@ -98,7 +98,8 @@ fresh dependency admission: a tight shared budget must still observe an earlier
 malformed descriptor before spending calls on later dependencies. The regression
 uses a 24-call budget and distinguishes `Unavailable` from `ResourceExhausted`.
 Continuation activation stays serial. Its guarded closing apply remains the cut
-before joined pure reads, and security absence/errors precede anchor errors.
+before joined pure reads, and in the closing fence security absence/errors
+precede anchor errors; the resumed prologue consumes the anchor first.
 
 Remaining-allowance hints never reserve or charge work. Unknown or insufficient
 allowances retain serial admission. Every dispatched wave still reserves its
@@ -106,6 +107,15 @@ calls before dispatch, and all object-reader metadata/blob work uses the same
 six-call envelope. Warming dispatches nothing when its optional reservation
 does not fit; speculative failures grant no proof and retain no guard reply.
 All original call, byte, operation, deadline, and wire limits remain in place.
+
+Two accounting consequences are deliberate. A wave is prepaid, so when one
+member of a wave fails or refuses, its already-dispatched siblings stay charged
+(serial code would have stopped at the first failure); successful shapes are
+unaffected. Warming also raises the per-commit call cost of first-parent
+history (about +14% with denial off and +5% with denial on), so the largest
+page that completes inside the fixed per-invocation call allowance shrinks by
+about the same fraction; the allowance itself is unchanged and the default page
+sizes remain far inside it (Log(50) with denial on uses 2,220 of 8,500).
 
 ## Conditional cold model
 

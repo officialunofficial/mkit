@@ -2666,3 +2666,65 @@ fn mixed_raw_run_caps_do_not_mask_earlier_corruption_or_cross_delta_boundary() {
     assert!(!loaded.contains_key(&target));
     assert_eq!(&*loaded[&id(&root)], serialize(&root).unwrap());
 }
+
+#[test]
+fn mixed_batch_raw_runs_do_not_charge_more_calls_than_serial_loads() {
+    use crate::http_objects::resolve::{self, Budget, Env};
+    use crate::indexed::budget::{Budgeted, SliceBudget};
+    let (fx, base, target) = published_external_delta_member();
+    let derived = blob(b"derived payload");
+    let root = tree(&[("derived", EntryMode::Blob, &derived)]);
+    let repo = fx.repo_id("room");
+    let no_reads = std::collections::BTreeSet::new();
+    macro_rules! env {
+        ($meta:expr, $blobs:expr) => {
+            Env {
+                no_reads: &no_reads,
+                blobs: $blobs,
+                meta: $meta,
+                shards: fx.pipe.shards.as_ref(),
+                repo: &repo,
+                indexed: fx.pipe.cfg.indexed.as_ref().unwrap(),
+                cfg: fx.pipe.cfg.http_objects.as_ref().unwrap(),
+                metrics: fx.pipe.metrics.as_ref(),
+                caps: crate::indexed::resolve::Caps::Reader,
+            }
+        };
+    }
+    let members = block_on(resolve::locate_ids(
+        &env!(&fx.pipe.meta, &fx.pipe.blobs),
+        &[base, id(&root), target],
+        resolve::OnCap::Fail,
+    ))
+    .unwrap()
+    .0;
+    let member = |id| *members.iter().find(|(hash, _)| *hash == id).unwrap();
+    let batch = [member(base), member(target), member(id(&root))];
+    let guards = std::collections::BTreeSet::new();
+    let serial_calls = SliceBudget::new(1_000);
+    {
+        let meta = Budgeted::new(&fx.pipe.meta, &serial_calls);
+        let blobs = Budgeted::new(&fx.pipe.blobs, &serial_calls);
+        let serial_env = env!(&meta, &blobs);
+        for (id, loc) in batch {
+            block_on(resolve::load(&serial_env, id, loc, &mut Budget(u64::MAX))).unwrap();
+        }
+    }
+    let waved_calls = SliceBudget::new(1_000);
+    let meta = Budgeted::new(&fx.pipe.meta, &waved_calls);
+    let blobs = Budgeted::new(&fx.pipe.blobs, &waved_calls);
+    let loaded = block_on(crate::pipeline::object_reader::load_permitted(
+        &env!(&meta, &blobs),
+        &batch,
+        &guards,
+        &mut Budget(u64::MAX),
+    ))
+    .unwrap();
+    assert_eq!(loaded.len(), 3);
+    assert!(
+        waved_calls.used() <= serial_calls.used(),
+        "waved {} serial {}",
+        waved_calls.used(),
+        serial_calls.used()
+    );
+}

@@ -429,6 +429,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         )
         .await
     }
+    // One precedence-ordered same-view operation; the wake flag is an explicit opt-in.
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn proved_nodes_with_successor_wake(
         &self,

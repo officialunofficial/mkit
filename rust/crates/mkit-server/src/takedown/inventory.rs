@@ -829,11 +829,8 @@ pub(crate) async fn located_entries<S: NamespaceStore>(
         let (wave, rest) = pending.split_at(width);
         pending = rest;
         // Six chunks hold at most 288 keys, within the shared row allowance.
-        let reservation = if store.reader_admission() {
-            store.reserve_read_calls(u32::try_from(wave.len()).unwrap_or(u32::MAX))?
-        } else {
-            None
-        };
+        let reservation =
+            store.reserve_read_calls(u32::try_from(wave.len()).unwrap_or(u32::MAX))?;
         let replies = crate::store::ReadReservation::scope(
             &[reservation],
             futures::future::join_all(wave.iter().map(|(p, _, _, keys)| store.get_many(p, keys))),
