@@ -646,7 +646,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         &self,
         authority: Option<&crate::pipeline::Authenticated>,
     ) -> Result<(Hash, u64), ServerError> {
-        let mut expiry = u64::MAX;
+        let mut grant_expiry = u64::MAX; // no grant: only the token TTL bounds it
         let mut parts = vec![b"anonymous".to_vec()];
         let crate::pipeline::AuthMode::AuthV2(auth) = &self.pipe.cfg.auth else {
             return Err(absent());
@@ -662,17 +662,19 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 .ok_or_else(absent)?
                 .check_public_roles(&[*a.principal.ed25519().ok_or_else(absent)?])
                 .map_err(|_| absent())?;
+            // Only an envelope-authenticated principal has a credential scope;
+            // the envelope's own expiry is enforced by `authenticate`.
             a.auth.as_ref().ok_or_else(absent)?;
             if let Some(grant) = &a.write_grant {
                 parts.push(grant.expose().as_bytes().to_vec());
                 let cfg = self.pipe.cfg.grants.as_ref().ok_or_else(absent)?;
                 let grant = mkit_attest::grant::verify_grant_owner(cfg.verifier(), grant.expose())
                     .map_err(|_| absent())?;
-                expiry = ms(grant.statement().expiry_ms);
+                grant_expiry = ms(grant.statement().expiry_ms);
             }
             parts.push(a.credential_scope_digest().to_vec());
         }
-        Ok((digest_parts(parts), expiry))
+        Ok((digest_parts(parts), grant_expiry))
     }
     #[allow(clippy::too_many_arguments)] // Optional already loaded selected tip avoids duplicate serving I/O.
     async fn resume_linear(
