@@ -20,7 +20,7 @@ pub(crate) async fn require_clear_many<S: NamespaceStore>(
         let reservation = if store.reader_admission() {
             store
                 .reserve_read_calls(u32::try_from(wave.len()).expect("bounded denial wave"))
-                .map_err(|_| ServerError::unavailable("decoded object unavailable"))?
+                .map_err(|_| super::unavailable())?
         } else {
             None
         };
@@ -248,5 +248,6 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code(), crate::Code::Unavailable);
         assert_eq!(store.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(error.public_message(), "object storage request failed");
     }
 }
