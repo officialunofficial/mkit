@@ -584,9 +584,9 @@ collect the applicable entries between their old and new immutable pins.
 ### Documentation
 
 - Integrator note on history continuations: captured credential headers
-  (names and values) bind a token, so a renewed `Authorization` or `Payment-*`
-  value mid-walk ends the continuation; keep them stable or do not capture them
-  on history reads. Anonymous readers carry no credential digest, and the fixed
+  (names and values) bind a token, so a renewed `Authorization`, `Payment-Authorization`
+  or `PAYMENT-SIGNATURE` value mid-walk ends the continuation; keep them stable
+  or do not send them on history reads. Anonymous readers carry no credential digest, and the fixed
   token lifetime is the minimum of the TTL and any write-grant expiry. Added to
   the server spec and the Workers embedding guide.
 - The generic Workers reference composes in-process hooks, bounded request reader

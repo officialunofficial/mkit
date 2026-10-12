@@ -2382,14 +2382,15 @@ ref when the token expires or its bound anchor or authority changes.
 > history read, the captured credential headers are part of a token's credential
 > binding, both names and values: `Payment-Authorization`, `PAYMENT-SIGNATURE`
 > and `Authorization`, plus the deployment's configured admission credential
-> headers. Capture records them before any admission judgment, so a header
+> headers (a deployment-wide setting that only adds to the three built-in names). Capture records them before any admission judgment, so a header
 > that admission would later ignore (for example a non-Payment `Authorization`)
 > is still bound. A value that changes between pages, such as a renewed
-> `Authorization` or `Payment-*` credential, changes the digest and ends the
+> `Authorization`, `Payment-Authorization` or `PAYMENT-SIGNATURE` credential, changes the digest and ends the
 > continuation: the next page is uniform absence and the client restarts from a
-> fresh first page. Integrators should keep captured headers stable for a whole
-> walk, or not send or capture them on history reads, for example by
-> configuring no admission credential headers for readers. An anonymous reader
+> fresh first page. Capture applies to every signed read under auth v2 and cannot be disabled
+> per read, so integrators should keep these headers stable for a whole walk,
+> or not send them on history reads; configuring no extra admission credential
+> headers removes only the extras. An anonymous reader
 > carries no credential digest. The token's fixed lifetime is the minimum of the
 > token TTL and, when present, the write-grant expiry; successors never extend
 > it, and each page still requires a fresh signed request and re-authorizes.
