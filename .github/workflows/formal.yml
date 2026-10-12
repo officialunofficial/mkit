@@ -46,14 +46,14 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: '22'
 
       - name: Install quint
         run: npm install -g "@informalsystems/quint@${QUINT_VERSION}"
 
-      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0  # v2
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe  # v2
         with:
           tool: just
 
@@ -88,14 +88,14 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: '22'
 
       - name: Install quint
         run: npm install -g "@informalsystems/quint@${QUINT_VERSION}"
 
-      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0  # v2
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe  # v2
         with:
           tool: just
 
@@ -120,7 +120,7 @@ jobs:
           cache-prefix: "formal-lean"
           protoc: "false"
 
-      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0  # v2
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe  # v2
         with:
           tool: just
 
@@ -154,7 +154,7 @@ jobs:
           cache-prefix: "formal-kani"
           protoc: "true"
 
-      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0  # v2
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe  # v2
         with:
           tool: just
 
@@ -180,7 +180,7 @@ jobs:
           cache-prefix: "formal-conformance"
           protoc: "false"
 
-      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0  # v2
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe  # v2
         with:
           tool: just
 
