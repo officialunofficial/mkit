@@ -76,7 +76,7 @@ pub struct RefPage {
 /// (SPEC-TRANSPORT-CONNECT §7.1). Writes need a signed client.
 ///
 /// [`Client::with_observer`] adds host policy that runs before every write is
-/// signed or sent (see the `seams` documentation in the crate README).
+/// signed or sent (see "Host policy seams" in the crate README).
 pub struct Client<'a, T, S = NoSigner, C = NoClock, O = NoObserver> {
     transport: &'a T,
     destination: Destination,
@@ -532,9 +532,10 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Client<'_, T, S, C, O> 
     /// It runs the same pipeline as a dispatched call: with `intent`, the
     /// [`Observer`] runs (and may veto or add headers); then the signer sees the
     /// operation (and may refuse); then a window that has already ended is
-    /// [`Error::EnvelopeExpired`]. A write procedure (see
-    /// [`procedures`]) cannot be signed without an `intent` for it; any other
-    /// procedure is observed only when an `intent` is passed. The attempt number
+    /// [`Error::EnvelopeExpired`]. One of the six
+    /// transport write procedures in [`procedures`] cannot be signed without an
+    /// `intent` for it. Any other procedure (for example an administrative one)
+    /// reaches the signer but is observed only when the host passes an `intent`. The attempt number
     /// is always 1. The observer sees the intent the host passes: build it from
     /// the body that will be sent, because the client cannot check it against the
     /// commitment. The result carries the envelope headers

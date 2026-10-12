@@ -96,8 +96,9 @@ default observer does nothing, and a signer that implements only
 - **Once per attempt.** The seams run each time an envelope is built, with the
   same `Attempt` for both (number from 1, nonce, created and expiry times), so a
   host can write one durable note per nonce. A new envelope (a fresh call, or
-  the renewal after a pending answer and an authentication rejection inside
-  `Push::run_with`) runs observer, signer and dispatch again with the next
+  the renewal inside `Push::run_with` after a pending answer and an
+  authentication rejection, or after a poll wait that reaches the envelope's
+  expiry) runs observer, signer and dispatch again with the next
   number and a new nonce. A caller who replays a persisted `Identity` (for
   example after a restart) builds an envelope again, so the seams run again with
   the same nonce and number 1: key the note on the nonce and replace it.
@@ -105,7 +106,8 @@ default observer does nothing, and a signer that implements only
   envelope is valid, a transport retry) builds nothing and does not call the
   seams.
 - **Per-attempt headers.** `AttemptHeaders` (for example `traceparent` or a
-  request id) is added to that attempt's request and is not signed. Names are
+  request id) is added to that attempt's request and is not signed. A name that
+  is not reserved replaces a transport default of the same name. Names are
   checked against the hard-reserved list of SPEC-TRANSPORT-CONNECT section 5.1
   (the auth v2 headers, `X-Mkit-*`, `X-Forwarded-*`, `Content-*`, `Connect-*`,
   `Host`, `Cookie`, `Idempotency-Key`, hop-by-hop headers; `Authorization` too,
@@ -116,8 +118,10 @@ default observer does nothing, and a signer that implements only
   &commitment, identity, intent)` returns the auth v2 request headers
   (`SignedEnvelope`) without sending: the same observer, signer and deadline
   check, for a host that dispatches an mkit
-  procedure through its own binding. A write procedure requires an `intent` naming that
-  procedure (`Error::Invalid` otherwise), so the observer cannot be skipped; the
+  procedure through its own binding. The six transport write procedures require an
+  `intent` naming that procedure (`Error::Invalid` otherwise), so the observer
+  cannot be skipped; any other procedure reaches the signer and is observed only
+  when an `intent` is passed; the
   attempt number is 1. The observer sees the intent the host passes, so build it
   from the body that will be sent. The caller supplies a body that matches the
   commitment. The headers verify with `mkit_core::write_auth::verify_headers`.

@@ -36,7 +36,8 @@ collect the applicable entries between their old and new immutable pins.
   moves, pack, tickets, new object ids when known), may veto, and may add
   unsigned per-attempt headers checked against the SPEC-TRANSPORT-CONNECT section
   5.1 reserved list. Order: observer, signer, deadline check, dispatch; once per
-  signed attempt. `Client::sign_envelope` builds signed auth v2 headers for a
+  signed envelope (a poll that reaches an envelope's expiry now renews it, as the
+  expiry check does). `Client::sign_envelope` builds signed auth v2 headers for a
   host-dispatched procedure through the same pipeline. New `Error` variants:
   `Vetoed`, `SignerRefused`, `ReservedHeader`, `EnvelopeExpired`. An envelope
   whose window has ended is never sent. `Client::advance_refs` returns

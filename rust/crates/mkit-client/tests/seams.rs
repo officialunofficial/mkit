@@ -1106,6 +1106,15 @@ fn sign_envelope_cannot_skip_or_mislabel_the_observed_intent() {
     let read = "/mkit.transport.v1.TransportService/ReadRef";
     block_on(client.sign_envelope(read, &commitment, None, None)).unwrap();
     assert!(observer.seen.borrow().is_empty());
+    // An administrative procedure is outside the six write RPCs: it reaches the
+    // signer, and is observed only when the host passes an intent.
+    let admin = "/mkit.transport.v1.TransportService/SetRepoVisibility";
+    block_on(client.sign_envelope(admin, &commitment, None, None)).unwrap();
+    assert!(observer.seen.borrow().is_empty());
+    assert_eq!(signer.seen.borrow().last().unwrap().0, admin);
+    block_on(client.sign_envelope(admin, &commitment, None, Some(&WriteIntent::new(admin))))
+        .unwrap();
+    assert_eq!(observer.seen.borrow().len(), 1);
 }
 
 #[test]

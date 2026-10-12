@@ -1955,7 +1955,8 @@ source is `AdvanceRefs` with `source_ref` (§4.1).
 The client lets its host run policy around every signed request without
 changing the wire: a pre-dispatch observer sees each write (the procedure and
 its exact ref moves, packs and tickets) and may veto it or add unsigned
-per-attempt headers (never a hard-reserved one, §5.1); the signer sees the
+per-attempt headers (never a hard-reserved one, §5.1; the client also refuses `Authorization`,
+since it cannot know whether its transport sends one); the signer sees the
 procedure, repository, audience, content commitment and validity window it
 signs and may refuse; and an envelope whose validity window has ended is not
 sent. The order is observer, signer, deadline check, dispatch, once per signed
