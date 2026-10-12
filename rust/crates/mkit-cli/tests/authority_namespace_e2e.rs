@@ -528,10 +528,12 @@ fn authority_namespace_public_private_and_signer_reads_end_to_end() {
     assert_not_found(&missing, &format!("{NS}/missing"), "missing repository");
     // Signed callers get the same answer on a missing repository as on the
     // private one: a hook outcome never distinguishes the two.
+    let mut signed_missing = Vec::new();
     for (party, label) in [(&stranger, "stranger"), (&reader, "reader")] {
         party.connect_to(&missing_url);
         let out = party.clone(&missing_url, &format!("missing-{label}"));
         assert_not_found(&out, &format!("{NS}/missing"), label);
+        signed_missing.push(out);
     }
     let error_text = |out: &Output| {
         let text = stderr(out);
@@ -547,6 +549,13 @@ fn authority_namespace_public_private_and_signer_reads_end_to_end() {
         error_text(&missing).replace("missing", "R"),
         "a denied signed clone must read byte-identically to a missing one"
     );
+    for out in &signed_missing {
+        assert_eq!(
+            error_text(out),
+            error_text(&missing),
+            "a signed clone of a missing repository must read like an anonymous one"
+        );
+    }
 
     // The hook saw only envelope signers — writer, reader and the denied
     // stranger — and the pipeline never adopted the hook's deliberately

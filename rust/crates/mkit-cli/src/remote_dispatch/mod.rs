@@ -2372,7 +2372,9 @@ mod tests {
         let uuid = "019c88c3-a904-7bd1-8a5d-3182a0c6978a";
         for (path, offending) in [("/Bad/repo", "`Bad`"), ("/repo/Name", "`Name`")] {
             let url = format!("mkit+https://vcs.example{path}");
-            let error = super::open(&url).err().expect("{url} must fail");
+            let error = super::open(&url)
+                .err()
+                .unwrap_or_else(|| panic!("{url} must fail"));
             let message = error.to_string();
             assert!(message.contains(offending), "{message}");
             assert!(message.contains("§7.4"), "{message}");
