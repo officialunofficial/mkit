@@ -3,7 +3,9 @@
 //! the index, and history-aware branch writes.
 //!
 //! These are also what the `mkit` command line's `checkout`, `reset`,
-//! `restore` and friends use, so they live in one place.
+//! `restore` and friends use, so they live in one place. Their error type is a
+//! plain message string and their shape follows the command line's needs:
+//! treat this module as an unstable convenience, not as the crate's API.
 
 use std::fs;
 use std::path::Path;

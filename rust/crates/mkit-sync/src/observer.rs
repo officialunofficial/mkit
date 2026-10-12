@@ -35,7 +35,8 @@ pub enum SyncEvent {
 
 /// Receives [`SyncEvent`]s and can cancel a sync at its checkpoints.
 pub trait SyncObserver {
-    /// Called synchronously, on the calling thread, as events happen.
+    /// Called synchronously, on the calling thread, as events happen. Some
+    /// events fire while the repository lock is held, so keep this cheap.
     fn event(&self, _event: &SyncEvent) {}
 
     /// Polled at every checkpoint between network or disk steps. Returning

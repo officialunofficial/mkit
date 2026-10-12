@@ -45,6 +45,9 @@ pub enum CloneInitError {
     Discover(#[from] DiscoverError),
     #[error("already a mkit repository")]
     AlreadyInitialized,
+    /// The remote name, URL or kind cannot be written to the config safely.
+    #[error("invalid remote: {0}")]
+    InvalidRemote(String),
     #[error("init: {0}")]
     Store(StoreError),
     #[error("refs init: {0}")]
@@ -57,6 +60,7 @@ pub enum CloneInitError {
 /// with `remote` recorded. Nothing is fetched. A failure leaves whatever was
 /// created so far in place, exactly like a failed `git clone`.
 pub fn init_clone_dir(dir: &Path, remote: &CloneRemote) -> Result<RepoLayout, CloneInitError> {
+    validate_remote(remote)?;
     std::fs::create_dir_all(dir).map_err(|source| CloneInitError::CreateDir {
         path: dir.display().to_string(),
         source,
@@ -70,6 +74,28 @@ pub fn init_clone_dir(dir: &Path, remote: &CloneRemote) -> Result<RepoLayout, Cl
     refs::init(&layout).map_err(CloneInitError::Refs)?;
     write_config(&layout, remote).map_err(CloneInitError::WriteConfig)?;
     Ok(layout)
+}
+
+/// Refuse values that would corrupt or inject into the config file, before
+/// anything is created. The config is `key = value` lines written raw, so a
+/// control character in any value would add lines of the caller's choosing.
+fn validate_remote(remote: &CloneRemote) -> Result<(), CloneInitError> {
+    let invalid = |what: &str| Err(CloneInitError::InvalidRemote(what.to_owned()));
+    for (what, value) in [
+        ("name", &remote.name),
+        ("url", &remote.url),
+        ("kind", &remote.kind),
+    ] {
+        if value.chars().any(char::is_control) {
+            return invalid(&format!("{what} contains control characters"));
+        }
+    }
+    if remote.name != DEFAULT_REMOTE_NAME
+        && (!refs::validate_ref_name(&remote.name) || remote.name.contains('.'))
+    {
+        return invalid("name must be `default` or a dot-free ref-safe name");
+    }
+    Ok(())
 }
 
 /// Render the repository config a clone writes.

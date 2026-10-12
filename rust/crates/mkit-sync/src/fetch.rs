@@ -33,7 +33,9 @@ pub struct FetchReport {
     pub branches_fetched: usize,
     /// Branches skipped because the listing was stale (deleted since).
     pub branches_skipped: Vec<String>,
-    /// Packs downloaded and applied.
+    /// Packs downloaded and applied. Like the other counters, this covers the
+    /// attempt that published each branch (a branch retried after a concurrent
+    /// re-baseline reports only its successful second attempt).
     pub packs_downloaded: usize,
     /// Packs already recorded as applied, so neither downloaded nor unpacked.
     pub packs_already_applied: usize,

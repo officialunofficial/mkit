@@ -250,6 +250,41 @@ fn clone_materialises_the_branch_worktree_and_tracking_ref() {
 }
 
 #[test]
+fn clone_refuses_values_that_would_inject_config_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    for remote in [
+        CloneRemote {
+            name: "default".to_owned(),
+            url: "mkit+file:///x\nremote.evil.url = y".to_owned(),
+            kind: "file".to_owned(),
+        },
+        CloneRemote {
+            name: "up\nstream".to_owned(),
+            url: "mkit+file:///x".to_owned(),
+            kind: "file".to_owned(),
+        },
+        CloneRemote {
+            name: "dotted.name".to_owned(),
+            url: "mkit+file:///x".to_owned(),
+            kind: "file".to_owned(),
+        },
+        CloneRemote {
+            name: "default".to_owned(),
+            url: "mkit+file:///x".to_owned(),
+            kind: "fi\rle".to_owned(),
+        },
+    ] {
+        let target = dir.path().join("work");
+        let err = init_clone_dir(&target, &remote).unwrap_err();
+        assert!(
+            matches!(err, mkit_sync::CloneInitError::InvalidRemote(_)),
+            "{err:?}"
+        );
+        assert!(!target.exists(), "nothing is created for a rejected remote");
+    }
+}
+
+#[test]
 fn clone_writes_the_flat_and_named_remote_config() {
     let dir = tempfile::tempdir().unwrap();
     let flat = dir.path().join("flat");
@@ -661,6 +696,10 @@ fn a_failed_worktree_restore_rolls_the_branch_and_head_back() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("work");
     clone_into(&remote, &target);
+    // HEAD sits on `dev`, so landing on `main` moves HEAD as well.
+    let layout = RepoLayout::single(&target);
+    refs::write_ref(&layout, "dev", &first).unwrap();
+    refs::write_head_branch(&layout, "dev").unwrap();
     remote.publish(
         Some(first),
         &[("a.txt", b"two\n"), ("c.txt", b"new\n")],
@@ -677,12 +716,13 @@ fn a_failed_worktree_restore_rolls_the_branch_and_head_back() {
         std::fs::set_permissions(&target, perms).unwrap();
         return;
     }
+    let options = SyncOptions::default().with_target_branch(Some("main".to_owned()));
 
     let result = pull(
         &target,
         &remote.source(),
         "default",
-        &SyncOptions::default(),
+        &options,
         &NoopObserver,
     );
 
@@ -693,11 +733,10 @@ fn a_failed_worktree_restore_rolls_the_branch_and_head_back() {
         matches!(&result, Err(SyncError::RestoreSafety(m)) if m.contains("restore worktree")),
         "{result:?}"
     );
-    let layout = RepoLayout::single(&target);
     assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some(first));
     assert_eq!(
         refs::read_head(&layout).unwrap(),
-        refs::Head::Branch("main".to_owned())
+        refs::Head::Branch("dev".to_owned())
     );
 }
 
