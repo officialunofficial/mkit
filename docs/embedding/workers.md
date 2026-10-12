@@ -213,6 +213,18 @@ pages cannot cure an emitted-set or frontier cap. Version 1 tokens are
 rejected; restart from page 1. The reference embedding route in
 `apps/embedded-worker` does not serve history, so it is unchanged.
 
+Captured credential headers are part of the token binding, names and values:
+`Payment-Authorization`, `PAYMENT-SIGNATURE`, `Authorization`, and every header
+in `PipelineConfig.admission_credential_headers`. A value that changes
+mid-walk, such as a renewed `Authorization` or `Payment-*` credential, ends the
+continuation: the next page is uniform absence and the client restarts from a
+fresh first page. Keep captured headers stable for a whole walk, or do not send
+or capture them on history reads, for example by configuring no admission
+credential headers for readers. Anonymous readers carry no credential digest.
+The token's fixed lifetime is the minimum of the configured TTL and the
+write-grant expiry when one is present; successors never extend it, and each
+page still requires a fresh signed request and re-authorizes.
+
 Invalid or expired tokens return uniform absence. Ref/publication changes,
 visibility changes, grant epochs, authority generations, and key replacement
 invalidate continuations; returning a ref to its old hash does not restore them.
