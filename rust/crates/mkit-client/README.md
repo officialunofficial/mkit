@@ -48,6 +48,75 @@ idempotent and keep no reply). An identity past its expiry is rejected by the
 server. Without one, each call draws a fresh
 identity from the clock and returns it. The window is at most 300 s.
 
+## Host policy seams: signer and observer
+
+The client carries no policy; it gives the host two places to run its own,
+before anything is signed or written. Both apply to every per-RPC call and to
+`Push::run_with`.
+
+For each signed request the client runs, in this order:
+
+1. **Observer** (`Observer::before_dispatch`, write RPCs only). It receives a
+   `WriteIntent` and the `Attempt`, and may veto (`Veto`, which surfaces as
+   `Error::Vetoed`) or return `AttemptHeaders`.
+2. **Signer** (`Signer::sign_operation`). It receives a `SigningRequest` next to
+   the digest and may refuse (`SignError::Refused`, `Error::SignerRefused`).
+3. **Deadline check.** If the signed window has ended, the request is never
+   sent: `Error::EnvelopeExpired`. An identity that has already ended fails the
+   same way before step 1.
+4. **Dispatch.**
+
+A veto or refusal stops the call there: nothing is signed after a veto and
+nothing is sent after either. Install an observer with
+`Client::with_observer(&observer)` or `Push::run_with(.., &observer)`. The
+default observer does nothing, and a signer that implements only
+`Signer::sign` keeps working, because `sign_operation` defaults to it.
+
+- **What the signer sees.** `SigningRequest` has the full procedure, audience,
+  repository, the parsed `ContentCommitment` (`body:`, `pack:` or `part:`, so a
+  policy can bound pack size or part index without parsing text), and the
+  attempt (nonce, validity window).
+- **What the observer sees.** `WriteIntent` has the procedure, the exact
+  `RefMove`s the request carries (name, `old` precondition, `new`: `Set`,
+  `Delete` or `CopyFrom`), the target ref, pack id and length, ticket ids, the
+  part index and, for a whole push whose pack holds only raw entries, the ids
+  of the objects it introduces (`new_objects`; `None` when unknown, as for a
+  pack with a delta entry, the packmap node and every per-RPC upload). Intents
+  are built from the request being sent, so the observer sees exactly what the
+  server receives; an `advance_refs` request whose ids or expectations are
+  malformed is `Error::Invalid` before any seam runs.
+- **Which calls.** `begin_upload`, `upload_pack`, `upload_part`,
+  `complete_upload`, `advance_refs`, `update_ref` and `delete_ref` (the five
+  write RPCs of the protocol plus `CompleteUpload`). Reads are signed but not
+  observed. A per-RPC `complete_upload` has only the opaque token, so its intent
+  has no ticket ids; a whole push reports them.
+- **Once per attempt.** An attempt is one signed envelope: the observer and
+  signer run once per envelope and receive the same `Attempt` (number from 1,
+  nonce, created and expiry times), so a host can write one durable note per
+  nonce. A new envelope (a fresh call, or the renewal after a pending answer and
+  an authentication rejection inside `Push::run_with`) runs observer, signer and
+  dispatch again with the next number and a new nonce. Resending the identical
+  signed bytes (a pending-verification poll while the envelope is valid, a
+  transport retry, or a caller replaying a persisted `Identity`) is not a new
+  attempt and does not call the seams again.
+- **Per-attempt headers.** `AttemptHeaders` (for example `traceparent` or a
+  request id) is added to that attempt's request and is not signed. Names are
+  checked against the hard-reserved list of SPEC-TRANSPORT-CONNECT section 5.1
+  (the auth v2 headers, `X-Mkit-*`, `X-Forwarded-*`, `Content-*`, `Connect-*`,
+  `Host`, `Cookie`, `Idempotency-Key`, hop-by-hop headers; `Authorization` too,
+  because the client cannot know whether its transport already sends one) and a
+  reserved name is `Error::ReservedHeader` before anything is signed.
+  `is_reserved_header` exposes the check.
+- **Signing outside the client.** `Client::sign_envelope(procedure,
+  &commitment, identity, intent)` returns the auth v2 request headers
+  (`SignedEnvelope`) without sending: the same observer (when an `intent` is
+  given), signer and deadline check, for a host that dispatches an mkit
+  procedure through its own binding. The caller supplies a body that matches the
+  commitment. The headers verify with `mkit_core::write_auth::verify_headers`.
+
+Objects the client signs itself: none. It verifies commits, remixes and tags in
+`unpack` and signs only auth envelopes, so the signer seam covers envelopes.
+
 ## Reading and verifying
 
 `unpack(pack_id, bytes, &mut sink, UnpackOptions::default())` verifies the

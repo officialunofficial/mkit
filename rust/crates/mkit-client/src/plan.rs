@@ -66,6 +66,28 @@ impl Default for Limits {
 pub(crate) struct Pack {
     pub(crate) key: Hash,
     pub(crate) bytes: Vec<u8>,
+    /// Ids of the objects the pack introduces, known only when every entry is
+    /// a raw object (a delta entry's id needs the delta applied).
+    pub(crate) objects: Option<Vec<Hash>>,
+}
+
+/// The entries of the pack being written, for the observer's object list.
+struct Pending {
+    ids: Vec<Hash>,
+    all_raw: bool,
+}
+impl Pending {
+    fn new() -> Self {
+        Self {
+            ids: Vec::new(),
+            all_raw: true,
+        }
+    }
+    fn take(&mut self) -> Option<Vec<Hash>> {
+        let all_raw = std::mem::replace(&mut self.all_raw, true);
+        let ids = std::mem::take(&mut self.ids);
+        all_raw.then_some(ids)
+    }
 }
 
 /// Deterministic, bounded sealed data packs. Reusing the same ordered input
@@ -91,6 +113,7 @@ impl Plan {
         let node_overhead =
             mkit_core::transfer::encode_packlist(Some([0; 32]), &[])?.len() as u64 + 4;
         let mut writer = PackWriter::new();
+        let mut pending = Pending::new();
         let mut packs = Vec::new();
         let mut seen = std::collections::HashSet::new();
         let mut staged = 0_u64;
@@ -107,7 +130,14 @@ impl Plan {
                         writer.entry_count() + 1,
                     ) > limits.max_pack_bytes)
             {
-                seal(&mut writer, &mut packs, &mut seen, &mut staged, limits)?;
+                seal(
+                    &mut writer,
+                    &mut pending,
+                    &mut packs,
+                    &mut seen,
+                    &mut staged,
+                    limits,
+                )?;
             }
             if size > cap || bound(size, 1) > limits.max_pack_bytes {
                 return Err(Error::Limit("one entry exceeds pack limit"));
@@ -131,13 +161,22 @@ impl Plan {
             match entry {
                 Entry::Raw { id, bytes } => {
                     writer.push_raw(id, &bytes)?;
+                    pending.ids.push(id);
                 }
                 Entry::Delta { base, stream } => {
                     writer.push_delta(&base, &stream)?;
+                    pending.all_raw = false;
                 }
             }
         }
-        seal(&mut writer, &mut packs, &mut seen, &mut staged, limits)?;
+        seal(
+            &mut writer,
+            &mut pending,
+            &mut packs,
+            &mut seen,
+            &mut staged,
+            limits,
+        )?;
         if !packs.is_empty() {
             // Reserve the largest node shape before any upload can reserve
             // server resources. A prior pointer adds 32 bytes.
@@ -165,6 +204,7 @@ fn bound(payload: u64, entries: usize) -> u64 {
 
 fn seal(
     writer: &mut PackWriter,
+    pending: &mut Pending,
     packs: &mut Vec<Pack>,
     seen: &mut std::collections::HashSet<Hash>,
     staged: &mut u64,
@@ -174,6 +214,7 @@ fn seal(
         return Ok(());
     }
     let bytes = std::mem::take(writer).finish()?;
+    let objects = pending.take();
     let key = pack::pack_key(&bytes);
     if !seen.insert(key) {
         return Ok(());
@@ -194,7 +235,11 @@ fn seal(
             "advance requires more than six ticketed data packs",
         ));
     }
-    packs.push(Pack { key, bytes });
+    packs.push(Pack {
+        key,
+        bytes,
+        objects,
+    });
     Ok(())
 }
 

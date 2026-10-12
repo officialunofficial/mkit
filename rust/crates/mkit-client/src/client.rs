@@ -7,18 +7,20 @@
 //! exactly, so a persisted identity replays the same signed request after a
 //! restart.
 
+use crate::calls;
 use crate::connect::{
     Clock, Destination, Error, HttpTransport, Identity, LIST_REFS_LIMIT, Opts, Reply, Rpc, Signer,
 };
 use crate::proto::{
-    AdvanceRefsRequest, AdvanceRefsResponse, BeginUploadRequest, BeginUploadResponse,
-    CompleteUploadRequest, CompleteUploadResponse, GetServerInfoResponse, ListRefsRequest,
-    ListRefsResponse, PackExistsRequest, PackExistsResponse, ReadRefRequest, ReadRefResponse,
-    RefRedaction, UpdateRefRequest, UpdateRefResponse, UploadPackResponse, UploadPartResponse,
-    UploadTicket,
+    AdvanceRefsRequest, AdvanceRefsResponse, BeginUploadResponse, CompleteUploadResponse,
+    GetServerInfoResponse, ListRefsRequest, ListRefsResponse, PackExistsRequest,
+    PackExistsResponse, ReadRefRequest, ReadRefResponse, RefRedaction, UpdateRefResponse,
+    UploadPackResponse, UploadPartResponse, UploadTicket,
 };
-use crate::push::{condition, pack_commitment, pack_messages, part_commitment, part_messages};
-use mkit_core::{hash::Hash, refs::RefWriteCondition, upload_parts::PartPlan};
+use crate::seams::{NoObserver, Observer, WriteIntent};
+use mkit_core::{
+    hash::Hash, refs::RefWriteCondition, upload_parts::PartPlan, write_auth::ContentCommitment,
+};
 
 /// The signer type of an anonymous client. It has no values.
 #[derive(Clone, Copy, Debug)]
@@ -72,13 +74,17 @@ pub struct RefPage {
 /// [`Client::anonymous`] sends unsigned reads. [`Client::signed`] signs every
 /// RPC except discovery, as the spec requires of a client that has a signer
 /// (SPEC-TRANSPORT-CONNECT §7.1). Writes need a signed client.
-pub struct Client<'a, T, S = NoSigner, C = NoClock> {
+///
+/// [`Client::with_observer`] adds host policy that runs before every write is
+/// signed or sent (see the `seams` documentation in the crate README).
+pub struct Client<'a, T, S = NoSigner, C = NoClock, O = NoObserver> {
     transport: &'a T,
     destination: Destination,
     auth: Option<(&'a S, &'a C)>,
+    observer: &'a O,
 }
 
-impl<T, S, C> std::fmt::Debug for Client<'_, T, S, C> {
+impl<T, S, C, O> std::fmt::Debug for Client<'_, T, S, C, O> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Client")
             .field("destination", &self.destination)
@@ -95,6 +101,7 @@ impl<'a, T: HttpTransport> Client<'a, T> {
             transport,
             destination,
             auth: None,
+            observer: &NoObserver,
         }
     }
 }
@@ -120,18 +127,37 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Client<'a, T, S, C> {
             transport,
             destination,
             auth: Some((signer, clock)),
+            observer: &NoObserver,
         }
     }
+}
 
+impl<'a, T, S, C, O> Client<'a, T, S, C, O> {
+    /// Run `observer` before every write RPC this client sends: it can veto the
+    /// write and add per-attempt headers. Order: observer, signer, deadline
+    /// check, dispatch.
+    #[must_use]
+    pub fn with_observer<P: Observer>(self, observer: &'a P) -> Client<'a, T, S, C, P> {
+        Client {
+            transport: self.transport,
+            destination: self.destination,
+            auth: self.auth,
+            observer,
+        }
+    }
+}
+
+impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Client<'_, T, S, C, O> {
     #[must_use]
     pub fn destination(&self) -> &Destination {
         &self.destination
     }
 
-    fn rpc(&self) -> Rpc<'_, T, S, C> {
+    fn rpc(&self) -> Rpc<'_, T, S, C, O> {
         Rpc {
             transport: self.transport,
             auth: self.auth,
+            observer: self.observer,
             destination: &self.destination,
             // Per-RPC calls have no push deadline; the signed window bounds them.
             deadline_ms: i64::MAX,
@@ -344,7 +370,8 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Client<'a, T, S, C> {
     /// precondition is a remote error for which [`Error::is_ref_conflict`] holds.
     ///
     /// # Errors
-    /// An anonymous client, or transport and remote failures.
+    /// An anonymous client, an observer veto, a signer refusal, or transport and
+    /// remote failures.
     pub async fn update_ref(
         &self,
         name: &str,
@@ -352,7 +379,8 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Client<'a, T, S, C> {
         new_id: Hash,
         identity: Option<&Identity>,
     ) -> Result<Reply<UpdateRefResponse>, Error> {
-        self.write_ref(name, expected, Some(new_id), identity).await
+        self.require_signer()?;
+        reply(calls::update_ref(&self.rpc(), name, expected, Some(new_id), identity).await)
     }
 
     /// `UpdateRef` with `delete`, under the same precondition rules.
@@ -365,58 +393,34 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Client<'a, T, S, C> {
         expected: RefWriteCondition,
         identity: Option<&Identity>,
     ) -> Result<Reply<UpdateRefResponse>, Error> {
-        self.write_ref(name, expected, None, identity).await
-    }
-
-    async fn write_ref(
-        &self,
-        name: &str,
-        expected: RefWriteCondition,
-        new_id: Option<Hash>,
-        identity: Option<&Identity>,
-    ) -> Result<Reply<UpdateRefResponse>, Error> {
         self.require_signer()?;
-        let (expectation, expected_id) = condition(expected);
-        let request = UpdateRefRequest {
-            name: Some(name.to_owned()),
-            expectation: Some(expectation.into()),
-            expected_id,
-            new_id: new_id.map(|id| id.to_vec()),
-            delete: new_id.is_none().then_some(true),
-            ..Default::default()
-        };
-        let opts = Opts {
-            identity,
-            ..Opts::default()
-        };
-        reply(self.rpc().unary_with("UpdateRef", &request, opts).await)
+        reply(calls::update_ref(&self.rpc(), name, expected, None, identity).await)
     }
 
     /// One `AdvanceRefs`. A pending verification returns
     /// [`Error::PendingVerification`] and a membership lag
     /// [`Error::MembershipNotVisible`], both resumable by replaying the same
-    /// identity while it is valid.
+    /// identity while it is valid. The request's ids and expectations must be
+    /// well formed: the observer is told the exact ref moves it carries.
     ///
     /// # Errors
-    /// An anonymous client, or transport and remote failures.
+    /// An anonymous client, a malformed request, an observer veto, a signer
+    /// refusal, or transport and remote failures.
     pub async fn advance_refs(
         &self,
         request: &AdvanceRefsRequest,
         identity: Option<&Identity>,
     ) -> Result<Reply<AdvanceRefsResponse>, Error> {
         self.require_signer()?;
-        let opts = Opts {
-            identity,
-            ..Opts::default()
-        };
-        reply(self.rpc().unary_with("AdvanceRefs", request, opts).await)
+        reply(calls::advance_refs(&self.rpc(), request, identity).await)
     }
 
     /// `BeginUpload`: reserve an upload for `head_ref`.
     ///
     /// # Errors
-    /// An anonymous client, or transport and remote failures (including
-    /// [`Error::PaymentRequired`] when the server admits uploads).
+    /// An anonymous client, an observer veto, a signer refusal, or transport and
+    /// remote failures (including [`Error::PaymentRequired`] when the server
+    /// admits uploads).
     pub async fn begin_upload(
         &self,
         head_ref: &str,
@@ -425,25 +429,16 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Client<'a, T, S, C> {
         identity: Option<&Identity>,
     ) -> Result<Reply<BeginUploadResponse>, Error> {
         self.require_signer()?;
-        let request = BeginUploadRequest {
-            r#ref: Some(head_ref.to_owned()),
-            pack_id: Some(pack_id.to_vec()),
-            bytes: Some(bytes),
-            ..Default::default()
-        };
-        let opts = Opts {
-            identity,
-            ..Opts::default()
-        };
-        reply(self.rpc().unary_with("BeginUpload", &request, opts).await)
+        reply(calls::begin_upload(&self.rpc(), head_ref, pack_id, bytes, identity).await)
     }
 
     /// `UploadPack` of the whole `pack`, optionally under a ticket token. The
     /// framed request is buffered, so peak memory is the pack plus its frames
-    /// plus the transport's replay copy.
+    /// plus the transport's replay copy. The observer's
+    /// [`new_objects`](crate::WriteIntent::new_objects) is `None` here.
     ///
     /// # Errors
-    /// An anonymous client, or transport and remote failures.
+    /// As [`Client::begin_upload`].
     pub async fn upload_pack(
         &self,
         pack_id: &Hash,
@@ -452,20 +447,16 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Client<'a, T, S, C> {
         identity: Option<&Identity>,
     ) -> Result<Reply<UploadPackResponse>, Error> {
         self.require_signer()?;
-        let messages = pack_messages(pack_id, pack, ticket_token.map(<[u8]>::to_vec));
-        let opts = Opts {
-            identity,
-            ..Opts::default()
-        };
         reply(
-            self.rpc()
-                .stream_with(
-                    "UploadPack",
-                    messages,
-                    &pack_commitment(pack_id, pack),
-                    opts,
-                )
-                .await,
+            calls::upload_pack(
+                &self.rpc(),
+                pack_id,
+                pack,
+                ticket_token.map(<[u8]>::to_vec),
+                None,
+                identity,
+            )
+            .await,
         )
     }
 
@@ -474,8 +465,7 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Client<'a, T, S, C> {
     /// `part` must be exactly the part the plan expects at `index`.
     ///
     /// # Errors
-    /// An anonymous client, a part that does not fit the plan, or transport and
-    /// remote failures.
+    /// A part that does not fit the plan, otherwise as [`Client::begin_upload`].
     pub async fn upload_part(
         &self,
         ticket: &UploadTicket,
@@ -492,23 +482,25 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Client<'a, T, S, C> {
             return Err(Error::Invalid("part length"));
         }
         let ticket_id = id32(ticket.id.as_deref(), "ticket id")?;
-        let commitment = part_commitment(ticket_id, plan, index, part)?;
-        let messages = part_messages(ticket.token.clone(), index, part);
-        let opts = Opts {
-            identity,
-            ..Opts::default()
-        };
         reply(
-            self.rpc()
-                .stream_with("UploadPart", messages, &commitment, opts)
-                .await,
+            calls::upload_part(
+                &self.rpc(),
+                ticket_id,
+                ticket.token.clone(),
+                plan,
+                index,
+                part,
+                identity,
+            )
+            .await,
         )
     }
 
-    /// `CompleteUpload` with the part receipts in index order.
+    /// `CompleteUpload` with the part receipts in index order. The observer's
+    /// ticket ids are empty here: only the opaque token is passed.
     ///
     /// # Errors
-    /// An anonymous client, or transport and remote failures.
+    /// As [`Client::begin_upload`].
     pub async fn complete_upload(
         &self,
         ticket_token: &[u8],
@@ -516,19 +508,63 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Client<'a, T, S, C> {
         identity: Option<&Identity>,
     ) -> Result<Reply<CompleteUploadResponse>, Error> {
         self.require_signer()?;
-        let request = CompleteUploadRequest {
-            ticket_token: Some(ticket_token.to_vec()),
-            receipts,
-            ..Default::default()
-        };
-        let opts = Opts {
-            identity,
-            ..Opts::default()
-        };
         reply(
-            self.rpc()
-                .unary_with("CompleteUpload", &request, opts)
-                .await,
+            calls::complete_upload(
+                &self.rpc(),
+                None,
+                Some(ticket_token.to_vec()),
+                receipts,
+                identity,
+            )
+            .await,
         )
     }
+
+    /// Build the signed auth v2 request headers for `procedure` and
+    /// `commitment` without sending anything, so a host that dispatches an mkit
+    /// procedure through its own binding can sign it.
+    ///
+    /// It runs the same pipeline as a dispatched call: with `intent`, the
+    /// [`Observer`] runs (and may veto or add headers); then the signer sees the
+    /// operation (and may refuse); then a window that has already ended is
+    /// [`Error::EnvelopeExpired`]. Pass an `intent` for every write: without
+    /// one the observer is not called. The result carries the envelope headers
+    /// (`x-envelope-version`, `x-audience`, `x-repository`, `x-content-commitment`,
+    /// `x-created-at`, `x-expires-at`, `idempotency-key`, `x-public-key`,
+    /// `x-signature`, and `x-digest` for a `body:` commitment) plus the
+    /// observer's headers, and the [`Identity`] used. The caller supplies the
+    /// body and must send the bytes the commitment covers.
+    ///
+    /// # Errors
+    /// An anonymous client, an invalid identity or procedure, an observer veto
+    /// or reserved header, a signer refusal, or an expired window.
+    pub async fn sign_envelope(
+        &self,
+        procedure: &str,
+        commitment: &ContentCommitment,
+        identity: Option<&Identity>,
+        intent: Option<&WriteIntent<'_>>,
+    ) -> Result<SignedEnvelope, Error> {
+        let opts = Opts {
+            identity,
+            intent,
+            ..Opts::default()
+        };
+        let signed = self
+            .rpc()
+            .sign(procedure, &commitment.to_string(), opts, 1)
+            .await?;
+        Ok(SignedEnvelope {
+            headers: signed.headers,
+            identity: signed.identity,
+        })
+    }
+}
+
+/// Signed auth v2 request headers and the identity they were signed under.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct SignedEnvelope {
+    pub headers: http::HeaderMap,
+    pub identity: Identity,
 }

@@ -28,6 +28,19 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Added
 
+- `mkit-client`: host policy seams (additive, no migration). `Signer::sign_operation`
+  (defaults to `sign`) receives a `SigningRequest` (procedure, audience, repository,
+  parsed `ContentCommitment`, attempt) and may refuse with `SignError::Refused`;
+  `Observer::before_dispatch`, installed with `Client::with_observer` or
+  `Push::run_with`, runs before every write RPC with a `WriteIntent` (exact ref
+  moves, pack, tickets, new object ids when known), may veto, and may add
+  unsigned per-attempt headers checked against the SPEC-TRANSPORT-CONNECT section
+  5.1 reserved list. Order: observer, signer, deadline check, dispatch; once per
+  signed attempt. `Client::sign_envelope` builds signed auth v2 headers for a
+  host-dispatched procedure through the same pipeline. New `Error` variants:
+  `Vetoed`, `SignerRefused`, `ReservedHeader`, `EnvelopeExpired`. An
+  `advance_refs` request with malformed ids or expectations is now `Error::Invalid`
+  before sending.
 - `mkit-client`: the runtime-independent async protocol client for reads and
   writes, on native and wasm32-unknown-unknown with no tokio, hyper or C
   compression in its dependency graph. The earlier `mkit-push` (never published) is renamed to it, with its code unchanged in

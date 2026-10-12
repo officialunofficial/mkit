@@ -1,3 +1,4 @@
+use crate::seams::{Attempt, NoObserver, Observer, SignError, SigningRequest, WriteIntent};
 use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
@@ -8,7 +9,7 @@ use mkit_core::{
     admission::{MAX_CHALLENGES, MAX_DESCRIPTION_BYTES, MAX_VALUE_BYTES, validate_challenges},
     hash::{Hash, hash, to_hex},
     protocol::{AdmissionChallengeEntry, AdmissionRequired},
-    write_auth::{Context, MAX_VALIDITY_MS, Operation},
+    write_auth::{ContentCommitment, Context, MAX_VALIDITY_MS, Operation},
 };
 use serde::Deserialize;
 use std::time::Duration;
@@ -44,10 +45,29 @@ pub trait Clock {
 }
 
 /// An async Ed25519 signer (the digest has already been domain separated).
+///
+/// The client calls [`Signer::sign_operation`], which receives the structured
+/// operation next to the digest. Its default delegates to [`Signer::sign`], so a
+/// plain digest signer keeps working; override it to enforce what a key may
+/// sign.
 #[allow(async_fn_in_trait)]
 pub trait Signer {
     fn public_key(&self) -> [u8; 32];
     async fn sign(&self, digest: &Hash) -> Result<[u8; 64], String>;
+
+    /// Sign `digest`, the domain separated digest of `request`. Refuse with
+    /// [`SignError::Refused`] to block this operation only.
+    ///
+    /// # Errors
+    /// A refusal, or a failure to sign.
+    async fn sign_operation(
+        &self,
+        request: &SigningRequest<'_>,
+        digest: &Hash,
+    ) -> Result<[u8; 64], SignError> {
+        let _ = request;
+        Ok(self.sign(digest).await?)
+    }
 }
 
 /// Destination identity bound into every signature. The origin must be
@@ -196,6 +216,19 @@ pub enum Error {
     Packlist(#[from] mkit_core::transfer::PackListError),
     #[error("push deadline expired")]
     Deadline,
+    /// The signed validity window ended before dispatch; nothing was sent.
+    #[error("signed request expired before dispatch")]
+    EnvelopeExpired,
+    /// The [`Observer`] vetoed a write; nothing was signed or sent.
+    #[error("write vetoed: {0}")]
+    Vetoed(String),
+    /// The [`Signer`] refused the operation; nothing was sent.
+    #[error("signer refused: {0}")]
+    SignerRefused(String),
+    /// An observer returned a hard-reserved request header
+    /// (SPEC-TRANSPORT-CONNECT section 5.1); nothing was signed or sent.
+    #[error("reserved request header `{0}`")]
+    ReservedHeader(String),
     /// The server requires an out-of-protocol action (STC §5.1). Every
     /// challenge is carried, in the server's order; the raw `WWW-Authenticate`
     /// and `PAYMENT-REQUIRED` values ride along for an admission helper. A 402
@@ -245,10 +278,11 @@ impl Error {
     }
 }
 
-pub(crate) struct Rpc<'a, T, S, C> {
+pub(crate) struct Rpc<'a, T, S, C, O = NoObserver> {
     pub(crate) transport: &'a T,
     /// `None` makes every request anonymous.
     pub(crate) auth: Option<(&'a S, &'a C)>,
+    pub(crate) observer: &'a O,
     pub(crate) destination: &'a Destination,
     pub(crate) deadline_ms: i64,
 }
@@ -260,6 +294,8 @@ pub(crate) struct Opts<'a> {
     pub(crate) identity: Option<&'a Identity>,
     pub(crate) hint: Option<&'a str>,
     pub(crate) limit: usize,
+    /// Present for write RPCs: what the observer is told before the attempt.
+    pub(crate) intent: Option<&'a WriteIntent<'a>>,
 }
 impl Default for Opts<'_> {
     fn default() -> Self {
@@ -267,6 +303,7 @@ impl Default for Opts<'_> {
             identity: None,
             hint: None,
             limit: RESPONSE_LIMIT,
+            intent: None,
         }
     }
 }
@@ -277,9 +314,15 @@ pub(crate) struct Built {
     pub(crate) identity: Option<Identity>,
 }
 
+/// The result of the signing pipeline.
+pub(crate) struct Signed {
+    pub(crate) headers: HeaderMap,
+    pub(crate) identity: Identity,
+}
+
 type Raw = (Vec<u8>, HeaderMap, Option<Identity>);
 
-impl<'a, T: HttpTransport, S: Signer, C: Clock> Rpc<'a, T, S, C> {
+impl<'a, T, S, C> Rpc<'a, T, S, C> {
     pub(crate) fn signed(
         transport: &'a T,
         signer: &'a S,
@@ -290,11 +333,26 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Rpc<'a, T, S, C> {
         Self {
             transport,
             auth: Some((signer, clock)),
+            observer: &NoObserver,
             destination,
             deadline_ms,
         }
     }
+}
 
+impl<'a, T, S, C, O> Rpc<'a, T, S, C, O> {
+    pub(crate) fn observed<P: Observer>(self, observer: &'a P) -> Rpc<'a, T, S, C, P> {
+        Rpc {
+            transport: self.transport,
+            auth: self.auth,
+            observer,
+            destination: self.destination,
+            deadline_ms: self.deadline_ms,
+        }
+    }
+}
+
+impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Rpc<'_, T, S, C, O> {
     pub(crate) async fn unary<Q: Message, R: Message + Default>(
         &self,
         method: &str,
@@ -315,18 +373,6 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Rpc<'a, T, S, C> {
         let value =
             R::decode_from_slice(&bytes).map_err(|_| Error::Invalid("protobuf response"))?;
         Ok((value, identity))
-    }
-
-    pub(crate) async fn stream<Q: Message, R: Message + Default>(
-        &self,
-        method: &str,
-        messages: impl IntoIterator<Item = Q>,
-        commitment: &str,
-    ) -> Result<R, Error> {
-        Ok(self
-            .stream_with(method, messages, commitment, Opts::default())
-            .await?
-            .0)
     }
 
     pub(crate) async fn stream_with<Q: Message, R: Message + Default>(
@@ -450,7 +496,7 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Rpc<'a, T, S, C> {
             mut request,
             identity,
         } = self
-            .build(method, body, commitment, streaming, opts.identity)
+            .build(method, body, commitment, streaming, opts, 1)
             .await?;
         if let Some(hint) = opts.hint {
             request.headers_mut().insert(
@@ -463,17 +509,19 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Rpc<'a, T, S, C> {
     }
 
     /// Build (and sign) one request. A caller-supplied identity is used
-    /// exactly; otherwise one is generated from the clock.
+    /// exactly; otherwise one is generated from the clock. `attempt` numbers
+    /// the envelope for the observer and signer.
     pub(crate) async fn build(
         &self,
         method: &str,
         body: Vec<u8>,
         commitment: &str,
         streaming: bool,
-        identity: Option<&Identity>,
+        opts: Opts<'_>,
+        attempt: u32,
     ) -> Result<Built, Error> {
-        let Some((signer, clock)) = self.auth else {
-            if identity.is_some() {
+        if self.auth.is_none() || method == "GetServerInfo" {
+            if opts.identity.is_some() && self.auth.is_none() {
                 return Err(Error::Invalid("identity requires a signer"));
             }
             let request = if method == "GetServerInfo" {
@@ -481,24 +529,45 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Rpc<'a, T, S, C> {
             } else {
                 self.destination.plain_request(method, body, streaming)?
             };
+            if let Some((_, clock)) = self.auth
+                && opts.identity.is_none()
+                && clock.now_ms() >= self.deadline_ms
+            {
+                return Err(Error::Deadline);
+            }
             return Ok(Built {
                 request,
                 identity: None,
             });
-        };
-        let id = if let Some(id) = identity {
+        }
+        let procedure = format!("{SERVICE}{method}");
+        let signed = self.sign(&procedure, commitment, opts, attempt).await?;
+        let mut request = self.destination.plain_request(method, body, streaming)?;
+        request.headers_mut().extend(signed.headers);
+        Ok(Built {
+            request,
+            identity: Some(signed.identity),
+        })
+    }
+
+    /// The seam pipeline for one envelope: identity, observer, signer, deadline
+    /// check. Returns the auth v2 headers (and the observer's extra ones) and
+    /// the identity. Needs a signer.
+    pub(crate) async fn sign(
+        &self,
+        procedure: &str,
+        commitment: &str,
+        opts: Opts<'_>,
+        attempt: u32,
+    ) -> Result<Signed, Error> {
+        let (signer, clock) = self.auth.ok_or(Error::Invalid("signed client required"))?;
+        let id = if let Some(id) = opts.identity {
             id.validate()?;
             *id
         } else {
             let created = clock.now_ms();
             if created >= self.deadline_ms {
                 return Err(Error::Deadline);
-            }
-            if method == "GetServerInfo" {
-                return Ok(Built {
-                    request: self.destination.info_request()?,
-                    identity: None,
-                });
             }
             Identity {
                 nonce: clock.nonce().map_err(Error::Signing)?,
@@ -508,20 +577,17 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Rpc<'a, T, S, C> {
                     .min(self.deadline_ms),
             }
         };
-        if method == "GetServerInfo" {
-            return Ok(Built {
-                request: self.destination.info_request()?,
-                identity: None,
-            });
+        // An envelope that has already ended is refused before any policy runs.
+        if clock.now_ms() >= id.expires_at_ms {
+            return Err(Error::EnvelopeExpired);
         }
         let nonce = id.idempotency_key();
-        let procedure = format!("{SERVICE}{method}");
         let digest = Operation {
             context: Context {
                 audience: &self.destination.origin,
                 repository: &self.destination.repository,
             },
-            procedure: &procedure,
+            procedure,
             commitment,
             created_at: id.created_at_ms,
             expires_at: id.expires_at_ms,
@@ -529,33 +595,67 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Rpc<'a, T, S, C> {
         }
         .digest()
         .map_err(|_| Error::Invalid("signed operation"))?;
-        let signature = to_hex_bytes(&signer.sign(&digest).await.map_err(Error::Signing)?);
-        let key = to_hex(&signer.public_key());
-        let mut request = self.destination.plain_request(method, body, streaming)?;
+        let parsed =
+            ContentCommitment::parse(commitment).map_err(|_| Error::Invalid("signed operation"))?;
+        let attempt = Attempt {
+            number: attempt,
+            nonce: id.nonce,
+            created_at_ms: id.created_at_ms,
+            expires_at_ms: id.expires_at_ms,
+        };
+        // 1. Observer: may veto, may add headers. Reserved names are refused
+        //    here, before a signature exists.
+        let extra = match opts.intent {
+            Some(intent) => self
+                .observer
+                .before_dispatch(intent, &attempt)
+                .await
+                .map_err(|veto| Error::Vetoed(veto.0))?
+                .validate()?,
+            None => HeaderMap::new(),
+        };
+        // 2. Signer: sees the structured operation.
+        let request = SigningRequest {
+            procedure,
+            audience: &self.destination.origin,
+            repository: &self.destination.repository,
+            commitment: parsed,
+            attempt,
+        };
+        let signature = signer
+            .sign_operation(&request, &digest)
+            .await
+            .map_err(SignError::into_error)?;
+        // 3. Deadline: an envelope that has expired is never dispatched.
+        if clock.now_ms() >= id.expires_at_ms {
+            return Err(Error::EnvelopeExpired);
+        }
+        let mut headers = extra;
         for (name, value) in [
             ("x-envelope-version", "2".to_owned()),
             ("x-audience", self.destination.origin.clone()),
+            ("x-repository", self.destination.repository.clone()),
             ("x-content-commitment", commitment.to_owned()),
             ("x-created-at", id.created_at_ms.to_string()),
             ("x-expires-at", id.expires_at_ms.to_string()),
             ("idempotency-key", nonce),
-            ("x-public-key", key),
-            ("x-signature", signature),
+            ("x-public-key", to_hex(&signer.public_key())),
+            ("x-signature", to_hex_bytes(&signature)),
         ] {
-            request.headers_mut().insert(
+            headers.insert(
                 name,
                 HeaderValue::from_str(&value).map_err(|_| Error::Invalid("auth header"))?,
             );
         }
         if let Some(value) = commitment.strip_prefix("body:") {
-            request.headers_mut().insert(
+            headers.insert(
                 "x-digest",
                 HeaderValue::from_str(value).map_err(|_| Error::Invalid("digest header"))?,
             );
         }
-        Ok(Built {
-            request,
-            identity: Some(id),
+        Ok(Signed {
+            headers,
+            identity: id,
         })
     }
 
