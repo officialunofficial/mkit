@@ -282,10 +282,14 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Fixed
 
-- History continuation lifetimes use the configured token TTL and credential
-  and grant expiry without the request-local proof cap. Walks may span longer
-  than the proof window while each page retains bounded proofs and fresh live
-  security checks. Successors keep the original absolute expiry. No API, wire,
+- History continuation tokens outlive the issuing signed request envelope.
+  Their fixed lifetime is the minimum of the configured token TTL and any
+  write-grant expiry, without the request-local proof cap or the envelope's
+  expiry; successors retain the original absolute expiry. Both first-parent
+  and selected-ref timestamp issuance follow this rule. Each authenticated page
+  still verifies its own currently valid signed envelope, current authority and
+  credential scope, and keeps bounded proofs and fresh live security checks.
+  Embedders may use short request envelopes for history walks. No API, wire,
   stored-format change, or store reset.
 
 - Takedown discovery found no ticketed memberships. It accepted only an empty

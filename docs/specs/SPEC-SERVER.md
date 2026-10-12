@@ -2343,7 +2343,10 @@ strings or headers — and MUST NOT be logged. The host enforces its separately
 streamed request-body cap rather than trusting Content-Length alone.
 
 Successors MUST inherit the original expiry. Initial expiry is bounded by the
-configured token TTL and credential/grant expiry. The request-local proof lag
+configured token TTL and, when present, the write-grant expiry. The issuing
+request envelope's expiry MUST NOT cap the token lifetime: every authenticated
+page MUST supply a currently valid signed request envelope and repeat live
+authorization and credential-scope checks. The request-local proof lag
 and deadline MUST NOT cap the token's lifetime. Each page's own proofs MUST
 still expire within its reachability lag, request deadline and token expiry.
 Imported proofs MUST be confined to the paging operation and discarded on

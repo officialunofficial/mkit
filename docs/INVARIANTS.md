@@ -149,8 +149,10 @@ server-verified priority keys plus a bounded witness of pending lineage. A
 redeemed token confers no permission: every served object is re-read live with
 current membership, denial and authorizer checks, a carried key is rechecked
 against the object at emission, and imported proofs die with the request.
-The token's fixed lifetime is the minimum of its configured TTL and credential
-and grant expiry; successors inherit its absolute expiry. The request-local
+The token's fixed lifetime is the minimum of its configured TTL and any
+write-grant expiry; successors inherit its absolute expiry. The issuing request
+envelope does not cap that lifetime: each authenticated page re-verifies its own
+signed envelope and current writer authority. The request-local
 proof window still bounds each page's evidence without capping the token.
 History state caps — frontier, emitted set, witness, payload — fail as typed
 `HistoryStateLimit` errors in both views, never as truncated output or
@@ -173,7 +175,7 @@ memo-only validation and fences, `history_token` bounded v2 codec and
 isolated proof scope; `timestamp_tests` no-object-I/O issuance, replay,
 seed-window, cancellation, refusal and cap tests plus the `history_token`
 codec bounds; continuation lifetime tests for advancing clocks and exact TTL,
-credential and grant expiry.
+fresh and expired request envelopes, and grant expiry.
 
 ## Private scanner retrieval requires current ticket and global-denial checks
 
