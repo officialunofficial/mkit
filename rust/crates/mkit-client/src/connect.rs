@@ -81,7 +81,7 @@ impl Destination {
     pub fn new(origin: String, repository: String) -> Result<Self, Error> {
         mkit_core::write_auth::validate_audience(&origin)
             .map_err(|_| Error::Invalid("canonical origin"))?;
-        mkit_core::repo_identity::RepositoryIdentity::parse_bare_allowed(&repository)
+        mkit_core::repo_identity::RemoteIdentity::parse_bare_allowed(&repository)
             .map_err(|_| Error::Invalid("repository identity"))?;
         Ok(Self { origin, repository })
     }

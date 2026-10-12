@@ -352,8 +352,8 @@ collect the applicable entries between their old and new immutable pins.
   HTTP serves objects by repository path (SPEC-HTTP-OBJECTS). Grants, grant
   epochs and visibility statements keep the self-certifying grammar and are
   never built for an opaque namespace; `mkit visibility set --statement`
-  reports this as a usage error while the envelope form works. No wire,
-  credential-hook or server-behavior change.
+  reports this as a usage error while the envelope form works. No wire or
+  server-behavior change.
 
 ### Fixed
 
@@ -921,6 +921,12 @@ stored shapes instead of upgrading or downgrading them.
   They had no callers: the pipeline verifies within the request's publication
   ledger.
 
+- [embedder: breaking API] `mkit-transport-connect`:
+  `ConnectTransport::repository()` now returns `Option<&RepositoryIdentity>`
+  (`None` for an authority-mode namespace, which names no owner). Migration:
+  use `remote_identity()` for the addressed repository, or `repository()`
+  where a self-certifying identity is required. No stored-format change.
+
 ### Removed
 
 - [embedder: breaking API] The Workers-only `published-view` optimization (ref snapshots in R2, its
@@ -943,12 +949,6 @@ stored shapes instead of upgrading or downgrading them.
   delivered once to the configured sink, unchanged. `PurgeDelivery::fire_with_local`
   and the Worker `NamespaceDelivery` handler are removed. Only current
   checkpoint rows resume; reset unsupported in-flight state.
-
-- [embedder: breaking API] `mkit-transport-connect`:
-  `ConnectTransport::repository()` now returns `Option<&RepositoryIdentity>`
-  (`None` for an authority-mode namespace, which names no owner). Migration:
-  use `remote_identity()` for the addressed repository, or `repository()`
-  where a self-certifying identity is required. No stored-format change.
 
 ## [0.5.0](https://github.com/officialunofficial/mkit/compare/v0.4.2...v0.5.0) - 2026-10-02
 

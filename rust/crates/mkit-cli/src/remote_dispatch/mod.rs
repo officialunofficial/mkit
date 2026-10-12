@@ -806,9 +806,12 @@ fn open_with_ssh_options(
     if url.starts_with("mkit+enc://") {
         return open_enc(url);
     }
-    if url.starts_with("https://") || url.starts_with("http://") {
+    if let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    {
         return Err(DispatchError::UnsupportedScheme(format!(
-            "`{url}` is not a sync remote: at a server's origin, plain HTTP(S) serves objects by repository path (SPEC-HTTP-OBJECTS); sync remotes use `mkit+https://` (or loopback-only `mkit+http://`), for example `mkit+{url}`"
+            "`{url}` is not a sync remote: at a server's origin, plain HTTP(S) serves objects by repository path (SPEC-HTTP-OBJECTS); sync remotes use `mkit+https://`, for example `mkit+https://{rest}`"
         )));
     }
     Err(DispatchError::MalformedUrl(url.to_string()))

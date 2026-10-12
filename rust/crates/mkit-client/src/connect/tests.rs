@@ -293,3 +293,19 @@ fn frames_are_yielded_lazily_and_require_a_clean_end() {
     assert!(matches!(frames.next(), Some(Err(_))), "no end frame");
     assert!(frames.next().is_none());
 }
+
+#[test]
+fn destination_accepts_both_namespace_grammars_and_refuses_others() {
+    let origin = || "https://vcs.example.org".to_owned();
+    let ed = format!("ed25519-{}/repo", "ab".repeat(32));
+    for repository in [
+        ed.as_str(),
+        "019c88c3-a904-7bd1-8a5d-3182a0c6978a/repo",
+        "default",
+    ] {
+        assert!(Destination::new(origin(), repository.into()).is_ok());
+    }
+    for repository in ["Upper/repo", "root/repo", "ed25519-zz/repo", "ns/Repo"] {
+        assert!(Destination::new(origin(), repository.into()).is_err());
+    }
+}
