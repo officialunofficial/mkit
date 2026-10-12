@@ -1585,6 +1585,11 @@ snapshot from the head read. Its planning deadline precedes the entry read.
 Entries with reference pages refresh the entry plan after staging those pages.
 The early replay exit and stored representation are unchanged.
 
+Scheduled Decode denial reads MUST follow completion of the batch's inventory
+staging and precede all of its frame, candidate, and index rows. Reads MAY run
+in bounded concurrent waves. A failed wave MUST report the first failing object
+in batch order, whether blocked or unavailable, and MUST NOT admit the batch.
+
 A scheduled Decode checkpoint MUST commit after, or atomically with, the completed
 entry's provisional writes and include its post-entry cursor, under the existing job and verification
 state guards. Retries resume that durable boundary. Interrupted entry writes may

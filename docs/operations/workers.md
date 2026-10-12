@@ -109,6 +109,11 @@ clock, so a Worker's CPU time between awaits is not visible in them:
 base reads), `denial_ms` and `denial_calls` (the per-object denial reads that
 follow staging), `write_ms` (recording an entry's rows, including the local
 frame lookup) and `checkpoint_ms` (the guarded cursor commits).
+`denial_ms` measures the wall time of bounded denial waves, including failed
+waves; it does not sum overlapping per-call durations. Each wave awaits all
+responses before inspecting failures in batch order. Successful batches still
+issue one denial call per object. A failing wave finishes its already-issued
+calls, then stops without issuing later waves or recording that batch's entries.
 `inventory_batches` counts staging applies and `slice_calls` the slice's total
 remote-budget charges. Time not covered by these fields and `staging_duration_ms`
 is the slice's own timer, job and ticket bookkeeping and CPU.
@@ -138,12 +143,22 @@ Up to sixteen decoded reference-free entries share one inventory read (the head
 and their entry rows) and one guarded apply (at most 83 of the 100 operations:
 five per entry plus the head's three); the per-object denial reads follow the
 apply, so a block that lands while the batch is in flight is refused; a
-store that reserves operations gets a smaller batch. Rows already staged are
+store that reserves operations gets a smaller batch. Decode issues those denial
+reads in waves of at most six, using the shared read parallelism. It reserves
+each wave's calls before dispatch and retains first-in-batch failure precedence.
+No pack range, staging apply, or provisional write overlaps a denial wave. Rows already staged are
 skipped, so a replay after a lost reply or a crash writes nothing twice. The
 head guard keeps stagers of one pack serial. Entries with reference pages retain
 an early replay lookup, refresh their plan after page staging, and stage alone.
 Durable cursor checkpoints are still per entry; the 10-second planning deadline
-and storage layout are unchanged.
+and storage layout are unchanged. Slice bounds cover work, calls, and memory;
+there is no total elapsed-time cap. The deadline limits each stale write plan.
+
+Progress events use console telemetry, not a transactionally retained slice row.
+The durable cursor is one mutable job row per repository and pack. Each guarded
+entry checkpoint overwrites it, and later slices overwrite it again. Termination
+after a checkpoint but before event emission can leave durable advancement
+without that slice's progress event; console retention belongs to the embedder.
 
 After relay delivery, at most sixteen future timer rows are inspected and eight
 waiting jobs are nudged with guarded timer moves. Only ordinary delivery polls

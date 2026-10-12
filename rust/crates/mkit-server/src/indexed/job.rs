@@ -56,6 +56,7 @@ use mkit_core::transfer::decode_packlist;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
+mod denial;
 mod extraction;
 
 /// Fixed work units of one slice. A Worker fixes them for its plan.
@@ -1517,8 +1518,8 @@ where
     /// than one entry. Denial still precedes any frame, candidate or index row.
     /// An object that is both malformed and blocked reports the malformed
     /// hash, because staging needs it parsed first.
-    /// The denial reads are one call each: content shards partition objects,
-    /// so ids of one batch share no shard.
+    /// Denial reads run in bounded waves, one call per object. Results are
+    /// checked in batch order, preserving sequential failure precedence.
     async fn admit(
         &self,
         st: &mut SliceState,
@@ -1546,22 +1547,23 @@ where
         .await?;
         st.inventory_batches += 1;
         st.entries_staged += batch.len() as u64;
-        for item in batch {
-            let started = now_ms(self.h.clock.as_ref());
-            let calls = self.budget.used();
-            let clear = crate::takedown::denial::require_clear(self.remote, &item.id).await;
-            st.denial_ms = st
-                .denial_ms
-                .saturating_add(now_ms(self.h.clock.as_ref()).saturating_sub(started));
-            st.denial_calls += self.budget.used().saturating_sub(calls);
-            clear.map_err(|error| {
-                if error.code() == crate::Code::PermissionDenied {
-                    Stop::Outcome(Outcome::Blocked)
-                } else {
-                    unavailable("decoded object unavailable")
-                }
-            })?;
-        }
+        let ids: Vec<_> = batch.iter().map(|item| item.id).collect();
+        let started = now_ms(self.h.clock.as_ref());
+        let calls = self.budget.used();
+        let clear = denial::require_clear_many(self.remote, &ids).await;
+        // Wall time of the bounded waves, including failed reads, rather than
+        // the sum of overlapping per-object durations.
+        st.denial_ms = st
+            .denial_ms
+            .saturating_add(now_ms(self.h.clock.as_ref()).saturating_sub(started));
+        st.denial_calls += self.budget.used().saturating_sub(calls);
+        clear.map_err(|error| {
+            if error.code() == crate::Code::PermissionDenied {
+                Stop::Outcome(Outcome::Blocked)
+            } else {
+                unavailable("decoded object unavailable")
+            }
+        })?;
         Ok(())
     }
 
