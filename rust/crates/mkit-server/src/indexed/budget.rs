@@ -125,6 +125,7 @@ impl<'a, S> Budgeted<'a, S> {
     }
     /// A speculative sibling with the same ledgers and admission, whose
     /// failures cannot reclassify an earlier branch's result.
+    // Only the http-objects readers speculate.
     #[cfg_attr(not(feature = "http-objects"), allow(dead_code))]
     pub(crate) fn unflagged(&self) -> Budgeted<'_, S> {
         Budgeted {

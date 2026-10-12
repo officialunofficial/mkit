@@ -133,7 +133,9 @@ fn raw_run_fits<B: crate::BlobStore, N: NamespaceStore>(
         };
         decoded = next_decoded;
         encoded = next_encoded;
-        calls += 4 + u32::from(guards.contains(id)) + u32::from(guards.contains(&loc.pack));
+        calls = calls.saturating_add(
+            4 + u32::from(guards.contains(id)) + u32::from(guards.contains(&loc.pack)),
+        );
     }
     decoded <= decode.0 && encoded <= encoded_left && calls <= meta_calls.min(blob_calls)
 }

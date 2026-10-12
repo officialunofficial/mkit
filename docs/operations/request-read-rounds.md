@@ -77,7 +77,7 @@ denial-off run. Subsequent page measurements reuse that durable revision.
 | On | Owner | Canonical Log(10) | 104 | 104 | 257 | 257 | +0 | 20/20 |
 | On | Owner | Selected Log(10) | 114 | 114 | 244 | 244 | +0 | 20/20 |
 
-The sole permitted metadata-call increase is first-parent successor warming:
+The sole permitted metadata-call increase on successful shapes is first-parent successor warming:
 two pure reads per consumed successor. Log(10) and Page1(10) add exactly 18
 calls; the last result never warms its unused page-boundary parent. Paired probe
 runs suppress only warming and assert that GETs and rounds do not increase.
@@ -112,7 +112,11 @@ Two accounting consequences are deliberate. A wave is prepaid, so when one
 member of a wave fails or refuses, its already-dispatched siblings stay charged
 (serial code would have stopped at the first failure), including the implicit
 packmap prologue when a malformed packmap is refused; successful shapes are
-unaffected. Warming also raises the per-commit call cost of first-parent
+unaffected. The wake starts together with the head node's own validation tail, so a head
+that is later denied, unauthorized or absent-after-location may already have
+spent its two reads; the walk's results and absence behavior are unchanged, and
+the walk's ledger difference between such heads was already present because
+their tails cost different amounts. Warming also raises the per-commit call cost of first-parent
 history (about +14% with denial off and +5% with denial on), so the largest
 page that completes inside the fixed per-invocation call allowance shrinks by
 about the same fraction; the allowance itself is unchanged and the default page
