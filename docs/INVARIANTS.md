@@ -2588,7 +2588,9 @@ split-vs-single-run equivalence.
 ## Denial waves preserve admission order
 
 **Always:** every batch's inventory staging completes before its denial reads.
-At most six reads run together; each wave reserves its calls before dispatch.
+At most six reads run together. Admitted readers reserve each wave's calls;
+ordinary mutation stores keep dispatch-time charging, so later budget exhaustion
+cannot mask an earlier object's denial.
 All responses in a wave finish before failures are examined in batch order.
 No frame, candidate, or index row for the batch precedes successful denial
 admission. EmitIndex and inline index writes use the same helper in their

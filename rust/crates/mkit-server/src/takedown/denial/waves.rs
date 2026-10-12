@@ -14,9 +14,16 @@ pub(crate) async fn require_clear_many<S: NamespaceStore>(
         if wave.is_empty() {
             return Ok(());
         }
-        let reservation = store
-            .reserve_read_calls(u32::try_from(wave.len()).expect("bounded denial wave"))
-            .map_err(|_| ServerError::unavailable("decoded object unavailable"))?;
+        // Ordinary mutation stores retain dispatch-time charging, so a later
+        // budget failure cannot mask an earlier object's denial. Admitted
+        // readers use their existing all-or-nothing wave reservation policy.
+        let reservation = if store.reader_admission() {
+            store
+                .reserve_read_calls(u32::try_from(wave.len()).expect("bounded denial wave"))
+                .map_err(|_| ServerError::unavailable("decoded object unavailable"))?
+        } else {
+            None
+        };
         // Await every response before selecting the first error in input order.
         // Short-circuiting on completion order would change Blocked precedence.
         let replies = crate::store::ReadReservation::scope(
@@ -167,50 +174,75 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn denial_waves_preserve_first_failure_in_batch_order() {
-        for (blocked, unavailable, expected, calls) in [
-            (Some([0; 32]), None, crate::Code::PermissionDenied, 6),
-            (None, Some([0; 32]), crate::Code::Unavailable, 6),
-            (
-                Some([0; 32]),
-                Some([1; 32]),
-                crate::Code::PermissionDenied,
-                6,
-            ),
-            (Some([1; 32]), Some([0; 32]), crate::Code::Unavailable, 6),
-            (
-                Some([6; 32]),
-                Some([7; 32]),
-                crate::Code::PermissionDenied,
-                12,
-            ),
-            (Some([7; 32]), Some([6; 32]), crate::Code::Unavailable, 12),
-        ] {
-            let store = Delayed {
-                blocked,
-                unavailable,
-                ..Delayed::default()
-            };
-            let budget = SliceBudget::new(20);
-            let inherited = SliceBudget::new(20);
-            let inner = Budgeted::new(&store, &inherited);
-            let remote = Budgeted::new(&inner, &budget);
-            let ids: Vec<_> = (0..13).map(|n| [n; 32]).collect();
-            let error = require_clear_many(&remote, ids.iter().copied())
-                .await
-                .unwrap_err();
-            assert_eq!(error.code(), expected);
-            assert_eq!(store.calls.load(Ordering::SeqCst), calls);
-            assert_eq!(inherited.used() as usize, calls);
-            assert_eq!(budget.used() as usize, store.calls.load(Ordering::SeqCst));
-            assert_eq!(store.active.load(Ordering::SeqCst), 0);
+        for admitted in [false, true] {
+            for (blocked, unavailable, expected, calls) in [
+                (Some([0; 32]), None, crate::Code::PermissionDenied, 6),
+                (None, Some([0; 32]), crate::Code::Unavailable, 6),
+                (
+                    Some([0; 32]),
+                    Some([1; 32]),
+                    crate::Code::PermissionDenied,
+                    6,
+                ),
+                (Some([1; 32]), Some([0; 32]), crate::Code::Unavailable, 6),
+                (
+                    Some([6; 32]),
+                    Some([7; 32]),
+                    crate::Code::PermissionDenied,
+                    12,
+                ),
+                (Some([7; 32]), Some([6; 32]), crate::Code::Unavailable, 12),
+            ] {
+                let store = Delayed {
+                    blocked,
+                    unavailable,
+                    ..Delayed::default()
+                };
+                let budget = SliceBudget::new(20);
+                let inherited = SliceBudget::new(20);
+                let inner = Budgeted::new(&store, &inherited);
+                let io = crate::store::read_io::ReadIo::new();
+                let remote = Budgeted::new(&inner, &budget);
+                let remote = if admitted {
+                    remote.with_io(&io)
+                } else {
+                    remote
+                };
+                let ids: Vec<_> = (0..13).map(|n| [n; 32]).collect();
+                let error = require_clear_many(&remote, ids.iter().copied())
+                    .await
+                    .unwrap_err();
+                assert_eq!(error.code(), expected);
+                assert_eq!(store.calls.load(Ordering::SeqCst), calls);
+                assert_eq!(inherited.used() as usize, calls);
+                assert_eq!(budget.used() as usize, store.calls.load(Ordering::SeqCst));
+                assert_eq!(store.active.load(Ordering::SeqCst), 0);
+            }
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn denial_waves_keep_first_block_when_later_calls_exhaust_budget() {
+        let store = Delayed {
+            blocked: Some([0; 32]),
+            ..Delayed::default()
+        };
+        let budget = SliceBudget::new(1);
+        let remote = Budgeted::new(&store, &budget);
+        let error = require_clear_many(&remote, (0..6).map(|n| [n; 32]))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), crate::Code::PermissionDenied);
+        assert_eq!(store.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(budget.used(), 1);
     }
 
     #[tokio::test(start_paused = true)]
     async fn denial_wave_reservation_failure_dispatches_no_reads() {
         let store = Delayed::default();
         let budget = SliceBudget::new(1);
-        let remote = Budgeted::new(&store, &budget);
+        let io = crate::store::read_io::ReadIo::new();
+        let remote = Budgeted::new(&store, &budget).with_io(&io);
         let error = require_clear_many(&remote, [[1; 32]; 6].into_iter())
             .await
             .unwrap_err();
