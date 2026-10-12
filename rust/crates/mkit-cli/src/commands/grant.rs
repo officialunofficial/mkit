@@ -18,7 +18,7 @@ use crate::exit;
 use crate::format::{JsonObject, human_date_utc, json_string_array};
 use crate::grants::cli::{Ctx, parse_namespace, print_statement};
 use crate::grants::owner::{Kind, OwnerArgs, Produced, produce};
-use crate::grants::remote::{Target, check_audiences, resolve_target};
+use crate::grants::remote::{Target, check_audiences, resolve_strict_target};
 use crate::grants::spec::{
     DEFAULT_GRANT_TTL, GrantSpec, RepoSelector, build_grant, canonical_audiences,
     canonical_capabilities, canonical_ref_scopes, check_ref_scopes, parse_ttl,
@@ -187,7 +187,7 @@ pub fn run(args: &[String]) -> u8 {
 }
 
 fn optional_target(ctx: &Ctx, remote: Option<&str>) -> Result<Option<Target>, u8> {
-    match resolve_target(&ctx.layered, remote) {
+    match resolve_strict_target(&ctx.layered, remote) {
         Ok(target) => Ok(Some(target)),
         Err(e) if remote.is_some() => Err(usage_error(&e)),
         Err(_) => Ok(None),
@@ -407,7 +407,7 @@ const ADD_EPOCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5)
 /// B6 caveat: a grant for an epoch above the remote's outranks the live
 /// grants until the owner bumps the epoch.
 fn warn_if_future_epoch(ctx: &Ctx, remote: Option<&str>, grant: &mkit_attest::grant::Grant) {
-    let Ok(target) = resolve_target(&ctx.layered, remote) else {
+    let Ok(target) = resolve_strict_target(&ctx.layered, remote) else {
         return;
     };
     let Ok(audience) = target.audience() else {
@@ -492,7 +492,7 @@ fn list(o: &ListOpts) -> u8 {
     let mut check_audience = None;
     let mut check_error = None;
     if o.check {
-        match resolve_target(&ctx.layered, o.remote.as_deref())
+        match resolve_strict_target(&ctx.layered, o.remote.as_deref())
             .and_then(|t| ctx.open_unsigned(&t).map(|tx| (t, tx)))
         {
             Ok((target, tx)) => {

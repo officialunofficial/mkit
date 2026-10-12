@@ -810,13 +810,14 @@ fn open_with_ssh_options(
         .split_once("://")
         .filter(|(scheme, _)| matches!(*scheme, "https" | "http"))
     {
-        // Never echo URL userinfo into an error message.
+        // Never echo URL userinfo or a query into an error message; a URL
+        // carrying userinfo gets the generic form instead of a rewrite.
         let rest = rest.split(['?', '#']).next().unwrap_or(rest);
-        let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
-        let authority = authority
-            .rsplit_once('@')
-            .map_or(authority, |(_, host)| host);
-        let shown = format!("{authority}/{path}");
+        let shown = if rest.contains('@') {
+            "<host>/<namespace>/<name>"
+        } else {
+            rest
+        };
         return Err(DispatchError::UnsupportedScheme(format!(
             "`{scheme}://{shown}` is not a sync remote: at a server's origin, plain HTTP(S) serves objects by repository path (SPEC-HTTP-OBJECTS); sync remotes use `mkit+https://`, for example `mkit+https://{shown}`"
         )));
@@ -834,7 +835,9 @@ fn validate_connect_repository(url: &str) -> Result<(), DispatchError> {
             .next()
             .unwrap_or("")
             .trim_matches('/');
-        DispatchError::MalformedUrl(format!("repository identity `{path}` in {url}: {reason}"))
+        DispatchError::MalformedUrl(format!(
+            "repository identity `{path}` in the remote URL: {reason}"
+        ))
     })?;
     Ok(())
 }
@@ -2349,20 +2352,35 @@ mod tests {
         );
         assert!(message.contains("SPEC-HTTP-OBJECTS"), "{message}");
 
-        // Userinfo is never echoed, and plain http:// is pointed at https.
+        // Userinfo and queries are never echoed.
         let error = super::open(&format!(
-            "http://user:secret@vcs.example/{uuid}/repo?k=secret2#f"
+            "http://user:secret@vcs.example/{uuid}/repo?k=q1#f"
         ))
         .err()
         .expect("plain http must fail");
         let message = error.to_string();
         assert!(!message.contains("secret"), "{message}");
         assert!(
-            !message.contains("secret2") && !message.contains("#f"),
+            !message.contains("q1") && !message.contains("#f"),
             "{message}"
         );
+        assert!(message.contains("mkit+https://"), "{message}");
+        let error = super::open(&format!("http://vcs.example/{uuid}/repo?k=q1"))
+            .err()
+            .expect("plain http must fail");
+        let message = error.to_string();
+        assert!(!message.contains("q1"), "{message}");
         assert!(
             message.contains(&format!("mkit+https://vcs.example/{uuid}/repo")),
+            "{message}"
+        );
+        // A rejected identity does not echo the URL's userinfo or query.
+        let error = super::open("mkit+https://user:secret@vcs.example/Bad/repo?k=q1")
+            .err()
+            .expect("bad namespace must fail");
+        let message = error.to_string();
+        assert!(
+            !message.contains("secret") && !message.contains("q1"),
             "{message}"
         );
     }

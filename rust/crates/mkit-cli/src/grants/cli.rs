@@ -7,11 +7,10 @@ use std::time::Duration;
 
 use mkit_attest::grant::{Namespace, RelyingParty};
 use mkit_core::layout::RepoLayout;
-use mkit_core::repo_identity::RemoteNamespace;
-use mkit_transport_connect::{ConnectTransport, remote_identity_from_url};
+use mkit_transport_connect::ConnectTransport;
 
 use super::owner::{self, NativeOwner, OwnerArgs, Plan, SignCtx};
-use super::remote::{Driven, Target, drive, interruptible_sleep};
+use super::remote::{Driven, Target, drive, interruptible_sleep, refuse_authority_namespace};
 use super::spec::parse_ttl;
 use crate::commands::{error, usage_error};
 use crate::config::{self, LayeredConfig};
@@ -210,38 +209,5 @@ pub fn finish_wait<T>(outcome: &Driven<T>, what: &str) -> Option<u8> {
             &format!("interrupted; {what} may still complete on the server. Check before retrying"),
             exit::TEMPFAIL,
         )),
-    }
-}
-
-/// Grants, grant epochs and owner statements are self-certifying-only
-/// (SPEC-SERVER §6.2.2): refuse a URL naming an authority-mode namespace
-/// instead of falling back to the signer's own namespace.
-fn refuse_authority_namespace(endpoint: &str) -> Result<(), String> {
-    match remote_identity_from_url(endpoint)
-        .ok()
-        .as_ref()
-        .and_then(|id| id.namespace())
-    {
-        Some(RemoteNamespace::Opaque(ns)) => Err(format!(
-            "`{ns}` is an authority-mode namespace; grants, grant epochs and owner statements need a self-certifying `ed25519-`/`0x` namespace (SPEC-SERVER §6.2.2, SPEC-TRANSPORT-CONNECT §7.4)"
-        )),
-        _ => Ok(()),
-    }
-}
-
-#[cfg(test)]
-mod authority_namespace_tests {
-    use super::refuse_authority_namespace;
-
-    #[test]
-    fn opaque_namespace_urls_are_refused_and_strict_ones_pass() {
-        let uuid = "019c88c3-a904-7bd1-8a5d-3182a0c6978a";
-        let err = refuse_authority_namespace(&format!("mkit+https://vcs.example/{uuid}/repo"))
-            .unwrap_err();
-        assert!(err.contains(uuid) && err.contains("§6.2.2"), "{err}");
-        let ed = format!("mkit+https://vcs.example/ed25519-{}/repo", "ab".repeat(32));
-        assert!(refuse_authority_namespace(&ed).is_ok());
-        assert!(refuse_authority_namespace("mkit+https://vcs.example/repo").is_ok());
-        assert!(refuse_authority_namespace("not a url").is_ok());
     }
 }

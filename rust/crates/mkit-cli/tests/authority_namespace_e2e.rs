@@ -655,3 +655,23 @@ fn malformed_path_segments_and_plain_https_are_refused_client_side() {
     assert!(text.contains("SPEC-HTTP-OBJECTS"), "{text}");
     assert!(text.contains(&format!("mkit+{url}")), "{text}");
 }
+
+#[test]
+fn grant_epoch_and_statement_commands_refuse_an_authority_namespace() {
+    let anon = Party::new(0x77);
+    let live = Live::authority();
+    let url = format!("mkit+http://{}/{NS}/repo", live.host());
+    for args in [
+        vec!["epoch", "show", url.as_str()],
+        vec!["epoch", "bump", url.as_str()],
+        vec!["visibility", "set", url.as_str(), "private", "--statement"],
+    ] {
+        let out = anon.run(&args);
+        assert!(!out.status.success(), "mkit {args:?} must fail");
+        let text = stderr(&out);
+        assert!(
+            text.contains(NS) && text.contains("SPEC-SERVER §6.2.2"),
+            "mkit {args:?}: {text}"
+        );
+    }
+}
