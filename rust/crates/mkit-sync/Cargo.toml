@@ -1,0 +1,40 @@
+[package]
+name = "mkit-sync"
+description = "Native clone, fetch and pull for .mkit repositories, as a library that returns typed reports and prints nothing"
+readme = "README.md"
+keywords = ["mkit", "vcs", "clone", "fetch", "sync"]
+categories = ["development-tools", "filesystem"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# `default-features = false`: the zstd C backend is this crate's own
+# `pack-zstd` feature (on by default), so an embedder can build without it
+# and decode packs with `pack-ruzstd` instead.
+# `batch-verify` is the Ed25519 batch fast path of the post-fetch signature
+# check (pure Rust, no C dependency).
+mkit-core = { version = "0.5", path = "../mkit-core", default-features = false, features = ["batch-verify"] }
+# Fan-out of signature verification, ref reads and chunk reads.
+rayon = "1"
+# Private staging directory for downloaded packs.
+tempfile = "3"
+thiserror = "2"
+
+[features]
+default = ["pack-zstd"]
+# Pack decode (and encode) through the zstd C library.
+pack-zstd = ["mkit-core/pack-zstd"]
+# Pure-Rust pack decode, for builds without `pack-zstd`.
+pack-ruzstd = ["mkit-core/pack-ruzstd"]
+# Publish versioned first-parent ancestry snapshots with branch writes.
+history-mmr = ["mkit-core/history-mmr"]
+
+[dev-dependencies]
+mkit-transport-memory = { path = "../mkit-transport-memory" }

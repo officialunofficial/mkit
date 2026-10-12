@@ -29,7 +29,7 @@ use mkit_transport_connect::{
 };
 
 use super::StepAuthority;
-use super::packmap::packmap_ref;
+use mkit_sync::packmap::packmap_ref;
 
 use crate::grants::store::StoredGrant;
 #[cfg(test)]

@@ -3287,6 +3287,7 @@ dependencies = [
  "mkit-keystore",
  "mkit-rpc",
  "mkit-server",
+ "mkit-sync",
  "mkit-test-util",
  "mkit-transport-connect",
  "mkit-transport-enc",
@@ -3584,6 +3585,17 @@ dependencies = [
  "web-sys",
  "worker",
  "zeroize",
+]
+
+[[package]]
+name = "mkit-sync"
+version = "0.5.0"
+dependencies = [
+ "mkit-core",
+ "mkit-transport-memory",
+ "rayon",
+ "tempfile",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

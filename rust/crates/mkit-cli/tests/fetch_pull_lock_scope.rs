@@ -13,7 +13,7 @@
 //!    the mechanism the narrowed design leans on for safety: a concurrent
 //!    `gc --grace-secs 0` cannot make progress while the SAME lock a
 //!    fetch/pull holds across its local-write + ref-publish window
-//!    (`packmap::apply_fetched_chain`) is held.
+//!    (`mkit_sync` `apply_fetched_chain`) is held.
 //! 3. [`fetch_objects_survive_a_grace_zero_gc_run_during_the_unlocked_download_phase`]
 //!    exercises the issue's literal testing decision: an aggressive
 //!    concurrent `gc --grace-secs 0` running purely during the (now
@@ -315,7 +315,7 @@ fn pull_all_does_not_hold_repo_lock_during_pack_download() {
 
 #[test]
 fn gc_blocks_while_repo_lock_held_mid_fetch_critical_section() {
-    // `packmap::apply_fetched_chain` holds the repo lock continuously from
+    // `mkit_sync` `apply_fetched_chain` holds the repo lock continuously from
     // the first object it unpacks through the caller's ref publish (#642).
     // Simulate being inside that window by holding the same lock directly,
     // and confirm a concurrent `gc --grace-secs 0` cannot proceed until it

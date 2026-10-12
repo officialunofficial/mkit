@@ -125,6 +125,7 @@ jobs:
             -p mkit-keystore \
             -p mkit-rpc \
             -p mkit-client \
+            -p mkit-sync \
             -p mkit-transport-file \
             -p mkit-transport-http \
             -p mkit-transport-memory \

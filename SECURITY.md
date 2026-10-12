@@ -94,7 +94,7 @@ In scope:
 
 - The `mkit` binary and the Rust workspace under `rust/crates/` &mdash;
   including the library crates published to crates.io (`mkit-core`,
-  `mkit-rpc`, `mkit-attest`, `mkit-keystore`, `mkit-git-bridge`, the
+  `mkit-rpc`, `mkit-attest`, `mkit-keystore`, `mkit-git-bridge`, `mkit-sync`, the
   `mkit-transport-*` crates).
 - The reference external signers under `contrib/signers/`.
 - Release pipeline integrity (signing, SBOM, reproducibility claims).

@@ -17,7 +17,7 @@ collect the applicable entries between their old and new immutable pins.
 
 - `mkit-client`: the runtime-independent async protocol client for reads and
   writes, on native and wasm32-unknown-unknown with no tokio, hyper or C
-  compression in its dependency graph. the earlier `mkit-push` (never published) is renamed to it, with its code unchanged in
+  compression in its dependency graph. The earlier `mkit-push` (never published) is renamed to it, with its code unchanged in
   behaviour (`Push`, `Plan`, `HttpTransport`, `Signer`, `Clock`). New: `Client`
   with a typed call per RPC (`server_info`, `list_refs` / `list_all_refs`,
   `read_ref`, `pack_exists`, `download_pack` with a caller size cap, `update_ref`
@@ -37,6 +37,17 @@ collect the applicable entries between their old and new immutable pins.
   The `pack-ruzstd` feature (default) reads compressed packs without a C
   toolchain; `pack-zstd` adds the native writer.
 
+- `mkit-sync`: a native clone, fetch and pull library for `.mkit`
+  repositories. It owns the filesystem layer that used to live inside
+  `mkit-cli` (packmap chain walk and download, the applied-packs record, the
+  per-branch repository lock, signature verification of newly fetched
+  objects, closure check, remote-tracking refs, fast-forward with rollback,
+  clone setup) and returns typed reports or errors, prints nothing, reads
+  nothing ambient, and verifies signatures by default with an explicit
+  opt-out. It reads through a `RemoteSource` trait whose first backend wraps
+  mkit-core's synchronous `Transport`, so every existing scheme keeps
+  working. `mkit clone`, `fetch` and `pull` are thin wrappers over it with
+  unchanged output and exit codes. No wire or stored-format change.
 - Ticketless same-repository branch creation from an authoritative published
   pair: `AdvanceRefsRequest.source_ref` (field 11), optional `expected_tip`
   (field 12), and `Pipeline::advance_refs_from_published{,_with_meta}`.

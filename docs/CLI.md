@@ -1048,6 +1048,8 @@ Remote / sync:
   set from a cloned repo's own `.mkit/config` (see THREAT-MODEL.md §4).
   `--all` applies the same verification (and the same opt-out) to every
   remote it iterates.
+- **Library.** `clone`, `fetch` and `pull` run on the `mkit-sync` crate
+  (`rust/crates/mkit-sync/README.md`), which an embedder can call directly.
 - `mkit push [<remote>] [--all] [--force|--force-with-lease] [--dry-run]
   [--format=json] [-q|--quiet]`
   &mdash; push refs and packs to a remote. With no `<remote>`, pushes the
