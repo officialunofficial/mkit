@@ -84,12 +84,11 @@ pub mod worktree;
 
 use crate::exit;
 use mkit_core::hash::Hash;
-use mkit_core::index::{EntryStatus, Index};
+use mkit_core::index::EntryStatus;
 use mkit_core::layout::RepoLayout;
 use mkit_core::object::Object;
 use mkit_core::ops::diff::{DiffKind, diff_trees};
 use mkit_core::ops::recovery::{self, RecoveryEntry};
-use mkit_core::ops::restore::{RestoreOptions, matches_sparse, restore_tree_to_worktree_with};
 use mkit_core::refs::{self, Head, RefError, RefWriteCondition};
 use mkit_core::store::ObjectStore;
 use mkit_core::worktree as core_worktree;
@@ -97,26 +96,17 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-/// Ref-read fan-out per thread. Ref files are tiny (65 bytes) and the
-/// per-entry cost is dominated by syscall overhead, not compute
-/// (`cargo bench -p mkit-benches --bench refs_ops -- list_refs_fanout`:
-/// ~4-6us/ref either way at 100-10k refs) — the same shape as
-/// `remote_dispatch::packmap`'s signature-verification fan-out, which
-/// uses the same low per-thread count for the same reason.
-const LIST_REFS_FANOUT_ENTRIES_PER_THREAD: usize = 2;
-
-/// The `read_batch` shared by every parallel ref-listing wrapper below:
-/// fans [`refs::read_ref_candidate`] out across rayon's global thread
-/// pool once there's enough work to amortize dispatch. One definition so
-/// the fan-out shape (and the sequential-below-threshold crossover) can't
-/// drift between the heads/tags/remote-refs variants.
-fn fanout_read_batch(candidates: &[refs::RefCandidate]) -> Vec<refs::RefReadOutcome> {
-    crate::fanout::map_seq_or_par(
-        candidates,
-        crate::fanout::threshold(LIST_REFS_FANOUT_ENTRIES_PER_THREAD),
-        |c, _| refs::read_ref_candidate(c),
-    )
-}
+// The restore-safety, index and history-aware ref-write primitives live in
+// `mkit-sync` (a pull's fast-forward is built on them); every command keeps
+// reaching them through this module.
+pub(crate) use mkit_sync::worktree::{
+    collect_worktree_paths, current_head_tree, fanout_read_batch, index_path_descends_from,
+    index_path_matches_or_descends, index_tracks_path_or_descendant, restore_affects_path,
+};
+pub use mkit_sync::worktree::{
+    ensure_restore_safe, ensure_restore_safe_with_options, read_or_seed_index_from_head,
+    restore_worktree_and_index, sync_index_to_tree, write_ref_recording_history,
+};
 
 /// [`refs::list_refs`], with the per-ref read-and-decode step fanned out
 /// across rayon's global thread pool once there's enough work to amortize
@@ -308,7 +298,7 @@ pub(crate) fn restore_head_ref(layout: &RepoLayout, target: &Hash) -> Result<(),
 ///
 /// Ref-only mutations (`branch`/`tag`) and config-only mutations do not
 /// take this lock — they rely on ref-CAS / atomic-config writes instead.
-pub const WORKTREE_LOCK: &str = "worktree.lock";
+pub use mkit_sync::WORKTREE_LOCK;
 
 /// Acquire the shared worktree/index lock for this worktree.
 ///
@@ -347,7 +337,7 @@ pub fn acquire_worktree_lock(layout: &RepoLayout) -> Result<mkit_core::repo_lock
 /// `mkit_core::layout`). Local mutating commands never take this lock
 /// themselves; they only [`probe_exclusive`](mkit_core::repo_lock::probe_exclusive)
 /// it via `warn_if_served` to detect a live `serve`.
-pub const SERVE_LOCK: &str = "serve.lock";
+pub use mkit_sync::SERVE_LOCK;
 
 /// Warn on stderr when at least one `mkit serve` is currently alive
 /// against `layout`'s common dir. Called by [`acquire_worktree_lock`]
@@ -376,15 +366,7 @@ pub const SERVE_LOCK: &str = "serve.lock";
 /// this is a best-effort diagnostic, never a reason to fail the calling
 /// command.
 pub(crate) fn warn_if_served(layout: &RepoLayout) {
-    if let Ok(false) = mkit_core::repo_lock::probe_exclusive(layout.common_dir(), SERVE_LOCK) {
-        let mut stderr = std::io::stderr().lock();
-        let _ = writeln!(
-            stderr,
-            "warning: {} is currently being served by `mkit serve`; concurrent worktree \
-             mutation and `gc` are not coordinated with it (SPEC-CONCURRENCY §3.1)",
-            layout.worktree_root().display()
-        );
-    }
+    mkit_sync::warn_if_served(layout, &crate::remote_dispatch::CliObserver);
 }
 
 /// Basename of the common-dir lock serialising linked-worktree
@@ -684,45 +666,12 @@ fn file_exec_status(_meta: &fs::Metadata) -> EntryStatus {
     EntryStatus::Blob
 }
 
-pub(crate) fn index_path_matches_or_descends(path: &str, base: &str) -> bool {
-    path == base || index_path_descends_from(path, base)
-}
-
-pub(crate) fn index_path_descends_from(path: &str, base: &str) -> bool {
-    path.len() > base.len()
-        && path.starts_with(base)
-        && path.as_bytes().get(base.len()) == Some(&b'/')
-}
-
 // ---------------------------------------------------------------------------
 // History-MMB ref-write helper (feature: history-mmr)
 // ---------------------------------------------------------------------------
 //
 // CLI branch writes publish versioned first-parent ancestry when enabled.
 // History locking precedes the full-ref mutation guard.
-
-/// Publish a branch tip and a versioned first-parent ancestry snapshot when
-/// history-mmr is enabled. The helper locks history then the full ref identity;
-/// pending publication is recovered before accepting another write.
-/// Detached HEAD updates do not claim branch
-/// membership and continue through their existing per-worktree path.
-pub fn write_ref_recording_history(
-    layout: &RepoLayout,
-    branch: &str,
-    condition: RefWriteCondition,
-    new_hash: &Hash,
-) -> Result<(), RefError> {
-    #[cfg(feature = "history-mmr")]
-    {
-        let store = ObjectStore::open(layout)
-            .map_err(|e| RefError::InvalidRef(format!("{branch}: open object store: {e}")))?;
-        refs::update_ref_with_ancestry(layout, branch, condition, new_hash, &store)
-    }
-    #[cfg(not(feature = "history-mmr"))]
-    {
-        refs::update_ref(layout, branch, condition, new_hash)
-    }
-}
 
 /// Delete a non-current branch and invalidate its current ancestry pointer.
 /// Historical generation snapshots are preserved. A later
@@ -815,42 +764,6 @@ pub fn record_superseded(
     recovery::record(layout, &entry).map_err(|e| (format!("recovery log: {e}"), exit::CANTCREAT))
 }
 
-/// Rewrite `.mkit/index` so it exactly mirrors `tree_hash`.
-///
-/// `mkit commit` now signs the index, so commands that move HEAD and
-/// materialize a committed tree must keep the index aligned with that
-/// snapshot.
-pub fn sync_index_to_tree(
-    layout: &RepoLayout,
-    store: &ObjectStore,
-    tree_hash: Hash,
-) -> Result<(), String> {
-    let mut idx =
-        mkit_core::index::from_tree(store, tree_hash).map_err(|e| format!("index: {e}"))?;
-    // Tree-derived entries carry no stat cache. Carry it over from the
-    // outgoing index wherever path AND object hash agree: a later stat
-    // match against the old observation still proves the same bytes,
-    // so commit/checkout don't wipe the O(stat) fast path.
-    if let Ok(old) = mkit_core::index::read_index(layout) {
-        // O(1) lookups: find_entry is a linear scan and this loop runs
-        // once per tree entry (was O(n²) per commit/checkout).
-        let by_path: std::collections::HashMap<&str, &mkit_core::index::IndexEntry> =
-            old.entries.iter().map(|o| (o.path.as_str(), o)).collect();
-        for e in &mut idx.entries {
-            if let Some(o) = by_path.get(e.path.as_str())
-                && o.object_hash == e.object_hash
-                && o.status == e.status
-            {
-                e.mtime_ns = o.mtime_ns;
-                e.size = o.size;
-                e.ino = o.ino;
-                e.ctime_ns = o.ctime_ns;
-            }
-        }
-    }
-    mkit_core::index::write_index(layout, &idx).map_err(|e| format!("write index: {e}"))
-}
-
 /// After staging a `result_tree` (which, being a tree, omits removed paths),
 /// add `Removed` tombstones to the index for every path present in
 /// `base_tree` but absent from `result_tree`.
@@ -896,134 +809,6 @@ pub fn stage_removed_tombstones(
         }
     }
     mkit_core::index::write_index(layout, &idx).map_err(|e| format!("write index: {e}"))
-}
-
-/// Materialise `tree_hash` and align the index while preserving `.mkitignore` entries.
-pub fn restore_worktree_and_index(
-    layout: &RepoLayout,
-    store: &ObjectStore,
-    tree_hash: Hash,
-) -> Result<(), String> {
-    restore_tree_to_worktree_with(
-        store,
-        &tree_hash,
-        None,
-        layout.worktree_root(),
-        &RestoreOptions::default(),
-        &crate::restore_fanout::read_chunks_fanout,
-    )
-    .map_err(|e| format!("restore worktree: {e}"))?;
-    sync_index_to_tree(layout, store, tree_hash)
-}
-
-/// Refuse a destructive restore when the index/worktree contains user work.
-pub fn ensure_restore_safe(
-    layout: &RepoLayout,
-    store: &ObjectStore,
-    target_tree: Hash,
-) -> Result<(), String> {
-    ensure_restore_safe_with_options(layout, store, target_tree, &RestoreOptions::default())
-}
-
-/// Refuse a destructive restore when affected index/worktree paths contain user work.
-pub fn ensure_restore_safe_with_options(
-    layout: &RepoLayout,
-    store: &ObjectStore,
-    target_tree: Hash,
-    options: &RestoreOptions,
-) -> Result<(), String> {
-    let root = layout.worktree_root();
-    let current_tree = current_head_tree(layout, store)?;
-    let idx = read_or_seed_index_from_head(layout, store)?;
-    // Safety-check snapshot trees are ephemeral — in-memory overlay,
-    // no durability cost, no garbage objects in the store.
-    let snapshot = mkit_core::store::EphemeralSink::new(store);
-    let index_tree = core_worktree::build_tree_from_index_with(store, &snapshot, &idx, false)
-        .map_err(|e| format!("check index state: {e}"))?;
-
-    let staged = diff_trees(&snapshot, current_tree, Some(index_tree))
-        .map_err(|e| format!("check staged changes: {e}"))?;
-    if let Some(entry) = staged
-        .entries
-        .iter()
-        .find(|entry| restore_affects_path(options, &entry.path))
-    {
-        return Err(format!(
-            "restore would overwrite staged changes; commit, stash, or reset '{}' first",
-            entry.path
-        ));
-    }
-
-    let worktree_tree = core_worktree::build_tree_filtered_observed_with_source(
-        &snapshot,
-        &snapshot,
-        root,
-        Some(&idx),
-        &mut Vec::new(),
-    )
-    .map_err(|e| format!("check working tree changes: {e}"))?;
-    let unstaged = diff_trees(&snapshot, Some(index_tree), Some(worktree_tree))
-        .map_err(|e| format!("check working tree changes: {e}"))?;
-    if let Some(entry) = unstaged
-        .entries
-        .iter()
-        .find(|entry| entry.kind != DiffKind::Added && restore_affects_path(options, &entry.path))
-    {
-        return Err(format!(
-            "restore would overwrite local changes; commit, stash, or reset '{}' first",
-            entry.path
-        ));
-    }
-
-    let target_writes = diff_trees(&snapshot, Some(index_tree), Some(target_tree))
-        .map_err(|e| format!("check restore target: {e}"))?
-        .entries
-        .into_iter()
-        .filter(|entry| entry.kind != DiffKind::Removed)
-        .filter(|entry| restore_affects_path(options, &entry.path))
-        .map(|entry| entry.path)
-        .collect::<Vec<_>>();
-    if target_writes.is_empty() && !options.clean {
-        return Ok(());
-    }
-
-    let ignore = mkit_core::ignore::load(root).map_err(|e| format!("read ignore file: {e}"))?;
-    let mut worktree_paths = Vec::new();
-    collect_worktree_paths(root, root, "", &mut worktree_paths)
-        .map_err(|e| format!("check untracked paths: {e}"))?;
-    if let Some(path) = worktree_paths.iter().find(|path| {
-        !index_tracks_path_or_descendant(&idx, path)
-            && target_writes
-                .iter()
-                .any(|target| paths_overlap(path, target))
-    }) {
-        return Err(format!(
-            "restore would overwrite untracked path '{path}'; move or remove it first"
-        ));
-    }
-
-    if options.clean
-        && let Some(path) = worktree_paths.iter().find(|path| {
-            !index_tracks_path_or_descendant(&idx, path)
-                && restore_affects_path(options, path)
-                && *path != ".mkitignore"
-                && *path != ".gitignore"
-                && !is_ignored_worktree_path(root, &ignore, path)
-        })
-    {
-        return Err(format!(
-            "restore would remove untracked path '{path}'; move or remove it first"
-        ));
-    }
-
-    Ok(())
-}
-
-pub(crate) fn restore_affects_path(options: &RestoreOptions, path: &str) -> bool {
-    options
-        .sparse_patterns
-        .as_deref()
-        .is_none_or(|patterns| matches_sparse(patterns, path, false))
 }
 
 /// Tracked paths present in the current index but absent from the target
@@ -1094,117 +879,6 @@ pub(crate) fn remove_dropped_path(abs: &Path) -> std::io::Result<()> {
         Ok(_) => fs::remove_file(abs),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
-    }
-}
-
-fn is_ignored_worktree_path(
-    root: &Path,
-    ignore: &mkit_core::ignore::IgnoreList,
-    path: &str,
-) -> bool {
-    let full_path = root.join(path);
-    let Ok(meta) = fs::symlink_metadata(&full_path) else {
-        return false;
-    };
-    // Match on the repo-relative path, and treat a path under an ignored
-    // directory as ignored too (no top-down walk here to carry that bit).
-    ignore.is_ignored_with_ancestors(path, meta.is_dir())
-}
-
-pub(crate) fn current_head_tree(
-    layout: &RepoLayout,
-    store: &ObjectStore,
-) -> Result<Option<Hash>, String> {
-    let Some(head_hash) = refs::resolve_head(layout).map_err(|e| format!("resolve HEAD: {e}"))?
-    else {
-        return Ok(None);
-    };
-    match store
-        .read_object(&head_hash)
-        .map_err(|e| format!("read HEAD: {e}"))?
-    {
-        Object::Commit(c) => Ok(Some(c.tree_hash)),
-        Object::Remix(r) => Ok(Some(r.tree_hash)),
-        _ => Err("HEAD does not resolve to a commit or remix".to_string()),
-    }
-}
-
-pub(crate) fn collect_worktree_paths(
-    root: &Path,
-    dir: &Path,
-    prefix: &str,
-    out: &mut Vec<String>,
-) -> std::io::Result<()> {
-    let read = match fs::read_dir(dir) {
-        Ok(read) => read,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e),
-    };
-    for entry in read {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if name.eq_ignore_ascii_case(".mkit") || name.eq_ignore_ascii_case(".git") {
-            continue;
-        }
-        let path = if prefix.is_empty() {
-            name.to_string()
-        } else {
-            format!("{prefix}/{name}")
-        };
-        out.push(path.clone());
-        let full_path = root.join(&path);
-        let meta = fs::symlink_metadata(&full_path)?;
-        if meta.is_dir() {
-            collect_worktree_paths(root, &full_path, &path, out)?;
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn index_tracks_path_or_descendant(index: &Index, path: &str) -> bool {
-    // Delegates to `Index::tracks_path_or_descendant`, which answers via
-    // the maintained `path -> position` map in `O(log n + k)` instead of
-    // this function's old `O(n)` full scan (issue #708) — `add_tree` calls
-    // this once per directory/file it walks.
-    index.tracks_path_or_descendant(path)
-}
-
-fn paths_overlap(left: &str, right: &str) -> bool {
-    index_path_matches_or_descends(left, right) || index_path_descends_from(right, left)
-}
-
-/// Read the index, seeding an absent/empty one from HEAD when possible.
-///
-/// This lets old repositories or manually removed indexes keep the
-/// expected staging invariant: adding/removing one path starts from the
-/// current commit snapshot instead of making the next commit forget all
-/// unchanged tracked files.
-pub fn read_or_seed_index_from_head(
-    layout: &RepoLayout,
-    store: &ObjectStore,
-) -> Result<mkit_core::index::Index, String> {
-    let idx = mkit_core::index::read_index(layout).map_err(|e| format!("read index: {e}"))?;
-    if !idx.entries.is_empty() {
-        return Ok(idx);
-    }
-
-    let Some(head_hash) =
-        mkit_core::refs::resolve_head(layout).map_err(|e| format!("resolve HEAD: {e}"))?
-    else {
-        return Ok(idx);
-    };
-    match store
-        .read_object(&head_hash)
-        .map_err(|e| format!("read HEAD: {e}"))?
-    {
-        Object::Commit(c) => mkit_core::index::from_tree(store, c.tree_hash)
-            .map_err(|e| format!("index from HEAD: {e}")),
-        Object::Remix(r) => mkit_core::index::from_tree(store, r.tree_hash)
-            .map_err(|e| format!("index from HEAD: {e}")),
-        _ => Err("HEAD does not resolve to a commit or remix".to_string()),
     }
 }
 

@@ -2,7 +2,7 @@
 //! store, keyed by remote — the fetch-side redownload-avoidance cache for
 //! issue #409.
 //!
-//! [`super::packmap::resolve_and_download_chain`] always walks a branch's
+//! [`crate::fetch::resolve_and_download_chain`] always walks a branch's
 //! *whole* packmap chain to discover its shape (chain-node downloads are
 //! small blobs and stay unconditional — see that function's docs), but
 //! without this record it re-downloads and re-unpacks every pack in the
@@ -81,13 +81,14 @@ use mkit_core::hash::{HEX_LEN, Hash, to_hex};
 use mkit_core::protocol::PackKey;
 use tempfile::NamedTempFile;
 
-use super::DispatchError;
+use crate::error::SyncError;
+use crate::observer::{SyncEvent, SyncObserver};
 
 /// A local record of pack digests already unpacked into this repo's object
 /// store for one remote. See the module docs for the on-disk format and the
 /// self-heal contract.
 #[derive(Debug)]
-pub(crate) struct AppliedPacks {
+pub struct AppliedPacks {
     set: HashSet<Hash>,
     path: PathBuf,
     dirty: bool,
@@ -100,18 +101,18 @@ impl AppliedPacks {
     ///
     /// # Errors
     ///
-    /// [`DispatchError::InvalidRemoteName`] if `remote` is not a legal ref
+    /// [`SyncError::InvalidRemoteName`] if `remote` is not a legal ref
     /// name (per [`mkit_core::refs::validate_ref_name`]). Any other I/O
-    /// failure reading the file propagates as [`DispatchError::Io`]. The
+    /// failure reading the file propagates as [`SyncError::Io`]. The
     /// fetch path treats both as non-fatal — the record is a pure cache — via
     /// [`Self::load_or_empty`].
-    pub(crate) fn load(layout: &RepoLayout, remote: &str) -> Result<Self, DispatchError> {
+    pub fn load(layout: &RepoLayout, remote: &str) -> Result<Self, SyncError> {
         validate_remote_name(remote)?;
         let path = record_path(layout, remote);
         let set = match fs::read(&path) {
             Ok(bytes) => parse(&bytes),
             Err(e) if e.kind() == io::ErrorKind::NotFound => HashSet::new(),
-            Err(e) => return Err(DispatchError::Io(e)),
+            Err(e) => return Err(SyncError::Io(e)),
         };
         Ok(Self {
             set,
@@ -126,11 +127,12 @@ impl AppliedPacks {
     /// be read. On any load error this warns and falls back to an empty
     /// in-memory record (every pack re-downloads, always correct); persisting
     /// is still attempted best-effort through the normal path.
-    pub(crate) fn load_or_empty(layout: &RepoLayout, remote: &str) -> Self {
+    pub fn load_or_empty(layout: &RepoLayout, remote: &str, observer: &dyn SyncObserver) -> Self {
         Self::load(layout, remote).unwrap_or_else(|e| {
-            eprintln!(
-                "warning: could not read applied-packs record for remote '{remote}' ({e}); continuing without redownload-avoidance for this fetch"
-            );
+            observer.event(&SyncEvent::AppliedPacksUnreadable {
+                remote: remote.to_owned(),
+                error: e.to_string(),
+            });
             Self {
                 set: HashSet::new(),
                 path: record_path(layout, remote),
@@ -140,13 +142,14 @@ impl AppliedPacks {
     }
 
     /// True iff `key`'s digest is already recorded as applied.
-    pub(crate) fn contains(&self, key: &PackKey) -> bool {
+    #[must_use]
+    pub fn contains(&self, key: &PackKey) -> bool {
         self.set.contains(&key.into_hash())
     }
 
     /// Record `key`'s digest as applied. Marks the record dirty so the next
     /// [`Self::persist`] call rewrites the file.
-    pub(crate) fn insert(&mut self, key: &PackKey) {
+    pub fn insert(&mut self, key: &PackKey) {
         self.set.insert(key.into_hash());
         self.dirty = true;
     }
@@ -156,7 +159,7 @@ impl AppliedPacks {
     /// been called since the last successful persist. A no-op call is free.
     /// Clears the dirty flag on a successful write so a subsequent no-op
     /// call really is free.
-    pub(crate) fn persist(&mut self) -> Result<(), DispatchError> {
+    pub fn persist(&mut self) -> Result<(), SyncError> {
         if !self.dirty {
             return Ok(());
         }
@@ -170,7 +173,7 @@ impl AppliedPacks {
     /// suspected stale relative to the object store (e.g. the store was
     /// wiped but `applied-packs/` survived) — the caller persists once at
     /// the end of the fetch, so this does not touch disk itself.
-    pub(crate) fn clear(&mut self) {
+    pub fn clear(&mut self) {
         self.set.clear();
         self.dirty = true;
     }
@@ -188,16 +191,16 @@ impl AppliedPacks {
     ///
     /// # Errors
     ///
-    /// [`DispatchError::InvalidRemoteName`] for an illegal name (same check
+    /// [`SyncError::InvalidRemoteName`] for an illegal name (same check
     /// as [`Self::load`]); any other deletion failure as
-    /// [`DispatchError::Io`]. Callers treat both as non-fatal — the record
+    /// [`SyncError::Io`]. Callers treat both as non-fatal — the record
     /// is a pure cache and the fetch-side self-heal still recovers.
-    pub(crate) fn remove_record(layout: &RepoLayout, remote: &str) -> Result<(), DispatchError> {
+    pub fn remove_record(layout: &RepoLayout, remote: &str) -> Result<(), SyncError> {
         validate_remote_name(remote)?;
         match fs::remove_file(record_path(layout, remote)) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(DispatchError::Io(e)),
+            Err(e) => Err(SyncError::Io(e)),
         }
     }
 
@@ -216,21 +219,17 @@ impl AppliedPacks {
     ///
     /// # Errors
     ///
-    /// [`DispatchError::InvalidRemoteName`] if either name is illegal; any
-    /// other rename failure as [`DispatchError::Io`]. Callers treat both as
+    /// [`SyncError::InvalidRemoteName`] if either name is illegal; any
+    /// other rename failure as [`SyncError::Io`]. Callers treat both as
     /// non-fatal — the worst case is one full re-download on the renamed
     /// remote's next fetch.
-    pub(crate) fn rename_record(
-        layout: &RepoLayout,
-        old: &str,
-        new: &str,
-    ) -> Result<(), DispatchError> {
+    pub fn rename_record(layout: &RepoLayout, old: &str, new: &str) -> Result<(), SyncError> {
         validate_remote_name(old)?;
         validate_remote_name(new)?;
         match fs::rename(record_path(layout, old), record_path(layout, new)) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(DispatchError::Io(e)),
+            Err(e) => Err(SyncError::Io(e)),
         }
     }
 }
@@ -242,11 +241,11 @@ impl AppliedPacks {
 /// backslash cases a bespoke blacklist misses. A legal name may still contain
 /// `/` (a multi-segment remote like `team/upstream`); [`record_file_name`]
 /// flattens that into the on-disk filename, so `/` is no longer rejected.
-fn validate_remote_name(remote: &str) -> Result<(), DispatchError> {
+fn validate_remote_name(remote: &str) -> Result<(), SyncError> {
     if mkit_core::refs::validate_ref_name(remote) {
         Ok(())
     } else {
-        Err(DispatchError::InvalidRemoteName(remote.to_string()))
+        Err(SyncError::InvalidRemoteName(remote.to_string()))
     }
 }
 
@@ -296,7 +295,7 @@ fn parse(bytes: &[u8]) -> HashSet<Hash> {
 
 /// Atomically rewrite `path` with the sorted, LF-terminated hex encoding of
 /// `set`. Creates the parent directory (`applied-packs/`) on first write.
-fn write(path: &Path, set: &HashSet<Hash>) -> Result<(), DispatchError> {
+fn write(path: &Path, set: &HashSet<Hash>) -> Result<(), SyncError> {
     let mut hexes: Vec<String> = set.iter().map(to_hex).collect();
     hexes.sort_unstable();
     let mut body = String::with_capacity(hexes.len() * (HEX_LEN + 1));
@@ -596,18 +595,18 @@ mod tests {
     fn lifecycle_ops_reject_invalid_names() {
         let (_dir, mkit_dir) = fresh_mkit_dir();
         let err = AppliedPacks::remove_record(&mkit_dir, "..").unwrap_err();
-        assert!(matches!(err, DispatchError::InvalidRemoteName(_)));
+        assert!(matches!(err, SyncError::InvalidRemoteName(_)));
         let err = AppliedPacks::rename_record(&mkit_dir, "..", "new").unwrap_err();
-        assert!(matches!(err, DispatchError::InvalidRemoteName(_)));
+        assert!(matches!(err, SyncError::InvalidRemoteName(_)));
         let err = AppliedPacks::rename_record(&mkit_dir, "old", "../escape").unwrap_err();
-        assert!(matches!(err, DispatchError::InvalidRemoteName(_)));
+        assert!(matches!(err, SyncError::InvalidRemoteName(_)));
     }
 
     #[test]
     fn remote_name_rejects_backslash() {
         let (_dir, mkit_dir) = fresh_mkit_dir();
         let err = AppliedPacks::load(&mkit_dir, "evil\\remote").unwrap_err();
-        assert!(matches!(err, DispatchError::InvalidRemoteName(_)));
+        assert!(matches!(err, SyncError::InvalidRemoteName(_)));
     }
 
     #[test]
@@ -615,10 +614,10 @@ mod tests {
         let (_dir, mkit_dir) = fresh_mkit_dir();
         // A `.` / `..` path segment (validate_ref_name rejects both).
         let err = AppliedPacks::load(&mkit_dir, "..").unwrap_err();
-        assert!(matches!(err, DispatchError::InvalidRemoteName(_)));
+        assert!(matches!(err, SyncError::InvalidRemoteName(_)));
         let err = AppliedPacks::load(&mkit_dir, "../escape").unwrap_err();
-        assert!(matches!(err, DispatchError::InvalidRemoteName(_)));
+        assert!(matches!(err, SyncError::InvalidRemoteName(_)));
         let err = AppliedPacks::load(&mkit_dir, "").unwrap_err();
-        assert!(matches!(err, DispatchError::InvalidRemoteName(_)));
+        assert!(matches!(err, SyncError::InvalidRemoteName(_)));
     }
 }

@@ -49,6 +49,7 @@ ceiling_for() {
         mkit-transport-enc)     echo 0  ;;
         mkit-transport-connect) echo 0  ;;
         mkit-git-bridge)        echo 0  ;;
+        mkit-sync)              echo 0  ;;
         # `mkit serve`'s engine (features ssh + fs), since WP-M0-13.
         mkit-server)            echo 0  ;;
         *)                      echo "UNKNOWN" ;;
@@ -64,7 +65,7 @@ EXPECTED_CRATES=(
     mkit-transport-file mkit-transport-http
     mkit-transport-s3 mkit-transport-ssh
     mkit-transport-enc mkit-transport-connect mkit-git-bridge
-    mkit-server
+    mkit-server mkit-sync
 )
 
 # Run from the crate that pulls every other first-party crate. mkit-cli

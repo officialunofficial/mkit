@@ -179,13 +179,13 @@ fn commit_does_not_warn_when_not_served() {
 
 /// Regression coverage for the serve-guard bypass a review found in
 /// `remote_dispatch/mod.rs`'s `pull_all_with` (fast-forward-phase lock)
-/// and `fetch_objects_inner` (per-branch unpack/publish lock): both take
+/// and `mkit-sync`'s `fetch_objects_inner` (per-branch unpack/publish lock): both take
 /// `WORKTREE_LOCK` directly via `mkit_core::repo_lock::acquire_default`
 /// rather than through `commands::acquire_worktree_lock`, so they used
 /// to skip `warn_if_served` entirely — `pull`/`fetch` mutated refs/HEAD/
 /// worktree with no warning while `commit`/`gc` (same lock, same root)
 /// did warn. A plain `mkit pull` exercises both fixed call sites in one
-/// shot: `fetch_objects_inner`'s lock during the fetch phase, then
+/// shot: `mkit-sync`'s `fetch_objects_inner`'s lock during the fetch phase, then
 /// `pull_all_with`'s own lock during the fast-forward phase.
 #[test]
 fn pull_warns_when_root_is_being_served() {

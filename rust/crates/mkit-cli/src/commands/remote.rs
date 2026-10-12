@@ -14,7 +14,7 @@ use crate::clap_shim;
 use crate::config::{self, Config, RemoteEntry};
 use crate::exit;
 use crate::format;
-use crate::remote_dispatch::applied_packs::AppliedPacks;
+use mkit_sync::AppliedPacks;
 
 const ACCEPTED_SCHEMES: &[(&str, &str)] = &[
     ("mkit+file://", "file"),
