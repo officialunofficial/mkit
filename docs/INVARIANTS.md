@@ -37,14 +37,6 @@ activation stays after authorization and anchor validation; closing reads stay
 after the guarded apply. Final denial and membership checks stay after all
 seam callbacks, with fresh per-phase state.
 
-First-parent history can join two pure reads of an eligible successor's index
-and content partitions with its predecessor's validation tail. Only slots that
-need another commit enable this hint. The hint runs alongside the head node's
-own validation tail, and the seam query it uses to skip descent-stopped nodes
-must stay pure. Failed speculation grants no proof, retains no guard reply, and
-cannot replace an earlier validation error. If the reservation does not fit,
-the hint dispatches nothing and charges nothing.
-
 **Because:** fewer serial rounds must preserve the same authority, live serving
 stop, response absence, and invocation resource bounds.
 
@@ -53,8 +45,8 @@ could serve revoked content, or concurrent reads could exceed backend bounds.
 
 **Enforced by:** reservation and precedence tests for inventory, dependency
 reads, raw runs, lease reads, implicit packmap prologues, and continuations;
-`successor_wake_tests` and the round probe pin exact warming overhead and the
-shared concurrency limit. Warming introduces no durable state or restart step.
+the round probe pins equal-or-lower call counts and the shared concurrency
+limit. The waves introduce no durable state or restart step.
 
 ## Chained Extract selection preserves guarded slice boundaries
 

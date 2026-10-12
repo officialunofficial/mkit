@@ -406,11 +406,7 @@ collect the applicable entries between their old and new immutable pins.
   and publication dependency rechecks. Lease reads, implicit
   packmap prologues, and pure continuation reads overlap independent work.
   Ordered result handling retains refusal and uniform-absence precedence;
-  unknown or tight allowances retain serial admission. Optional first-parent
-  successor warming joins two pure reads with the preceding commit's live
-  validation tail. A ten-commit page warms nine successors, adding 18 metadata
-  calls within the existing budget. Speculative replies grant no proof and
-  final checks remain fresh. Stores can expose remaining read-call and encoded
+  unknown or tight allowances retain serial admission. Stores can expose remaining read-call and encoded
   byte allowances through additive hidden trait methods; their default is
   unknown. No wire, stored-format, limit, or store-reset change is required.
 

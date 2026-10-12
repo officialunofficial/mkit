@@ -2140,12 +2140,8 @@ membership/denial remain mandatory.
 
 Informative: independent backend reads can run in bounded, prepaid waves while
 results retain their original refusal order. Unknown or insufficient allowance
-can retain serial admission. First-parent history may warm a successor's index
-and content partitions with pure reads joined to its predecessor's validation
-tail. Those replies grant no proof and are discarded before the next phase.
-Warming consumes the existing call allowance and is skipped when its reservation
-does not fit. Page-boundary successors need no warming. Continuation activation
-writes retain their ordered boundary; the closing guarded apply remains the
+can retain serial admission. Continuation activation writes retain their
+ordered boundary; the closing guarded apply remains the
 validation cut before its pure closing reads.
 
 Independent reader I/O MAY run concurrently with one shared concurrency, transient

@@ -250,16 +250,12 @@ async fn canonical_log(
 
 /// Rounds, KV calls and blob GETs of one operation.
 fn measure(shape: &Shape, owner: bool, op: Op) -> (f64, u32, usize) {
-    measure_with_wake(shape, owner, op, true)
-}
-fn measure_with_wake(shape: &Shape, owner: bool, op: Op, wake: bool) -> (f64, u32, usize) {
-    measure_latency(shape, owner, op, wake, LATENCY, None, false)
+    measure_latency(shape, owner, op, LATENCY, None, false)
 }
 fn measure_latency(
     shape: &Shape,
     owner: bool,
     op: Op,
-    wake: bool,
     latency: u32,
     cold: Option<u64>,
     warm_packs: bool,
@@ -306,15 +302,7 @@ fn measure_latency(
             operation.await
         }
     };
-    if wake {
-        runtime.block_on(operation).unwrap();
-    } else {
-        runtime
-            .block_on(crate::pipeline::object_reader::without_successor_wake(
-                operation,
-            ))
-            .unwrap();
-    }
+    runtime.block_on(operation).unwrap();
     let elapsed = runtime.block_on(async { tokio::time::Instant::now() - start });
     fx.pipe.meta.latency_ms.store(0, Ordering::SeqCst);
     fx.pipe.blobs.latency_ms.store(0, Ordering::SeqCst);
@@ -334,7 +322,7 @@ fn measure_latency(
     }
     if let Some(cold) = cold {
         println!(
-            "COLD_LOG owner={owner} op={op:?} prewake={wake} source_packs_warm={warm_packs} warm_ms={latency} cold_ms={cold} elapsed_ms={} KV={} GET={}",
+            "COLD_LOG owner={owner} op={op:?} source_packs_warm={warm_packs} warm_ms={latency} cold_ms={cold} elapsed_ms={} KV={} GET={}",
             elapsed.as_millis(),
             fx.pipe.meta.calls() - kv,
             get_count(fx) - gets
@@ -467,12 +455,6 @@ fn embedder_read_shapes_report_rounds() {
             {
                 let (rounds, kv, _) = measure(shape, owner, op);
                 let (old_rounds, old_kv) = baseline[row];
-                let warming_calls = match op {
-                    Op::Log(count) | Op::Page1(count) => {
-                        u32::try_from(count.min(shape.commits).saturating_sub(1) * 2).unwrap()
-                    }
-                    _ => 0,
-                };
                 if std::env::var_os("MKIT_BENCH_RANGED_HEAD").is_none() {
                     assert!(
                         rounds.round() <= f64::from(old_rounds),
@@ -480,8 +462,8 @@ fn embedder_read_shapes_report_rounds() {
                     );
                 }
                 assert!(
-                    kv <= old_kv + warming_calls,
-                    "{op:?}: only successor warming may increase KV calls"
+                    kv <= old_kv,
+                    "{op:?}: KV calls increased from {old_kv} to {kv}"
                 );
                 println!(
                     "ROUND_DELTA denial={denial} owner={owner} row={row} op={op:?} rounds_before={old_rounds} rounds_after={rounds:.0} KV_before={old_kv} KV_after={kv} KV_delta={}",
@@ -505,43 +487,7 @@ fn embedder_read_shapes_report_rounds() {
     }
 }
 
-#[test]
-fn first_parent_prewake_adds_only_consumed_successor_calls() {
-    let mut history = shape(11, 2, false, |_| 1);
-    // Establish the visibility revision before the paired measurements. Its
-    // one-time activation remains a separate, serial boundary.
-    measure(&history, false, Op::Page1(1));
-    for denial in [false, true] {
-        history.fx.pipe.cfg.takedown_denial = denial;
-        for owner in [false, true] {
-            for op in [Op::Log(10), Op::Page1(10)] {
-                let (before, kv, gets) = measure_with_wake(&history, owner, op, false);
-                let (after, warmed_kv, warmed_gets) = measure_with_wake(&history, owner, op, true);
-                assert_eq!(
-                    warmed_kv,
-                    kv + 18,
-                    "nine consumed successors, two pure reads each"
-                );
-                assert_eq!(warmed_gets, gets, "warming reads no blob bytes");
-                assert!(
-                    after.round() <= before.round(),
-                    "warming must add no serial rounds"
-                );
-                println!(
-                    "PREWAKE_DELTA denial={denial} owner={owner} op={op:?} rounds_before={before:.0} rounds_after={after:.0} KV_delta={} GET_delta={}",
-                    warmed_kv - kv,
-                    warmed_gets - gets
-                );
-            }
-            for op in [Op::Log(1), Op::Page1(1)] {
-                let (_, kv, _) = measure_with_wake(&history, owner, op, false);
-                let (_, warmed_kv, _) = measure_with_wake(&history, owner, op, true);
-                assert_eq!(warmed_kv, kv, "final result never warms its unused parent");
-            }
-        }
-    }
-}
-
+/// Reports the modeled cold first-touch cost of the unchanged serial Log walk.
 #[test]
 fn first_parent_log_models_cold_first_touches() {
     let history = shape(11, 2, false, |_| 1);
@@ -549,20 +495,9 @@ fn first_parent_log_models_cold_first_touches() {
     for cold in [300, 500] {
         for warm_packs in [false, true] {
             for op in [Op::Log(10), Op::Page1(10)] {
-                let (before, kv, gets) =
-                    measure_latency(&history, false, op, false, 50, Some(cold), warm_packs);
-                let (after, warmed_kv, warmed_gets) =
-                    measure_latency(&history, false, op, true, 50, Some(cold), warm_packs);
-                assert_eq!(warmed_kv, kv + 18);
-                assert_eq!(warmed_gets, gets);
-                // Cold source-pack guards remain on the critical path. Report
-                // that counter-case rather than claiming every cold shape wins.
-                if warm_packs {
-                    assert!(
-                        after <= before,
-                        "joined warming reduces delay when source guards are warm"
-                    );
-                }
+                let (rounds, _, _) =
+                    measure_latency(&history, false, op, 50, Some(cold), warm_packs);
+                assert!(rounds > 0.0);
             }
         }
     }

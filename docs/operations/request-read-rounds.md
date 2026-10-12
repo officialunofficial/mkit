@@ -28,61 +28,57 @@ denial-off run. Subsequent page measurements reuse that durable revision.
 | Off | Anonymous | Nested Cat | 30 | 30 | 38 | 38 | +0 | 8/8 |
 | Off | Anonymous | Nested Show | 24 | 24 | 37 | 37 | +0 | 6/6 |
 | Off | Anonymous | Flat Show with sizes | 26 | 25 | 56 | 56 | +0 | 4/4 |
-| Off | Anonymous | Short Log(5), four commits | 34 | 34 | 52 | 58 | +6 | 8/8 |
-| Off | Anonymous | Log(5) | 42 | 42 | 64 | 72 | +8 | 10/10 |
-| Off | Anonymous | Log(10) | 80 | 80 | 124 | 142 | +18 | 20/20 |
-| Off | Anonymous | Page1(10) | 85 | 84 | 129 | 147 | +18 | 20/20 |
+| Off | Anonymous | Short Log(5), four commits | 34 | 34 | 52 | 52 | +0 | 8/8 |
+| Off | Anonymous | Log(5) | 42 | 42 | 64 | 64 | +0 | 10/10 |
+| Off | Anonymous | Log(10) | 80 | 80 | 124 | 124 | +0 | 20/20 |
+| Off | Anonymous | Page1(10) | 85 | 84 | 129 | 129 | +0 | 20/20 |
 | Off | Anonymous | ListRefs | 17 | 4 | 17 | 17 | +0 | 0/0 |
-| Off | Anonymous | Log(50) | 380 | 380 | 603 | 701 | +98 | 100/100 |
-| Off | Anonymous | Page1(50) | 384 | 383 | 607 | 705 | +98 | 100/100 |
+| Off | Anonymous | Log(50) | 380 | 380 | 603 | 603 | +0 | 100/100 |
+| Off | Anonymous | Page1(50) | 384 | 383 | 607 | 607 | +0 | 100/100 |
 | Off | Anonymous | Canonical Log(10) | 73 | 73 | 86 | 86 | +0 | 20/20 |
 | Off | Anonymous | Selected Log(10) | 73 | 73 | 73 | 73 | +0 | 20/20 |
 | Off | Owner | Nested Show with sizes | 31 | 31 | 69 | 69 | +0 | 6/6 |
 | Off | Owner | Nested Cat | 31 | 31 | 39 | 39 | +0 | 8/8 |
 | Off | Owner | Nested Show | 22 | 22 | 38 | 38 | +0 | 6/6 |
 | Off | Owner | Flat Show with sizes | 25 | 24 | 57 | 57 | +0 | 4/4 |
-| Off | Owner | Short Log(5), four commits | 35 | 35 | 53 | 59 | +6 | 8/8 |
-| Off | Owner | Log(5) | 43 | 43 | 65 | 73 | +8 | 10/10 |
-| Off | Owner | Log(10) | 81 | 81 | 125 | 143 | +18 | 20/20 |
-| Off | Owner | Page1(10) | 85 | 84 | 129 | 147 | +18 | 20/20 |
+| Off | Owner | Short Log(5), four commits | 35 | 35 | 53 | 53 | +0 | 8/8 |
+| Off | Owner | Log(5) | 43 | 43 | 65 | 65 | +0 | 10/10 |
+| Off | Owner | Log(10) | 81 | 81 | 125 | 125 | +0 | 20/20 |
+| Off | Owner | Page1(10) | 85 | 84 | 129 | 129 | +0 | 20/20 |
 | Off | Owner | ListRefs | 17 | 4 | 17 | 17 | +0 | 0/0 |
-| Off | Owner | Log(50) | 381 | 381 | 604 | 702 | +98 | 100/100 |
-| Off | Owner | Page1(50) | 385 | 384 | 608 | 706 | +98 | 100/100 |
+| Off | Owner | Log(50) | 381 | 381 | 604 | 604 | +0 | 100/100 |
+| Off | Owner | Page1(50) | 385 | 384 | 608 | 608 | +0 | 100/100 |
 | Off | Owner | Canonical Log(10) | 64 | 64 | 87 | 87 | +0 | 20/20 |
 | Off | Owner | Selected Log(10) | 74 | 74 | 74 | 74 | +0 | 20/20 |
 | On | Anonymous | Nested Show with sizes | 49 | 49 | 135 | 135 | +0 | 6/6 |
 | On | Anonymous | Nested Cat | 54 | 50 | 114 | 114 | +0 | 8/8 |
 | On | Anonymous | Nested Show | 36 | 36 | 88 | 88 | +0 | 6/6 |
 | On | Anonymous | Flat Show with sizes | 37 | 36 | 106 | 106 | +0 | 4/4 |
-| On | Anonymous | Short Log(5), four commits | 73 | 60 | 156 | 162 | +6 | 8/8 |
-| On | Anonymous | Log(5) | 90 | 73 | 190 | 198 | +8 | 10/10 |
-| On | Anonymous | Log(10) | 173 | 139 | 360 | 378 | +18 | 20/20 |
-| On | Anonymous | Page1(10) | 177 | 142 | 364 | 382 | +18 | 20/20 |
+| On | Anonymous | Short Log(5), four commits | 73 | 60 | 156 | 156 | +0 | 8/8 |
+| On | Anonymous | Log(5) | 90 | 73 | 190 | 190 | +0 | 10/10 |
+| On | Anonymous | Log(10) | 173 | 139 | 360 | 360 | +0 | 20/20 |
+| On | Anonymous | Page1(10) | 177 | 142 | 364 | 364 | +0 | 20/20 |
 | On | Anonymous | ListRefs | 17 | 4 | 17 | 17 | +0 | 0/0 |
-| On | Anonymous | Log(50) | 833 | 659 | 1719 | 1817 | +98 | 100/100 |
-| On | Anonymous | Page1(50) | 837 | 662 | 1723 | 1821 | +98 | 100/100 |
+| On | Anonymous | Log(50) | 833 | 659 | 1719 | 1719 | +0 | 100/100 |
+| On | Anonymous | Page1(50) | 837 | 662 | 1723 | 1723 | +0 | 100/100 |
 | On | Anonymous | Canonical Log(10) | 113 | 113 | 256 | 256 | +0 | 20/20 |
 | On | Anonymous | Selected Log(10) | 113 | 113 | 243 | 243 | +0 | 20/20 |
 | On | Owner | Nested Show with sizes | 46 | 46 | 136 | 136 | +0 | 6/6 |
 | On | Owner | Nested Cat | 55 | 51 | 115 | 115 | +0 | 8/8 |
 | On | Owner | Nested Show | 34 | 34 | 89 | 89 | +0 | 6/6 |
 | On | Owner | Flat Show with sizes | 36 | 35 | 107 | 107 | +0 | 4/4 |
-| On | Owner | Short Log(5), four commits | 74 | 61 | 157 | 163 | +6 | 8/8 |
-| On | Owner | Log(5) | 91 | 74 | 191 | 199 | +8 | 10/10 |
-| On | Owner | Log(10) | 174 | 140 | 361 | 379 | +18 | 20/20 |
-| On | Owner | Page1(10) | 178 | 143 | 365 | 383 | +18 | 20/20 |
+| On | Owner | Short Log(5), four commits | 74 | 61 | 157 | 157 | +0 | 8/8 |
+| On | Owner | Log(5) | 91 | 74 | 191 | 191 | +0 | 10/10 |
+| On | Owner | Log(10) | 174 | 140 | 361 | 361 | +0 | 20/20 |
+| On | Owner | Page1(10) | 178 | 143 | 365 | 365 | +0 | 20/20 |
 | On | Owner | ListRefs | 17 | 4 | 17 | 17 | +0 | 0/0 |
-| On | Owner | Log(50) | 834 | 660 | 1720 | 1818 | +98 | 100/100 |
-| On | Owner | Page1(50) | 838 | 663 | 1724 | 1822 | +98 | 100/100 |
+| On | Owner | Log(50) | 834 | 660 | 1720 | 1720 | +0 | 100/100 |
+| On | Owner | Page1(50) | 838 | 663 | 1724 | 1724 | +0 | 100/100 |
 | On | Owner | Canonical Log(10) | 104 | 104 | 257 | 257 | +0 | 20/20 |
 | On | Owner | Selected Log(10) | 114 | 114 | 244 | 244 | +0 | 20/20 |
 
-The sole permitted metadata-call increase on successful shapes is first-parent successor warming:
-two pure reads per consumed successor. Log(10) and Page1(10) add exactly 18
-calls; the last result never warms its unused page-boundary parent. Paired probe
-runs suppress only warming and assert that GETs and rounds do not increase.
-Single-result pages add no warming calls. Other shapes retain equal or lower
-call counts.
+Metadata calls are equal in every probe row; no shape's rounds increase. GETs are
+unchanged.
 
 ListRefs replaces sixteen serial bucket scans with three prepaid waves.
 Inventory waves preserve partition/chunk validation order. Fresh dependency
@@ -104,33 +100,34 @@ precede anchor errors; the resumed prologue consumes the anchor first.
 Remaining-allowance hints never reserve or charge work. Unknown or insufficient
 allowances retain serial admission. Every dispatched wave still reserves its
 calls before dispatch, and all object-reader metadata/blob work uses the same
-six-call envelope. Warming dispatches nothing when its optional reservation
-does not fit; speculative failures grant no proof and retain no guard reply.
+six-call envelope.
 All original call, byte, operation, deadline, and wire limits remain in place.
 
-Two accounting consequences are deliberate. A wave is prepaid, so when one
+One accounting consequence is deliberate. A wave is prepaid, so when one
 member of a wave fails or refuses, its already-dispatched siblings stay charged
 (serial code would have stopped at the first failure), including the implicit
 packmap prologue when a malformed packmap is refused; successful shapes are
-unaffected. The wake starts together with the head node's own validation tail, so a head
-that is later denied, unauthorized or absent-after-location may already have
-spent its two reads; the walk's results and absence behavior are unchanged, and
-the walk's ledger difference between such heads was already present because
-their tails cost different amounts. Warming also raises the per-commit call cost of first-parent
-history (about +14% with denial off and +5% with denial on), so the largest
-page that completes inside the fixed per-invocation call allowance shrinks by
-about the same fraction; the allowance itself is unchanged and the default page
-sizes remain far inside it (Log(50) with denial on uses 2,220 of 8,500).
+unaffected.
 
-## Conditional cold model
+## Deferred: pre-wake parent shards, pending production cold/warm split
 
-The cold model sets warm storage latency to 50 ms and first touches of RepoIndex
-and ContentShard partitions to 300 or 500 ms. Blob reads remain warm. It reports
-both fully cold partitions and initially warm source-pack content partitions.
-These are synthetic assumptions, not evidence of actual backend activation.
-Cold source-pack guards can remain on the critical path even after the parent's
-partitions are warm. In the fully cold 300 ms case, anonymous Log(10) measured
-9.75 s without warming and 10.30 s with warming. Retain warming only after the
-embedder's cold/warm re-measure confirms a benefit for its actual read shape.
-Warming is isolated from the other request-path changes for an independent
-revert.
+An earlier revision of this change warmed each consumed first-parent
+successor's RepoIndex and ContentShard partitions with two pure reads joined to
+the preceding commit's validation tail (+2 metadata calls per consumed
+successor: +18 on Log(10), +98 on Log(50)). It was removed because the model
+cuts both ways. With warm storage at 50 ms and first touches at 300 or 500 ms
+(synthetic assumptions, not evidence of real activation), anonymous Log(10),
+denial off:
+
+| First touch | Source-pack guards | Without | With |
+| --- | --- | --- | --- |
+| 300 ms | warm | 9.75 s | 8.05 s |
+| 300 ms | cold | 9.75 s | 10.30 s |
+| 500 ms | warm | 14.35 s | 11.65 s |
+| 500 ms | cold | 14.35 s | 15.70 s |
+
+It helps only when source-pack guards are already warm, is slower when
+everything is cold, and shrinks the largest page that completes inside the
+fixed call allowance by about 5% to 14%. Revisit with the production cold/warm
+split. `first_parent_log_models_cold_first_touches` keeps the cold-model
+harness for the unchanged walk.

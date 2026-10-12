@@ -1,6 +1,5 @@
 //! Real indexed fixtures for bounded history and exact commit/path reads.
 mod continuation_tests;
-mod successor_wake_tests;
 use super::*;
 use crate::pipeline::{
     HistoryMode, HistoryOptions, ObjectReader, PathOptions, ReadLimits, ReaderSession, ReaderView,

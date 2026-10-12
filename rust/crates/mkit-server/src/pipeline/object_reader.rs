@@ -21,8 +21,6 @@ use mkit_core::{hash::Hash, object::ObjectType};
 use std::collections::{BTreeMap, BTreeSet};
 type Prefetched = (BTreeMap<Hash, Vec<u8>>, BTreeMap<Hash, ObjectMetadata>);
 mod history;
-#[cfg(test)]
-pub(super) use history::without_successor_wake;
 pub use history::{
     CommitPathRead, ContinuedHistoryOptions, ContinuedHistoryOrder, ContinuedHistoryPage,
     HistoryCommit, HistoryContinuation, HistoryContinuationState, HistoryMode, HistoryOptions,

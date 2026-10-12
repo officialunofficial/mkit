@@ -359,15 +359,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             let mut tags = BTreeSet::new();
             let first = loop {
                 let node = self
-                    .proved_node_with_successor_wake(
-                        session,
-                        tip,
-                        role,
-                        calls,
-                        admission,
-                        &mut decode,
-                        order == ContinuedHistoryOrder::FirstParent && limit > 1,
-                    )
+                    .proved_node(session, tip, role, calls, admission, &mut decode)
                     .await?
                     .ok_or_else(absent)?;
                 if let Object::Tag(tag) = &node.object {
@@ -748,17 +740,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             let node = if let Some(node) = first.take() {
                 node
             } else {
-                self.proved_node_with_successor_wake(
-                    session,
-                    current,
-                    Role::Commit,
-                    calls,
-                    admission,
-                    decode,
-                    output.len() + 1 < limit,
-                )
-                .await?
-                .ok_or_else(absent)?
+                self.proved_node(session, current, Role::Commit, calls, admission, decode)
+                    .await?
+                    .ok_or_else(absent)?
             };
             let parent = node.parents().and_then(|p| p.first()).copied();
             let next = parent.filter(|_| !self.seams.takedown.stops_descent(&self.repo, &node.id));

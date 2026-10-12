@@ -11,17 +11,6 @@ use std::{
     sync::Arc,
 };
 
-#[cfg(test)]
-tokio::task_local! {
-    static SUPPRESS_SUCCESSOR_WAKE: ();
-}
-
-/// Compare the optional activation reads without changing production options.
-#[cfg(test)]
-pub(crate) async fn without_successor_wake<F: std::future::Future>(future: F) -> F::Output {
-    SUPPRESS_SUCCESSOR_WAKE.scope((), future).await
-}
-
 const MAX_NODES: usize = 50_000;
 const MAX_TAGS: usize = 16;
 const MAX_PATH_DEPTH: usize = 1_024;
@@ -241,7 +230,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 &calls,
                 &admission,
                 &mut decode,
-                options.mode == HistoryMode::FirstParent,
             )
             .await;
         let Some((nodes, complete)) = self.discovery_result(result)? else {
@@ -415,6 +403,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
     /// membership and final-guard phases; whenever the working set empties
     /// the call answers all-`None` without another phase, so a single id runs
     /// the identical call sequence a dedicated lookup would.
+    #[allow(clippy::too_many_lines)] // One precedence-ordered same-view operation.
     async fn proved_nodes(
         &self,
         session: &mut ReaderSession,
@@ -423,23 +412,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         calls: &SliceBudget,
         admission: &crate::store::read_io::ReadIo,
         operation: &mut Budget,
-    ) -> Result<Vec<Option<Node>>, ServerError> {
-        self.proved_nodes_with_successor_wake(
-            session, ids, role, calls, admission, operation, false,
-        )
-        .await
-    }
-    // One precedence-ordered same-view operation; the wake flag is an explicit opt-in.
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-    async fn proved_nodes_with_successor_wake(
-        &self,
-        session: &mut ReaderSession,
-        ids: &[Hash],
-        role: Role,
-        calls: &SliceBudget,
-        admission: &crate::store::read_io::ReadIo,
-        operation: &mut Budget,
-        wake_successor: bool,
     ) -> Result<Vec<Option<Node>>, ServerError> {
         // Callers deduplicate; `found.remove` below serves one slot per id.
         debug_assert!(
@@ -573,196 +545,147 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     Err(miss) => return Err(resolution_failure(miss)),
                 }
             }
-            // This hint is syntactic acquisition data only. The tail still owns
-            // every authorization, denial, membership and source guard below.
-            let successor = if wake_successor
-                && ids.len() == 1
-                && !self.seams.takedown.stops_descent(&self.repo, &ids[0])
-            {
-                bytes.get(&ids[0]).and_then(|bytes| {
-                    let object = mkit_core::serialize::deserialize(bytes).ok()?;
-                    let parents = match &object {
-                        Object::Commit(commit) => &commit.parents,
-                        Object::Remix(remix) => &remix.parents,
-                        _ => return None,
-                    };
-                    parents
-                        .first()
-                        .copied()
-                        .filter(|parent| !proofs.contains(parent))
-                })
-            } else {
-                None
+            let mut serving = Vec::new();
+            for (id, location) in &locations {
+                let Some(bytes) = bytes.get(id) else {
+                    continue;
+                };
+                if !resolve::type_of(bytes).is_some_and(|kind| role.accepts(kind)) {
+                    continue;
+                }
+                meta.charge().map_err(|_| exhausted())?;
+                if matches!(
+                    self.seams.takedown.check(&self.repo, id).await?,
+                    TakedownVerdict::Clear
+                ) {
+                    serving.push((*id, *location));
+                }
+            }
+            if serving.is_empty() {
+                return Ok(all_none());
+            }
+            io.calls.charge_many(2).map_err(|_| exhausted())?;
+            let current = self.authorize(calls).await?;
+            proofs.bind(
+                &self.identity,
+                current,
+                ms(self.pipe.clock.now_ms()),
+                self.cfg,
+            )?;
+            proofs
+                .revalidate(&meta, &self.repo, self.seams.takedown.as_ref(), &targets)
+                .await?;
+            serving.retain(|(id, _)| proofs.contains(id));
+            if serving.is_empty() {
+                return Ok(all_none());
+            }
+            // Descriptor proofs retain live dependency reads after their
+            // strong directory walk, rather than borrowing phase guard replies.
+            let live_view = ViewStore {
+                store: &meta,
+                repo: &self.repo,
+                writer,
+                policy: self.pipe.publication_policy.as_deref(),
             };
-            let wake_meta = Budgeted::new(&self.pipe.meta, calls)
-                .with_session(&io.calls)
-                .with_io(admission);
-            let reservation = successor.and_then(|_| self.reserve_successor_wake(&wake_meta));
-            let tail = Box::pin(async {
-                let mut serving = Vec::new();
-                for (id, location) in &locations {
-                    let Some(bytes) = bytes.get(id) else {
-                        continue;
-                    };
-                    if !resolve::type_of(bytes).is_some_and(|kind| role.accepts(kind)) {
-                        continue;
-                    }
-                    meta.charge().map_err(|_| exhausted())?;
-                    if matches!(
-                        self.seams.takedown.check(&self.repo, id).await?,
-                        TakedownVerdict::Clear
-                    ) {
-                        serving.push((*id, *location));
-                    }
-                }
-                if serving.is_empty() {
-                    return Ok(BTreeMap::new());
-                }
-                io.calls.charge_many(2).map_err(|_| exhausted())?;
-                let current = self.authorize(calls).await?;
-                proofs.bind(
-                    &self.identity,
-                    current,
-                    ms(self.pipe.clock.now_ms()),
-                    self.cfg,
-                )?;
-                proofs
-                    .revalidate(&meta, &self.repo, self.seams.takedown.as_ref(), &targets)
-                    .await?;
-                serving.retain(|(id, _)| proofs.contains(id));
-                if serving.is_empty() {
-                    return Ok(BTreeMap::new());
-                }
-                // Descriptor proofs retain live dependency reads after their
-                // strong directory walk, rather than borrowing phase guard replies.
-                let live_view = ViewStore {
-                    store: &meta,
-                    repo: &self.repo,
-                    writer,
-                    policy: self.pipe.publication_policy.as_deref(),
+            let facts = if self.pipe.cfg.takedown_denial {
+                inventory::located_entries(&live_view, &serving)
+                    .await
+                    .map_err(failure)?
+            } else {
+                BTreeMap::new()
+            };
+            if self.pipe.cfg.takedown_denial {
+                let quiet_meta = meta.unflagged();
+                let quiet_view = ViewStore {
+                    store: &quiet_meta,
+                    ..live_view
                 };
-                let facts = if self.pipe.cfg.takedown_denial {
-                    inventory::located_entries(&live_view, &serving)
-                        .await
-                        .map_err(failure)?
-                } else {
-                    BTreeMap::new()
-                };
-                if self.pipe.cfg.takedown_denial {
-                    let quiet_meta = meta.unflagged();
-                    let quiet_view = ViewStore {
-                        store: &quiet_meta,
-                        ..live_view
-                    };
-                    let blocked = crate::takedown::denial::object_denials_in(
-                        &live_view,
-                        &quiet_view,
+                let blocked = crate::takedown::denial::object_denials_in(
+                    &live_view,
+                    &quiet_view,
+                    self.pipe.shards.as_ref(),
+                    &self.repo,
+                    &serving,
+                    &facts,
+                    self.indexed,
+                )
+                .await?;
+                serving.retain(|(id, _)| !blocked.contains(id));
+            }
+            if serving.is_empty() {
+                return Ok(all_none());
+            }
+            // Loading, authorization, seam callbacks and descriptor I/O may
+            // revoke a source. The final target/pack guards are one fresh
+            // bounded phase, shared across the batch. The guards and the
+            // source pack's membership row are independent reads of the same
+            // final phase: one round, not two; a guard failure keeps
+            // precedence over the membership answer.
+            checks.reset();
+            let packs: Vec<Hash> = serving.iter().map(|(_, loc)| loc.pack).collect();
+            let (guards, present) =
+                futures::future::join(checks.prefetch_locations(&serving), async {
+                    if let [(_, location)] = serving.as_slice() {
+                        // Retain the actual body source, not a different
+                        // newly selected pack that could conceal denial of
+                        // the source read.
+                        self.pack_present(&view, location.pack)
+                            .await
+                            .map(|member| vec![Ok(member)])
+                    } else {
+                        self.packs_present(&view, &packs).await
+                    }
+                })
+                .await;
+            guards.map_err(failure)?;
+            let present = present.map_err(failure)?;
+            let mut nodes = BTreeMap::new();
+            for ((id, location), present) in serving.iter().zip(present) {
+                if !present.map_err(failure)?
+                    || !crate::indexed::resolve::member_dependencies_clear(
+                        &view,
                         self.pipe.shards.as_ref(),
                         &self.repo,
-                        &serving,
-                        &facts,
-                        self.indexed,
+                        *id,
+                        *location,
+                        self.indexed.max_delta_chain_depth,
+                        self.pipe.metrics.as_ref(),
+                        Caps::Reader,
                     )
-                    .await?;
-                    serving.retain(|(id, _)| !blocked.contains(id));
+                    .await?
+                {
+                    continue;
                 }
-                if serving.is_empty() {
-                    return Ok(BTreeMap::new());
+                nodes.insert(*id, *location);
+            }
+            if nodes.is_empty() {
+                return Ok(all_none());
+            }
+            if !proofs.current(ms(self.pipe.clock.now_ms())) {
+                return Err(exhausted());
+            }
+            let mut found: BTreeMap<Hash, Node> = BTreeMap::new();
+            for (id, location) in nodes {
+                let bytes = bytes.remove(&id).ok_or_else(|| failure(()))?;
+                let object = mkit_core::serialize::deserialize(&bytes).map_err(failure)?;
+                // Preserve the existing canonical manifest/chunk contract for
+                // a subsequent deep-file read, without promoting siblings.
+                if matches!(object, Object::ChunkedBlob(_))
+                    && proofs.can_decode(&id, &bytes)
+                    && !self.seams.takedown.stops_descent(&self.repo, &id)
+                {
+                    proofs.expand(id, location.pack, &object);
                 }
-                // Loading, authorization, seam callbacks and descriptor I/O may
-                // revoke a source. The final target/pack guards are one fresh
-                // bounded phase, shared across the batch. The guards and the
-                // source pack's membership row are independent reads of the same
-                // final phase: one round, not two; a guard failure keeps
-                // precedence over the membership answer.
-                checks.reset();
-                let packs: Vec<Hash> = serving.iter().map(|(_, loc)| loc.pack).collect();
-                let (guards, present) =
-                    futures::future::join(checks.prefetch_locations(&serving), async {
-                        if let [(_, location)] = serving.as_slice() {
-                            // Retain the actual body source, not a different
-                            // newly selected pack that could conceal denial of
-                            // the source read.
-                            self.pack_present(&view, location.pack)
-                                .await
-                                .map(|member| vec![Ok(member)])
-                        } else {
-                            self.packs_present(&view, &packs).await
-                        }
-                    })
-                    .await;
-                guards.map_err(failure)?;
-                let present = present.map_err(failure)?;
-                let mut nodes = BTreeMap::new();
-                for ((id, location), present) in serving.iter().zip(present) {
-                    if !present.map_err(failure)?
-                        || !crate::indexed::resolve::member_dependencies_clear(
-                            &view,
-                            self.pipe.shards.as_ref(),
-                            &self.repo,
-                            *id,
-                            *location,
-                            self.indexed.max_delta_chain_depth,
-                            self.pipe.metrics.as_ref(),
-                            Caps::Reader,
-                        )
-                        .await?
-                    {
-                        continue;
-                    }
-                    nodes.insert(*id, *location);
-                }
-                if nodes.is_empty() {
-                    return Ok(BTreeMap::new());
-                }
-                if !proofs.current(ms(self.pipe.clock.now_ms())) {
-                    return Err(exhausted());
-                }
-                let mut found: BTreeMap<Hash, Node> = BTreeMap::new();
-                for (id, location) in nodes {
-                    let bytes = bytes.remove(&id).ok_or_else(|| failure(()))?;
-                    let object = mkit_core::serialize::deserialize(&bytes).map_err(failure)?;
-                    // Preserve the existing canonical manifest/chunk contract for
-                    // a subsequent deep-file read, without promoting siblings.
-                    if matches!(object, Object::ChunkedBlob(_))
-                        && proofs.can_decode(&id, &bytes)
-                        && !self.seams.takedown.stops_descent(&self.repo, &id)
-                    {
-                        proofs.expand(id, location.pack, &object);
-                    }
-                    found.insert(
+                found.insert(
+                    id,
+                    Node {
                         id,
-                        Node {
-                            id,
-                            bytes,
-                            object,
-                            location,
-                        },
-                    );
-                }
-                Ok(found)
-            });
-            let (nodes, ()) = futures::future::join(tail, async {
-                if let (Some(parent), Some(reservation)) = (successor, reservation) {
-                    // Scope only the speculative reads: the tail cannot spend
-                    // their prepaid credit. No reply or Checks crosses a phase.
-                    crate::store::ReadReservation::scope(&[Some(reservation)], async {
-                        let index = self.pipe.shards.object_index(&self.repo, &parent);
-                        let content = crate::store::content_shard(&parent);
-                        let index_key =
-                            crate::store::keys::object_index_range(&self.repo.name, &parent).0;
-                        let block_key = crate::store::keys::block(&parent);
-                        let _ = futures::future::join(
-                            wake_meta.get(&index, &index_key),
-                            wake_meta.get(&content, &block_key),
-                        )
-                        .await;
-                    })
-                    .await;
-                }
-            })
-            .await;
-            let mut found = nodes?;
+                        bytes,
+                        object,
+                        location,
+                    },
+                );
+            }
             // Callers pass deduplicated ids: each found node serves one slot.
             Ok(ids.iter().map(|id| found.remove(id)).collect())
         }
@@ -786,50 +709,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             .next()
             .flatten())
     }
-    // Unknown or insufficient capacity is a skipped optimization, before any
-    // ledger reservation can charge or set its exhausted flag.
-    #[allow(clippy::unused_self)] // Kept a method so tests reach it through the reader.
-    pub(in crate::pipeline) fn reserve_successor_wake<S: NamespaceStore>(
-        &self,
-        store: &S,
-    ) -> Option<crate::store::ReadReservation> {
-        #[cfg(test)]
-        if SUPPRESS_SUCCESSOR_WAKE.try_with(|()| ()).is_ok() {
-            return None;
-        }
-        if store.read_call_allowance()? < 2 {
-            return None;
-        }
-        store.reserve_read_calls(2).ok().flatten()
-    }
-
-    /// Only first-parent page callers with a consumed successor slot opt in.
-    #[allow(clippy::too_many_arguments)] // Explicit page-slot opt-in preserves default callers.
-    async fn proved_node_with_successor_wake(
-        &self,
-        session: &mut ReaderSession,
-        id: Hash,
-        role: Role,
-        calls: &SliceBudget,
-        admission: &crate::store::read_io::ReadIo,
-        operation: &mut Budget,
-        wake_successor: bool,
-    ) -> Result<Option<Node>, ServerError> {
-        Ok(self
-            .proved_nodes_with_successor_wake(
-                session,
-                &[id],
-                role,
-                calls,
-                admission,
-                operation,
-                wake_successor,
-            )
-            .await?
-            .into_iter()
-            .next()
-            .flatten())
-    }
     fn link_node(
         &self,
         session: &mut ReaderSession,
@@ -844,7 +723,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         }
         Ok(true)
     }
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Page selector plus explicit bounded operation context.
+    #[allow(clippy::too_many_arguments)] // Page selector plus explicit bounded operation context.
     async fn history_nodes(
         &self,
         session: &mut ReaderSession,
@@ -855,7 +734,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         calls: &SliceBudget,
         admission: &crate::store::read_io::ReadIo,
         decode: &mut Budget,
-        wake_successors: bool,
     ) -> Result<Option<(Vec<Node>, bool)>, ServerError> {
         let Some(mut tip) = self
             .capture_ref(session, reference, calls, admission)
@@ -867,15 +745,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         let mut role = Role::Tip;
         let first = loop {
             let Some(node) = self
-                .proved_node_with_successor_wake(
-                    session,
-                    tip,
-                    role,
-                    calls,
-                    admission,
-                    decode,
-                    wake_successors && start.is_none() && limit > 1,
-                )
+                .proved_node(session, tip, role, calls, admission, decode)
                 .await?
             else {
                 return Ok(None);
@@ -912,15 +782,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 first
             } else {
                 let Some(node) = self
-                    .proved_node_with_successor_wake(
-                        session,
-                        id,
-                        Role::Commit,
-                        calls,
-                        admission,
-                        decode,
-                        wake_successors && emitting && output.len() + 1 < limit,
-                    )
+                    .proved_node(session, id, Role::Commit, calls, admission, decode)
                     .await?
                 else {
                     continue;
@@ -999,7 +861,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 calls,
                 admission,
                 decode,
-                false,
             )
             .await?
         else {
