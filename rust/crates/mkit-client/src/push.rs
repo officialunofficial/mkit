@@ -1,4 +1,4 @@
-use crate::connect::Rpc;
+use crate::connect::{Built, RESPONSE_LIMIT, Rpc, pending_delay};
 use crate::{
     Clock, Destination, Error, HttpTransport, Plan, Signer,
     proto::{
@@ -10,6 +10,8 @@ use crate::{
         begin_upload_response, upload_part_request,
     },
 };
+use buffa::Message;
+use mkit_core::hash::{hash, to_hex};
 use mkit_core::{
     hash::Hash,
     pack,
@@ -19,10 +21,9 @@ use mkit_core::{
     write_auth::{ContentCommitment, PartCommitment},
 };
 use std::collections::HashSet;
+use std::time::Duration;
 
 const CHUNK_SIZE: usize = 800 * 1024;
-const MAX_CHAIN_DEPTH: usize = 100_000;
-const MAX_CHAIN_PACKS: usize = 1_000_000;
 
 /// The host certifies whether the supplied entries contain the whole closure.
 /// Reset requires a self-contained plan and an atomic conditioned advance.
@@ -101,13 +102,13 @@ impl Push {
         signer: &S,
         clock: &C,
     ) -> Result<Outcome, Error> {
-        let mut rpc = Rpc {
+        let mut rpc = Rpc::signed(
             transport,
             signer,
             clock,
-            destination: &self.destination,
-            deadline_ms: self.deadline_ms,
-        };
+            &self.destination,
+            self.deadline_ms,
+        );
         let info: GetServerInfoResponse = rpc
             .unary("GetServerInfo", &GetServerInfoRequest::default())
             .await?;
@@ -275,7 +276,10 @@ async fn upload<T: HttpTransport, S: Signer, C: Clock>(
                 .expires_unix_ms
                 .ok_or(Error::Invalid("ticket expiry"))?,
         );
-        if rpc.deadline_ms <= rpc.clock.now_ms() {
+        if rpc
+            .auth
+            .is_some_and(|(_, clock)| rpc.deadline_ms <= clock.now_ms())
+        {
             return Err(Error::Deadline);
         }
         Some(id)
@@ -304,36 +308,10 @@ async fn upload<T: HttpTransport, S: Signer, C: Clock>(
             )
             .map_err(|_| Error::Invalid("part length"))?;
             let part = &bytes[offset..offset + len];
-            let commitment = ContentCommitment::Part(PartCommitment {
-                ticket: id,
-                index,
-                subtree: part_subtree_cv(&plan, index, part)
-                    .map_err(|_| Error::Invalid("part hash"))?,
-                len: len as u64,
-            })
-            .to_string();
-            let header = UploadPartRequest {
-                msg: Some(
-                    UploadPartHeader {
-                        ticket_token: ticket.token.clone(),
-                        index: Some(index),
-                        ..Default::default()
-                    }
-                    .into(),
-                ),
-                ..Default::default()
-            };
-            let chunks = part.chunks(CHUNK_SIZE).map(|bytes| UploadPartRequest {
-                msg: Some(upload_part_request::Msg::Chunk(bytes.to_vec())),
-                ..Default::default()
-            });
-            let response: UploadPartResponse = rpc
-                .stream(
-                    "UploadPart",
-                    std::iter::once(header).chain(chunks),
-                    &commitment,
-                )
-                .await?;
+            let commitment = part_commitment(id, &plan, index, part)?;
+            let messages = part_messages(ticket.token.clone(), index, part);
+            let response: UploadPartResponse =
+                rpc.stream("UploadPart", messages, &commitment).await?;
             let receipt = response
                 .receipt
                 .filter(|receipt| !receipt.is_empty() && receipt.len() <= 512)
@@ -351,50 +329,106 @@ async fn upload<T: HttpTransport, S: Signer, C: Clock>(
             )
             .await?;
     } else {
-        let header = UploadPackRequest {
-            body: Some(
-                UploadPackHeader {
-                    pack_id: Some(key.to_vec()),
-                    total_bytes: Some(bytes.len() as u64),
-                    ticket_token: ticket.as_ref().and_then(|ticket| ticket.token.clone()),
-                    ..Default::default()
-                }
-                .into(),
-            ),
-            ..Default::default()
-        };
-        let chunks = bytes
-            .chunks(CHUNK_SIZE)
-            .enumerate()
-            .map(|(index, bytes_chunk)| UploadPackRequest {
-                body: Some(
-                    PackChunk {
-                        pack_id: Some(key.to_vec()),
-                        offset: Some((index * CHUNK_SIZE) as u64),
-                        data: Some(bytes_chunk.to_vec()),
-                        last: Some(index * CHUNK_SIZE + bytes_chunk.len() == bytes.len()),
-                        ..Default::default()
-                    }
-                    .into(),
-                ),
-                ..Default::default()
-            });
+        let messages = pack_messages(
+            key,
+            bytes,
+            ticket.as_ref().and_then(|ticket| ticket.token.clone()),
+        );
         let _: UploadPackResponse = rpc
-            .stream(
-                "UploadPack",
-                std::iter::once(header).chain(chunks),
-                &ContentCommitment::Pack {
-                    id: *key,
-                    len: bytes.len() as u64,
-                }
-                .to_string(),
-            )
+            .stream("UploadPack", messages, &pack_commitment(key, bytes))
             .await?;
     }
     Ok(id)
 }
 
-fn condition(condition: RefWriteCondition) -> (RefExpectation, Option<Vec<u8>>) {
+/// The `UploadPack` stream: a header, then ordered chunks ending in `last`.
+pub(crate) fn pack_messages(
+    key: &Hash,
+    bytes: &[u8],
+    ticket_token: Option<Vec<u8>>,
+) -> impl Iterator<Item = UploadPackRequest> {
+    let key = *key;
+    let total = bytes.len();
+    let header = UploadPackRequest {
+        body: Some(
+            UploadPackHeader {
+                pack_id: Some(key.to_vec()),
+                total_bytes: Some(total as u64),
+                ticket_token,
+                ..Default::default()
+            }
+            .into(),
+        ),
+        ..Default::default()
+    };
+    let chunks = bytes
+        .chunks(CHUNK_SIZE)
+        .enumerate()
+        .map(move |(index, bytes_chunk)| UploadPackRequest {
+            body: Some(
+                PackChunk {
+                    pack_id: Some(key.to_vec()),
+                    offset: Some((index * CHUNK_SIZE) as u64),
+                    data: Some(bytes_chunk.to_vec()),
+                    last: Some(index * CHUNK_SIZE + bytes_chunk.len() == total),
+                    ..Default::default()
+                }
+                .into(),
+            ),
+            ..Default::default()
+        });
+    std::iter::once(header).chain(chunks)
+}
+
+pub(crate) fn pack_commitment(key: &Hash, bytes: &[u8]) -> String {
+    ContentCommitment::Pack {
+        id: *key,
+        len: bytes.len() as u64,
+    }
+    .to_string()
+}
+
+/// The `UploadPart` stream: a header, then the part in chunks.
+pub(crate) fn part_messages(
+    ticket_token: Option<Vec<u8>>,
+    index: u32,
+    part: &[u8],
+) -> impl Iterator<Item = UploadPartRequest> {
+    let header = UploadPartRequest {
+        msg: Some(
+            UploadPartHeader {
+                ticket_token,
+                index: Some(index),
+                ..Default::default()
+            }
+            .into(),
+        ),
+        ..Default::default()
+    };
+    let chunks = part.chunks(CHUNK_SIZE).map(|bytes| UploadPartRequest {
+        msg: Some(upload_part_request::Msg::Chunk(bytes.to_vec())),
+        ..Default::default()
+    });
+    std::iter::once(header).chain(chunks)
+}
+
+/// The signed commitment of one part (SPEC-TRANSPORT-CONNECT §7.6).
+pub(crate) fn part_commitment(
+    ticket: Hash,
+    plan: &PartPlan,
+    index: u32,
+    part: &[u8],
+) -> Result<String, Error> {
+    Ok(ContentCommitment::Part(PartCommitment {
+        ticket,
+        index,
+        subtree: part_subtree_cv(plan, index, part).map_err(|_| Error::Invalid("part hash"))?,
+        len: part.len() as u64,
+    })
+    .to_string())
+}
+
+pub(crate) fn condition(condition: RefWriteCondition) -> (RefExpectation, Option<Vec<u8>>) {
     match condition {
         RefWriteCondition::Any => (RefExpectation::Any, None),
         RefWriteCondition::Missing => (RefExpectation::Missing, None),
@@ -433,28 +467,85 @@ async fn walk_chain<T: HttpTransport, S: Signer, C: Clock>(
     root: Hash,
     head_ref: &str,
 ) -> Result<HashSet<Hash>, Error> {
-    let mut cursor = Some(root);
-    let mut seen = HashSet::new();
-    let mut packs = HashSet::new();
-    while let Some(key) = cursor {
-        if seen.len() >= MAX_CHAIN_DEPTH || !seen.insert(key) {
-            return Err(Error::Limit("packmap depth/cycle"));
-        }
-        let node = transfer::decode_packlist(&rpc.download(key, head_ref).await?)?;
-        packs.extend(node.packs);
-        if packs.len() > MAX_CHAIN_PACKS {
-            return Err(Error::Limit("packmap pack count"));
-        }
-        cursor = node.prev;
-    }
-    Ok(packs)
+    Ok(crate::read::walk_nodes(rpc, root, head_ref)
+        .await?
+        .into_iter()
+        .flat_map(|node| node.packs)
+        .collect())
 }
 
-async fn advance<T: HttpTransport, S: Signer, C: Clock>(
+/// One `AdvanceRefs` with the whole-push waits: poll a definitive pending or
+/// membership-lag answer on the host clock, keeping the same signed identity
+/// until it expires. Per-RPC calls never wait; this loop is the only place the
+/// crate calls `Clock::wait`.
+pub(crate) async fn advance<T: HttpTransport, S: Signer, C: Clock>(
     rpc: &Rpc<'_, T, S, C>,
-    request: &AdvanceRefsRequest,
+    message: &AdvanceRefsRequest,
 ) -> Result<AdvanceRefsResponse, Error> {
-    rpc.advance(request).await
+    let (_, clock) = rpc.auth.ok_or(Error::Invalid("signed client required"))?;
+    let body = message.encode_to_vec();
+    let commitment = format!("body:{}", to_hex(&hash(&body)));
+    let sign = || rpc.build("AdvanceRefs", body.clone(), &commitment, false, None);
+    let expiry = |built: &Built| built.identity.map_or(i64::MAX, |id| id.expires_at_ms);
+    let mut built = sign().await?;
+    let mut expires = expiry(&built);
+    let mut lag_start = None;
+    let mut saw_pending = false;
+    let mut renewed_after_unauthenticated = false;
+    loop {
+        let now = clock.now_ms();
+        if now >= rpc.deadline_ms {
+            return Err(Error::Deadline);
+        }
+        // Only a definitive pending/lag answer reaches this continuation.
+        // Keep exactly the same nonce and timestamps until actual expiry.
+        if now > expires {
+            built = sign().await?;
+            expires = expiry(&built);
+        }
+        match rpc.send(&built.request, RESPONSE_LIMIT).await {
+            Ok((bytes, _)) => {
+                return AdvanceRefsResponse::decode_from_slice(&bytes)
+                    .map_err(|_| Error::Invalid("advance protobuf"));
+            }
+            Err(Error::Remote(error)) => {
+                // A post-pending authentication rejection is definitive,
+                // including expiry in transit or a small server clock lead.
+                // Recover once; an ambiguous transport error never reaches here.
+                if saw_pending && !renewed_after_unauthenticated && error.code == "unauthenticated"
+                {
+                    renewed_after_unauthenticated = true;
+                    built = sign().await?;
+                    expires = expiry(&built);
+                    continue;
+                }
+                let delay = if let Some(delay) = pending_delay(&error) {
+                    lag_start = None;
+                    renewed_after_unauthenticated = false;
+                    delay
+                } else if !message.ticket_ids.is_empty()
+                    && error.code == "unavailable"
+                    && error.message == "repository membership not yet visible"
+                {
+                    let start = *lag_start.get_or_insert(now);
+                    if now.saturating_sub(start) >= 60_000 {
+                        return Err(Error::Remote(error));
+                    }
+                    Duration::from_secs(2)
+                } else {
+                    return Err(Error::Remote(error));
+                };
+                saw_pending = true;
+                if now.saturating_add(i64::try_from(delay.as_millis()).unwrap_or(i64::MAX))
+                    >= rpc.deadline_ms
+                {
+                    return Err(Error::Deadline);
+                }
+                clock.wait(delay).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 async fn commit_head<T: HttpTransport, S: Signer, C: Clock>(

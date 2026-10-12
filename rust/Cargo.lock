@@ -3319,6 +3319,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mkit-client"
+version = "0.5.0"
+dependencies = [
+ "base64 0.22.1",
+ "buffa",
+ "http",
+ "mkit-core",
+ "mkit-rpc",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "mkit-core"
 version = "0.5.0"
 dependencies = [
@@ -3428,14 +3442,8 @@ dependencies = [
 name = "mkit-push"
 version = "0.5.0"
 dependencies = [
- "base64 0.22.1",
- "buffa",
- "http",
+ "mkit-client",
  "mkit-core",
- "mkit-rpc",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -3536,6 +3544,7 @@ dependencies = [
  "k256",
  "mkit-attest",
  "mkit-cli",
+ "mkit-client",
  "mkit-core",
  "mkit-push",
  "mkit-rpc",

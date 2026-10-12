@@ -166,6 +166,8 @@ ci-scripts:
     fi
     ( cd rust && cargo check --locked -p mkit-core --no-default-features --target wasm32-unknown-unknown )
     ( cd rust && cargo check -p mkit-wasm --target wasm32-unknown-unknown )
+    ( cd rust && cargo build --locked -p mkit-client --target wasm32-unknown-unknown )
+    ( cd rust && cargo build --locked -p mkit-client --no-default-features --target wasm32-unknown-unknown )
     ( cd rust && cargo check --locked -p mkit-push --target wasm32-unknown-unknown )
     ( cd rust && cargo check --locked -p mkit-server --target wasm32-unknown-unknown )
     ( cd rust && cargo check --locked -p mkit-server --features remote-hooks --target wasm32-unknown-unknown )

@@ -15,6 +15,28 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Added
 
+- `mkit-client`: the runtime-independent async protocol client for reads and
+  writes, on native and wasm32-unknown-unknown with no tokio, hyper or C
+  compression in its dependency graph. `mkit-push` moves into it unchanged in
+  behaviour (`Push`, `Plan`, `HttpTransport`, `Signer`, `Clock`). New: `Client`
+  with a typed call per RPC (`server_info`, `list_refs` / `list_all_refs`,
+  `read_ref`, `pack_exists`, `download_pack` with a caller size cap, `update_ref`
+  / `delete_ref`, `begin_upload`, `upload_pack`, `upload_part`,
+  `complete_upload`, `advance_refs`), anonymous or signed reads, and
+  `resolve_pack_chain`. Per-RPC calls never wait: a pending verification,
+  membership lag, `Retry-After` hint or admission challenge returns as a typed
+  `Error` (`PendingVerification`, `MembershipNotVisible`, `RetryAfter`,
+  `PaymentRequired` with every challenge, also from a bare 402's headers). Every
+  signed call takes an optional caller-owned `Identity` (nonce, which is the
+  idempotency key, and validity window), uses it exactly, and returns the one it
+  used, so a persisted identity replays the same request after a restart.
+  `unpack` decodes a pack into an `ObjectSink` (no filesystem) and verifies
+  commit, remix and tag signatures by default; `Verification::Skip` is the
+  explicit opt-out. `Push::run` keeps its waits; they now live only in its own
+  polling loop. A golden test pins pack and packmap node ids for a fixed plan.
+  The `pack-ruzstd` feature (default) reads compressed packs without a C
+  toolchain; `pack-zstd` adds the native writer.
+
 - Ticketless same-repository branch creation from an authoritative published
   pair: `AdvanceRefsRequest.source_ref` (field 11), optional `expected_tip`
   (field 12), and `Pipeline::advance_refs_from_published{,_with_meta}`.
@@ -591,6 +613,20 @@ collect the applicable entries between their old and new immutable pins.
   URL-token reads, supplied hooks, cold outcome retry and injected slice recovery.
 
 ### Breaking (toward 0.6)
+
+- [embedder: breaking API] `mkit-push` (never published to crates.io, so only
+  embedders pinning a git revision are affected) is deprecated and now only
+  re-exports `mkit-client`; it is removed after one release. Migration: depend on
+  `mkit-client` and rename `mkit_push` to `mkit_client`. The old names
+  (`Push`, `Plan`, `Entry`, `Limits`, `Destination`, `HttpTransport`, `Signer`,
+  `Clock`, `Error`, `proto`) are unchanged. `Error` is now `#[non_exhaustive]`
+  and gains `PaymentRequired`, `PendingVerification`, `MembershipNotVisible`,
+  `RetryAfter`, `Sink` and `Signature`: add a wildcard arm to any exhaustive
+  `match`. An HTTP 402 (or `permission_denied` with an admission challenge) was
+  `Error::Remote`; it is now `Error::PaymentRequired`, and a body that is not a
+  Connect error no longer fails as `Invalid("Connect error JSON")` when the
+  status is 402. `Push::run` still polls pending and membership-lag answers
+  itself. Pack bytes and ids are unchanged. No wire or stored-format change; wipe: no.
 
 - [embedder: breaking API] Generated `AdvanceRefsRequest` and remote-hook
   `Operation` Rust records gain the published-source fields. Migration: build

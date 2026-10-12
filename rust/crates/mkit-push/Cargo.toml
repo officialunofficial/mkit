@@ -1,6 +1,6 @@
 [package]
 name = "mkit-push"
-description = "Runtime-independent async ticketed push for native and wasm mkit clients"
+description = "Deprecated: a re-export of mkit-client, the runtime-independent async protocol client"
 readme = "README.md"
 keywords = ["mkit", "vcs", "push", "wasm", "client"]
 categories = ["network-programming", "web-programming::http-client"]
@@ -14,12 +14,13 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["pack-ruzstd"]
+pack-zstd = ["mkit-client/pack-zstd"]
+pack-ruzstd = ["mkit-client/pack-ruzstd"]
+
 [dependencies]
+mkit-client = { version = "0.5", path = "../mkit-client", default-features = false }
+
+[dev-dependencies]
 mkit-core = { version = "0.5", path = "../mkit-core", default-features = false }
-mkit-rpc = { version = "0.5", path = "../mkit-rpc", features = ["transport-messages"] }
-buffa = "0.9.1"
-http = "1"
-base64 = "0.22"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-thiserror = "2"
