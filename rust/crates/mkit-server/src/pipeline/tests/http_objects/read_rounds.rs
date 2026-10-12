@@ -359,7 +359,7 @@ const BASELINE: [(&str, u32); 5] = [
 const CEILING: [u32; 5] = [38, 34, 30, 38, 420];
 
 // Current baseline for every matrix row, in denial/view/operation order.
-// Only consumed first-parent successor hints may increase KV calls.
+// No row may increase KV calls.
 const MEASURED_BASELINE: [[(u32, u32); 13]; 4] = [
     [
         (34, 68),
