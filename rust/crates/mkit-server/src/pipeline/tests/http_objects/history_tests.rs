@@ -10,11 +10,13 @@ pub(super) fn in_view<H: HookSet>(
     writer: bool,
     test: impl FnOnce(ObjectReader<'_, SpyBlobs, Arc<Spy>, H>),
 ) {
-    let req = signed(
+    let req = Req::signed_for(
         &fx.owner,
-        &fx.identity("room"),
         Procedure::ListRefs,
-        fx.number(),
+        &fx.identity("room"),
+        b"indexed-pipeline",
+        &nonce(fx.number()),
+        fx.clock.now_ms(),
     );
     let lookup = |name: &str| {
         req.headers

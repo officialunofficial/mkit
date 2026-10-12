@@ -42,7 +42,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
     /// credential and the ref/publication/security fence, then MACs the
     /// sealed reducer snapshot with a provenance witness rooted at the
     /// checkpoint tip. The token expires at the minimum of the token TTL and
-    /// credential/grant expiry, and is never extended. Each page's proofs
+    /// any write-grant expiry, and is never extended. Each page's proofs
     /// retain their request-local expiry independently of the token lifetime.
     /// A complete walk returns `Ok(None)` — no continuation exists to mint.
     /// # Errors
@@ -123,7 +123,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         else {
             return Ok(None);
         };
-        let (credential, credential_expiry) = self.history_credential(authority.as_ref())?;
+        let (credential, grant_expiry) = self.history_credential(authority.as_ref())?;
         // Memo-only consistency checks: every emitted id must be a decoded
         // commit/remix row and every pending id a proven history edge of this
         // session. A supplied reducer key must equal the memo's key.
@@ -177,7 +177,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             return Ok(None);
         }
         let now = ms(self.pipe.clock.now_ms());
-        let expires = now.saturating_add(config.ttl_ms()).min(credential_expiry);
+        let expires = now.saturating_add(config.ttl_ms()).min(grant_expiry);
         if now >= expires {
             return Ok(None);
         }

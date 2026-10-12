@@ -271,8 +271,16 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Fixed
 
-- History continuation lifetimes use the configured token TTL and credential
-  and grant expiry without the request-local proof cap. Walks may span longer
+- History continuation tokens outlive the issuing signed request envelope.
+  Initial lifetime is the minimum of the configured token TTL and any
+  write-grant expiry; successors retain the original absolute expiry. Both
+  first-parent and selected-ref timestamp issuance follow this rule. Each
+  authenticated page still verifies its own signed envelope, current authority
+  and credential scope. Embedders may use short request envelopes for history
+  walks; no API, wire, stored-format change, or store reset is required.
+
+- History continuation lifetimes use the configured token TTL and any
+  write-grant expiry without the request-local proof cap. Walks may span longer
   than the proof window while each page retains bounded proofs and fresh live
   security checks. Successors keep the original absolute expiry. No API, wire,
   stored-format change, or store reset.
