@@ -2585,13 +2585,16 @@ implementations, or grow a continuation token without bound.
 snapshot round-trip and explicit cap tests, plus proptest
 split-vs-single-run equivalence.
 
-## Decode denial waves preserve admission order
+## Denial waves preserve admission order
 
 **Always:** every batch's inventory staging completes before its denial reads.
 At most six reads run together; each wave reserves its calls before dispatch.
 All responses in a wave finish before failures are examined in batch order.
 No frame, candidate, or index row for the batch precedes successful denial
-admission. Denial time records wave wall time, not summed call durations.
+admission. EmitIndex and inline index writes use the same helper in their
+existing put order before each direct apply. The earlier inline pre-staging
+check and Extract's per-chunk checks retain their existing serial boundaries.
+Decode denial time records wave wall time, not summed call durations.
 
 **Because:** staging must expose objects to a concurrent takedown before denial
 admission, and response timing must not change blocked/unavailable precedence.
@@ -2599,6 +2602,6 @@ admission, and response timing must not change blocked/unavailable precedence.
 **If violated:** a concurrent block can escape admission or network timing can
 select the outcome and misstate its cost.
 
-**Enforced by:** Decode admission and its private denial-wave helper;
+**Enforced by:** Decode admission, direct index writes, and the shared denial-wave helper;
 `inventory_stage_guard` covers a block landing during staging, and denial-wave
 unit tests cover latency, call charges, reservations, and mixed failures.

@@ -15,11 +15,14 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Changed
 
-- Scheduled Decode reads per-object takedown denial in waves of at most six,
-  after inventory staging and before provisional rows. First failing object
+- Scheduled Decode, EmitIndex, and inline index writes share per-object takedown
+  denial waves of at most six, after inventory staging and before provisional
+  rows or the direct index apply. First failing object
   in batch order still selects blocked or unavailable. Successful batches keep
   one call per object; a failed wave completes already-issued reads and skips
-  later waves. `verification_inventory_progress.denial_ms` now reports wave
+  later waves. The early inline pre-staging check and per-chunk extraction
+  checks stay at their existing serial boundaries.
+  `verification_inventory_progress.denial_ms` now reports wave
   wall time rather than summed per-call time. No API, wire, hook, stored-format,
   project-limit, or store-reset change is required.
 

@@ -1,12 +1,19 @@
-//! Decode denial admission, after inventory staging and before provisional rows.
+//! Bounded denial reads with input-order failure precedence.
 use crate::{ServerError, store::NamespaceStore};
 use mkit_core::hash::Hash;
 
-pub(super) async fn require_clear_many<S: NamespaceStore>(
+pub(crate) async fn require_clear_many<S: NamespaceStore>(
     store: &S,
-    ids: &[Hash],
+    mut ids: impl Iterator<Item = Hash> + crate::MaybeSend,
 ) -> Result<(), ServerError> {
-    for wave in ids.chunks(crate::store::read_io::parallelism()) {
+    loop {
+        let wave: Vec<_> = ids
+            .by_ref()
+            .take(crate::store::read_io::parallelism())
+            .collect();
+        if wave.is_empty() {
+            return Ok(());
+        }
         let reservation = store
             .reserve_read_calls(u32::try_from(wave.len()).expect("bounded denial wave"))
             .map_err(|_| ServerError::unavailable("decoded object unavailable"))?;
@@ -24,7 +31,6 @@ pub(super) async fn require_clear_many<S: NamespaceStore>(
             reply?;
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -126,7 +132,9 @@ mod tests {
             })
             .collect();
         let started = tokio::time::Instant::now();
-        require_clear_many(&remote, &ids).await.unwrap();
+        require_clear_many(&remote, ids.iter().copied())
+            .await
+            .unwrap();
         assert_eq!(store.calls.load(Ordering::SeqCst), 333);
         assert_eq!(budget.used(), 333);
         let width = crate::store::read_io::parallelism();
@@ -141,7 +149,9 @@ mod tests {
         let remote = Budgeted::new(&store, &budget);
         let cap = crate::takedown::inventory::STAGE_BATCH_ENTRIES;
         for batch in ids.chunks(cap) {
-            require_clear_many(&remote, batch).await.unwrap();
+            require_clear_many(&remote, batch.iter().copied())
+                .await
+                .unwrap();
         }
         let rounds: usize = ids
             .chunks(cap)
@@ -185,7 +195,9 @@ mod tests {
             let inner = Budgeted::new(&store, &inherited);
             let remote = Budgeted::new(&inner, &budget);
             let ids: Vec<_> = (0..13).map(|n| [n; 32]).collect();
-            let error = require_clear_many(&remote, &ids).await.unwrap_err();
+            let error = require_clear_many(&remote, ids.iter().copied())
+                .await
+                .unwrap_err();
             assert_eq!(error.code(), expected);
             assert_eq!(store.calls.load(Ordering::SeqCst), calls);
             assert_eq!(inherited.used() as usize, calls);
@@ -199,7 +211,7 @@ mod tests {
         let store = Delayed::default();
         let budget = SliceBudget::new(1);
         let remote = Budgeted::new(&store, &budget);
-        let error = require_clear_many(&remote, &[[1; 32]; 6])
+        let error = require_clear_many(&remote, [[1; 32]; 6].into_iter())
             .await
             .unwrap_err();
         assert_eq!(error.code(), crate::Code::Unavailable);

@@ -56,7 +56,6 @@ use mkit_core::transfer::decode_packlist;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
-mod denial;
 mod extraction;
 
 /// Fixed work units of one slice. A Worker fixes them for its plan.
@@ -1547,10 +1546,13 @@ where
         .await?;
         st.inventory_batches += 1;
         st.entries_staged += batch.len() as u64;
-        let ids: Vec<_> = batch.iter().map(|item| item.id).collect();
         let started = now_ms(self.h.clock.as_ref());
         let calls = self.budget.used();
-        let clear = denial::require_clear_many(self.remote, &ids).await;
+        let clear = crate::takedown::denial::require_clear_many(
+            self.remote,
+            batch.iter().map(|item| item.id),
+        )
+        .await;
         // Wall time of the bounded waves, including failed reads, rather than
         // the sum of overlapping per-object durations.
         st.denial_ms = st
@@ -2037,18 +2039,25 @@ where
         )?;
         for direct in plan.direct {
             let mut batch = Batch::new().require(Precondition::NotAfter(self.deadline()));
-            for (key, value) in direct.puts {
-                if let Some(keys::ParsedKey::ObjectIndex { object, .. }) = keys::parse(&key) {
-                    crate::takedown::denial::require_clear(self.remote, &object)
-                        .await
-                        .map_err(|error| {
-                            if error.code() == crate::Code::PermissionDenied {
-                                Stop::Outcome(Outcome::Blocked)
-                            } else {
-                                unavailable("index object unavailable")
-                            }
-                        })?;
+            crate::takedown::denial::require_clear_many(
+                self.remote,
+                direct
+                    .puts
+                    .iter()
+                    .filter_map(|(key, _)| match keys::parse(key) {
+                        Some(keys::ParsedKey::ObjectIndex { object, .. }) => Some(object),
+                        _ => None,
+                    }),
+            )
+            .await
+            .map_err(|error| {
+                if error.code() == crate::Code::PermissionDenied {
+                    Stop::Outcome(Outcome::Blocked)
+                } else {
+                    unavailable("index object unavailable")
                 }
+            })?;
+            for (key, value) in direct.puts {
                 batch = batch.put(key, value);
             }
             if !matches!(

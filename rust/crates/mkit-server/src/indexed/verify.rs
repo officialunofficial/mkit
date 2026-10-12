@@ -1149,10 +1149,18 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
         for direct in plan.direct {
             renew_all_pending(store, source, repo, acquired, clock).await?;
             let mut batch = Batch::new().require(Precondition::NotAfter(deadline(clock)));
+            crate::takedown::denial::require_clear_many(
+                store,
+                direct
+                    .puts
+                    .iter()
+                    .filter_map(|(key, _)| match keys::parse(key) {
+                        Some(keys::ParsedKey::ObjectIndex { object, .. }) => Some(object),
+                        _ => None,
+                    }),
+            )
+            .await?;
             for (key, value) in direct.puts {
-                if let Some(keys::ParsedKey::ObjectIndex { object, .. }) = keys::parse(&key) {
-                    crate::takedown::denial::require_clear(store, &object).await?;
-                }
                 batch = batch.put(key, value);
             }
             if !matches!(

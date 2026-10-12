@@ -13,6 +13,9 @@ use mkit_core::hash::Hash;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+mod waves;
+pub(crate) use waves::require_clear_many;
+
 /// Independent action. Chunk IDs are the verified canonical manifest's set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -111,7 +111,8 @@ follow staging), `write_ms` (recording an entry's rows, including the local
 frame lookup) and `checkpoint_ms` (the guarded cursor commits).
 `denial_ms` measures the wall time of bounded denial waves, including failed
 waves; it does not sum overlapping per-call durations. Each wave awaits all
-responses before inspecting failures in batch order. Successful batches still
+responses before inspecting failures in input order. Decode, EmitIndex, and
+the inline verifier's post-staging index writes share this helper. Successful batches still
 issue one denial call per object. A failing wave finishes its already-issued
 calls, then stops without issuing later waves or recording that batch's entries.
 `inventory_batches` counts staging applies and `slice_calls` the slice's total
@@ -146,7 +147,13 @@ apply, so a block that lands while the batch is in flight is refused; a
 store that reserves operations gets a smaller batch. Decode issues those denial
 reads in waves of at most six, using the shared read parallelism. It reserves
 each wave's calls before dispatch and retains first-in-batch failure precedence.
-No pack range, staging apply, or provisional write overlaps a denial wave. Rows already staged are
+No pack range, staging apply, or provisional write overlaps a denial wave.
+EmitIndex and inline index writes recheck their ObjectIndex puts in the existing
+put order before each direct apply. Their per-batch planning deadlines are
+created at the same boundary as before. The earlier inline denial precheck stays
+serial: it precedes signature and closure validation and inventory staging.
+Extract retains a fresh denial before each chunk's frame read; prefetching later
+chunks would move their checks ahead of earlier chunks' I/O and effects. Rows already staged are
 skipped, so a replay after a lost reply or a crash writes nothing twice. The
 head guard keeps stagers of one pack serial. Entries with reference pages retain
 an early replay lookup, refresh their plan after page staging, and stage alone.
