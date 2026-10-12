@@ -523,7 +523,7 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
         }
         if kind.is_none() {
             let (object, bytes) = self
-                .incremental_member(st, x, head)
+                .incremental_member(st, x, head, false)
                 .await?
                 .ok_or(Stop::Yield(0))?;
             if x.staged_bytes.saturating_add(bytes) > self.h.cfg.decode_budget {
@@ -808,49 +808,37 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
             .map(|v| v.as_bytes().try_into().map_err(|_| corrupt()))
             .collect()
     }
-    async fn walk_source(
+    /// The chunk id the walk cursor names next.
+    async fn chunk_id(
+        &self,
+        x: &ExtractionV1,
+        id: Hash,
+        pack: &Hash,
+        p: &Projection,
+    ) -> Result<Hash, Stop> {
+        if p.kind == 0 {
+            return Ok(id);
+        }
+        let page = x.chunk / 128;
+        let key = self.source_row(pack, keys::VC_CANDIDATE, &p.page_id(page));
+        let raw = self.require(&key).await?;
+        p.decode_page(page, &raw)?
+            .nth((x.chunk % 128) as usize)
+            .ok_or_else(corrupt)
+    }
+    /// One walked chunk: resolve its member, spool its bytes and finish the
+    /// part it completes. Returns whether its part was finished.
+    async fn walk_chunk(
         &self,
         st: &mut SliceState,
-        job: &VerifyJobV1,
         x: &mut ExtractionV1,
-    ) -> Result<(), Stop> {
-        let id = x.object.ok_or_else(corrupt)?;
-        self.protect(job, x).await?;
-        let (pack, p) = self.selected_projection(x, id).await?;
-        let count = if p.kind == 0 { 1 } else { p.references };
-        check(x.chunk <= count)?;
-        if x.chunk == count {
-            if x.written != x.length {
-                return Err(Stop::Reject("object hash mismatch"));
-            }
-            if x.length <= PART {
-                let bytes = self.fragment_bytes(x, id, b"payload", x.length).await?;
-                x.root = Some(hash(&bytes));
-            } else {
-                x.root = Some(
-                    merge_to_root(&plan(x.length)?, &self.cv_list(x, id).await?)
-                        .map_err(|_| corrupt())?,
-                );
-            }
-            x.stage = if x.stage == PREFLIGHT {
-                START
-            } else {
-                COMPLETE
-            };
-            return Ok(());
-        }
-        let chunk_id = if p.kind == 0 {
-            id
-        } else {
-            let page = x.chunk / 128;
-            let key = self.source_row(&pack, keys::VC_CANDIDATE, &p.page_id(page));
-            let raw = self.require(&key).await?;
-            p.decode_page(page, &raw)?
-                .nth((x.chunk % 128) as usize)
-                .ok_or_else(corrupt)?
-        };
+        id: Hash,
+        pack: &Hash,
+        p: &Projection,
+    ) -> Result<bool, Stop> {
+        let chunk_id = self.chunk_id(x, id, pack, p).await?;
         let (chunk, charged) = self
-            .incremental_member(st, x, chunk_id)
+            .incremental_member(st, x, chunk_id, true)
             .await?
             .ok_or(Stop::Yield(0))?;
         let Object::Blob(blob) = chunk else {
@@ -888,12 +876,117 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
         if take > 0 && x.length > PART && (x.written.is_multiple_of(PART) || x.written == x.length)
         {
             self.finish_part(st, x, id).await?;
+            return Ok(true);
         }
+        Ok(false)
+    }
+    /// The next walked chunk, only while it is a staged non-delta frame that
+    /// decodes in this call; `None` leaves it to its own slice's first step.
+    async fn walk_fused(
+        &self,
+        st: &mut SliceState,
+        x: &mut ExtractionV1,
+        id: Hash,
+        pack: &Hash,
+        p: &Projection,
+    ) -> Result<Option<bool>, Stop> {
+        let chunk_id = self.chunk_id(x, id, pack, p).await?;
+        let fusable = self
+            .staged_frame(x, chunk_id)
+            .await?
+            .is_some_and(|location| location.value.delta_base.is_none());
+        if !fusable {
+            return Ok(None);
+        }
+        self.walk_chunk(st, x, id, pack, p).await.map(Some)
+    }
+    /// Denial reads a fused slice deferred still run before its last effect:
+    /// once per source pack, ahead of the part upload and the commit. The
+    /// set stays whole when a check fails so a caller restoring cursor state
+    /// still has the packs to recheck before it commits anything.
+    async fn flush_denials(&self, st: &mut SliceState) -> Result<(), Stop> {
+        for pack in &st.deferred_denials {
+            crate::takedown::denial::require_clear(self.remote, pack)
+                .await
+                .map_err(|error| match error.code() {
+                    crate::Code::PermissionDenied => Stop::Outcome(Outcome::Blocked),
+                    _ => unavailable("extraction source unavailable"),
+                })?;
+        }
+        st.deferred_denials.clear();
         Ok(())
+    }
+    async fn walk_source(
+        &self,
+        st: &mut SliceState,
+        job: &VerifyJobV1,
+        x: &mut ExtractionV1,
+    ) -> Result<(), Stop> {
+        let id = x.object.ok_or_else(corrupt)?;
+        let started = now_ms(self.h.clock.as_ref());
+        self.protect(job, x).await?;
+        let (pack, p) = self.selected_projection(x, id).await?;
+        let count = if p.kind == 0 { 1 } else { p.references };
+        check(x.chunk <= count)?;
+        if x.chunk == count {
+            if x.written != x.length {
+                return Err(Stop::Reject("object hash mismatch"));
+            }
+            if x.length <= PART {
+                let bytes = self.fragment_bytes(x, id, b"payload", x.length).await?;
+                x.root = Some(hash(&bytes));
+            } else {
+                x.root = Some(
+                    merge_to_root(&plan(x.length)?, &self.cv_list(x, id).await?)
+                        .map_err(|_| corrupt())?,
+                );
+            }
+            x.stage = if x.stage == PREFLIGHT {
+                START
+            } else {
+                COMPLETE
+            };
+            return self.flush_denials(st).await;
+        }
+        let mut finished_part = self.walk_chunk(st, x, id, &pack, &p).await?;
+        let mut steps = 1_u32;
+        // Chunks after the first fuse only while every bound holds; a chunk
+        // that fails or cannot fuse leaves the slice at its own first step.
+        while !finished_part && x.chunk_offset == 0 && x.chunk < count {
+            if !may_chain_chunks(
+                self.h.limits.extract_chain_steps,
+                steps,
+                self.budget.remaining(),
+                st.guards.len() + st.settled.len(),
+                now_ms(self.h.clock.as_ref()).saturating_sub(started),
+            ) {
+                break;
+            }
+            let (before, guards, settled, denials) = (
+                x.clone(),
+                st.guards.len(),
+                st.settled.len(),
+                st.deferred_denials.clone(),
+            );
+            let next = self.walk_fused(st, x, id, &pack, &p).await;
+            steps += 1;
+            match next {
+                Ok(Some(done)) => finished_part = done,
+                Ok(None) => break,
+                Err(_) => {
+                    *x = before;
+                    st.guards.truncate(guards);
+                    st.settled.truncate(settled);
+                    st.deferred_denials = denials;
+                    break;
+                }
+            }
+        }
+        self.flush_denials(st).await
     }
     async fn finish_part(
         &self,
-        st: &SliceState,
+        st: &mut SliceState,
         x: &mut ExtractionV1,
         id: Hash,
     ) -> Result<(), Stop> {
@@ -908,6 +1001,7 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
         } else {
             let expected = self.require(&self.aux(x, b"cv", &id, index)).await?;
             check(expected.as_bytes() == cv)?;
+            self.flush_denials(st).await?;
             self.extraction_lease().await?;
             let tag = self
                 .h
@@ -1154,6 +1248,7 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
         }
         job.extraction = Some(x);
         result?;
+        self.flush_denials(st).await?;
         Ok(0)
     }
 
@@ -1208,6 +1303,22 @@ fn may_chain(
         && chains(stage)
         && remaining_calls >= CHAIN_MIN_CALLS
         && ops + step_ops(stage) <= CHAIN_MAX_OPS
+        && elapsed_ms < CHAIN_MAX_MS
+}
+
+/// Whether another fused chunk may run in a PREFLIGHT or UPLOAD walk slice:
+/// below the step cap, enough remote calls left, the commit batch within the
+/// apply limit after the chunk's worst case, and under the slice's time cap.
+fn may_chain_chunks(
+    step_cap: u32,
+    steps: u32,
+    remaining_calls: u32,
+    ops: usize,
+    elapsed_ms: u64,
+) -> bool {
+    steps < step_cap.min(CHAIN_MAX_STEPS)
+        && remaining_calls >= CHAIN_MIN_CALLS
+        && ops + 4 <= CHAIN_MAX_OPS
         && elapsed_ms < CHAIN_MAX_MS
 }
 
@@ -1297,5 +1408,33 @@ mod chain_bounds {
                 "stage {stage} must chain"
             );
         }
+    }
+
+    #[test]
+    fn every_chunk_bound_holds_at_its_boundary() {
+        let ok = |steps, calls, ops, ms| may_chain_chunks(CHAIN_MAX_STEPS, steps, calls, ops, ms);
+        assert!(ok(1, CHAIN_MIN_CALLS, 0, 0));
+        // Step cap: the last allowed chunk is the one that makes `cap`.
+        assert!(ok(CHAIN_MAX_STEPS - 1, CHAIN_MIN_CALLS, 0, 0));
+        assert!(!ok(CHAIN_MAX_STEPS, CHAIN_MIN_CALLS, 0, 0));
+        // One chunk per slice when the caller pins the cap, and a caller cap
+        // can never widen the hard ceiling.
+        assert!(!may_chain_chunks(1, 1, CHAIN_MIN_CALLS, 0, 0));
+        assert!(may_chain_chunks(1, 0, CHAIN_MIN_CALLS, 0, 0));
+        assert!(!may_chain_chunks(
+            u32::MAX,
+            CHAIN_MAX_STEPS,
+            CHAIN_MIN_CALLS,
+            0,
+            0
+        ));
+        // Remote calls left.
+        assert!(!ok(1, CHAIN_MIN_CALLS - 1, 0, 0));
+        // Guards plus settled writes, after the chunk's worst case.
+        assert!(ok(1, CHAIN_MIN_CALLS, CHAIN_MAX_OPS - 4, 0));
+        assert!(!ok(1, CHAIN_MIN_CALLS, CHAIN_MAX_OPS - 4 + 1, 0));
+        // Time.
+        assert!(ok(1, CHAIN_MIN_CALLS, 0, CHAIN_MAX_MS - 1));
+        assert!(!ok(1, CHAIN_MIN_CALLS, 0, CHAIN_MAX_MS));
     }
 }

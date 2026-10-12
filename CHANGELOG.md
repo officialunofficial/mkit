@@ -390,6 +390,31 @@ collect the applicable entries between their old and new immutable pins.
   unchanged). `SliceLimits::extract_chain_steps` (default 16; 1 restores one
   step per slice) and `with_extract_chain_steps` are new. No stored-format
   change: wipe not required.
+- Scheduled Extract decodes staged, local, non-delta member frames in the
+  call that used to stage a `member-frame` row and yield, then walks
+  several chunks per PREFLIGHT and UPLOAD slice instead of two slices per
+  chunk. A slice keeps fusing while the chunk fits the staged
+  non-delta fast path, the previous chunk finished inside the slice
+  without ending a part, and the shared step, remote-call, operation and
+  time bounds hold; a chunk that fails after earlier chunks in the slice
+  keeps those chunks and reruns first in the next slice. Each chunk's
+  own frame denial read stays per chunk; each source pack's denial is
+  read once per slice, after its last chunk and before the part upload
+  and the commit, so a block landing mid-slice still refuses the whole
+  extraction. The source lease is still renewed once at slice start and
+  again immediately before every part upload, and holds and
+  pending-holder protection still run once per slice. On a 64-chunk
+  object of ~256 KiB chunks, remote calls per chunk across both stages
+  fall from 24.5 to 3.1 — PREFLIGHT from 131 slices and 786 calls to 6
+  slices and 101, UPLOAD from 131 and 785 to 6 and 100 — and remote plus
+  pack-window calls per chunk across both stages from 26.6 to 5.2. At
+  150 MiB (600 chunks) the two stages drop from 16,079 remote+window
+  calls to 3,155 (804 s to 158 s modeled at 50 ms per call); at 1 GiB
+  (4,096 chunks) from 109,809 to 21,499 (5,490 s to 1,075 s). Pack
+  window reads remain one per chunk. External and delta members keep
+  their separate descent, member-lookup and base-resolution slices, and
+  `extract_chain_steps = 1` restores one chunk per slice. Stored formats
+  are unchanged (wipe: no).
 - Fewer sequential storage rounds per read, with no change to results, limits,
   guards. Backend R2 calls drop; KV calls and ledger charges drop only by the removed publish-time block read (one per proof-expanding decoded object; a nine-file show with sizes goes from 72 to 69 KV calls, with fewer for a no-sizes show and a six-file show). A rare failure path, where the pack prefix exceeds the decode budget before the frame read, can now send and charge the frame read. The Workers R2 adapter serves a bounded blob range with
   one ranged GET instead of a HEAD followed by a GET (a missing object is still

@@ -174,123 +174,64 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
         st.settled.push(Write::Put(key, encode(&lookup)?));
         Ok(None)
     }
-    #[allow(clippy::too_many_lines)] // A frame decode and its replay-safe accumulator checkpoint.
-    pub(super) async fn incremental_member(
+    /// The level-0 staged lookup: the first source pack holding this frame's
+    /// staged row wins, whatever its wire kind.
+    pub(super) async fn staged_frame(
+        &self,
+        x: &ExtractionV1,
+        id: Hash,
+    ) -> Result<Option<LocatedObject>, Stop> {
+        for pack in x.sources.iter().map(|s| s.member.pack) {
+            if let Some(raw) = self
+                .get(&self.source_row(&pack, keys::VC_FRAME, &id))
+                .await?
+            {
+                let row = super::decode_frame(&id, &raw)?;
+                return Ok(Some(LocatedObject {
+                    pack,
+                    value: row.value,
+                }));
+            }
+        }
+        Ok(None)
+    }
+    /// Checks and reads shared by a persisted or in-memory frame: limits,
+    /// source membership, denial subjects (pack checks deferred when asked),
+    /// the window read, canonical base wiring and decoded identity and size.
+    #[allow(clippy::too_many_lines)] // One frame decode and its replay-safe canonical wiring.
+    async fn decode_member_frame(
         &self,
         st: &mut SliceState,
-        x: &mut ExtractionV1,
-        id: Hash,
-    ) -> Result<Option<(Object, u64)>, Stop> {
-        let mut cursor = x.reconstruction.clone().unwrap_or(MemberCursor {
-            target: id,
-            next: id,
-            ..MemberCursor::default()
-        });
-        check(cursor.target == id && cursor.level <= self.h.cfg.max_delta_chain_depth)?;
-        let frame_key = self.aux(x, b"member-frame", &id, cursor.level);
-        if !cursor.ascending {
-            let packs: Vec<_> = if cursor.level == 0 {
-                x.sources.iter().map(|s| s.member.pack).collect()
-            } else {
-                cursor
-                    .preferred
-                    .filter(|_| cursor.local)
-                    .map(|(pack, _)| pack)
-                    .into_iter()
-                    .collect()
-            };
-            let mut staged = None;
-            for pack in packs {
-                if let Some(raw) = self
-                    .get(&self.source_row(&pack, keys::VC_FRAME, &cursor.next))
-                    .await?
-                {
-                    let row = super::decode_frame(&cursor.next, &raw)?;
-                    if cursor.level == 0
-                        || cursor
-                            .preferred
-                            .is_some_and(|(_, before)| row.value.frame_offset < before)
-                    {
-                        staged = Some(LocatedObject {
-                            pack,
-                            value: row.value,
-                        });
-                        break;
-                    }
-                }
-            }
-            let local = staged.is_some();
-            let location = if local {
-                staged
-            } else {
-                let preferred = if cursor.level > 0 && cursor.local {
-                    None
-                } else {
-                    cursor.preferred
-                };
-                let Some(location) = self
-                    .member_lookup(st, x, (id, cursor.next), preferred, cursor.level)
-                    .await?
-                else {
-                    x.reconstruction = Some(cursor);
-                    return Ok(None);
-                };
-                location
-            };
-            let oldest = x
-                .sources
-                .iter()
-                .map(|s| s.member.created_at_ms)
-                .min()
-                .ok_or_else(corrupt)?;
-            let location =
-                location.ok_or_else(|| self.missing_closure(oldest, Outcome::ClosureMissing))?;
-            self.member_limits(location.value)?;
-            let frame = Frame {
-                id: cursor.next,
-                pack: location.pack,
-                index: codec::encode_object_index(&cursor.next, &location.value)?
-                    .as_bytes()
-                    .to_vec(),
-                local,
-            };
-            st.settled.push(Write::Put(frame_key, encode(&frame)?));
-            cursor.local = local;
-            if let Some(base) = location.value.delta_base {
-                if cursor.level >= self.h.cfg.max_delta_chain_depth {
-                    return Err(Stop::Outcome(Outcome::ExternalTooDeep));
-                }
-                cursor.preferred = Some((location.pack, location.value.frame_offset));
-                cursor.next = base;
-                cursor.level += 1;
-            } else {
-                cursor.ascending = true;
-            }
-            x.reconstruction = Some(cursor);
-            return Ok(None);
-        }
-        let frame: Frame = decode(&self.require(&frame_key).await?)?;
-        let index = codec::decode_object_index(&frame.id, &Value::new(frame.index))?;
+        x: &ExtractionV1,
+        cursor: &MemberCursor,
+        frame: &Frame,
+        defer_pack: bool,
+    ) -> Result<(Vec<u8>, u32), Stop> {
+        let index = codec::decode_object_index(&frame.id, &Value::new(frame.index.clone()))?;
         let (budget, wire_budget) = self.member_limits(index)?;
         if frame.local {
             check(x.sources.iter().any(|s| s.member.pack == frame.pack))?;
         } else if !self.member_has(frame.pack).await? {
             return Err(Stop::Outcome(Outcome::ClosureMissing));
         }
-        let mut subjects = vec![frame.id, frame.pack];
+        let mut subjects = vec![(frame.id, false), (frame.pack, true)];
         if let Some((base, _, _, pack)) = cursor.canonical {
             if !x.sources.iter().any(|s| s.member.pack == pack) && !self.member_has(pack).await? {
                 return Err(Stop::Outcome(Outcome::ClosureMissing));
             }
-            subjects.extend([base, pack]);
+            subjects.extend([(base, false), (pack, true)]);
         }
-        for subject in subjects {
-            crate::takedown::denial::require_clear(self.remote, &subject)
-                .await
-                .map_err(|error| match error.code() {
-                    crate::Code::PermissionDenied => Stop::Outcome(Outcome::Blocked),
-                    _ => super::unavailable("extraction source unavailable"),
-                })?;
+        for (subject, pack) in subjects {
+            if defer_pack && pack {
+                st.deferred_denials.insert(subject);
+            } else {
+                crate::takedown::denial::require_clear(self.remote, &subject)
+                    .await
+                    .map_err(|error| match error.code() {
+                        crate::Code::PermissionDenied => Stop::Outcome(Outcome::Blocked),
+                        _ => super::unavailable("extraction source unavailable"),
+                    })?;
+            }
         }
         let (version, wire) = if frame.local {
             let raw = self
@@ -348,6 +289,109 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
         .map_err(|_| corrupt())?;
         let length = bytes.len() as u64;
         check(actual == frame.id && length == index.decoded_size)?;
+        Ok((bytes, depth))
+    }
+    #[allow(clippy::too_many_lines)] // A frame decode and its replay-safe accumulator checkpoint.
+    pub(super) async fn incremental_member(
+        &self,
+        st: &mut SliceState,
+        x: &mut ExtractionV1,
+        id: Hash,
+        defer_pack: bool,
+    ) -> Result<Option<(Object, u64)>, Stop> {
+        let mut cursor = x.reconstruction.clone().unwrap_or(MemberCursor {
+            target: id,
+            next: id,
+            ..MemberCursor::default()
+        });
+        check(cursor.target == id && cursor.level <= self.h.cfg.max_delta_chain_depth)?;
+        let frame_key = self.aux(x, b"member-frame", &id, cursor.level);
+        if !cursor.ascending {
+            let staged = if cursor.level == 0 {
+                self.staged_frame(x, cursor.next).await?
+            } else {
+                let mut staged = None;
+                if let Some((pack, before)) = cursor.preferred.filter(|_| cursor.local)
+                    && let Some(raw) = self
+                        .get(&self.source_row(&pack, keys::VC_FRAME, &cursor.next))
+                        .await?
+                {
+                    let row = super::decode_frame(&cursor.next, &raw)?;
+                    if row.value.frame_offset < before {
+                        staged = Some(LocatedObject {
+                            pack,
+                            value: row.value,
+                        });
+                    }
+                }
+                staged
+            };
+            let local = staged.is_some();
+            let location = if local {
+                staged
+            } else {
+                let preferred = if cursor.level > 0 && cursor.local {
+                    None
+                } else {
+                    cursor.preferred
+                };
+                let Some(location) = self
+                    .member_lookup(st, x, (id, cursor.next), preferred, cursor.level)
+                    .await?
+                else {
+                    x.reconstruction = Some(cursor);
+                    return Ok(None);
+                };
+                location
+            };
+            let oldest = x
+                .sources
+                .iter()
+                .map(|s| s.member.created_at_ms)
+                .min()
+                .ok_or_else(corrupt)?;
+            let location =
+                location.ok_or_else(|| self.missing_closure(oldest, Outcome::ClosureMissing))?;
+            self.member_limits(location.value)?;
+            let frame = Frame {
+                id: cursor.next,
+                pack: location.pack,
+                index: codec::encode_object_index(&cursor.next, &location.value)?
+                    .as_bytes()
+                    .to_vec(),
+                local,
+            };
+            // A staged, non-delta level-0 frame decodes in this call: its
+            // member-frame row is never written and no ascent slice runs.
+            if cursor.level == 0 && local && location.value.delta_base.is_none() {
+                let (bytes, _) = self
+                    .decode_member_frame(st, x, &cursor, &frame, defer_pack)
+                    .await?;
+                check(frame.id == cursor.target)?;
+                let object = mkit_core::serialize::deserialize(&bytes).map_err(|_| corrupt())?;
+                x.reconstruction = None;
+                return Ok(Some((object, 0)));
+            }
+            st.settled.push(Write::Put(frame_key, encode(&frame)?));
+            cursor.local = local;
+            if let Some(base) = location.value.delta_base {
+                if cursor.level >= self.h.cfg.max_delta_chain_depth {
+                    return Err(Stop::Outcome(Outcome::ExternalTooDeep));
+                }
+                cursor.preferred = Some((location.pack, location.value.frame_offset));
+                cursor.next = base;
+                cursor.level += 1;
+            } else {
+                cursor.ascending = true;
+            }
+            x.reconstruction = Some(cursor);
+            return Ok(None);
+        }
+        let frame: Frame = decode(&self.require(&frame_key).await?)?;
+        let (bytes, depth) = self
+            .decode_member_frame(st, x, &cursor, &frame, false)
+            .await?;
+        let length = bytes.len() as u64;
         cursor.bytes = cursor.bytes.checked_add(length).ok_or_else(corrupt)?;
         st.settled.push(Write::Delete(frame_key));
         if let Some((base, length, _, _)) = cursor.canonical {
@@ -357,15 +401,15 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
             }
         }
         if cursor.level == 0 {
-            check(actual == cursor.target)?;
+            check(frame.id == cursor.target)?;
             let object = mkit_core::serialize::deserialize(&bytes).map_err(|_| corrupt())?;
             x.reconstruction = None;
             return Ok(Some((object, if frame.local { 0 } else { cursor.bytes })));
         }
-        self.append_fragment(st, x, actual, b"member-bytes", 0, &bytes)
+        self.append_fragment(st, x, frame.id, b"member-bytes", 0, &bytes)
             .await?;
         cursor.level -= 1;
-        cursor.canonical = Some((actual, length, depth, frame.pack));
+        cursor.canonical = Some((frame.id, length, depth, frame.pack));
         x.reconstruction = Some(cursor);
         Ok(None)
     }

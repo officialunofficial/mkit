@@ -403,6 +403,9 @@ struct SliceState {
     checkpoint_ms: u64,
     cache: Lru,
     memo: MemberCache,
+    /// Source packs whose denial reads fused chunk decodes defer to the end
+    /// of the slice: they still run before the part upload and the commit.
+    deferred_denials: BTreeSet<Hash>,
     visiting: BTreeSet<(Hash, Hash, u64)>,
     frames: BTreeMap<Hash, FrameRow>,
     bases: BTreeMap<Hash, u32>,

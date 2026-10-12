@@ -1595,7 +1595,12 @@ Verified before its required index delivery.
 
 Informative. The scheduled implementation may run several Extract selection
 steps within one bounded slice and guarded checkpoint, with a fixed 16-step
-ceiling independent of the Worker clock. An external effect still
+ceiling independent of the Worker clock. It may also decode a staged,
+local, non-delta member frame in the call that consults its staged row
+and walk several chunks per PREFLIGHT or UPLOAD slice under the same
+ceilings; each chunk's own denial read stays per chunk while each
+source pack's denial is read once per slice, after its last chunk and
+before the part upload and the checkpoint commit. An external effect still
 starts in a later slice. On entering the index-delivery wait, it checks after
 300 ms and then once per second until delivery; the client-facing poll hint
 still has its one-second floor.

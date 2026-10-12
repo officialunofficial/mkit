@@ -69,6 +69,44 @@ package(mkit-server) and (
 threads-required = "num-test-threads"
 slow-timeout = { period = "300s", terminate-after = 1 }
 
+# The fused-chunk walk call table decodes 150 MiB of staged fixture in the
+# unoptimized build: ~371 s measured alone. CPU-bound, not a hang — reserve
+# the run's threads and keep the ceiling near 2.5x the measurement.
+[[profile.default.overrides]]
+filter = 'package(mkit-server) and test(=indexed::job_tests::extraction_tests::budget_tests::staged_chunks_fuse_their_reads_at_150_mib)'
+threads-required = "num-test-threads"
+slow-timeout = { period = "450s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = 'package(mkit-server) and test(=indexed::job_tests::extraction_tests::budget_tests::staged_chunks_fuse_their_reads_at_150_mib)'
+threads-required = "num-test-threads"
+slow-timeout = { period = "450s", terminate-after = 1 }
+
+# The 64-chunk fused call table decodes ~17 MiB of staged fixture twice
+# (PREFLIGHT and UPLOAD): ~18 s alone in the unoptimized build, but the
+# suite's own parallelism pushed it past the default 60 s kill. CPU-bound,
+# not a hang — same 120 s envelope as the fused-walk regressions below.
+[[profile.default.overrides]]
+filter = 'package(mkit-server) and test(=indexed::job_tests::extraction_tests::budget_tests::staged_chunks_fuse_into_one_remote_round_per_chunk)'
+slow-timeout = { period = "120s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = 'package(mkit-server) and test(=indexed::job_tests::extraction_tests::budget_tests::staged_chunks_fuse_into_one_remote_round_per_chunk)'
+slow-timeout = { period = "120s", terminate-after = 1 }
+
+# The fused-walk crash/loss/block regressions drive two or more full
+# extractions of a multi-chunk fixture; under MKIT_TEST_EXTRACT_CHAIN=1 each
+# chunk is its own slice, so a loaded shared machine pushes them past the
+# default 60s kill. None hangs — the same 2x ceiling as the other loaded
+# debug-build suites.
+[[profile.default.overrides]]
+filter = 'package(mkit-server) and test(/indexed::job_tests::extraction_tests::budget_tests::a_(crash_between_fused_chunks|lost_part_reply_in_a_fused_slice|pack_block_mid_fused_slice|pack_block_at_a_fused_part_boundary|fused_walk_slice_protects_once|lost_source_lease_before_the_part_upload)/)'
+slow-timeout = { period = "120s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = 'package(mkit-server) and test(/indexed::job_tests::extraction_tests::budget_tests::a_(crash_between_fused_chunks|lost_part_reply_in_a_fused_slice|pack_block_mid_fused_slice|pack_block_at_a_fused_part_boundary|fused_walk_slice_protects_once|lost_source_lease_before_the_part_upload)/)'
+slow-timeout = { period = "120s", terminate-after = 1 }
+
 # The bounded PR run of the stateful suite (tests/state_machine.rs, 32 cases)
 # is ~12s locally, but it spawns the `mkit` binary per op, so a slow/loaded
 # (especially macOS) runner could drift toward the default 60s / ci 120s kill

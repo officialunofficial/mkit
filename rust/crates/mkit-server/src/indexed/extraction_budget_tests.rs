@@ -1770,3 +1770,786 @@ fn a_corrupt_blob_chunk_cursor_fails_without_overflow_or_publication() {
     assert_eq!(rig.job(&ticket.pack_id).unwrap().extraction, job.extraction);
     assert!(read_blob(&rig.blobs, &BlobKey::object(object)).is_none());
 }
+
+/// The staged non-delta chunk fixture: `chunks_n` blobs of `256 KiB - 10`
+/// bytes of distinct content each in one pack, one chunked manifest over
+/// them, a 16 MiB pack window. Returns the rig, the pack, the manifest id
+/// and the reconstructed payload.
+fn staged_chunk_rig(chunks_n: usize) -> (Rig, Hash, Hash, Vec<u8>) {
+    let chunk_bytes: usize = (256 << 10) - 10;
+    let mut rig = Rig::new();
+    rig.limits.window_bytes = 16 << 20;
+    let data = (0..chunks_n)
+        .map(|i| {
+            let mut d = vec![0_u8; chunk_bytes];
+            for (j, b) in d.iter_mut().enumerate() {
+                *b = u8::try_from((i * 31 + j * 7) % 256).unwrap();
+            }
+            d
+        })
+        .collect::<Vec<_>>();
+    let chunks = data
+        .iter()
+        .map(|d| Object::Blob(Blob { data: d.clone() }))
+        .collect::<Vec<_>>();
+    let total: u64 = data.iter().map(|d| d.len() as u64).sum();
+    let manifest = Object::ChunkedBlob(ChunkedBlob {
+        total_size: total,
+        chunk_size: 0,
+        chunks: chunks.iter().map(|o| o.id().unwrap()).collect(),
+    });
+    let id = manifest.id().unwrap();
+    let (tree, commit, head) = tree_head(&[id]);
+    let objects = chunks
+        .into_iter()
+        .chain([manifest, tree, commit])
+        .collect::<Vec<_>>();
+    let (ticket, ticket_id) = rig.add(&pack(&objects));
+    assert!(rig.check(&[(&ticket, ticket_id)], head).is_err());
+    (rig, ticket.pack_id, id, data.concat())
+}
+
+type CallTable = BTreeMap<(String, u8), (u32, u32, u32, u32)>;
+
+/// Drive the whole extraction counting remote, blob and window calls per
+/// (phase, stage) slice. Returns the table plus the fixture facts.
+fn extract_call_table(chunks_n: usize) -> (Rig, Hash, Hash, Vec<u8>, CallTable) {
+    let (rig, pack_id, id, expected) = staged_chunk_rig(chunks_n);
+    let remote = Arc::new(AtomicU32::new(0));
+    let blob_calls = Arc::new(AtomicU32::new(0));
+    let window_calls = Arc::new(AtomicU32::new(0));
+    let h = extraction_handler(&rig, TestExtraction::new(&rig));
+    let handler: CountedExtraction = VerifyTimer {
+        remote: Shared(Arc::new(CountReads {
+            inner: rig.store.clone(),
+            job: keys::verify_job(&rig.repo.name, &pack_id),
+            maximum: Mutex::default(),
+            calls: remote.clone(),
+        })),
+        blobs: CountBlobCalls {
+            inner: rig.blobs.clone(),
+            calls: blob_calls.clone(),
+        },
+        windows: CountWindows {
+            inner: h.windows,
+            maximum: Arc::default(),
+            calls: Some(window_calls.clone()),
+        },
+        shards: h.shards,
+        cfg: h.cfg,
+        limits: h.limits,
+        lease: h.lease,
+        clock: h.clock,
+        metrics: h.metrics,
+        extension: h.extension,
+    };
+    // (phase, stage) -> (slices, remote, blob, window)
+    let mut table: CallTable = BTreeMap::new();
+    for _ in 0..20_000 {
+        if rig.finished(&pack_id) {
+            break;
+        }
+        let job = rig.job(&pack_id).unwrap();
+        let k = (
+            format!("{:?}", job.phase),
+            job.extraction.as_ref().map_or(255, |x| x.stage),
+        );
+        for c in [&remote, &blob_calls, &window_calls] {
+            c.store(0, Ordering::SeqCst);
+        }
+        // A failed fire still spent the calls the table records.
+        let _ = counted_fire_due(&rig, &handler, pack_id);
+        let e = table.entry(k).or_default();
+        e.0 += 1;
+        e.1 += remote.load(Ordering::SeqCst);
+        e.2 += blob_calls.load(Ordering::SeqCst);
+        e.3 += window_calls.load(Ordering::SeqCst);
+        rig.clock.advance(1_000);
+        relay_only(&rig);
+    }
+    assert!(rig.finished(&pack_id));
+    (rig, pack_id, id, expected, table)
+}
+
+fn print_call_table(chunks_n: usize, table: &CallTable) {
+    let (mut s, mut r, mut b, mut w) = (0, 0, 0, 0);
+    println!("XC1 chunks={chunks_n}");
+    println!("phase stage | slices remote blob window");
+    for ((phase, stage), (sl, re, bl, wi)) in table {
+        println!("{phase} {stage} | {sl} {re} {bl} {wi}");
+        s += sl;
+        r += re;
+        b += bl;
+        w += wi;
+    }
+    println!("TOTAL | {s} {r} {b} {w}");
+}
+
+/// The walk a fused extraction takes over this fixture: each slice decodes
+/// at most `cap` chunks, a finished part ends its slice inside the current
+/// chunk, and that resumed chunk decodes once more on the next slice.
+/// Returns (frame decodes, walk slices).
+fn fused_walk(chunks_n: usize, length: u64, cap: u64) -> (u64, u64) {
+    let part: u64 = 8 << 20;
+    let chunk_bytes: u64 = (256 << 10) - 10;
+    let (mut written, mut chunk, mut offset) = (0_u64, 0_u64, 0_u64);
+    let (mut decodes, mut walks) = (0_u64, 0_u64);
+    while chunk < chunks_n as u64 {
+        let mut steps = 0_u64;
+        let mut finished = false;
+        loop {
+            decodes += 1;
+            let take = (part - written % part).min(chunk_bytes - offset);
+            written += take;
+            offset += take;
+            if offset == chunk_bytes {
+                chunk += 1;
+                offset = 0;
+            }
+            if length > part && take > 0 && (written % part == 0 || written == length) {
+                finished = true;
+            }
+            steps += 1;
+            if finished || offset != 0 || chunk == chunks_n as u64 || steps == cap {
+                break;
+            }
+        }
+        walks += 1;
+    }
+    (decodes, walks)
+}
+
+/// Exact call counts of the fused walk. Every decode costs one chunk-id
+/// denial read and one pack window read; every walk slice costs one
+/// deferred pack denial read plus its protect round: `add_hold`'s three
+/// calls and the pending-holder probe, three calls on the extraction's
+/// first protect and two afterwards.
+fn assert_fused_calls(rig: &Rig, chunks_n: usize, table: &CallTable) {
+    let cap = u64::from(rig.limits.extract_chain_steps).min(16);
+    let chunk_bytes: u64 = (256 << 10) - 10;
+    let length = chunks_n as u64 * chunk_bytes;
+    let (decodes, walks) = fused_walk(chunks_n, length, cap);
+    let slices = walks + 1; // the stage-ending step stays its own slice
+    let extract = format!("{:?}", Phase::Extract);
+    for (stage, first_protect) in [(3_u8, true), (5, false)] {
+        let &(seen_slices, remote, _, windows) = table
+            .get(&(extract.clone(), stage))
+            .expect("the walk stage ran");
+        assert_eq!(u64::from(seen_slices), slices, "stage {stage} slices");
+        assert_eq!(u64::from(windows), decodes, "stage {stage} window reads");
+        let protect = 5 * slices + u64::from(first_protect);
+        assert_eq!(
+            u64::from(remote),
+            decodes + walks + protect,
+            "stage {stage} remote calls"
+        );
+    }
+}
+
+#[test]
+fn staged_chunks_fuse_into_one_remote_round_per_chunk() {
+    let chunks_n = 64;
+    let (rig, pack_id, id, expected, table) = extract_call_table(chunks_n);
+    print_call_table(chunks_n, &table);
+    assert_eq!(rig.job(&pack_id).unwrap().outcome, None);
+    assert_eq!(read_blob(&rig.blobs, &BlobKey::object(id)), Some(expected));
+    assert_fused_calls(&rig, chunks_n, &table);
+    if std::env::var("MKIT_TEST_EXTRACT_CHAIN").is_err() {
+        // At the default cap, remote+window calls per chunk across both
+        // walks are at most half the old two-slice cost of 26.6.
+        let extract = format!("{:?}", Phase::Extract);
+        let calls: u32 = [3_u8, 5]
+            .iter()
+            .map(|stage| {
+                let (_, remote, _, window) = table[&(extract.clone(), *stage)];
+                remote + window
+            })
+            .sum();
+        assert!(
+            u64::from(calls) * 10 <= 133 * chunks_n as u64,
+            "{calls} remote+window calls across {chunks_n} chunks"
+        );
+    }
+}
+
+#[test]
+fn staged_chunks_fuse_their_reads_at_150_mib() {
+    let (rig, pack_id, id, expected, table) = extract_call_table(600);
+    print_call_table(600, &table);
+    assert_eq!(rig.job(&pack_id).unwrap().outcome, None);
+    assert_eq!(read_blob(&rig.blobs, &BlobKey::object(id)), Some(expected));
+    assert_fused_calls(&rig, 600, &table);
+}
+
+/// The same walk arithmetic applied to the 1 GiB geometry (4,096 chunks of
+/// 256 KiB - 10 bytes, 128 parts) that the measured driven table confirmed:
+/// 384 slices and 6,527/6,526 remote calls in PREFLIGHT/UPLOAD with 4,223
+/// window reads.
+#[test]
+fn the_fused_walk_model_at_1_gib_matches_the_driven_table() {
+    let chunks_n = 4_096_usize;
+    let cap = u64::from(SliceLimits::default().extract_chain_steps).min(16);
+    let chunk_bytes: u64 = (256 << 10) - 10;
+    let (decodes, walks) = fused_walk(chunks_n, chunks_n as u64 * chunk_bytes, cap);
+    let slices = walks + 1;
+    for (stage, first_protect, remote) in [(3_u8, true, 6_527), (5, false, 6_526)] {
+        assert_eq!(slices, 384, "stage {stage} slices");
+        assert_eq!(decodes, 4_223, "stage {stage} window reads");
+        assert_eq!(
+            decodes + walks + 5 * slices + u64::from(first_protect),
+            remote,
+            "stage {stage} remote calls"
+        );
+    }
+}
+
+/// Fire one due slice, returning the guarded batch so a test can commit it
+/// or drop it as a crash would.
+fn fire_with<H>(rig: &Rig, handler: &H, pack: Hash) -> Result<Option<Batch>, StoreError>
+where
+    H: crate::timers::TimerHandler<MemoryKv>,
+{
+    use crate::timers::{DueTimer, Fired, TimerCtx};
+    let now = u64::try_from(rig.clock.now_ms()).unwrap();
+    let fired = block_on(handler.fire(
+        &TimerCtx {
+            store: rig.store.as_ref(),
+            partition: &rig.source(),
+            now_ms: now,
+        },
+        &DueTimer {
+            due_at_ms: now,
+            kind: crate::timers::registry::kinds::VERIFY,
+            reference: Bytes::from(checkpoint::timer_reference(&rig.repo.name, &pack)),
+            value: Value::default(),
+        },
+    ))?;
+    Ok(match fired {
+        Fired::Done(batch) | Fired::Reschedule { batch, .. } => Some(batch),
+        Fired::Retry => None,
+    })
+}
+
+fn commit_batch(rig: &Rig, batch: Option<Batch>) {
+    if let Some(batch) = batch {
+        assert_eq!(
+            block_on(rig.store.apply(&rig.source(), batch)).unwrap(),
+            BatchOutcome::Committed
+        );
+    }
+}
+
+/// Fire slices until the extraction cursor satisfies `at`.
+fn drive_until(
+    rig: &Rig,
+    extension: &TestExtraction,
+    pack: Hash,
+    at: impl Fn(&checkpoint::ExtractionV1) -> bool,
+) {
+    for _ in 0..3_000 {
+        if rig.job(&pack).unwrap().extraction.as_ref().is_some_and(&at) {
+            return;
+        }
+        fire_pack(rig, extension, pack);
+        relay_only(rig);
+        rig.clock.advance(1_000);
+    }
+    panic!(
+        "extraction never reached the wanted stage: {:?}",
+        rig.job(&pack)
+    );
+}
+
+/// The deterministic aux row id of `label` for `object`, index `index`.
+fn aux_row(label: &[u8], group: &Hash, object: &Hash, index: u32) -> Hash {
+    let mut h = mkit_core::hash::Hasher::new();
+    h.update(b"mkit-extraction-row:v1");
+    h.update(label);
+    h.update(group);
+    h.update(object);
+    h.update(&index.to_be_bytes());
+    h.finalize()
+}
+
+fn aux(
+    rig: &Rig,
+    pack: &Hash,
+    label: &[u8],
+    group: &Hash,
+    object: &Hash,
+    index: u32,
+) -> Option<Value> {
+    let key = keys::verify_row(
+        &rig.repo.name,
+        pack,
+        keys::VC_CANDIDATE,
+        Some(&aux_row(label, group, object, index)),
+    );
+    block_on(rig.store.get(&rig.source(), &key)).unwrap()
+}
+
+#[test]
+fn a_crash_between_fused_chunks_replays_the_same_extraction() {
+    let (rig, pack_id, id, expected) = staged_chunk_rig(40);
+    let extension = TestExtraction::new(&rig);
+    let handler = extraction_handler(&rig, extension.clone());
+    // Dropping the guarded batch is a crash before commit: durable aux rows
+    // stay, the cursor must not move.
+    drive_until(&rig, &extension, pack_id, |x| x.stage == 3 && x.chunk == 0);
+    let before = rig.job(&pack_id).unwrap().extraction.unwrap();
+    drop(fire_with(&rig, &handler, pack_id));
+    assert_eq!(
+        rig.job(&pack_id).unwrap().extraction.unwrap(),
+        before,
+        "the dropped PREFLIGHT slice moved the cursor"
+    );
+    drive_until(&rig, &extension, pack_id, |x| x.stage == 5 && x.chunk == 0);
+    let before = rig.job(&pack_id).unwrap().extraction.unwrap();
+    drop(fire_with(&rig, &handler, pack_id));
+    assert_eq!(
+        rig.job(&pack_id).unwrap().extraction.unwrap(),
+        before,
+        "the dropped UPLOAD slice moved the cursor"
+    );
+    drive(&rig, &extension, &[pack_id]);
+    assert_eq!(read_blob(&rig.blobs, &BlobKey::object(id)), Some(expected));
+    // A crash-free run of the identical fixture leaves identical state.
+    let (oracle, oracle_pack, oracle_id, _) = staged_chunk_rig(40);
+    drive(&oracle, &TestExtraction::new(&oracle), &[oracle_pack]);
+    assert_eq!(id, oracle_id);
+    assert_eq!(
+        read_blob(&rig.blobs, &BlobKey::object_offsets(id)),
+        read_blob(&oracle.blobs, &BlobKey::object_offsets(oracle_id)),
+        "offsets blob differs from a crash-free run"
+    );
+    assert_eq!(
+        rig.rows(&pack_id, keys::VC_CANDIDATE),
+        oracle.rows(&oracle_pack, keys::VC_CANDIDATE),
+        "offset, CV, receipt and shared charge rows differ from a crash-free run"
+    );
+}
+
+#[test]
+fn a_lost_part_reply_in_a_fused_slice_replays_the_same_part() {
+    let (rig, pack_id, id, expected) = staged_chunk_rig(40);
+    let extension = TestExtraction::new(&rig);
+    drive_until(&rig, &extension, pack_id, |x| x.stage == 5 && x.chunk == 0);
+    let group = rig.job(&pack_id).unwrap().extraction.unwrap().group;
+    assert_eq!(rig.blobs.multipart_session_count(), 1);
+    // The UPLOAD slice crossing the first part boundary ends in
+    // put_object_part; the backend commits it and the reply is lost, so the
+    // slice cannot commit.
+    *extension.fail.lock().unwrap() = Some("part");
+    drive(&rig, &extension, &[pack_id]);
+    let plan = PartPlan::new(
+        expected.len() as u64,
+        mkit_core::upload_parts::MIN_PART_SIZE,
+        10_000,
+    )
+    .unwrap();
+    assert_eq!(read_blob(&rig.blobs, &BlobKey::object(id)), Some(expected));
+    // The replay re-uploaded the same index in the same operation-keyed
+    // session: no second begin, one receipt per part index, one completion.
+    assert_eq!(extension.sessions.lock().unwrap().len(), 1);
+    for index in 0..plan.count() {
+        assert!(
+            aux(&rig, &pack_id, b"receipt", &group, &id, index).is_some(),
+            "part {index} has no receipt row"
+        );
+    }
+    assert_eq!(extension.completed.load(Ordering::SeqCst), 1);
+    assert_eq!(rig.job(&pack_id).unwrap().outcome, None);
+}
+
+/// Remote op names as a walk slice sees them: `hold-*` for the protect
+/// round's hold and pending-holder rows, `read` for every denial `get_many`,
+/// and the rest by operation.
+#[derive(Clone)]
+struct RecordOps {
+    inner: Arc<MemoryKv>,
+    ops: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl RecordOps {
+    fn holds(batch: &Batch) -> bool {
+        batch.writes.iter().any(|write| {
+            let key = match write {
+                crate::store::Write::Put(key, _) | crate::store::Write::Delete(key) => key,
+            };
+            key.as_bytes().starts_with(b"g")
+        })
+    }
+}
+
+impl NamespaceStore for RecordOps {
+    fn capabilities(&self) -> StoreCapabilities {
+        self.inner.capabilities()
+    }
+    async fn get(&self, p: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
+        self.ops.lock().unwrap().push("get");
+        self.inner.get(p, key).await
+    }
+    async fn get_many(
+        &self,
+        p: &Partition,
+        keys: &[Key],
+    ) -> Result<Vec<Option<Value>>, StoreError> {
+        let op = if keys.iter().any(|k| k.as_bytes().starts_with(b"g")) {
+            "hold-read"
+        } else {
+            "read"
+        };
+        self.ops.lock().unwrap().push(op);
+        self.inner.get_many(p, keys).await
+    }
+    async fn scan(
+        &self,
+        p: &Partition,
+        start: &Key,
+        end: &Key,
+        after: Option<&Cursor>,
+        limit: u32,
+    ) -> Result<ScanPage, StoreError> {
+        let op = if start.as_bytes().starts_with(b"g") {
+            "hold-scan"
+        } else {
+            "scan"
+        };
+        self.ops.lock().unwrap().push(op);
+        self.inner.scan(p, start, end, after, limit).await
+    }
+    async fn scan_many(
+        &self,
+        p: &Partition,
+        ranges: &[RangeScan],
+    ) -> Result<Vec<ScanPage>, StoreError> {
+        self.ops.lock().unwrap().push("scan-many");
+        self.inner.scan_many(p, ranges).await
+    }
+    async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+        let op = if Self::holds(&batch) {
+            "hold-write"
+        } else {
+            "apply"
+        };
+        self.ops.lock().unwrap().push(op);
+        self.inner.apply(p, batch).await
+    }
+    async fn stats(&self, p: &Partition) -> Result<crate::PartitionStats, StoreError> {
+        self.ops.lock().unwrap().push("stats");
+        self.inner.stats(p).await
+    }
+    async fn probe(&self) -> Result<(), StoreError> {
+        self.ops.lock().unwrap().push("probe");
+        self.inner.probe().await
+    }
+}
+
+#[test]
+fn a_fused_walk_slice_protects_once_for_all_its_chunks() {
+    let (rig, pack_id, _id, _expected) = staged_chunk_rig(40);
+    let extension = TestExtraction::new(&rig);
+    drive_until(&rig, &extension, pack_id, |x| x.stage == 3 && x.chunk == 0);
+    let record = RecordOps {
+        inner: rig.store.clone(),
+        ops: Arc::default(),
+    };
+    let h = extraction_handler(&rig, extension.clone());
+    let handler = VerifyTimer {
+        remote: Shared(Arc::new(record.clone())),
+        blobs: h.blobs,
+        windows: h.windows,
+        shards: h.shards,
+        cfg: h.cfg,
+        limits: h.limits,
+        lease: h.lease,
+        clock: h.clock,
+        metrics: h.metrics,
+        extension: h.extension,
+    };
+    commit_batch(&rig, fire_with(&rig, &handler, pack_id).unwrap());
+    let ops = record.ops.lock().unwrap().clone();
+    let advanced = rig.job(&pack_id).unwrap().extraction.unwrap().chunk;
+    assert_eq!(advanced, rig.limits.extract_chain_steps.min(16));
+    // The protect round leads the slice: hold read, scan and write, then
+    // the pending-holder read, scan and (first time) write. Nothing
+    // protection-shaped may appear after the first denial read.
+    let protect = ops.iter().take_while(|op| op.starts_with("hold")).count();
+    assert!(protect >= 5, "the protect round leads the slice: {ops:?}");
+    assert!(
+        ops.iter().skip(protect).all(|op| *op == "read"),
+        "every post-protect remote op is a denial read: {ops:?}"
+    );
+    assert_eq!(
+        ops.iter().filter(|op| op.starts_with("hold")).count(),
+        protect,
+        "protection repeats per chunk: {ops:?}"
+    );
+    // One chunk denial read per decode and one deferred pack read.
+    assert_eq!(
+        ops.len() - protect,
+        advanced as usize + 1,
+        "chunk reads plus the flush: {ops:?}"
+    );
+}
+
+/// Windows that overwrite the epoch lease with an unusable row after the
+/// first armed read, as a revoked lease appears to the next renewal.
+#[derive(Clone)]
+struct BreakLease {
+    inner: Arc<Windows>,
+    store: Arc<MemoryKv>,
+    partition: Partition,
+    reads: Arc<AtomicU32>,
+    at: u32,
+}
+
+impl PackWindows for BreakLease {
+    fn read<'a>(
+        &'a self,
+        pack: &'a Hash,
+        offset: u64,
+        len: u64,
+        etag: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Window, WindowError>> {
+        Box::pin(async move {
+            let window = self.inner.read(pack, offset, len, etag).await?;
+            if self.reads.fetch_add(1, Ordering::SeqCst) + 1 == self.at {
+                self.store
+                    .apply(
+                        &self.partition,
+                        Batch::new().put(keys::epoch_lease(), Value::default()),
+                    )
+                    .await
+                    .map_err(|_| WindowError::Unavailable)?;
+            }
+            Ok(window)
+        })
+    }
+}
+
+#[test]
+fn a_lost_source_lease_before_the_part_upload_commits_no_effects() {
+    // Sixteen ~640 KiB chunks keep every frame under the admission decode
+    // budget while the first part boundary lands mid-chunk after twelve of
+    // them, inside a multi-chunk UPLOAD slice under the default chain cap.
+    let chunk_bytes: usize = (640 << 10) - 10;
+    let mut rig = Rig::named("one", Arc::new(D34Shards));
+    rig.limits.window_bytes = 16 << 20;
+    let data = (0..16_u8)
+        .map(|i| vec![i + 1; chunk_bytes])
+        .collect::<Vec<_>>();
+    let chunks = data
+        .iter()
+        .map(|d| Object::Blob(Blob { data: d.clone() }))
+        .collect::<Vec<_>>();
+    let manifest = Object::ChunkedBlob(ChunkedBlob {
+        total_size: data.iter().map(|d| d.len() as u64).sum(),
+        chunk_size: 0,
+        chunks: chunks.iter().map(|o| o.id().unwrap()).collect(),
+    });
+    let id = manifest.id().unwrap();
+    let (tree, commit, head) = tree_head(&[id]);
+    let objects = chunks
+        .into_iter()
+        .chain([manifest, tree, commit])
+        .collect::<Vec<_>>();
+    let (ticket, ticket_id) = rig.add(&pack(&objects));
+    assert!(rig.check(&[(&ticket, ticket_id)], head).is_err());
+    let extension = TestExtraction::new(&rig);
+    drive_until(&rig, &extension, ticket.pack_id, |x| {
+        x.stage == 5 && x.chunk == 0 && x.object == Some(id)
+    });
+    let h = extraction_handler(&rig, extension.clone());
+    let handler = VerifyTimer {
+        remote: h.remote,
+        blobs: h.blobs,
+        windows: BreakLease {
+            inner: h.windows,
+            store: rig.store.clone(),
+            partition: rig.source(),
+            reads: Arc::new(AtomicU32::new(0)),
+            at: 1,
+        },
+        shards: h.shards,
+        cfg: h.cfg,
+        limits: h.limits,
+        lease: h.lease,
+        clock: h.clock,
+        metrics: h.metrics,
+        extension: h.extension,
+    };
+    // The lease is lost after the first chunk's read and before the slice's
+    // part upload: the boundary step fails and cannot commit its upload.
+    // The chunks before it still commit — twelve when the slice can reach
+    // the boundary, otherwise the slice's own chunk count.
+    commit_batch(&rig, fire_with(&rig, &handler, ticket.pack_id).unwrap());
+    let x = rig.job(&ticket.pack_id).unwrap().extraction.unwrap();
+    assert_eq!(x.stage, 5);
+    let walked = u64::from(rig.limits.extract_chain_steps.min(12));
+    assert_eq!(
+        (x.chunk, x.written),
+        (u32::try_from(walked).unwrap(), walked * chunk_bytes as u64)
+    );
+    assert_eq!(x.uploaded, 0, "no part was uploaded after the lease loss");
+    assert!(read_blob(&rig.blobs, &BlobKey::object(id)).is_none());
+    let group = x.group;
+    assert!(
+        aux(&rig, &ticket.pack_id, b"receipt", &group, &id, 0).is_none(),
+        "a part receipt committed under a lost lease"
+    );
+    // Every following slice closes at protect before any effect.
+    for _ in 0..3 {
+        let before = rig.job(&ticket.pack_id).unwrap();
+        assert!(fire_with(&rig, &handler, ticket.pack_id).is_err());
+        assert_eq!(rig.job(&ticket.pack_id).unwrap(), before);
+    }
+}
+
+/// Windows that block `blocked` after `at` armed reads, as a denial landing
+/// between two fused chunks of one slice would.
+#[derive(Clone)]
+struct BlockAfterReads {
+    inner: Arc<Windows>,
+    store: Arc<MemoryKv>,
+    blocked: Hash,
+    now_ms: u64,
+    reads: Arc<AtomicU32>,
+    at: u32,
+}
+
+impl PackWindows for BlockAfterReads {
+    fn read<'a>(
+        &'a self,
+        pack: &'a Hash,
+        offset: u64,
+        len: u64,
+        etag: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Window, WindowError>> {
+        Box::pin(async move {
+            let window = self.inner.read(pack, offset, len, etag).await?;
+            if self.reads.fetch_add(1, Ordering::SeqCst) + 1 == self.at {
+                ContentIndex::new(crate::store::BorrowedStore(self.store.as_ref()))
+                    .block(
+                        &self.blocked,
+                        &crate::store::BlockEntry::new("test denial", self.now_ms),
+                        self.now_ms,
+                    )
+                    .await
+                    .map_err(|_| WindowError::Unavailable)?;
+            }
+            Ok(window)
+        })
+    }
+}
+
+fn blocked_windows_handler(
+    rig: &Rig,
+    extension: &TestExtraction,
+    blocked: Hash,
+    at: u32,
+) -> VerifyTimer<Shared<MemoryKv>, Shared<MemoryBlobStore>, BlockAfterReads, TestExtraction> {
+    let h = extraction_handler(rig, extension.clone());
+    VerifyTimer {
+        remote: h.remote,
+        blobs: h.blobs,
+        windows: BlockAfterReads {
+            inner: h.windows,
+            store: rig.store.clone(),
+            blocked,
+            now_ms: u64::try_from(rig.clock.now_ms()).unwrap(),
+            reads: Arc::new(AtomicU32::new(0)),
+            at,
+        },
+        shards: h.shards,
+        cfg: h.cfg,
+        limits: h.limits,
+        lease: h.lease,
+        clock: h.clock,
+        metrics: h.metrics,
+        extension: h.extension,
+    }
+}
+
+#[test]
+fn a_pack_block_mid_fused_slice_still_blocks_the_extraction() {
+    let (rig, pack_id, id, _expected) = staged_chunk_rig(40);
+    let extension = TestExtraction::new(&rig);
+    drive_until(&rig, &extension, pack_id, |x| x.stage == 3 && x.chunk == 0);
+    // The denial lands after the first chunk's read of a multi-chunk slice;
+    // the slice's deferred pack read finds it before any upload or commit.
+    let handler = blocked_windows_handler(&rig, &extension, pack_id, 1);
+    commit_batch(&rig, fire_with(&rig, &handler, pack_id).unwrap());
+    let job = rig.job(&pack_id).unwrap();
+    assert_eq!(job.outcome, Some(checkpoint::Outcome::Blocked));
+    let x = job.extraction.unwrap();
+    assert_eq!(x.stage, 3, "the blocked slice never reached upload");
+    assert_eq!(x.uploaded, 0, "no part was uploaded after the block");
+    assert!(
+        aux(&rig, &pack_id, b"receipt", &x.group, &id, 0).is_none(),
+        "a part receipt committed under a blocked pack"
+    );
+    assert!(read_blob(&rig.blobs, &BlobKey::object(id)).is_none());
+    // One chunk per slice ends with the same outcome.
+    let (single, single_pack, single_id, _) = staged_chunk_rig(4);
+    let mut single = single;
+    single.limits.extract_chain_steps = 1;
+    let single_extension = TestExtraction::new(&single);
+    drive_until(&single, &single_extension, single_pack, |x| {
+        x.stage == 3 && x.chunk == 0
+    });
+    let handler = blocked_windows_handler(&single, &single_extension, single_pack, 1);
+    commit_batch(&single, fire_with(&single, &handler, single_pack).unwrap());
+    let job = single.job(&single_pack).unwrap();
+    assert_eq!(job.outcome, Some(checkpoint::Outcome::Blocked));
+    assert!(read_blob(&single.blobs, &BlobKey::object(single_id)).is_none());
+}
+
+#[test]
+fn a_pack_block_at_a_fused_part_boundary_blocks_before_the_upload() {
+    // Sixteen ~640 KiB chunks put the first part boundary inside the
+    // thirteenth chunk, so the last walked chunk of a multi-chunk UPLOAD
+    // slice ends in finish_part. The denial lands after the first chunk's
+    // window read; the deferred pack read inside finish_part is the first
+    // one positioned to see it, and it must see it before the part upload
+    // and before any chunk of the slice commits.
+    let chunk_bytes: usize = (640 << 10) - 10;
+    let mut rig = Rig::named("one", Arc::new(D34Shards));
+    rig.limits.window_bytes = 16 << 20;
+    let data = (0..16_u8)
+        .map(|i| vec![i + 1; chunk_bytes])
+        .collect::<Vec<_>>();
+    let chunks = data
+        .iter()
+        .map(|d| Object::Blob(Blob { data: d.clone() }))
+        .collect::<Vec<_>>();
+    let manifest = Object::ChunkedBlob(ChunkedBlob {
+        total_size: data.iter().map(|d| d.len() as u64).sum(),
+        chunk_size: 0,
+        chunks: chunks.iter().map(|o| o.id().unwrap()).collect(),
+    });
+    let id = manifest.id().unwrap();
+    let (tree, commit, head) = tree_head(&[id]);
+    let objects = chunks
+        .into_iter()
+        .chain([manifest, tree, commit])
+        .collect::<Vec<_>>();
+    let (ticket, ticket_id) = rig.add(&pack(&objects));
+    assert!(rig.check(&[(&ticket, ticket_id)], head).is_err());
+    let extension = TestExtraction::new(&rig);
+    drive_until(&rig, &extension, ticket.pack_id, |x| {
+        x.stage == 5 && x.chunk == 0 && x.object == Some(id)
+    });
+    let handler = blocked_windows_handler(&rig, &extension, ticket.pack_id, 1);
+    commit_batch(&rig, fire_with(&rig, &handler, ticket.pack_id).unwrap());
+    let job = rig.job(&ticket.pack_id).unwrap();
+    assert_eq!(job.outcome, Some(checkpoint::Outcome::Blocked));
+    let x = job.extraction.unwrap();
+    assert_eq!(x.stage, 5, "the blocked slice never left upload");
+    assert_eq!(x.uploaded, 0, "no part was uploaded after the block");
+    assert!(
+        aux(&rig, &ticket.pack_id, b"receipt", &x.group, &id, 0).is_none(),
+        "a part receipt committed under a blocked pack"
+    );
+    assert!(read_blob(&rig.blobs, &BlobKey::object(id)).is_none());
+}
