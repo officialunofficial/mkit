@@ -21,7 +21,7 @@ members = [
     "crates/mkit-transport-connect",
     "crates/mkit-cli",
     "crates/mkit-rpc",
-    "crates/mkit-push",
+    "crates/mkit-client",
     "crates/mkit-sync",
     "crates/mkit-wasm",
     "crates/mkit-repo-client",

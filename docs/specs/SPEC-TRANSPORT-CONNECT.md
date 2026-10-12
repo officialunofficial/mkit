@@ -1939,22 +1939,41 @@ limits, streaming and authentication unchanged; hosts may bound work using their
 platform clock and timer.
 
 
-## Runtime-independent push client (informative)
+## Runtime-independent client (informative)
 
-`mkit-push` implements one bounded ticketed advance from public protocol code.
-It accepts ordered canonical objects or delta streams, uses the shared
-`mkit-rpc/transport-messages` types, plans packlist nodes, and performs
-`BeginUpload`, `UploadPack` or `UploadPart`/`CompleteUpload`, then `AdvanceRefs`.
-It preserves the signed request identity through pending polls while valid,
-honors typed poll hints and `Retry-After`, and reports conflict/replan outcomes.
+`mkit-client` implements the client side
+of this protocol from public code, on native and wasm32 with no async runtime or
+C compression in its dependency graph. It shares the `mkit-rpc/transport-messages`
+types and exposes one typed call per RPC: `GetServerInfo`, `ListRefs` (paged,
+response cap 2 MiB), `ReadRef`, `PackExists`, `DownloadPack` (caller size cap),
+`UpdateRef` (general CAS and delete), `BeginUpload`, `UploadPack`, `UploadPart`,
+`CompleteUpload` and `AdvanceRefs`. A client with a signer signs every RPC but
+discovery (§7.1); an anonymous client sends unsigned reads. There is no fork RPC
+in `mkit.transport.v1`, so none is exposed; branch creation from a published
+source is `AdvanceRefs` with `source_ref` (§4.1).
 
-The HTTP boundary is injectable and carries buffered Connect frames with an
-explicit response limit. Clock/entropy/waiting and signing are also injectable;
-no tokio or native compression library is required on wasm. The host owns
-staged input, closure/delta selection, authorization, persistence, network
-retry policy and scheduling larger histories as independent advances.
-Exact signed requests are the transport's replay unit. No result claims
-eternal replay retention or proves that an earlier ambiguous attempt never
-wrote. The native CLI retains its existing push path during embedder validation.
-See [the client guide](../../rust/crates/mkit-push/README.md) for bounds and the
-API needed to replace a private protocol port. This library adds no wire change.
+A per-RPC call sends one request and never waits. The outcomes a caller
+schedules come back as typed errors: a challenge (§5.1, every challenge, and a
+402 without a Connect body parsed from `WWW-Authenticate` and `PAYMENT-REQUIRED`),
+a `PendingVerification` hint, a membership-lag `unavailable`, and an
+`unavailable` carrying `Retry-After` (1&ndash;60 s). Every signed call accepts a
+caller-owned request identity (the nonce, which is also the `Idempotency-Key`,
+and the validity window) and uses it exactly, returning the identity it used, so
+a persisted identity replays the same signed request and, for a write, a server
+that saved the first reply returns it (§7.1; signed reads keep no reply). Calls without one generate it from the host clock.
+
+`Push::run` is the bounded whole-push built on the same calls. It preserves the
+signed request identity through pending polls while valid, honors typed poll
+hints and `Retry-After`, and reports conflict/replan outcomes; its waits live
+only in that loop. Read helpers walk a packmap chain and unpack packs into an
+abstract object sink, verifying commit, remix and tag signatures unless the
+caller opts out. The HTTP boundary is injectable and carries buffered Connect
+frames with an explicit response limit; clock, entropy, waiting and signing are
+also injectable. A streaming request body does not fit that boundary: the
+transport must replay the exact request bytes after an ambiguous failure, and
+browser fetch cannot stream request bodies portably, so request bodies stay
+buffered (bounded per part by the ticket part size). Exact signed requests are
+the transport's replay unit. No result claims eternal replay retention or proves
+that an earlier ambiguous attempt never wrote. The native CLI retains its
+existing push path. See [the client guide](../../rust/crates/mkit-client/README.md)
+for bounds and the API. This library adds no wire change.

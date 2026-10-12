@@ -194,23 +194,20 @@ fn advance_script(
     clock: &ScriptClock,
 ) -> Result<crate::proto::AdvanceRefsResponse, Error> {
     let destination = Destination::new("https://vcs.example.org".into(), "default".into()).unwrap();
-    let rpc = Rpc {
-        transport,
-        signer: &ScriptSigner,
-        clock,
-        destination: &destination,
-        deadline_ms: 600_000,
-    };
-    ready(rpc.advance(&crate::proto::AdvanceRefsRequest {
-        head_ref: Some("refs/heads/main".into()),
-        head_expectation: Some(crate::proto::RefExpectation::Missing.into()),
-        head_new_id: Some(vec![7; 32]),
-        packmap_ref: Some("refs/mkit/packmap/main".into()),
-        packmap_expectation: Some(crate::proto::RefExpectation::Missing.into()),
-        packmap_new_id: Some(vec![8; 32]),
-        ticket_ids: vec![vec![9; 32]],
-        ..Default::default()
-    }))
+    let rpc = Rpc::signed(transport, &ScriptSigner, clock, &destination, 600_000);
+    ready(crate::push::advance(
+        &rpc,
+        &crate::proto::AdvanceRefsRequest {
+            head_ref: Some("refs/heads/main".into()),
+            head_expectation: Some(crate::proto::RefExpectation::Missing.into()),
+            head_new_id: Some(vec![7; 32]),
+            packmap_ref: Some("refs/mkit/packmap/main".into()),
+            packmap_expectation: Some(crate::proto::RefExpectation::Missing.into()),
+            packmap_new_id: Some(vec![8; 32]),
+            ticket_ids: vec![vec![9; 32]],
+            ..Default::default()
+        },
+    ))
 }
 #[test]
 fn pending_renews_after_local_expiry_and_once_after_expiry_in_transit() {
@@ -282,4 +279,17 @@ fn post_pending_authentication_recovery_is_bounded_and_never_hides_response_loss
         }
         assert_eq!(transport.requests.borrow().len(), count);
     }
+}
+
+#[test]
+fn frames_are_yielded_lazily_and_require_a_clean_end() {
+    let mut bytes = Vec::new();
+    for _ in 0..10_000 {
+        frame(&mut bytes, &[]).unwrap();
+    }
+    let mut frames = Frames::new(&bytes);
+    assert!(matches!(frames.next(), Some(Ok(f)) if f.is_empty()));
+    assert!(matches!(frames.nth(9_998), Some(Ok(_))));
+    assert!(matches!(frames.next(), Some(Err(_))), "no end frame");
+    assert!(frames.next().is_none());
 }

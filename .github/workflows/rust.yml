@@ -66,7 +66,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        crate: [mkit-server, mkit-server-worker, mkit-rpc, mkit-push, mkit-sync]
+        crate: [mkit-server, mkit-server-worker, mkit-rpc, mkit-client, mkit-sync]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-rust
@@ -116,6 +116,33 @@ jobs:
       - name: Check server 0.6 API against 0.5.0
         working-directory: rust
         run: cargo semver-checks -p mkit-server --all-features --baseline-version 0.5.0 --release-type major
+
+  # mkit-client is the runtime-independent protocol client. Its wasm32 build is
+  # the product requirement, so it is built (not only checked) for the real
+  # target, and its dependency graph is held free of async runtimes and C
+  # compression (scripts/check-wasm-dep-graph.sh).
+  client-wasm:
+    name: mkit-client wasm32 build
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: wasm32-unknown-unknown
+          cache-prefix: client-wasm
+      - name: Build mkit-client for wasm32
+        working-directory: rust
+        run: cargo build --locked -p mkit-client --target wasm32-unknown-unknown
+      - name: Build mkit-client without a zstd decoder for wasm32
+        working-directory: rust
+        run: cargo build --locked -p mkit-client --no-default-features --target wasm32-unknown-unknown
+      - name: Dependency graph has no runtime or C compression
+        run: bash scripts/check-wasm-dep-graph.sh
 
   build-and-test:
     name: Build & Test (${{ matrix.os }})
@@ -411,7 +438,7 @@ jobs:
   ci-gate:
     name: Rust CI gate
     if: always()
-    needs: [build-and-test, keystore-backends, server-feature-clippy, server-semver]
+    needs: [build-and-test, keystore-backends, server-feature-clippy, server-semver, client-wasm]
     runs-on: ubuntu-latest
     steps:
       - name: Verify no critical job failed
@@ -421,6 +448,7 @@ jobs:
           KEYSTORE_BACKENDS: ${{ needs.keystore-backends.result }}
           SERVER_FEATURE_CLIPPY: ${{ needs.server-feature-clippy.result }}
           SERVER_SEMVER: ${{ needs.server-semver.result }}
+          CLIENT_WASM: ${{ needs.client-wasm.result }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
           echo "event:              ${EVENT_NAME}"
@@ -429,7 +457,7 @@ jobs:
 
           fail=0
 
-          for result in "${SERVER_FEATURE_CLIPPY}" "${SERVER_SEMVER}"; do
+          for result in "${SERVER_FEATURE_CLIPPY}" "${SERVER_SEMVER}" "${CLIENT_WASM}"; do
             case "${result}" in
               success|skipped) ;;
               *)
