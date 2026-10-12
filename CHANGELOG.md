@@ -345,8 +345,7 @@ collect the applicable entries between their old and new immutable pins.
   so client and server share the one grammar. `mkit-transport-connect` adds
   `remote_identity_from_url` beside the strict `repository_identity_from_url`
   and `ConnectTransport::remote_identity()`; `UrlIdentityError` gains
-  `Namespace`/`Name`
-  variants that name the offending segment and the accepted grammars. The CLI
+  `Namespace`/`Name` variants that name the offending segment and the accepted grammars. The CLI
   prints those clearer URL/identity errors, and a plain `https://` URL is
   refused with guidance pointing at `mkit+https://` and explaining that plain
   HTTP serves objects by repository path (SPEC-HTTP-OBJECTS). Grants, grant
