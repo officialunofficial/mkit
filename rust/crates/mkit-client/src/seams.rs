@@ -103,13 +103,15 @@ impl<'a> SigningRequest<'a> {
 }
 
 /// Why a signer did not sign.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum SignError {
     /// Policy refused this operation. Becomes [`Error::SignerRefused`].
+    #[error("refused: {0}")]
     Refused(String),
     /// The signer could not run (key unavailable, device error). Becomes
     /// [`Error::Signing`].
+    #[error("signing failed: {0}")]
     Failed(String),
 }
 impl From<String> for SignError {
@@ -127,7 +129,8 @@ impl SignError {
 }
 
 /// An observer's refusal of a write. Becomes [`Error::Vetoed`].
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("vetoed: {0}")]
 pub struct Veto(String);
 impl Veto {
     #[must_use]
@@ -193,12 +196,15 @@ pub struct WriteIntent<'a> {
     pub pack_id: Option<Hash>,
     /// Pack bytes (`BeginUpload`, `UploadPack`) or part bytes (`UploadPart`).
     pub bytes: Option<u64>,
-    /// Tickets: the one an `UploadPart` / `CompleteUpload` uses, or those an
-    /// `AdvanceRefs` consumes. A per-RPC `complete_upload` takes only the opaque
-    /// token, so it reports none; a whole push does.
+    /// Tickets: the one an `UploadPack` (when ticketed), `UploadPart` or
+    /// `CompleteUpload` uses, or those an
+    /// `AdvanceRefs` consumes. A per-RPC `upload_pack` or `complete_upload`
+    /// takes only the opaque token, so it reports none; a whole push does.
     pub ticket_ids: &'a [Hash],
     pub part_index: Option<u32>,
-    /// Ids of the objects the pack introduces. `Some` only when the caller knows
+    /// Ids of the objects the pack introduces, on every RPC of its upload
+    /// (`BeginUpload`, `UploadPack`, `UploadPart`, `CompleteUpload`) in a whole
+    /// push. `Some` only when the caller knows
     /// all of them: a whole push whose entries are all raw objects. A delta
     /// entry's id is not known without applying it, so a pack holding one
     /// reports `None`, and so does every per-RPC upload.

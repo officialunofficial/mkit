@@ -1952,6 +1952,16 @@ discovery (§7.1); an anonymous client sends unsigned reads. There is no fork RP
 in `mkit.transport.v1`, so none is exposed; branch creation from a published
 source is `AdvanceRefs` with `source_ref` (§4.1).
 
+The client lets its host run policy around every signed request without
+changing the wire: a pre-dispatch observer sees each write (the procedure and
+its exact ref moves, packs and tickets) and may veto it or add unsigned
+per-attempt headers (never a hard-reserved one, §5.1); the signer sees the
+procedure, repository, audience, content commitment and validity window it
+signs and may refuse; and an envelope whose validity window has ended is not
+sent. The order is observer, signer, deadline check, dispatch, once per signed
+envelope. The client can also build the signed envelope headers for a procedure
+the host dispatches itself.
+
 A per-RPC call sends one request and never waits. The outcomes a caller
 schedules come back as typed errors: a challenge (§5.1, every challenge, and a
 402 without a Connect body parsed from `WWW-Authenticate` and `PAYMENT-REQUIRED`),

@@ -429,13 +429,14 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Client<'_, T, S, C, O> 
         identity: Option<&Identity>,
     ) -> Result<Reply<BeginUploadResponse>, Error> {
         self.require_signer()?;
-        reply(calls::begin_upload(&self.rpc(), head_ref, pack_id, bytes, identity).await)
+        reply(calls::begin_upload(&self.rpc(), head_ref, pack_id, bytes, None, identity).await)
     }
 
     /// `UploadPack` of the whole `pack`, optionally under a ticket token. The
     /// framed request is buffered, so peak memory is the pack plus its frames
     /// plus the transport's replay copy. The observer's
-    /// [`new_objects`](crate::WriteIntent::new_objects) is `None` here.
+    /// [`new_objects`](crate::WriteIntent::new_objects) and ticket ids are empty
+    /// here (only the opaque token is passed).
     ///
     /// # Errors
     /// As [`Client::begin_upload`].
@@ -452,6 +453,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Client<'_, T, S, C, O> 
                 &self.rpc(),
                 pack_id,
                 pack,
+                None,
                 ticket_token.map(<[u8]>::to_vec),
                 None,
                 identity,
@@ -490,6 +492,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Client<'_, T, S, C, O> 
                 plan,
                 index,
                 part,
+                None,
                 identity,
             )
             .await,
@@ -514,6 +517,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Client<'_, T, S, C, O> 
                 None,
                 Some(ticket_token.to_vec()),
                 receipts,
+                None,
                 identity,
             )
             .await,
@@ -530,7 +534,9 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Client<'_, T, S, C, O> 
     /// [`Error::EnvelopeExpired`]. A write procedure (see
     /// [`procedures`]) requires an `intent` for that procedure, so the observer
     /// cannot be skipped; other procedures are not observed. The attempt number
-    /// is always 1. The result carries the envelope headers
+    /// is always 1. The observer sees the intent the host passes: build it from
+    /// the body that will be sent, because the client cannot check it against the
+    /// commitment. The result carries the envelope headers
     /// (`x-envelope-version`, `x-audience`, `x-repository`, `x-content-commitment`,
     /// `x-created-at`, `x-expires-at`, `idempotency-key`, `x-public-key`,
     /// `x-signature`, and `x-digest` for a `body:` commitment) plus the

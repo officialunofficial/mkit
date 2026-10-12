@@ -19,6 +19,7 @@ pub(crate) async fn begin_upload<T: HttpTransport, S: Signer, C: Clock, O: Obser
     head_ref: &str,
     pack_id: &Hash,
     bytes: u64,
+    new_objects: Option<&[Hash]>,
     identity: Option<&Identity>,
 ) -> Called<BeginUploadResponse> {
     let request = BeginUploadRequest {
@@ -29,7 +30,8 @@ pub(crate) async fn begin_upload<T: HttpTransport, S: Signer, C: Clock, O: Obser
     };
     let intent = WriteIntent::new(procedures::BEGIN_UPLOAD)
         .with_target_ref(head_ref)
-        .with_pack(*pack_id, bytes);
+        .with_pack(*pack_id, bytes)
+        .with_new_objects(new_objects);
     let opts = Opts {
         identity,
         intent: Some(&intent),
@@ -42,11 +44,14 @@ pub(crate) async fn upload_pack<T: HttpTransport, S: Signer, C: Clock, O: Observ
     rpc: &Rpc<'_, T, S, C, O>,
     pack_id: &Hash,
     pack: &[u8],
+    ticket_id: Option<Hash>,
     ticket_token: Option<Vec<u8>>,
     new_objects: Option<&[Hash]>,
     identity: Option<&Identity>,
 ) -> Called<UploadPackResponse> {
+    let tickets: Vec<Hash> = ticket_id.into_iter().collect();
     let intent = WriteIntent::new(procedures::UPLOAD_PACK)
+        .with_tickets(&tickets)
         .with_pack(*pack_id, pack.len() as u64)
         .with_new_objects(new_objects);
     let opts = Opts {
@@ -70,13 +75,15 @@ pub(crate) async fn upload_part<T: HttpTransport, S: Signer, C: Clock, O: Observ
     plan: &PartPlan,
     index: u32,
     part: &[u8],
+    new_objects: Option<&[Hash]>,
     identity: Option<&Identity>,
 ) -> Called<UploadPartResponse> {
     let commitment = part_commitment(ticket_id, plan, index, part)?;
     let tickets = [ticket_id];
     let intent = WriteIntent::new(procedures::UPLOAD_PART)
         .with_tickets(&tickets)
-        .with_part(index, part.len() as u64);
+        .with_part(index, part.len() as u64)
+        .with_new_objects(new_objects);
     let opts = Opts {
         identity,
         intent: Some(&intent),
@@ -96,6 +103,7 @@ pub(crate) async fn complete_upload<T: HttpTransport, S: Signer, C: Clock, O: Ob
     ticket_id: Option<Hash>,
     ticket_token: Option<Vec<u8>>,
     receipts: Vec<Vec<u8>>,
+    new_objects: Option<&[Hash]>,
     identity: Option<&Identity>,
 ) -> Called<CompleteUploadResponse> {
     let request = CompleteUploadRequest {
@@ -104,7 +112,9 @@ pub(crate) async fn complete_upload<T: HttpTransport, S: Signer, C: Clock, O: Ob
         ..Default::default()
     };
     let tickets: Vec<Hash> = ticket_id.into_iter().collect();
-    let intent = WriteIntent::new(procedures::COMPLETE_UPLOAD).with_tickets(&tickets);
+    let intent = WriteIntent::new(procedures::COMPLETE_UPLOAD)
+        .with_tickets(&tickets)
+        .with_new_objects(new_objects);
     let opts = Opts {
         identity,
         intent: Some(&intent),

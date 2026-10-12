@@ -270,7 +270,7 @@ async fn upload<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
 ) -> Result<Option<Hash>, Error> {
     let ticket = if bytes.len() as u64 >= limits.ticket_threshold_bytes {
         let (response, _) =
-            calls::begin_upload(rpc, head_ref, key, bytes.len() as u64, None).await?;
+            calls::begin_upload(rpc, head_ref, key, bytes.len() as u64, objects, None).await?;
         match response.result {
             Some(begin_upload_response::Result::AlreadyPresent(_)) => return Ok(None),
             Some(begin_upload_response::Result::Ticket(ticket)) => Some(ticket),
@@ -330,20 +330,31 @@ async fn upload<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
             )
             .map_err(|_| Error::Invalid("part length"))?;
             let part = &bytes[offset..offset + len];
-            let (response, _) =
-                calls::upload_part(rpc, id, ticket.token.clone(), &plan, index, part, None).await?;
+            let (response, _) = calls::upload_part(
+                rpc,
+                id,
+                ticket.token.clone(),
+                &plan,
+                index,
+                part,
+                objects,
+                None,
+            )
+            .await?;
             let receipt = response
                 .receipt
                 .filter(|receipt| !receipt.is_empty() && receipt.len() <= 512)
                 .ok_or(Error::Invalid("part receipt"))?;
             receipts.push(receipt);
         }
-        calls::complete_upload(rpc, Some(id), ticket.token.clone(), receipts, None).await?;
+        calls::complete_upload(rpc, Some(id), ticket.token.clone(), receipts, objects, None)
+            .await?;
     } else {
         calls::upload_pack(
             rpc,
             key,
             bytes,
+            id,
             ticket.as_ref().and_then(|ticket| ticket.token.clone()),
             objects,
             None,

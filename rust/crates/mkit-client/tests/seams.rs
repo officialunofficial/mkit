@@ -99,12 +99,15 @@ fn error(status: u16, body: &str) -> Result<Response<Vec<u8>>, String> {
 struct TestClock {
     now: Cell<i64>,
     nonces: Cell<u8>,
+    /// Where `wait` leaves the clock, to land exactly on an expiry.
+    after_wait: Cell<Option<i64>>,
 }
 impl TestClock {
     fn new() -> Self {
         Self {
             now: Cell::new(1_000_000),
             nonces: Cell::new(0),
+            after_wait: Cell::new(None),
         }
     }
 }
@@ -116,7 +119,11 @@ impl Clock for TestClock {
         self.nonces.set(self.nonces.get() + 1);
         Ok([self.nonces.get(); 32])
     }
-    async fn wait(&self, _: Duration) {}
+    async fn wait(&self, _: Duration) {
+        if let Some(now) = self.after_wait.get() {
+            self.now.set(now);
+        }
+    }
 }
 
 /// Records every signing request. Refuses the procedures it is told to, and
@@ -1153,4 +1160,198 @@ fn a_window_cut_short_by_the_push_deadline_is_a_deadline_error() {
     .unwrap();
     let result = block_on(push.run(&script, &signer, &*clock));
     assert!(matches!(result, Err(Error::Deadline)), "{result:?}");
+}
+
+#[test]
+fn a_poll_that_lands_on_the_expiry_renews_the_envelope() {
+    let pending = pending_body();
+    let log = log();
+    let script = server(&log, move |call| match call {
+        1 => error(503, &pending),
+        _ => unary(&proto::AdvanceRefsResponse {
+            outcome: Some(proto::AdvanceOutcome::Committed.into()),
+            ..Default::default()
+        }),
+    });
+    let signer = PolicySigner::new(&log);
+    let observer = Recorder::new(&log);
+    let clock = TestClock::new();
+    // The envelope is created at 1_000_000 and expires 300 s later.
+    clock.after_wait.set(Some(1_300_000));
+    let (push, _) = push_fixture();
+    block_on(push.run_with(&script, &signer, &clock, &observer)).unwrap();
+    let advances: Vec<_> = script
+        .seen
+        .borrow()
+        .iter()
+        .filter(|r| method(r) == "AdvanceRefs")
+        .cloned()
+        .collect();
+    assert_eq!(advances.len(), 2);
+    assert_ne!(
+        header(&advances[0], "idempotency-key"),
+        header(&advances[1], "idempotency-key"),
+        "an envelope at its expiry is not re-sent"
+    );
+    let numbers: Vec<_> = observer
+        .seen
+        .borrow()
+        .iter()
+        .filter(|s| s.method == "AdvanceRefs")
+        .map(|s| s.attempt.number)
+        .collect();
+    assert_eq!(numbers, [1, 2]);
+}
+
+fn pending_body() -> String {
+    let detail = proto::PendingVerification {
+        retry_after_ms: Some(1000),
+        ..Default::default()
+    }
+    .encode_to_vec();
+    serde_json::json!({"code":"unavailable","details":[
+        {"type":"type.googleapis.com/mkit.transport.v1.PendingVerification",
+         "value":base64::engine::general_purpose::STANDARD.encode(detail)}]})
+    .to_string()
+}
+
+fn ticket_info() -> proto::GetServerInfoResponse {
+    proto::GetServerInfoResponse {
+        max_pack_bytes: Some(32 << 20),
+        begin_upload_threshold_bytes: Some(0),
+        ..info()
+    }
+}
+
+#[test]
+fn a_ticketed_multipart_push_reports_tickets_and_new_objects_on_each_rpc() {
+    let log = log();
+    let ticket = proto::UploadTicket {
+        id: Some([9; 32].to_vec()),
+        token: Some(vec![1, 2, 3]),
+        part_size: Some(8 << 20),
+        expires_unix_ms: Some(i64::MAX),
+        ..Default::default()
+    };
+    let script = Script::new(&log, move |_, request| match method(request).as_str() {
+        "GetServerInfo" => unary(&ticket_info()),
+        "BeginUpload" => unary(&proto::BeginUploadResponse {
+            result: Some(proto::begin_upload_response::Result::Ticket(Box::new(
+                ticket.clone(),
+            ))),
+            ..Default::default()
+        }),
+        "UploadPart" => stream(&proto::UploadPartResponse {
+            receipt: Some(vec![7]),
+            ..Default::default()
+        }),
+        "UploadPack" => stream(&proto::UploadPackResponse::default()),
+        "CompleteUpload" => unary(&proto::CompleteUploadResponse::default()),
+        "ReadRef" => unary(&proto::ReadRefResponse {
+            exists: Some(false),
+            ..Default::default()
+        }),
+        "AdvanceRefs" => unary(&proto::AdvanceRefsResponse {
+            outcome: Some(proto::AdvanceOutcome::Committed.into()),
+            ..Default::default()
+        }),
+        other => panic!("unexpected {other}"),
+    });
+    let limits = Limits::from_server_info(&ticket_info(), 16 << 20, 64 << 20).unwrap();
+    let bytes = serialize(&Object::Blob(Blob {
+        data: vec![1; (8 << 20) + 1000],
+    }))
+    .unwrap();
+    let id = hash(&bytes);
+    let plan = Plan::prepare([Entry::Raw { id, bytes }], limits).unwrap();
+    let push = Push::new(
+        destination(),
+        "main",
+        RefWriteCondition::Missing,
+        [4; 32],
+        PackmapMode::Append {
+            self_contained: true,
+        },
+        plan,
+        i64::MAX,
+    )
+    .unwrap();
+    let signer = PolicySigner::new(&log);
+    let observer = Recorder::new(&log);
+    let clock = TestClock::new();
+    block_on(push.run_with(&script, &signer, &clock, &observer)).unwrap();
+
+    let seen = observer.seen.borrow();
+    let methods: Vec<_> = seen.iter().map(|s| s.method.as_str()).collect();
+    assert_eq!(
+        methods,
+        [
+            "BeginUpload",
+            "UploadPart",
+            "UploadPart",
+            "CompleteUpload",
+            "BeginUpload",
+            "UploadPack",
+            "AdvanceRefs"
+        ]
+    );
+    // The data pack: every RPC of its upload names the object and the ticket.
+    for step in &seen[..4] {
+        assert_eq!(
+            step.new_objects.as_deref(),
+            Some(&[id][..]),
+            "{}",
+            step.method
+        );
+    }
+    assert_eq!(seen[1].tickets, [[9; 32]]);
+    assert_eq!(seen[2].part_index, Some(1));
+    assert_eq!(seen[3].tickets, [[9; 32]]);
+    // The packmap node: ticketed single-shot, no objects.
+    assert!(seen[4].new_objects.is_none() && seen[5].new_objects.is_none());
+    assert_eq!(seen[5].tickets, [[9; 32]]);
+    // The advance consumes both tickets.
+    assert_eq!(seen[6].tickets.len(), 2);
+}
+
+#[test]
+fn a_pack_with_a_delta_entry_reports_no_new_objects() {
+    let log = log();
+    let script = server(&log, |_| {
+        unary(&proto::AdvanceRefsResponse {
+            outcome: Some(proto::AdvanceOutcome::Committed.into()),
+            ..Default::default()
+        })
+    });
+    let limits = Limits::from_server_info(&info(), 1 << 16, 1 << 20).unwrap();
+    let plan = Plan::prepare(
+        [
+            blob(1),
+            Entry::Delta {
+                base: [1; 32],
+                stream: vec![0; 4],
+            },
+        ],
+        limits,
+    )
+    .unwrap();
+    let push = Push::new(
+        destination(),
+        "main",
+        RefWriteCondition::Missing,
+        [4; 32],
+        PackmapMode::Append {
+            self_contained: true,
+        },
+        plan,
+        i64::MAX,
+    )
+    .unwrap();
+    let signer = PolicySigner::new(&log);
+    let observer = Recorder::new(&log);
+    let clock = TestClock::new();
+    block_on(push.run_with(&script, &signer, &clock, &observer)).unwrap();
+    let seen = observer.seen.borrow();
+    assert_eq!(seen[0].method, "UploadPack");
+    assert!(seen[0].new_objects.is_none());
 }
