@@ -151,10 +151,10 @@ object's block. First-in-batch failure precedence is preserved.
 No pack range, staging apply, or provisional write overlaps a denial wave.
 EmitIndex and inline index writes recheck their ObjectIndex puts in the existing
 put order before each direct apply. Their per-batch planning deadlines are
-created at the same boundary as before. The earlier inline denial precheck stays
-serial: it precedes signature and closure validation and inventory staging.
-Extract retains a fresh denial before each chunk's frame read; prefetching later
-chunks would move their checks ahead of earlier chunks' I/O and effects. Rows already staged are
+created at the same boundary as before. The earlier inline denial precheck uses
+the same waves before signature and closure validation. Extract retains a fresh
+denial before each chunk's frame read and each member frame's subjects;
+prefetching would move later checks ahead of earlier I/O and effects. Rows already staged are
 skipped, so a replay after a lost reply or a crash writes nothing twice. The
 head guard keeps stagers of one pack serial. Entries with reference pages retain
 an early replay lookup, refresh their plan after page staging, and stage alone.

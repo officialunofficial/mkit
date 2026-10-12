@@ -20,8 +20,8 @@ collect the applicable entries between their old and new immutable pins.
   rows or the direct index apply. First failing object
   in batch order still selects blocked or unavailable. Successful batches keep
   one call per object; a failed wave completes already-issued reads and skips
-  later waves. The early inline pre-staging check and per-chunk extraction
-  checks stay at their existing serial boundaries.
+  later waves. The inline verifier's pre-staging check uses the same waves at its
+  existing boundary; per-chunk and per-frame extraction checks stay serial.
   `verification_inventory_progress.denial_ms` now reports wave
   wall time rather than summed per-call time. No API, wire, hook, stored-format,
   project-limit, or store-reset change is required.

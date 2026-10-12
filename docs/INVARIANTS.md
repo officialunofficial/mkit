@@ -2595,7 +2595,8 @@ All responses in a wave finish before failures are examined in batch order.
 No frame, candidate, or index row for the batch precedes successful denial
 admission. EmitIndex and inline index writes use the same helper in their
 existing put order before each direct apply. The earlier inline pre-staging
-check and Extract's per-chunk checks retain their existing serial boundaries.
+check uses the same waves at its existing boundary. Extract's per-chunk and
+per-frame checks retain their existing serial boundaries.
 Decode denial time records wave wall time, not summed call durations.
 
 **Because:** staging must expose objects to a concurrent takedown before denial

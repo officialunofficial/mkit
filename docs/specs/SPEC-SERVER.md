@@ -1591,7 +1591,7 @@ in bounded concurrent waves. A failed wave MUST report the first failing object
 in batch order, whether blocked or unavailable, and MUST NOT admit the batch.
 Informative: scheduled and inline direct index writes use the same bounded
 waves, preserving ObjectIndex put order and rechecking denial before each apply.
-The earlier inline pre-staging check remains at its existing boundary.
+The earlier inline pre-staging check uses the same waves at its existing boundary.
 
 A scheduled Decode checkpoint MUST commit after, or atomically with, the completed
 entry's provisional writes and include its post-entry cursor, under the existing job and verification

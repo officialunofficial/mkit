@@ -970,9 +970,7 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
             }
         }
     }
-    for id in staged.keys() {
-        crate::takedown::denial::require_clear(store, id).await?;
-    }
+    crate::takedown::denial::require_clear_many(store, staged.keys().copied()).await?;
     for (id, (_, object, _)) in &staged {
         if verify_object_signature(object).is_err() {
             let owner = staged_owner[id];
