@@ -239,7 +239,7 @@ pub(super) async fn page<S: BucketSource>(
     merge(repo, prefix, scans, page_size, byte_budget)
 }
 
-/// The serial `page` for a read operation: the sources are independent scans, so each
+/// Waved counterpart of `page` for a read operation: the sources are independent scans, so each
 /// wave of up to [`crate::store::read_io::parallelism`] of them is reserved
 /// against the operation's call ledger and dispatched together. The page is
 /// the same; only the number of sequential rounds changes. A failed source
