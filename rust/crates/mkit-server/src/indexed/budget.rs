@@ -518,7 +518,7 @@ mod tests {
     #[test]
     fn read_allowance_hints_include_every_ledger_without_charging() {
         use crate::{MemoryBlobStore, MemoryKv};
-        let inherited = SliceBudget::new(9);
+        let inherited = SliceBudget::new(5);
         let calls = SliceBudget::with_parent(10, inherited.clone());
         let session = SliceBudget::new(8);
         let encoded = EncodedBudget::new(100);
@@ -528,15 +528,15 @@ mod tests {
         let blobs = Budgeted::new(&blobs, &calls)
             .with_session(&session)
             .with_encoded(&encoded);
-        assert_eq!(meta.read_call_allowance(), Some(8));
-        assert_eq!(blobs.read_call_allowance(), Some(8));
+        assert_eq!(meta.read_call_allowance(), Some(5));
+        assert_eq!(blobs.read_call_allowance(), Some(5));
         assert_eq!(blobs.read_byte_allowance(), Some(100));
         assert_eq!((calls.used(), session.used(), inherited.used()), (0, 0, 0));
         calls.charge_many(3).unwrap();
         session.charge_many(4).unwrap();
         encoded.charge(25).unwrap();
-        assert_eq!(meta.read_call_allowance(), Some(4));
-        assert_eq!(blobs.read_call_allowance(), Some(4));
+        assert_eq!(meta.read_call_allowance(), Some(2));
+        assert_eq!(blobs.read_call_allowance(), Some(2));
         assert_eq!(blobs.read_byte_allowance(), Some(75));
         assert!(!calls.refused() && !session.refused() && !inherited.refused());
     }

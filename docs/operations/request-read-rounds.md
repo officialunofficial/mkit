@@ -3,7 +3,7 @@
 The sequential-round probe uses a paused clock and the shared six-call read
 admission. Each storage call costs one virtual latency unit. Round counts
 measure dependencies, not elapsed production latency. The baseline is commit
-`2e25d163`. The probe retains the existing shape ceilings and records every
+`2e25d163`; later main commits do not change these probe shapes. The probe retains the existing shape ceilings and records every
 row's before/after rounds and metadata-call delta.
 
 Run from **rust/**:
@@ -110,7 +110,8 @@ All original call, byte, operation, deadline, and wire limits remain in place.
 
 Two accounting consequences are deliberate. A wave is prepaid, so when one
 member of a wave fails or refuses, its already-dispatched siblings stay charged
-(serial code would have stopped at the first failure); successful shapes are
+(serial code would have stopped at the first failure), including the implicit
+packmap prologue when a malformed packmap is refused; successful shapes are
 unaffected. Warming also raises the per-commit call cost of first-parent
 history (about +14% with denial off and +5% with denial on), so the largest
 page that completes inside the fixed per-invocation call allowance shrinks by

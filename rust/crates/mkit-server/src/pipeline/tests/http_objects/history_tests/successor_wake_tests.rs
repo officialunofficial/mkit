@@ -170,3 +170,45 @@ fn successor_wake_preserves_denied_absent_unauthorized_and_mixed_results() {
         }
     }
 }
+
+#[test]
+fn successor_wake_read_faults_neither_flag_exhaustion_nor_change_results() {
+    let baseline = {
+        let (fx, _, _, _) = history(3, 0, 1, true);
+        first_parent_walk(&fx)
+    };
+    assert!(matches!(baseline, Ok(Some(_))));
+    let (fx, commits, _, _) = history(3, 0, 1, true);
+    let parent = id(&commits[1]);
+    let armed = [
+        crate::store::keys::object_index_range(&fx.repo_id("room").name, &parent).0,
+        crate::store::keys::block(&parent),
+    ];
+    fx.pipe.meta.fail_once_keys.lock().unwrap().extend(armed);
+    assert_eq!(first_parent_walk(&fx), baseline);
+    assert!(
+        fx.pipe.meta.fail_once_keys.lock().unwrap().is_empty(),
+        "both speculative reads were dispatched and failed"
+    );
+}
+
+fn first_parent_walk(fx: &Fx) -> Result<Option<Vec<Hash>>, Code> {
+    let mut walked = None;
+    in_view(fx, false, |reader| {
+        walked = Some(
+            block_on(reader.walk_history_in(
+                &mut ReaderSession::default(),
+                HEAD,
+                None,
+                3,
+                HistoryOptions {
+                    mode: HistoryMode::FirstParent,
+                    ..HistoryOptions::default()
+                },
+            ))
+            .map(|page| page.map(|page| page.commits.iter().map(|commit| commit.id).collect()))
+            .map_err(|error| error.code()),
+        );
+    });
+    walked.unwrap()
+}

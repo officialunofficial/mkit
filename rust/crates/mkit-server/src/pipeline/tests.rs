@@ -772,6 +772,8 @@ struct Spy {
     calls: AtomicU32,
     touched: Mutex<Vec<Partition>>,
     fail_next_apply: Arc<AtomicBool>,
+    /// Single-key reads that fail once, then succeed.
+    fail_once_keys: Mutex<Vec<Key>>,
 }
 
 impl Spy {
@@ -797,6 +799,7 @@ impl Spy {
             calls: AtomicU32::new(0),
             touched: Mutex::default(),
             fail_next_apply: Arc::new(AtomicBool::new(false)),
+            fail_once_keys: Mutex::default(),
         }
     }
 
@@ -907,6 +910,13 @@ impl NamespaceStore for Spy {
         self.pause_read(p, crate::store::read_probe::phase(key.as_bytes()), "get")
             .await;
         self.maybe_fail_read()?;
+        {
+            let mut armed = self.fail_once_keys.lock().unwrap();
+            if let Some(at) = armed.iter().position(|armed| armed == key) {
+                armed.remove(at);
+                return Err(StoreError::unavailable("injected one-shot read fault"));
+            }
+        }
         self.saw(key);
         self.inner.get(p, key).await
     }

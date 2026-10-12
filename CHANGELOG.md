@@ -402,7 +402,8 @@ collect the applicable entries between their old and new immutable pins.
 ### Performance
 
 - Request reads use bounded waves for ref listing, sealed inventory, and
-  contiguous raw members in mixed raw/delta batches. Lease reads, implicit
+  contiguous raw members in mixed raw/delta batches, fresh dependency denials,
+  and publication dependency rechecks. Lease reads, implicit
   packmap prologues, and pure continuation reads overlap independent work.
   Ordered result handling retains refusal and uniform-absence precedence;
   unknown or tight allowances retain serial admission. Optional first-parent
