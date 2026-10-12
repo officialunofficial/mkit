@@ -120,12 +120,12 @@ check_tree "mkit-rpc (transport-messages)" "rust/crates/mkit-rpc" "--features tr
 # mkit-client is the runtime-independent protocol client: no async runtime, no
 # HTTP stack, no C compression, with the default pure-Rust zstd decoder.
 check_tree "mkit-client" "rust/crates/mkit-client" "" "buffa mkit-rpc ruzstd" \
-    blst zstd-sys commonware-runtime commonware-storage tokio hyper connectrpc
+    blst zstd-sys commonware-runtime commonware-storage tokio hyper reqwest connectrpc
 check_tree "mkit-client (no zstd decoder)" "rust/crates/mkit-client" "--no-default-features" "buffa mkit-rpc" \
-    blst zstd-sys ruzstd commonware-runtime commonware-storage tokio hyper connectrpc
+    blst zstd-sys ruzstd commonware-runtime commonware-storage tokio hyper reqwest connectrpc
 # The deprecated re-export crate must not widen the graph.
 check_tree "mkit-push" "rust/crates/mkit-push" "" "buffa mkit-rpc mkit-client" \
-    blst zstd-sys commonware-runtime commonware-storage tokio hyper connectrpc
+    blst zstd-sys commonware-runtime commonware-storage tokio hyper reqwest connectrpc
 
 if [ "$fail" -ne 0 ]; then
   echo

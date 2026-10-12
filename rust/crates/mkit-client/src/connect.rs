@@ -133,12 +133,23 @@ pub struct RemoteError {
 /// replay the same call after a restart; the server then answers from its saved
 /// reply instead of applying the operation again (SPEC-TRANSPORT-CONNECT §7.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Identity {
     pub nonce: Hash,
     pub created_at_ms: i64,
     pub expires_at_ms: i64,
 }
 impl Identity {
+    /// Restore an identity, for example one persisted before a restart.
+    #[must_use]
+    pub fn new(nonce: Hash, created_at_ms: i64, expires_at_ms: i64) -> Self {
+        Self {
+            nonce,
+            created_at_ms,
+            expires_at_ms,
+        }
+    }
+
     /// The `Idempotency-Key` header value: the nonce as 64 lowercase hex.
     #[must_use]
     pub fn idempotency_key(&self) -> String {
@@ -157,6 +168,7 @@ impl Identity {
 /// A successful per-RPC result with the identity the request used. The identity
 /// is `None` for anonymous and discovery calls.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Reply<R> {
     pub value: R,
     pub identity: Option<Identity>,
@@ -367,7 +379,7 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Rpc<'a, T, S, C> {
         };
         let body = framed(&request.encode_to_vec())?;
         let commitment = format!("body:{}", to_hex(&hash(&body)));
-        let overhead = usize::try_from(cap / 1024)
+        let overhead = usize::try_from(cap / 512)
             .unwrap_or(usize::MAX)
             .saturating_add(8192);
         let limit = usize::try_from(cap)
@@ -385,7 +397,8 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Rpc<'a, T, S, C> {
         let mut out = Vec::new();
         let mut expected = None;
         let mut last = false;
-        for frame in decode_stream(&bytes)? {
+        for frame in Frames::new(&bytes) {
+            let frame = frame?;
             let response = DownloadPackResponse::decode_from_slice(frame)
                 .map_err(|_| Error::Invalid("download protobuf"))?;
             match response.body {
@@ -747,40 +760,80 @@ pub(crate) fn frame(body: &mut Vec<u8>, bytes: &[u8]) -> Result<(), Error> {
     Ok(())
 }
 
-pub(crate) fn decode_stream(bytes: &[u8]) -> Result<Vec<&[u8]>, Error> {
-    let mut frames = Vec::new();
-    let mut rest = bytes;
-    while !rest.is_empty() {
-        if rest.len() < 5 {
-            return Err(Error::Invalid("Connect frame header"));
-        }
-        let flag = rest[0];
-        let len = u32::from_be_bytes(
-            rest[1..5]
-                .try_into()
-                .map_err(|_| Error::Invalid("Connect frame size"))?,
-        ) as usize;
-        let frame = rest
-            .get(5..5_usize.saturating_add(len))
-            .ok_or(Error::Invalid("truncated Connect frame"))?;
-        rest = &rest[5 + len..];
-        match flag {
-            0 => frames.push(frame),
-            2 if rest.is_empty() => {
-                let end: serde_json::Value = serde_json::from_slice(frame)
-                    .map_err(|_| Error::Invalid("Connect end JSON"))?;
-                if let Some(error) = end.get("error") {
-                    return Err(Error::Remote(Box::new(
-                        serde_json::from_value(error.clone())
-                            .map_err(|_| Error::Invalid("Connect end error"))?,
-                    )));
-                }
-                return Ok(frames);
-            }
-            _ => return Err(Error::Invalid("Connect frame flags/order")),
+/// Lazily parsed Connect frames: yields each data frame, then stops at a clean
+/// end frame; a missing, malformed or error end frame is an `Err`. Nothing is
+/// collected, so a hostile run of tiny frames costs no allocation here.
+pub(crate) struct Frames<'a> {
+    rest: &'a [u8],
+    done: bool,
+}
+impl<'a> Frames<'a> {
+    pub(crate) fn new(bytes: &'a [u8]) -> Self {
+        Self {
+            rest: bytes,
+            done: false,
         }
     }
-    Err(Error::Invalid("missing Connect end frame"))
+}
+impl<'a> Iterator for Frames<'a> {
+    type Item = Result<&'a [u8], Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        let fail = |this: &mut Self, error: Error| {
+            this.done = true;
+            Some(Err(error))
+        };
+        let rest = self.rest;
+        if rest.is_empty() {
+            return fail(self, Error::Invalid("missing Connect end frame"));
+        }
+        if rest.len() < 5 {
+            return fail(self, Error::Invalid("Connect frame header"));
+        }
+        let flag = rest[0];
+        let len = u32::from_be_bytes([rest[1], rest[2], rest[3], rest[4]]) as usize;
+        let Some(frame) = rest.get(5..5_usize.saturating_add(len)) else {
+            return fail(self, Error::Invalid("truncated Connect frame"));
+        };
+        self.rest = &rest[5 + len..];
+        match flag {
+            0 => Some(Ok(frame)),
+            2 if self.rest.is_empty() => {
+                self.done = true;
+                match end_error(frame) {
+                    Ok(()) => None,
+                    Err(error) => Some(Err(error)),
+                }
+            }
+            _ => fail(self, Error::Invalid("Connect frame flags/order")),
+        }
+    }
+}
+
+/// The end frame of a stream: `{}` or `{"error": ...}`. A challenge error
+/// becomes `PaymentRequired`, like a unary one.
+fn end_error(frame: &[u8]) -> Result<(), Error> {
+    let end: serde_json::Value =
+        serde_json::from_slice(frame).map_err(|_| Error::Invalid("Connect end JSON"))?;
+    let Some(error) = end.get("error") else {
+        return Ok(());
+    };
+    let remote: RemoteError =
+        serde_json::from_value(error.clone()).map_err(|_| Error::Invalid("Connect end error"))?;
+    if challenged(Some(&remote)) {
+        return Err(Error::PaymentRequired(Box::new(admission_required(
+            Some(&remote),
+            &HeaderMap::new(),
+        )?)));
+    }
+    Err(Error::Remote(Box::new(remote)))
+}
+
+pub(crate) fn decode_stream(bytes: &[u8]) -> Result<Vec<&[u8]>, Error> {
+    Frames::new(bytes).collect()
 }
 
 #[cfg(test)]

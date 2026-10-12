@@ -51,7 +51,9 @@ identity from the clock and returns it. The window is at most 300 s.
 
 `unpack(pack_id, bytes, &mut sink, UnpackOptions::default())` verifies the
 signature of every commit, remix and tag before it reaches the sink, and rejects
-an unsigned or badly signed one (`Error::Signature`). `Verification::Skip` is
+an unsigned or badly signed one (`Error::Signature`). The check is integrity
+under the signer key embedded in the object; whether that key is trusted is the
+caller's decision. `Verification::Skip` is
 the explicit opt-out. A failed unpack can leave earlier verified objects in the
 sink: treat it as staging and publish refs only after success. Decoding is
 bounded by `UnpackOptions::limits` (the format maximum by default; size it down
@@ -66,7 +68,7 @@ for a constrained host). Delta bases that are not in the same pack come from
 | `pack-zstd` | Native only: the C zstd backend. Push writes compressed packs and reads use the C decoder. Pulls in `zstd-sys`. |
 | neither | Raw packs only; a compressed entry fails closed at runtime. |
 
-The default build is 88 crates (87 for wasm32). It contains no tokio, hyper,
+The default build contains no tokio, hyper,
 connectrpc, reqwest or zstd-sys; `scripts/check-wasm-dep-graph.sh` fails CI if
 one appears. CI builds the crate for `wasm32-unknown-unknown` with and without
 the default feature. With `pack-zstd` the writer compresses; the same feature
@@ -120,8 +122,8 @@ reconstruct the same plan on restart. A current head equal to the requested tip
 is treated as landed, as in the CLI. This is an observation of the requested
 state, not proof that a particular expired operation performed a write.
 
-This first slice accepts one bounded advance (at most six ticketed data packs
-plus one packmap ticket). It does not change the CLI's push path. The pack
+`Push` accepts one bounded advance (at most six ticketed data packs plus one
+packmap ticket) and does not change the CLI's push path. The pack
 encoding follows enabled `mkit-core` features: default builds write raw packs;
 a native host may enable the `pack-zstd` feature. The same feature choice and entry
 order are required to reproduce identical pack ids across restarts.

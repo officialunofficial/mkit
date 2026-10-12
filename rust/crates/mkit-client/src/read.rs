@@ -19,39 +19,57 @@ pub(crate) const MAX_CHAIN_PACKS: usize = 1_000_000;
 /// Walk a packmap chain from `root` along `prev`, newest node first. Bounded by
 /// depth, distinct pack count and cycle detection; every node is downloaded
 /// under its content commitment.
+///
+/// Each node goes to `visit` and is then dropped, so the walk retains only what
+/// the visitor keeps.
 pub(crate) async fn walk_nodes<T: HttpTransport, S: Signer, C: Clock>(
     rpc: &Rpc<'_, T, S, C>,
     root: Hash,
     head_ref: &str,
-) -> Result<Vec<PackListNode>, Error> {
+    mut visit: impl FnMut(PackListNode) -> Result<Option<Hash>, Error>,
+) -> Result<(), Error> {
     let mut cursor = Some(root);
     let mut seen = HashSet::new();
-    let mut packs = HashSet::new();
-    let mut nodes = Vec::new();
     while let Some(key) = cursor {
         if seen.len() >= MAX_CHAIN_DEPTH || !seen.insert(key) {
             return Err(Error::Limit("packmap depth/cycle"));
         }
         let node = transfer::decode_packlist(&rpc.download(key, head_ref).await?)?;
-        packs.extend(node.packs.iter().copied());
-        if packs.len() > MAX_CHAIN_PACKS {
+        cursor = visit(node)?;
+    }
+    Ok(())
+}
+
+/// Walk to a flat, oldest-first pack list. Retention is bounded by the total
+/// number of pack ids the nodes list (not only the distinct ones).
+pub(crate) async fn resolve<T: HttpTransport, S: Signer, C: Clock>(
+    rpc: &Rpc<'_, T, S, C>,
+    root: Hash,
+    head_ref: &str,
+) -> Result<Vec<Hash>, Error> {
+    let mut nodes: Vec<Vec<Hash>> = Vec::new();
+    let mut listed = 0_usize;
+    walk_nodes(rpc, root, head_ref, |node| {
+        listed = listed.saturating_add(node.packs.len());
+        if listed > MAX_CHAIN_PACKS {
             return Err(Error::Limit("packmap pack count"));
         }
-        cursor = node.prev;
-        nodes.push(node);
-    }
-    Ok(nodes)
+        nodes.push(node.packs);
+        Ok(node.prev)
+    })
+    .await?;
+    Ok(oldest_first(nodes))
 }
 
 /// Pack ids of a walked chain, oldest first (the order a fetcher unpacks so
 /// every delta base is already present). A pack named twice is listed once, at
 /// its first position.
-pub(crate) fn oldest_first(mut nodes: Vec<PackListNode>) -> Vec<Hash> {
+pub(crate) fn oldest_first(mut nodes: Vec<Vec<Hash>>) -> Vec<Hash> {
     nodes.reverse();
     let mut seen = HashSet::new();
     nodes
         .into_iter()
-        .flat_map(|node| node.packs)
+        .flatten()
         .filter(|id| seen.insert(*id))
         .collect()
 }
@@ -68,6 +86,8 @@ pub trait ObjectSink {
     /// Canonical bytes of an object the sink already holds, used as the base of
     /// a delta whose base is not in the same pack. `None` if absent. The bytes
     /// are re-hashed by the decoder, so a sink cannot substitute another object.
+    /// A base is not signature-checked: the sink is expected to hold only objects
+    /// it already accepted.
     ///
     /// # Errors
     /// A sink failure, which aborts the unpack.
@@ -97,8 +117,11 @@ impl ObjectSink for MemorySink {
 
 /// Signature policy for commits, remixes and tags. The default is `Require`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Verification {
-    /// Reject an unsigned or badly signed commit, remix or tag.
+    /// Reject an unsigned or badly signed commit, remix or tag. This checks
+    /// integrity under the signer key embedded in the object; deciding whether
+    /// that signer is trusted is the caller's job.
     #[default]
     Require,
     /// Explicit opt-out: store signed kinds without checking them.
@@ -107,15 +130,29 @@ pub enum Verification {
 
 /// Unpack options.
 #[derive(Clone, Copy, Debug, Default)]
+#[non_exhaustive]
 pub struct UnpackOptions {
     pub verification: Verification,
     /// Cap on bytes one decode allocates beyond the pack itself. The default
     /// is the format maximum; size it down for a constrained host.
     pub limits: DecodeLimits,
 }
+impl UnpackOptions {
+    #[must_use]
+    pub fn with_verification(mut self, verification: Verification) -> Self {
+        self.verification = verification;
+        self
+    }
+    #[must_use]
+    pub fn with_limits(mut self, limits: DecodeLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+}
 
 /// What an unpack stored.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Unpacked {
     pub raw_count: usize,
     pub delta_count: usize,

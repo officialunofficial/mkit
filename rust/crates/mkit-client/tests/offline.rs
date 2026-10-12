@@ -10,8 +10,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use buffa::Message;
 use http::{Request, Response};
 use mkit_client::{
-    Client, Clock, Destination, Error, HttpTransport, MemorySink, Signer, UnpackOptions,
-    Verification, proto, unpack,
+    Client, Clock, Destination, Error, HttpTransport, Identity as ClientIdentity, MemorySink,
+    Signer, UnpackOptions, Verification, proto, unpack,
 };
 use mkit_core::{
     admission::encode_admission_challenge,
@@ -394,10 +394,18 @@ fn invalid_identities_and_unsigned_writes_are_refused_before_sending() {
     let clock = clock();
     let client = Client::signed(&script, destination(), &signer, &clock);
     let mut identity = client.new_identity().unwrap();
-    identity.expires_at_ms = identity.created_at_ms + 300_001;
+    identity = ClientIdentity::new(
+        identity.nonce,
+        identity.created_at_ms,
+        identity.created_at_ms + 300_001,
+    );
     let error = block_on(client.read_ref("refs/heads/main", Some(&identity))).unwrap_err();
     assert!(matches!(error, Error::Invalid(_)));
-    identity.expires_at_ms = identity.created_at_ms;
+    identity = ClientIdentity::new(
+        identity.nonce,
+        identity.created_at_ms,
+        identity.created_at_ms,
+    );
     assert!(block_on(client.read_ref("refs/heads/main", Some(&identity))).is_err());
 
     let anonymous = Client::anonymous(&script, destination());
@@ -620,10 +628,7 @@ fn unpack_verifies_signatures_by_default_and_fails_closed() {
     assert!(sink.objects.is_empty());
 
     // The explicit opt-out stores both.
-    let skip = UnpackOptions {
-        verification: Verification::Skip,
-        ..UnpackOptions::default()
-    };
+    let skip = UnpackOptions::default().with_verification(Verification::Skip);
     let mut sink = MemorySink::default();
     unpack(&pack_id, &pack, &mut sink, skip).unwrap();
     assert!(sink.objects.contains_key(&id_tampered));
@@ -661,4 +666,37 @@ fn a_failing_sink_aborts_the_unpack() {
     let (pack_id, _, pack) = pack_of(&signed);
     let error = unpack(&pack_id, &pack, &mut Full, UnpackOptions::default()).unwrap_err();
     assert!(matches!(error, Error::Sink(message) if message == "disk full"));
+}
+
+#[test]
+fn a_stream_end_frame_challenge_is_a_typed_payment_required() {
+    let (key, _) = sample_pack(1);
+    let script = Script::new(move |_| {
+        let mut body = Vec::new();
+        let detail = encode_admission_challenge(&[("mpp", "v")], "pay");
+        let end = serde_json::json!({"error": {"code":"permission_denied","details":[
+            {"type":"mkit.transport.v1.AdmissionChallenge","value":STANDARD.encode(detail)}]}})
+        .to_string();
+        body.push(2);
+        body.extend_from_slice(&u32::try_from(end.len()).unwrap().to_be_bytes());
+        body.extend_from_slice(end.as_bytes());
+        proto_reply("application/connect+proto", body)
+    });
+    let error = block_on(anonymous(&script).download_pack(&key, None, 1 << 20, None)).unwrap_err();
+    assert!(matches!(error, Error::PaymentRequired(r) if r.challenges.len() == 1));
+}
+
+#[test]
+fn a_flood_of_empty_frames_is_rejected_without_collecting_them() {
+    let (key, _) = sample_pack(1);
+    let script = Script::new(move |_| {
+        let mut body = Vec::new();
+        for _ in 0..10_000 {
+            frame(&mut body, &[]);
+        }
+        end(&mut body);
+        proto_reply("application/connect+proto", body)
+    });
+    let error = block_on(anonymous(&script).download_pack(&key, None, 1 << 20, None)).unwrap_err();
+    assert!(matches!(error, Error::Invalid(_)), "{error:?}");
 }

@@ -1,3 +1,4 @@
+const MAX_CHAIN_PACKS: usize = crate::read::MAX_CHAIN_PACKS;
 use crate::connect::{Built, RESPONSE_LIMIT, Rpc, pending_delay};
 use crate::{
     Clock, Destination, Error, HttpTransport, Plan, Signer,
@@ -467,11 +468,16 @@ async fn walk_chain<T: HttpTransport, S: Signer, C: Clock>(
     root: Hash,
     head_ref: &str,
 ) -> Result<HashSet<Hash>, Error> {
-    Ok(crate::read::walk_nodes(rpc, root, head_ref)
-        .await?
-        .into_iter()
-        .flat_map(|node| node.packs)
-        .collect())
+    let mut packs = HashSet::new();
+    crate::read::walk_nodes(rpc, root, head_ref, |node| {
+        packs.extend(node.packs.iter().copied());
+        if packs.len() > MAX_CHAIN_PACKS {
+            return Err(Error::Limit("packmap pack count"));
+        }
+        Ok(node.prev)
+    })
+    .await?;
+    Ok(packs)
 }
 
 /// One `AdvanceRefs` with the whole-push waits: poll a definitive pending or

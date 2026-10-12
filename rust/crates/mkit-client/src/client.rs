@@ -49,6 +49,7 @@ impl Clock for NoClock {
 
 /// A ref from a listing.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct NamedRef {
     pub name: String,
     pub id: Hash,
@@ -56,6 +57,7 @@ pub struct NamedRef {
 
 /// One `ListRefs` page.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct RefPage {
     /// Names have the requested prefix stripped (SPEC-REFS §4).
     pub refs: Vec<NamedRef>,
@@ -299,8 +301,9 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Client<'a, T, S, C> {
 
     /// `DownloadPack`, bounded by `max_bytes`: a larger declared size or a
     /// longer response is [`Error::Limit`]. The pack must hash to `pack_id`.
-    /// Peak memory is the buffered response plus the returned pack, about twice
-    /// `max_bytes`.
+    /// The transport buffers the response (at most `max_bytes` plus
+    /// framing) and the returned pack is a second copy, so peak memory is about
+    /// twice `max_bytes`.
     ///
     /// # Errors
     /// Transport, remote, limit or commitment failures.
@@ -330,10 +333,9 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Client<'a, T, S, C> {
         packmap_root: Hash,
         ref_hint: &str,
     ) -> Result<Vec<Hash>, Error> {
-        let nodes = crate::read::walk_nodes(&self.rpc(), packmap_root, ref_hint)
+        crate::read::resolve(&self.rpc(), packmap_root, ref_hint)
             .await
-            .map_err(Error::typed)?;
-        Ok(crate::read::oldest_first(nodes))
+            .map_err(Error::typed)
     }
 
     /// `UpdateRef`: a compare-and-swap write of `name` to `new_id`. A failed
