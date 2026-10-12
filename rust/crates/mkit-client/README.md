@@ -80,10 +80,9 @@ default observer does nothing, and a signer that implements only
   `RefMove`s the request carries (name, `old` precondition, `new`: `Set`,
   `Delete` or `CopyFrom`), the target ref, pack id and length, ticket ids, the
   part index and, for a whole push whose pack holds only raw entries, the ids
-  of the objects it introduces (`new_objects`, reported on each RPC of that pack's upload, ticketed or not;
-  `None` when unknown, as for a pack with a delta entry, the packmap node and
-  every per-RPC upload). Intents
-  are built from the request being sent, so the observer sees exactly what the
+  of the objects it introduces (`new_objects`, reported on each RPC of that
+  pack's upload, ticketed or not; `None` when unknown, as for a pack with a
+  delta entry, the packmap node and every per-RPC upload). Intents are built from the request being sent, so the observer sees exactly what the
   server receives; an `advance_refs` request whose ids or expectations are
   malformed is `Error::Invalid` before any seam runs, with or without an
   observer. A branch copy (`source_ref`) names only the destination head; the

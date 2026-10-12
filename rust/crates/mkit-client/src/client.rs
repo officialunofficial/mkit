@@ -532,8 +532,8 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Client<'_, T, S, C, O> 
     /// [`Observer`] runs (and may veto or add headers); then the signer sees the
     /// operation (and may refuse); then a window that has already ended is
     /// [`Error::EnvelopeExpired`]. A write procedure (see
-    /// [`procedures`]) requires an `intent` for that procedure, so the observer
-    /// cannot be skipped; other procedures are not observed. The attempt number
+    /// [`procedures`]) cannot be signed without an `intent` for it; any other
+    /// procedure is observed only when an `intent` is passed. The attempt number
     /// is always 1. The observer sees the intent the host passes: build it from
     /// the body that will be sent, because the client cannot check it against the
     /// commitment. The result carries the envelope headers
