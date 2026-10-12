@@ -353,6 +353,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         refs: &[crate::op::RefUpdate],
         ahead: Option<&super::Snapshot>,
     ) -> Result<Vec<ResolvedRefUpdate>, ServerError> {
+        for (i, update) in refs.iter().enumerate() {
+            if refs[..i].iter().any(|prior| prior.name == update.name) {
+                return Err(ServerError::invalid_argument(
+                    "duplicate ref name; use distinct destination refs",
+                ));
+            }
+        }
         let mut resolved = Vec::with_capacity(refs.len());
         for update in refs {
             let present = match update.condition {

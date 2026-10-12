@@ -181,6 +181,61 @@ fn explicit_ref_effects_and_outcomes_cover_create_replace_delete_and_absent_dele
 }
 
 #[test]
+fn custom_admission_rejects_duplicate_ref_creates_and_deletes_before_reserving() {
+    for deleting in [false, true] {
+        let clock = clock();
+        let env = build(
+            cfg(authv2()),
+            Spy::new(store(&clock)),
+            with_admission(Effects::default()),
+            clock,
+        );
+        if deleting {
+            seed(&env.pipe.meta.inner, &[(HEAD, A)]);
+        }
+        let before = env.rows();
+        let update = RefUpdate {
+            name: HEAD.into(),
+            condition: if deleting { Match(A) } else { Missing },
+            new: if deleting { None } else { Some(B) },
+        };
+        let req = Req::signed(&key(7), Procedure::AdvanceRefs, b"duplicate", &nonce(1), T0);
+        let error = env.advance(&req, &update, &update).unwrap_err();
+        assert_eq!(error.code(), Code::InvalidArgument);
+        assert!(env.pipe.hooks.admission.0.lock().unwrap().is_empty());
+        assert!(env.batches().is_empty());
+        assert_eq!(
+            env.rows(),
+            before,
+            "no ref, replay, quota, or reservation changes"
+        );
+    }
+}
+
+#[test]
+fn default_admission_preserves_duplicate_ref_creates_and_deletes() {
+    let env = env(AuthMode::Open);
+    let create = upd(HEAD, Missing, A);
+    assert_eq!(
+        env.advance(&Req::unsigned(Procedure::AdvanceRefs), &create, &create)
+            .unwrap(),
+        AdvanceOutcome::Committed
+    );
+    assert_eq!(env.read(HEAD), Some(A));
+    let delete = RefUpdate {
+        name: HEAD.into(),
+        condition: Match(A),
+        new: None,
+    };
+    assert_eq!(
+        env.advance(&Req::unsigned(Procedure::AdvanceRefs), &delete, &delete)
+            .unwrap(),
+        AdvanceOutcome::Committed
+    );
+    assert_eq!(env.read(HEAD), None);
+}
+
+#[test]
 fn ticketless_advance_admits_both_ref_effects() {
     let clock = clock();
     let env = build(

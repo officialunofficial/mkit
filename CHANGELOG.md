@@ -35,6 +35,8 @@ collect the applicable entries between their old and new immutable pins.
   or deletion, and `Create`, `Replace`, `Delete`, or `NoChange` (deletion of an
   absent ref). Original request CAS conditions remain in `Operation`; correlate
   the views by ref name, since effects use planner order (packmap before head).
+  Custom ref admission rejects duplicate destination names before invoking
+  the hook, so one ref cannot reserve or settle multiple presence effects.
   Successful applies fence these effects in their ref batch: conditional
   writes use CAS; unconditional writes retain the pre-admission presence
   through retries and abort if it changes. Present-to-present target changes

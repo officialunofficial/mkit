@@ -748,6 +748,10 @@ conditions with resolved effects, consumers MUST match ref names. `CREATE` adds 
 ref, `REPLACE` sets a present ref (including the same target), `DELETE`
 removes a present ref, and `NO_CHANGE` deletes an already absent ref. The
 server MUST fence each admitted effect in the same batch that applies it.
+With custom Admission, duplicate destination ref names MUST be rejected
+before invoking the hook or recording a reservation. Each admitted name
+therefore represents exactly one ref's presence effect. The built-in default
+retains its existing validation and accounting.
 The public deletion API still requires `MATCH`; deleting an absent ref there
 conflicts. `NO_CHANGE` represents the planner's absent-deletion case without
 widening that request validation. Published-pair branch creation supplies both

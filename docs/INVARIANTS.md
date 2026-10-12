@@ -14,7 +14,9 @@ effect before mutation, including ticketed advances, published-pair creation, an
 consumption. CAS conditions bind conditional writes. Unconditional writes
 carry the same presence observation across retries and guard it in the applying
 batch; a changed presence aborts the write. Deleting an absent ref is
-`NoChange`. Default Admission retains its existing accounting and paths.
+`NoChange`. Duplicate destination names are rejected before custom Admission,
+so a single ref cannot advertise multiple effects. Default Admission retains
+its existing accounting and paths.
 
 **Because:** an embedder may reserve ref capacity separately from pack bytes.
 The admitted presence delta must describe the successful apply exactly.

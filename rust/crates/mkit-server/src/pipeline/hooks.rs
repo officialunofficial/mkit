@@ -102,6 +102,7 @@ pub struct AdmissionInput<'a> {
     /// write rather than applying an effect the hook did not admit. Original
     /// request conditions remain available through [`Self::op`]. Entries follow
     /// planner order (packmap before head for an advance); correlate by name.
+    /// Duplicate destination names are rejected before custom admission.
     pub resolved_ref_updates: Vec<ResolvedRefUpdate>,
 }
 
