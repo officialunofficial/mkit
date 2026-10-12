@@ -42,7 +42,9 @@ impl Target {
             .filter(|id| id.namespace().is_some())
     }
 
-    /// The namespace in the URL's repository, if any.
+    /// The self-certifying namespace in the URL's repository, if any. `None`
+    /// also for an authority-mode namespace, so use it only on a target from
+    /// [`resolve_strict_target`].
     #[must_use]
     pub fn namespace(&self) -> Option<Namespace> {
         self.repository().and_then(|id| id.namespace().copied())

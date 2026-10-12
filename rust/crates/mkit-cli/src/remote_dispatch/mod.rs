@@ -827,17 +827,20 @@ fn open_with_ssh_options(
 
 fn validate_connect_repository(url: &str) -> Result<(), DispatchError> {
     remote_identity_from_url(url).map_err(|reason| {
+        // Userinfo and queries are never echoed. A URL carrying either gets a
+        // generic message: its segments can't be trusted to exclude
+        // credential text.
+        if url.contains(['@', '?', '#']) {
+            return DispatchError::MalformedUrl(
+                "the remote URL is not a valid mkit+https:// remote; use mkit+https://<host>/<namespace>/<name> without userinfo or a query".to_owned(),
+            );
+        }
         let path = url
             .split_once("://")
             .and_then(|(_, rest)| rest.split_once('/'))
             .map_or("", |(_, path)| path)
-            .split(['?', '#'])
-            .next()
-            .unwrap_or("")
             .trim_matches('/');
-        DispatchError::MalformedUrl(format!(
-            "repository identity `{path}` in the remote URL: {reason}"
-        ))
+        DispatchError::MalformedUrl(format!("repository identity `{path}` in {url}: {reason}"))
     })?;
     Ok(())
 }
@@ -2383,6 +2386,16 @@ mod tests {
             !message.contains("secret") && !message.contains("q1"),
             "{message}"
         );
+        for url in [
+            "mkit+https://user:pa/ss@vcs.example/Bad/repo",
+            "mkit+https://user:12/ss@vcs.example/Bad/repo",
+        ] {
+            let message = super::open(url).err().expect("must fail").to_string();
+            assert!(
+                !message.contains("ss@") && !message.contains("pa/"),
+                "{message}"
+            );
+        }
     }
 
     #[test]

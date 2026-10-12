@@ -18,7 +18,9 @@ use crate::exit;
 use crate::format::{JsonObject, human_date_utc, json_string_array};
 use crate::grants::cli::{Ctx, parse_namespace, print_statement};
 use crate::grants::owner::{Kind, OwnerArgs, Produced, produce};
-use crate::grants::remote::{Target, check_audiences, resolve_strict_target};
+use crate::grants::remote::{
+    Target, check_audiences, refuse_authority_namespace, resolve_strict_target, resolve_target,
+};
 use crate::grants::spec::{
     DEFAULT_GRANT_TTL, GrantSpec, RepoSelector, build_grant, canonical_audiences,
     canonical_capabilities, canonical_ref_scopes, check_ref_scopes, parse_ttl,
@@ -187,8 +189,13 @@ pub fn run(args: &[String]) -> u8 {
 }
 
 fn optional_target(ctx: &Ctx, remote: Option<&str>) -> Result<Option<Target>, u8> {
-    match resolve_strict_target(&ctx.layered, remote) {
-        Ok(target) => Ok(Some(target)),
+    // An authority-mode namespace in a remote is refused even when the
+    // remote is only the configured default; "no remote" stays optional.
+    match resolve_target(&ctx.layered, remote) {
+        Ok(target) => {
+            refuse_authority_namespace(&target.endpoint).map_err(|e| usage_error(&e))?;
+            Ok(Some(target))
+        }
         Err(e) if remote.is_some() => Err(usage_error(&e)),
         Err(_) => Ok(None),
     }
