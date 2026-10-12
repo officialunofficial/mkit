@@ -37,11 +37,13 @@ pub mod procedures {
 /// One signed envelope: the nonce and window the signature covers, and which
 /// try of the call this is.
 ///
-/// `number` counts the envelopes built for one call in this process, from 1. A
-/// replay of the same bytes (a caller replaying an [`Identity`](crate::Identity)
-/// after a restart, a transport retry, or a pending-verification poll while the
-/// envelope is valid) is not a new attempt: it carries the same nonce, so a
-/// host keys its per-attempt record on `nonce`.
+/// `number` counts the envelopes built by one operation in this process, from
+/// 1. The seams run each time an envelope is built, so a caller who replays a
+/// persisted [`Identity`](crate::Identity) (for example after a restart) runs
+/// them again with the same nonce and number 1: a host keys its per-attempt
+/// record on `nonce` and replaces it. Re-sending already signed bytes (a
+/// pending-verification poll inside `Push::run_with`, a transport retry) does
+/// not build an envelope and does not call the seams.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Attempt {
@@ -49,6 +51,19 @@ pub struct Attempt {
     pub nonce: Hash,
     pub created_at_ms: i64,
     pub expires_at_ms: i64,
+}
+
+impl Attempt {
+    /// For a host's own tests of its seams.
+    #[must_use]
+    pub fn new(number: u32, nonce: Hash, created_at_ms: i64, expires_at_ms: i64) -> Self {
+        Self {
+            number,
+            nonce,
+            created_at_ms,
+            expires_at_ms,
+        }
+    }
 }
 
 /// What a [`Signer`](crate::Signer) is asked to sign, next to the domain
@@ -65,6 +80,26 @@ pub struct SigningRequest<'a> {
     pub commitment: ContentCommitment,
     /// Validity window and nonce; `attempt.number` is the try.
     pub attempt: Attempt,
+}
+
+impl<'a> SigningRequest<'a> {
+    /// For a host's own tests of its signer.
+    #[must_use]
+    pub fn new(
+        procedure: &'a str,
+        audience: &'a str,
+        repository: &'a str,
+        commitment: ContentCommitment,
+        attempt: Attempt,
+    ) -> Self {
+        Self {
+            procedure,
+            audience,
+            repository,
+            commitment,
+            attempt,
+        }
+    }
 }
 
 /// Why a signer did not sign.
@@ -93,11 +128,15 @@ impl SignError {
 
 /// An observer's refusal of a write. Becomes [`Error::Vetoed`].
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Veto(pub String);
+pub struct Veto(String);
 impl Veto {
     #[must_use]
     pub fn new(reason: impl Into<String>) -> Self {
         Self(reason.into())
+    }
+    #[must_use]
+    pub fn reason(&self) -> &str {
+        &self.0
     }
 }
 
@@ -110,7 +149,10 @@ pub enum RefTarget {
     /// Delete the ref.
     Delete,
     /// Copy the published branch pair of `source` to the destination
-    /// (`AdvanceRefs` with `source_ref`). The new value is the source's.
+    /// (`AdvanceRefs` with `source_ref`). The new value is the source's. The
+    /// request names only the destination head, but the server also writes its
+    /// packmap twin, whose name the client does not know: a policy keyed on ref
+    /// names must treat this move as covering both.
     CopyFrom {
         source: String,
         expected_tip: Option<Hash>,

@@ -17,7 +17,7 @@ use crate::proto::{
     PackExistsResponse, ReadRefRequest, ReadRefResponse, RefRedaction, UpdateRefResponse,
     UploadPackResponse, UploadPartResponse, UploadTicket,
 };
-use crate::seams::{NoObserver, Observer, WriteIntent};
+use crate::seams::{NoObserver, Observer, WriteIntent, procedures};
 use mkit_core::{
     hash::Hash, refs::RefWriteCondition, upload_parts::PartPlan, write_auth::ContentCommitment,
 };
@@ -527,8 +527,10 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Client<'_, T, S, C, O> 
     /// It runs the same pipeline as a dispatched call: with `intent`, the
     /// [`Observer`] runs (and may veto or add headers); then the signer sees the
     /// operation (and may refuse); then a window that has already ended is
-    /// [`Error::EnvelopeExpired`]. Pass an `intent` for every write: without
-    /// one the observer is not called. The result carries the envelope headers
+    /// [`Error::EnvelopeExpired`]. A write procedure (see
+    /// [`procedures`]) requires an `intent` for that procedure, so the observer
+    /// cannot be skipped; other procedures are not observed. The attempt number
+    /// is always 1. The result carries the envelope headers
     /// (`x-envelope-version`, `x-audience`, `x-repository`, `x-content-commitment`,
     /// `x-created-at`, `x-expires-at`, `idempotency-key`, `x-public-key`,
     /// `x-signature`, and `x-digest` for a `body:` commitment) plus the
@@ -545,6 +547,23 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Client<'_, T, S, C, O> 
         identity: Option<&Identity>,
         intent: Option<&WriteIntent<'_>>,
     ) -> Result<SignedEnvelope, Error> {
+        if let Some(intent) = intent
+            && intent.procedure != procedure
+        {
+            return Err(Error::Invalid("intent procedure"));
+        }
+        let is_write = [
+            procedures::BEGIN_UPLOAD,
+            procedures::UPLOAD_PACK,
+            procedures::UPLOAD_PART,
+            procedures::COMPLETE_UPLOAD,
+            procedures::ADVANCE_REFS,
+            procedures::UPDATE_REF,
+        ]
+        .contains(&procedure);
+        if is_write && intent.is_none() {
+            return Err(Error::Invalid("write intent required"));
+        }
         let opts = Opts {
             identity,
             intent,

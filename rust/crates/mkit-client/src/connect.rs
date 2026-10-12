@@ -550,6 +550,15 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Rpc<'_, T, S, C, O> {
         })
     }
 
+    /// A window clamped to the push deadline ended because the push did.
+    fn expired(&self, id: &Identity) -> Error {
+        if id.expires_at_ms == self.deadline_ms {
+            Error::Deadline
+        } else {
+            Error::EnvelopeExpired
+        }
+    }
+
     /// The seam pipeline for one envelope: identity, observer, signer, deadline
     /// check. Returns the auth v2 headers (and the observer's extra ones) and
     /// the identity. Needs a signer.
@@ -579,7 +588,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Rpc<'_, T, S, C, O> {
         };
         // An envelope that has already ended is refused before any policy runs.
         if clock.now_ms() >= id.expires_at_ms {
-            return Err(Error::EnvelopeExpired);
+            return Err(self.expired(&id));
         }
         let nonce = id.idempotency_key();
         let digest = Operation {
@@ -610,7 +619,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Rpc<'_, T, S, C, O> {
                 .observer
                 .before_dispatch(intent, &attempt)
                 .await
-                .map_err(|veto| Error::Vetoed(veto.0))?
+                .map_err(|veto| Error::Vetoed(veto.reason().to_owned()))?
                 .validate()?,
             None => HeaderMap::new(),
         };
@@ -628,7 +637,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Rpc<'_, T, S, C, O> {
             .map_err(SignError::into_error)?;
         // 3. Deadline: an envelope that has expired is never dispatched.
         if clock.now_ms() >= id.expires_at_ms {
-            return Err(Error::EnvelopeExpired);
+            return Err(self.expired(&id));
         }
         let mut headers = extra;
         for (name, value) in [

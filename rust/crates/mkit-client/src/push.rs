@@ -534,7 +534,7 @@ pub(crate) async fn advance<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
         }
         // Only a definitive pending/lag answer reaches this continuation.
         // Keep exactly the same nonce and timestamps until actual expiry.
-        if now > expires {
+        if now >= expires {
             built = sign().await?;
             expires = expiry(&built);
         }

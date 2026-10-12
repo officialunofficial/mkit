@@ -84,21 +84,25 @@ default observer does nothing, and a signer that implements only
   pack with a delta entry, the packmap node and every per-RPC upload). Intents
   are built from the request being sent, so the observer sees exactly what the
   server receives; an `advance_refs` request whose ids or expectations are
-  malformed is `Error::Invalid` before any seam runs.
+  malformed is `Error::Invalid` before any seam runs, with or without an
+  observer. A branch copy (`source_ref`) names only the destination head; the
+  server also writes its packmap twin (`RefTarget::CopyFrom`).
 - **Which calls.** `begin_upload`, `upload_pack`, `upload_part`,
   `complete_upload`, `advance_refs`, `update_ref` and `delete_ref` (the five
   write RPCs of the protocol plus `CompleteUpload`). Reads are signed but not
   observed. A per-RPC `complete_upload` has only the opaque token, so its intent
   has no ticket ids; a whole push reports them.
-- **Once per attempt.** An attempt is one signed envelope: the observer and
-  signer run once per envelope and receive the same `Attempt` (number from 1,
-  nonce, created and expiry times), so a host can write one durable note per
-  nonce. A new envelope (a fresh call, or the renewal after a pending answer and
-  an authentication rejection inside `Push::run_with`) runs observer, signer and
-  dispatch again with the next number and a new nonce. Resending the identical
-  signed bytes (a pending-verification poll while the envelope is valid, a
-  transport retry, or a caller replaying a persisted `Identity`) is not a new
-  attempt and does not call the seams again.
+- **Once per attempt.** The seams run each time an envelope is built, with the
+  same `Attempt` for both (number from 1, nonce, created and expiry times), so a
+  host can write one durable note per nonce. A new envelope (a fresh call, or
+  the renewal after a pending answer and an authentication rejection inside
+  `Push::run_with`) runs observer, signer and dispatch again with the next
+  number and a new nonce. A caller who replays a persisted `Identity` (for
+  example after a restart) builds an envelope again, so the seams run again with
+  the same nonce and number 1: key the note on the nonce and replace it.
+  Re-sending already signed bytes (a pending-verification poll while the
+  envelope is valid, a transport retry) builds nothing and does not call the
+  seams.
 - **Per-attempt headers.** `AttemptHeaders` (for example `traceparent` or a
   request id) is added to that attempt's request and is not signed. Names are
   checked against the hard-reserved list of SPEC-TRANSPORT-CONNECT section 5.1
@@ -109,10 +113,11 @@ default observer does nothing, and a signer that implements only
   `is_reserved_header` exposes the check.
 - **Signing outside the client.** `Client::sign_envelope(procedure,
   &commitment, identity, intent)` returns the auth v2 request headers
-  (`SignedEnvelope`) without sending: the same observer (when an `intent` is
-  given), signer and deadline check, for a host that dispatches an mkit
-  procedure through its own binding. The caller supplies a body that matches the
-  commitment. The headers verify with `mkit_core::write_auth::verify_headers`.
+  (`SignedEnvelope`) without sending: the same observer, signer and deadline
+  check, for a host that dispatches an mkit
+  procedure through its own binding. A write procedure requires an `intent` naming that
+  procedure (`Error::Invalid` otherwise), so the observer cannot be skipped; the
+  attempt number is 1. The caller supplies a body that matches the commitment. The headers verify with `mkit_core::write_auth::verify_headers`.
 
 Objects the client signs itself: none. It verifies commits, remixes and tags in
 `unpack` and signs only auth envelopes, so the signer seam covers envelopes.

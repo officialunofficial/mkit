@@ -810,8 +810,13 @@ fn the_public_envelope_signer_verifies_against_the_server_validator() {
         id: [3; 32],
         len: 10,
     };
-    let envelope =
-        block_on(client.sign_envelope(procedures::UPLOAD_PACK, &pack, None, None)).unwrap();
+    let envelope = block_on(client.sign_envelope(
+        procedures::UPLOAD_PACK,
+        &pack,
+        None,
+        Some(&WriteIntent::new(procedures::UPLOAD_PACK)),
+    ))
+    .unwrap();
     verify(
         &envelope.headers,
         procedures::UPLOAD_PACK,
@@ -819,7 +824,7 @@ fn the_public_envelope_signer_verifies_against_the_server_validator() {
         clock.now_ms(),
     )
     .unwrap();
-    assert_eq!(observer.seen.borrow().len(), 1, "no intent, no observer");
+    assert_eq!(observer.seen.borrow().len(), 2);
 }
 fn header_of(headers: &http::HeaderMap, name: &str) -> String {
     headers.get(name).unwrap().to_str().unwrap().to_owned()
@@ -837,7 +842,12 @@ fn the_public_envelope_signer_applies_the_same_policy() {
     let client = Client::signed(&script, destination(), &signer, &clock).with_observer(&observer);
     let commitment = ContentCommitment::Body([1; 32]);
     assert!(matches!(
-        block_on(client.sign_envelope(procedures::UPDATE_REF, &commitment, None, None)),
+        block_on(client.sign_envelope(
+            procedures::UPDATE_REF,
+            &commitment,
+            None,
+            Some(&WriteIntent::new(procedures::UPDATE_REF))
+        )),
         Err(Error::SignerRefused(_))
     ));
     let intent = WriteIntent::new(procedures::ADVANCE_REFS);
@@ -1063,4 +1073,84 @@ fn a_poll_resends_the_same_envelope_and_a_renewed_envelope_is_a_new_attempt() {
         signed_attempts, attempts,
         "signer sees the observer's attempts"
     );
+}
+
+#[test]
+fn sign_envelope_cannot_skip_or_mislabel_the_observed_intent() {
+    let log = log();
+    let script = ok_update();
+    let signer = PolicySigner::new(&log);
+    let observer = Recorder::new(&log);
+    let clock = TestClock::new();
+    let client = Client::signed(&script, destination(), &signer, &clock).with_observer(&observer);
+    let commitment = ContentCommitment::Body([1; 32]);
+    // A write without an intent, and an intent for another procedure.
+    assert!(matches!(
+        block_on(client.sign_envelope(procedures::UPDATE_REF, &commitment, None, None)),
+        Err(Error::Invalid(_))
+    ));
+    let other = WriteIntent::new(procedures::ADVANCE_REFS);
+    assert!(matches!(
+        block_on(client.sign_envelope(procedures::UPDATE_REF, &commitment, None, Some(&other))),
+        Err(Error::Invalid(_))
+    ));
+    assert!(log.borrow().is_empty(), "no seam ran");
+    // A non-write procedure needs no intent and is not observed.
+    let read = "/mkit.transport.v1.TransportService/ReadRef";
+    block_on(client.sign_envelope(read, &commitment, None, None)).unwrap();
+    assert!(observer.seen.borrow().is_empty());
+}
+
+#[test]
+fn replaying_a_persisted_identity_runs_the_seams_again_with_the_same_nonce() {
+    let log = log();
+    let script = ok_update();
+    let signer = PolicySigner::new(&log);
+    let observer = Recorder::new(&log);
+    let clock = TestClock::new();
+    let client = Client::signed(&script, destination(), &signer, &clock).with_observer(&observer);
+    let identity = client.new_identity().unwrap();
+    for _ in 0..2 {
+        block_on(client.update_ref(
+            "refs/heads/main",
+            RefWriteCondition::Any,
+            [1; 32],
+            Some(&identity),
+        ))
+        .unwrap();
+    }
+    let seen = observer.seen.borrow();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[0].attempt, seen[1].attempt);
+    assert_eq!(seen[1].attempt.nonce, identity.nonce);
+    let sent = script.seen.borrow();
+    assert_eq!(
+        header(&sent[0], "x-signature"),
+        header(&sent[1], "x-signature")
+    );
+}
+
+#[test]
+fn a_window_cut_short_by_the_push_deadline_is_a_deadline_error() {
+    let log = log();
+    let script = server(&log, |_| unreachable!());
+    let clock = Rc::new(TestClock::new());
+    let mut signer = PolicySigner::new(&log);
+    signer.advance_clock = Some((clock.clone(), 1_000_000 + 10_000));
+    let limits = Limits::from_server_info(&info(), 1 << 16, 1 << 20).unwrap();
+    let plan = Plan::prepare([blob(1)], limits).unwrap();
+    let push = Push::new(
+        destination(),
+        "main",
+        RefWriteCondition::Missing,
+        [4; 32],
+        PackmapMode::Append {
+            self_contained: true,
+        },
+        plan,
+        1_000_000 + 5_000,
+    )
+    .unwrap();
+    let result = block_on(push.run(&script, &signer, &*clock));
+    assert!(matches!(result, Err(Error::Deadline)), "{result:?}");
 }
