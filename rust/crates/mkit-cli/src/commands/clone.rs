@@ -10,16 +10,14 @@
 //! after the pull. `--depth` (shallow clone) is still deferred and is
 //! rejected with a clear message rather than silently ignored.
 
-use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
 use clap::Parser;
 use mkit_core::refs;
-use mkit_core::store::{ObjectStore, StoreError};
 
 use crate::clap_shim;
-use crate::config::{self, Config, RemoteEntry};
+use crate::config;
 use crate::exit;
 use crate::remote_dispatch;
 
@@ -106,47 +104,19 @@ pub fn run(args: &[String]) -> u8 {
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(stderr, "Cloning into '{}'...", target.display());
     }
-    if let Err(e) = fs::create_dir_all(&target) {
-        return emit_err(
-            &format!("create {}: {e}", target.display()),
-            exit::CANTCREAT,
-        );
-    }
-    let target_layout = match crate::commands::resolve_layout(&target) {
-        Ok(layout) => layout,
-        Err(code) => return code,
+    let remote = mkit_sync::CloneRemote {
+        name: origin_name.clone(),
+        url: url.to_string(),
+        kind: scheme_of(url).unwrap_or_default().to_string(),
     };
-    match ObjectStore::init(&target_layout) {
-        Ok(_) => {}
-        Err(StoreError::AlreadyInitialized) => {
-            return emit_err("already a mkit repository", exit::GENERAL_ERROR);
-        }
-        Err(e) => return emit_err(&format!("init: {e}"), exit::CANTCREAT),
-    }
-    if let Err(e) = refs::init(&target_layout) {
-        return emit_err(&format!("refs init: {e}"), exit::CANTCREAT);
-    }
-    let mut cfg = Config::with_defaults();
-    if origin_name == config::DEFAULT_REMOTE_NAME {
-        url.clone_into(&mut cfg.remote_endpoint);
-        cfg.remote_type = scheme_of(url).unwrap_or_default().to_string();
-    } else {
-        // A non-default `-o <name>` is a genuine named remote — persist it
-        // the same way `mkit remote add <name> <url>` would, so `pull_all`
-        // below (called with this same name) resolves tracking refs under
-        // `refs/remotes/<name>/*` consistently with what `.mkit/config`
-        // records.
-        cfg.remotes.insert(
-            origin_name.clone(),
-            RemoteEntry {
-                url: url.to_string(),
-                remote_type: scheme_of(url).unwrap_or_default().to_string(),
-            },
-        );
-    }
-    if let Err(e) = config::write(&target_layout, &cfg) {
-        return emit_err(&format!("write config: {e}"), exit::CANTCREAT);
-    }
+    // A non-default `-o <name>` is a genuine named remote, persisted the way
+    // `mkit remote add <name> <url>` would, so the pull below (called with
+    // this same name) resolves tracking refs under `refs/remotes/<name>/*`
+    // consistently with what `.mkit/config` records.
+    let target_layout = match mkit_sync::init_clone_dir(&target, &remote) {
+        Ok(layout) => layout,
+        Err(e) => return emit_err(&e.to_string(), clone_init_exit_code(&e)),
+    };
 
     // Issue #389: clone establishes trust for a brand-new endpoint, so it
     // bypasses `open_trusted`'s credential gate — but it must still thread
@@ -297,6 +267,17 @@ fn apply_sparse_after_clone(
     )
     .map_err(|e| (format!("restore: {e}"), exit::CANTCREAT))?;
     Ok(())
+}
+
+/// The exit status of a failed destination setup, as the pre-extraction
+/// code returned for each step.
+fn clone_init_exit_code(error: &mkit_sync::CloneInitError) -> u8 {
+    use mkit_sync::CloneInitError as E;
+    match error {
+        E::CreateDir { .. } | E::Store(_) | E::Refs(_) | E::WriteConfig(_) => exit::CANTCREAT,
+        E::Discover(_) => exit::DATAERR,
+        E::AlreadyInitialized => exit::GENERAL_ERROR,
+    }
 }
 
 fn derive_dir_from_url(url: &str) -> String {

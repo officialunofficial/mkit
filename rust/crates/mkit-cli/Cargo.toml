@@ -58,6 +58,10 @@ mkit-core = { version = "0.5", path = "../mkit-core", features = ["batch-verify"
 mkit-attest = { version = "0.5", path = "../mkit-attest", features = ["grants"] }
 mkit-git-bridge = { version = "0.5", path = "../mkit-git-bridge", optional = true }
 mkit-keystore = { version = "0.5", path = "../mkit-keystore" }
+# The native clone/fetch/pull engine (packmap fetch, signature verification,
+# applied-packs record, fast-forward and rollback). The CLI keeps all
+# printing, config layering, trust gates and exit codes.
+mkit-sync = { version = "0.5", path = "../mkit-sync" }
 # `mkit-transport-memory` is a dev-only (test) dependency — see
 # `[dev-dependencies]`. It is intentionally NOT a normal dependency so it
 # does not ship in `cargo install mkit-cli`.
@@ -347,7 +351,7 @@ pack-shards = [
 ]
 # Canonical first-parent ancestry snapshots and contextual proofs. Opt in for
 # commit/branch/merge/rebase/cherry-pick publication and verified reflog output.
-history-mmr = ["mkit-core/history-mmr"]
+history-mmr = ["mkit-core/history-mmr", "mkit-sync/history-mmr"]
 
 [package.metadata.docs.rs]
 # Build docs with every feature so docs.rs renders the feature-gated API.
