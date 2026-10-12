@@ -18,7 +18,7 @@ deprecated re-export.
   source is `advance_refs` with `source_ref`).
 - **`Push`: the bounded whole-push** built on the same calls (below).
 - **Read helpers.** `Client::resolve_pack_chain` walks a packmap chain (bounded
-  at 100,000 nodes and 1,000,000 distinct packs, every node checked against its
+  at 100,000 nodes and 1,000,000 listed pack ids, every node checked against its
   content id) and returns pack ids oldest first. `unpack` decodes a pack into an
   `ObjectSink` you implement (no filesystem; `MemorySink` is provided), after
   checking the pack against its requested id.
@@ -43,8 +43,10 @@ Every signed call takes an optional `Identity` (the nonce, which is also the
 `Idempotency-Key`, plus the created and expiry times). The call uses it exactly
 and returns it in `Reply::identity`. Persist `Client::new_identity()` before a
 call, pass it, and after a restart replay the same call with the same identity:
-the request is byte-identical and a server that saved the first reply returns
-it instead of applying the operation again. Without one, each call draws a fresh
+the request is byte-identical and, for a write, a server that saved the first
+reply returns it instead of applying the operation again (signed reads are
+idempotent and keep no reply). An identity past its expiry is rejected by the
+server. Without one, each call draws a fresh
 identity from the clock and returns it. The window is at most 300 s.
 
 ## Reading and verifying

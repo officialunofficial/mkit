@@ -180,9 +180,9 @@ pub struct Reply<R> {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("push limit: {0}")]
+    #[error("limit: {0}")]
     Limit(&'static str),
-    #[error("invalid push response/input: {0}")]
+    #[error("invalid response/input: {0}")]
     Invalid(&'static str),
     #[error("transport: {0}")]
     Transport(String),
@@ -395,7 +395,7 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Rpc<'a, T, S, C> {
             )
             .await?;
         let mut out = Vec::new();
-        let mut expected = None;
+        let mut expected: Option<u64> = None;
         let mut last = false;
         for frame in Frames::new(&bytes) {
             let frame = frame?;
@@ -408,6 +408,9 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Rpc<'a, T, S, C> {
                         return Err(Error::Limit("pack download"));
                     }
                     expected = Some(size);
+                    // Reserve once, so growth never holds two copies. A lying
+                    // header cannot reserve more than the response holds.
+                    out.reserve_exact(usize::try_from(size).unwrap_or(0).min(bytes.len()));
                 }
                 Some(Body::Chunk(chunk)) if expected.is_some() && !last => {
                     if chunk.pack_id.as_deref() != Some(key.as_slice())

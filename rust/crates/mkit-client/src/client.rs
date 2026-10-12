@@ -300,7 +300,9 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Client<'a, T, S, C> {
     }
 
     /// `DownloadPack`, bounded by `max_bytes`: a larger declared size or a
-    /// longer response is [`Error::Limit`]. The pack must hash to `pack_id`.
+    /// longer response is [`Error::Limit`]. The response cap is `max_bytes` plus
+    /// 1/512 plus 8 KiB for framing, which assumes the server's chunks are at
+    /// least about 30 KiB (the reference server sends 800 KiB). The pack must hash to `pack_id`.
     /// The transport buffers the response (at most `max_bytes` plus
     /// framing) and the returned pack is a second copy, so peak memory is about
     /// twice `max_bytes`.

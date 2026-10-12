@@ -1959,8 +1959,8 @@ a `PendingVerification` hint, a membership-lag `unavailable`, and an
 `unavailable` carrying `Retry-After` (1&ndash;60 s). Every signed call accepts a
 caller-owned request identity (the nonce, which is also the `Idempotency-Key`,
 and the validity window) and uses it exactly, returning the identity it used, so
-a persisted identity replays the same signed request and a server that saved the
-first reply returns it (§7.1). Calls without one generate it from the host clock.
+a persisted identity replays the same signed request and, for a write, a server
+that saved the first reply returns it (§7.1; signed reads keep no reply). Calls without one generate it from the host clock.
 
 `Push::run` is the bounded whole-push built on the same calls. It preserves the
 signed request identity through pending polls while valid, honors typed poll

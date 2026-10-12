@@ -280,3 +280,16 @@ fn post_pending_authentication_recovery_is_bounded_and_never_hides_response_loss
         assert_eq!(transport.requests.borrow().len(), count);
     }
 }
+
+#[test]
+fn frames_are_yielded_lazily_and_require_a_clean_end() {
+    let mut bytes = Vec::new();
+    for _ in 0..10_000 {
+        frame(&mut bytes, &[]).unwrap();
+    }
+    let mut frames = Frames::new(&bytes);
+    assert!(matches!(frames.next(), Some(Ok(f)) if f.is_empty()));
+    assert!(matches!(frames.nth(9_998), Some(Ok(_))));
+    assert!(matches!(frames.next(), Some(Err(_))), "no end frame");
+    assert!(frames.next().is_none());
+}

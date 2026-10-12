@@ -29,6 +29,7 @@ const CHUNK_SIZE: usize = 800 * 1024;
 /// The host certifies whether the supplied entries contain the whole closure.
 /// Reset requires a self-contained plan and an atomic conditioned advance.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub enum PackmapMode {
     Append { self_contained: bool },
     ResetSelfContained,
@@ -37,6 +38,7 @@ pub enum PackmapMode {
 /// Wire outcomes and reasons requiring host replanning. A conflict never
 /// asserts that an earlier ambiguous operation did not commit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Outcome {
     Committed,
     HeadConflict,
