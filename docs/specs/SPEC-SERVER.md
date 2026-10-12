@@ -1588,7 +1588,9 @@ The early replay exit and stored representation are unchanged.
 Scheduled Decode denial reads MUST follow completion of the batch's inventory
 staging and precede all of its frame, candidate, and index rows. Reads MAY run
 in bounded concurrent waves. A failed wave MUST report the first failing object
-in batch order, whether blocked or unavailable, and MUST NOT admit the batch.
+in batch order among the reads it issued, whether blocked or unavailable, and
+MUST NOT admit the batch. A wave whose all-or-nothing read reservation is
+refused issues no reads and reports unavailable.
 Informative: scheduled and inline direct index writes use the same bounded
 waves, preserving ObjectIndex put order and rechecking denial before each apply.
 The earlier inline pre-staging check uses the same waves at its existing boundary.

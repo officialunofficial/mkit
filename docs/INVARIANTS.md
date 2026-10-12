@@ -2590,7 +2590,9 @@ split-vs-single-run equivalence.
 **Always:** a Decode batch's inventory staging completes before its denial reads.
 At most six reads run together. Admitted readers reserve each wave's calls;
 ordinary mutation stores keep dispatch-time charging, so later budget exhaustion
-cannot mask an earlier object's denial.
+cannot mask an earlier object's denial. A wave whose all-or-nothing
+reservation is refused issues no reads and reports unavailable (fail-closed;
+the slice retries).
 All responses in a wave finish before failures are examined in batch order.
 No frame, candidate, or index row for the batch precedes successful denial
 admission. EmitIndex and inline index writes use the same helper in their
@@ -2605,6 +2607,6 @@ admission, and response timing must not change blocked/unavailable precedence.
 **If violated:** a concurrent block can escape admission or network timing can
 select the outcome and misstate its cost.
 
-**Enforced by:** Decode admission, direct index writes, and the shared denial-wave helper;
+**Enforced by:** Decode admission, direct index writes, the inline verifier's pre-staging check, and the shared denial-wave helper;
 `inventory_stage_guard` covers a block landing during staging, and denial-wave
 unit tests cover latency, call charges, reservations, and mixed failures.

@@ -2,6 +2,10 @@
 use crate::{ServerError, store::NamespaceStore};
 use mkit_core::hash::Hash;
 
+/// Checks `ids` in waves of at most `read_io::parallelism()` concurrent reads,
+/// one `require_clear` call per id. Every response of a wave is awaited, then
+/// the first failure in input order is returned and later waves are skipped.
+/// Callers must await this helper serially: the width bound is per call.
 pub(crate) async fn require_clear_many<S: NamespaceStore>(
     store: &S,
     mut ids: impl Iterator<Item = Hash> + crate::MaybeSend,
