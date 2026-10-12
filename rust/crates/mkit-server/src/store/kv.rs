@@ -431,6 +431,14 @@ pub trait NamespaceStore: MaybeSend + MaybeSync {
         false
     }
 
+    /// Known remaining backend read calls, including inherited ledgers. `None`
+    /// means unknown. This read-only hint never reserves calls; optional reads
+    /// must still reserve before dispatch and skip when the allowance is unknown.
+    #[doc(hidden)]
+    fn read_call_allowance(&self) -> Option<u32> {
+        None
+    }
+
     /// Reserve a wave's calls before dispatch. Ordinary backends need no
     /// accounting; operation facades propagate their shared reservation.
     #[doc(hidden)]
@@ -542,6 +550,9 @@ pub trait NamespaceStore: MaybeSend + MaybeSync {
 
 // Share a store handle across response streams and retained finalizers.
 impl<S: NamespaceStore + ?Sized> NamespaceStore for std::sync::Arc<S> {
+    fn read_call_allowance(&self) -> Option<u32> {
+        self.as_ref().read_call_allowance()
+    }
     fn reader_admission(&self) -> bool {
         self.as_ref().reader_admission()
     }

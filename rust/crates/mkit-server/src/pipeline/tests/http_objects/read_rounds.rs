@@ -20,6 +20,7 @@ const LATENCY: u32 = 30;
 enum Op {
     Show { sizes: bool },
     Cat,
+    ListRefs,
     Log(usize),
     Page1(usize),
     CanonicalLog(usize),
@@ -34,6 +35,7 @@ struct Shape {
     dir: Option<Hash>,
     files: Vec<Hash>,
     path: Vec<Vec<u8>>,
+    packs: Vec<Hash>,
 }
 
 /// `commits` linear commits over `files` root files (plus one nested file when
@@ -56,6 +58,7 @@ fn shape(commits: usize, files: usize, nested: bool, changed: impl Fn(usize) -> 
         .unwrap(),
     );
     let mut seen = BTreeSet::new();
+    let mut packs = Vec::new();
     let (mut previous, mut parent) = (None, None);
     let mut last = None;
     for n in 0..commits {
@@ -86,6 +89,7 @@ fn shape(commits: usize, files: usize, nested: bool, changed: impl Fn(usize) -> 
         objects.extend([root.clone(), head.clone()]);
         let fresh: Vec<&Object> = objects.iter().filter(|o| seen.insert(id(o))).collect();
         let pack = fx.push("room", &fresh, id(&head), previous);
+        packs.push(pack);
         drain(&fx);
         previous = Some((id(&head), pack));
         parent = Some(head.clone());
@@ -101,13 +105,16 @@ fn shape(commits: usize, files: usize, nested: bool, changed: impl Fn(usize) -> 
             dir: nested.then(|| id(&dir)),
             files: file_ids,
             path: vec![b"dir".to_vec(), b"leaf".to_vec()],
+            packs: Vec::new(),
         });
     }
     let mut shape = last.unwrap();
     shape.fx = fx;
+    shape.packs = packs;
     shape
 }
 
+#[allow(clippy::too_many_lines)] // One probe driver covering every shape.
 async fn run(
     shape: &Shape,
     owner: bool,
@@ -134,6 +141,17 @@ async fn run(
         unary_body: Some(&req.body),
         transport_principal: None,
     };
+    if matches!(op, Op::ListRefs) {
+        let request = if owner {
+            req
+        } else {
+            Req::unsigned(Procedure::ListRefs).header("x-repository", &fx.identity("room"))
+        };
+        let auth = fx.auth(&request);
+        let refs = fx.pipe.list_refs(&auth, "").await?;
+        assert!(!refs.is_empty());
+        return Ok(());
+    }
     let reader = fx
         .pipe
         .object_reader(
@@ -158,6 +176,7 @@ async fn run(
                 assert!(answers.iter().all(Option::is_some));
             }
         }
+        Op::ListRefs => unreachable!(),
         Op::Cat => {
             let read = reader
                 .read_commit_path_in(
@@ -231,6 +250,16 @@ async fn canonical_log(
 
 /// Rounds, KV calls and blob GETs of one operation.
 fn measure(shape: &Shape, owner: bool, op: Op) -> (f64, u32, usize) {
+    measure_latency(shape, owner, op, LATENCY, None, false)
+}
+fn measure_latency(
+    shape: &Shape,
+    owner: bool,
+    op: Op,
+    latency: u32,
+    cold: Option<u64>,
+    warm_packs: bool,
+) -> (f64, u32, usize) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .start_paused(true)
@@ -242,27 +271,42 @@ fn measure(shape: &Shape, owner: bool, op: Op) -> (f64, u32, usize) {
     fx.pipe
         .meta
         .latency_ms
-        .store(u64::from(LATENCY), Ordering::SeqCst);
+        .store(u64::from(latency), Ordering::SeqCst);
     fx.pipe
         .blobs
         .latency_ms
-        .store(u64::from(LATENCY), Ordering::SeqCst);
+        .store(u64::from(latency), Ordering::SeqCst);
     let trace = Arc::new(Mutex::new(Vec::new()));
     let mut session = ReaderSession::default();
     let start = runtime.block_on(async { tokio::time::Instant::now() });
-    runtime
-        .block_on(read_probe::run(
-            Config {
-                concurrency: crate::store::read_io::PARALLELISM,
-                trace: trace.clone(),
-            },
-            run(shape, owner, op, &mut session),
-        ))
-        .unwrap();
+    let operation = read_probe::run(
+        Config {
+            concurrency: crate::store::read_io::PARALLELISM,
+            trace: trace.clone(),
+        },
+        Box::pin(run(shape, owner, op, &mut session)),
+    );
+    let warm_partitions = if warm_packs {
+        shape
+            .packs
+            .iter()
+            .map(crate::store::content_shard)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let operation = async {
+        if let Some(milliseconds) = cold {
+            read_probe::run_cold(milliseconds, &warm_partitions, operation).await
+        } else {
+            operation.await
+        }
+    };
+    runtime.block_on(operation).unwrap();
     let elapsed = runtime.block_on(async { tokio::time::Instant::now() - start });
     fx.pipe.meta.latency_ms.store(0, Ordering::SeqCst);
     fx.pipe.blobs.latency_ms.store(0, Ordering::SeqCst);
-    let rounds = elapsed.as_secs_f64() * 1000.0 / f64::from(LATENCY);
+    let rounds = elapsed.as_secs_f64() * 1000.0 / f64::from(latency);
     let partitions: BTreeSet<Partition> = fx
         .pipe
         .meta
@@ -276,13 +320,27 @@ fn measure(shape: &Shape, owner: bool, op: Op) -> (f64, u32, usize) {
     for partition in &partitions {
         *by_kind.entry(partition.kind()).or_default() += 1;
     }
+    if let Some(cold) = cold {
+        println!(
+            "COLD_LOG owner={owner} op={op:?} source_packs_warm={warm_packs} warm_ms={latency} cold_ms={cold} elapsed_ms={} KV={} GET={}",
+            elapsed.as_millis(),
+            fx.pipe.meta.calls() - kv,
+            get_count(fx) - gets
+        );
+    } else {
+        println!(
+            "READ_ROUNDS denial={} owner={owner} op={op:?} rounds={rounds:.0} KV={} GET={} partitions={} by_kind={by_kind:?} phases={}",
+            fx.pipe.cfg.takedown_denial,
+            fx.pipe.meta.calls() - kv,
+            get_count(fx) - gets,
+            partitions.len(),
+            read_probe::summary(&trace.lock().unwrap())
+        );
+    }
     println!(
-        "READ_ROUNDS denial={} owner={owner} op={op:?} rounds={rounds:.0} KV={} GET={} partitions={} by_kind={by_kind:?} phases={}",
-        fx.pipe.cfg.takedown_denial,
-        fx.pipe.meta.calls() - kv,
-        get_count(fx) - gets,
-        partitions.len(),
-        read_probe::summary(&trace.lock().unwrap())
+        "READ_LEDGER op={op:?} session_calls={} remaining={}",
+        session.io.calls.used(),
+        session.io.calls.remaining()
     );
     (rounds, fx.pipe.meta.calls() - kv, get_count(fx) - gets)
 }
@@ -300,6 +358,71 @@ const BASELINE: [(&str, u32); 5] = [
 ];
 const CEILING: [u32; 5] = [38, 34, 30, 38, 420];
 
+// Current baseline for every matrix row, in denial/view/operation order.
+// No row may increase KV calls.
+const MEASURED_BASELINE: [[(u32, u32); 13]; 4] = [
+    [
+        (34, 68),
+        (30, 38),
+        (24, 37),
+        (26, 56),
+        (34, 52),
+        (42, 64),
+        (80, 124),
+        (85, 129),
+        (17, 17),
+        (380, 603),
+        (384, 607),
+        (73, 86),
+        (73, 73),
+    ],
+    [
+        (31, 69),
+        (31, 39),
+        (22, 38),
+        (25, 57),
+        (35, 53),
+        (43, 65),
+        (81, 125),
+        (85, 129),
+        (17, 17),
+        (381, 604),
+        (385, 608),
+        (64, 87),
+        (74, 74),
+    ],
+    [
+        (49, 135),
+        (54, 114),
+        (36, 88),
+        (37, 106),
+        (73, 156),
+        (90, 190),
+        (173, 360),
+        (177, 364),
+        (17, 17),
+        (833, 1719),
+        (837, 1723),
+        (113, 256),
+        (113, 243),
+    ],
+    [
+        (46, 136),
+        (55, 115),
+        (34, 89),
+        (36, 107),
+        (74, 157),
+        (91, 191),
+        (174, 361),
+        (178, 365),
+        (17, 17),
+        (834, 1720),
+        (838, 1724),
+        (104, 257),
+        (114, 244),
+    ],
+];
+
 #[test]
 fn embedder_read_shapes_report_rounds() {
     let mut a = shape(1, 8, true, |_| 8);
@@ -310,8 +433,9 @@ fn embedder_read_shapes_report_rounds() {
             shape.fx.pipe.cfg.takedown_denial = denial;
         }
         for owner in [false, true] {
+            let baseline = &MEASURED_BASELINE[usize::from(denial) * 2 + usize::from(owner)];
             let mut guarded = Vec::new();
-            for (shape, op, guard) in [
+            for (row, (shape, op, guard)) in [
                 (&a, Op::Show { sizes: true }, true),
                 (&a, Op::Cat, true),
                 (&a, Op::Show { sizes: false }, false),
@@ -319,12 +443,32 @@ fn embedder_read_shapes_report_rounds() {
                 (&b, Op::Log(5), true),
                 (&c, Op::Log(5), false),
                 (&c, Op::Log(10), false),
+                (&c, Op::Page1(10), false),
+                (&c, Op::ListRefs, false),
                 (&c, Op::Log(50), true),
                 (&c, Op::Page1(50), false),
                 (&c, Op::CanonicalLog(10), false),
                 (&c, Op::SelectedLog(10), false),
-            ] {
-                let (rounds, ..) = measure(shape, owner, op);
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let (rounds, kv, _) = measure(shape, owner, op);
+                let (old_rounds, old_kv) = baseline[row];
+                if std::env::var_os("MKIT_BENCH_RANGED_HEAD").is_none() {
+                    assert!(
+                        rounds.round() <= f64::from(old_rounds),
+                        "{op:?}: rounds increased from {old_rounds} to {rounds}"
+                    );
+                }
+                assert!(
+                    kv <= old_kv,
+                    "{op:?}: KV calls increased from {old_kv} to {kv}"
+                );
+                println!(
+                    "ROUND_DELTA denial={denial} owner={owner} row={row} op={op:?} rounds_before={old_rounds} rounds_after={rounds:.0} KV_before={old_kv} KV_after={kv} KV_delta={}",
+                    i64::from(kv) - i64::from(old_kv)
+                );
                 if guard {
                     guarded.push(rounds);
                 }
@@ -338,6 +482,22 @@ fn embedder_read_shapes_report_rounds() {
                         "{name}: {rounds} rounds, ceiling {ceiling} (baseline {baseline})"
                     );
                 }
+            }
+        }
+    }
+}
+
+/// Reports the modeled cold first-touch cost of the unchanged serial Log walk.
+#[test]
+fn first_parent_log_models_cold_first_touches() {
+    let history = shape(11, 2, false, |_| 1);
+    measure(&history, false, Op::Page1(1));
+    for cold in [300, 500] {
+        for warm_packs in [false, true] {
+            for op in [Op::Log(10), Op::Page1(10)] {
+                let (rounds, _, _) =
+                    measure_latency(&history, false, op, 50, Some(cold), warm_packs);
+                assert!(rounds > 0.0);
             }
         }
     }

@@ -3,7 +3,7 @@ use super::{
     AtomicBool, BTreeSet, Budget, Budgeted, Caps, Code, Env, Hash, HookSet, MultipartBlobStore,
     NamespaceStore, OBJECT_READER_CALLS, ObjectReader, ObjectType, ReaderSession, ReaderView,
     ServerError, SliceBudget, TakedownVerdict, ViewStore, denied, exhausted, failure, inventory,
-    ms, object_denials, resolution_failure, resolve, settle,
+    ms, resolution_failure, resolve, settle,
 };
 use mkit_core::object::{EntryMode, Object, TreeEntry};
 use std::{
@@ -595,8 +595,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 BTreeMap::new()
             };
             if self.pipe.cfg.takedown_denial {
-                let blocked = object_denials(
+                let quiet_meta = meta.unflagged();
+                let quiet_view = ViewStore {
+                    store: &quiet_meta,
+                    ..live_view
+                };
+                let blocked = crate::takedown::denial::object_denials_in(
                     &live_view,
+                    &quiet_view,
                     self.pipe.shards.as_ref(),
                     &self.repo,
                     &serving,
@@ -1002,9 +1008,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             } else {
                 BTreeMap::new()
             };
+            let quiet_meta = meta.unflagged();
+            let quiet_view = ViewStore {
+                store: &quiet_meta,
+                ..live_view
+            };
             if self.pipe.cfg.takedown_denial
-                && !object_denials(
+                && !crate::takedown::denial::object_denials_in(
                     &live_view,
+                    &quiet_view,
                     self.pipe.shards.as_ref(),
                     &self.repo,
                     &locations,

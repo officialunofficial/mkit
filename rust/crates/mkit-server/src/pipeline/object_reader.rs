@@ -47,6 +47,96 @@ fn resolution_failure(miss: resolve::Miss) -> ServerError {
         failure(miss)
     }
 }
+// Mixed batches preserve each delta boundary; the raw loader owns wave
+// reservations and consumes replies in member order.
+pub(super) async fn load_permitted<B: crate::BlobStore, N: NamespaceStore>(
+    env: &Env<'_, B, N>,
+    permitted: &[(Hash, crate::store::index::LocatedObject)],
+    uncached_guards: &BTreeSet<Hash>,
+    decode: &mut Budget,
+) -> Result<BTreeMap<Hash, std::sync::Arc<[u8]>>, resolve::Miss> {
+    let mut loaded = BTreeMap::new();
+    // Delta chains stay serial at their original position. Only
+    // contiguous raw runs share the existing bounded, reserved loader;
+    // a raw member after a delta cannot spend its allowance first.
+    let mixed = permitted
+        .iter()
+        .any(|(_, loc)| loc.value.delta_base.is_some());
+    let mut remaining = permitted;
+    while !remaining.is_empty() {
+        let raw_len = remaining
+            .iter()
+            .take_while(|(_, loc)| loc.value.delta_base.is_none())
+            .count();
+        let raw_len = if raw_len > 0
+            && mixed
+            && !raw_run_fits(env, &remaining[..raw_len], uncached_guards, decode)
+        {
+            0
+        } else {
+            raw_len
+        };
+        if raw_len > 0 {
+            let (raw, rest) = remaining.split_at(raw_len);
+            loaded.extend(resolve::load_raw_many(env, raw, uncached_guards, decode).await?);
+            remaining = rest;
+        } else {
+            let (id, loc) = remaining[0];
+            match resolve::load(env, id, loc, decode).await {
+                Ok(bytes) => {
+                    loaded.insert(id, bytes);
+                }
+                Err(resolve::Miss::NotFound) => {}
+                Err(miss) => return Err(miss),
+            }
+            remaining = &remaining[1..];
+        }
+    }
+    Ok(loaded)
+}
+// Admission must not make a later raw member's cap outrank an earlier
+// mixed-batch failure. Unknown inherited allowances keep the serial resolver.
+fn raw_run_fits<B: crate::BlobStore, N: NamespaceStore>(
+    env: &Env<'_, B, N>,
+    raw: &[(Hash, crate::store::index::LocatedObject)],
+    guards: &BTreeSet<Hash>,
+    decode: &Budget,
+) -> bool {
+    let Some(meta_calls) = env.meta.read_call_allowance() else {
+        return false;
+    };
+    let Some(blob_calls) = env.blobs.read_call_allowance() else {
+        return false;
+    };
+    let Some(encoded_left) = env.blobs.read_byte_allowance() else {
+        return false;
+    };
+    let mut decoded = 0u64;
+    let mut encoded = 0u64;
+    let mut calls = 0u32;
+    for (id, loc) in raw {
+        if loc.value.frame_length > crate::indexed::geometry::FRAME_BYTES
+            || loc.value.decoded_size > crate::indexed::geometry::CANONICAL_BYTES
+        {
+            return false;
+        }
+        let Some(next_decoded) = decoded.checked_add(loc.value.decoded_size) else {
+            return false;
+        };
+        let Some(next_encoded) = encoded
+            .checked_add(8)
+            .and_then(|n| n.checked_add(loc.value.frame_length))
+        else {
+            return false;
+        };
+        decoded = next_decoded;
+        encoded = next_encoded;
+        calls = calls.saturating_add(
+            4 + u32::from(guards.contains(id)) + u32::from(guards.contains(&loc.pack)),
+        );
+    }
+    decoded <= decode.0 && encoded <= encoded_left && calls <= meta_calls.min(blob_calls)
+}
 /// Stable public message for exhausted object-reader allowances.
 pub const OBJECT_READER_LIMIT_MESSAGE: &str = super::repo_storage::OWNER_READ_LIMIT_MESSAGE;
 /// Default IDs per call; duplicates preserve input order and share proof work.
@@ -883,32 +973,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 .filter(|n| *n <= output_left)
                 .ok_or_else(exhausted)?;
             let _ = output; // Admission precedes every independently allocated canonical result.
-            if permitted
-                .iter()
-                .all(|(_, loc)| loc.value.delta_base.is_none())
-            {
-                loaded = resolve::load_raw_many(
-                    &env,
-                    &permitted,
-                    &checks.uncached_locations(&permitted),
-                    decode,
-                )
-                .await
-                .map_err(resolution_failure)?;
-            } else {
-                // Reconstruction chains remain serial. Retain only the bounded
-                // requested results, then take the same fresh guard boundary as
-                // raw loads; no guard prefetched before I/O is a final decision.
-                for (id, loc) in permitted {
-                    match resolve::load(&env, id, loc, decode).await {
-                        Ok(bytes) => {
-                            loaded.insert(id, bytes);
-                        }
-                        Err(resolve::Miss::NotFound) => {}
-                        Err(miss) => return Err(resolution_failure(miss)),
-                    }
-                }
-            }
+            loaded = load_permitted(
+                &env,
+                &permitted,
+                &checks.uncached_locations(&permitted),
+                decode,
+            )
+            .await
+            .map_err(resolution_failure)?;
         }
         let mut final_locations = Vec::new();
         for (id, located) in located {

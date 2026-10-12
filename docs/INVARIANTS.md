@@ -27,6 +27,27 @@ unreserved create, or absent deletion could decrement a counter incorrectly.
 **Enforced by:** `pipeline::resolve_ref_updates`, `plan::decide_refs`, the
 shared pending-reservation outbox planner, and `pipeline::tests::ref_admission`.
 
+## Request read scheduling retains ordered boundaries and exact reservations
+
+**Always:** independent reads consume results in their original semantic order.
+Every dispatched wave reserves its backend calls first and shares the existing
+six-call admission envelope. Unknown or insufficient allowance keeps the serial
+path. Delta members stay serial between contiguous raw runs. Continuation
+activation stays after authorization and anchor validation; closing reads stay
+after the guarded apply. Final denial and membership checks stay after all
+seam callbacks, with fresh per-phase state.
+
+**Because:** fewer serial rounds must preserve the same authority, live serving
+stop, response absence, and invocation resource bounds.
+
+**If violated:** a budget refusal could mask an earlier error, a cached guard
+could serve revoked content, or concurrent reads could exceed backend bounds.
+
+**Enforced by:** reservation and precedence tests for inventory, dependency
+reads, raw runs, lease reads, implicit packmap prologues, and continuations;
+the round probe pins equal-or-lower call counts and the shared concurrency
+limit. The waves introduce no durable state or restart step.
+
 ## Chained Extract selection preserves guarded slice boundaries
 
 **Always:** only Extract selection stages run together inside a slice, and

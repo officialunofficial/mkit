@@ -21,6 +21,44 @@ pub(crate) struct Event {
 }
 tokio::task_local! { static ACTIVE: Config; }
 #[cfg(feature = "http-objects")]
+struct ColdTouches {
+    milliseconds: u64,
+    seen: Mutex<std::collections::BTreeSet<super::Partition>>,
+}
+#[cfg(feature = "http-objects")]
+tokio::task_local! { static COLD: ColdTouches; }
+#[cfg(feature = "http-objects")]
+pub(crate) async fn run_cold<T>(
+    milliseconds: u64,
+    warm: &[super::Partition],
+    future: impl Future<Output = T>,
+) -> T {
+    COLD.scope(
+        ColdTouches {
+            milliseconds,
+            seen: Mutex::new(warm.iter().cloned().collect()),
+        },
+        future,
+    )
+    .await
+}
+#[cfg(feature = "http-objects")]
+pub(crate) fn partition_latency_ms(partition: &super::Partition, warm: u64) -> u64 {
+    COLD.try_with(|cold| {
+        if matches!(
+            partition,
+            super::Partition::RepoIndex { .. } | super::Partition::ContentShard(_)
+        ) && cold.seen.lock().unwrap().insert(partition.clone())
+        {
+            cold.milliseconds
+        } else {
+            warm
+        }
+    })
+    .unwrap_or(warm)
+}
+
+#[cfg(feature = "http-objects")]
 pub(crate) async fn run<T>(config: Config, future: impl Future<Output = T>) -> T {
     ACTIVE.scope(config, future).await
 }

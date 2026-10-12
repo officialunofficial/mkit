@@ -358,7 +358,40 @@ async fn read_lease_rows<L: NamespaceStore, M: NamespaceStore>(
         wanted.push(keys::quota_total(window));
     }
     wanted.push(keys::repo_visibility(&repo_id.name));
-    let reported = match relay_watermark(source, p, ms(clock.now_ms())).await {
+    // Consume the watermark first, including its fail-safe corrupt => zero
+    // rule, even when the coordinator read completes first.
+    let source_reservation = source.reserve_read_calls(1).map_err(meta_error)?;
+    let coordinator = shards.coordinator(&repo_id.namespace);
+    let overlap = source.read_call_allowance().is_some_and(|calls| calls >= 1)
+        && coordinator_store
+            .read_call_allowance()
+            .is_some_and(|calls| calls >= 1);
+    let (watermark, rows) = if overlap {
+        let coordinator_reservation = coordinator_store.reserve_read_calls(1);
+        let (watermark, rows) = crate::store::ReadReservation::scope(
+            &[source_reservation],
+            futures::future::join(relay_watermark(source, p, ms(clock.now_ms())), async {
+                let reservation = coordinator_reservation?;
+                crate::store::ReadReservation::scope(
+                    &[reservation],
+                    coordinator_store.get_many(&coordinator, &wanted),
+                )
+                .await
+            }),
+        )
+        .await;
+        (watermark, Some(rows))
+    } else {
+        (
+            crate::store::ReadReservation::scope(
+                &[source_reservation],
+                relay_watermark(source, p, ms(clock.now_ms())),
+            )
+            .await,
+            None,
+        )
+    };
+    let reported = match watermark {
         Ok(value) => value,
         Err(StoreError::Corrupt(reason)) => {
             tracing::warn!(shard = ?p, %reason, "renewal cannot decode relay outbox; reporting zero");
@@ -366,10 +399,19 @@ async fn read_lease_rows<L: NamespaceStore, M: NamespaceStore>(
         }
         Err(error) => return Err(meta_error(error)),
     };
-    let rows = coordinator_store
-        .get_many(&shards.coordinator(&repo_id.namespace), &wanted)
+    let rows = if let Some(rows) = rows {
+        rows
+    } else {
+        let reservation = coordinator_store
+            .reserve_read_calls(1)
+            .map_err(meta_error)?;
+        crate::store::ReadReservation::scope(
+            &[reservation],
+            coordinator_store.get_many(&coordinator, &wanted),
+        )
         .await
-        .map_err(meta_error)?;
+    }
+    .map_err(meta_error)?;
     if rows.len() != wanted.len() {
         return Err(internal("lease get_many returned the wrong row count"));
     }
@@ -769,3 +811,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
 #[cfg(test)]
 #[path = "lease_model_tests.rs"]
 mod model_tests;
+
+#[cfg(test)]
+#[path = "lease_read_tests.rs"]
+mod read_tests;

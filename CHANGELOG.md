@@ -423,6 +423,15 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Performance
 
+- Request reads use bounded waves for ref listing, sealed inventory, and
+  contiguous raw members in mixed raw/delta batches, fresh dependency denials,
+  and publication dependency rechecks. Lease reads, implicit
+  packmap prologues, and pure continuation reads overlap independent work.
+  Ordered result handling retains refusal and uniform-absence precedence;
+  unknown or tight allowances retain serial admission. Stores can expose remaining read-call and encoded
+  byte allowances through additive hidden trait methods; their default is
+  unknown. No wire, stored-format, limit, or store-reset change is required.
+
 - Scheduled pack verification stages Decode inventory in batches. Up to 16
   decoded entries share one inventory read (head and entry rows together) and
   one guarded apply (at most 83 of the 100 operations), instead of three remote

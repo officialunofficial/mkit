@@ -2535,3 +2535,196 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             .collect())
     }
 }
+
+#[test]
+fn mixed_raw_runs_preserve_absence_and_delta_results() {
+    let (fx, base, target) = published_external_delta_member();
+    let derived = blob(b"derived payload");
+    let root = tree(&[("derived", EntryMode::Blob, &derived)]);
+    let ids = [base, target, id(&root), [91; 32], target];
+    let expected = vec![
+        None,
+        Some(serialize(&derived).unwrap()),
+        Some(serialize(&root).unwrap()),
+        None,
+        Some(serialize(&derived).unwrap()),
+    ];
+    with_owner_reader(&fx, |reader| {
+        assert_eq!(
+            block_on(reader.read_canonical(&[base])).unwrap(),
+            vec![None]
+        );
+        assert_eq!(block_on(reader.read_canonical(&ids)).unwrap(), expected);
+    });
+    // General-ID reads retain reachability in both views: the old raw base
+    // participates in reconstruction but is not a direct reachable target.
+    let mut public = expected.clone();
+    public[0] = None;
+    assert_eq!(public_read(&fx, "room", &ids), public);
+    fx.make_private("room");
+    assert!(public_read(&fx, "room", &ids).iter().all(Option::is_none));
+}
+
+#[test]
+fn mixed_raw_run_caps_do_not_mask_earlier_corruption_or_cross_delta_boundary() {
+    use crate::http_objects::resolve::{self, Budget, Env};
+    use crate::indexed::budget::{Budgeted, EncodedBudget, SliceBudget};
+    let (fx, base, target) = published_external_delta_member();
+    let derived = blob(b"derived payload");
+    let root = tree(&[("derived", EntryMode::Blob, &derived)]);
+    let repo = fx.repo_id("room");
+    let no_reads = std::collections::BTreeSet::new();
+    let env = Env {
+        no_reads: &no_reads,
+        blobs: &fx.pipe.blobs,
+        meta: &fx.pipe.meta,
+        shards: fx.pipe.shards.as_ref(),
+        repo: &repo,
+        indexed: fx.pipe.cfg.indexed.as_ref().unwrap(),
+        cfg: fx.pipe.cfg.http_objects.as_ref().unwrap(),
+        metrics: fx.pipe.metrics.as_ref(),
+        caps: crate::indexed::resolve::Caps::Reader,
+    };
+    let members = block_on(resolve::locate_ids(
+        &env,
+        &[base, id(&root), target],
+        resolve::OnCap::Fail,
+    ))
+    .unwrap()
+    .0;
+    let member = |id| *members.iter().find(|(hash, _)| *hash == id).unwrap();
+    let mut corrupt = member(base);
+    corrupt.1.value.frame_offset = u64::MAX;
+    let guards = members
+        .iter()
+        .flat_map(|(id, loc)| [*id, loc.pack])
+        .collect();
+    for dimension in ["decode", "calls", "encoded"] {
+        let calls = SliceBudget::new(if dimension == "calls" { 6 } else { 100 });
+        let encoded = EncodedBudget::new(if dimension == "encoded" {
+            8 + corrupt.1.value.frame_length
+        } else {
+            u64::MAX
+        });
+        let meta = Budgeted::new(&fx.pipe.meta, &calls);
+        let blobs = Budgeted::new(&fx.pipe.blobs, &calls).with_encoded(&encoded);
+        let budgeted = Env {
+            blobs: &blobs,
+            meta: &meta,
+            no_reads: env.no_reads,
+            shards: env.shards,
+            repo: env.repo,
+            indexed: env.indexed,
+            cfg: env.cfg,
+            metrics: env.metrics,
+            caps: env.caps,
+        };
+        let mut decode = Budget(if dimension == "decode" {
+            corrupt.1.value.decoded_size
+        } else {
+            u64::MAX
+        });
+        let error = block_on(crate::pipeline::object_reader::load_permitted(
+            &budgeted,
+            &[corrupt, member(id(&root)), member(target)],
+            &guards,
+            &mut decode,
+        ))
+        .unwrap_err();
+        assert_eq!(error, resolve::Miss::Unavailable, "{dimension}");
+    }
+    let mut delta = member(target);
+    delta.1.value.frame_offset = u64::MAX;
+    let mut later_raw = member(base);
+    later_raw.1.value.decoded_size = u64::MAX;
+    assert_eq!(
+        block_on(crate::pipeline::object_reader::load_permitted(
+            &env,
+            &[delta, later_raw],
+            &guards,
+            &mut Budget(u64::MAX),
+        ))
+        .unwrap_err(),
+        resolve::Miss::Unavailable
+    );
+    block_on(fx.pipe.meta.inner.apply(
+        &crate::store::content_shard(&base),
+        Batch::new().put(
+            keys::block(&base),
+            codec::encode_block_entry(&crate::store::BlockEntry::new("stop", T0 as u64)),
+        ),
+    ))
+    .unwrap();
+    let loaded = block_on(crate::pipeline::object_reader::load_permitted(
+        &env,
+        &[member(base), member(target), member(id(&root))],
+        &guards,
+        &mut Budget(u64::MAX),
+    ))
+    .unwrap();
+    assert!(!loaded.contains_key(&base));
+    assert!(!loaded.contains_key(&target));
+    assert_eq!(&*loaded[&id(&root)], serialize(&root).unwrap());
+}
+
+#[test]
+fn mixed_batch_raw_runs_do_not_charge_more_calls_than_serial_loads() {
+    use crate::http_objects::resolve::{self, Budget, Env};
+    use crate::indexed::budget::{Budgeted, SliceBudget};
+    let (fx, base, target) = published_external_delta_member();
+    let derived = blob(b"derived payload");
+    let root = tree(&[("derived", EntryMode::Blob, &derived)]);
+    let repo = fx.repo_id("room");
+    let no_reads = std::collections::BTreeSet::new();
+    macro_rules! env {
+        ($meta:expr, $blobs:expr) => {
+            Env {
+                no_reads: &no_reads,
+                blobs: $blobs,
+                meta: $meta,
+                shards: fx.pipe.shards.as_ref(),
+                repo: &repo,
+                indexed: fx.pipe.cfg.indexed.as_ref().unwrap(),
+                cfg: fx.pipe.cfg.http_objects.as_ref().unwrap(),
+                metrics: fx.pipe.metrics.as_ref(),
+                caps: crate::indexed::resolve::Caps::Reader,
+            }
+        };
+    }
+    let members = block_on(resolve::locate_ids(
+        &env!(&fx.pipe.meta, &fx.pipe.blobs),
+        &[base, id(&root), target],
+        resolve::OnCap::Fail,
+    ))
+    .unwrap()
+    .0;
+    let member = |id| *members.iter().find(|(hash, _)| *hash == id).unwrap();
+    let batch = [member(base), member(target), member(id(&root))];
+    let guards = std::collections::BTreeSet::new();
+    let serial_calls = SliceBudget::new(1_000);
+    {
+        let meta = Budgeted::new(&fx.pipe.meta, &serial_calls);
+        let blobs = Budgeted::new(&fx.pipe.blobs, &serial_calls);
+        let serial_env = env!(&meta, &blobs);
+        for (id, loc) in batch {
+            block_on(resolve::load(&serial_env, id, loc, &mut Budget(u64::MAX))).unwrap();
+        }
+    }
+    let waved_calls = SliceBudget::new(1_000);
+    let meta = Budgeted::new(&fx.pipe.meta, &waved_calls);
+    let blobs = Budgeted::new(&fx.pipe.blobs, &waved_calls);
+    let loaded = block_on(crate::pipeline::object_reader::load_permitted(
+        &env!(&meta, &blobs),
+        &batch,
+        &guards,
+        &mut Budget(u64::MAX),
+    ))
+    .unwrap();
+    assert_eq!(loaded.len(), 3);
+    assert!(
+        waved_calls.used() <= serial_calls.used(),
+        "waved {} serial {}",
+        waved_calls.used(),
+        serial_calls.used()
+    );
+}

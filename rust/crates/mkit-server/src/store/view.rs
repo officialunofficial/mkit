@@ -97,6 +97,9 @@ impl<S: NamespaceStore> NamespaceStore for ViewStore<'_, S> {
     fn capabilities(&self) -> StoreCapabilities {
         self.store.capabilities()
     }
+    fn read_call_allowance(&self) -> Option<u32> {
+        self.store.read_call_allowance()
+    }
     fn reader_admission(&self) -> bool {
         self.store.reader_admission()
     }

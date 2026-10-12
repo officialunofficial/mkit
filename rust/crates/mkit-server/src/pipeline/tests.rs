@@ -830,7 +830,18 @@ impl Spy {
     }
 
     async fn pause_as(&self, phase: &'static str, op: &'static str) {
-        let latency = self.latency_ms.load(Ordering::SeqCst);
+        self.pause_delay(self.latency_ms.load(Ordering::SeqCst), phase, op)
+            .await;
+    }
+    async fn pause_read(&self, partition: &Partition, phase: &'static str, op: &'static str) {
+        let warm = self.latency_ms.load(Ordering::SeqCst);
+        #[cfg(feature = "http-objects")]
+        let warm = crate::store::read_probe::partition_latency_ms(partition, warm);
+        #[cfg(not(feature = "http-objects"))]
+        let _ = partition;
+        self.pause_delay(warm, phase, op).await;
+    }
+    async fn pause_delay(&self, latency: u64, phase: &'static str, op: &'static str) {
         if latency != 0 {
             crate::store::read_probe::delay(latency, phase).await;
         }
@@ -868,6 +879,15 @@ impl Spy {
 }
 
 impl NamespaceStore for Spy {
+    fn read_call_allowance(&self) -> Option<u32> {
+        Some(
+            self.request_budget
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map_or(u32::MAX, crate::indexed::budget::SliceBudget::remaining),
+        )
+    }
     fn reserve_read_calls(
         &self,
         calls: u32,
@@ -884,7 +904,7 @@ impl NamespaceStore for Spy {
 
     async fn get(&self, p: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
         self.touch(p);
-        self.pause_as(crate::store::read_probe::phase(key.as_bytes()), "get")
+        self.pause_read(p, crate::store::read_probe::phase(key.as_bytes()), "get")
             .await;
         self.maybe_fail_read()?;
         self.saw(key);
@@ -897,7 +917,8 @@ impl NamespaceStore for Spy {
         keys: &[Key],
     ) -> Result<Vec<Option<Value>>, StoreError> {
         self.touch(p);
-        self.pause_as(
+        self.pause_read(
+            p,
             keys.first().map_or("authorization_other", |key| {
                 crate::store::read_probe::phase(key.as_bytes())
             }),
@@ -926,7 +947,7 @@ impl NamespaceStore for Spy {
         limit: u32,
     ) -> Result<ScanPage, StoreError> {
         self.touch(p);
-        self.pause_as(crate::store::read_probe::phase(start.as_bytes()), "scan")
+        self.pause_read(p, crate::store::read_probe::phase(start.as_bytes()), "scan")
             .await;
         if let Some(hook) = &self.scan_hook {
             hook(&self.inner, p);
@@ -956,7 +977,8 @@ impl NamespaceStore for Spy {
     ) -> Result<Vec<ScanPage>, StoreError> {
         if self.count_partition_scans.load(Ordering::SeqCst) {
             self.touch(p);
-            self.pause_as(
+            self.pause_read(
+                p,
                 ranges.first().map_or("authorization_other", |range| {
                     crate::store::read_probe::phase(range.start.as_bytes())
                 }),

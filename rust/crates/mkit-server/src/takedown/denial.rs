@@ -723,6 +723,55 @@ pub(crate) async fn object_denials<S: NamespaceStore>(
     facts: &std::collections::BTreeMap<Hash, super::inventory::Entry>,
     cfg: &IndexedConfig,
 ) -> Result<BTreeSet<Hash>, ServerError> {
+    let contexts = object_contexts(store, shards, repo, requested, facts, cfg).await?;
+    let mut blocked = directory_denials(store, shards, repo, &contexts).await?;
+    // This facade can contain phase-cached guards: retain dispatch-time
+    // accounting rather than reserving calls for cache hits.
+    let dependencies = dependency_denials(store, &contexts, false)
+        .await
+        .map_err(|_| unavailable())?;
+    merge_dependencies(&mut blocked, &contexts, &dependencies);
+    Ok(blocked)
+}
+
+#[cfg(feature = "http-objects")]
+#[allow(clippy::too_many_arguments)] // Separate failure capture for independent reads in one phase.
+pub(crate) async fn object_denials_in<S: NamespaceStore, D: NamespaceStore>(
+    store: &S,
+    dependencies: &D,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    requested: &[(Hash, crate::store::index::LocatedObject)],
+    facts: &std::collections::BTreeMap<Hash, super::inventory::Entry>,
+    cfg: &IndexedConfig,
+) -> Result<BTreeSet<Hash>, ServerError> {
+    let contexts = object_contexts(store, shards, repo, requested, facts, cfg).await?;
+    // Directory work can need further calls for descriptors and continuations.
+    // Its errors precede dependency admission, so dependency reservations cannot
+    // spend the shared headroom needed to observe those earlier errors.
+    let mut blocked = directory_denials(store, shards, repo, &contexts).await?;
+    let dependencies = dependency_denials(dependencies, &contexts, true)
+        .await
+        .map_err(|error| {
+            if crate::indexed::budget::is_exhausted(&error) {
+                reader_exhausted()
+            } else {
+                unavailable()
+            }
+        })?;
+    merge_dependencies(&mut blocked, &contexts, &dependencies);
+    Ok(blocked)
+}
+
+#[cfg(feature = "http-objects")]
+async fn object_contexts<S: NamespaceStore>(
+    store: &S,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    requested: &[(Hash, crate::store::index::LocatedObject)],
+    facts: &std::collections::BTreeMap<Hash, super::inventory::Entry>,
+    cfg: &IndexedConfig,
+) -> Result<Vec<(Hash, ObjectContext)>, ServerError> {
     let mut contexts = Vec::new();
     let mut bytes = 0;
     for (id, location) in requested {
@@ -743,12 +792,17 @@ pub(crate) async fn object_denials<S: NamespaceStore>(
         }
         contexts.push((*id, context));
     }
-    let start = Key::new(INDEX_PREFIX.to_vec());
-    let mut end = INDEX_PREFIX.to_vec();
-    *end.last_mut().ok_or_else(unavailable)? = 1;
-    let end = Key::new(end);
+    Ok(contexts)
+}
+
+#[cfg(feature = "http-objects")]
+async fn directory_denials<S: NamespaceStore>(
+    store: &S,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    contexts: &[(Hash, ObjectContext)],
+) -> Result<BTreeSet<Hash>, ServerError> {
     let mut denied = BTreeSet::new();
-    let _ = (start, end);
     let mut directory = super::directory::Walk::start_reader(store)
         .await
         .map_err(|_| unavailable())?;
@@ -757,7 +811,7 @@ pub(crate) async fn object_denials<S: NamespaceStore>(
             .await
             .map_err(|_| unavailable())?
         {
-            for (id, context) in &contexts {
+            for (id, context) in contexts {
                 if denied.contains(id) {
                     continue;
                 }
@@ -772,17 +826,72 @@ pub(crate) async fn object_denials<S: NamespaceStore>(
             }
         }
     }
-    for (id, context) in contexts {
-        for dependency in &context.ids {
-            if self::denied(store, dependency)
-                .await
-                .map_err(|_| unavailable())?
-            {
-                denied.insert(id);
+    Ok(denied)
+}
+
+#[cfg(feature = "http-objects")]
+async fn dependency_denials<S: NamespaceStore>(
+    store: &S,
+    contexts: &[(Hash, ObjectContext)],
+    reserved: bool,
+) -> Result<BTreeSet<Hash>, StoreError> {
+    let mut seen = BTreeSet::new();
+    let ids: Vec<_> = contexts
+        .iter()
+        .flat_map(|(_, c)| c.ids.iter())
+        .copied()
+        .filter(|id| seen.insert(*id))
+        .collect();
+    let mut blocked = BTreeSet::new();
+    let mut offset = 0;
+    while offset < ids.len() {
+        let width = (ids.len() - offset).min(crate::store::read_io::parallelism());
+        let width = if reserved
+            && store
+                .read_call_allowance()
+                .is_some_and(|calls| calls >= u32::try_from(width).unwrap_or(u32::MAX))
+        {
+            width
+        } else {
+            1
+        };
+        let wave = &ids[offset..offset + width];
+        let reservation = if reserved {
+            store.reserve_read_calls(u32::try_from(width).unwrap_or(u32::MAX))?
+        } else {
+            None
+        };
+        let replies = crate::store::ReadReservation::scope(
+            &[reservation],
+            futures::future::join_all(wave.iter().map(|id| async move {
+                ContentIndex::new(BorrowedStore(store))
+                    .blocked(id)
+                    .await
+                    .map(|entry| entry.is_some())
+            })),
+        )
+        .await;
+        for (id, reply) in wave.iter().zip(replies) {
+            if reply? {
+                blocked.insert(*id);
             }
         }
+        offset += width;
     }
-    Ok(denied)
+    Ok(blocked)
+}
+
+#[cfg(feature = "http-objects")]
+fn merge_dependencies(
+    blocked: &mut BTreeSet<Hash>,
+    contexts: &[(Hash, ObjectContext)],
+    dependencies: &BTreeSet<Hash>,
+) {
+    for (id, context) in contexts {
+        if context.ids.iter().any(|id| dependencies.contains(id)) {
+            blocked.insert(*id);
+        }
+    }
 }
 
 pub async fn require_pack_clear<S: NamespaceStore>(
@@ -1683,3 +1792,6 @@ mod tests {
         });
     }
 }
+
+#[cfg(all(test, feature = "http-objects"))]
+mod read_tests;

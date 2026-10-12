@@ -262,6 +262,18 @@ pub enum CommitOutcome {
 /// A content-addressed, immutable blob store. Writes are put-if-absent;
 /// rewriting a present key with identical bytes is `AlreadyPresent`.
 pub trait BlobStore: MaybeSend + MaybeSync {
+    /// Known remaining backend calls, including inherited ledgers. `None`
+    /// means unknown; this hint never reserves or charges calls.
+    #[doc(hidden)]
+    fn read_call_allowance(&self) -> Option<u32> {
+        None
+    }
+    /// Known remaining encoded read bytes. `None` means unknown; callers
+    /// must still reserve bytes before dispatch.
+    #[doc(hidden)]
+    fn read_byte_allowance(&self) -> Option<u64> {
+        None
+    }
     /// Reserve a read wave's backend calls before dispatch.
     #[doc(hidden)]
     fn reserve_read_calls(

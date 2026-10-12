@@ -126,6 +126,12 @@ pub enum RangeRead {
 /// (`EnvBucket`, wasm32), a simulation in tests. Errors carry the backend's
 /// detail, which the store logs and never returns.
 pub trait ObjectBucket: MaybeSend + MaybeSync + Clone + 'static {
+    /// Known remaining backend calls. `None` means unknown; this hint does
+    /// not reserve or charge calls.
+    #[doc(hidden)]
+    fn read_call_allowance(&self) -> Option<u32> {
+        None
+    }
     /// Reserve backend calls before a bounded read wave.
     #[doc(hidden)]
     fn reserve_read_calls(
@@ -499,6 +505,12 @@ impl<B: ObjectBucket> R2PackSink<B> {
 pub const MAX_R2_RANGE: u64 = (1 << 53) - 1;
 
 impl<B: ObjectBucket> BlobStore for R2BlobStore<B> {
+    fn read_call_allowance(&self) -> Option<u32> {
+        self.bucket.read_call_allowance()
+    }
+    fn read_byte_allowance(&self) -> Option<u64> {
+        Some(u64::MAX)
+    }
     type Sink = R2PackSink<B>;
     fn reserve_read_calls(
         &self,
@@ -874,6 +886,20 @@ pub type WorkerBlobStore = R2BlobStore<EnvBucket>;
 
 #[cfg(target_arch = "wasm32")]
 impl ObjectBucket for EnvBucket {
+    fn read_call_allowance(&self) -> Option<u32> {
+        Some(
+            self.request_budget
+                .as_ref()
+                .map_or(
+                    u32::MAX,
+                    mkit_server::indexed::budget::SliceBudget::remaining,
+                )
+                .min(self.alarm_budget.as_ref().map_or(
+                    u32::MAX,
+                    mkit_server::indexed::budget::SliceBudget::remaining,
+                )),
+        )
+    }
     fn reserve_read_calls(
         &self,
         calls: u32,

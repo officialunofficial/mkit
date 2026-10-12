@@ -2138,6 +2138,12 @@ start fresh after independently loaded objects complete. A strongly empty denial
 directory MUST NOT be cached across calls. Final access gates and external-base
 membership/denial remain mandatory.
 
+Informative: independent backend reads can run in bounded, prepaid waves while
+results retain their original refusal order. Unknown or insufficient allowance
+can retain serial admission. Continuation activation writes retain their
+ordered boundary; the closing guarded apply remains the
+validation cut before its pure closing reads.
+
 Independent reader I/O MAY run concurrently with one shared concurrency, transient
 row and byte admission envelope across scans, membership groups and object loads.
 Every wave MUST reserve page, row, byte and call allowances before dispatch, drain
