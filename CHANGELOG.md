@@ -13,6 +13,19 @@ Combine tags when applicable; every breaking API entry states a replacement and
 every stored-format entry states whether a store reset is required. Embedders
 collect the applicable entries between their old and new immutable pins.
 
+### Changed
+
+- Scheduled Decode, EmitIndex, and inline index writes share per-object takedown
+  denial waves of at most six, after inventory staging and before provisional
+  rows or the direct index apply. The first failing object in batch order still
+  selects blocked or unavailable. Successful batches keep
+  one call per object; a failed wave completes already-issued reads and skips
+  later waves. The inline verifier's pre-staging check uses the same waves at its
+  existing boundary; per-chunk and per-frame extraction checks stay serial.
+  `verification_inventory_progress.denial_ms` now reports wave
+  wall time rather than summed per-call time. No API, wire, hook, stored-format,
+  project-limit, or store-reset change is required.
+
 ### Added
 
 - `mkit-sync`: a native clone, fetch and pull library for `.mkit`

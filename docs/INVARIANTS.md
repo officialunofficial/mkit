@@ -2586,3 +2586,29 @@ implementations, or grow a continuation token without bound.
 [SPEC-HISTORY-ORDER](specs/SPEC-HISTORY-ORDER.md); fixture, page-boundary,
 snapshot round-trip and explicit cap tests, plus proptest
 split-vs-single-run equivalence.
+
+## Denial waves preserve admission order
+
+**Always:** a Decode batch's inventory staging completes before its denial reads.
+At most six reads run together. Admitted readers reserve each wave's calls;
+ordinary mutation stores keep dispatch-time charging, so later budget exhaustion
+cannot mask an earlier object's denial. A wave whose all-or-nothing
+reservation is refused issues no reads and reports unavailable (fail-closed;
+the slice retries).
+All responses in a wave finish before failures are examined in batch order.
+No frame, candidate, or index row for the batch precedes successful denial
+admission. EmitIndex and inline index writes use the same helper in their
+existing put order before each direct apply. The earlier inline pre-staging
+check uses the same waves at its existing boundary. Extract's per-chunk and
+per-frame checks retain their existing serial boundaries.
+Decode denial time records wave wall time, not summed call durations.
+
+**Because:** staging must expose objects to a concurrent takedown before denial
+admission, and response timing must not change blocked/unavailable precedence.
+
+**If violated:** a concurrent block can escape admission or network timing can
+select the outcome and misstate its cost.
+
+**Enforced by:** Decode admission, direct index writes, the inline verifier's pre-staging check, and the shared denial-wave helper;
+`inventory_stage_guard` covers a block landing during staging, and denial-wave
+unit tests cover latency, call charges, reservations, and mixed failures.
