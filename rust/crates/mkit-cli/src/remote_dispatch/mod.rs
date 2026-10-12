@@ -811,6 +811,7 @@ fn open_with_ssh_options(
         .filter(|(scheme, _)| matches!(*scheme, "https" | "http"))
     {
         // Never echo URL userinfo into an error message.
+        let rest = rest.split(['?', '#']).next().unwrap_or(rest);
         let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
         let authority = authority
             .rsplit_once('@')
@@ -2349,11 +2350,17 @@ mod tests {
         assert!(message.contains("SPEC-HTTP-OBJECTS"), "{message}");
 
         // Userinfo is never echoed, and plain http:// is pointed at https.
-        let error = super::open(&format!("http://user:secret@vcs.example/{uuid}/repo"))
-            .err()
-            .expect("plain http must fail");
+        let error = super::open(&format!(
+            "http://user:secret@vcs.example/{uuid}/repo?k=secret2#f"
+        ))
+        .err()
+        .expect("plain http must fail");
         let message = error.to_string();
         assert!(!message.contains("secret"), "{message}");
+        assert!(
+            !message.contains("secret2") && !message.contains("#f"),
+            "{message}"
+        );
         assert!(
             message.contains(&format!("mkit+https://vcs.example/{uuid}/repo")),
             "{message}"

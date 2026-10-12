@@ -579,7 +579,8 @@ fn authority_namespace_public_private_and_signer_reads_end_to_end() {
     assert!(admit.calls > 0, "the signed pushes must run admission");
     assert!(
         !admit.saw_authorization,
-        "the `Bearer` `MKIT_API_TOKEN` header must be discarded before hooks"
+        "the `Bearer` `MKIT_API_TOKEN` header must be discarded before admission (writes; \
+         the server unit test `bearer_authorization_is_not_selected_for_hooks` is the control)"
     );
 }
 

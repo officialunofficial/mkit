@@ -591,6 +591,26 @@ mod tests {
     }
 
     #[test]
+    fn bearer_authorization_is_not_selected_for_hooks() {
+        let values = |name: &str| match name.to_ascii_lowercase().as_str() {
+            "authorization" => vec!["Bearer abc123".into()],
+            _ => Vec::new(),
+        };
+        let first = |name: &str| values(name).into_iter().next();
+        let meta = RequestMeta {
+            procedure: Procedure::UpdateRef,
+            header: &first,
+            header_values: Some(&values),
+            unary_body: None,
+            transport_principal: None,
+        };
+        // The header is captured, then dropped by validation: a bearer
+        // value never reaches a hook.
+        assert_eq!(capture_credentials(&meta, &[]).len(), 1);
+        assert!(select_credentials(&meta, &[]).unwrap().is_empty());
+    }
+
+    #[test]
     fn malformed_credentials_deny_without_echoing_values() {
         for raw in ["bad\n", &"x".repeat(8193)] {
             let values = |name: &str| {
