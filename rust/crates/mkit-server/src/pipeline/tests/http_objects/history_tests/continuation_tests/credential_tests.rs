@@ -69,11 +69,14 @@ fn continuation_fixed_expiry_is_capped_by_ttl_and_grant() {
         ContinuedHistoryOrder::FirstParent,
         ContinuedHistoryOrder::TimestampDiscovery,
     ] {
-        for grant_caps in [false, true] {
+        // No grant, a grant shorter than the TTL, and a grant outliving it.
+        for grant_offset in [None, Some(120_000), Some(2_000_000)] {
+            let grant_caps = grant_offset.is_some_and(|offset| offset < 900_000);
+            let granted = grant_offset.is_some();
             let (fx, head, cursor) = scope_fixture(false);
             let signer = key(56);
             let ttl_expiry = T0 + 900_000;
-            let grant_expiry = T0 + 120_000;
+            let grant_expiry = T0 + grant_offset.unwrap_or(0);
             let grant = crate::pipeline::tests::grants::grant(&fx.owner, &signer, |grant| {
                 grant.scope = RepoScope::Repository(
                     mkit_core::repo_identity::RepositoryIdentity::parse(&fx.identity("room"))
@@ -81,7 +84,7 @@ fn continuation_fixed_expiry_is_capped_by_ttl_and_grant() {
                 );
                 grant.expiry_ms = grant_expiry;
             });
-            let req = if grant_caps {
+            let req = if granted {
                 envelope_with_ttl(&fx, &signer, AUDIENCE, T0, 10_000)
                     .header("x-write-grant", &grant)
             } else {
@@ -91,7 +94,7 @@ fn continuation_fixed_expiry_is_capped_by_ttl_and_grant() {
             let expires = if grant_caps { grant_expiry } else { ttl_expiry };
             assert_eq!(token.expires_at_ms, u64::try_from(expires).unwrap());
             // Fresh envelopes have later expiry but cannot extend the token's original cap.
-            let fresh = if grant_caps {
+            let fresh = if granted {
                 envelope(&fx, &signer, AUDIENCE, expires - 2).header("x-write-grant", &grant)
             } else {
                 envelope(&fx, &fx.owner, AUDIENCE, expires - 2)
