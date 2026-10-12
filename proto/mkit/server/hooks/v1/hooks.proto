@@ -205,7 +205,8 @@ message AdmitRequest {
   repeated Header credential_headers = 7;
   // Present only for a fork: what its charge is for; SPEC-SERVER §9.9.
   ForkAdmission fork = 8;
-  // Ref effects admitted for the guarded apply, in operation ref order.
+  // Ref effects admitted for the guarded apply, in planner order (packmap
+  // before head for an advance). Correlate operation refs by name.
   // Empty when this operation applies no refs; SPEC-SERVER §6.3.
   repeated ResolvedRefUpdate resolved_ref_updates = 9;
 }

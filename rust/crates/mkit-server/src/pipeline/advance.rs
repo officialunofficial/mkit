@@ -462,7 +462,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
 impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// Default consumption verifies before its admission-free apply. Custom
     /// admission runs before mutating inline verification; scheduled readiness
-    /// stays before admission so polling allocates no ref reservation.
+    /// stays before admission. Pending checks may schedule verification work,
+    /// and return before admission without allocating a ref reservation.
     #[allow(clippy::too_many_lines)] // Verification modes share ticket bindings and staging.
     pub(super) async fn verify_ticketed_advance(
         &self,

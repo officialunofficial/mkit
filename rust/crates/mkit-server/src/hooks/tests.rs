@@ -510,7 +510,7 @@ fn resolved_ref_effects_preserve_request_conditions_in_hook_goldens() {
                 condition: RefWriteCondition::Match([0x22; 32]),
                 new: Some([0x44; 32]),
             },
-            [RefEffect::Create, RefEffect::Replace],
+            [RefEffect::Replace, RefEffect::Create],
         ),
         (
             "admit-ref-deletions.request.json",
@@ -524,10 +524,10 @@ fn resolved_ref_effects_preserve_request_conditions_in_hook_goldens() {
                 condition: RefWriteCondition::Missing,
                 new: None,
             },
-            [RefEffect::Delete, RefEffect::NoChange],
+            [RefEffect::NoChange, RefEffect::Delete],
         ),
     ] {
-        let resolved_ref_updates = [&head, &packmap]
+        let resolved_ref_updates = [&packmap, &head]
             .into_iter()
             .zip(effects)
             .map(|(update, effect)| ResolvedRefUpdate {

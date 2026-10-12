@@ -743,7 +743,8 @@ store. Presence MUST preserve the distinction between unknown and zero.
 
 **Resolved ref effects.** The original request conditions remain in
 `operation.refs`. `resolved_ref_updates` describes each working update in
-planner order (packmap before head for an advance). `CREATE` adds an absent
+planner order (packmap before head for an advance). When correlating request
+conditions with resolved effects, consumers MUST match ref names. `CREATE` adds an absent
 ref, `REPLACE` sets a present ref (including the same target), `DELETE`
 removes a present ref, and `NO_CHANGE` deletes an already absent ref. The
 server MUST fence each admitted effect in the same batch that applies it.
@@ -766,9 +767,10 @@ implicit consuming `UpdateRef`. Their ref admission has `declared_bytes = 0`,
 no `pack_id`, and no `new_to_repo_bytes`; uploads retain their own byte
 admission. A refusal or challenge MUST leave refs, tickets, membership, quota,
 replay, and inline verification state unchanged. Custom ref Admission runs
-after ticket binding and read-only scheduled readiness checks, but before
-mutating inline verification. A pending scheduled answer runs no ref Admission
-and allocates no ref reservation. A granted inline reservation uses the existing
+after ticket binding and scheduled readiness checks, but before mutating
+inline verification. Scheduled checks may schedule verification work and
+return Pending before Admission, without allocating a ref reservation. A
+ready call reaching Admission performs no such preparation writes. A granted inline reservation uses the existing
 apply deadline; a failed or late proof MUST abort it. The built-in default keeps its existing skipped
 paths and quota accounting, and adds no presence fence or operation charge.
 Replay and existing-ticket answers continue to skip Admission.

@@ -5489,7 +5489,8 @@ pub struct AdmitRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
     )]
     pub fork: ::buffa::MessageField<ForkAdmission, ::buffa::Inline<ForkAdmission>>,
-    /// Ref effects admitted for the guarded apply, in operation ref order.
+    /// Ref effects admitted for the guarded apply, in planner order (packmap
+    /// before head for an advance). Correlate operation refs by name.
     /// Empty when this operation applies no refs; SPEC-SERVER §6.3.
     ///
     /// Field 9: `resolved_ref_updates`

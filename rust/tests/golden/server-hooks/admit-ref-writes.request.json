@@ -34,16 +34,16 @@
   "createsRepo": false,
   "resolvedRefUpdates": [
     {
-      "name": "refs/heads/main",
-      "delete": false,
-      "effect": "REF_EFFECT_CREATE",
-      "new": "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM="
-    },
-    {
       "name": "refs/packmaps/main",
       "delete": false,
       "effect": "REF_EFFECT_REPLACE",
       "new": "REREREREREREREREREREREREREREREREREREREREREQ="
+    },
+    {
+      "name": "refs/heads/main",
+      "delete": false,
+      "effect": "REF_EFFECT_CREATE",
+      "new": "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM="
     }
   ]
 }

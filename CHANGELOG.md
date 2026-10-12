@@ -33,7 +33,8 @@ collect the applicable entries between their old and new immutable pins.
 - Ref admission exposes additive `AdmissionInput::resolved_ref_updates` and
   `pipeline::{ResolvedRefUpdate, RefEffect}`. Each ref has its name, new target
   or deletion, and `Create`, `Replace`, `Delete`, or `NoChange` (deletion of an
-  absent ref). Original request CAS conditions remain in `Operation`.
+  absent ref). Original request CAS conditions remain in `Operation`; correlate
+  the views by ref name, since effects use planner order (packmap before head).
   Successful applies fence these effects in their ref batch: conditional
   writes use CAS; unconditional writes retain the pre-admission presence
   through retries and abort if it changes. Present-to-present target changes

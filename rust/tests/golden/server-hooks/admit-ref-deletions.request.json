@@ -32,14 +32,14 @@
   "createsRepo": false,
   "resolvedRefUpdates": [
     {
-      "name": "refs/heads/main",
-      "delete": true,
-      "effect": "REF_EFFECT_DELETE"
-    },
-    {
       "name": "refs/packmaps/main",
       "delete": true,
       "effect": "REF_EFFECT_NO_CHANGE"
+    },
+    {
+      "name": "refs/heads/main",
+      "delete": true,
+      "effect": "REF_EFFECT_DELETE"
     }
   ]
 }
