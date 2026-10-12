@@ -525,6 +525,10 @@ collect the applicable entries between their old and new immutable pins.
 
 ### CI
 
+- Four heavy indexed extraction and cold-delta regressions use exact-name,
+  serialized nextest overrides with a 300-second ceiling. Their full fixtures
+  and assertions remain in the default and unchained CI runs; the global
+  timeout stays unchanged.
 - The indexed verification suite runs a second time with one Extract step per
   slice (`MKIT_TEST_EXTRACT_CHAIN=1`), so every outcome assertion holds both
   chained and unchained.

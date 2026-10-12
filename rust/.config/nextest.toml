@@ -40,6 +40,35 @@ filter = 'package(mkit-server) and test(=chained_extract_steps_do_not_slow_large
 threads-required = "num-test-threads"
 slow-timeout = { period = "600s", terminate-after = 1 }
 
+# These extraction fixtures cross the 64 MiB multipart threshold, a raw
+# read-window boundary, three lost-reply boundaries, or fifty cold delta
+# reconstructions. Each has exceeded 60 s under parallel load. Keep the full
+# fixtures and assertions in both execution modes, reserve the run's threads,
+# and give only these exact tests the existing five-minute slow-test ceiling.
+[[profile.default.overrides]]
+filter = '''
+package(mkit-server) and (
+    test(=indexed::extract_tests::large_objects_use_parts_from_sixty_four_mebibytes)
+    or test(=indexed::job_tests::extraction_tests::geometry_tests::compressed_exact_blob_crossing_read_window_matches_inline_and_preservation)
+    or test(=indexed::job_tests::extraction_tests::multipart_lost_replies_at_begin_part_and_completion_resume_same_session)
+    or test(=indexed::job_tests::fifty_in_pack_deltas_keep_cold_slice_progress_and_call_budget)
+)
+'''
+threads-required = "num-test-threads"
+slow-timeout = { period = "300s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = '''
+package(mkit-server) and (
+    test(=indexed::extract_tests::large_objects_use_parts_from_sixty_four_mebibytes)
+    or test(=indexed::job_tests::extraction_tests::geometry_tests::compressed_exact_blob_crossing_read_window_matches_inline_and_preservation)
+    or test(=indexed::job_tests::extraction_tests::multipart_lost_replies_at_begin_part_and_completion_resume_same_session)
+    or test(=indexed::job_tests::fifty_in_pack_deltas_keep_cold_slice_progress_and_call_budget)
+)
+'''
+threads-required = "num-test-threads"
+slow-timeout = { period = "300s", terminate-after = 1 }
+
 # The bounded PR run of the stateful suite (tests/state_machine.rs, 32 cases)
 # is ~12s locally, but it spawns the `mkit` binary per op, so a slow/loaded
 # (especially macOS) runner could drift toward the default 60s / ci 120s kill

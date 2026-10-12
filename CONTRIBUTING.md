@@ -260,6 +260,17 @@ The toolchain plus protoc plus cargo-cache setup shared by the Rust CI workflows
 the `.github/actions/setup-rust` composite action &mdash; bump the pinned action SHAs
 or the protoc version there, in one place, rather than per workflow.
 
+### Scoped slow tests
+
+The exact-name overrides in **rust/.config/nextest.toml** retain full heavy
+fixtures in the default and CI runs. The 64 MiB multipart threshold,
+compressed read-window geometry, multipart lost-reply recovery, and fifty-delta
+cold-slice tests reserve the run's test threads and have a 300-second ceiling.
+Their fixtures and assertions stay unchanged. Both workspace CI runs and the
+second indexed run with `MKIT_TEST_EXTRACT_CHAIN=1` still execute them.
+`just ci-server` also retains them. Other tests keep their existing timeouts;
+the default 60-second ceiling does not change.
+
 ## Commit conventions
 
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) with
