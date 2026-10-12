@@ -38,13 +38,19 @@ pub trait RemoteSource {
     /// Map a failed repository-level call to a [`SyncError`]. The default
     /// recognises a missing repository; backends may add their own cases.
     fn repository_error(&self, error: TransportError) -> SyncError {
-        if matches!(error, TransportError::PackNotFound)
-            && let Some((identity, origin)) = self.repository_address()
-        {
-            return SyncError::RepositoryNotFound { identity, origin };
-        }
-        error.into()
+        default_repository_error(self.repository_address(), error)
     }
+}
+
+/// The default mapping of a failed repository-level call: a missing pack at
+/// repository level means the repository does not exist.
+fn default_repository_error(address: Option<(String, String)>, error: TransportError) -> SyncError {
+    if matches!(error, TransportError::PackNotFound)
+        && let Some((identity, origin)) = address
+    {
+        return SyncError::RepositoryNotFound { identity, origin };
+    }
+    error.into()
 }
 
 /// Classifies a failed repository-level call before the default mapping.
@@ -118,11 +124,6 @@ impl RemoteSource for TransportSource<'_> {
         if let Some(classified) = self.classifier.and_then(|classify| classify(&error)) {
             return classified;
         }
-        if matches!(error, TransportError::PackNotFound)
-            && let Some((identity, origin)) = self.repository_address()
-        {
-            return SyncError::RepositoryNotFound { identity, origin };
-        }
-        error.into()
+        default_repository_error(self.repository_address(), error)
     }
 }

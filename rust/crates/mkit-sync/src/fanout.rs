@@ -46,7 +46,7 @@ pub fn threshold(entries_per_thread: usize) -> usize {
 /// Map `f` over `items` — sequentially below `threshold`, via rayon's
 /// global thread pool at or above it — preserving input order either
 /// way. `f`'s second argument is `true` exactly when the parallel path
-/// was taken, for the rare caller (`commands::add::hash_pending_batch`)
+/// was taken, for the rare caller
 /// whose per-item work itself needs to know whether it's already running
 /// as one of several concurrently-busy rayon workers (to avoid nesting
 /// a second fan-out into an already-saturated pool) — callers that don't

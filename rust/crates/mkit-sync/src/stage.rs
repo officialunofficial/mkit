@@ -41,6 +41,7 @@ pub(crate) fn download_pack_chain(
     branch: &str,
     chain: &[Hash],
     applied: &AppliedPacks,
+    stage_parent: Option<&std::path::Path>,
 ) -> Result<StagedPacks, SyncError> {
     download_pack_chain_with_limits(
         source,
@@ -49,7 +50,7 @@ pub(crate) fn download_pack_chain(
         chain,
         applied,
         MAX_FETCH_STAGED_BYTES,
-        None,
+        stage_parent,
     )
 }
 
@@ -244,7 +245,8 @@ mod tests {
                 &NoopObserver,
                 "main",
                 &[key],
-                &applied
+                &applied,
+                None
             ),
             Err(SyncError::Transport(TransportError::InvalidResponse))
         ));
@@ -281,6 +283,7 @@ mod tests {
             "main",
             &vec![key; 32],
             &applied,
+            None,
         )
         .unwrap();
         let peak = PEAK_RETAINED_PACK_BYTES.with(std::cell::Cell::get);

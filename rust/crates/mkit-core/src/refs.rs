@@ -832,7 +832,7 @@ pub fn write_remote_ref(
 /// that want the successful prefix to be durable even when the batch as
 /// a whole errors out should call [`Self::commit`] regardless of
 /// whether the write loop returned early (see
-/// `remote_dispatch::push_all_with` / `fetch_objects_inner` for the
+/// `remote_dispatch::push_all_with` / `mkit-sync`'s `fetch_objects_inner` for the
 /// pattern).
 #[derive(Debug)]
 pub struct RemoteRefBatch<'a> {
@@ -2674,7 +2674,7 @@ mod tests {
     //
     // `push`/`fetch` publish one remote-tracking ref per branch in a loop
     // (`mkit-cli`'s `remote_dispatch::push_all_with` /
-    // `fetch_objects_inner`). Each `write_remote_ref` call goes through
+    // `mkit-sync`'s `fetch_objects_inner`). Each `write_remote_ref` call goes through
     // `cas_write` → `write_atomic`, which pays a parent-directory fsync
     // EVERY call (`atomic.rs`'s `sync_parent_dir`) — so N branches cost N
     // directory fsyncs, serially, even though they all land in the same
@@ -2683,7 +2683,7 @@ mod tests {
     // were written into it.
 
     /// Baseline (pre-#645): today's per-ref loop — exactly what
-    /// `push_all_with`/`fetch_objects_inner` do today — pays one
+    /// `push_all_with`/`mkit-sync`'s `fetch_objects_inner` do today — pays one
     /// directory fsync per ref, even though every ref lands in the same
     /// `refs/remotes/origin/` directory. This is the O(N) cost #645
     /// exists to amortise; it must keep holding after the fix, since

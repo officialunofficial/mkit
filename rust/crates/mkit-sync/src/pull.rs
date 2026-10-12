@@ -85,15 +85,7 @@ pub fn pull(
 ) -> Result<PullReport, SyncError> {
     let layout = mkit_core::layout::discover(dir)?;
     let store = open_store(&layout, options)?;
-    let fetch = fetch_objects(
-        &store,
-        &layout,
-        source,
-        observer,
-        remote,
-        options.target_branch.as_deref(),
-        options.verify_signatures,
-    )?;
+    let fetch = fetch_objects(&store, &layout, source, observer, remote, options)?;
     let remote_refs = list_remote_refs_parallel(&layout, remote)?
         .into_iter()
         .filter_map(|r| r.hash.map(|hash| (r.name, hash)))
@@ -187,15 +179,7 @@ pub fn fetch(
     // No outer lock: `fetch_objects` takes the repo lock itself, narrowly and
     // per branch, around only the local unpack and ref-publish window.
     let store = open_store(&layout, options)?;
-    fetch_objects(
-        &store,
-        &layout,
-        source,
-        observer,
-        remote,
-        options.target_branch.as_deref(),
-        options.verify_signatures,
-    )
+    fetch_objects(&store, &layout, source, observer, remote, options)
 }
 
 fn rollback_pull_ref_and_head(

@@ -42,6 +42,25 @@ impl Remote {
     /// `signed = false` leaves the signature zeroed, as a hostile remote's
     /// forged history would.
     fn publish(&self, parent: Option<Hash>, files: &[(&str, &[u8])], signed: bool) -> Hash {
+        let (objects, tip) = self.build(parent, files, signed);
+        self.publish_objects(&objects, tip, false);
+        tip
+    }
+
+    /// Replace the branch with `files` as a fresh single-node chain, the way
+    /// a re-baselining push resets a packmap.
+    fn publish_reset(&self, files: &[(&str, &[u8])]) -> Hash {
+        let (objects, tip) = self.build(None, files, true);
+        self.publish_objects(&objects, tip, true);
+        tip
+    }
+
+    fn build(
+        &self,
+        parent: Option<Hash>,
+        files: &[(&str, &[u8])],
+        signed: bool,
+    ) -> (Vec<Object>, Hash) {
         let mut objects = Vec::new();
         let mut entries = Vec::new();
         for (name, data) in files {
@@ -74,11 +93,10 @@ impl Remote {
         let commit = Object::Commit(commit);
         let tip = commit.id().unwrap();
         objects.push(commit);
-        self.publish_objects(&objects, tip);
-        tip
+        (objects, tip)
     }
 
-    fn publish_objects(&self, objects: &[Object], tip: Hash) {
+    fn publish_objects(&self, objects: &[Object], tip: Hash, reset: bool) {
         let mut writer = PackWriter::new();
         for object in objects {
             writer
@@ -93,24 +111,33 @@ impl Remote {
         self.tx
             .upload_pack(&pack, &PackKey::from_hash(pack_key))
             .unwrap();
-        let prev = *self.packmap_head.borrow();
+        let prev = if reset {
+            None
+        } else {
+            *self.packmap_head.borrow()
+        };
         let node = transfer::encode_packlist(prev, &[pack_key]).unwrap();
         let node_key = hash::hash(&node);
         self.tx
             .upload_blob(&node, &PackKey::from_hash(node_key))
             .unwrap();
-        let condition = prev.map_or(RefWriteCondition::Missing, RefWriteCondition::Match);
+        let condition = if reset {
+            RefWriteCondition::Any
+        } else {
+            prev.map_or(RefWriteCondition::Missing, RefWriteCondition::Match)
+        };
         self.tx
             .update_ref("refs/mkit/packmap/main", condition, &node_key)
             .unwrap();
         *self.packmap_head.borrow_mut() = Some(node_key);
         let head = self.tx.read_ref("refs/heads/main").unwrap();
+        let condition = match (reset, head) {
+            (true, _) => RefWriteCondition::Any,
+            (false, None) => RefWriteCondition::Missing,
+            (false, Some(head)) => RefWriteCondition::Match(head),
+        };
         self.tx
-            .update_ref(
-                "refs/heads/main",
-                head.map_or(RefWriteCondition::Missing, RefWriteCondition::Match),
-                &tip,
-            )
+            .update_ref("refs/heads/main", condition, &tip)
             .unwrap();
     }
 
@@ -123,6 +150,9 @@ impl Remote {
 struct Recorder {
     events: RefCell<Vec<SyncEvent>>,
     cancel: Cell<bool>,
+    /// Cancel once this many checkpoints have been polled.
+    cancel_after: Cell<Option<usize>>,
+    polls: Cell<usize>,
 }
 
 impl SyncObserver for Recorder {
@@ -130,7 +160,43 @@ impl SyncObserver for Recorder {
         self.events.borrow_mut().push(event.clone());
     }
     fn cancelled(&self) -> bool {
+        self.polls.set(self.polls.get() + 1);
         self.cancel.get()
+            || self
+                .cancel_after
+                .get()
+                .is_some_and(|n| self.polls.get() > n)
+    }
+}
+
+/// A source that serves a stale branch listing and otherwise delegates.
+struct StaleListing<'a> {
+    inner: TransportSource<'a>,
+    listing: Vec<mkit_core::refs::Ref>,
+}
+
+impl RemoteSource for StaleListing<'_> {
+    fn list_branches(
+        &self,
+    ) -> Result<Vec<mkit_core::refs::Ref>, mkit_core::protocol::TransportError> {
+        Ok(self.listing.clone())
+    }
+    fn read_ref(&self, name: &str) -> Result<Option<Hash>, mkit_core::protocol::TransportError> {
+        self.inner.read_ref(name)
+    }
+    fn download_blob_via_ref(
+        &self,
+        key: &PackKey,
+        ref_name: &str,
+    ) -> Result<Vec<u8>, mkit_core::protocol::TransportError> {
+        self.inner.download_blob_via_ref(key, ref_name)
+    }
+    fn download_pack_via_ref(
+        &self,
+        key: &PackKey,
+        ref_name: &str,
+    ) -> Result<Vec<u8>, mkit_core::protocol::TransportError> {
+        self.inner.download_pack_via_ref(key, ref_name)
     }
 }
 
@@ -345,10 +411,7 @@ fn the_explicit_opt_out_accepts_an_unsigned_commit() {
     let tip = remote.publish(None, &[("a.txt", b"unsigned\n")], false);
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("work");
-    let options = SyncOptions {
-        verify_signatures: false,
-        ..SyncOptions::default()
-    };
+    let options = SyncOptions::default().with_verify_signatures(false);
 
     let report = clone(
         &target,
@@ -371,10 +434,7 @@ fn a_missing_target_branch_is_an_error_not_a_fallback() {
     remote.publish(None, &[("a.txt", b"one\n")], true);
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("work");
-    let options = SyncOptions {
-        target_branch: Some("release".to_owned()),
-        ..SyncOptions::default()
-    };
+    let options = SyncOptions::default().with_target_branch(Some("release".to_owned()));
 
     let err = clone(
         &target,
@@ -485,4 +545,248 @@ fn the_source_trait_is_object_safe() {
     let remote = Remote::new();
     let source: &dyn RemoteSource = &remote.source();
     assert!(source.list_branches().unwrap().is_empty());
+}
+
+#[test]
+fn a_listed_branch_deleted_since_the_listing_is_skipped_not_fetched() {
+    let remote = Remote::new();
+    let tip = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    init_clone_dir(&target, &default_remote("mkit+memory://x")).unwrap();
+    let mut listing = remote.tx.list_refs("refs/heads/").unwrap();
+    listing.push(mkit_core::refs::Ref {
+        name: "ghost".to_owned(),
+        hash: Some(tip),
+    });
+    let source = StaleListing {
+        inner: remote.source(),
+        listing,
+    };
+    let observer = Recorder::default();
+
+    let report = fetch(
+        &target,
+        &source,
+        "default",
+        &SyncOptions::default(),
+        &observer,
+    )
+    .unwrap();
+
+    assert_eq!(report.branches_fetched, 1);
+    assert_eq!(report.branches_skipped, vec!["ghost".to_owned()]);
+    assert!(
+        observer
+            .events
+            .borrow()
+            .iter()
+            .any(|e| matches!(e, SyncEvent::BranchSkippedStale { branch } if branch == "ghost"))
+    );
+    let layout = RepoLayout::single(&target);
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "ghost").unwrap(),
+        None
+    );
+}
+
+#[test]
+fn a_concurrent_rebaseline_is_retried_once_with_the_fresh_tip() {
+    let remote = Remote::new();
+    remote.publish(None, &[("a.txt", b"one\n")], true);
+    // The listing was taken before another pusher reset the packmap to a
+    // single node covering only the new tip.
+    let stale = remote.tx.list_refs("refs/heads/").unwrap();
+    let fresh_tip = remote.publish_reset(&[("b.txt", b"rebaselined\n")]);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    init_clone_dir(&target, &default_remote("mkit+memory://x")).unwrap();
+    let source = StaleListing {
+        inner: remote.source(),
+        listing: stale,
+    };
+
+    let report = fetch(
+        &target,
+        &source,
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+
+    assert_eq!(report.branches_fetched, 1);
+    let layout = RepoLayout::single(&target);
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(fresh_tip)
+    );
+}
+
+#[test]
+fn pull_refuses_to_overwrite_local_work_and_leaves_the_branch_alone() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    remote.publish(Some(first), &[("a.txt", b"two\n")], true);
+    std::fs::write(target.join("a.txt"), b"local edit\n").unwrap();
+
+    let err = pull(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap_err();
+
+    assert!(matches!(err, SyncError::RestoreSafety(_)), "{err:?}");
+    let layout = RepoLayout::single(&target);
+    assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some(first));
+    assert_eq!(
+        std::fs::read(target.join("a.txt")).unwrap(),
+        b"local edit\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_worktree_restore_rolls_the_branch_and_head_back() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    remote.publish(
+        Some(first),
+        &[("a.txt", b"two\n"), ("c.txt", b"new\n")],
+        true,
+    );
+    // A read-only worktree root makes writing the new file fail after the
+    // branch ref and HEAD have moved.
+    let mut perms = std::fs::metadata(&target).unwrap().permissions();
+    perms.set_mode(0o555);
+    std::fs::set_permissions(&target, perms.clone()).unwrap();
+    if std::fs::write(target.join("probe"), b"x").is_ok() {
+        // Running with privileges that ignore directory permissions.
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&target, perms).unwrap();
+        return;
+    }
+
+    let result = pull(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    );
+
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&target, perms).unwrap();
+    // The failure is the worktree write itself, after the ref and HEAD moved.
+    assert!(
+        matches!(&result, Err(SyncError::RestoreSafety(m)) if m.contains("restore worktree")),
+        "{result:?}"
+    );
+    let layout = RepoLayout::single(&target);
+    assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some(first));
+    assert_eq!(
+        refs::read_head(&layout).unwrap(),
+        refs::Head::Branch("main".to_owned())
+    );
+}
+
+#[test]
+fn cancellation_after_the_first_checkpoint_stops_before_publishing() {
+    let remote = Remote::new();
+    remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    init_clone_dir(&target, &default_remote("mkit+memory://x")).unwrap();
+    let observer = Recorder::default();
+    observer.cancel_after.set(Some(1));
+
+    let err = fetch(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &observer,
+    )
+    .unwrap_err();
+
+    assert!(matches!(err, SyncError::Interrupted), "{err:?}");
+    let layout = RepoLayout::single(&target);
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        None
+    );
+}
+
+#[test]
+fn a_live_server_is_reported_as_an_event() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    remote.publish(Some(first), &[("a.txt", b"two\n")], true);
+    let layout = RepoLayout::single(&target);
+    let _serving =
+        mkit_core::repo_lock::acquire_default(layout.common_dir(), mkit_sync::SERVE_LOCK).unwrap();
+    let observer = Recorder::default();
+
+    pull(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &observer,
+    )
+    .unwrap();
+
+    assert!(
+        observer
+            .events
+            .borrow()
+            .iter()
+            .any(|e| matches!(e, SyncEvent::RepositoryServed { .. }))
+    );
+}
+
+#[test]
+fn staging_honours_the_configured_directory() {
+    let remote = Remote::new();
+    remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let staging = dir.path().join("stage");
+    std::fs::create_dir(&staging).unwrap();
+    let options = SyncOptions::default().with_staging_dir(Some(staging.clone()));
+
+    clone(
+        &dir.path().join("work"),
+        &remote.source(),
+        &default_remote("mkit+memory://x"),
+        &options,
+        &NoopObserver,
+    )
+    .unwrap();
+
+    // Staging directories are removed on success; the directory itself stays.
+    assert_eq!(std::fs::read_dir(&staging).unwrap().count(), 0);
+    let missing = SyncOptions::default().with_staging_dir(Some(dir.path().join("nope")));
+    let err = clone(
+        &dir.path().join("work2"),
+        &remote.source(),
+        &default_remote("mkit+memory://x"),
+        &missing,
+        &NoopObserver,
+    )
+    .unwrap_err();
+    assert!(matches!(err, mkit_sync::CloneError::Sync(SyncError::Io(_))));
 }

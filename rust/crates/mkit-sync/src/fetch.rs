@@ -15,6 +15,9 @@ use mkit_core::refs;
 use mkit_core::store::{ObjectStore, StoreError};
 
 use crate::applied_packs::AppliedPacks;
+use std::path::Path;
+
+use crate::SyncOptions;
 use crate::error::SyncError;
 use crate::lock::acquire_worktree_lock;
 use crate::observer::{SyncEvent, SyncObserver};
@@ -66,9 +69,10 @@ pub(crate) fn resolve_and_download_chain(
     branch: &str,
     head_key: Hash,
     applied: &AppliedPacks,
+    stage_parent: Option<&Path>,
 ) -> Result<FetchedChain, SyncError> {
     let chain = resolve_pack_chain(source, observer, branch, head_key)?;
-    let downloaded = download_pack_chain(source, observer, branch, &chain, applied)?;
+    let downloaded = download_pack_chain(source, observer, branch, &chain, applied, stage_parent)?;
     Ok(FetchedChain { chain, downloaded })
 }
 
@@ -117,6 +121,7 @@ pub(crate) fn apply_fetched_chain(
     tip: Hash,
     applied: &mut AppliedPacks,
     require_signed: bool,
+    stage_parent: Option<&Path>,
 ) -> Result<Applied, SyncError> {
     let FetchedChain { chain, downloaded } = fetched;
     let mut stats = Applied {
@@ -144,7 +149,8 @@ pub(crate) fn apply_fetched_chain(
             // store wipe that trips self-heal makes those entries just as
             // stale.
             applied.clear();
-            let downloaded = download_pack_chain(source, observer, branch, &chain, applied)?;
+            let downloaded =
+                download_pack_chain(source, observer, branch, &chain, applied, stage_parent)?;
             stats.packs_downloaded = downloaded.packs.len();
             stats.packs_skipped = 0;
             stats.objects_unpacked +=
@@ -219,8 +225,7 @@ pub(crate) fn fetch_objects(
     source: &dyn RemoteSource,
     observer: &dyn SyncObserver,
     remote: &str,
-    target_branch: Option<&str>,
-    require_signed: bool,
+    options: &SyncOptions,
 ) -> Result<FetchReport, SyncError> {
     let mut applied = AppliedPacks::load_or_empty(layout, remote, observer);
     let mut report = FetchReport::default();
@@ -230,9 +235,8 @@ pub(crate) fn fetch_objects(
         source,
         observer,
         remote,
-        target_branch,
+        options,
         &mut applied,
-        require_signed,
         &mut report,
     );
     if let Err(e) = applied.persist() {
@@ -251,11 +255,13 @@ fn fetch_objects_inner(
     source: &dyn RemoteSource,
     observer: &dyn SyncObserver,
     remote: &str,
-    target_branch: Option<&str>,
+    options: &SyncOptions,
     applied: &mut AppliedPacks,
-    require_signed: bool,
     report: &mut FetchReport,
 ) -> Result<(), SyncError> {
+    let target_branch = options.target_branch.as_deref();
+    let require_signed = options.verify_signatures;
+    let stage_parent = options.staging_dir.as_deref();
     let mut remote_refs = source
         .list_branches()
         .map_err(|error| source.repository_error(error))?;
@@ -311,8 +317,14 @@ fn fetch_objects_inner(
 
             // Phase 1: resolve this branch's chain and download its packs.
             // No repo lock is held.
-            let fetched =
-                resolve_and_download_chain(source, observer, &r.name, chain_head, applied)?;
+            let fetched = resolve_and_download_chain(
+                source,
+                observer,
+                &r.name,
+                chain_head,
+                applied,
+                stage_parent,
+            )?;
 
             // Phase 2: unpack, verify and publish this branch's ref under a
             // repo lock acquired fresh for this branch and released once this
@@ -334,6 +346,7 @@ fn fetch_objects_inner(
                 h,
                 applied,
                 require_signed,
+                stage_parent,
             ) {
                 Ok(stats) => (h, lock, stats),
                 Err(e @ SyncError::RemoteMissingObject(_)) => {
@@ -352,8 +365,14 @@ fn fetch_objects_inner(
                     // re-acquire before the retry's local unpack and publish,
                     // which still need the GC-prune protection.
                     drop(lock);
-                    let fresh_fetched =
-                        resolve_and_download_chain(source, observer, &r.name, fresh_head, applied)?;
+                    let fresh_fetched = resolve_and_download_chain(
+                        source,
+                        observer,
+                        &r.name,
+                        fresh_head,
+                        applied,
+                        stage_parent,
+                    )?;
                     let lock = acquire_worktree_lock(layout, observer)?;
                     let stats = apply_fetched_chain(
                         store,
@@ -365,6 +384,7 @@ fn fetch_objects_inner(
                         fresh_h,
                         applied,
                         require_signed,
+                        stage_parent,
                     )?;
                     (fresh_h, lock, stats)
                 }

@@ -2087,11 +2087,10 @@ fn sync_options(
         .map_or(mkit_core::store::SyncPolicy::Batch, |cfg| {
             cfg.object_sync_policy()
         });
-    Ok(mkit_sync::SyncOptions {
-        verify_signatures: require_signed,
-        target_branch: target_branch.map(str::to_owned),
-        sync_policy,
-    })
+    Ok(mkit_sync::SyncOptions::default()
+        .with_verify_signatures(require_signed)
+        .with_target_branch(target_branch.map(str::to_owned))
+        .with_sync_policy(sync_policy))
 }
 
 /// Fetch remote refs, then fast-forward the current local branch from

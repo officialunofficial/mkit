@@ -27,6 +27,7 @@ rust/
 │   ├── mkit-attest/            # jcs, statement, envelope, signers, verify
 │   ├── mkit-keystore/          # signing-key vault interface + backends
 │   ├── mkit-git-bridge/        # git import/export bridge
+│   ├── mkit-sync/              # native clone/fetch/pull library (typed reports, no printing)
 │   ├── mkit-rpc/               # protobuf wire schemas + stdio framing
 │   ├── mkit-wasm/              # wasm-bindgen surface for browsers / Workers
 │   └── mkit-cli/               # bin "mkit"

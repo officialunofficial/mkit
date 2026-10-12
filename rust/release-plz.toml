@@ -110,6 +110,7 @@ changelog_include = [
   "mkit-transport-enc",
   "mkit-transport-connect",
   "mkit-git-bridge",
+  "mkit-sync",
 ]
 
 # Every other crate: shares the lockstep version_group, never tags/releases.
@@ -121,6 +122,9 @@ name = "mkit-git-bridge"
 version_group = "mkit"
 [[package]]
 name = "mkit-keystore"
+version_group = "mkit"
+[[package]]
+name = "mkit-sync"
 version_group = "mkit"
 [[package]]
 name = "mkit-rpc"

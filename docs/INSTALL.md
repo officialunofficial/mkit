@@ -67,6 +67,7 @@ cargo test --workspace       # all crates, all tests
 | `mkit-attest`                        | DSSE plus in-toto v1, multi-algo signers                      |
 | `mkit-keystore`                      | key vault interface plus backends                             |
 | `mkit-git-bridge`                    | git import/export bridge                                   |
+| `mkit-sync`                          | native clone/fetch/pull as a library                       |
 | `mkit-rpc`                           | shared stdio framing for subprocess protocols              |
 | `mkit-cli`                           | the `mkit` binary                                          |
 | `mkit-transport-{memory,file,http,s3,ssh}` | one crate per transport scheme                       |

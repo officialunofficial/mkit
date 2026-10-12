@@ -5,7 +5,9 @@
 //! report or a typed error and prints nothing: warnings and progress go to a
 //! [`SyncObserver`], and cancellation is polled through it.
 //!
-//! * Nothing is read from the environment or from user config. The caller
+//! * No mkit config, credentials or environment variables are read by the
+//!   library itself (downloaded packs are staged under the system temporary
+//!   directory unless [`SyncOptions::staging_dir`] says otherwise). The caller
 //!   passes the [`RemoteSource`] (already authenticated; for the transport
 //!   backend the credentials live in the [`Transport`](mkit_core::protocol::Transport)
 //!   it was built with) and the [`SyncOptions`].
@@ -52,8 +54,10 @@ pub use source::{ErrorClassifier, RemoteSource, TransportSource};
 
 use mkit_core::store::SyncPolicy;
 
-/// Options shared by [`fetch`], [`pull`] and [`clone`].
+/// Options shared by [`fetch`], [`pull`] and [`clone`]. Start from
+/// [`SyncOptions::default`] and set the fields you need.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct SyncOptions {
     /// Verify the Ed25519 signature of every commit, remix and tag the call
     /// introduces. `true` by default; failing closed on an unsigned or invalid
@@ -64,6 +68,39 @@ pub struct SyncOptions {
     pub target_branch: Option<String>,
     /// Object-store durability schedule.
     pub sync_policy: SyncPolicy,
+    /// Directory under which downloaded packs are staged before they are
+    /// unpacked. `None` uses the system temporary directory.
+    pub staging_dir: Option<std::path::PathBuf>,
+}
+
+impl SyncOptions {
+    /// Set [`verify_signatures`](Self::verify_signatures).
+    #[must_use]
+    pub fn with_verify_signatures(mut self, verify: bool) -> Self {
+        self.verify_signatures = verify;
+        self
+    }
+
+    /// Set [`target_branch`](Self::target_branch).
+    #[must_use]
+    pub fn with_target_branch(mut self, branch: Option<String>) -> Self {
+        self.target_branch = branch;
+        self
+    }
+
+    /// Set [`sync_policy`](Self::sync_policy).
+    #[must_use]
+    pub fn with_sync_policy(mut self, policy: SyncPolicy) -> Self {
+        self.sync_policy = policy;
+        self
+    }
+
+    /// Set [`staging_dir`](Self::staging_dir).
+    #[must_use]
+    pub fn with_staging_dir(mut self, dir: Option<std::path::PathBuf>) -> Self {
+        self.staging_dir = dir;
+        self
+    }
 }
 
 impl Default for SyncOptions {
@@ -72,6 +109,7 @@ impl Default for SyncOptions {
             verify_signatures: true,
             target_branch: None,
             sync_policy: SyncPolicy::Batch,
+            staging_dir: None,
         }
     }
 }

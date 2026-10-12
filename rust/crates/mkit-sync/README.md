@@ -10,8 +10,10 @@ the tip's closure is complete, publishes the remote-tracking ref, and (for
 `pull`) fast-forwards the branch, HEAD and worktree with rollback on failure.
 
 Every call returns a typed report or a typed error. **Nothing is printed**
-(`#![deny(clippy::print_stdout, clippy::print_stderr)]`), and **nothing is
-read from the environment or from user config**.
+(`#![deny(clippy::print_stdout, clippy::print_stderr)]`), and the library
+reads **no mkit config, credentials or environment variables** of its own.
+(Downloaded packs are staged under the system temporary directory unless
+`SyncOptions::staging_dir` names another.)
 
 ## API
 
@@ -38,7 +40,7 @@ let pulled = pull(&dir, &source, "default", &SyncOptions::default(), &NoopObserv
 |---|---|
 | `init_clone_dir(dir, &CloneRemote)` | Create the directory, an empty repository and its config (the flat `remote_endpoint` / `remote_type` keys for the `default` remote, `remote.<name>.*` otherwise). |
 | `fetch(dir, source, remote, &SyncOptions, observer) -> FetchReport` | Reconstruct every remote branch and publish `refs/remotes/<remote>/*`. HEAD, local branches and the worktree are untouched. |
-| `pull(...) -> PullReport` | `fetch`, then fast-forward the current (or `target_branch`) branch, HEAD and worktree. Anything that is not a fast-forward is `SyncError::NonFastForwardPull`. A dirty worktree is `SyncError::RestoreSafety`. |
+| `pull(...) -> PullReport` | `fetch`, then fast-forward the current (or `target_branch`) branch, HEAD and worktree. Anything that is not a fast-forward is `SyncError::NonFastForwardPull`. A worktree whose local changes the fast-forward would overwrite is `SyncError::RestoreSafety`. |
 | `clone(...) -> CloneReport` | `init_clone_dir` followed by `pull`. |
 
 `SyncOptions`:
@@ -49,6 +51,10 @@ let pulled = pull(&dir, &source, "default", &SyncOptions::default(), &NoopObserv
 * `target_branch`: land on this branch. It must exist on the remote; there is
   no silent fallback (`SyncError::RemoteBranchMissing`).
 * `sync_policy`: object-store durability (`Batch` by default).
+* `staging_dir`: where downloaded packs are staged (system temp dir by default).
+
+`SyncOptions` is `#[non_exhaustive]`: start from `SyncOptions::default()` and
+use the `with_*` setters.
 
 ### Observing a sync
 
@@ -79,7 +85,7 @@ command line's `checkout`, `reset` and `restore` use the same functions.
 | Feature | Default | Effect |
 |---|---|---|
 | `pack-zstd` | yes | Pack decode and encode through the zstd C library. |
-| `pack-ruzstd` | no | Pure-Rust pack decode, for builds without `pack-zstd`. |
+| `pack-ruzstd` | no | Pure-Rust decode of v2 pack entries, for builds without `pack-zstd`. |
 | `history-mmr` | no | Publish versioned first-parent ancestry snapshots with branch writes. |
 
 ## Dependency footprint
