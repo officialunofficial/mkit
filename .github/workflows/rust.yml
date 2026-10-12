@@ -456,7 +456,7 @@ jobs:
   ci-gate:
     name: Rust CI gate
     if: always()
-    needs: [build-and-test, keystore-backends, server-feature-clippy, server-semver, client-wasm]
+    needs: [build-and-test, keystore-backends, server-feature-clippy, server-semver, client-wasm, sync-native-deps]
     runs-on: ubuntu-latest
     steps:
       - name: Verify no critical job failed
@@ -467,6 +467,7 @@ jobs:
           SERVER_FEATURE_CLIPPY: ${{ needs.server-feature-clippy.result }}
           SERVER_SEMVER: ${{ needs.server-semver.result }}
           CLIENT_WASM: ${{ needs.client-wasm.result }}
+          SYNC_NATIVE_DEPS: ${{ needs.sync-native-deps.result }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
           echo "event:              ${EVENT_NAME}"
@@ -475,7 +476,7 @@ jobs:
 
           fail=0
 
-          for result in "${SERVER_FEATURE_CLIPPY}" "${SERVER_SEMVER}" "${CLIENT_WASM}"; do
+          for result in "${SERVER_FEATURE_CLIPPY}" "${SERVER_SEMVER}" "${CLIENT_WASM}" "${SYNC_NATIVE_DEPS}"; do
             case "${result}" in
               success|skipped) ;;
               *)

@@ -25,7 +25,8 @@ pub trait Executor {
 
 /// An executor with no reactor, for transports whose futures need none (an
 /// in-process or host-provided channel). A transport built on a runtime, such
-/// as [`NativeHttp`](crate::NativeHttp), is its own executor.
+/// as `NativeHttp`, is its own executor: pairing it (or `NativeClock`) with
+/// this one panics at the first call, because there is no reactor to drive it.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FuturesExecutor;
 
@@ -40,7 +41,8 @@ const MAX_LIST_PAGES: u32 = 4096;
 /// A packmap node is small; this is the response cap `mkit-client` uses.
 const NODE_LIMIT: u64 = 1024 * 1024;
 
-/// The read side of a remote repository reached through a [`Client`].
+/// The read side of a remote repository reached through a [`Client`]. The
+/// engine calls it one operation at a time.
 pub struct ClientSource<'a, T, S, C, E> {
     client: &'a Client<'a, T, S, C>,
     executor: &'a E,
@@ -75,7 +77,11 @@ fn transport_error(error: ClientError) -> TransportError {
             "failed_precondition" => TransportError::RefConflict,
             _ => TransportError::RemoteError(remote.message),
         },
-        ClientError::Transport(_) => TransportError::ConnectionFailed,
+        // Keep the cause: a refused redirect, an oversized or undecodable body,
+        // a TLS failure and a timeout are different problems, and the first
+        // two are deterministic, so they must not look like a retryable
+        // connection failure.
+        ClientError::Transport(cause) => TransportError::RemoteError(format!("transport: {cause}")),
         ClientError::PaymentRequired(required) => TransportError::AdmissionRequired(required),
         ClientError::Limit(_)
         | ClientError::Invalid(_)

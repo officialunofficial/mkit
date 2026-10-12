@@ -34,9 +34,12 @@ type Connector = hyper_rustls::HttpsConnector<HttpConnector>;
 /// runtime that drives them. Do not call it from inside another tokio
 /// runtime.
 pub struct NativeHttp {
-    runtime: tokio::runtime::Runtime,
+    // Declared first so the pooled connections drop before the runtime that
+    // drives them.
     client: HyperClient<Connector, Full<Bytes>>,
+    runtime: tokio::runtime::Runtime,
     timeout: Duration,
+    allow_insecure_http: bool,
 }
 
 impl std::fmt::Debug for NativeHttp {
@@ -74,9 +77,9 @@ impl NativeHttp {
         Self::with_tls_config(&default_tls_config()?)
     }
 
-    /// A transport using `tls` for `https` origins. Plain `http` origins are
-    /// sent in the clear; whether one is acceptable is the destination's
-    /// decision (`mkit_client::Destination` admits only canonical origins).
+    /// A transport using `tls` for `https` origins. Cleartext `http` is
+    /// refused except to loopback, unless
+    /// [`allow_insecure_http`](Self::allow_insecure_http) is set.
     ///
     /// # Errors
     /// The runtime cannot be built.
@@ -95,7 +98,18 @@ impl NativeHttp {
             runtime,
             client,
             timeout: DEFAULT_TIMEOUT,
+            allow_insecure_http: false,
         })
+    }
+
+    /// Allow cleartext `http` to hosts other than loopback. Off by default: a
+    /// signed request and the packs it fetches would cross the network
+    /// unencrypted. `https` and loopback `http` (for local development and
+    /// tests) are always allowed.
+    #[must_use]
+    pub fn allow_insecure_http(mut self, allow: bool) -> Self {
+        self.allow_insecure_http = allow;
+        self
     }
 
     /// Bound one request, response body included. The default is ten minutes.
@@ -110,6 +124,15 @@ impl Executor for NativeHttp {
     fn block_on<F: std::future::Future>(&self, future: F) -> F::Output {
         self.runtime.block_on(future)
     }
+}
+
+/// Loopback hosts, the same set the Connect transport admits for plain HTTP.
+fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Read at most `limit` bytes of `body`, refusing a longer one while it is
@@ -149,6 +172,12 @@ impl HttpTransport for NativeHttp {
         response_limit: usize,
     ) -> Result<Response<Vec<u8>>, String> {
         let (mut parts, body) = request.into_parts();
+        if parts.uri.scheme_str() == Some("http")
+            && !self.allow_insecure_http
+            && !parts.uri.host().is_some_and(is_loopback_host)
+        {
+            return Err("cleartext http to a non-loopback host refused".to_owned());
+        }
         parts
             .headers
             .insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
@@ -194,8 +223,9 @@ impl HttpTransport for NativeHttp {
 }
 
 /// A [`Clock`] on the system time, the operating system's entropy and the
-/// tokio timer. `wait` needs to run inside [`NativeHttp`]'s runtime, which is
-/// where [`ClientSource`](crate::ClientSource) runs every call.
+/// tokio timer. `wait` needs a tokio reactor, so run the client with
+/// [`NativeHttp`] as the executor, as [`ClientSource`](crate::ClientSource) does
+/// when given it; under `FuturesExecutor` it panics.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NativeClock;
 

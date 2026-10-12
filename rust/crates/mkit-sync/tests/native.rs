@@ -110,10 +110,11 @@ fn a_signed_client_fetches_with_an_injected_signer() {
         None,
         &[("a.txt", b"signed\n")],
     );
-    // Any signer works for a public repository; the point is that an injected
-    // signer and clock authenticate every call, and nothing is read from the
-    // environment.
-    let signer = Dalek::new(READER_SEED);
+    // A public repository answers a signed or an anonymous caller alike, so
+    // the proof that the injected signer is used is that it is called: a
+    // signed client signs every RPC but discovery. (The private-read case,
+    // where signing decides the answer, is in `tests/authority.rs`.)
+    let signer = Counting::new(READER_SEED);
     let clock = NativeClock;
     let client = Client::signed(
         &http,
@@ -141,6 +142,35 @@ fn a_signed_client_fetches_with_an_injected_signer() {
         refs::read_remote_ref(&layout, "default", "main").unwrap(),
         Some(tip)
     );
+    assert!(
+        signer.calls.load(std::sync::atomic::Ordering::SeqCst) >= 3,
+        "the signer must authenticate list, read and download calls"
+    );
+}
+
+/// A signer that counts how many digests it signed.
+struct Counting {
+    inner: Dalek,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl Counting {
+    fn new(seed: u8) -> Self {
+        Self {
+            inner: Dalek::new(seed),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+impl mkit_client::Signer for Counting {
+    fn public_key(&self) -> [u8; 32] {
+        self.inner.public_key()
+    }
+    async fn sign(&self, digest: &mkit_core::hash::Hash) -> Result<[u8; 64], String> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.sign(digest).await
+    }
 }
 
 #[test]

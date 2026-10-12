@@ -9,12 +9,13 @@
 #
 #   - no zstd at all: not `zstd`, `zstd-safe` or `zstd-sys` (so no C zstd
 #     library), with pack decode through the pure-Rust `ruzstd`;
-#   - no second C crypto library (`aws-lc-*`, `openssl*`), no HTTP/2 (`h2`),
+#   - no second C crypto library (`aws-lc-*`, `openssl*`, `native-tls`), no platform trust store (`rustls-native-certs`),
+#     no brotli, no HTTP/2 (`h2`),
 #     no Connect runtime (`connectrpc`) and no `reqwest`;
 #   - no tokio multi-thread scheduler (`rt-multi-thread`);
 #
 # and it must contain the pieces that make it work: `flate2` (gzip), `hyper`,
-# `rustls` and `ruzstd`.
+# `rustls`, `ring` and (in the pack-ruzstd row) `ruzstd`.
 #
 # Rows checked:
 #   --no-default-features --features pack-ruzstd,connect-native  (the addon build)
@@ -31,7 +32,8 @@ err() {
   fail=1
 }
 
-banned=(zstd zstd-safe zstd-sys aws-lc-rs aws-lc-sys openssl openssl-sys h2 connectrpc reqwest)
+banned=(zstd zstd-safe zstd-sys aws-lc-rs aws-lc-sys openssl openssl-sys native-tls
+  rustls-native-certs brotli h2 connectrpc reqwest)
 
 check_row() {
   local features=$1 want_ruzstd=$2
@@ -43,18 +45,18 @@ check_row() {
   count=$(printf '%s\n' "$tree" | awk '{print $1}' | sort -u | wc -l | tr -d ' ')
   echo "check-sync-native-deps: [$features] $count unique crates"
   for pkg in "${banned[@]}"; do
-    if printf '%s\n' "$tree" | grep -q "^$pkg "; then
+    if grep -q "^$pkg " <<<"$tree"; then
       err "[$features] the graph contains $pkg"
     fi
   done
-  if printf '%s\n' "$feats" | grep -q 'tokio feature "rt-multi-thread"'; then
+  if grep -q 'tokio feature "rt-multi-thread"' <<<"$feats"; then
     err "[$features] tokio's multi-thread scheduler is enabled"
   fi
-  for pkg in flate2 hyper rustls; do
-    printf '%s\n' "$tree" | grep -q "^$pkg " || err "[$features] the graph lacks $pkg"
+  for pkg in flate2 hyper rustls ring; do
+    grep -q "^$pkg " <<<"$tree" || err "[$features] the graph lacks $pkg"
   done
   if [ "$want_ruzstd" = yes ]; then
-    printf '%s\n' "$tree" | grep -q '^ruzstd ' || err "[$features] the graph lacks ruzstd"
+    grep -q '^ruzstd ' <<<"$tree" || err "[$features] the graph lacks ruzstd"
   fi
 }
 
