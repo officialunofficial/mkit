@@ -67,11 +67,53 @@ cancellation (`cancelled()`), which makes the call fail with
 ### Remote sources
 
 The engine reads through the `RemoteSource` trait: list branches, read a ref,
-download a packmap node, download a pack. The first backend is
-`TransportSource`, over mkit-core's synchronous `Transport`, so every
-transport scheme (file, ssh, s3, http, connect) works. Credentials live in
-the transport the caller built; `TransportSource::with_error_classifier` lets
-a caller map transport-specific failures to typed errors.
+download a packmap node, download a pack. Two backends ship:
+
+* `TransportSource` (always): mkit-core's synchronous `Transport`, so every
+  transport scheme (file, ssh, s3, http, connect) works. Credentials live in
+  the transport the caller built; `with_error_classifier` lets a caller map
+  transport-specific failures to typed errors.
+* `ClientSource` (feature `client`): `mkit_client::Client` for `mkit+https` and
+  `mkit+http` remotes, anonymous or **signed by an injected
+  `mkit_client::Signer` and `Clock`**. Private reads are authenticated by the
+  signer; nothing is read from the environment or from user config. The async
+  client is driven by an `Executor` (`block_on`): `FuturesExecutor` for a
+  transport that needs no reactor, or the transport itself when it owns a
+  runtime, as `NativeHttp` does.
+
+```rust,ignore
+use mkit_client::Client;
+use mkit_sync::{ClientSource, NativeClock, NativeHttp, NoopObserver, SyncOptions, clone};
+
+let http = NativeHttp::new()?;                       // feature `connect-native`
+let client = Client::signed(&http, destination, &my_signer, &NativeClock);
+let source = ClientSource::new(&client, &http);
+clone(&dir, &source, &remote, &SyncOptions::default(), &NoopObserver)?;
+```
+
+A missing repository, a private one read anonymously and one read by a signer
+the server denies all come back as the same `SyncError::RepositoryNotFound`
+(the wire answer is a uniform `not_found`).
+
+### `connect-native`: a small native HTTP channel
+
+`NativeHttp` implements `mkit_client::HttpTransport` with hyper over rustls
+(`ring`) on a **current-thread** tokio runtime, HTTP/1.1 only. It speaks
+**gzip as its only content coding** (`accept-encoding: gzip`; a response in any
+other coding is refused, and an inflated body is bounded by the same response
+limit as a plain one), never follows a redirect (a signed request must not be
+replayed to another origin), bounds every response while receiving it, and
+bounds each request by a timeout (ten minutes by default). TLS trusts the
+built-in web PKI roots unless the caller passes a `rustls::ClientConfig`.
+`NativeClock` supplies the epoch clock, OS entropy for nonces and the tokio
+timer. Calling `NativeHttp` from inside another tokio runtime panics, as
+`block_on` does.
+
+There is no zstd anywhere in this feature's tree: pack decode goes through
+mkit-core's `pack-ruzstd`. `scripts/check-sync-native-deps.sh` runs in CI and
+fails if `zstd`, `zstd-safe`, `zstd-sys`, `aws-lc-*`, `openssl*`, `h2`,
+`connectrpc` or `reqwest` enter the normal graph, if tokio's multi-thread
+scheduler is enabled, or if `flate2`, `hyper`, `rustls` or `ruzstd` leave it.
 
 ### Worktree primitives
 
@@ -84,22 +126,35 @@ command line's `checkout`, `reset` and `restore` use the same functions.
 
 | Feature | Default | Effect |
 |---|---|---|
-| `pack-zstd` | yes | Pack decode and encode through the zstd C library. |
+| `pack-zstd` | yes | Reads zstd-compressed (format v2) pack entries through the zstd C library. Without it, v2 packs are rejected unless `pack-ruzstd` is on. |
 | `pack-ruzstd` | no | Pure-Rust decode of v2 pack entries, for builds without `pack-zstd`. |
 | `history-mmr` | no | Publish versioned first-parent ancestry snapshots with branch writes. |
+| `client` | no | `ClientSource`, `Executor`, `FuturesExecutor`: the `mkit-client` backend. |
+| `connect-native` | no | `client` plus `NativeHttp`, `NativeClock`, `default_tls_config`. Gzip only, no zstd. |
+
+The embedding native addon builds `--no-default-features --features
+pack-ruzstd,connect-native`.
 
 ## Dependency footprint
 
-`cargo tree -e normal -p mkit-sync`: direct dependencies are `mkit-core`,
-`rayon`, `tempfile` and `thiserror`.
+`cargo tree -e normal -p mkit-sync` (host target, unique crate names):
 
-| Build | Unique crates in the normal tree | `zstd-sys` |
-|---|---|---|
-| default (`pack-zstd`) | 85 | yes |
-| `--no-default-features` | 82 | no |
-| `--no-default-features --features pack-ruzstd` | 84 | no |
+| Build | Crates | `zstd-sys` | Pack decode |
+|---|---|---|---|
+| default (`pack-zstd`) | 67 | yes | C zstd |
+| `--no-default-features` | 64 | no | raw packs only |
+| `--no-default-features --features pack-ruzstd` | 66 | no | `ruzstd` |
+| `--features client` | 88 | yes | C zstd |
+| `--no-default-features --features pack-ruzstd,client` | 87 | no | `ruzstd` |
+| `--features connect-native` | 117 | yes | C zstd |
+| `--no-default-features --features connect-native` | 114 | no | raw packs only |
+| `--no-default-features --features pack-ruzstd,connect-native` | **116** | **no** | `ruzstd` |
 
-No async runtime, HTTP client or TLS stack is involved.
+The last row is the addon build. `connect-native` adds hyper, hyper-util,
+hyper-rustls, rustls (`ring`), webpki-roots, tokio (`rt`, `net`, `time`),
+flate2 (pure-Rust backend), http, http-body-util, bytes and getrandom, about 50
+crates over the `client` row; no async runtime beyond the current-thread
+scheduler, no HTTP/2, no Connect runtime.
 
 ## License
 

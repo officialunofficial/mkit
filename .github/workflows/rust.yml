@@ -144,6 +144,24 @@ jobs:
       - name: Dependency graph has no runtime or C compression
         run: bash scripts/check-wasm-dep-graph.sh
 
+  # mkit-sync's `connect-native` feature is a small native HTTP channel: gzip
+  # only, no zstd-sys, no second C crypto library, no HTTP/2 or Connect runtime.
+  # The gate reads the resolved dependency graph for the embedding addon's build.
+  sync-native-deps:
+    name: mkit-sync connect-native dependency gate
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          cache-prefix: sync-native-deps
+          protoc: "false"
+      - name: Dependency graph has no zstd and no heavy runtime
+        run: bash scripts/check-sync-native-deps.sh
+
   build-and-test:
     name: Build & Test (${{ matrix.os }})
     # macOS-only here: the Linux leg moved to Cloud Build (cloudbuild/ci.yaml).

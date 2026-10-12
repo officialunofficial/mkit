@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# The `connect-native` dependency gate for `mkit-sync`.
+#
+# `connect-native` is a small native HTTP channel (hyper over rustls on a
+# current-thread runtime, gzip as the only content coding). For the builds an
+# embedding native addon uses, the normal dependency graph must contain:
+#
+#   - no zstd at all: not `zstd`, `zstd-safe` or `zstd-sys` (so no C zstd
+#     library), with pack decode through the pure-Rust `ruzstd`;
+#   - no second C crypto library (`aws-lc-*`, `openssl*`), no HTTP/2 (`h2`),
+#     no Connect runtime (`connectrpc`) and no `reqwest`;
+#   - no tokio multi-thread scheduler (`rt-multi-thread`);
+#
+# and it must contain the pieces that make it work: `flate2` (gzip), `hyper`,
+# `rustls` and `ruzstd`.
+#
+# Rows checked:
+#   --no-default-features --features pack-ruzstd,connect-native  (the addon build)
+#   --no-default-features --features connect-native
+# Both are printed with their crate counts so a reviewer sees the footprint.
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+fail=0
+err() {
+  echo "check-sync-native-deps: $*" >&2
+  fail=1
+}
+
+banned=(zstd zstd-safe zstd-sys aws-lc-rs aws-lc-sys openssl openssl-sys h2 connectrpc reqwest)
+
+check_row() {
+  local features=$1 want_ruzstd=$2
+  local tree feats count
+  tree=$(cd rust && cargo tree --locked -p mkit-sync --no-default-features \
+    --features "$features" -e normal --target all --prefix none)
+  feats=$(cd rust && cargo tree --locked -p mkit-sync --no-default-features \
+    --features "$features" -e normal,features --target all --prefix none)
+  count=$(printf '%s\n' "$tree" | awk '{print $1}' | sort -u | wc -l | tr -d ' ')
+  echo "check-sync-native-deps: [$features] $count unique crates"
+  for pkg in "${banned[@]}"; do
+    if printf '%s\n' "$tree" | grep -q "^$pkg "; then
+      err "[$features] the graph contains $pkg"
+    fi
+  done
+  if printf '%s\n' "$feats" | grep -q 'tokio feature "rt-multi-thread"'; then
+    err "[$features] tokio's multi-thread scheduler is enabled"
+  fi
+  for pkg in flate2 hyper rustls; do
+    printf '%s\n' "$tree" | grep -q "^$pkg " || err "[$features] the graph lacks $pkg"
+  done
+  if [ "$want_ruzstd" = yes ]; then
+    printf '%s\n' "$tree" | grep -q '^ruzstd ' || err "[$features] the graph lacks ruzstd"
+  fi
+}
+
+check_row pack-ruzstd,connect-native yes
+check_row connect-native no
+
+if [ "$fail" -ne 0 ]; then
+  exit 1
+fi
+echo "check-sync-native-deps: OK"

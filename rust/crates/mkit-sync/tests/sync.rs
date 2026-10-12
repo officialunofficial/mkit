@@ -829,3 +829,56 @@ fn staging_honours_the_configured_directory() {
     .unwrap_err();
     assert!(matches!(err, mkit_sync::CloneError::Sync(SyncError::Io(_))));
 }
+
+/// A signed one-commit history whose pack carries a zstd entry
+/// (`examples/gen_zstd_fixture.rs` regenerates it).
+const ZSTD_PACK: &[u8] = include_bytes!("fixtures/zstd.pack");
+const ZSTD_TIP: &str = "8c6b7803b11c2e4325369f93927a180c80cb97bdec7708cf30c0f541d2ae8787";
+
+fn remote_with_zstd_pack() -> Remote {
+    let remote = Remote::new();
+    let pack_key = pack::pack_key(ZSTD_PACK);
+    remote
+        .tx
+        .upload_pack(ZSTD_PACK, &PackKey::from_hash(pack_key))
+        .unwrap();
+    let node = transfer::encode_packlist(None, &[pack_key]).unwrap();
+    let node_key = hash::hash(&node);
+    remote
+        .tx
+        .upload_blob(&node, &PackKey::from_hash(node_key))
+        .unwrap();
+    remote
+        .tx
+        .update_ref(
+            "refs/mkit/packmap/main",
+            RefWriteCondition::Missing,
+            &node_key,
+        )
+        .unwrap();
+    remote
+        .tx
+        .update_ref(
+            "refs/heads/main",
+            RefWriteCondition::Missing,
+            &hash::from_hex(ZSTD_TIP).unwrap(),
+        )
+        .unwrap();
+    remote
+}
+
+// Test builds unify mkit-core's features across the dev-dependencies, so this
+// runs with the C decoder available whichever of the two features is selected;
+// the pure-Rust-only build is held by `scripts/check-sync-native-deps.sh`
+// (the normal graph has `ruzstd` and no `zstd`).
+#[test]
+fn a_zstd_compressed_pack_is_cloned() {
+    let remote = remote_with_zstd_pack();
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+
+    clone_into(&remote, &target);
+
+    let text = std::fs::read_to_string(target.join("big.txt")).unwrap();
+    assert_eq!(text, "mkit compresses repetitive text well. ".repeat(256));
+}

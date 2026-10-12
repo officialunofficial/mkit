@@ -49,6 +49,14 @@ impl Clock for NoClock {
     }
 }
 
+/// A repository's visibility.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Visibility {
+    Public,
+    Private,
+}
+
 /// A ref from a listing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -395,6 +403,40 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Client<'_, T, S, C, O> 
     ) -> Result<Reply<UpdateRefResponse>, Error> {
         self.require_signer()?;
         reply(calls::update_ref(&self.rpc(), name, expected, None, identity).await)
+    }
+
+    /// `SetRepoVisibility` in the signed (envelope) mode: the signer must be
+    /// the repository's owner or authority, as the server decides.
+    ///
+    /// # Errors
+    /// An anonymous client, or transport and remote failures.
+    pub async fn set_repo_visibility(
+        &self,
+        visibility: Visibility,
+        identity: Option<&Identity>,
+    ) -> Result<Reply<()>, Error> {
+        use crate::proto::{
+            RepoVisibility, SetRepoVisibilityRequest, SetRepoVisibilityResponse,
+            set_repo_visibility_request::Mode,
+        };
+        self.require_signer()?;
+        let wire = match visibility {
+            Visibility::Public => RepoVisibility::REPO_VISIBILITY_PUBLIC,
+            Visibility::Private => RepoVisibility::REPO_VISIBILITY_PRIVATE,
+        };
+        let request = SetRepoVisibilityRequest {
+            mode: Some(Mode::Visibility(wire.into())),
+            ..Default::default()
+        };
+        let opts = Opts {
+            identity,
+            ..Opts::default()
+        };
+        let result: Result<(SetRepoVisibilityResponse, _), Error> = self
+            .rpc()
+            .unary_with("SetRepoVisibility", &request, opts)
+            .await;
+        reply(result.map(|(_, identity)| ((), identity)))
     }
 
     /// One `AdvanceRefs`. A pending verification returns

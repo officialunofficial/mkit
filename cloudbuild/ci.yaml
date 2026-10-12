@@ -236,6 +236,7 @@ steps:
         )
         bash scripts/check-wasm-dep-graph.sh
         bash scripts/check-cli-baseline.sh
+        bash scripts/check-sync-native-deps.sh
 
         sccache --show-stats
 

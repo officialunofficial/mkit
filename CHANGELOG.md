@@ -45,6 +45,16 @@ collect the applicable entries between their old and new immutable pins.
   not 32 bytes, an unspecified expectation, a missing new id), with or without an
   observer, so the ref moves reported to the observer are exactly the ones sent;
   well-formed requests are unaffected.
+- `mkit-sync` gains a `mkit-client` backend (`client` feature): `ClientSource`
+  reads `mkit+https` and `mkit+http` remotes through `mkit_client::Client`,
+  anonymous or signed by an injected `Signer` and `Clock`, driven by an
+  `Executor`. The `connect-native` feature adds `NativeHttp`, `NativeClock`
+  and `default_tls_config`: a small native HTTP channel (hyper over rustls on
+  a current-thread runtime, gzip as the only content coding, no zstd-sys) for
+  embedders that bring no HTTP client of their own. A CI gate
+  (`scripts/check-sync-native-deps.sh`) holds its dependency graph. The CLI is
+  unchanged. `mkit-client` gains `Client::set_repo_visibility`,
+  `Visibility`, and `Destination::{origin, repository}`.
 - `mkit-client`: the runtime-independent async protocol client for reads and
   writes, on native and wasm32-unknown-unknown with no tokio, hyper or C
   compression in its dependency graph. The earlier `mkit-push` (never published) is renamed to it, with its code unchanged in
