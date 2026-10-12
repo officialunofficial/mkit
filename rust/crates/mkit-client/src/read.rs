@@ -2,6 +2,7 @@
 //! signature verification on by default.
 
 use crate::connect::{Clock, Error, HttpTransport, Rpc, Signer};
+use crate::seams::Observer;
 use mkit_core::{
     hash::{Hash, to_hex},
     pack::{self, DecodeLimits, DeltaBaseSource, PackError, decode_entries_with},
@@ -22,8 +23,8 @@ pub(crate) const MAX_CHAIN_PACKS: usize = 1_000_000;
 ///
 /// Each node goes to `visit` and is then dropped, so the walk retains only what
 /// the visitor keeps.
-pub(crate) async fn walk_nodes<T: HttpTransport, S: Signer, C: Clock>(
-    rpc: &Rpc<'_, T, S, C>,
+pub(crate) async fn walk_nodes<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
+    rpc: &Rpc<'_, T, S, C, O>,
     root: Hash,
     head_ref: &str,
     mut visit: impl FnMut(PackListNode) -> Result<Option<Hash>, Error>,
@@ -42,8 +43,8 @@ pub(crate) async fn walk_nodes<T: HttpTransport, S: Signer, C: Clock>(
 
 /// Walk to a flat, oldest-first pack list. Retention is bounded by the total
 /// number of pack ids the nodes list (not only the distinct ones).
-pub(crate) async fn resolve<T: HttpTransport, S: Signer, C: Clock>(
-    rpc: &Rpc<'_, T, S, C>,
+pub(crate) async fn resolve<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
+    rpc: &Rpc<'_, T, S, C, O>,
     root: Hash,
     head_ref: &str,
 ) -> Result<Vec<Hash>, Error> {

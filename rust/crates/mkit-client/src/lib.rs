@@ -1,13 +1,15 @@
 #![forbid(unsafe_code)]
 #![doc = include_str!("../README.md")]
 
+mod calls;
 mod client;
 mod connect;
 mod plan;
 mod push;
 mod read;
+mod seams;
 
-pub use client::{Client, NamedRef, NoClock, NoSigner, RefPage};
+pub use client::{Client, NamedRef, NoClock, NoSigner, RefPage, SignedEnvelope};
 pub use connect::{
     Clock, Destination, Detail, Error, HttpTransport, Identity, RemoteError, Reply, Signer,
 };
@@ -18,3 +20,7 @@ pub use mkit_rpc::transport::mkit::transport::v1 as proto;
 pub use plan::{Entry, Limits, Plan};
 pub use push::{Outcome, PackmapMode, Push};
 pub use read::{MemorySink, ObjectSink, UnpackOptions, Unpacked, Verification, unpack};
+pub use seams::{
+    Attempt, AttemptHeaders, NoObserver, Observer, RefMove, RefTarget, SignError, SigningRequest,
+    Veto, WriteIntent, is_reserved_header, procedures,
+};

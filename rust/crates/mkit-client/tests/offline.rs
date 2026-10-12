@@ -269,6 +269,19 @@ fn malformed_or_duplicated_challenge_details_are_invalid() {
 
 // ---- resumable outcomes, never a wait ------------------------------------
 
+/// A well-formed advance: the client reads its ref moves back for the observer.
+fn valid_advance() -> proto::AdvanceRefsRequest {
+    proto::AdvanceRefsRequest {
+        head_ref: Some("refs/heads/main".into()),
+        head_expectation: Some(proto::RefExpectation::Missing.into()),
+        head_new_id: Some([1; 32].to_vec()),
+        packmap_ref: Some("refs/mkit/packmap/main".into()),
+        packmap_expectation: Some(proto::RefExpectation::Missing.into()),
+        packmap_new_id: Some([2; 32].to_vec()),
+        ..Default::default()
+    }
+}
+
 #[test]
 fn per_rpc_calls_return_typed_resumable_outcomes_without_waiting() {
     let pending = {
@@ -300,8 +313,7 @@ fn per_rpc_calls_return_typed_resumable_outcomes_without_waiting() {
     for (index, (status, headers, body)) in cases.into_iter().enumerate() {
         let script = Script::new(move |_| json(status, &headers, &body));
         let client = Client::signed(&script, destination(), &signer, &clock);
-        let error =
-            block_on(client.advance_refs(&proto::AdvanceRefsRequest::default(), None)).unwrap_err();
+        let error = block_on(client.advance_refs(&valid_advance(), None)).unwrap_err();
         match (index, error) {
             (0, Error::PendingVerification { retry_after }) => {
                 assert_eq!(retry_after, Duration::from_secs(5));

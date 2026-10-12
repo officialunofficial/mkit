@@ -1,13 +1,13 @@
 const MAX_CHAIN_PACKS: usize = crate::read::MAX_CHAIN_PACKS;
-use crate::connect::{Built, RESPONSE_LIMIT, Rpc, pending_delay};
+use crate::calls;
+use crate::connect::{Built, Opts, RESPONSE_LIMIT, Rpc, pending_delay};
+use crate::seams::{NoObserver, Observer};
 use crate::{
     Clock, Destination, Error, HttpTransport, Plan, Signer,
     proto::{
-        AdvanceOutcome, AdvanceRefsRequest, AdvanceRefsResponse, BeginUploadRequest,
-        BeginUploadResponse, CompleteUploadRequest, CompleteUploadResponse, GetServerInfoRequest,
+        AdvanceOutcome, AdvanceRefsRequest, AdvanceRefsResponse, GetServerInfoRequest,
         GetServerInfoResponse, PackChunk, ReadRefRequest, ReadRefResponse, RefExpectation,
-        UpdateRefRequest, UpdateRefResponse, UploadPackHeader, UploadPackRequest,
-        UploadPackResponse, UploadPartHeader, UploadPartRequest, UploadPartResponse,
+        UploadPackHeader, UploadPackRequest, UploadPartHeader, UploadPartRequest,
         begin_upload_response, upload_part_request,
     },
 };
@@ -94,16 +94,34 @@ impl Push {
         })
     }
 
-    /// Runs the operation over host boundaries. The host transport may retry
+    /// Runs the operation over host boundaries, with no observer. The host
+    /// transport may retry
     /// an exact signed request, journal it, add grants or stop on cancellation.
     /// The host clock schedules pending polls without requiring tokio.
-    // One linear retry loop over upload, advance and head-conflict handling.
-    #[allow(clippy::too_many_lines)]
     pub async fn run<T: HttpTransport, S: Signer, C: Clock>(
         &self,
         transport: &T,
         signer: &S,
         clock: &C,
+    ) -> Result<Outcome, Error> {
+        self.run_with(transport, signer, clock, &NoObserver).await
+    }
+
+    /// [`Push::run`] with host policy: `observer` runs before every write RPC
+    /// of the push (`BeginUpload`, `UploadPack`, `UploadPart`, `CompleteUpload`,
+    /// `AdvanceRefs`, `UpdateRef`), once per signed attempt, and the signer sees
+    /// each operation. A veto or refusal ends the run with a typed error and
+    /// nothing further is sent; earlier steps stay done (uploaded packs stay
+    /// unreferenced until a later advance). An upload reports the objects its
+    /// pack introduces when every entry of the plan's pack is a raw object.
+    // One linear retry loop over upload, advance and head-conflict handling.
+    #[allow(clippy::too_many_lines)]
+    pub async fn run_with<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
+        &self,
+        transport: &T,
+        signer: &S,
+        clock: &C,
+        observer: &O,
     ) -> Result<Outcome, Error> {
         let mut rpc = Rpc::signed(
             transport,
@@ -111,7 +129,8 @@ impl Push {
             clock,
             &self.destination,
             self.deadline_ms,
-        );
+        )
+        .observed(observer);
         let info: GetServerInfoResponse = rpc
             .unary("GetServerInfo", &GetServerInfoRequest::default())
             .await?;
@@ -135,6 +154,7 @@ impl Push {
                 &self.head_ref,
                 &pack.key,
                 &pack.bytes,
+                pack.objects.as_deref(),
                 self.plan.limits,
             )
             .await?
@@ -170,8 +190,15 @@ impl Push {
                 return Err(Error::Limit("packmap node"));
             }
             let node = pack::pack_key(&bytes);
-            let node_ticket =
-                upload(&mut rpc, &self.head_ref, &node, &bytes, self.plan.limits).await?;
+            let node_ticket = upload(
+                &mut rpc,
+                &self.head_ref,
+                &node,
+                &bytes,
+                None,
+                self.plan.limits,
+            )
+            .await?;
             let (head_expectation, head_expected_id) = condition(self.condition);
             let (packmap_expectation, packmap_expected_id) =
                 condition(prior.map_or(RefWriteCondition::Missing, RefWriteCondition::Match));
@@ -233,25 +260,17 @@ impl Push {
 // The upload steps share one ticket/deadline state across the single-part
 // and multipart paths; splitting them would thread that state through helpers.
 #[allow(clippy::too_many_lines)]
-async fn upload<T: HttpTransport, S: Signer, C: Clock>(
-    rpc: &mut Rpc<'_, T, S, C>,
+async fn upload<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
+    rpc: &mut Rpc<'_, T, S, C, O>,
     head_ref: &str,
     key: &Hash,
     bytes: &[u8],
+    objects: Option<&[Hash]>,
     limits: crate::Limits,
 ) -> Result<Option<Hash>, Error> {
     let ticket = if bytes.len() as u64 >= limits.ticket_threshold_bytes {
-        let response: BeginUploadResponse = rpc
-            .unary(
-                "BeginUpload",
-                &BeginUploadRequest {
-                    r#ref: Some(head_ref.to_owned()),
-                    pack_id: Some(key.to_vec()),
-                    bytes: Some(bytes.len() as u64),
-                    ..Default::default()
-                },
-            )
-            .await?;
+        let (response, _) =
+            calls::begin_upload(rpc, head_ref, key, bytes.len() as u64, objects, None).await?;
         match response.result {
             Some(begin_upload_response::Result::AlreadyPresent(_)) => return Ok(None),
             Some(begin_upload_response::Result::Ticket(ticket)) => Some(ticket),
@@ -311,35 +330,36 @@ async fn upload<T: HttpTransport, S: Signer, C: Clock>(
             )
             .map_err(|_| Error::Invalid("part length"))?;
             let part = &bytes[offset..offset + len];
-            let commitment = part_commitment(id, &plan, index, part)?;
-            let messages = part_messages(ticket.token.clone(), index, part);
-            let response: UploadPartResponse =
-                rpc.stream("UploadPart", messages, &commitment).await?;
+            let (response, _) = calls::upload_part(
+                rpc,
+                id,
+                ticket.token.clone(),
+                &plan,
+                index,
+                part,
+                objects,
+                None,
+            )
+            .await?;
             let receipt = response
                 .receipt
                 .filter(|receipt| !receipt.is_empty() && receipt.len() <= 512)
                 .ok_or(Error::Invalid("part receipt"))?;
             receipts.push(receipt);
         }
-        let _: CompleteUploadResponse = rpc
-            .unary(
-                "CompleteUpload",
-                &CompleteUploadRequest {
-                    ticket_token: ticket.token.clone(),
-                    receipts,
-                    ..Default::default()
-                },
-            )
+        calls::complete_upload(rpc, Some(id), ticket.token.clone(), receipts, objects, None)
             .await?;
     } else {
-        let messages = pack_messages(
+        calls::upload_pack(
+            rpc,
             key,
             bytes,
+            id,
             ticket.as_ref().and_then(|ticket| ticket.token.clone()),
-        );
-        let _: UploadPackResponse = rpc
-            .stream("UploadPack", messages, &pack_commitment(key, bytes))
-            .await?;
+            objects,
+            None,
+        )
+        .await?;
     }
     Ok(id)
 }
@@ -439,8 +459,8 @@ pub(crate) fn condition(condition: RefWriteCondition) -> (RefExpectation, Option
     }
 }
 
-async fn read_ref<T: HttpTransport, S: Signer, C: Clock>(
-    rpc: &Rpc<'_, T, S, C>,
+async fn read_ref<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
+    rpc: &Rpc<'_, T, S, C, O>,
     name: &str,
 ) -> Result<Option<Hash>, Error> {
     let response: ReadRefResponse = rpc
@@ -465,8 +485,8 @@ async fn read_ref<T: HttpTransport, S: Signer, C: Clock>(
     }
 }
 
-async fn walk_chain<T: HttpTransport, S: Signer, C: Clock>(
-    rpc: &Rpc<'_, T, S, C>,
+async fn walk_chain<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
+    rpc: &Rpc<'_, T, S, C, O>,
     root: Hash,
     head_ref: &str,
 ) -> Result<HashSet<Hash>, Error> {
@@ -486,14 +506,32 @@ async fn walk_chain<T: HttpTransport, S: Signer, C: Clock>(
 /// membership-lag answer on the host clock, keeping the same signed identity
 /// until it expires. Per-RPC calls never wait; this loop is the only place the
 /// crate calls `Clock::wait`.
-pub(crate) async fn advance<T: HttpTransport, S: Signer, C: Clock>(
-    rpc: &Rpc<'_, T, S, C>,
+pub(crate) async fn advance<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
+    rpc: &Rpc<'_, T, S, C, O>,
     message: &AdvanceRefsRequest,
 ) -> Result<AdvanceRefsResponse, Error> {
     let (_, clock) = rpc.auth.ok_or(Error::Invalid("signed client required"))?;
     let body = message.encode_to_vec();
     let commitment = format!("body:{}", to_hex(&hash(&body)));
-    let sign = || rpc.build("AdvanceRefs", body.clone(), &commitment, false, None);
+    let advance = calls::Advance::from_request(message)?;
+    let intent = advance.intent();
+    let opts = Opts {
+        intent: Some(&intent),
+        ..Opts::default()
+    };
+    // Each signing is a new attempt; resends of the same signed bytes are not.
+    let attempts = std::cell::Cell::new(0_u32);
+    let sign = || {
+        attempts.set(attempts.get() + 1);
+        rpc.build(
+            "AdvanceRefs",
+            body.clone(),
+            &commitment,
+            false,
+            opts,
+            attempts.get(),
+        )
+    };
     let expiry = |built: &Built| built.identity.map_or(i64::MAX, |id| id.expires_at_ms);
     let mut built = sign().await?;
     let mut expires = expiry(&built);
@@ -507,7 +545,7 @@ pub(crate) async fn advance<T: HttpTransport, S: Signer, C: Clock>(
         }
         // Only a definitive pending/lag answer reaches this continuation.
         // Keep exactly the same nonce and timestamps until actual expiry.
-        if now > expires {
+        if now >= expires {
             built = sign().await?;
             expires = expiry(&built);
         }
@@ -556,24 +594,13 @@ pub(crate) async fn advance<T: HttpTransport, S: Signer, C: Clock>(
     }
 }
 
-async fn commit_head<T: HttpTransport, S: Signer, C: Clock>(
-    rpc: &Rpc<'_, T, S, C>,
+async fn commit_head<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
+    rpc: &Rpc<'_, T, S, C, O>,
     name: &str,
     lease: RefWriteCondition,
     tip: Hash,
 ) -> Result<Outcome, Error> {
-    let (expectation, expected_id) = condition(lease);
-    let request = UpdateRefRequest {
-        name: Some(name.to_owned()),
-        expectation: Some(expectation.into()),
-        expected_id,
-        new_id: Some(tip.to_vec()),
-        ..Default::default()
-    };
-    match rpc
-        .unary::<_, UpdateRefResponse>("UpdateRef", &request)
-        .await
-    {
+    match calls::update_ref(rpc, name, lease, Some(tip), None).await {
         Ok(_) => Ok(Outcome::Committed),
         Err(Error::Remote(error)) if error.code == "failed_precondition" => {
             head_conflict(rpc, name, tip).await
@@ -581,8 +608,8 @@ async fn commit_head<T: HttpTransport, S: Signer, C: Clock>(
         Err(error) => Err(error),
     }
 }
-async fn head_conflict<T: HttpTransport, S: Signer, C: Clock>(
-    rpc: &Rpc<'_, T, S, C>,
+async fn head_conflict<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
+    rpc: &Rpc<'_, T, S, C, O>,
     name: &str,
     tip: Hash,
 ) -> Result<Outcome, Error> {
