@@ -1828,10 +1828,9 @@ transport_auth envelope` and `mkit config trusted_remote_endpoint <url>`,
 with a user-scoped `signing_key` as for any private clone. To a caller
 the hook does not admit, a private repository answers `not_found`,
 indistinguishable from a missing one. `MKIT_API_TOKEN` is still sent as
-`Authorization: Bearer …`, but the server does not capture it for hooks:
-only signed requests capture credentials, and an `Authorization` value
-is kept only when it is a single `Payment` credential, so a bearer
-value is discarded.
+`Authorization: Bearer …`, but the server does not pass it to hooks: it
+discards an `Authorization` value unless it is a single `Payment`
+credential, and an unsigned request captures no credentials at all.
 
 See `docs/specs/SPEC-TRANSPORT.md` for the other transports' wire
 protocols.

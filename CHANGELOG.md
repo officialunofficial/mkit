@@ -353,7 +353,7 @@ collect the applicable entries between their old and new immutable pins.
   epochs and visibility statements keep the self-certifying grammar and are
   never built for an opaque namespace; `mkit visibility set --statement`
   reports this as a usage error while the envelope form works. No wire or
-  server-behavior change.
+  server-behavior change; wipe: no.
 
 ### Fixed
 

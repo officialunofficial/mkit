@@ -526,6 +526,13 @@ fn authority_namespace_public_private_and_signer_reads_end_to_end() {
     assert_not_found(&private_unsigned, &format!("{NS}/private"), "anonymous");
     assert_not_found(&private_denied, &format!("{NS}/private"), "denied signer");
     assert_not_found(&missing, &format!("{NS}/missing"), "missing repository");
+    // Signed callers get the same answer on a missing repository as on the
+    // private one: a hook outcome never distinguishes the two.
+    for (party, label) in [(&stranger, "stranger"), (&reader, "reader")] {
+        party.connect_to(&missing_url);
+        let out = party.clone(&missing_url, &format!("missing-{label}"));
+        assert_not_found(&out, &format!("{NS}/missing"), label);
+    }
     let error_text = |out: &Output| {
         let text = stderr(out);
         text[text.find("error:").unwrap_or(0)..].to_owned()
@@ -591,7 +598,7 @@ fn each_namespace_mode_refuses_the_others_namespaces_over_the_wire() {
         let out = anon.clone(&url, format!("bad-{namespace}").as_str());
         assert!(!out.status.success(), "{url} must fail");
         let text = stderr(&out).to_lowercase();
-        assert!(text.contains("invalid"), "{url}: {text}");
+        assert!(text.contains("invalid x-repository"), "{url}: {text}");
         assert!(!text.contains("not found"), "{url}: {text}");
     }
 
@@ -602,7 +609,7 @@ fn each_namespace_mode_refuses_the_others_namespaces_over_the_wire() {
     let out = anon.clone(&url, "opaque-at-self-cert");
     assert!(!out.status.success(), "{url} must fail");
     let text = stderr(&out).to_lowercase();
-    assert!(text.contains("invalid"), "{url}: {text}");
+    assert!(text.contains("invalid x-repository"), "{url}: {text}");
     assert!(!text.contains("not found"), "{url}: {text}");
 }
 

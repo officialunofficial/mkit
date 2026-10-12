@@ -806,12 +806,18 @@ fn open_with_ssh_options(
     if url.starts_with("mkit+enc://") {
         return open_enc(url);
     }
-    if let Some(rest) = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
+    if let Some((scheme, rest)) = url
+        .split_once("://")
+        .filter(|(scheme, _)| matches!(*scheme, "https" | "http"))
     {
+        // Never echo URL userinfo into an error message.
+        let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+        let authority = authority
+            .rsplit_once('@')
+            .map_or(authority, |(_, host)| host);
+        let shown = format!("{authority}/{path}");
         return Err(DispatchError::UnsupportedScheme(format!(
-            "`{url}` is not a sync remote: at a server's origin, plain HTTP(S) serves objects by repository path (SPEC-HTTP-OBJECTS); sync remotes use `mkit+https://`, for example `mkit+https://{rest}`"
+            "`{scheme}://{shown}` is not a sync remote: at a server's origin, plain HTTP(S) serves objects by repository path (SPEC-HTTP-OBJECTS); sync remotes use `mkit+https://`, for example `mkit+https://{shown}`"
         )));
     }
     Err(DispatchError::MalformedUrl(url.to_string()))
@@ -2341,6 +2347,17 @@ mod tests {
             "{message} must suggest the mkit+ spelling"
         );
         assert!(message.contains("SPEC-HTTP-OBJECTS"), "{message}");
+
+        // Userinfo is never echoed, and plain http:// is pointed at https.
+        let error = super::open(&format!("http://user:secret@vcs.example/{uuid}/repo"))
+            .err()
+            .expect("plain http must fail");
+        let message = error.to_string();
+        assert!(!message.contains("secret"), "{message}");
+        assert!(
+            message.contains(&format!("mkit+https://vcs.example/{uuid}/repo")),
+            "{message}"
+        );
     }
 
     #[test]
