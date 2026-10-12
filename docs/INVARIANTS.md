@@ -9,22 +9,30 @@ distinguishes current enforcement from future integration.
 
 ## Chained Extract selection preserves guarded slice boundaries
 
-**Always:** only Extract selection stages run together inside a slice. The
+**Always:** only Extract selection stages run together inside a slice, and
+PREFLIGHT/UPLOAD chunk walking chains only staged, local, non-delta member
+frames that decode without a saved `member-frame` row. The
 guarded checkpoint commits their progress once; effect stages begin in a later
-slice. Chaining stops before the call, operation, step, or time budget is
-exhausted. A failed later selection step leaves the preceding progress
+slice and a part upload still ends its walk slice. Chaining stops before the
+call, operation, step, or time budget is
+exhausted. A failed later selection step or fused chunk leaves the preceding progress
 checkpointable and retries that step on the next slice. A hard ceiling of 16
 steps applies even when the Worker clock is frozen during synchronous CPU work;
-the two-second elapsed check is a further limit across I/O.
+the two-second elapsed check is a further limit across I/O. Each chunk's own
+denial read stays per chunk; a source pack's denial is read once per slice,
+after its last chunk and before the part upload and the commit.
 
 **Because:** cutting alarm waits for small packs must preserve the durable
 verification order and the Worker's per-invocation bounds.
 
 **If violated:** a crash could skip an effect or lose selection progress, or
-one alarm could exceed its storage or time limit.
+one alarm could exceed its storage or time limit, or a pack block landing
+mid-slice could be uploaded past.
 
-**Enforced by:** `indexed::job::extraction::may_chain`, its boundary tests, and
-`indexed::extraction_chain_tests` crash-at-apply and effect-stage tests.
+**Enforced by:** `indexed::job::extraction::may_chain` and
+`may_chain_chunks`, their boundary tests, and
+`indexed::extraction_chain_tests` and `extraction_budget_tests` crash-at-apply,
+effect-stage and deferred-denial tests.
 
 ## Production verification retry telemetry exposes only fixed failure classes
 
