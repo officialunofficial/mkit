@@ -1189,8 +1189,16 @@ by a request. Owner-signed grants, grant epochs, and visibility statements
 are refused with the uniform §6.2.2 error; signed visibility envelopes and
 deployment URL tokens retain their separate authorization rules.
 A deployment under `any` MUST NOT claim complete deployment-wide takedown.
-The auth-v2 wire envelope and RPC schema do not change. CLI addressing retains
-the default self-certifying grammar.
+The auth-v2 wire envelope and RPC schema do not change. A client MUST accept
+the union of the two namespace grammars when it parses a remote URL: the
+self-certifying grammar above and the authority-mode grammar of
+[SPEC-SERVER §6.2.2](SPEC-SERVER.md#622-opt-in-authority-owned-namespaces).
+The grammars are disjoint, because an authority-mode namespace is never `root`
+and never starts with `ed25519-` or `0x`, so the union is unambiguous; a URL
+does not tell the client which mode the server runs. The server still enforces
+only its own mode's grammar and answers `invalid_argument` for the other.
+Grants, grant epochs, and visibility statements keep the self-certifying
+grammar, and a client MUST NOT build one for an authority-mode namespace.
 
 Identities are lowercase only, so two spellings never name one
 repository. A server MUST reject an identity that does not match the
@@ -1868,6 +1876,7 @@ Explicitly deferred to sibling issues:
 
 | Version | Status | Changes |
 |---|---|---|
+| `2` | draft | §7.4 client URL parsing accepts the union of the self-certifying and authority-mode namespace grammars; the server still enforces only its own mode's grammar, and grants, grant epochs, and visibility statements keep the self-certifying grammar. No wire schema change. |
 | `2` | draft | Opt-in authority-owned opaque namespace grammar in §7.4; disjoint from self-certifying names, with deployment-rooted ownership and refused owner statements under SPEC-SERVER §6.2.2. No wire schema or CLI change. |
 | `2` (ListRepos) | draft | Additive §7.10 namespace listing RPC and new messages, atomic coordinator visibility indexes, bounded sorted pages and integrity-protected tokens; grants retain public listing rights only. |
 | `2` (WP-2.16) | draft | Additive namespace Get/SetAuthorityGeneration RPCs outside auth-v2, with deployment-authority statements and pending completion hints. |

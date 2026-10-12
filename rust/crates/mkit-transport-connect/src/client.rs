@@ -21,7 +21,7 @@ use mkit_core::protocol::{
     TransportError, TransportResult, UploadLimits,
 };
 use mkit_core::refs::{Ref, validate_ref_name};
-use mkit_core::repo_identity::{IdentityError, RepositoryIdentity};
+use mkit_core::repo_identity::{IdentityError, RemoteIdentity, RepositoryIdentity};
 use mkit_core::upload_parts::{PartError, PartPlan, part_subtree_cv};
 use mkit_core::write_auth::{ContentCommitment, PartCommitment};
 use url::{Host, Url};
@@ -116,6 +116,29 @@ pub enum UrlIdentityError {
     NonLiteralPath,
     /// The literal path is outside the repository identity grammar.
     Identity(IdentityError),
+    /// The namespace segment is outside both namespace grammars.
+    Namespace(String),
+    /// The name segment is outside the repository name grammar.
+    Name(String),
+}
+
+/// The grammar sentence [`UrlIdentityError::Namespace`] and
+/// [`UrlIdentityError::Name`] end with.
+const URL_GRAMMARS: &str = "accepted namespaces are self-certifying \
+    `ed25519-<64 lowercase hex>` or `0x<40 lowercase hex>`, or authority-mode \
+    `[a-z0-9][a-z0-9._-]{0,71}` other than `root`, `ed25519-…` and `0x…`; \
+    names are `[a-z0-9][a-z0-9._-]{0,99}` (SPEC-TRANSPORT-CONNECT §7.4)";
+
+/// Escape `text` with `char::escape_default`, truncating to 64 escaped
+/// characters plus `…` when longer, so an offending URL segment stays
+/// printable and bounded in an error message.
+fn escape_offending(text: &str) -> String {
+    let mut escaped = text.chars().flat_map(char::escape_default);
+    let mut out: String = escaped.by_ref().take(64).collect();
+    if escaped.next().is_some() {
+        out.push('…');
+    }
+    out
 }
 
 impl std::fmt::Display for UrlIdentityError {
@@ -129,6 +152,16 @@ impl std::fmt::Display for UrlIdentityError {
                 "repository URLs must be written as scheme://host/path, with a path URL parsing leaves unchanged",
             ),
             Self::Identity(e) => e.fmt(f),
+            Self::Namespace(ns) => write!(
+                f,
+                "namespace `{}` is outside both namespace grammars; {URL_GRAMMARS}",
+                escape_offending(ns)
+            ),
+            Self::Name(name) => write!(
+                f,
+                "repository name `{}` is outside the name grammar; {URL_GRAMMARS}",
+                escape_offending(name)
+            ),
         }
     }
 }
@@ -138,16 +171,17 @@ impl std::error::Error for UrlIdentityError {
         match self {
             Self::Url(e) => Some(e),
             Self::Identity(e) => Some(e),
-            Self::QueryOrFragment | Self::NonLiteralPath => None,
+            Self::QueryOrFragment | Self::NonLiteralPath | Self::Namespace(_) | Self::Name(_) => {
+                None
+            }
         }
     }
 }
 
-/// Read the repository identity from a remote URL's literal path.
-///
-/// # Errors
-/// Returns [`UrlIdentityError`] for an invalid URL, query, fragment or identity.
-pub fn repository_identity_from_url(url: &str) -> Result<RepositoryIdentity, UrlIdentityError> {
+/// The literal repository path text of `url`: the `mkit+` prefix stripped,
+/// no non-empty query or fragment, and a path URL parsing leaves unchanged.
+/// An empty path spells `default`.
+fn repository_path_from_url(url: &str) -> Result<&str, UrlIdentityError> {
     let stripped = url.strip_prefix("mkit+").unwrap_or(url);
     let parsed = Url::parse(stripped).map_err(UrlIdentityError::Url)?;
     if parsed.query().is_some_and(|s| !s.is_empty())
@@ -170,8 +204,40 @@ pub fn repository_identity_from_url(url: &str) -> Result<RepositoryIdentity, Url
         return Err(UrlIdentityError::NonLiteralPath);
     }
     let path = raw_path.trim_matches('/');
-    RepositoryIdentity::parse_bare_allowed(if path.is_empty() { "default" } else { path })
+    Ok(if path.is_empty() { "default" } else { path })
+}
+
+/// Read the repository identity from a remote URL's literal path, in the
+/// strict self-certifying grammar.
+///
+/// # Errors
+/// Returns [`UrlIdentityError`] for an invalid URL, query, fragment or identity.
+pub fn repository_identity_from_url(url: &str) -> Result<RepositoryIdentity, UrlIdentityError> {
+    RepositoryIdentity::parse_bare_allowed(repository_path_from_url(url)?)
         .map_err(UrlIdentityError::Identity)
+}
+
+/// Read the remote repository identity from a remote URL's literal path, accepting
+/// the union of the self-certifying and authority-mode namespace grammars
+/// (SPEC-TRANSPORT-CONNECT §7.4).
+///
+/// # Errors
+/// Returns [`UrlIdentityError`] for an invalid URL, query, fragment or
+/// identity — [`UrlIdentityError::Namespace`] or [`UrlIdentityError::Name`]
+/// name the offending segment.
+pub fn remote_identity_from_url(url: &str) -> Result<RemoteIdentity, UrlIdentityError> {
+    let text = repository_path_from_url(url)?;
+    RemoteIdentity::parse_bare_allowed(text).map_err(|e| match e {
+        IdentityError::Namespace => {
+            UrlIdentityError::Namespace(text.split('/').next().unwrap_or(text).to_owned())
+        }
+        IdentityError::Name => UrlIdentityError::Name(
+            text.split_once('/')
+                .map_or(text, |(_, name)| name)
+                .to_owned(),
+        ),
+        other => UrlIdentityError::Identity(other),
+    })
 }
 
 fn valid_server_info(info: &GetServerInfoResponse) -> bool {
@@ -348,7 +414,11 @@ pub struct ConnectTransport {
     client: TransportServiceClient<EnvelopeTransport<StatusTransport<HttpClient>>>,
     executor: TokioExecutor,
     server_info: OnceLock<ServerInfoView>,
-    repository: RepositoryIdentity,
+    remote_identity: RemoteIdentity,
+    /// The strict self-certifying identity, cached from
+    /// [`RemoteIdentity::to_identity`] — `None` when `remote_identity` carries an
+    /// opaque authority-mode namespace.
+    repository: Option<RepositoryIdentity>,
     repository_text: String,
     origin: String,
     signer_key: Option<String>,
@@ -385,7 +455,7 @@ impl std::fmt::Debug for ConnectTransport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConnectTransport")
             .field("server_info", &self.server_info)
-            .field("repository", &self.repository)
+            .field("remote_identity", &self.remote_identity)
             .field("unary_timeout", &self.unary_timeout)
             .field("pack_transfer_timeout", &self.pack_transfer_timeout)
             .finish_non_exhaustive()
@@ -433,8 +503,8 @@ impl ConnectTransport {
     ///
     /// - [`TransportError::InvalidResponse`] — URL has no `mkit+` prefix,
     ///   is otherwise unparseable, uses a scheme other than `http`/`https`,
-    ///   or its path, query or fragment is not a valid repository address;
-    ///   [`repository_identity_from_url`] reports which.
+    ///   or its path, query or fragment is not a valid remote identity;
+    ///   [`remote_identity_from_url`] reports which.
     /// - [`TransportError::InsecureScheme`] — plain `http://` to a
     ///   non-loopback host.
     /// - [`TransportError::TlsConfiguration`] — a selected HTTPS CA file
@@ -481,8 +551,8 @@ impl ConnectTransport {
             .ok_or(TransportError::InvalidResponse)?;
         let parsed = Url::parse(stripped).map_err(|_| TransportError::InvalidResponse)?;
         validate_http_scheme(&parsed)?;
-        let repository =
-            repository_identity_from_url(url).map_err(|_| TransportError::InvalidResponse)?;
+        let remote_identity =
+            remote_identity_from_url(url).map_err(|_| TransportError::InvalidResponse)?;
         let origin = parsed.origin().ascii_serialization();
 
         // RPC routes are rooted at the origin; the identity travels in a header.
@@ -507,7 +577,7 @@ impl ConnectTransport {
         } else {
             HttpClient::plaintext()
         };
-        let repository_text = repository.to_string();
+        let repository_text = remote_identity.to_string();
         let signer_key = signer.as_ref().map(|signer| signer.public_key_hex());
         let transport = EnvelopeTransport::new(
             StatusTransport(transport),
@@ -536,7 +606,8 @@ impl ConnectTransport {
             client: TransportServiceClient::new(transport, config),
             executor,
             server_info: OnceLock::new(),
-            repository,
+            repository: remote_identity.to_identity(),
+            remote_identity,
             repository_text,
             origin,
             signer_key,
@@ -586,9 +657,9 @@ impl ConnectTransport {
             base_uri.scheme_str().unwrap_or("http"),
             base_uri.authority().expect("test authority")
         );
-        let repository =
-            repository_identity_from_url(&base_uri.to_string()).expect("test identity");
-        let repository_text = repository.to_string();
+        let remote_identity =
+            remote_identity_from_url(&base_uri.to_string()).expect("test remote identity");
+        let repository_text = remote_identity.to_string();
         let config = ClientConfig::new(audience.parse().expect("test origin"))
             .with_default_timeout(Duration::from_secs(10));
         let signer_key = signer.as_ref().map(|signer| signer.public_key_hex());
@@ -604,7 +675,8 @@ impl ConnectTransport {
             ),
             executor: TokioExecutor::new().expect("tokio runtime for test transport"),
             server_info: OnceLock::new(),
-            repository,
+            repository: remote_identity.to_identity(),
+            remote_identity,
             repository_text,
             origin: audience,
             signer_key,
@@ -650,10 +722,20 @@ impl ConnectTransport {
         &self.origin
     }
 
-    /// The repository this transport addresses.
+    /// The remote repository identity this transport addresses, in the
+    /// union of the two namespace grammars.
     #[must_use]
-    pub fn repository(&self) -> &RepositoryIdentity {
-        &self.repository
+    pub fn remote_identity(&self) -> &RemoteIdentity {
+        &self.remote_identity
+    }
+
+    /// The strict self-certifying identity of the addressed repository, or
+    /// `None` when it lives in an opaque authority-mode namespace. Grants,
+    /// grant epochs and owner statements need a self-certifying namespace;
+    /// anything else should use [`Self::remote_identity`].
+    #[must_use]
+    pub fn repository(&self) -> Option<&RepositoryIdentity> {
+        self.repository.as_ref()
     }
 
     /// Discover and cache deployment capabilities for this instance's lifetime.
@@ -741,11 +823,17 @@ impl ConnectTransport {
         if matches!(operation, GrantOperation::Part) {
             return options;
         }
-        let (Some(source), Some(key), Some(namespace)) = (
+        // No grants exist for an opaque authority-mode namespace — the
+        // repository() identity is None there — so this source is never
+        // consulted on such a transport.
+        let (Some(source), Some(key), Some(identity)) = (
             &self.grant_source,
             &self.signer_key,
-            self.repository.namespace(),
+            self.repository.as_ref(),
         ) else {
+            return options;
+        };
+        let Some(namespace) = identity.namespace() else {
             return options;
         };
         if namespace.to_string() == format!("ed25519-{key}") {
@@ -2675,8 +2763,13 @@ mod tests {
                 expected
             );
         }
+        // `ns` is a valid authority-mode namespace, so the strict identity
+        // parser refuses it while the union address parser accepts it.
+        let opaque_url = "mkit+https://example.invalid/ns/name";
+        assert!(repository_identity_from_url(opaque_url).is_err());
+        assert!(remote_identity_from_url(opaque_url).is_ok());
+        assert!(ConnectTransport::connect(opaque_url).is_ok());
         for path in [
-            "/ns/name".to_owned(),
             "/Upper".into(),
             "/a%62".into(),
             format!("/{ns}//name"),
@@ -2720,6 +2813,61 @@ mod tests {
                 .name(),
             "name"
         );
+    }
+
+    #[test]
+    fn url_remote_identity_table_accepts_authority_mode_namespaces() {
+        let ns = format!("ed25519-{}", "ab".repeat(32));
+        let uuid = "019c88c3-a904-7bd1-8a5d-3182a0c6978a";
+        for (path, expected) in [
+            ("".to_owned(), "default".to_owned()),
+            (format!("/{uuid}/public"), format!("{uuid}/public")),
+            (format!("/{uuid}/public/"), format!("{uuid}/public")),
+            (format!("/{ns}/name"), format!("{ns}/name")),
+        ] {
+            let url = format!("mkit+https://example.invalid{path}");
+            let remote = remote_identity_from_url(&url).unwrap();
+            assert_eq!(remote.to_string(), expected);
+            assert_eq!(
+                remote.to_identity().is_some(),
+                expected == format!("{ns}/name") || expected == "default"
+            );
+        }
+        // The union is also the identity grammar for `connect`.
+        let t = ConnectTransport::connect(&format!("mkit+https://example.invalid/{uuid}/public"))
+            .unwrap();
+        assert_eq!(t.remote_identity().to_string(), format!("{uuid}/public"));
+        assert!(t.repository().is_none());
+        assert_eq!(t.repository_text, format!("{uuid}/public"));
+        let t =
+            ConnectTransport::connect(&format!("mkit+https://example.invalid/{ns}/name")).unwrap();
+        assert_eq!(
+            t.repository().map(ToString::to_string),
+            Some(format!("{ns}/name"))
+        );
+    }
+
+    #[test]
+    fn url_remote_identity_errors_name_the_offending_segment() {
+        let uuid = "019c88c3-a904-7bd1-8a5d-3182a0c6978a";
+        let err = remote_identity_from_url("mkit+https://example.invalid/Bad/repo")
+            .unwrap_err()
+            .to_string();
+        for needle in ["`Bad`", "ed25519-", "[a-z0-9][a-z0-9._-]{0,71}", "§7.4"] {
+            assert!(err.contains(needle), "{err} missing {needle}");
+        }
+        let err = remote_identity_from_url(&format!("mkit+https://example.invalid/{uuid}/Repo"))
+            .unwrap_err()
+            .to_string();
+        for needle in ["`Repo`", "§7.4"] {
+            assert!(err.contains(needle), "{err} missing {needle}");
+        }
+        // Offending bytes URL parsing preserves are escaped, not echoed raw.
+        let err = remote_identity_from_url("mkit+https://example.invalid/a'b/repo")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("a\\'b"), "{err}");
+        assert_eq!(escape_offending("a\u{7}b"), "a\\u{7}b");
     }
 
     // -- per-verb-class timeouts (mkit#798) ------------------------------

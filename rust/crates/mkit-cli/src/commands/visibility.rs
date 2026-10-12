@@ -120,7 +120,12 @@ fn set(opts: &SetOpts) -> u8 {
             Ok(tx) => tx,
             Err(e) => return error(&e, exit::UNAVAILABLE),
         };
-        let repository = tx.repository().clone();
+        let Some(repository) = tx.repository() else {
+            return usage_error(
+                "visibility statements need a self-certifying `ed25519-`/`0x` namespace; authority-mode servers refuse them (SPEC-SERVER §6.2.2)",
+            );
+        };
+        let repository = repository.clone();
         let Some(namespace) = repository.namespace().copied() else {
             return usage_error(
                 "a visibility statement names a full <namespace>/<name> repository: use a remote URL that includes it",

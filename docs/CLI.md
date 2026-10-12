@@ -1808,6 +1808,30 @@ Write RPCs against a deployment that requires the Ed25519 write envelope
 `mkit config transport_auth envelope` &mdash; see the config table above and
 SPEC-TRANSPORT-CONNECT §7.3.
 
+The URL path names the repository as `<namespace>/<name>`
+(SPEC-TRANSPORT-CONNECT §7.4). Two namespace grammars are accepted: the
+self-certifying `ed25519-<64 lowercase hex>` and `0x<40 lowercase hex>`
+forms, and the opaque authority-mode form `[a-z0-9][a-z0-9._-]{0,71}`
+other than `root`, `ed25519-…` and `0x…` (SPEC-SERVER §6.2.2). An
+authority-mode deployment can therefore use a UUIDv7, for example
+`mkit+https://vcs.example/019c88c3-a904-7bd1-8a5d-3182a0c6978a/repo`. The
+URL does not say which mode the server runs; the server still enforces
+only its own grammar and answers `invalid_argument` for the other. Plain
+`https://` is not a sync remote &mdash; at a server's origin it serves
+objects by repository path (SPEC-HTTP-OBJECTS) &mdash; so `mkit clone
+https://…` is refused with a hint to add the `mkit+` prefix.
+
+Private reads on an authority-mode server are decided by the
+deployment's authority hook on the signer's key, not by grants or owner
+statements. Read one by signing each request: run `mkit config
+transport_auth envelope` and `mkit config trusted_remote_endpoint <url>`,
+with a user-scoped `signing_key` as for any private clone. To a caller
+the hook does not admit, a private repository answers `not_found`,
+indistinguishable from a missing one. `MKIT_API_TOKEN` is still sent as
+`Authorization: Bearer …`, but the server does not pass it to hooks:
+unsigned requests capture no credentials, and an `Authorization` value
+that is not a single token68 is discarded.
+
 See `docs/specs/SPEC-TRANSPORT.md` for the other transports' wire
 protocols.
 
