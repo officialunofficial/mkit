@@ -9,7 +9,9 @@ use super::proto::v1 as pb;
 use super::proto::v1::__buffa::oneof as one;
 use crate::error::ServerError;
 use crate::op::{CallerView, OpKind, Operation, RefUpdate};
-use crate::pipeline::{AdmissionDecision, AdmissionInput, Challenge, Outcome, OutcomeKind};
+use crate::pipeline::{
+    AdmissionDecision, AdmissionInput, Challenge, Outcome, OutcomeKind, RefEffect,
+};
 use crate::principal::Principal;
 use crate::repo::NamespaceKey;
 use crate::store::codec::AbortReason;
@@ -160,6 +162,22 @@ pub(super) fn authorize_request(op: &Operation, audience: &str) -> pb::Authorize
 pub(super) fn admit_request(input: &AdmissionInput<'_>, audience: &str) -> pb::AdmitRequest {
     pb::AdmitRequest {
         operation: operation(input.op, audience).into(),
+        resolved_ref_updates: input
+            .resolved_ref_updates
+            .iter()
+            .map(|update| pb::ResolvedRefUpdate {
+                name: Some(update.name.clone()),
+                new: update.new.map(|id| id.to_vec()),
+                delete: Some(update.new.is_none()),
+                effect: Some(EnumValue::from(match update.effect {
+                    RefEffect::Create => pb::RefEffect::REF_EFFECT_CREATE,
+                    RefEffect::Replace => pb::RefEffect::REF_EFFECT_REPLACE,
+                    RefEffect::Delete => pb::RefEffect::REF_EFFECT_DELETE,
+                    RefEffect::NoChange => pb::RefEffect::REF_EFFECT_NO_CHANGE,
+                })),
+                ..Default::default()
+            })
+            .collect(),
         declared_bytes: Some(input.declared_bytes),
         pack_id: input.pack_id.map(|key| key.0.to_vec()),
         creates_namespace: Some(input.creates_namespace),

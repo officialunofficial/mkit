@@ -14,8 +14,8 @@ use super::{
 
 /// Each ticket costs at most nine ops: ticket guard/delete, index
 /// guard/delete, reservation guard/put, pending-outcome put, membership
-/// put and one relay-row share. An advance uses one signer and runs no
-/// admission (the quota planner asserts this in `pipeline::plan_namespace`),
+/// put and one relay-row share. An advance uses one signer; the default
+/// ticketed path adds no quota charge,
 /// so `tu` and `tc` are each guarded/written once. Shared
 /// overhead is at most 31: publication guard/state 2, retained value 1,
 /// two published refs 2, deadline 1, lease guard/install 2, absent layout
@@ -29,6 +29,10 @@ use super::{
 /// opportunistic pruning. Stored-bytes counting (`repo_storage`) adds one
 /// relay row on D34 and, on Single, seven markers, the counter and one outcome
 /// row: 97 ops for seven tickets with a retained obligation.
+/// A separate ref admission reservation adds three ops (guard, terminal row,
+/// pending-outcome index): 98 on D34 and 100 on Single with storage counting
+/// and a retained obligation. Its ref guard also fences a grant's presence
+/// requirement on that ref. Custom quota charges must fit the same bound.
 ///
 /// The same constant caps an implicit transport-identity session's pending
 /// packs (WP-1.15 B9): a D34 packmap write consuming all seven — one
@@ -43,8 +47,15 @@ const _: () = assert!(MAX_TICKETS_PER_ADVANCE * 9 + ADVANCE_SHARED_OPS <= MAX_BA
 /// put per pack, the counter guard and put, and the outcome's guard, row and
 /// pending index (`os`, `oc` and the kick are already present).
 const SINGLE_COUNT_OPS: usize = MAX_TICKETS_PER_ADVANCE + 5;
+const REF_ADMISSION_OPS: usize = 3;
 // Single's maximal advance (85 ops with a retained obligation) plus counting.
 const _: () = assert!(MAX_TICKETS_PER_ADVANCE * 8 + 29 + SINGLE_COUNT_OPS <= MAX_BATCH_OPS);
+const _: () = assert!(
+    MAX_TICKETS_PER_ADVANCE * 8 + 29 + SINGLE_COUNT_OPS + REF_ADMISSION_OPS <= MAX_BATCH_OPS
+);
+const _: () = assert!(
+    MAX_TICKETS_PER_ADVANCE * 9 + ADVANCE_SHARED_OPS + 1 + REF_ADMISSION_OPS <= MAX_BATCH_OPS
+);
 
 /// Maximum operations (puts plus deletes) per relay row; two ops guard/advance rh,
 /// and two remain for hooks.

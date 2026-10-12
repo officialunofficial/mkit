@@ -12,6 +12,7 @@ mod info;
 mod list_repos;
 mod policy;
 mod publication_binding;
+mod ref_admission;
 mod ref_policy;
 #[cfg(feature = "remote-hooks")]
 mod remote_hooks;
@@ -109,7 +110,21 @@ fn try_planned_ticket_publication(
     bound: clearance::PreparedAt,
     count_storage: bool,
 ) -> Result<Batch, ServerError> {
+    try_planned_ticket_publication_admitted(count, d34, retained, bound, count_storage, None)
+}
+
+#[allow(clippy::too_many_lines)] // The same maximal snapshot also admits a ref reservation.
+fn try_planned_ticket_publication_admitted(
+    count: usize,
+    d34: bool,
+    retained: bool,
+    bound: clearance::PreparedAt,
+    count_storage: bool,
+    reservation_id: Option<&str>,
+) -> Result<Batch, ServerError> {
     use crate::store::codec::{ReservationV1, TicketV1};
+    let admitted = reservation_id.is_some();
+    let reservation_id = reservation_id.unwrap_or("ref-only");
     let repo = RepoId {
         namespace: NamespaceKey::deployment_default(),
         name: repo_name(),
@@ -162,6 +177,25 @@ fn try_planned_ticket_publication(
                 state: crate::store::publication::Clearance::Cleared,
             });
     }
+    let pending_value = codec::encode_reservation(&ReservationV1::Pending {
+        repository: REPO.into(),
+        created_at_ms: ms(T0),
+        reconcile_at_ms: ms(T0) + 60_000,
+        op: codec::PendingOp::Write,
+        procedure: codec::StoredProcedure::AdvanceRefs,
+    });
+    let pending = reservation::PendingGuard {
+        rid: reservation_id.into(),
+        key: keys::reservation(reservation_id).unwrap(),
+        value: pending_value,
+        apply_deadline_ms: ms(T0) + 10_000,
+        repository: REPO.into(),
+        procedure: codec::StoredProcedure::AdvanceRefs,
+    };
+    let resolved = [
+        ResolvedRefUpdate::new(PACKMAP.into(), Some(B), RefEffect::Create),
+        ResolvedRefUpdate::new(HEAD.into(), Some(C), RefEffect::Create),
+    ];
     let req = WriteRequest {
         denial_ids: None,
         denial_packs: &[],
@@ -170,6 +204,7 @@ fn try_planned_ticket_publication(
         repo: &repo.name,
         kind: WriteKind::AdvanceRefs,
         refs: &refs,
+        resolved_ref_updates: if admitted { &resolved } else { &[] },
         ref_index: d34.then_some((&repo, &source, shards)),
         replay: Some(replay),
         charges: &[],
@@ -177,7 +212,8 @@ fn try_planned_ticket_publication(
         grant: Some(crate::op::GrantRef {
             id: [9; 32],
             epoch: u64::from(d34),
-            presence_requirement: None,
+            presence_requirement: admitted
+                .then(|| crate::op::PresenceRequirement::Absent(HEAD.into())),
         }),
         lease: d34.then_some(lease::LeaseWrite {
             value: codec::EpochLease {
@@ -202,9 +238,12 @@ fn try_planned_ticket_publication(
             prepared: Some(&record),
             bound: Some(bound),
         }),
-        pending: None,
+        pending: admitted.then_some(&pending),
     };
     let mut snap = snapshot(&req, &[]);
+    if admitted {
+        snap.insert(pending.key.clone(), Some(pending.value.clone()));
+    }
     let tickets: Vec<_> = reservations
         .iter()
         .enumerate()
@@ -328,6 +367,40 @@ fn seven_ticket_publication_with_storage_counting_fits_a_batch() {
                 .iter()
                 .any(|w| matches!(w, Write::Put(k, _) if *k == counter)),
             !d34
+        );
+    }
+}
+
+#[test]
+fn maximal_ticket_publication_with_ref_admission_stays_within_existing_batch_bound() {
+    for (d34, expected) in [(true, 98), (false, 100)] {
+        let batch = try_planned_ticket_publication_admitted(
+            crate::store::outbox::MAX_TICKETS_PER_ADVANCE,
+            d34,
+            true,
+            ZERO_ROW,
+            true,
+            Some("ref-only"),
+        )
+        .unwrap();
+        assert_eq!(batch.preconditions.len() + batch.writes.len(), expected);
+        batch.validate(&StoreCapabilities::full()).unwrap();
+        let head = keys::ref_key(&repo_name(), HEAD);
+        assert_eq!(
+            batch
+                .preconditions
+                .iter()
+                .filter(|guard| matches!(guard, Precondition::Absent(key) if *key == head))
+                .count(),
+            1,
+            "the applying guard fences both ref admission and grant scope",
+        );
+        assert_eq!(
+            batch.writes.iter().filter(|write| matches!(write,
+                Write::Put(key, value) if *key == keys::reservation("ref-only").unwrap()
+                    && matches!(codec::decode_reservation(value), Ok(codec::ReservationV1::Committed { bytes_stored: 0, .. }))
+            )).count(),
+            1,
         );
     }
 }
@@ -480,6 +553,7 @@ fn maximal_implicit_consume_plans_a_valid_batch() {
         kind: WriteKind::UpdateRef,
         refs: &refs,
         // Production sets ref_index on every non-empty D34 ref write.
+        resolved_ref_updates: &[],
         ref_index: Some((&repo, &source, &shards)),
         replay: None,
         charges: &[],
@@ -3159,6 +3233,7 @@ fn incapable_authority_planner_request_refuses_generation() {
             repo: &name,
             kind: WriteKind::UpdateRef,
             refs: &refs,
+            resolved_ref_updates: &[],
             ref_index: None,
             replay: None,
             charges: &[],
@@ -3202,6 +3277,7 @@ fn simple_index_batch(
             WriteKind::AdvanceRefs
         },
         refs,
+        resolved_ref_updates: &[],
         ref_index: index.then_some((repo, source, shards)),
         replay: None,
         charges: &[],
@@ -3363,6 +3439,7 @@ fn plan_cas_any_missing_match_on_snapshot() {
             repo: &name,
             kind: WriteKind::UpdateRef,
             refs: &refs,
+            resolved_ref_updates: &[],
             ref_index: None,
             replay: None,
             charges: &[],
@@ -3434,6 +3511,7 @@ fn plan_conflict_writes_only_the_replay_record() {
         repo: &name,
         kind: WriteKind::AdvanceRefs,
         refs: &refs,
+        resolved_ref_updates: &[],
         ref_index: None,
         replay: Some(replay()),
         charges: &[],
@@ -3509,6 +3587,7 @@ fn plan_quota_exhaustion_yields_no_batch() {
         repo: &name,
         kind: WriteKind::UpdateRef,
         refs: &refs,
+        resolved_ref_updates: &[],
         ref_index: None,
         replay: Some(replay()),
         charges: &charges,
@@ -3569,6 +3648,7 @@ proptest! {
             repo: &name,
             kind: if advance { WriteKind::AdvanceRefs } else { WriteKind::UpdateRef },
             refs,
+            resolved_ref_updates: &[],
             ref_index: None,
             replay: signed.then(replay),
             charges: &charges,
@@ -4193,6 +4273,7 @@ fn plan_signed_conflict_still_charges_quota() {
         repo: &name,
         kind: WriteKind::UpdateRef,
         refs: &refs,
+        resolved_ref_updates: &[],
         ref_index: None,
         replay: Some(replay()),
         charges: &charges,
@@ -4258,6 +4339,7 @@ fn plan_prune_fits_the_batch_op_cap() {
         repo: &name,
         kind: WriteKind::AdvanceRefs,
         refs: &refs,
+        resolved_ref_updates: &[],
         ref_index: None,
         replay: Some(replay()),
         charges: &charges,
@@ -4316,6 +4398,7 @@ fn prune_sampling_is_deterministic_one_in_eight() {
         repo: &name,
         kind: WriteKind::UpdateRef,
         refs: &refs,
+        resolved_ref_updates: &[],
         ref_index: None,
         replay,
         charges: &[],
@@ -4806,6 +4889,7 @@ fn d34_prune_retry_refreshes_the_epoch_even_without_a_counted_replan() {
         repo: &repo_name(),
         kind: WriteKind::UpdateRef,
         refs: &refs,
+        resolved_ref_updates: &[],
         ref_index: None,
         replay: Some(ReplayGuard {
             scope: [0; 32],
@@ -4938,6 +5022,7 @@ fn leased_epoch_checks_use_the_granted_epoch_and_cap_replay_deadlines() {
             repo: &name,
             kind: WriteKind::UpdateRef,
             refs: &refs,
+            resolved_ref_updates: &[],
             ref_index: None,
             replay: Some(ReplayGuard {
                 expires_at_ms: T0 - MAX_CLOCK_LEAD_MS + 2_500,
@@ -5525,6 +5610,7 @@ fn prepared_publication_pair_cannot_survive_a_counterpart_guard_race() {
         repo: &repo.name,
         kind: WriteKind::UpdateRef,
         refs: &refs,
+        resolved_ref_updates: &[],
         ref_index: None,
         replay: None,
         charges: &[],

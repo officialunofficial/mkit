@@ -202,6 +202,8 @@ pub struct ServerError {
 /// message text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AbortCause {
+    /// A ref's presence no longer matches its admitted effect.
+    RefConflict,
     /// The grant epoch moved.
     EpochMismatch,
     /// Another request with this nonce won the replay guard.

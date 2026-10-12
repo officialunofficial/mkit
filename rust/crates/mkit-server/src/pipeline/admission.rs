@@ -6,7 +6,9 @@ use mkit_core::admission::{encode_admission_challenge, validate_challenges};
 use super::{Allowance, AuthMode, Pipeline, RequestMeta, Snapshot, meta_error};
 use crate::error::{Redacted, ServerError};
 use crate::pipeline::HookSet;
-use crate::pipeline::hooks::{Admission, AdmissionDecision, AdmissionInput, CredentialHeader};
+use crate::pipeline::hooks::{
+    Admission, AdmissionDecision, AdmissionInput, CredentialHeader, RefEffect, ResolvedRefUpdate,
+};
 use crate::store::{MultipartBlobStore, NamespaceStore, Partition, codec, keys};
 
 fn invalid(reason: &'static str) -> ServerError {
@@ -341,6 +343,45 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             );
         }
         Ok(())
+    }
+
+    /// Resolve effects from the working CAS conditions. An unconditional
+    /// update uses the read-ahead presence, retained by the applying planner.
+    pub(super) async fn resolve_ref_updates(
+        &self,
+        op: &crate::op::Operation,
+        refs: &[crate::op::RefUpdate],
+        ahead: Option<&super::Snapshot>,
+    ) -> Result<Vec<ResolvedRefUpdate>, ServerError> {
+        for (i, update) in refs.iter().enumerate() {
+            if refs[..i].iter().any(|prior| prior.name == update.name) {
+                return Err(ServerError::invalid_argument(
+                    "duplicate ref name; use distinct destination refs",
+                ));
+            }
+        }
+        let mut resolved = Vec::with_capacity(refs.len());
+        for update in refs {
+            let present = match update.condition {
+                mkit_core::protocol::RefWriteCondition::Missing => false,
+                mkit_core::protocol::RefWriteCondition::Match(_) => true,
+                mkit_core::protocol::RefWriteCondition::Any => {
+                    self.current_ref(op, &update.name, ahead).await?.is_some()
+                }
+            };
+            let effect = match (present, update.new.is_some()) {
+                (false, true) => RefEffect::Create,
+                (true, true) => RefEffect::Replace,
+                (true, false) => RefEffect::Delete,
+                (false, false) => RefEffect::NoChange,
+            };
+            resolved.push(ResolvedRefUpdate::new(
+                update.name.clone(),
+                update.new,
+                effect,
+            ));
+        }
+        Ok(resolved)
     }
 
     pub(super) async fn admit(&self, input: AdmissionInput<'_>) -> Result<Allowance, ServerError> {

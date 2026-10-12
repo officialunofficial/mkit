@@ -48,6 +48,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             repo: &op.repo.name,
             kind: WriteKind::UpdateRef,
             refs: &[],
+            resolved_ref_updates: &[],
             ref_index: None,
             replay: Some(replay),
             charges: &[],

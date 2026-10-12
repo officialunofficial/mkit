@@ -1557,13 +1557,17 @@ separate signed operations.
 The server also runs admission on every other signed unary write:
 `UpdateRef`, including deletion (§7.8), and an `AdvanceRefs` that
 consumes no ticket. Allowing, challenging or denying it is deployment
-policy.
+policy. A configured non-default admission also runs on ticketed
+`AdvanceRefs` and the same-session implicit consuming `UpdateRef` (§7.4).
+That admission covers ref effects with zero bytes; uploads keep their
+independent byte reservations. The built-in default retains its existing
+skipped paths and quota accounting.
 
 | RPC | Admission | What its apply writes |
 |---|---|---|
 | `BeginUpload` (unary; names its target ref) | Yes | In the target ref's shard: the replay record, a reservation row, and the ticket. |
 | `UploadPart`, `CompleteUpload`, and a ticketed `UploadPack` (the part path, §7.6) | No | Pack or part bytes, authorized by the stateless ticket token. A ticketed `UploadPack` MAY also write server-internal content-addressed blobs, including its upload marker (R-113). The part path writes nothing to a metadata shard. The ticket's audience, repository, and signer MUST equal the request's, and for a ticketed `UploadPack` its `pack_id` and byte count MUST equal the request's `pack:` commitment; otherwise the request is `permission_denied` (§7.6). |
-| `AdvanceRefs` | No; it consumes tickets | In the same ref shard: the head and the packmap, the ref's membership additions, which the server propagates to the repository index shards at least once, and one `Committed` outcome for each ticket it consumes. Tickets are local to the ref shard, so there is no cross-shard handoff. |
+| `AdvanceRefs` | Yes for configured non-default admission; the built-in default skips ticket consumption | In the same ref shard: the head and the packmap, the ref's membership additions, which the server propagates to the repository index shards at least once, one `Committed` outcome for each consumed ticket, and the separate zero-byte ref reservation's outcome when granted. Tickets are local to the ref shard, so there is no cross-shard handoff. |
 
 - **Membership.** A pack becomes a member of the repository only at the
   apply of the `AdvanceRefs` that consumes its ticket, or at the completion
@@ -1588,7 +1592,10 @@ policy.
   it produces `Expired` (§7.6).
 - **Conflicts.** An `AdvanceRefs` that ends in a typed conflict (§4)
   consumes no ticket. Its tickets stay usable until they expire. A lost
-  compare-and-swap on `AdvanceRefs` is such a conflict, not `Aborted`.
+  compare-and-swap on `AdvanceRefs` is such a conflict, not a ticket abort.
+  A separate ref admission reservation settles as `Aborted` on that conflict.
+  An unconditional update whose presence changes after admission MUST abort
+  rather than apply a different ref effect (SPEC-SERVER §6.3).
 
 A deployment settles a payment on `Committed` and releases it on
 `Aborted` or `Expired`, so an aborted upload settles nothing

@@ -149,7 +149,8 @@ pub use faults::{
 pub use hooks::{
     ADMISSION_EXPOSE_HEADERS, Admission, AdmissionDecision, AdmissionInput, Authorizer, Challenge,
     Choice, CredentialHeader, DefaultAdmission, ForkAdmission, HookSet, Hooks, NoOutcomes,
-    NoPreReceive, NoReceipts, OpenAuthorizer, OutcomeSink, PreReceive, ReceiptSigner,
+    NoPreReceive, NoReceipts, OpenAuthorizer, OutcomeSink, PreReceive, ReceiptSigner, RefEffect,
+    ResolvedRefUpdate,
 };
 #[cfg(feature = "ssh")]
 pub(crate) use implicit::IMPLICIT_PACKMAP_UNKNOWN;
@@ -579,6 +580,7 @@ pub struct Pipeline<B, N, H = Hooks> {
 type ReplacedSession = std::sync::Mutex<Option<(crate::store::BlobKey, Vec<u8>)>>;
 
 struct WriteInputs<'a> {
+    resolved_ref_updates: &'a [ResolvedRefUpdate],
     replaced: &'a ReplacedSession,
     denial_ids: &'a std::collections::BTreeSet<Hash>,
     denial_packs: &'a [Hash],
@@ -2439,8 +2441,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
 
     /// [`Self::write`], optionally consuming the session's pending packs
     /// as implicit tickets (WP-1.15): the B10 packmap check runs after
-    /// authorization, admission is skipped exactly when `pending` is
-    /// non-empty, and under Multi the plan adds membership and relay rows.
+    /// authorization, custom admission covers the ref effects with zero
+    /// bytes, and under Multi the plan adds membership and relay rows.
     fn write_with<'a>(
         &'a self,
         a: &'a Authenticated,
@@ -2523,6 +2525,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
         let ticketed =
             matches!(&op.kind, OpKind::AdvanceRefs { tickets, .. } if !tickets.is_empty());
+        let default_admission = self.hooks.admission().is_default();
+        let defer_verification = ticketed
+            && !default_admission
+            && self.cfg.indexed.is_some_and(|indexed| {
+                indexed.verification == crate::indexed::VerificationMode::Inline
+            });
         let mut staged = crate::indexed::verify::StagedCommits::default();
         let mut ticket_ms = None;
         if ticketed {
@@ -2532,96 +2540,16 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             if let Some(stored) = self.ticket_decision(&op, a, &p, snap).await? {
                 return Ok((stored, ResponseMeta::default()));
             }
-            if let Some(indexed) = self.cfg.indexed
-                && let OpKind::AdvanceRefs { head, tickets, .. } = &op.kind
+            // Pending scheduled jobs remain admission-free polling answers.
+            // Inline verification can write state, so custom admission precedes it.
+            #[cfg(feature = "__test-faults")]
+            if self.cfg.indexed.is_some()
+                && a.test_directives().fault.as_deref() == Some("indexed-pending")
             {
-                // The wire conformance fixture exercises the pending response
-                // after ticket proof validation, before any verification state
-                // or replay row is written. Release builds omit this seam.
-                #[cfg(feature = "__test-faults")]
-                if a.test_directives().fault.as_deref() == Some("indexed-pending") {
-                    return Err(crate::indexed::pending(5_000));
-                }
-                let rows = tickets
-                    .iter()
-                    .map(|id| {
-                        snap.get(&keys::ticket(id))
-                            .ok_or_else(|| {
-                                ServerError::failed_precondition("invalid or expired upload ticket")
-                            })
-                            .and_then(|raw| codec::decode_ticket(raw).map_err(meta_error))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let tip = head
-                    .new
-                    .ok_or_else(|| ServerError::invalid_argument("delete consumes no tickets"))?;
-                ticket_ms = rows.iter().map(|ticket| ticket.created_at_ms).min();
-                staged = if let Some(limit) = self.inspection_max_objects() {
-                    if indexed.verification == crate::indexed::VerificationMode::Scheduled {
-                        crate::indexed::scheduled::check_inspected(
-                            &self.blobs,
-                            &self.meta,
-                            self.shards.as_ref(),
-                            &op.repo,
-                            &p,
-                            &rows,
-                            tickets,
-                            tip,
-                            indexed,
-                            self.clock.as_ref(),
-                            self.metrics.as_ref(),
-                            limit as usize,
-                        )
-                        .await?
-                    } else {
-                        crate::indexed::verify::verify_ticketed_inspected(
-                            &self.blobs,
-                            &self.meta,
-                            self.shards.as_ref(),
-                            &op.repo,
-                            &p,
-                            &rows,
-                            tickets,
-                            tip,
-                            indexed,
-                            self.clock.as_ref(),
-                            self.metrics.as_ref(),
-                            limit as usize,
-                        )
-                        .await?
-                    }
-                } else if indexed.verification == crate::indexed::VerificationMode::Scheduled {
-                    // Kind-7 slices verify; the advance only checks their result.
-                    crate::indexed::scheduled::check(
-                        &self.blobs,
-                        &self.meta,
-                        self.shards.as_ref(),
-                        &op.repo,
-                        &p,
-                        &rows,
-                        tickets,
-                        tip,
-                        indexed,
-                        self.clock.as_ref(),
-                        self.metrics.as_ref(),
-                    )
-                    .await?
-                } else {
-                    crate::indexed::verify::verify_ticketed(
-                        &self.blobs,
-                        &self.meta,
-                        self.shards.as_ref(),
-                        &op.repo,
-                        &p,
-                        &rows,
-                        tickets,
-                        tip,
-                        indexed,
-                        self.clock.as_ref(),
-                        self.metrics.as_ref(),
-                    )
-                    .await?
-                };
+                return Err(crate::indexed::pending(5_000));
+            }
+            if !defer_verification {
+                (staged, ticket_ms) = self.verify_ticketed_advance(&op, &p, snap).await?;
             }
         } else if let Err(error) = self.check_ticketless_head(&op).await {
             return self
@@ -2629,7 +2557,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .await
                 .map(|stored| (stored, ResponseMeta::default()));
         }
-        if staged.inspection.is_none() {
+        if !defer_verification && staged.inspection.is_none() {
             staged.inspection = self
                 .inspection_max_objects()
                 .map(|limit| crate::indexed::inspection::InspectionSet::new(limit as usize));
@@ -2644,18 +2572,22 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .await?;
         }
         let existing = self.begin_decision(&op, a, ahead.as_mut()).await?;
-        if existing.is_none() && !ticketed {
+        let consuming = ticketed || implicit.is_some_and(|pending| !pending.is_empty());
+        let run_admission = existing.is_none() && !(default_admission && consuming);
+        if existing.is_none() && (!ticketed || !default_admission) {
             self.check_outbox_backpressure(&p, ahead.as_ref()).await?;
         }
-        // An implicit consuming write skips admission exactly when it has
-        // pending packs to consume; an empty pending set runs admission
-        // like any other UpdateRef (the B10 check still applied).
-        let allowance = if existing.is_some() || ticketed || implicit.is_some_and(|p| !p.is_empty())
-        {
-            Allowance::default()
+        let resolved_ref_updates = if run_admission && !default_admission {
+            self.resolve_ref_updates(&op, &refs, ahead.as_ref()).await?
         } else {
+            Vec::new()
+        };
+        // Keep the default's existing consumption paths and quota accounting.
+        // Custom admission reserves refs separately from the upload's bytes.
+        let allowance = if run_admission {
             let credentials = admission::validate_credentials(&a.credential_capture)?;
             let mut input = AdmissionInput::new(&op);
+            input.resolved_ref_updates.clone_from(&resolved_ref_updates);
             input.credential_headers = &credentials;
             if let OpKind::BeginUpload { key, bytes, .. } = &op.kind {
                 input.declared_bytes = *bytes;
@@ -2663,6 +2595,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 input.new_to_repo_bytes = self.new_to_repo_bytes(&op, key, *bytes).await?;
             }
             self.admit(input).await?
+        } else {
+            Allowance::default()
         };
         let pending = match allowance.reservation.as_deref() {
             Some(rid) => Some(
@@ -2673,6 +2607,17 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         };
         let replaced = ReplacedSession::default();
         let write_result = async {
+            if defer_verification {
+                let snap = ahead
+                    .as_ref()
+                    .ok_or_else(|| internal("ticket advance requires atomic metadata"))?;
+                (staged, ticket_ms) = self.verify_ticketed_advance(&op, &p, snap).await?;
+                if staged.inspection.is_none() {
+                    staged.inspection = self.inspection_max_objects().map(|limit| {
+                        crate::indexed::inspection::InspectionSet::new(limit as usize)
+                    });
+                }
+            }
             let mut begin = self.begin_write(&op, a, existing, allowance.reservation.clone())?;
             self.precheck_namespace(&p, &allowance.charges, &mut ahead, a.business_skew_ms)?;
             let mut opened_session = None;
@@ -2754,6 +2699,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     ahead,
                     (lease, begin.as_ref()),
                     WriteInputs {
+                        resolved_ref_updates: &resolved_ref_updates,
                         denial_ids: &staged.denial_ids,
                         denial_packs: &staged.denial_packs,
                         replaced: &replaced,
@@ -3716,6 +3662,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         inputs: WriteInputs<'_>,
     ) -> Result<StoredResult, ServerError> {
         let WriteInputs {
+            resolved_ref_updates,
             replaced,
             denial_ids,
             denial_packs,
@@ -3743,6 +3690,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             repo: &op.repo.name,
             kind,
             refs,
+            resolved_ref_updates,
             ref_index: (self.cfg.sharding == Sharding::D34 && !refs.is_empty()).then_some((
                 &op.repo,
                 p,

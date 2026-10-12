@@ -26,6 +26,8 @@ authorize-published-source.request.json AuthorizeRequest
 admit.request.json AdmitRequest
 admit-first-attempt.request.json AdmitRequest
 admit-fork.request.json AdmitRequest
+admit-ref-writes.request.json AdmitRequest
+admit-ref-deletions.request.json AdmitRequest
 admit-allow.response.json AdmitResponse
 admit-allow-external-ref.response.json AdmitResponse
 admit-challenge.response.json AdmitResponse
@@ -80,8 +82,8 @@ for file in "$golden_dir"/*.request.json "$golden_dir"/*.response.json; do
   count=$((count + 1))
 done
 
-if [[ "$count" -ne 35 ]]; then
-  echo "check-server-hooks-goldens: expected 35 mapped fixtures, found $count" >&2
+if [[ "$count" -ne 37 ]]; then
+  echo "check-server-hooks-goldens: expected 37 mapped fixtures, found $count" >&2
   exit 1
 fi
 echo "check-server-hooks-goldens: all $count fixtures preserve canonical protobuf JSON"

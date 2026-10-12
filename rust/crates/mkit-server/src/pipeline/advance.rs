@@ -459,6 +459,108 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     }
 }
 
+impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
+    /// Default consumption verifies before its admission-free apply. Custom
+    /// admission runs before mutating inline verification; scheduled readiness
+    /// stays before admission. Pending checks may schedule verification work,
+    /// and return before admission without allocating a ref reservation.
+    #[allow(clippy::too_many_lines)] // Verification modes share ticket bindings and staging.
+    pub(super) async fn verify_ticketed_advance(
+        &self,
+        op: &Operation,
+        p: &Partition,
+        snap: &Snapshot,
+    ) -> Result<(crate::indexed::verify::StagedCommits, Option<u64>), ServerError> {
+        if let Some(indexed) = self.cfg.indexed
+            && let OpKind::AdvanceRefs { head, tickets, .. } = &op.kind
+        {
+            let rows = tickets
+                .iter()
+                .map(|id| {
+                    snap.get(&keys::ticket(id))
+                        .ok_or_else(|| {
+                            ServerError::failed_precondition("invalid or expired upload ticket")
+                        })
+                        .and_then(|raw| codec::decode_ticket(raw).map_err(meta_error))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let tip = head
+                .new
+                .ok_or_else(|| ServerError::invalid_argument("delete consumes no tickets"))?;
+            let ticket_ms = rows.iter().map(|ticket| ticket.created_at_ms).min();
+            let staged = if let Some(limit) = self.inspection_max_objects() {
+                if indexed.verification == crate::indexed::VerificationMode::Scheduled {
+                    crate::indexed::scheduled::check_inspected(
+                        &self.blobs,
+                        &self.meta,
+                        self.shards.as_ref(),
+                        &op.repo,
+                        p,
+                        &rows,
+                        tickets,
+                        tip,
+                        indexed,
+                        self.clock.as_ref(),
+                        self.metrics.as_ref(),
+                        limit as usize,
+                    )
+                    .await?
+                } else {
+                    crate::indexed::verify::verify_ticketed_inspected(
+                        &self.blobs,
+                        &self.meta,
+                        self.shards.as_ref(),
+                        &op.repo,
+                        p,
+                        &rows,
+                        tickets,
+                        tip,
+                        indexed,
+                        self.clock.as_ref(),
+                        self.metrics.as_ref(),
+                        limit as usize,
+                    )
+                    .await?
+                }
+            } else if indexed.verification == crate::indexed::VerificationMode::Scheduled {
+                // Kind-7 slices verify; the advance only checks their result.
+                crate::indexed::scheduled::check(
+                    &self.blobs,
+                    &self.meta,
+                    self.shards.as_ref(),
+                    &op.repo,
+                    p,
+                    &rows,
+                    tickets,
+                    tip,
+                    indexed,
+                    self.clock.as_ref(),
+                    self.metrics.as_ref(),
+                )
+                .await?
+            } else {
+                crate::indexed::verify::verify_ticketed(
+                    &self.blobs,
+                    &self.meta,
+                    self.shards.as_ref(),
+                    &op.repo,
+                    p,
+                    &rows,
+                    tickets,
+                    tip,
+                    indexed,
+                    self.clock.as_ref(),
+                    self.metrics.as_ref(),
+                )
+                .await?
+            };
+            Ok((staged, ticket_ms))
+        } else {
+            Ok((crate::indexed::verify::StagedCommits::default(), None))
+        }
+    }
+}
+
 #[cfg(test)]
 mod concurrency_tests {
     use super::*;

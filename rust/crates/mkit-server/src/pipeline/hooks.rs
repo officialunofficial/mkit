@@ -57,6 +57,8 @@ pub trait Authorizer: MaybeSend + MaybeSync {
 /// `idempotency_key` is `None` and `op.auth` is unset (its signer is the
 /// namespace owner, reported as `op.authz.owner`). The resulting outcome
 /// carries `Outcome::procedure` and `Outcome::visibility`.
+/// Configured custom admission also sees ticket-consuming ref writes; the
+/// built-in default retains its existing admission-free consumption paths.
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct AdmissionInput<'a> {
@@ -91,6 +93,55 @@ pub struct AdmissionInput<'a> {
     /// destination is empty, so all of the inherited bytes are new to it), and
     /// the admitted charge binds the fork as a hard bound.
     pub fork: Option<ForkAdmission<'a>>,
+    /// Ref effects admitted for this write. Empty for operations without ref
+    /// writes and for the built-in default admission, which does not use them.
+    ///
+    /// A successful apply guarantees these effects in its guarded batch.
+    /// CAS conditions bind conditional writes; unconditional writes retain
+    /// their observed presence across retries. A changed presence aborts the
+    /// write rather than applying an effect the hook did not admit. Original
+    /// request conditions remain available through [`Self::op`]. Entries follow
+    /// planner order (packmap before head for an advance); correlate by name.
+    /// Duplicate destination names are rejected before custom admission.
+    pub resolved_ref_updates: Vec<ResolvedRefUpdate>,
+}
+
+/// The effect a successful ref write has on repository ref presence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RefEffect {
+    /// An absent ref receives a target.
+    Create,
+    /// A present ref receives a target, including its existing target.
+    Replace,
+    /// A present ref is removed.
+    Delete,
+    /// An absent ref remains absent after a deletion request.
+    NoChange,
+}
+
+/// One ref write resolved for admission, fenced at successful apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ResolvedRefUpdate {
+    /// Full ref name.
+    pub name: String,
+    /// New target, or `None` for deletion.
+    pub new: Option<mkit_core::hash::Hash>,
+    /// The effect on ref presence if the write commits.
+    pub effect: RefEffect,
+}
+
+impl ResolvedRefUpdate {
+    /// A resolved ref write. The pipeline establishes its apply fence.
+    #[must_use]
+    pub fn new(name: String, new: Option<mkit_core::hash::Hash>, effect: RefEffect) -> Self {
+        Self { name, new, effect }
+    }
+
+    pub(crate) const fn prior_present(&self) -> bool {
+        matches!(self.effect, RefEffect::Replace | RefEffect::Delete)
+    }
 }
 
 /// What a fork's admission charge is for (SPEC-SERVER §9.9).
@@ -169,6 +220,7 @@ impl<'a> AdmissionInput<'a> {
             audience: None,
             credential_headers: &[],
             fork: None,
+            resolved_ref_updates: Vec::new(),
         }
     }
 }

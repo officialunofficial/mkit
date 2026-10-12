@@ -180,15 +180,62 @@ pub(super) async fn helper_flow_commit(ctx: Ctx) -> CaseResult {
             .is_some_and(|v| v == "private"),
         "receipt cache policy"
     );
+    let signed = sign_unary(&ctx.v2_signer("main")?, Rpc::AdvanceRefs, &advance, |_| {});
+    let challenge = post(&ctx, &signed).await?;
+    want_error(&challenge, 402, "permission_denied")?;
+    ctx.expect_ref(&ctx.head("main"), None).await?;
+    ctx.expect_ref(&ctx.packmap("main"), None).await?;
+    ensure!(
+        snapshot(&ctx).await? == before,
+        "challenged advance settled upload"
+    );
+    let signed = signed.with_header("Authorization", credential(&challenge)?);
+    let reply = post(&ctx, &signed).await?;
     want_outcome(
-        ctx.advance(&advance).await?,
+        decode_unary::<mkit_transport_connect::generated::AdvanceRefsResponse>(&reply)?
+            .map(|response| response.outcome.map_or(0, |outcome| outcome.to_i32())),
         mkit_transport_connect::generated::AdvanceOutcome::ADVANCE_OUTCOME_COMMITTED,
     )?;
-    let rows = wait_new(&ctx, &before, 1).await?;
     ensure!(
-        rows.len() == 1 && rows[0]["kind"] == "committed" && rows[0]["settled"] == true,
+        calls(&ctx).await? == admit_count + 4,
+        "advance admission count"
+    );
+    let rows = wait_new(&ctx, &before, 2).await?;
+    ensure!(
+        rows.len() == 2
+            && rows
+                .iter()
+                .all(|row| row["kind"] == "committed" && row["settled"] == true),
         "commit ledger"
     );
+    let ref_row = rows
+        .iter()
+        .find(|row| row["declared_bytes"] == 0)
+        .ok_or("no ref reservation")?;
+    let effects = ref_row["resolved_ref_updates"]
+        .as_array()
+        .ok_or("no resolved ref view")?;
+    ensure!(
+        effects.len() == 2
+            && effects
+                .iter()
+                .all(|effect| effect["effect"] == "REF_EFFECT_CREATE"),
+        "ticketed create effects"
+    );
+    ensure!(
+        rows.iter()
+            .filter(|row| row["declared_bytes"] == 128)
+            .count()
+            == 1,
+        "pack charged twice"
+    );
+    let count = calls(&ctx).await?;
+    let repeated = post(&ctx, &signed).await?;
+    ensure!(
+        repeated.status == 200 && repeated.body == reply.body,
+        "advance replay differs"
+    );
+    ensure!(calls(&ctx).await? == count, "advance replay reached Admit");
     Ok(())
 }
 
