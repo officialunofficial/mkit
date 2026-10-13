@@ -340,6 +340,7 @@ impl Rig {
             },
             limits: SliceLimits {
                 window_bytes: WINDOW,
+                tiny_chain_slices: 1,
                 // The suite also runs with one step per slice (set the
                 // variable to 1): the same assertions must hold unchained.
                 extract_chain_steps: std::env::var("MKIT_TEST_EXTRACT_CHAIN")
@@ -3385,3 +3386,5 @@ fn a_batch_that_outgrows_one_slice_shrinks_instead_of_ending_terminal() {
             .all(|calls| *calls <= 256.0)
     );
 }
+
+mod tiny;

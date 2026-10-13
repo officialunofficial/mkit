@@ -672,6 +672,7 @@ async fn stale_zero_backlog_drain_cannot_delete_new_outcome_or_its_wake() {
                 store: &store,
                 partition: &p,
                 now_ms: 10,
+                continuation_deadline_ms: None,
             },
             &timer,
         )

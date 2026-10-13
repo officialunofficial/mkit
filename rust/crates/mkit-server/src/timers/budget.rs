@@ -38,6 +38,12 @@ impl TickState {
         self.budget.max_scanned.saturating_sub(self.examined)
     }
 
+    /// Cutoff inherited by optional work inside a single handler invocation.
+    pub(crate) fn deadline_ms(&self) -> i64 {
+        self.start
+            .saturating_add(i64::try_from(self.budget.max_elapsed_ms).unwrap_or(i64::MAX))
+    }
+
     /// Whether another page or partition must wait for a later physical tick.
     #[must_use]
     pub fn exhausted(&self, clock: &dyn Clock) -> bool {

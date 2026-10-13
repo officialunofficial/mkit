@@ -1,6 +1,7 @@
 //! Partition-local timers, shared by native and Durable Object drivers.
 
 mod budget;
+mod inline_relay;
 pub use budget::TickState;
 
 pub mod lease_sweep;
@@ -54,6 +55,8 @@ pub struct TimerCtx<'a, S> {
     pub partition: &'a Partition,
     /// Business time for this tick.
     pub now_ms: u64,
+    /// Physical tick's cutoff for beginning optional continuation work.
+    pub(crate) continuation_deadline_ms: Option<i64>,
 }
 /// A handler's decision, committed by the core.
 #[non_exhaustive]
@@ -77,7 +80,7 @@ pub enum Fired {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy)]
 pub struct TickBudget {
-    /// Maximum successful commits.
+    /// Maximum successfully committed timer batches.
     pub max_fired: u32,
     /// Maximum handler invocations per kind, including failed attempts.
     pub max_per_kind: u32,
@@ -159,7 +162,7 @@ fn time_prefix(now: u64) -> Key {
     Key::new([&b"w\0"[..], &now.to_be_bytes()].concat())
 }
 enum FireOutcome {
-    Committed(Option<u64>),
+    Committed(Option<u64>, bool),
     Raced,
     Failed(&'static str),
 }
@@ -205,40 +208,24 @@ async fn fire_timer<S: NamespaceStore>(
     let progress = (timer.kind == registry::kinds::VERIFY)
         .then(|| crate::indexed::wake::committed_progress(&batch))
         .flatten();
+    let inline_relay = progress.as_ref().is_some_and(|(_, job, _, _)| {
+        job.tiny()
+            && job.phase == crate::indexed::checkpoint::Phase::AwaitDelivery
+            && job.last_relay_seq.is_some()
+    });
     match ctx.store.apply(ctx.partition, batch).await {
         Ok(BatchOutcome::Committed) => {
-            if let Some((pack, job, old_phase, verified)) = progress {
-                let now_ms = u64::try_from(clock.now_ms()).unwrap_or(ctx.now_ms);
-                let metrics = handler.metrics().unwrap_or(&crate::telemetry::NoopMetrics);
-                crate::telemetry::verification_progress(
-                    metrics,
-                    "verify_checkpoint",
-                    now_ms,
-                    Some(&job.ticket_id),
-                    Some(&pack),
+            if let Some(progress) = progress {
+                observe_checkpoint(
+                    progress,
+                    put_due,
+                    ctx.partition,
+                    clock,
+                    handler.metrics().unwrap_or(&crate::telemetry::NoopMetrics),
+                    ctx.now_ms,
                 );
-                tracing::info!(event = "verification_checkpoint", now_ms, source = ?ctx.partition,
-                    pack = %mkit_core::hash::to_hex(&pack), ticket = %mkit_core::hash::to_hex(&job.ticket_id),
-                    old_phase = ?old_phase, new_phase = ?job.phase, generation = job.generation,
-                    relay_sequence = job.last_relay_seq, due_at_ms = put_due);
-                if verified
-                    && job.usable()
-                    && !matches!(
-                        old_phase,
-                        crate::indexed::checkpoint::Phase::Watch
-                            | crate::indexed::checkpoint::Phase::Recheck
-                    )
-                {
-                    crate::telemetry::verification_progress(
-                        metrics,
-                        "verification_usable",
-                        now_ms,
-                        Some(&job.ticket_id),
-                        Some(&pack),
-                    );
-                }
             }
-            FireOutcome::Committed(put_due)
+            FireOutcome::Committed(put_due, inline_relay)
         }
         Ok(BatchOutcome::PreconditionFailed { .. }) => FireOutcome::Raced,
         Ok(BatchOutcome::DeadlinePassed { .. }) => {
@@ -251,6 +238,50 @@ async fn fire_timer<S: NamespaceStore>(
             tracing::warn!(kind = timer.kind.get(), %error, "test timer apply failed");
             FireOutcome::Failed(failure_class(&error))
         }
+    }
+}
+
+/// Observe a checkpoint only after its guarded batch committed durably.
+pub(crate) fn observe_checkpoint(
+    progress: (
+        mkit_core::hash::Hash,
+        crate::indexed::checkpoint::VerifyJobV1,
+        crate::indexed::checkpoint::Phase,
+        bool,
+    ),
+    put_due: Option<u64>,
+    source: &Partition,
+    clock: &dyn Clock,
+    metrics: &dyn crate::Metrics,
+    fallback_now: u64,
+) {
+    let (pack, job, old_phase, verified) = progress;
+    let now_ms = u64::try_from(clock.now_ms()).unwrap_or(fallback_now);
+    crate::telemetry::verification_progress(
+        metrics,
+        "verify_checkpoint",
+        now_ms,
+        Some(&job.ticket_id),
+        Some(&pack),
+    );
+    tracing::info!(event = "verification_checkpoint", now_ms, source = ?source,
+        pack = %mkit_core::hash::to_hex(&pack), ticket = %mkit_core::hash::to_hex(&job.ticket_id),
+        old_phase = ?old_phase, new_phase = ?job.phase, generation = job.generation,
+        relay_sequence = job.last_relay_seq, due_at_ms = put_due);
+    if verified
+        && job.usable()
+        && !matches!(
+            old_phase,
+            crate::indexed::checkpoint::Phase::Watch | crate::indexed::checkpoint::Phase::Recheck
+        )
+    {
+        crate::telemetry::verification_progress(
+            metrics,
+            "verification_usable",
+            now_ms,
+            Some(&job.ticket_id),
+            Some(&pack),
+        );
     }
 }
 
@@ -293,6 +324,7 @@ pub async fn run_due_with_state<S: NamespaceStore>(
         store,
         partition: p,
         now_ms,
+        continuation_deadline_ms: Some(state.deadline_ms()),
     };
     let mut run = PartitionRun::new();
     let mut cursor = None;
@@ -319,25 +351,36 @@ pub async fn run_due_with_state<S: NamespaceStore>(
             None => break,
         }
     }
+    let inline_committed = if run.inline_relay {
+        inline_relay::deliver(&ctx, registry, state, &mut run, clock).await
+    } else {
+        false
+    };
     // If the future range cannot be examined, keep a wake even when the
     // final due page happened to end exactly at the commit/clock allowance.
     if now_ms < u64::MAX && (state.work_exhausted(clock) || state.remaining_scanned() < 2) {
         run.report.stopped_on_budget = true;
     }
-    let future_due =
-        if !state.work_exhausted(clock) && state.remaining_scanned() >= 2 && now_ms < u64::MAX {
-            let page = store.scan(p, &end, &class_end, None, 1).await?;
-            let _ = state.charge_scan(2);
-            page.entries
-                .first()
-                .and_then(|(key, _)| match keys::parse(key) {
-                    Some(keys::ParsedKey::Timer { due_at_ms, .. }) => Some(due_at_ms),
-                    _ => None,
-                })
-        } else {
-            None
-        };
-    let pending = run.report.stopped_on_budget || run.retained_due;
+    let future_due = if !inline_committed
+        && !state.work_exhausted(clock)
+        && state.remaining_scanned() >= 2
+        && now_ms < u64::MAX
+    {
+        let page = store.scan(p, &end, &class_end, None, 1).await?;
+        let _ = state.charge_scan(2);
+        page.entries
+            .first()
+            .and_then(|(key, _)| match keys::parse(key) {
+                Some(keys::ParsedKey::Timer { due_at_ms, .. }) => Some(due_at_ms),
+                _ => None,
+            })
+    } else {
+        None
+    };
+    // The committed relay pass can wake verification behind our original
+    // snapshot. Wake once promptly; durable polls recover a missed nudge.
+    // A future-range read cannot improve this immediate wake.
+    let pending = inline_committed || run.report.stopped_on_budget || run.retained_due;
     let next = if pending && run.progress {
         Some(now_ms)
     } else if pending {
@@ -356,6 +399,7 @@ struct PartitionRun {
     retained_due: bool,
     committed_due: Option<u64>,
     progress: bool,
+    inline_relay: bool,
 }
 impl PartitionRun {
     fn new() -> Self {
@@ -365,6 +409,7 @@ impl PartitionRun {
             retained_due: false,
             committed_due: None,
             progress: false,
+            inline_relay: false,
         }
     }
 }
@@ -408,7 +453,7 @@ async fn process_row<S: NamespaceStore>(
             run.warned[usize::from(kind)] = true;
         }
         match backoff(ctx, &timer, key, attempt).await {
-            FireOutcome::Committed(due) => {
+            FireOutcome::Committed(due, _) => {
                 state.committed();
                 run.progress = true;
                 run.committed_due = min_due(run.committed_due, due);
@@ -433,7 +478,8 @@ async fn process_row<S: NamespaceStore>(
     let outcome = fire_timer(handler, ctx, &timer, key.clone(), clock).await;
     observe_verify_result(handler, ctx, &timer, &key, attempt, &outcome, clock);
     match outcome {
-        FireOutcome::Committed(put_due) => {
+        FireOutcome::Committed(put_due, inline_relay) => {
+            run.inline_relay |= inline_relay;
             state.committed();
             run.report.fired += 1;
             run.progress = true;
@@ -444,7 +490,7 @@ async fn process_row<S: NamespaceStore>(
             // A failed ancillary guard can leave the exact timer unchanged.
             // Move that retained work too; a replaced timer fails this guard.
             match backoff(ctx, &timer, key, attempt).await {
-                FireOutcome::Committed(due) => {
+                FireOutcome::Committed(due, _) => {
                     state.committed();
                     run.progress = true;
                     run.committed_due = min_due(run.committed_due, due);
@@ -456,7 +502,7 @@ async fn process_row<S: NamespaceStore>(
             run.report.failed += 1;
             // Failed handler effects are discarded; only its timer moves.
             match backoff(ctx, &timer, key, attempt).await {
-                FireOutcome::Committed(due) => {
+                FireOutcome::Committed(due, _) => {
                     state.committed();
                     run.progress = true;
                     run.committed_due = min_due(run.committed_due, due);
@@ -509,7 +555,7 @@ fn observe_verify_result<S: NamespaceStore>(
         return;
     }
     let result = match outcome {
-        FireOutcome::Committed(_) => "committed",
+        FireOutcome::Committed(..) => "committed",
         FireOutcome::Raced => "raced",
         FireOutcome::Failed(_class) => "failed",
     };
@@ -523,7 +569,7 @@ fn observe_verify_result<S: NamespaceStore>(
     #[cfg(not(feature = "__test-faults"))]
     {
         let class = match outcome {
-            FireOutcome::Committed(_) => None,
+            FireOutcome::Committed(..) => None,
             FireOutcome::Raced => Some("guard_conflict"),
             FireOutcome::Failed(class) => Some(*class),
         };
@@ -605,7 +651,7 @@ async fn backoff<S: NamespaceStore>(
         .delete(key)
         .put(next_key, timer.value.clone());
     match ctx.store.apply(ctx.partition, batch).await {
-        Ok(BatchOutcome::Committed) => FireOutcome::Committed(Some(due)),
+        Ok(BatchOutcome::Committed) => FireOutcome::Committed(Some(due), false),
         Ok(BatchOutcome::PreconditionFailed { .. }) => FireOutcome::Raced,
         Ok(BatchOutcome::DeadlinePassed { .. }) => FireOutcome::Failed("deadline"),
         Err(error) => FireOutcome::Failed(failure_class(&error)),

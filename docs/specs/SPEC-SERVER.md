@@ -1617,7 +1617,8 @@ requires. This answer MUST NOT be stored as a replay result, under
 STC §7.1; a retry must be able to observe verification progress.
 
 `PendingVerification.retry_after_ms` is the server's suggested poll
-interval in milliseconds. The server SHOULD send at least 1,000. For a
+interval in milliseconds. The server SHOULD send at least 1,000, except when
+bounded tiny-pack work is expected to finish sooner. For a
 verification that is still progressing it SHOULD NOT send more than 5,000:
 the hint is a poll interval, not a completion estimate, and a client
 honours it in full up to the 60,000 clamp.
@@ -1654,13 +1655,25 @@ misses found when the advance checks the consumed set, and a base that is
 still absent after the window is the permanent §9.4 answer, as inline.
 
 Informative. Scheduled verification polling hints use the consumed job's
-persisted timer, rounded up to whole seconds and bounded to 1–3 seconds;
-retry backoff and lag waits are not exposed. A missing job or a wake not found within bounded
-inspection uses the one-second floor. The header and typed pending detail
-agree; neither promises completion at that time. Relay delivery may move an
-awaiting job's existing guarded timer earlier, retaining the delivery poll as
-recovery. This does not perform verification in the advance or make a pack
-Verified before its required index delivery.
+persisted timer with a 3,000 ms cap. Tiny decoded packs awaiting relay delivery
+use a 100 ms floor and preserve millisecond precision in the typed detail.
+Other phases round up to whole seconds with a 1,000 ms floor. A missing job or a
+wake not found within bounded inspection uses 1,000 ms. The HTTP Retry-After
+header always rounds the detail up to whole seconds; neither value promises
+completion. Clients retain STC's one-second polling clamp.
+
+Consecutive slices for one to three entries and at most 16 KiB of encoded and
+decoded data, or canonical packlists of at most 256 bytes, MAY share one
+handler's existing call allowance. Each intermediate
+checkpoint MUST commit before the next slice begins, retaining durable recovery
+work. The implementation caps consecutive slices at eight and checks a two-second
+elapsed cutoff and the enclosing physical tick's deadline before starting
+another slice. Extraction work and larger groups
+retain their scheduled boundaries. A tiny AwaitDelivery checkpoint MAY trigger
+one bounded discovery of its small source outbox through the registered relay
+handler, under the same physical alarm limits. Target delivery, source cleanup,
+and guarded wakeups retain their existing ordering and idempotence. Verification
+still waits for required relay delivery before writing Verified.
 
 Informative. The scheduled implementation may run several Extract selection
 steps within one bounded slice and guarded checkpoint, with a fixed 16-step

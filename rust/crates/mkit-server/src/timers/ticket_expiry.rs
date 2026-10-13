@@ -488,6 +488,7 @@ mod tests {
             store: &store,
             partition: &partition(),
             now_ms: 100,
+            continuation_deadline_ms: None,
         };
         let Fired::Done(stale) = (TicketExpiry {
             blobs: MemoryBlobStore::default(),

@@ -77,6 +77,7 @@ fn lookup_fire(rig: &Rig, extension: &TestExtraction, pack: Hash) -> Result<Fire
             store: rig.store.as_ref(),
             partition: &rig.source(),
             now_ms: u64::try_from(rig.clock.now_ms()).unwrap(),
+            continuation_deadline_ms: None,
         },
         &DueTimer {
             due_at_ms: u64::try_from(rig.clock.now_ms()).unwrap(),

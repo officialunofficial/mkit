@@ -28,6 +28,18 @@ collect the applicable entries between their old and new immutable pins.
   feature comment qualifies its zstd-free dependency claim with default
   features disabled.
 
+- Scheduled verification can run up to eight consecutive slices for decoded
+  packs with one to three entries and at most 16 KiB of encoded and decoded
+  data, and for canonical packlists of at most 256 bytes. Every slice commits
+  before the next and shares the handler's existing call allowance. Tiny delivery
+  waits can discover a small outbox immediately
+  through the registered relay handler, retaining its hooks and alarm limits.
+  `SliceLimits::with_tiny_chain_slices(1)` selects single-slice scheduling.
+  Tiny AwaitDelivery jobs can return a millisecond polling detail with a
+  100 ms floor and a 3,000 ms cap; HTTP Retry-After still rounds up to seconds,
+  and clients that clamp to one second behave as before. No wire or stored-format
+  change and no store reset. Upload-time job creation remains a design follow-up.
+
 - Scheduled Decode, EmitIndex, and inline index writes share per-object takedown
   denial waves of at most six, after inventory staging and before provisional
   rows or the direct index apply. The first failing object in batch order still

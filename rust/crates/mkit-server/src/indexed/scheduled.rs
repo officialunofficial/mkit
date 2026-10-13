@@ -58,14 +58,15 @@ fn storage_failed() -> ServerError {
 const MAX_PENDING_HINT_SECS: u64 = 3;
 
 /// A polling hint from this consumed job's persisted timer, not a completion ETA.
-/// Bound inspection to four pages; an unobserved wake has the one-second floor,
-/// and a distant one is capped at [`MAX_PENDING_HINT_SECS`].
+/// Bound inspection to four pages. Tiny delivery waits have a 100 ms floor;
+/// other or unobserved wakes use one second. Distant wakes have the same cap.
 async fn retry_after<N: NamespaceStore>(
     store: &N,
     source: &Partition,
     repo: &RepoId,
     pack: &Hash,
     clock: &dyn Clock,
+    job: &VerifyJobV1,
 ) -> Result<u64, ServerError> {
     let reference = timer_reference(&repo.name, pack);
     let (start, end) = keys::class_range(keys::TAG_TIMER);
@@ -85,11 +86,14 @@ async fn retry_after<N: NamespaceStore>(
                 && found.as_ref() == reference.as_slice()
             {
                 let now = u64::try_from(clock.now_ms()).unwrap_or(0);
-                return Ok(due_at_ms
-                    .saturating_sub(now)
-                    .div_ceil(1_000)
-                    .clamp(1, MAX_PENDING_HINT_SECS)
-                    * 1_000);
+                let delay = due_at_ms.saturating_sub(now);
+                return Ok(
+                    if job.tiny() && job.phase == super::checkpoint::Phase::AwaitDelivery {
+                        delay.clamp(100, MAX_PENDING_HINT_SECS * 1_000)
+                    } else {
+                        delay.div_ceil(1_000).clamp(1, MAX_PENDING_HINT_SECS) * 1_000
+                    },
+                );
             }
         }
         match page.next {
@@ -847,7 +851,7 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
             pending = Some(
                 pending
                     .unwrap_or(0)
-                    .max(retry_after(store, source, repo, &ticket.pack_id, clock).await?),
+                    .max(retry_after(store, source, repo, &ticket.pack_id, clock, &job).await?),
             );
             continue;
         }

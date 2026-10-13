@@ -65,6 +65,7 @@ async fn test_timer_d34_deletes_ref_and_enqueues_index_delete_without_lease() {
                 store: &store,
                 partition: &source,
                 now_ms: 100,
+                continuation_deadline_ms: None,
             },
             &due,
         )

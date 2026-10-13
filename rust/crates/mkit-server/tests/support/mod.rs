@@ -412,9 +412,13 @@ impl PackWindows for Windows {
 pub struct Recorder {
     pub results: Mutex<Vec<(String, String, f64)>>,
     pub attempts: AtomicU32,
+    pub slice_attempts: AtomicU32,
 }
 impl Metrics for Recorder {
     fn incr(&self, name: &'static str, labels: &[(&'static str, &str)], _: u64) {
+        if name == mkit_server::telemetry::METRIC_INDEX_INVENTORY_ATTEMPTS {
+            self.slice_attempts.fetch_add(1, Ordering::SeqCst);
+        }
         if name == mkit_server::telemetry::METRIC_VERIFICATION_PROGRESS
             && labels.contains(&("stage", "verify_fire"))
         {

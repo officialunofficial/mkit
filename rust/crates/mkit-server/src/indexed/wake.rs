@@ -172,6 +172,7 @@ mod tests {
                 store: &store,
                 partition: &source,
                 now_ms: 100,
+                continuation_deadline_ms: None,
             };
             let batch = after_delivery(&ctx, 7).await.unwrap();
             assert_eq!(batch.writes.len(), 2);
@@ -235,6 +236,7 @@ mod tests {
                 store: &store,
                 partition: &source,
                 now_ms: 100,
+                continuation_deadline_ms: None,
             };
             assert!(after_delivery(&ctx, 6).await.unwrap().writes.is_empty());
             let batch = after_delivery(&ctx, 7).await.unwrap();

@@ -1019,6 +1019,7 @@ async fn fire_audit_relay(
                 store,
                 partition: source,
                 now_ms,
+                continuation_deadline_ms: None,
             },
             &crate::timers::DueTimer {
                 due_at_ms: now_ms,
@@ -1102,7 +1103,8 @@ async fn committed_automatic_purge_recovers_relay_and_target_checkpoint_crash() 
                 &crate::timers::TimerCtx {
                     store: &crashing_source,
                     partition: &source,
-                    now_ms: 100
+                    now_ms: 100,
+                    continuation_deadline_ms: None,
                 },
                 &crate::timers::DueTimer {
                     due_at_ms: 100,

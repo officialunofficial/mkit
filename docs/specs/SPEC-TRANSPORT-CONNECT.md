@@ -1535,7 +1535,8 @@ After that it signs a new operation.
 consumes a pack still under verification MUST fail with `unavailable`
 and exactly one `PendingVerification` detail (SPEC-SERVER §9.5).
 Its `retry_after_ms` field is the server's suggested poll interval.
-The server SHOULD send at least 1,000 milliseconds. The client MUST
+The server SHOULD send at least 1,000 milliseconds, except for bounded
+tiny-pack work expected to finish sooner (SPEC-SERVER §9.5). The client MUST
 poll, waiting `retry_after_ms` clamped to 1,000–60,000 milliseconds
 between attempts; a missing or zero value means 1,000 milliseconds.
 It polls until the ticket expires and MUST NOT use its normal backoff

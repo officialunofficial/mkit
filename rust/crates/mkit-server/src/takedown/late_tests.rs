@@ -295,6 +295,7 @@ fn ready_materialization_and_owner_failure_retain_the_original_request() {
             store: store.as_ref(),
             partition: &partition,
             now_ms: 104,
+            continuation_deadline_ms: None,
         };
         let Fired::Reschedule { batch, .. } = handler(store.clone(), true, false)
             .fire(&ctx, &timer())
@@ -358,6 +359,7 @@ fn lost_acceptance_reply_and_cold_restart_transfer_real_durable_responsibility()
             store: store.as_ref(),
             partition: &partition,
             now_ms: 104,
+            continuation_deadline_ms: None,
         };
         assert!(
             handler(store.clone(), false, true)
@@ -454,6 +456,7 @@ fn invalid_identity_readiness_and_shared_budget_fail_before_acknowledgment() {
                 store: store.as_ref(),
                 partition: &partition,
                 now_ms: 104,
+                continuation_deadline_ms: None,
             };
             let mut handler = handler(store.clone(), false, false);
             handler.max_subrequests = if ready == Some(103) { 5 } else { 16 };
@@ -474,6 +477,7 @@ fn invalid_identity_readiness_and_shared_budget_fail_before_acknowledgment() {
                 store: store.as_ref(),
                 partition: &partition,
                 now_ms: 104,
+                continuation_deadline_ms: None,
             };
             assert!(
                 handler(store.clone(), false, false)
@@ -494,6 +498,7 @@ fn invalid_identity_readiness_and_shared_budget_fail_before_acknowledgment() {
             store: store.as_ref(),
             partition: &partition,
             now_ms: 104,
+            continuation_deadline_ms: None,
         };
         let mut invalid = timer();
         let mut reference = invalid.reference.to_vec();

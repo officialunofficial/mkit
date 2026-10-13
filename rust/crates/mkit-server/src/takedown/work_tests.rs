@@ -1344,6 +1344,7 @@ async fn timer15_uses_firing_local_store_for_owner_and_durable_copy_intents() {
         store: f.work.metadata.as_ref(),
         partition: &f.work.root,
         now_ms: 20_000,
+        continuation_deadline_ms: None,
     };
     let timer = DueTimer {
         due_at_ms: 20_000,

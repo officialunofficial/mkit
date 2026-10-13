@@ -300,7 +300,28 @@ pub struct ExtractionSource {
     pub member_body_id: Option<Hash>,
 }
 
+pub(crate) const TINY_PACK_BYTES: u64 = 16 * 1024;
+pub(crate) const TINY_PACKLIST_BYTES: u64 = 256;
+pub(crate) const TINY_ENTRIES: u64 = 3;
+
 impl VerifyJobV1 {
+    /// Bounded work eligible for immediate scheduling after Decode completes.
+    pub(crate) fn tiny(&self) -> bool {
+        !self.gone
+            && self.outcome.is_none()
+            && self.phase != Phase::Decode
+            && match self.kind {
+                Kind::Pack => (1..=TINY_ENTRIES).contains(&self.entries),
+                // Packlists have no MKIT frame count. Bound their member work
+                // by their canonical encoded size instead.
+                Kind::Packlist => self.pack_len <= TINY_PACKLIST_BYTES,
+                Kind::Unknown => false,
+            }
+            && self.pack_len <= TINY_PACK_BYTES
+            && self.in_pack_bytes <= TINY_PACK_BYTES
+            && self.external_bytes <= TINY_PACK_BYTES
+    }
+
     pub(super) fn closure_retry(&self) -> bool {
         matches!(
             self.outcome,

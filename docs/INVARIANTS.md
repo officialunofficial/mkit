@@ -48,6 +48,33 @@ reads, raw runs, lease reads, implicit packmap prologues, and continuations;
 the round probe pins equal-or-lower call counts and the shared concurrency
 limit. The waves introduce no durable state or restart step.
 
+## Consecutive tiny verification slices preserve durable recovery
+
+**Always:** tiny decoded packs share one handler's call allowance across at most
+eight slices. Canonical packlists qualify by their 256-byte encoded-size bound;
+ordinary packs require one to three frames and at most 16 KiB of encoded, decoded,
+and external-base data. Actual extraction and larger groups keep their separate
+slices. Each intermediate checkpoint atomically guards the job, verification
+state, and original timer before the next slice begins. The original timer remains
+until the final guarded reschedule; retries with a different physical timer key
+retain single-slice scheduling. The physical tick's elapsed deadline, a two-second
+handler cutoff, and the remaining-call check stop chaining. The deadline is
+inherited without refreshing it, including after checkpoint I/O. External closure
+lookups retain their full-slice reservation; bounded Decode facts only predict
+resource cost and never replace fresh closure reads. Relay discovery runs only
+after a durable AwaitDelivery checkpoint, with bounded source inspection and the
+registered handler's existing physical alarm limits, hooks, order, and watermarks.
+
+**Because:** removing alarm waits must preserve recovery after a lost commit reply
+and must not grant another slice's worth of backend calls.
+
+**If violated:** a crash could lose runnable work, concurrent verification could
+commit stale progress, or inline delivery could bypass a hook or exceed an alarm
+allowance.
+
+**Enforced by:** `indexed::job::tiny`, `timers::inline_relay`, and the tiny-slice
+fault, delivery, backlog, and physical-budget tests.
+
 ## Chained Extract selection preserves guarded slice boundaries
 
 **Always:** only Extract selection stages run together inside a slice, and
