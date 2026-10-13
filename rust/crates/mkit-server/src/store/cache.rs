@@ -229,16 +229,9 @@ impl ImmutableCache for MemoryImmutableCache {
         let now = self.clock.now_ms();
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.evict_expired(now, self.ttl);
-        let Some((bytes, inserted)) = state.entries.get(key) else {
+        let Some((bytes, _)) = state.entries.get(key) else {
             return Ok(None);
         };
-        let age = now
-            .checked_sub(*inserted)
-            .and_then(|age| u128::try_from(age).ok());
-        if now < 0 || age.is_none_or(|age| age >= self.ttl.as_millis()) {
-            state.remove(key);
-            return Ok(None);
-        }
         let bytes = bytes.clone();
         state.order.retain(|entry| entry.as_ref() != key);
         state.order.push_back(Bytes::copy_from_slice(key));
@@ -492,7 +485,13 @@ impl<B: BlobStore, C: ImmutableCache> BlobStore for CachingBlobStore<B, C> {
             if meta.len == bytes.len() as u64 {
                 let bytes = if let Some(range) = range {
                     let range = range.resolve(meta.len)?;
-                    bytes.slice(range.start as usize..range.end as usize)
+                    let start = usize::try_from(range.start).map_err(|_| {
+                        StoreError::Invalid("cache range exceeds platform bounds".into())
+                    })?;
+                    let end = usize::try_from(range.end).map_err(|_| {
+                        StoreError::Invalid("cache range exceeds platform bounds".into())
+                    })?;
+                    bytes.slice(start..end)
                 } else {
                     bytes
                 };
@@ -508,19 +507,20 @@ impl<B: BlobStore, C: ImmutableCache> BlobStore for CachingBlobStore<B, C> {
             Some(BlobBody::Stream { len, mut stream })
                 if len <= MAX_IMMUTABLE_CACHE_ENTRY_BYTES as u64 =>
             {
-                let mut bytes = Vec::with_capacity(len as usize);
+                let len = usize::try_from(len).map_err(|_| {
+                    StoreError::Invalid("cache byte length exceeds platform bounds".into())
+                })?;
+                let mut bytes = Vec::with_capacity(len);
                 while let Some(piece) = stream.next().await {
                     let piece = piece?;
-                    if piece.len() > MAX_BLOB_PIECE_BYTES
-                        || bytes.len() + piece.len() > len as usize
-                    {
+                    if piece.len() > MAX_BLOB_PIECE_BYTES || bytes.len() + piece.len() > len {
                         return Err(StoreError::Invalid(
                             "blob stream exceeds declared length".into(),
                         ));
                     }
                     bytes.extend_from_slice(&piece);
                 }
-                if bytes.len() as u64 != len {
+                if bytes.len() != len {
                     return Err(StoreError::Invalid("short blob stream".into()));
                 }
                 Bytes::from(bytes)
