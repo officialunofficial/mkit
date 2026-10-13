@@ -85,6 +85,18 @@ impl Destination {
             .map_err(|_| Error::Invalid("repository identity"))?;
         Ok(Self { origin, repository })
     }
+    /// The canonical origin every request is sent to and signed for.
+    #[must_use]
+    pub fn origin(&self) -> &str {
+        &self.origin
+    }
+
+    /// The repository identity every request addresses.
+    #[must_use]
+    pub fn repository(&self) -> &str {
+        &self.repository
+    }
+
     /// Discover canonical capabilities before preparing a bounded plan.
     pub async fn server_info<T: HttpTransport>(
         &self,

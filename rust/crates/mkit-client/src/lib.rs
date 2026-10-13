@@ -9,7 +9,7 @@ mod push;
 mod read;
 mod seams;
 
-pub use client::{Client, NamedRef, NoClock, NoSigner, RefPage, SignedEnvelope};
+pub use client::{Client, NamedRef, NoClock, NoSigner, RefPage, SignedEnvelope, Visibility};
 pub use connect::{
     Clock, Destination, Detail, Error, HttpTransport, Identity, RemoteError, Reply, Signer,
 };

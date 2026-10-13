@@ -16,20 +16,27 @@
 //!   explicit option.
 //! * [`pull`] refuses anything that is not a fast-forward.
 //!
-//! The fetch engine reads through the [`RemoteSource`] trait. The first
-//! backend, [`TransportSource`], wraps mkit-core's synchronous `Transport`,
-//! so every transport scheme keeps working.
+//! The fetch engine reads through the [`RemoteSource`] trait. The always-on
+//! backend, [`TransportSource`], wraps mkit-core's synchronous `Transport`, so
+//! every transport scheme keeps working. With the `client` feature,
+//! `ClientSource` reads `mkit+https` and `mkit+http` remotes through
+//! `mkit_client::Client` with an injected signer; with `connect-native`,
+//! `NativeHttp` is a small native HTTP channel (gzip only, adding no zstd) for it.
 
 #![deny(unsafe_code)]
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
 mod applied_packs;
+#[cfg(feature = "client")]
+mod client_source;
 mod clone;
 mod error;
 #[doc(hidden)]
 pub mod fanout;
 mod fetch;
 mod lock;
+#[cfg(feature = "connect-native")]
+mod native;
 mod observer;
 pub mod packmap;
 mod pull;
@@ -41,6 +48,8 @@ mod verify;
 pub mod worktree;
 
 pub use applied_packs::AppliedPacks;
+#[cfg(feature = "client")]
+pub use client_source::{ClientSource, Executor, FuturesExecutor};
 pub use clone::{
     CloneError, CloneInitError, CloneRemote, CloneReport, DEFAULT_REMOTE_NAME, clone,
     init_clone_dir,
@@ -48,6 +57,8 @@ pub use clone::{
 pub use error::SyncError;
 pub use fetch::FetchReport;
 pub use lock::{SERVE_LOCK, WORKTREE_LOCK, warn_if_served};
+#[cfg(feature = "connect-native")]
+pub use native::{NativeClock, NativeHttp, default_tls_config};
 pub use observer::{NoopObserver, SyncEvent, SyncObserver};
 pub use pull::{PullOutcome, PullReport, fetch, pull};
 pub use source::{ErrorClassifier, RemoteSource, TransportSource};

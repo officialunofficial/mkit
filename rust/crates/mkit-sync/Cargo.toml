@@ -27,14 +27,61 @@ rayon = "1"
 tempfile = "3"
 thiserror = "2"
 
+# --- `client`: the mkit-client backend -----------------------------------
+mkit-client = { version = "0.5", path = "../mkit-client", default-features = false, optional = true }
+# Drives mkit-client's futures to completion from the synchronous engine.
+futures-executor = { version = "0.3", optional = true }
+
+# --- `connect-native`: a small native HTTP channel -----------------------
+# current-thread runtime only: no scheduler threads.
+tokio = { version = "1", default-features = false, features = ["rt", "net", "time"], optional = true }
+hyper = { version = "1", default-features = false, features = ["client", "http1"], optional = true }
+hyper-util = { version = "0.1.20", default-features = false, features = ["client-legacy", "http1", "tokio"], optional = true }
+# ring, not aws-lc: no second C crypto library. No http2.
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "ring"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+webpki-roots = { version = "1", optional = true }
+http = { version = "1", optional = true }
+http-body-util = { version = "0.1", optional = true }
+bytes = { version = "1", optional = true }
+# gzip, pure-Rust backend. The only content coding the channel speaks.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"], optional = true }
+getrandom = { version = "0.4", optional = true }
+
 [features]
 default = ["pack-zstd"]
 # Pack decode (and encode) through the zstd C library.
 pack-zstd = ["mkit-core/pack-zstd"]
 # Pure-Rust pack decode, for builds without `pack-zstd`.
-pack-ruzstd = ["mkit-core/pack-ruzstd"]
+pack-ruzstd = ["mkit-core/pack-ruzstd", "mkit-client?/pack-ruzstd"]
 # Publish versioned first-parent ancestry snapshots with branch writes.
 history-mmr = ["mkit-core/history-mmr"]
 
+# `ClientSource`, the `RemoteSource` over `mkit_client::Client` (anonymous or
+# with an injected signer), for `mkit+https` / `mkit+http` remotes.
+client = ["dep:mkit-client", "dep:futures-executor"]
+# `NativeHttp` + `NativeClock`: hyper/rustls on a current-thread runtime,
+# gzip only, no `zstd-sys` anywhere in the tree (`scripts/check-sync-native-deps.sh`).
+connect-native = [
+    "client",
+    "dep:tokio", "dep:hyper", "dep:hyper-util", "dep:hyper-rustls", "dep:rustls",
+    "dep:webpki-roots", "dep:http", "dep:http-body-util", "dep:bytes", "dep:flate2",
+    "dep:getrandom",
+]
+
 [dev-dependencies]
 mkit-transport-memory = { path = "../mkit-transport-memory" }
+# The local-server tests (feature `connect-native`): a real in-process
+# mkit-server pipeline served over loopback.
+mkit-server = { version = "0.5", path = "../mkit-server", default-features = false, features = ["connect", "memory"] }
+connectrpc = { version = "0.9.0", default-features = false, features = ["server"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "time", "sync"] }
+ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] }
+base64 = "0.22"
+buffa = "0.9.1"
+mkit-attest = { path = "../mkit-attest", features = ["grants"] }
+
+[[example]]
+name = "gen_zstd_fixture"
+# Writes a compressed pack, which needs the C zstd backend.
+required-features = ["pack-zstd"]

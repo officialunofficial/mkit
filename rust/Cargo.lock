@@ -3592,11 +3592,30 @@ dependencies = [
 name = "mkit-sync"
 version = "0.5.0"
 dependencies = [
+ "base64 0.22.1",
+ "buffa",
+ "bytes",
+ "connectrpc",
+ "ed25519-dalek",
+ "flate2",
+ "futures-executor",
+ "getrandom 0.4.3",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "mkit-attest",
+ "mkit-client",
  "mkit-core",
+ "mkit-server",
  "mkit-transport-memory",
  "rayon",
+ "rustls",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
+ "webpki-roots",
 ]
 
 [[package]]

@@ -160,6 +160,7 @@ ci-scripts:
     python3 scripts/test-server-gates.py
     python3 scripts/test-workers-wire-diagnostics.py
     bash scripts/check-cli-baseline.sh
+    bash scripts/check-sync-native-deps.sh
     if ! rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unknown$'; then
       echo "error: wasm32-unknown-unknown target not installed. Run: rustup target add wasm32-unknown-unknown" >&2
       exit 1
