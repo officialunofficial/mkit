@@ -4812,7 +4812,8 @@ consumed prefix restored and do not populate the cache. Larger packs retain
 the ordinary streaming path. Cache I/O MUST have
 a finite deadline and bounded response allocation. Each backend get or put
 MUST complete or time out within at most 100 ms; errors and timeouts fall back to the
-store and do not fail an otherwise successful read. Backends MUST support
+store without propagating the cache error. Authoritative fallback remains subject
+to the invocation’s remaining budget. Backends MUST support
 cancellation and bound retained bytes. A put already completed when canceled
 may leave a retained copy. External cache I/O MUST reserve capacity from the
 same invocation budget as authoritative storage before dispatch.
