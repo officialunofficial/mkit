@@ -2,7 +2,7 @@
 //! blob is large and repetitive enough that the pack carries a zstd entry.
 //! Needs the `pack-zstd` feature (on by default).
 //!
-//!     cargo run -p mkit-sync --example gen_zstd_fixture
+//!     cargo run -p mkit-sync --example gen_zstd_fixture   # from the `rust/` directory
 #![allow(clippy::unwrap_used)]
 use mkit_core::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
 use mkit_core::pack::PackWriter;

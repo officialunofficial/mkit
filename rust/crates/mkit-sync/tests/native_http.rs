@@ -227,3 +227,18 @@ fn a_content_encoding_list_is_refused() {
 
     assert!(err.contains("gzip only"), "{err}");
 }
+
+#[test]
+fn a_connection_failure_keeps_its_cause() {
+    // Nothing listens on port 1: the message must say why, not just
+    // "client error (Connect)".
+    let http = NativeHttp::new().unwrap();
+
+    let err = send(&http, "http://127.0.0.1:1/", 1024).unwrap_err();
+
+    assert!(err.starts_with("request failed: "), "{err}");
+    assert!(
+        err.matches(": ").count() >= 2 && !err.ends_with("client error (Connect)"),
+        "the cause is missing: {err}"
+    );
+}

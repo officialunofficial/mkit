@@ -68,6 +68,7 @@ impl<'a, T, S, C, E> ClientSource<'a, T, S, C, E> {
 }
 
 /// Map a client failure to the transport vocabulary the engine reports in.
+///
 /// A transport failure keeps its cause as `RemoteError("transport: ...")`, not
 /// a retryable connection failure: the channel's refusals (an oversized or
 /// undecodable body, a refused redirect) are deterministic, so match on

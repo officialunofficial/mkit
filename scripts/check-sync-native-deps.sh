@@ -52,6 +52,9 @@ check_row() {
       err "[$features] the graph contains $pkg"
     fi
   done
+  # Canary: the feature listing must show tokio's `rt`, else the negative
+  # check below would pass on a changed output format.
+  grep -q 'tokio feature "rt"' <<<"$feats" || err "[$features] cannot read tokio's features"
   if grep -q 'tokio feature "rt-multi-thread"' <<<"$feats"; then
     err "[$features] tokio's multi-thread scheduler is enabled"
   fi

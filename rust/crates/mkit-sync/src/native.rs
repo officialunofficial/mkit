@@ -132,6 +132,20 @@ impl Executor for NativeHttp {
     }
 }
 
+/// An error and its whole `source()` chain, joined: hyper-util's own `Display`
+/// is only "client error (Connect)", and the reason (certificate, DNS, refused,
+/// reset) lives in the sources.
+fn chain(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(next) = source {
+        text.push_str(": ");
+        text.push_str(&next.to_string());
+        source = next.source();
+    }
+    text
+}
+
 /// Loopback hosts, the same set the Connect transport admits for plain HTTP.
 /// `localhost` is trusted by name, as there; the resolver is not consulted.
 fn is_loopback_host(host: &str) -> bool {
@@ -147,7 +161,7 @@ fn is_loopback_host(host: &str) -> bool {
 async fn read_bounded(mut body: hyper::body::Incoming, limit: usize) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     while let Some(frame) = body.frame().await {
-        let frame = frame.map_err(|e| format!("response body: {e}"))?;
+        let frame = frame.map_err(|e| format!("response body: {}", chain(&e)))?;
         if let Some(data) = frame.data_ref() {
             if out.len().saturating_add(data.len()) > limit {
                 return Err("response exceeds the size limit".to_owned());
@@ -198,7 +212,7 @@ impl HttpTransport for NativeHttp {
                 .client
                 .request(request)
                 .await
-                .map_err(|e| format!("request failed: {e}"))?;
+                .map_err(|e| format!("request failed: {}", chain(&e)))?;
             // Redirects are never followed: a redirect would carry a signed
             // request to an origin the signature was not made for.
             if response.status().is_redirection() {

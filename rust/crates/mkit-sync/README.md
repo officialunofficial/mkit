@@ -112,9 +112,11 @@ timer. Calling `NativeHttp` from inside another tokio runtime panics, as
 
 There is no zstd anywhere in this feature's tree: pack decode goes through
 mkit-core's `pack-ruzstd`. `scripts/check-sync-native-deps.sh` runs in CI and
-fails if `zstd`, `zstd-safe`, `zstd-sys`, `aws-lc-*`, `openssl*`, `h2`,
-`connectrpc` or `reqwest` enter the normal graph, if tokio's multi-thread
-scheduler is enabled, or if `flate2`, `hyper`, `rustls` or `ruzstd` leave it.
+fails if `zstd`, `zstd-safe`, `zstd-sys`, `aws-lc-*`, `openssl*`,
+`native-tls`, `rustls-native-certs`, `brotli` and other compression crates,
+`libz-sys`, `hyper-tls`, `h2`, `connectrpc` or `reqwest` enter the normal or
+build graph, if tokio's multi-thread scheduler is enabled, or if `flate2`,
+`hyper`, `rustls`, `ring` or (in the `pack-ruzstd` row) `ruzstd` leave it.
 
 ### Worktree primitives
 
@@ -153,7 +155,7 @@ pack-ruzstd,connect-native`.
 
 The last row is the addon build. `connect-native` adds hyper, hyper-util,
 hyper-rustls, rustls (`ring`), webpki-roots, tokio (`rt`, `net`, `time`),
-flate2 (pure-Rust backend), http, http-body-util, bytes and getrandom, about 50
+flate2 (pure-Rust backend), http, http-body-util, bytes and getrandom, about 30
 crates over the `client` row; no async runtime beyond the current-thread
 scheduler, no HTTP/2, no Connect runtime.
 
