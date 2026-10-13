@@ -1951,6 +1951,16 @@ platform clock and timer.
 
 ## Runtime-independent client (informative)
 
+Complete ref listings in the Rust client, sync adapter, and Connect transport
+share a runtime-free accumulator in `mkit-core`. It rejects unordered or duplicate
+names within and across pages, repeated nonempty cursors, cursors over 4 KiB,
+and listings exceeding 100,000 pages or a caller's lower cap.
+`ConnectTransport::list_refs_with_page_limit` lets a native caller lower this cap. Its 128 MiB
+retained-state budget charges names, fixed ref metadata, collection overhead,
+32-byte BLAKE3 cursor digests, and the active cursor. Empty pages consume page
+and cursor-history budgets. The client page primitive also checks ordering and
+cursor length. These are local defensive limits; the wire format is unchanged.
+
 `mkit-client` implements the client side
 of this protocol from public code, on native and wasm32 with no async runtime or
 C compression in its dependency graph. It shares the `mkit-rpc/transport-messages`

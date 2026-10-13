@@ -502,7 +502,7 @@ fn list_refs_pages_with_a_two_mib_response_cap() {
     );
     assert!(matches!(
         block_on(client.list_all_refs("refs/heads/", 2)),
-        Err(Error::Limit(_))
+        Err(Error::Invalid(_))
     ));
 }
 
@@ -716,4 +716,98 @@ fn a_flood_of_empty_frames_is_rejected_without_collecting_them() {
     });
     let error = block_on(anonymous(&script).download_pack(&key, None, 1 << 20, None)).unwrap_err();
     assert!(matches!(error, Error::Invalid(_)), "{error:?}");
+}
+
+#[test]
+fn listing_rejects_oversized_cursor_and_unordered_page() {
+    for (names, token) in [(vec![], "x".repeat(4097)), (vec!["b", "a"], String::new())] {
+        let script = Script::new(move |_| {
+            proto_reply(
+                "application/proto",
+                proto::ListRefsResponse {
+                    refs: names
+                        .iter()
+                        .map(|name| proto::RefEntry {
+                            name: Some((*name).into()),
+                            object_id: Some(vec![1; 32]),
+                            ..Default::default()
+                        })
+                        .collect(),
+                    next_page_token: Some(token.clone()),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            )
+        });
+        assert!(matches!(
+            block_on(anonymous(&script).list_all_refs("", 4)),
+            Err(Error::Invalid(_))
+        ));
+    }
+}
+
+use mkit_test_util::ref_listing::listing_cases;
+#[test]
+fn shared_listing_adversaries() {
+    for case in listing_cases() {
+        let expected_pages = case.pages.len();
+        let pages = RefCell::new(std::collections::VecDeque::from(case.pages));
+        let script = Script::new(move |_| {
+            let (names, token) = pages.borrow_mut().pop_front().unwrap();
+            proto_reply(
+                "application/proto",
+                proto::ListRefsResponse {
+                    refs: names
+                        .into_iter()
+                        .map(|name| proto::RefEntry {
+                            name: Some(name),
+                            object_id: Some(vec![7; 32]),
+                            ..Default::default()
+                        })
+                        .collect(),
+                    next_page_token: token,
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            )
+        });
+        let result = block_on(anonymous(&script).list_all_refs("", case.max_pages));
+        assert_eq!(script.seen.borrow().len(), expected_pages, "{}", case.name);
+        if case.valid {
+            let refs = result.unwrap();
+            assert!(refs.iter().all(|entry| entry.id == [7; 32]));
+            assert_eq!(
+                refs.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+                ["a", "b", "c"]
+            );
+        } else {
+            assert!(matches!(result, Err(Error::Invalid(_))), "{}", case.name);
+        }
+    }
+}
+#[test]
+fn primitive_rejects_duplicate_and_unordered_names() {
+    for names in [["b", "a"], ["a", "a"]] {
+        let script = Script::new(move |_| {
+            proto_reply(
+                "application/proto",
+                proto::ListRefsResponse {
+                    refs: names
+                        .into_iter()
+                        .map(|name| proto::RefEntry {
+                            name: Some(name.into()),
+                            object_id: Some(vec![7; 32]),
+                            ..Default::default()
+                        })
+                        .collect(),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            )
+        });
+        assert!(matches!(
+            block_on(anonymous(&script).list_refs("", 0, "", None)),
+            Err(Error::Invalid(_))
+        ));
+    }
 }

@@ -38,3 +38,6 @@ pub fn require_tool(name: &str) -> bool {
     eprintln!("SKIP: {name} not available");
     false
 }
+
+/// Shared ref-listing adversarial fixtures.
+pub mod ref_listing;

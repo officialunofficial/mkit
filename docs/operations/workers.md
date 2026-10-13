@@ -225,13 +225,14 @@ and their entry rows) and one guarded apply (at most 83 of the 100 operations:
 five per entry plus the head's three); the per-object denial reads follow the
 apply, so a block that lands while the batch is in flight is refused; a
 store that reserves operations gets a smaller batch. Decode issues those denial
-reads in waves of at most six, using the shared read parallelism. Admitted
+reads in waves of at most sixteen, matching the staging batch cap. The shared
+read parallelism remains six for other paths. Admitted
 readers reserve each wave before dispatch; ordinary mutation stores retain
 dispatch-time charging, so a later budget failure cannot mask an earlier
 object's block. A wave whose all-or-nothing reservation fails reports
 unavailable, even if an earlier object in it was blocked; the slice retries.
 First-in-batch failure precedence is otherwise preserved. A failing wave may
-have issued up to five reads past the failing object. No pack range, staging
+have issued up to fifteen reads past the failing object. No pack range, staging
 apply, or provisional write overlaps a denial wave.
 EmitIndex and inline index writes recheck their ObjectIndex puts in the existing
 put order before each direct apply. Their per-batch planning deadlines are
@@ -347,7 +348,8 @@ The reference defaults are not the launch profile. Copy the template into
 `apps/vcs-worker/wrangler.staging.jsonc`, choose a distinct Worker name, exact
 HTTPS origin and private resource names, and replace every placeholder.
 Environment vars and bindings do not inherit: repeat them under `env.staging`.
-Use compatibility date `2026-09-09`, `build/worker/shim.mjs`, Smart Placement,
+Use compatibility date `2026-09-09`, `build/worker/shim.mjs`, an explicit
+[Placement Hint](#placement),
 `workers_dev=false`, `preview_urls=false`, and only the approved custom-domain
 route. Confirm the account has Workers Paid before setting its storage cap.
 
@@ -772,16 +774,65 @@ After a quiet period the first read pays an activation on most of the objects
 above, in parallel where the pipeline allows, so the first read is the slow one
 and the next is fast.
 
-**Placement.** `NAMESPACE_LOCATION_HINT` maps to the Durable Object
-`locationHint`. A hint is best effort and applies only when an object is first
-created; existing objects do not move
-([data location](https://developers.cloudflare.com/durable-objects/reference/data-location/)).
-Set it before any data exists, or before a store reset, to the region where the
-Worker runs. Changing it later leaves existing partitions where they are. Also
-enable Smart Placement for the Worker (`placement.mode = "smart"`;
-[Smart Placement](https://developers.cloudflare.com/workers/configuration/placement/)).
-Cross-region calls multiply across the fan-out above, so a misplaced namespace
-shows up as uniformly slow spans for every object, warm or cold.
+### Placement
+
+Use an explicit Placement Hint for the Worker that calls mkit's Durable Objects.
+For example, set `placement.region = "gcp:us-east4"` in Wrangler:
+
+```toml
+[placement]
+region = "gcp:us-east4"
+
+[vars]
+NAMESPACE_LOCATION_HINT = "enam"
+```
+
+Replace `placement.mode = "smart"`; the placement options are mutually exclusive.
+Smart Placement only considers locations where the Worker has already run.
+It cannot discover a location that receives no Worker traffic.
+A region hint selects a Cloudflare data center near that cloud region, not inside it
+([Workers placement](https://developers.cloudflare.com/workers/configuration/placement/)).
+Placement affects fetch handlers; it does not affect RPC methods or named entrypoints.
+
+Set `NAMESPACE_LOCATION_HINT` to the same region family as the Worker.
+For `gcp:us-east4`, use `enam` (Eastern North America).
+The adapter passes this value as the Durable Object `locationHint`.
+A hint is best effort and only the first `get()` for an object respects it.
+A Durable Object stays where it was first created; changing the hint does not move it
+([Durable Object data location](https://developers.cloudflare.com/durable-objects/reference/data-location/)).
+Set hints before the first access to new partitions.
+
+An embedder's own Durable Objects can also call mkit, such as a job coordinator.
+Create those objects with the same location hint on their first access:
+
+```javascript
+const id = env.JOB_COORDINATOR.idFromName(jobId);
+const stub = env.JOB_COORDINATOR.get(id, { locationHint: "enam" });
+```
+
+`NAMESPACE_LOCATION_HINT` configures mkit's objects only; it does not configure the embedder's objects.
+Worker placement does not relocate an existing coordinator or its downstream objects.
+
+Place R2 buckets in the same region family, using `enam` for this example.
+Choose the location hint when creating each bucket, rather than relying on the creator's location.
+R2 hints are best effort and apply only when a bucket name is first created.
+Deleting and recreating that name retains its original location
+([R2 data location](https://developers.cloudflare.com/r2/reference/data-location/)).
+
+Each serial storage call pays a full round trip between its caller and the Durable Object.
+Those round trips accumulate across dependent calls.
+As an illustration, a cross-region call can take about 300 ms at the caller
+while its work inside the object takes about 40 ms.
+These numbers are illustrative, not a latency target or a measurement of your deployment.
+The difference includes transport and, for cold calls, activation overhead; it is not all network time.
+
+**Verify placement with traces.** Use the automatic tracing setup above and compare the same operation before and after deployment.
+In each trace, compare `cloudflare.colo` on the caller invocation with the target Durable Object invocation.
+Use `cloudflare.durable_object.id` to match the same object across cold and warm traces
+([trace spans and attributes](https://developers.cloudflare.com/workers/observability/traces/spans-and-attributes/)).
+For calls from an embedder's object, the caller colo is that object's colo, not the ingress Worker's.
+Compare caller-side call duration with the object's `cloudflare.wall_time_ms`.
+Check both reads and job-driven writes; region hints do not guarantee identical colos.
 
 ### Repository storage counter
 

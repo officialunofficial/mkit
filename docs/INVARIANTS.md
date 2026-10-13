@@ -2655,7 +2655,8 @@ split-vs-single-run equivalence.
 ## Denial waves preserve admission order
 
 **Always:** a Decode batch's inventory staging completes before its denial reads.
-At most six reads run together. Admitted readers reserve each wave's calls;
+Denial waves contain at most sixteen reads, matching the staging batch cap;
+the shared reader admission envelope remains six. Admitted readers reserve each wave's calls;
 ordinary mutation stores keep dispatch-time charging, so later budget exhaustion
 cannot mask an earlier object's denial. A wave whose all-or-nothing
 reservation is refused issues no reads and reports unavailable (fail-closed;
@@ -2719,3 +2720,21 @@ unrelated output or source.
 through `just check-local-build` and the existing local `just ci-scripts` gate.
 No CI caching configuration changes. Stop concurrent edits before applying GC;
 Git status is rechecked but editors do not participate in a shared lock.
+
+## Complete ref listings retain bounded, strictly ordered state
+
+**Always:** all three listing drivers use `mkit_core::ref_listing::RefListing`.
+Names increase strictly within and across pages, including empty intervening
+pages. Each nonempty cursor is at most 4 KiB and appears once. Cursor history
+retains only BLAKE3 digests. A listing accepts at most 100,000 pages and charges
+names, ref entries, digest history, and the active cursor to 128 MiB. A caller's
+lower page limit still applies. Invalid state fails before the page is retained.
+
+**Because:** a remote server controls page contents and continuation tokens.
+Empty pages must not bypass resource limits or cursor-cycle detection.
+
+**If violated:** a remote can exhaust memory, loop a listing, or expose duplicate
+or inconsistent refs to a caller.
+
+**Enforced by:** the shared accumulator, `Client::list_refs` page validation,
+core budget/page-cap tests, and `shared_listing_adversaries` in each driver.

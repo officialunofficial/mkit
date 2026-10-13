@@ -20,6 +20,10 @@ collect the applicable entries between their old and new immutable pins.
   driver-specific limits and errors are unchanged. No wire or stored-format
   change; no wipe.
 
+- Workers deployment guidance recommends explicit region placement, matching
+  Durable Object and R2 location hints, and caller-versus-object trace checks.
+  No runtime, API, wire, or stored-format change; no store reset is required.
+
 - Re-vendor ruzstd 0.9.1 for RUSTSEC-2026-0344, retaining the stricter RFC 8878
   bounds on compressed bodies, regenerated literals and sequence output before
   allocation. Independent workspaces resolve the patched 0.9.1 source.
@@ -45,8 +49,24 @@ collect the applicable entries between their old and new immutable pins.
   and clients that clamp to one second behave as before. No wire or stored-format
   change and no store reset. Upload-time job creation remains a design follow-up.
 
+- Ref listings in `mkit-client`, `mkit-sync`, and `mkit-transport-connect`
+  share ordering, duplicate, cursor-cycle, and resource checks. Cursors are
+  capped at 4 KiB; retained state is charged to a 128 MiB budget, including
+  cursor digests, names, and collection overhead. Complete listings stop at
+  100,000 pages or a caller's lower cap. Invalid listings return each
+  driver's invalid-response error (`mkit-client::Error::Invalid`, including
+  page-cap exhaustion that previously returned `Error::Limit`). Entry-point
+  signatures and wire formats stay unchanged; no store reset is required.
+
+- Denial waves now contain at most sixteen per-object reads, matching the
+  inventory staging batch. Other read paths retain their shared parallelism of
+  six. Successful batches still charge one call per object and select failures
+  in input order; a failing wave may issue up to fifteen later reads. Staging
+  still precedes admission, and admitted-reader reservations remain
+  all-or-nothing. No API, wire, hook, stored-format, or store-reset change.
+
 - Scheduled Decode, EmitIndex, and inline index writes share per-object takedown
-  denial waves of at most six, after inventory staging and before provisional
+  bounded denial waves, after inventory staging and before provisional
   rows or the direct index apply. The first failing object in batch order still
   selects blocked or unavailable. Successful batches keep
   one call per object; a failed wave completes already-issued reads and skips
@@ -66,6 +86,10 @@ collect the applicable entries between their old and new immutable pins.
 - `NativeHttp` exposes independent `with_metadata_timeout` and
   `with_transfer_timeout` budgets and `send_typed` for native errors, including
   `NativeHttpError::UnsupportedAcceptEncoding`. `with_timeout` sets both budgets.
+
+- `ConnectTransport::list_refs_with_page_limit` accepts a lower caller page cap,
+  clamped to the fixed 100,000-page ceiling. Existing listing entry points keep
+  their fixed cursor and retained-state caps.
 
 - Typed `mkit.transport.v1.MembershipNotVisible` Connect error detail (an empty
   message) on the repository-membership-lag `unavailable`, emitted at every

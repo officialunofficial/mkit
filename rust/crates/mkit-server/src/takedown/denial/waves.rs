@@ -2,7 +2,10 @@
 use crate::{ServerError, store::NamespaceStore};
 use mkit_core::hash::Hash;
 
-/// Checks `ids` in waves of at most `read_io::parallelism()` concurrent reads,
+// Decode denial admission follows staging, so match its batch cap.
+const DENIAL_WAVE_WIDTH: usize = crate::takedown::inventory::STAGE_BATCH_ENTRIES;
+
+/// Checks `ids` in waves of at most sixteen concurrent reads,
 /// one `require_clear` call per id. Every response of a wave is awaited, then
 /// the first failure in input order is returned and later waves are skipped.
 /// Callers must await this helper serially: the width bound is per call.
@@ -11,10 +14,7 @@ pub(crate) async fn require_clear_many<S: NamespaceStore>(
     mut ids: impl Iterator<Item = Hash> + crate::MaybeSend,
 ) -> Result<(), ServerError> {
     loop {
-        let wave: Vec<_> = ids
-            .by_ref()
-            .take(crate::store::read_io::parallelism().max(1))
-            .collect();
+        let wave: Vec<_> = ids.by_ref().take(DENIAL_WAVE_WIDTH).collect();
         if wave.is_empty() {
             return Ok(());
         }
@@ -82,12 +82,13 @@ mod tests {
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.peak.fetch_max(active, Ordering::SeqCst);
             // Earlier failures deliberately complete later than later failures.
-            let delay =
-                if requested[0] == keys::block(&[0; 32]) || requested[0] == keys::block(&[6; 32]) {
-                    620
-                } else {
-                    310
-                };
+            let delay = if requested[0] == keys::block(&[0; 32])
+                || requested[0] == keys::block(&[16; 32])
+            {
+                620
+            } else {
+                310
+            };
             tokio::time::sleep(Duration::from_millis(delay)).await;
             self.active.fetch_sub(1, Ordering::SeqCst);
             if self
@@ -148,7 +149,9 @@ mod tests {
             .unwrap();
         assert_eq!(store.calls.load(Ordering::SeqCst), 333);
         assert_eq!(budget.used(), 333);
-        let width = crate::store::read_io::parallelism();
+        let width = DENIAL_WAVE_WIDTH;
+        assert_eq!(width, 16);
+        assert_eq!(crate::store::read_io::PARALLELISM, 6);
         assert_eq!(store.peak.load(Ordering::SeqCst), width);
         assert_eq!(
             started.elapsed(),
@@ -168,7 +171,7 @@ mod tests {
             .chunks(cap)
             .map(|batch| batch.len().div_ceil(width))
             .sum();
-        assert_eq!(rounds, 63);
+        assert_eq!(rounds, 21);
         assert_eq!(
             started.elapsed(),
             Duration::from_millis(rounds as u64 * 310)
@@ -180,30 +183,30 @@ mod tests {
     async fn denial_waves_preserve_first_failure_in_batch_order() {
         for admitted in [false, true] {
             for (blocked, unavailable, expected, calls) in [
-                (Some([0; 32]), None, crate::Code::PermissionDenied, 6),
-                (None, Some([0; 32]), crate::Code::Unavailable, 6),
+                (Some([0; 32]), None, crate::Code::PermissionDenied, 16),
+                (None, Some([0; 32]), crate::Code::Unavailable, 16),
                 (
                     Some([0; 32]),
                     Some([1; 32]),
                     crate::Code::PermissionDenied,
-                    6,
+                    16,
                 ),
-                (Some([1; 32]), Some([0; 32]), crate::Code::Unavailable, 6),
+                (Some([1; 32]), Some([0; 32]), crate::Code::Unavailable, 16),
                 (
-                    Some([6; 32]),
-                    Some([7; 32]),
+                    Some([16; 32]),
+                    Some([17; 32]),
                     crate::Code::PermissionDenied,
-                    12,
+                    32,
                 ),
-                (Some([7; 32]), Some([6; 32]), crate::Code::Unavailable, 12),
+                (Some([17; 32]), Some([16; 32]), crate::Code::Unavailable, 32),
             ] {
                 let store = Delayed {
                     blocked,
                     unavailable,
                     ..Delayed::default()
                 };
-                let budget = SliceBudget::new(20);
-                let inherited = SliceBudget::new(20);
+                let budget = SliceBudget::new(40);
+                let inherited = SliceBudget::new(40);
                 let inner = Budgeted::new(&store, &inherited);
                 let io = crate::store::read_io::ReadIo::new();
                 let remote = Budgeted::new(&inner, &budget);
@@ -212,7 +215,7 @@ mod tests {
                 } else {
                     remote
                 };
-                let ids: Vec<_> = (0..13).map(|n| [n; 32]).collect();
+                let ids: Vec<_> = (0..33).map(|n| [n; 32]).collect();
                 let error = require_clear_many(&remote, ids.iter().copied())
                     .await
                     .unwrap_err();
@@ -221,6 +224,10 @@ mod tests {
                 assert_eq!(inherited.used() as usize, calls);
                 assert_eq!(budget.used() as usize, store.calls.load(Ordering::SeqCst));
                 assert_eq!(store.active.load(Ordering::SeqCst), 0);
+                assert_eq!(
+                    store.peak.load(Ordering::SeqCst),
+                    if admitted { 6 } else { 16 }
+                );
             }
         }
     }
@@ -233,7 +240,7 @@ mod tests {
         };
         let budget = SliceBudget::new(1);
         let remote = Budgeted::new(&store, &budget);
-        let error = require_clear_many(&remote, (0..6).map(|n| [n; 32]))
+        let error = require_clear_many(&remote, (0..16).map(|n| [n; 32]))
             .await
             .unwrap_err();
         assert_eq!(error.code(), crate::Code::PermissionDenied);
@@ -242,12 +249,37 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn denial_waves_issue_at_most_fifteen_reads_after_failure() {
+        for failed in [0_u8, 15, 16, 31] {
+            let store = Delayed {
+                blocked: Some([failed; 32]),
+                ..Delayed::default()
+            };
+            let budget = SliceBudget::new(64);
+            let remote = Budgeted::new(&store, &budget);
+            let error = require_clear_many(&remote, (0..49).map(|n| [n; 32]))
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), crate::Code::PermissionDenied);
+            let calls = store.calls.load(Ordering::SeqCst);
+            assert_eq!(calls, (usize::from(failed) + 1).div_ceil(16) * 16);
+            let extra = calls - usize::from(failed) - 1;
+            assert!(extra <= 15);
+            if failed == 0 {
+                assert_eq!(extra, 15);
+            }
+            assert_eq!(budget.used() as usize, calls);
+            assert_eq!(store.active.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn denial_wave_reservation_failure_dispatches_no_reads() {
         let store = Delayed::default();
-        let budget = SliceBudget::new(1);
+        let budget = SliceBudget::new(15);
         let io = crate::store::read_io::ReadIo::new();
         let remote = Budgeted::new(&store, &budget).with_io(&io);
-        let error = require_clear_many(&remote, [[1; 32]; 6].into_iter())
+        let error = require_clear_many(&remote, [[1; 32]; 16].into_iter())
             .await
             .unwrap_err();
         assert_eq!(error.code(), crate::Code::Unavailable);
