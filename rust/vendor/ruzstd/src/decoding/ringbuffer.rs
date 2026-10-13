@@ -47,6 +47,8 @@ impl RingBuffer {
     /// Return the amount of available space (in bytes) of the buffer.
     pub fn free(&self) -> usize {
         let (x, y) = self.free_slice_lengths();
+
+        // We always keep one free slot as a sentinel
         (x + y).saturating_sub(1)
     }
 
@@ -74,11 +76,20 @@ impl RingBuffer {
         // SAFETY: if we were succesfully able to construct this layout when we allocated then it's also valid do so now
         let current_layout = unsafe { Layout::array::<u8>(self.cap).unwrap_unchecked() };
 
-        // Always have at least 1 unused element as the sentinel.
-        let new_cap = usize::max(
-            self.cap.next_power_of_two(),
-            (self.cap + amount).next_power_of_two(),
-        ) + 1;
+        // We always need at least 1 unused element as the sentinel, so add 1 to the required capacity
+        let required = self.cap + amount;
+
+        // We still grow exponentionally but only when the demand exceeds 2^k + 2 blocks
+        // This is where the demand commonly settles when we have reached the window size (commonly a 2^k)
+        // And the user code is regularly collecting chunks of decoded data
+        const SLACK: usize = 2 * crate::common::MAX_BLOCK_SIZE as usize;
+        let new_cap = if required <= SLACK {
+            usize::max(self.cap.next_power_of_two(), required.next_power_of_two()) + 1
+        } else {
+            (required - SLACK).next_power_of_two() + SLACK + 1
+        };
+
+        vprintln!("Reallocate ringbuffer to fit: {} KB", new_cap / 1024);
 
         // Check that the capacity isn't bigger than isize::MAX, which is the max allowed by LLVM, or that
         // we are on a >= 64 bit system which will never allow that much memory to be allocated

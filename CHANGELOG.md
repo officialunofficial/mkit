@@ -15,6 +15,13 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Changed
 
+- Re-vendor ruzstd 0.9.1 for RUSTSEC-2026-0344, retaining the stricter RFC 8878
+  bounds on compressed bodies, regenerated literals and sequence output before
+  allocation. Independent workspaces resolve the patched 0.9.1 source.
+  Embedders using the pure-Rust decoder must update their immutable
+  `[patch.crates-io]` revision to include this vendor refresh. No API, wire,
+  stored-format or store-reset change.
+
 - Client replay documentation now distinguishes reconstructing the same
   authenticated operation, body and identity from exact-byte replay of a
   retained request: unsigned observer headers may be regenerated. The sync

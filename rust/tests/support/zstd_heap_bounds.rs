@@ -118,7 +118,48 @@ fn reject_with_bounded_heap(name: &str, zstd: &[u8], claim: usize) {
     );
 }
 
+fn reject_before_block_growth(name: &str, zstd: &[u8]) {
+    let frame = pack_frame(zstd, 1024);
+    let baseline = LIVE.load(Ordering::SeqCst);
+    PEAK.store(baseline, Ordering::SeqCst);
+    let result = decode_frame_with(
+        &frame,
+        2,
+        &mut NoExternalBases,
+        DecodeLimits::default().with_max_decoded_bytes(1024),
+    );
+    let peak = PEAK.load(Ordering::SeqCst).saturating_sub(baseline);
+    println!(
+        "{name}: input={}, peak_decode_alloc_bytes={peak}, result={result:?}",
+        zstd.len()
+    );
+    assert!(matches!(result, Err(PackError::ZstdDecompress(_))));
+    // Tables, the 1 KiB output reservation and rejection fit in 16 KiB.
+    // Materializing the malformed matches or literals would exceed this.
+    assert!(
+        peak <= 16 << 10,
+        "{name}: materialized output before rejection: {peak}"
+    );
+}
+
 pub(crate) fn corrupt_zstd_frames_bound_heap() {
+    // RUSTSEC-2026-0344 input class: a tiny compressed block has four
+    // sequences that each regenerate 65,539 bytes. The 1 KiB window makes
+    // Block_Maximum_Size 1 KiB, so reject before the first match grows history.
+    let mut advisory = sequence_flood(4);
+    advisory[5] = 0; // 1 KiB window
+    assert!(advisory.len() < BLOCK_MAXIMUM);
+    reject_before_block_growth("advisory sequence block", &advisory);
+
+    // A five-byte compressed body claims 512 KiB of RLE literals. This
+    // must fail before the literal buffer is materialized, even with no sequences.
+    let literals_header = ((512u32 << 10) << 4) | 0x0d;
+    let mut literals_body = literals_header.to_le_bytes()[..3].to_vec();
+    literals_body.extend_from_slice(&[b'A', 0]);
+    let mut literals = windowed_frame(0);
+    block(&mut literals, 2, literals_body.len(), true, &literals_body);
+    reject_before_block_growth("oversized regenerated literals", &literals);
+
     let reviewer = sequence_flood(2000);
     assert_eq!(reviewer.len(), 4524);
     let baseline = LIVE.load(Ordering::SeqCst);
