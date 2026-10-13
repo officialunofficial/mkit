@@ -16,6 +16,103 @@ use mkit_core::{
 };
 use proptest::prelude::*;
 
+#[test]
+#[allow(clippy::too_many_lines)] // Keep capture rendering and boundary checks together.
+fn planner_matches_recorded_driver_matrix() {
+    use mkit_core::{
+        hash::hash,
+        object::{Blob, Object},
+        pack::PackWriter,
+        serialize::serialize,
+    };
+    use std::fmt::Write as _;
+
+    // Both real-driver capture tests use these canonical, sub-64-byte blobs.
+    // The payload cap seals one blob per pack, so recreate those packs directly.
+    let keys: Vec<Hash> = [1_u8, 2]
+        .into_iter()
+        .map(|salt| {
+            let bytes = serialize(&Object::Blob(Blob {
+                data: vec![salt; 10],
+            }))
+            .unwrap();
+            let mut writer = PackWriter::new();
+            writer.push_raw(hash(&bytes), &bytes).unwrap();
+            pack_key(&writer.finish().unwrap())
+        })
+        .collect();
+    let mut output = String::new();
+    writeln!(
+        output,
+        "capture packs {} {}",
+        to_hex(&keys[0]),
+        to_hex(&keys[1])
+    )
+    .unwrap();
+    for (label, held, reset, conflict) in [
+        ("first", None, false, false),
+        ("append", Some(vec![[9; 32]]), false, false),
+        ("partial", Some(vec![keys[0]]), false, false),
+        ("full", Some(keys.clone()), false, false),
+        ("rollover", Some(keys.clone()), true, false),
+        ("changed-prior", Some(vec![[9; 32]]), false, true),
+    ] {
+        let prior = held
+            .as_ref()
+            .map(|packs| pack_key(&encode_packlist(None, packs).unwrap()));
+        let retry = prior.map(|head| pack_key(&encode_packlist(Some(head), &[[8; 32]]).unwrap()));
+        for attempt in 0..if conflict { 2 } else { 1 } {
+            let current = if attempt == 0 { prior } else { retry };
+            let mut held_set: HashSet<Hash> =
+                held.clone().unwrap_or_default().into_iter().collect();
+            if attempt > 0 {
+                held_set.insert([8; 32]);
+            }
+            let planned = plan_advance(state(current, &held_set, reset), &keys, None).unwrap();
+            let Some(node) = planned else {
+                assert_eq!(label, "full");
+                writeln!(
+                    output,
+                    "capture {label} prior={} head-only",
+                    to_hex(&current.unwrap())
+                )
+                .unwrap();
+                continue;
+            };
+            let length = u64::try_from(node.bytes.len()).unwrap();
+            assert_eq!(
+                plan_advance(state(current, &held_set, reset), &keys, Some(length - 1)),
+                Err(PlanError::NodeTooLarge)
+            );
+            assert_eq!(
+                plan_advance(state(current, &held_set, reset), &keys, Some(length)),
+                Ok(Some(Node {
+                    bytes: node.bytes.clone(),
+                    key: node.key,
+                    condition: node.condition
+                }))
+            );
+            assert_eq!(
+                node.condition,
+                current.map_or(RefWriteCondition::Missing, RefWriteCondition::Match)
+            );
+            writeln!(
+                output,
+                "capture {label} attempt={attempt} prior={} node={} cas={}",
+                current.as_ref().map_or_else(|| "missing".into(), to_hex),
+                to_hex(&node.key),
+                if current.is_some() {
+                    "match"
+                } else {
+                    "missing"
+                }
+            )
+            .unwrap();
+        }
+    }
+    assert_eq!(output, include_str!("fixtures/packmap_advance.txt"));
+}
+
 // These retain the old pure decisions, rather than invoking the new planner.
 // `reset` represents either an authorized rollover or a classified broken chain.
 fn former_cli(prior: Option<Hash>, held: &[Hash], keys: &[Hash], reset: bool) -> Option<Node> {

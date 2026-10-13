@@ -561,6 +561,8 @@ mod tests {
         /// sees only the second outcome (`PackmapConflict`: both refs
         /// already moved).
         Advance,
+        /// Atomic advance without a lost response, for recorded planner fixtures.
+        Atomic,
         /// Nothing is re-issued: a plain transport, for the genuine
         /// non-fast-forward cases.
         None,
@@ -569,6 +571,9 @@ mod tests {
     struct LostResponseTransport {
         inner: MemoryTransport,
         reissue: Reissue,
+        capture:
+            std::sync::Mutex<Vec<(refs::RefWriteCondition, Hash, refs::RefWriteCondition, Hash)>>,
+        race: Option<Hash>,
     }
 
     impl LostResponseTransport {
@@ -576,6 +581,8 @@ mod tests {
             Self {
                 inner: MemoryTransport::new(),
                 reissue,
+                capture: std::sync::Mutex::new(Vec::new()),
+                race: None,
             }
         }
 
@@ -646,9 +653,25 @@ mod tests {
             packmap_condition: refs::RefWriteCondition,
             packmap_value: &Hash,
         ) -> Result<AdvanceOutcome, TransportError> {
+            let first = {
+                let mut capture = self.capture.lock().unwrap();
+                capture.push((
+                    head_condition,
+                    *head_value,
+                    packmap_condition,
+                    *packmap_value,
+                ));
+                capture.len() == 1
+            };
+            if first && let Some(race) = self.race {
+                self.inner
+                    .update_ref(packmap_ref, refs::RefWriteCondition::Any, &race)?;
+                return Ok(AdvanceOutcome::PackmapConflict);
+            }
             let head = (head_ref, head_condition, head_value);
             let packmap = (packmap_ref, packmap_condition, packmap_value);
             match self.reissue {
+                Reissue::Atomic => self.atomic_advance_once(head, packmap),
                 Reissue::Advance => {
                     // First attempt lands; its response is lost.
                     let _ = self.atomic_advance_once(head, packmap)?;
@@ -672,7 +695,119 @@ mod tests {
             }
         }
         fn supports_atomic_advance(&self) -> bool {
-            matches!(self.reissue, Reissue::Advance)
+            matches!(self.reissue, Reissue::Advance | Reissue::Atomic)
+        }
+    }
+
+    /// Recorded against the former driver as well as the shared planner.
+    #[test]
+    #[allow(clippy::too_many_lines)] // Keep the capture cases and assertions together.
+    fn packmap_driver_capture_matrix() {
+        let keys: Vec<Hash> = (1..=2)
+            .map(|salt| {
+                let bytes = mkit_core::serialize::serialize(&mkit_core::object::Object::Blob(
+                    mkit_core::object::Blob {
+                        data: vec![salt; 10],
+                    },
+                ))
+                .unwrap();
+                let mut writer = mkit_core::pack::PackWriter::new();
+                writer.push_raw(hash::hash(&bytes), &bytes).unwrap();
+                mkit_core::pack::pack_key(&writer.finish().unwrap())
+            })
+            .collect();
+        println!(
+            "capture packs {} {}",
+            hash::to_hex(&keys[0]),
+            hash::to_hex(&keys[1])
+        );
+        for (label, held, reset, conflict) in [
+            ("first", None, false, false),
+            ("append", Some(vec![[9; 32]]), false, false),
+            ("partial", Some(vec![keys[0]]), false, false),
+            ("full", Some(keys.clone()), false, false),
+            ("rollover", Some(keys.clone()), true, false),
+            ("changed-prior", Some(vec![[9; 32]]), false, true),
+        ] {
+            let mut tx = LostResponseTransport::new(Reissue::Atomic);
+            let prior = held.as_ref().map(|packs| put_node(&tx.inner, None, packs));
+            if let Some(prior) = prior {
+                tx.inner
+                    .update_ref(
+                        &packmap_ref("main"),
+                        refs::RefWriteCondition::Missing,
+                        &prior,
+                    )
+                    .unwrap();
+            }
+            let retry = prior.map(|head| put_node(&tx.inner, Some(head), &[[8; 32]]));
+            if conflict {
+                tx.race = retry;
+            }
+            tx.inner
+                .update_ref(
+                    "refs/heads/main",
+                    refs::RefWriteCondition::Missing,
+                    &[6; 32],
+                )
+                .unwrap();
+            advance_packmap(
+                &tx,
+                "main",
+                &keys,
+                if reset {
+                    ChainAction::ResetSelfContained
+                } else {
+                    ChainAction::Append {
+                        self_contained: true,
+                    }
+                },
+                None,
+                refs::RefWriteCondition::Match([6; 32]),
+                [4; 32],
+            )
+            .unwrap();
+            assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some([4; 32]));
+            let moves = tx.capture.lock().unwrap();
+            if label == "full" {
+                assert!(moves.is_empty());
+                assert_eq!(tx.read_ref(&packmap_ref("main")).unwrap(), prior);
+                println!(
+                    "capture {label} prior={} head-only",
+                    hash::to_hex(&prior.unwrap())
+                );
+                continue;
+            }
+            assert_eq!(moves.len(), if conflict { 2 } else { 1 });
+            for (attempt, (head_condition, head, condition, key)) in moves.iter().enumerate() {
+                let current = if attempt == 0 { prior } else { retry };
+                let bytes = tx.download_blob(&PackKey::from_hash(*key)).unwrap();
+                let expected =
+                    transfer::encode_packlist(if reset { None } else { current }, &keys).unwrap();
+                assert_eq!(bytes, expected, "{label}: bytes");
+                assert_eq!(*key, mkit_core::pack::pack_key(&expected));
+                assert_eq!(*head_condition, refs::RefWriteCondition::Match([6; 32]));
+                assert_eq!(*head, [4; 32]);
+                assert_eq!(
+                    *condition,
+                    current.map_or(
+                        refs::RefWriteCondition::Missing,
+                        refs::RefWriteCondition::Match
+                    )
+                );
+                println!(
+                    "capture {label} attempt={attempt} prior={} node={} cas={}",
+                    current
+                        .as_ref()
+                        .map_or_else(|| "missing".into(), hash::to_hex),
+                    hash::to_hex(key),
+                    if current.is_some() {
+                        "match"
+                    } else {
+                        "missing"
+                    }
+                );
+            }
         }
     }
 
