@@ -27,7 +27,7 @@ use crate::client_source::Executor;
 /// Default wall-clock bound on metadata requests, response body included.
 pub const DEFAULT_METADATA_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default wall-clock bound on pack/part transfers, response body included.
-pub const DEFAULT_TRANSFER_TIMEOUT: Duration = Duration::from_secs(300);
+pub const DEFAULT_TRANSFER_TIMEOUT: Duration = Duration::from_mins(5);
 
 type Connector = hyper_rustls::HttpsConnector<HttpConnector>;
 
@@ -393,7 +393,7 @@ mod tests {
     fn timeout_defaults_and_overrides_are_selected_by_exact_procedure() {
         let http = NativeHttp::new().expect("native transport");
         assert_eq!(DEFAULT_METADATA_TIMEOUT, Duration::from_secs(30));
-        assert_eq!(DEFAULT_TRANSFER_TIMEOUT, Duration::from_secs(300));
+        assert_eq!(DEFAULT_TRANSFER_TIMEOUT, Duration::from_mins(5));
         for procedure in [
             "GetServerInfo",
             "ListRefs",
