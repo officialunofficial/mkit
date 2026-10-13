@@ -49,8 +49,15 @@ collect the applicable entries between their old and new immutable pins.
   page-cap exhaustion that previously returned `Error::Limit`). Entry-point
   signatures and wire formats stay unchanged; no store reset is required.
 
+- Denial waves now contain at most sixteen per-object reads, matching the
+  inventory staging batch. Other read paths retain their shared parallelism of
+  six. Successful batches still charge one call per object and select failures
+  in input order; a failing wave may issue up to fifteen later reads. Staging
+  still precedes admission, and admitted-reader reservations remain
+  all-or-nothing. No API, wire, hook, stored-format, or store-reset change.
+
 - Scheduled Decode, EmitIndex, and inline index writes share per-object takedown
-  denial waves of at most six, after inventory staging and before provisional
+  bounded denial waves, after inventory staging and before provisional
   rows or the direct index apply. The first failing object in batch order still
   selects blocked or unavailable. Successful batches keep
   one call per object; a failed wave completes already-issued reads and skips

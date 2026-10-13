@@ -225,13 +225,14 @@ and their entry rows) and one guarded apply (at most 83 of the 100 operations:
 five per entry plus the head's three); the per-object denial reads follow the
 apply, so a block that lands while the batch is in flight is refused; a
 store that reserves operations gets a smaller batch. Decode issues those denial
-reads in waves of at most six, using the shared read parallelism. Admitted
+reads in waves of at most sixteen, matching the staging batch cap. The shared
+read parallelism remains six for other paths. Admitted
 readers reserve each wave before dispatch; ordinary mutation stores retain
 dispatch-time charging, so a later budget failure cannot mask an earlier
 object's block. A wave whose all-or-nothing reservation fails reports
 unavailable, even if an earlier object in it was blocked; the slice retries.
 First-in-batch failure precedence is otherwise preserved. A failing wave may
-have issued up to five reads past the failing object. No pack range, staging
+have issued up to fifteen reads past the failing object. No pack range, staging
 apply, or provisional write overlaps a denial wave.
 EmitIndex and inline index writes recheck their ObjectIndex puts in the existing
 put order before each direct apply. Their per-batch planning deadlines are
