@@ -602,11 +602,13 @@ physical budgets, durable continuation, host projections and per-pin upgrades.
 
 On wasm32, mkit entry points (`connect::service`, `serve`, `serve_with`,
 `serve_admin_with` and the `fetch*` helpers) are safe with `connect-timeout-ms`
-and `grpc-timeout` present. **Deadlines are ignored on wasm**: the core Connect
+and `grpc-timeout` present. **Dispatch deadlines are ignored on wasm**: the core Connect
 service removes both headers before connectrpc computes an absolute deadline,
 and ignores configured `DeadlinePolicy` settings, including default and
 inter-message timeouts. Native deadlines are unchanged. Body streaming,
-authentication and body limits still apply. Bound host work using the platform
+authentication and body limits still apply. The optional verification hold
+uses `connect-timeout-ms` only to shorten its own waiting allowance, as described
+above. Bound host work using the platform
 clock and timer as needed; the admin engine already uses the Worker timer.
 
 To mount `connect::router` yourself, use `connect::ConnectService::new(router)`
