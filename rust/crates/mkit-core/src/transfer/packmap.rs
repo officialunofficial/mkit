@@ -43,7 +43,7 @@ pub enum PlanError {
 /// Resets always produce a node and CAS against `prior`. The host decides
 /// rollover depth before building a self-contained pack; this function never
 /// changes that decision on retry. `max_node_bytes = None` preserves drivers
-/// without a separate node-size limit. The codec entry cap always applies.
+/// without a separate node-size limit. The codec entry cap applies when encoding a node.
 ///
 /// # Errors
 /// Returns a codec error or [`PlanError::NodeTooLarge`].
