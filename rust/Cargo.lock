@@ -3247,6 +3247,8 @@ dependencies = [
  "k256",
  "mkit-cli",
  "mkit-core",
+ "mkit-transport-file",
+ "mkit-transport-memory",
  "p256",
  "rayon",
  "serde",

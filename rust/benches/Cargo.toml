@@ -279,6 +279,19 @@ harness = false
 name = "worktree_walk_fanout"
 harness = false
 
+# Multi-writer ref CAS contention (read-then-CAS retry loop) across
+# local refs, the file transport and the memory transport. Prints a
+# table; not a chart suite.
+[[bench]]
+name = "ref_cas_contention"
+harness = false
+
+# Sparse-witness traversal cost (round trips, wire bytes, time) on a
+# synthetic monorepo tree, plus re-fetch cost after a one-file edit.
+[[bench]]
+name = "sparse_negotiation"
+harness = false
+
 [features]
 default = []
 pack-shards = ["mkit-core/pack-shards"]
@@ -298,12 +311,14 @@ serde_json = "1"
 criterion = { version = "0.8", default-features = false, features = ["plotters", "cargo_bench_support", "html_reports"] }
 # `batch-verify` (not a default feature) is required by
 # `verify_fanout.rs`'s `sign::verify_batch` series.
-mkit-core = { path = "../crates/mkit-core", features = ["batch-verify"] }
+mkit-core = { path = "../crates/mkit-core", features = ["batch-verify", "sparse-checkout"] }
 # add_staging.rs drives the real `mkit add -A` CLI path in-process (issue
 # #708) — mkit-cli's library surface is unstable/internal-only (see its
 # Cargo.toml header), which is fine for a dev-dependency exercising it as
 # a black box, same as the CLI's own integration tests do.
 mkit-cli = { path = "../crates/mkit-cli" }
+mkit-transport-memory = { path = "../crates/mkit-transport-memory" }
+mkit-transport-file = { path = "../crates/mkit-transport-file" }
 blake3 = "1"
 sha1 = "0.11"
 sha2 = "0.11"
