@@ -158,6 +158,7 @@ async fn fire<S: NamespaceStore, T: NamespaceStore, H: RelayHook>(
             store,
             partition: &source(),
             now_ms: 100,
+            continuation_deadline_ms: None,
         },
         &DueTimer {
             due_at_ms: 100,
@@ -548,6 +549,7 @@ async fn identical_index_rows_from_two_sources_survive_redelivery() {
             store: &s,
             partition: &second,
             now_ms: 100,
+            continuation_deadline_ms: None,
         },
         &DueTimer {
             due_at_ms: 100,
@@ -2422,6 +2424,7 @@ async fn fire_with_value<S: NamespaceStore, T: NamespaceStore, H: RelayHook>(
                 store,
                 partition: &source(),
                 now_ms: 100,
+                continuation_deadline_ms: None,
             },
             &DueTimer {
                 due_at_ms: 100,
@@ -3140,6 +3143,7 @@ async fn late_blocked_holder_handoff(v2: bool) {
                 store: &h.target.inner,
                 partition: &p,
                 now_ms: now,
+                continuation_deadline_ms: None,
             },
             &DueTimer {
                 due_at_ms: now,

@@ -35,6 +35,86 @@ launch profile without naming a platform. On Workers it means:
   After syntax and normal access checks, they return 416 before proof
   preparation, validators or payment; conditional requests cannot return 304.
 
+## Small-pack scheduling
+
+After Decode finishes, packs with one to three entries and at most 16 KiB of
+encoded and decoded data can run consecutive verification slices in one handler.
+Packlists use a 256-byte encoded-size bound because they have no MKIT frame count.
+A small group and at least 128 remaining calls are required; actual extraction
+work retains its separate slice boundaries.
+Each slice commits its guarded job checkpoint before the next begins. The
+handler retains its original durable timer until its final checkpoint, so a
+restart resumes the latest committed phase. Slices share the existing call
+allowance and stop at a fixed step ceiling, the two-second handler cutoff, or
+the physical alarm's existing elapsed deadline.
+
+A tiny job entering AwaitDelivery can trigger one immediate pass through the
+registered relay handler. This requires a small whole source outbox; backlog
+keeps the scheduled path. Target watermarks, ordered source cleanup, relay hooks,
+and physical alarm limits apply to this pass. Delivery still precedes Verified.
+
+An AwaitDelivery timer for a tiny job can advertise a millisecond poll hint below
+1,000 ms, with a 100 ms floor and a 3,000 ms cap. Other jobs and unobserved wakes
+keep the 1,000 ms floor. The HTTP Retry-After header rounds up to seconds.
+Clients that clamp polling to one second retain their existing behavior.
+
+### Latency model and harness
+
+The small-pack latency harness advances its injected clock by 50 ms per storage
+call and follows durable timer wakes. Its one-entry case uploads a commit over
+published bases; its three-entry case uploads a blob, tree, and signed commit.
+Each includes a one-entry packlist and measures until both jobs are usable.
+Upload and ref commitment sit outside this span. Wall-clock tick durations are
+reported separately and depend on the test machine.
+
+Run `cargo test -p mkit-server --features memory,http-objects --test small_pack_latency -- --nocapture`
+from **rust/**. The larger fixtures retain the same model and cover 6, 50, 500,
+and 3,000 entries. The model's elapsed time consists of charged storage time
+plus scheduler waits; production call latency, hooks, and alarm delivery can
+change that balance.
+
+Single-slice and consecutive-slice runs produce:
+
+| Data-pack entries | Elapsed before / after | Alarms before / after | KV calls before / after |
+| --- | --- | --- | --- |
+| 1 | 9,158 / 9,156 ms | 9 / 7 | 181 / 181 |
+| 3 | 8,807 / 8,704 ms | 8 / 5 | 174 / 172 |
+
+The harness uses a 1 ms progressing-alarm floor and does not model production
+alarm dispatch delays or relay scheduling outliers. Its elapsed savings therefore
+come mostly from fewer storage calls. Removing two or three dispatch boundaries
+matters more when alarms arrive late. Fresh production observations are needed
+to quantify that gain. External closure lookups keep their full slice reservation;
+Decode only chains into closure when its bounded own-frame facts prove that no
+external lookup is expected. The actual closure checks still read storage fresh.
+
+After an immediate relay pass commits, the driver requests one prompt follow-up
+alarm and skips a redundant future-range probe. A lost delivery nudge retains the
+durable poll; a follow-up that finds no due work resumes normal future scheduling.
+
+### Job creation at upload completion
+
+Verification jobs still start with the first consuming AdvanceRefs. Creating
+one at upload completion could overlap verification with client preparation:
+observed upload-to-advance gaps suggest a potential two to five seconds of gain,
+limited by how much work can finish before the advance arrives. This is a design
+estimate, not a measured scheduling improvement.
+
+The upload ticket binds the repository, signer, pack, size, and reservation.
+It does not bind the consuming head or the complete extraction group. Eager work
+must not infer those inputs, publish membership, consume a ticket, or bypass
+fresh authorization, admission, denial, and final guards at AdvanceRefs.
+Group-dependent extraction must wait for the guarded first-advance group claim.
+
+An admitted upload does not necessarily admit verification CPU, shard calls, or
+inventory writes for a pack that no advance consumes. A follow-up needs explicit
+verification quotas and abuse limits, including abandoned uploads and duplicate
+tickets. Job creation must atomically guard the live ticket and persist its timer;
+repeated upload completion must reuse the same job. Expiry and lost upload or
+job-creation replies must recover without orphan work. Upload-marker durability
+across blob and namespace stores also needs a recoverable handoff. These concerns
+make eager creation a separate change.
+
 ## Verification latency traces
 
 The existing Worker console telemetry emits `verification_*` structured events

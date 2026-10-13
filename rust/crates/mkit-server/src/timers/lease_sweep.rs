@@ -369,6 +369,7 @@ mod tests {
             store: &store,
             partition: &partition(),
             now_ms: 100,
+            continuation_deadline_ms: None,
         };
         let Fired::Done(batch) = LeaseSweep::new(MemoryKv::default())
             .fire(&ctx, &timer)
@@ -451,6 +452,7 @@ mod tests {
             store: &coordinator,
             partition: &partition(),
             now_ms: 100,
+            continuation_deadline_ms: None,
         };
         assert!(matches!(
             LeaseSweep::<MemoryKv>::optional(None)

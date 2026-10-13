@@ -460,6 +460,7 @@ fn corrupt_frame_is_rejected_before_ranged_read(damage: BadFrame) {
                 store: rig.store.as_ref(),
                 partition: &rig.source(),
                 now_ms: now,
+                continuation_deadline_ms: None,
             },
             &DueTimer {
                 due_at_ms: now,
@@ -660,6 +661,7 @@ fn counted_fire_due(rig: &Rig, handler: &CountedExtraction, pack: Hash) -> Resul
             store: rig.store.as_ref(),
             partition: &rig.source(),
             now_ms: now,
+            continuation_deadline_ms: None,
         },
         &DueTimer {
             due_at_ms: now - 1,
@@ -795,6 +797,7 @@ fn fifty_deep_member_chunk(payload_bytes: usize, window_bytes: u64, quota_shortf
                 store: rig.store.as_ref(),
                 partition: &rig.source(),
                 now_ms: now,
+                continuation_deadline_ms: None,
             },
             &DueTimer {
                 due_at_ms: now,
@@ -1512,6 +1515,7 @@ fn a_denial_after_source_descent_prevents_chunk_and_ancestor_reads() {
                     store: rig.store.as_ref(),
                     partition: &rig.source(),
                     now_ms: now,
+                    continuation_deadline_ms: None,
                 },
                 &DueTimer {
                     due_at_ms: now,
@@ -1657,6 +1661,7 @@ fn a_staged_thin_chunk_resumes_when_its_member_base_changes_after_decode() {
                 store: rig.store.as_ref(),
                 partition: &rig.source(),
                 now_ms: now,
+                continuation_deadline_ms: None,
             },
             &DueTimer {
                 due_at_ms: now,
@@ -2016,6 +2021,7 @@ where
             store: rig.store.as_ref(),
             partition: &rig.source(),
             now_ms: now,
+            continuation_deadline_ms: None,
         },
         &DueTimer {
             due_at_ms: now,

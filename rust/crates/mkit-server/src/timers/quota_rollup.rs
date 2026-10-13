@@ -540,6 +540,7 @@ mod tests {
             store: &local,
             partition: &first_source,
             now_ms: 60_000,
+            continuation_deadline_ms: None,
         };
         let first = handler.fire(&ctx, &fired).await.unwrap();
         let Fired::Reschedule { batch, .. } = first else {
@@ -570,6 +571,7 @@ mod tests {
                 store: &local,
                 partition: &partition,
                 now_ms: 60_000,
+                continuation_deadline_ms: None,
             };
             assert!(matches!(
                 handler.fire(&ctx, &fired).await.unwrap(),
@@ -586,6 +588,7 @@ mod tests {
                 store: &local,
                 partition: &partition,
                 now_ms: 60_000,
+                continuation_deadline_ms: None,
             };
             let Fired::Reschedule { batch, .. } = handler.fire(&ctx, &fired).await.unwrap() else {
                 panic!("must reschedule")
@@ -689,6 +692,7 @@ mod tests {
             store: &local,
             partition: &shard,
             now_ms: 700_000,
+            continuation_deadline_ms: None,
         };
         let Fired::Done(_) = handler.fire(&ctx, &fired).await.unwrap() else {
             panic!("ended window must stop")
@@ -739,6 +743,7 @@ mod tests {
             store: &local,
             partition: &shard,
             now_ms: 60_000,
+            continuation_deadline_ms: None,
         };
         assert!(matches!(
             handler.fire(&ctx, &fired).await.unwrap(),
@@ -1043,6 +1048,7 @@ mod tests {
             store: &local,
             partition: &shard,
             now_ms: QUOTA_ROLLUP_MS,
+            continuation_deadline_ms: None,
         };
         let Fired::Reschedule { due_at_ms, .. } = handler.fire(&ctx, &fired).await.unwrap() else {
             panic!("aggregate contention must back off")

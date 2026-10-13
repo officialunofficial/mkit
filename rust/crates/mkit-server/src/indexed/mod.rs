@@ -39,10 +39,15 @@ pub(crate) fn check_pack_cap(bytes: u64, cap: u64) -> Result<(), ServerError> {
 }
 
 /// The canonical pending response: one protobuf detail, HTTP 503 and
-/// `Retry-After` rounded up to whole seconds.
+/// `Retry-After` rounded up to whole seconds. Positive hints have a 100 ms
+/// floor; zero means an unspecified wake and uses 1,000 ms.
 #[must_use]
 pub fn pending(retry_after_ms: u64) -> ServerError {
-    let retry_after_ms = retry_after_ms.max(1_000);
+    let retry_after_ms = if retry_after_ms == 0 {
+        1_000
+    } else {
+        retry_after_ms.max(100)
+    };
     let mut value = vec![0x08];
     let mut n = retry_after_ms;
     while n >= 0x80 {

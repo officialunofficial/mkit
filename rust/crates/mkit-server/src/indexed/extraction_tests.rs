@@ -1399,6 +1399,7 @@ fn fire_pack(rig: &Rig, extension: &TestExtraction, pack: Hash) {
             store: rig.store.as_ref(),
             partition: &rig.source(),
             now_ms: now,
+            continuation_deadline_ms: None,
         },
         &DueTimer {
             due_at_ms: now,

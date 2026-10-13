@@ -1008,6 +1008,7 @@ mod tests {
             store: &handler.target,
             partition: &source_partition,
             now_ms: 200,
+            continuation_deadline_ms: None,
         };
         let timer = DueTimer {
             due_at_ms: 200,
@@ -1471,6 +1472,7 @@ mod tests {
             store: &handler.target,
             partition: &source(),
             now_ms: 200,
+            continuation_deadline_ms: None,
         };
         let timer = DueTimer {
             due_at_ms: 200,

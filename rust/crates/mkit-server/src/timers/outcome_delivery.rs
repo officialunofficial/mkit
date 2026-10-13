@@ -613,6 +613,7 @@ mod tests {
                     store,
                     partition: &partition(),
                     now_ms: 100,
+                    continuation_deadline_ms: None,
                 },
                 &timer,
             )

@@ -1,8 +1,8 @@
-//! Scheduled verification: the kind-7 slice machine (WP-4.8, R-171).
+//! Scheduled verification: the kind-7 slice machine.
 //!
-//! A ticketed pack verifies in checkpointed slices, one per alarm fire, with
+//! A ticketed pack verifies in checkpointed slices, bounded within an alarm fire, with
 //! repository-isolated checks; Scheduled error priority and duplicate budget
-//! charging follow R-171's stricter deployment rules. Each fire runs one phase
+//! charging follow the stricter scheduled rules. Each slice runs one phase
 //! step of a [`VerifyJobV1`] and ends in `Fired::Reschedule`, whose batch
 //! carries the job put guarded by the latest job row (and `vs`), so a
 //! duplicate fire loses. Decode also checkpoints each completed entry.
@@ -57,6 +57,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
 mod extraction;
+mod tiny;
 
 /// Fixed work units of one slice. A Worker fixes them for its plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,9 +77,19 @@ pub struct SliceLimits {
     /// Selection steps one Extract slice may run back to back before its
     /// one guarded commit; `1` runs one step per slice.
     pub extract_chain_steps: u32,
+    /// Consecutive durably committed slices for a tiny decoded pack per handler.
+    /// One retains single-slice scheduling; the implementation caps this at eight.
+    pub tiny_chain_slices: u32,
 }
 
 impl SliceLimits {
+    /// Set the consecutive durable slice ceiling for tiny decoded packs.
+    #[must_use]
+    pub const fn with_tiny_chain_slices(mut self, slices: u32) -> Self {
+        self.tiny_chain_slices = slices;
+        self
+    }
+
     /// Set how many Extract selection steps one slice may chain.
     #[must_use]
     pub const fn with_extract_chain_steps(mut self, steps: u32) -> Self {
@@ -102,6 +113,7 @@ impl Default for SliceLimits {
             max_subrequests: crate::limits::VERIFY_SLICE_CALLS,
             max_entries: checkpoint::DEFAULT_ENTRY_CAP,
             extract_chain_steps: 16,
+            tiny_chain_slices: 8,
         }
     }
 }
@@ -277,7 +289,7 @@ where
         Some(self.metrics.as_ref())
     }
 
-    /// One slice per alarm: a slice spends most of an alarm's budget.
+    /// One handler per alarm; tiny slices share this handler's call allowance.
     fn max_per_tick(&self) -> Option<u32> {
         Some(1)
     }
@@ -313,8 +325,9 @@ where
                 remote: &remote,
                 blobs: &blobs,
                 now: ctx.now_ms,
+                continuation_deadline_ms: ctx.continuation_deadline_ms,
             };
-            run.slice(timer).await
+            run.tiny_slices(timer).await
         })
     }
 }
@@ -408,6 +421,8 @@ struct SliceState {
     deferred_denials: BTreeSet<Hash>,
     visiting: BTreeSet<(Hash, Hash, u64)>,
     frames: BTreeMap<Hash, FrameRow>,
+    /// Bounded resource prediction only; Closure still reads its rows fresh.
+    tiny_children: Option<BTreeSet<Hash>>,
     bases: BTreeMap<Hash, u32>,
     charged: BTreeSet<(Hash, Hash, u64)>,
     writes: Vec<Write>,
@@ -455,6 +470,7 @@ struct Run<'a, S, R, B, W, X> {
     remote: &'a Budgeted<'a, R>,
     blobs: &'a Budgeted<'a, B>,
     now: u64,
+    continuation_deadline_ms: Option<i64>,
 }
 
 fn now_ms(clock: &dyn Clock) -> u64 {
@@ -517,21 +533,27 @@ where
             .max(timer.due_at_ms.saturating_add(1))
     }
 
-    async fn slice(&self, timer: &DueTimer) -> Result<Fired, StoreError> {
-        let fired = self.slice_inner(timer).await;
+    async fn slice(&self, timer: &DueTimer, local_closure: &mut bool) -> Result<Fired, StoreError> {
+        let calls_before = self.budget.used();
+        let fired = self.slice_inner(timer, calls_before, local_closure).await;
         if let Err(error) = &fired {
             tracing::warn!(%error, pack = %mkit_core::hash::to_hex(&self.pack), "verification slice failed");
         }
         self.h.metrics.gauge(
             crate::telemetry::METRIC_INDEX_SLICE_SUBREQUESTS,
             &[],
-            f64::from(self.budget.used()),
+            f64::from(self.budget.used().saturating_sub(calls_before)),
         );
         fired
     }
 
     #[allow(clippy::too_many_lines)] // Phase results and their guarded checkpoint commit together.
-    async fn slice_inner(&self, timer: &DueTimer) -> Result<Fired, StoreError> {
+    async fn slice_inner(
+        &self,
+        timer: &DueTimer,
+        calls_before: u32,
+        local_closure: &mut bool,
+    ) -> Result<Fired, StoreError> {
         let (job, state) =
             checkpoint::read_job(self.local, self.source, &self.repo.name, &self.pack).await?;
         let Some((mut job, mut raw)) = job else {
@@ -580,6 +602,10 @@ where
             }
         }
         let mut st = SliceState {
+            tiny_children: (job.phase == Phase::Decode
+                && job.entries == 0
+                && job.pack_len <= checkpoint::TINY_PACK_BYTES)
+                .then(BTreeSet::new),
             job_guard: Some(raw.clone()),
             ..SliceState::default()
         };
@@ -636,7 +662,7 @@ where
             staging_start_ms = st.staging_start_ms.unwrap_or(0), staging_end_ms = st.staging_end_ms,
             staging_duration_ms = st.staging_duration_ms, remote_inventory_calls = st.remote_inventory_calls,
             entries_staged = st.entries_staged, entries_checkpointed = st.entries_checkpointed,
-            slice_calls = self.budget.used(), inventory_batches = st.inventory_batches,
+            slice_calls = self.budget.used().saturating_sub(calls_before), inventory_batches = st.inventory_batches,
             window_read_ms = st.window_read_ms, decode_ms = st.decode_ms,
             denial_ms = st.denial_ms, denial_calls = st.denial_calls,
             write_ms = st.write_ms, checkpoint_ms = st.checkpoint_ms);
@@ -680,6 +706,12 @@ where
             relay_sequence = job.last_relay_seq, due_at_ms = self.due(timer, delay));
         // A slice that ended by itself is not a killed one.
         job.attempts = 0;
+        *local_closure = old_phase == Phase::Decode
+            && job.phase == Phase::ClosureResolve
+            && st
+                .tiny_children
+                .as_ref()
+                .is_some_and(|children| children.iter().all(|child| st.frames.contains_key(child)));
         self.flush(&mut st).await?;
         let mut batch = Batch::new()
             .require(Precondition::NotAfter(self.deadline()))
@@ -1661,6 +1693,14 @@ where
                 ));
             }
             for child in children(&object, ClosureMode::History) {
+                if let Some(children) = &mut st.tiny_children {
+                    children.insert(child);
+                    if children.len()
+                        > usize::try_from(checkpoint::TINY_ENTRIES).unwrap_or(usize::MAX)
+                    {
+                        st.tiny_children = None;
+                    }
+                }
                 st.writes.push(Write::Put(
                     self.row(keys::VC_CHILD, &child),
                     Value::default(),
@@ -1950,6 +1990,13 @@ where
         Ok(false)
     }
 
+    fn closure_lookup_reserve(&self) -> u32 {
+        self.h.limits.max_subrequests.min(
+            u32::try_from(index::MAX_LOOKUP_PAGES + index::MAX_LOOKUP_MEMBERSHIP_READS)
+                .unwrap_or(u32::MAX),
+        )
+    }
+
     /// Look one page of owed children up together. `Ok(false)` leaves the page
     /// unconsumed for a later slice.
     async fn locate_owed(
@@ -1960,10 +2007,7 @@ where
     ) -> Result<bool, Stop> {
         // Reserve the lesser of the lookup's worst case and a full slice. A
         // larger single-id lookup is a terminal cap.
-        let reserve = self.h.limits.max_subrequests.min(
-            u32::try_from(index::MAX_LOOKUP_PAGES + index::MAX_LOOKUP_MEMBERSHIP_READS)
-                .unwrap_or(u32::MAX),
-        );
+        let reserve = self.closure_lookup_reserve();
         if self.budget.remaining() < reserve {
             return Ok(false);
         }

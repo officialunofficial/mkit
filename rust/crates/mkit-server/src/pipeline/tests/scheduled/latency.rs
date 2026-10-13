@@ -35,7 +35,7 @@ fn verifier(
         windows: BlobWindows(&env.pipe.blobs),
         shards: env.pipe.shards.clone(),
         cfg: env.pipe.cfg.indexed.unwrap(),
-        limits: SliceLimits::default(),
+        limits: SliceLimits::default().with_tiny_chain_slices(1),
         lease: LeaseParams::from(&env.pipe.cfg),
         clock: env.clock.clone(),
         metrics: env.metrics.clone(),
@@ -44,19 +44,22 @@ fn verifier(
 }
 
 fn assert_hint(error: &ServerError, seconds: u64) {
+    assert_hint_ms(error, seconds * 1_000);
+}
+
+fn assert_hint_ms(error: &ServerError, milliseconds: u64) {
     assert_eq!(error.public_message(), "pack verification pending");
-    assert!(
-        error
-            .headers()
-            .contains(&("Retry-After".into(), seconds.to_string()))
-    );
+    assert!(error.headers().contains(&(
+        "Retry-After".into(),
+        milliseconds.div_ceil(1_000).to_string()
+    )));
     let bytes = &error.details()[0].value;
     assert_eq!(bytes[0], 0x08);
     let ms = bytes[1..]
         .iter()
         .enumerate()
         .fold(0_u64, |v, (i, b)| v | (u64::from(b & 0x7f) << (7 * i)));
-    assert_eq!(ms, seconds * 1_000);
+    assert_eq!(ms, milliseconds);
 }
 
 #[test]
@@ -220,8 +223,8 @@ fn relay_delivery_resumes_promptly_and_a_lost_nudge_recovers_by_poll() {
         tick(&registry);
         assert_eq!(job().phase, Phase::AwaitDelivery);
         assert!(!job().usable());
-        // The first delivery poll is 300 ms away; the hint keeps its 1 s floor.
-        assert_hint(&attempt().unwrap_err(), 1);
+        // The detail preserves the short delivery poll; the header rounds up.
+        assert_hint_ms(&attempt().unwrap_err(), 300);
         let poll_at = ms(env.clock.now_ms()) + 300;
         // Lose only the optional timer move after durable relay delivery.
         // Its failure must preserve both the recovery poll and relay progress.
@@ -241,7 +244,7 @@ fn relay_delivery_resumes_promptly_and_a_lost_nudge_recovers_by_poll() {
             .unwrap()
         );
         assert!(!job().usable(), "delivery alone cannot verify the pack");
-        assert_hint(&attempt().unwrap_err(), 1);
+        assert_hint_ms(&attempt().unwrap_err(), if missed { 300 } else { 100 });
         tick(&registry);
         if missed {
             assert_eq!(job().phase, Phase::AwaitDelivery);
@@ -398,7 +401,7 @@ fn retry_hint_is_capped_for_a_backed_off_timer_in_every_unfinished_phase() {
     let job_key = keys::verify_job(&repo.name, &pack_id);
     let now = ms(env.clock.now_ms());
     let mut old = keys::timer(now, kinds::VERIFY.get(), &reference);
-    // The hint does not depend on the phase; each is checked anyway.
+    // The distant wake cap applies in every unfinished phase.
     // A fifth consecutive failure backs the timer off by 5 s * 2^4 = 80 s.
     let backoff = 80_000;
     for phase in [
@@ -468,4 +471,65 @@ impl tracing::Subscriber for Events {
         event.record(&mut fields);
         self.0.lock().unwrap().push(fields.0);
     }
+}
+
+#[test]
+fn tiny_delivery_hint_preserves_milliseconds_with_fallback_and_cap() {
+    let (env, owner, identity) = environment_with(Sharding::D34, scheduled());
+    let (bytes, head) = pack();
+    let pack_id = hash(&bytes);
+    let ticket = begin_and_upload(&env, &owner, &identity, &bytes, 940);
+    let request = signed(&owner, &identity, Procedure::AdvanceRefs, 941);
+    let repo = env.auth(&request).unwrap().repo().repo.clone();
+    let source = env.pipe.shards.ref_shard(&repo, HEAD);
+    let attempt = || advance(&env, &owner, &identity, 941, head, pack_id, vec![ticket]);
+    assert_hint(&attempt().unwrap_err(), 1);
+    let reference = timer_reference(&repo.name, &pack_id);
+    let job_key = keys::verify_job(&repo.name, &pack_id);
+    let raw = block_on(env.pipe.meta.get(&source, &job_key))
+        .unwrap()
+        .unwrap();
+    let mut job = decode_job(&raw).unwrap();
+    job.phase = Phase::AwaitDelivery;
+    job.entries = 2;
+    job.kind = crate::indexed::checkpoint::Kind::Pack;
+    job.in_pack_bytes = 100;
+    block_on(env.pipe.meta.apply(
+        &source,
+        Batch::new().put(
+            job_key.clone(),
+            crate::indexed::checkpoint::encode_job(&job),
+        ),
+    ))
+    .unwrap();
+    let now = ms(env.clock.now_ms());
+    let mut old = keys::timer(now, kinds::VERIFY.get(), &reference);
+    for (delay, expected) in [(0, 100), (300, 300), (1_001, 1_001), (15_001, 3_000)] {
+        let next = keys::timer(now + delay, kinds::VERIFY.get(), &reference);
+        block_on(env.pipe.meta.apply(
+            &source,
+            Batch::new().delete(old).put(next.clone(), Value::default()),
+        ))
+        .unwrap();
+        assert_hint_ms(&attempt().unwrap_err(), expected);
+        old = next;
+    }
+    block_on(
+        env.pipe
+            .meta
+            .apply(&source, Batch::new().delete(old.clone())),
+    )
+    .unwrap();
+    assert_hint(&attempt().unwrap_err(), 1);
+    job.entries = 4;
+    block_on(
+        env.pipe.meta.apply(
+            &source,
+            Batch::new()
+                .put(job_key, crate::indexed::checkpoint::encode_job(&job))
+                .put(old, Value::default()),
+        ),
+    )
+    .unwrap();
+    assert_hint(&attempt().unwrap_err(), 3);
 }

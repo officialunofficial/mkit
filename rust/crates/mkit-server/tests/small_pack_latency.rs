@@ -70,12 +70,16 @@ impl mkit_server::indexed::job::SliceExtension for Enabled {
 struct Run {
     elapsed_ms: i64,
     slices: u32,
+    alarms: u32,
     calls: u64,
     max_tick_wall_ms: u128,
 }
 
 #[allow(clippy::too_many_lines)] // One alarm-driven fixture, kept together.
-async fn measure(objects: u16, chain: u32) -> Run {
+async fn measure(objects: u16, chain: u32, tiny_slices: u32) -> Run {
+    let trace = std::env::var_os("MKIT_LATENCY_TRACE").is_some();
+    let events = Events::default();
+    let _subscriber = trace.then(|| tracing::subscriber::set_default(events.clone()));
     let clock = Arc::new(ManualClock::new(1_700_000_000_000));
     let inner = Arc::new(MemoryKv::with_clock(clock.clone()));
     let store = Slow {
@@ -135,7 +139,9 @@ async fn measure(objects: u16, chain: u32) -> Run {
         },
         shards: shards.clone(),
         cfg,
-        limits: SliceLimits::default().with_extract_chain_steps(chain),
+        limits: SliceLimits::default()
+            .with_extract_chain_steps(chain)
+            .with_tiny_chain_slices(tiny_slices),
         lease: LeaseParams::default(),
         clock: clock.clone(),
         metrics: recorder.clone(),
@@ -253,10 +259,12 @@ async fn measure(objects: u16, chain: u32) -> Run {
         .unwrap_err();
     assert_eq!(error.public_message(), "pack verification pending");
     let started = clock.now_ms();
-    let slices_before = recorder.attempts.load(Ordering::SeqCst);
+    let slices_before = recorder.slice_attempts.load(Ordering::SeqCst);
+    let ledger_before = store.ledger.lock().unwrap().by_class.clone();
+    events.0.lock().unwrap().clear();
     let calls_before = store.ledger.lock().unwrap().calls;
     let mut max_tick_wall_ms = 0;
-    for _ in 0..16_384 {
+    for alarms in 1..=16_384 {
         let now = u64::try_from(clock.now_ms()).unwrap();
         let tick_started = Instant::now();
         let report = run_due(
@@ -285,9 +293,29 @@ async fn measure(objects: u16, chain: u32) -> Run {
         if job.phase == Phase::Watch && map_ready {
             assert!(job.usable(), "verification outcome: {:?}", job.outcome);
             assert_eq!(job.entries, u64::from(objects));
+            if trace {
+                for event in events.0.lock().unwrap().iter().filter(|event| {
+                    event.get("event").is_some_and(|name| {
+                        name == "verification_slice_result"
+                            || name == "verification_inventory_progress"
+                    })
+                }) {
+                    eprintln!("trace tiny={tiny_slices}: {event:?}");
+                }
+                let ledger = store.ledger.lock().unwrap();
+                let delta: std::collections::BTreeMap<_, _> = ledger
+                    .by_class
+                    .iter()
+                    .map(|(name, calls)| {
+                        (name, calls - ledger_before.get(name).copied().unwrap_or(0))
+                    })
+                    .collect();
+                eprintln!("ledger tiny={tiny_slices}: {delta:?}");
+            }
             return Run {
                 elapsed_ms: clock.now_ms() - started,
-                slices: recorder.attempts.load(Ordering::SeqCst) - slices_before,
+                alarms,
+                slices: recorder.slice_attempts.load(Ordering::SeqCst) - slices_before,
                 calls: store.ledger.lock().unwrap().calls - calls_before,
                 max_tick_wall_ms,
             };
@@ -303,9 +331,9 @@ async fn measure(objects: u16, chain: u32) -> Run {
 
 #[tokio::test(start_paused = true)]
 async fn chained_extract_steps_cut_small_pack_slices_and_time_at_50ms() {
-    for objects in [1_u16, 2, 6, 50] {
-        let unchained = measure(objects, 1).await;
-        let chained = measure(objects, SliceLimits::default().extract_chain_steps).await;
+    for objects in [1_u16, 2, 3, 6, 50] {
+        let unchained = measure(objects, 1, 1).await;
+        let chained = measure(objects, SliceLimits::default().extract_chain_steps, 1).await;
         eprintln!(
             "SP1 objects={objects} unchained: {} ms, {} slices, {} calls, max tick {} ms; chained: {} ms, {} slices, {} calls, max tick {} ms",
             unchained.elapsed_ms,
@@ -328,8 +356,8 @@ async fn chained_extract_steps_cut_small_pack_slices_and_time_at_50ms() {
 #[tokio::test(start_paused = true)]
 async fn chained_extract_steps_do_not_slow_large_packs_at_50ms() {
     for objects in [500_u16, 3_000] {
-        let unchained = measure(objects, 1).await;
-        let chained = measure(objects, SliceLimits::default().extract_chain_steps).await;
+        let unchained = measure(objects, 1, 1).await;
+        let chained = measure(objects, SliceLimits::default().extract_chain_steps, 1).await;
         eprintln!(
             "SP1 objects={objects} unchained: {} ms, {} slices, {} calls, max tick {} ms; chained: {} ms, {} slices, {} calls, max tick {} ms",
             unchained.elapsed_ms,
@@ -341,8 +369,51 @@ async fn chained_extract_steps_do_not_slow_large_packs_at_50ms() {
             chained.calls,
             chained.max_tick_wall_ms
         );
+        let default_tiny = measure(
+            objects,
+            SliceLimits::default().extract_chain_steps,
+            SliceLimits::default().tiny_chain_slices,
+        )
+        .await;
+        eprintln!(
+            "default tiny objects={objects}: {} ms, {} alarms, {} slices, {} calls",
+            default_tiny.elapsed_ms, default_tiny.alarms, default_tiny.slices, default_tiny.calls
+        );
+        assert!(default_tiny.alarms <= chained.alarms);
+        assert!(default_tiny.slices <= chained.slices);
+        assert!(default_tiny.calls <= chained.calls);
+        assert!(default_tiny.elapsed_ms <= chained.elapsed_ms);
         assert!(chained.slices <= unchained.slices);
         assert!(chained.calls <= unchained.calls);
         assert!(chained.elapsed_ms <= unchained.elapsed_ms);
     }
+}
+
+async fn assert_consecutive_tiny(objects: u16) {
+    let single = measure(objects, SliceLimits::default().extract_chain_steps, 1).await;
+    let tiny = measure(objects, SliceLimits::default().extract_chain_steps, 8).await;
+    eprintln!(
+        "tiny objects={objects} single: {} ms, {} alarms, {} slices, {} calls; consecutive: {} ms, {} alarms, {} slices, {} calls",
+        single.elapsed_ms,
+        single.alarms,
+        single.slices,
+        single.calls,
+        tiny.elapsed_ms,
+        tiny.alarms,
+        tiny.slices,
+        tiny.calls
+    );
+    assert!(tiny.alarms < single.alarms);
+    assert!(tiny.elapsed_ms < single.elapsed_ms);
+    assert!(tiny.calls <= single.calls);
+}
+
+#[tokio::test(start_paused = true)]
+async fn consecutive_one_entry_slices_reduce_alarms_and_modeled_latency() {
+    assert_consecutive_tiny(1).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn consecutive_three_entry_slices_reduce_alarms_and_modeled_latency() {
+    assert_consecutive_tiny(3).await;
 }
