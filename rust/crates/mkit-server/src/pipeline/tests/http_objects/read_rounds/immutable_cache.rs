@@ -68,6 +68,8 @@ fn embedder_read_shapes_immutable_cache_warm_repeat() {
         history.fx.pipe.cfg.takedown_denial = denial;
         for owner in [false, true] {
             for op in [Op::Show { sizes: true }, Op::Log(10), Op::GetReadGate] {
+                // Compare repeats on both paths; selected capture may initialize rj.
+                let _ = measure(&history, owner, op);
                 let before = measure(&history, owner, op);
                 let pipe = cached(&history, Hooks::new());
                 let _ = measure_on(&history, &pipe, owner, op, LATENCY, None, false);
