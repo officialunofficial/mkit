@@ -15,7 +15,7 @@ use mkit_sync::{Executor as _, NativeHttp};
 
 /// Read a whole request (headers plus the declared body) before answering, so
 /// closing never resets a connection that still has unread data.
-fn read_request(stream: &mut std::net::TcpStream) {
+fn read_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
     let mut request = Vec::new();
     let mut buf = [0u8; 4096];
     loop {
@@ -36,6 +36,7 @@ fn read_request(stream: &mut std::net::TcpStream) {
             }
         }
     }
+    request
 }
 
 /// Serve exactly one canned HTTP response, then close. Returns the base URL.
@@ -252,4 +253,104 @@ fn a_connection_failure_keeps_its_cause() {
         err.matches(": ").count() >= 2 && !err.ends_with("client error (Connect)"),
         "the cause is missing: {err}"
     );
+}
+
+#[test]
+fn supplied_headers_survive_on_the_wire() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let request = read_request(&mut stream);
+        stream.write_all(&response("200 OK", &[], b"ok")).unwrap();
+        String::from_utf8(request).unwrap()
+    });
+    let http = NativeHttp::new().unwrap();
+    let request = Request::post(format!("http://{addr}/"))
+        .header("user-agent", "observer-agent")
+        .header("accept-encoding", "gzip;q=0.8, identity;q=0.2")
+        .body(Vec::new())
+        .unwrap();
+    http.block_on(http.send(request, 1024)).unwrap();
+    let wire = server.join().unwrap();
+    assert!(wire.contains("user-agent: observer-agent\r\n"), "{wire}");
+    assert!(
+        wire.contains("accept-encoding: gzip;q=0.8, identity;q=0.2\r\n"),
+        "{wire}"
+    );
+}
+
+#[test]
+fn unsupported_negotiation_is_a_typed_refusal_before_connecting() {
+    use mkit_sync::NativeHttpError;
+    let http = NativeHttp::new().unwrap();
+    for value in [
+        "br",
+        "gzip, zstd",
+        "gzip, br;q=0",
+        "*",
+        "gzip;q=2",
+        "gzip;q=0.1234",
+        "gzip;foo=1",
+        "gzip,",
+        "gzip;q=1.001",
+    ] {
+        let request = Request::post("http://127.0.0.1:1/")
+            .header("accept-encoding", value)
+            .body(Vec::new())
+            .unwrap();
+        assert_eq!(
+            http.block_on(http.send_typed(request, 1024)).unwrap_err(),
+            NativeHttpError::UnsupportedAcceptEncoding,
+            "{value}"
+        );
+    }
+    let request = Request::post("http://127.0.0.1:1/")
+        .header("accept-encoding", "gzip")
+        .header("accept-encoding", "br")
+        .body(Vec::new())
+        .unwrap();
+    assert_eq!(
+        http.block_on(http.send_typed(request, 1024)).unwrap_err(),
+        NativeHttpError::UnsupportedAcceptEncoding
+    );
+}
+
+#[test]
+fn request_kind_selects_independent_timeout_budgets() {
+    let http = NativeHttp::new()
+        .unwrap()
+        .with_metadata_timeout(Duration::from_millis(200))
+        .with_transfer_timeout(Duration::from_secs(5));
+    for (procedure, transfer) in [
+        ("ReadRef", false),
+        ("BeginUpload", false),
+        ("CompleteUpload", false),
+        ("UploadPack", true),
+        ("UploadPart", true),
+        ("DownloadPack", true),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_request(&mut stream);
+            // Send headers immediately: the timeout must include the body.
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n");
+            std::thread::sleep(Duration::from_millis(500));
+            let _ = stream.write_all(b"ok");
+        });
+        let result = send(
+            &http,
+            &format!("http://{addr}/mkit.transport.v1.TransportService/{procedure}"),
+            1024,
+        );
+        if transfer {
+            assert_eq!(result.unwrap().body(), b"ok", "{procedure}");
+        } else {
+            assert!(result.unwrap_err().contains("timed out"), "{procedure}");
+        }
+        server.join().unwrap();
+    }
 }

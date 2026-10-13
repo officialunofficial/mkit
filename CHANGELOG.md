@@ -15,6 +15,12 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Changed
 
+- Client replay documentation now distinguishes reconstructing the same
+  authenticated operation, body and identity from exact-byte replay of a
+  retained request: unsigned observer headers may be regenerated. The sync
+  feature comment qualifies its zstd-free dependency claim with default
+  features disabled.
+
 - Scheduled Decode, EmitIndex, and inline index writes share per-object takedown
   denial waves of at most six, after inventory staging and before provisional
   rows or the direct index apply. The first failing object in batch order still
@@ -27,6 +33,10 @@ collect the applicable entries between their old and new immutable pins.
   project-limit, or store-reset change is required.
 
 ### Added
+
+- `NativeHttp` exposes independent `with_metadata_timeout` and
+  `with_transfer_timeout` budgets and `send_typed` for native errors, including
+  `NativeHttpError::UnsupportedAcceptEncoding`. `with_timeout` sets both budgets.
 
 - Typed `mkit.transport.v1.MembershipNotVisible` Connect error detail (an empty
   message) on the repository-membership-lag `unavailable`, emitted at every
@@ -736,6 +746,15 @@ collect the applicable entries between their old and new immutable pins.
   URL-token reads, supplied hooks, cold outcome retry and injected slice recovery.
 
 ### Breaking (toward 0.6)
+
+- `NativeHttp` now defaults to 30 seconds for metadata and 300 seconds for
+  `UploadPack`, `UploadPart` and `DownloadPack`, including response receipt,
+  instead of ten minutes for every request. Migration: set the independent
+  timeout builders, or `with_timeout`, when a longer bound is required.
+  Supplied `user-agent` and gzip/identity-compatible `accept-encoding` headers
+  now survive dispatch. Unsupported or malformed encoding negotiation is
+  refused before connecting instead of overwritten. Migration: request only
+  gzip/identity codings. No stored-format change or store reset is required.
 
 - [embedder: breaking API] `mkit-push` (never published to crates.io) is
   renamed to `mkit-client`; there is no shim. Migration: depend on

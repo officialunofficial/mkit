@@ -61,7 +61,8 @@ history-mmr = ["mkit-core/history-mmr"]
 # with an injected signer), for `mkit+https` / `mkit+http` remotes.
 client = ["dep:mkit-client", "dep:futures-executor"]
 # `NativeHttp` + `NativeClock`: hyper/rustls on a current-thread runtime,
-# gzip only, no `zstd-sys` anywhere in the tree (`scripts/check-sync-native-deps.sh`).
+# gzip only; with default features disabled, no `zstd-sys` anywhere in the
+# tree (`scripts/check-sync-native-deps.sh`).
 connect-native = [
     "client",
     "dep:tokio", "dep:hyper", "dep:hyper-util", "dep:hyper-rustls", "dep:rustls",

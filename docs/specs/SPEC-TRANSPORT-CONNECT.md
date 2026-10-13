@@ -1979,8 +1979,10 @@ a `PendingVerification` hint, a membership-lag `unavailable`, and an
 `unavailable` carrying `Retry-After` (1&ndash;60 s). Every signed call accepts a
 caller-owned request identity (the nonce, which is also the `Idempotency-Key`,
 and the validity window) and uses it exactly, returning the identity it used, so
-a persisted identity replays the same signed request and, for a write, a server
-that saved the first reply returns it (§7.1; signed reads keep no reply). Calls without one generate it from the host clock.
+a persisted identity reconstructs the same authenticated operation, body and
+identity; unsigned observer headers may be regenerated. For a write, a server
+that saved the first reply returns it (§7.1; signed reads keep no reply). Calls
+without an identity generate it from the host clock.
 
 `Push::run` is the bounded whole-push built on the same calls. It preserves the
 signed request identity through pending polls while valid, honors typed poll
@@ -1992,8 +1994,10 @@ frames with an explicit response limit; clock, entropy, waiting and signing are
 also injectable. A streaming request body does not fit that boundary: the
 transport must replay the exact request bytes after an ambiguous failure, and
 browser fetch cannot stream request bodies portably, so request bodies stay
-buffered (bounded per part by the ticket part size). Exact signed requests are
-the transport's replay unit. No result claims eternal replay retention or proves
+buffered (bounded per part by the ticket part size). Exact-byte replay applies
+to retained requests; reconstructing a request with the same identity preserves
+its authenticated operation and body. No result claims eternal replay retention
+or proves
 that an earlier ambiguous attempt never wrote. The native CLI retains its
 existing push path. See [the client guide](../../rust/crates/mkit-client/README.md)
 for bounds and the API. This library adds no wire change.
