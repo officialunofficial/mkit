@@ -662,7 +662,9 @@ with `ed25519-` or `0x`, including otherwise valid self-certifying identities.
 This accepts lowercase UUIDv7 names with dashes. A self-certifying deployment
 MUST reject these opaque names at repository request and HTTP route boundaries.
 Repository names and the maximum 173-byte identity length remain unchanged.
-The CLI and owner-statement codecs retain their self-certifying grammar.
+Owner-statement and grant codecs retain their self-certifying grammar; client
+URL addressing accepts the union of both grammars
+([SPEC-TRANSPORT-CONNECT §7.4](SPEC-TRANSPORT-CONNECT.md#74-repository-addressing)).
 
 Registration: a namespace in authority mode is registered when its
 authority-generation row exists, which a verified `SetAuthorityGeneration`

@@ -25,7 +25,9 @@ use crate::exit;
 use crate::grants::cli::{Ctx, finish_wait, parse_timeout, print_statement};
 use crate::grants::now_ms;
 use crate::grants::owner::{Kind, OwnerArgs, Produced, produce};
-use crate::grants::remote::{Driven, check_audiences, drive, interruptible_sleep, resolve_target};
+use crate::grants::remote::{
+    Driven, check_audiences, drive, interruptible_sleep, resolve_strict_target, resolve_target,
+};
 use crate::grants::spec::{build_visibility, canonical_audiences, statement_lifetime_ms};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -106,7 +108,14 @@ fn set(opts: &SetOpts) -> u8 {
             "--scheme, --print-statement, --statement-file, --signature and --webauthn-assertion sign a statement: add --statement",
         );
     }
-    let target = match resolve_target(&ctx.layered, Some(&opts.remote)) {
+    // A statement is self-certifying-only; the envelope form works under
+    // any namespace grammar.
+    let resolved = if opts.statement {
+        resolve_strict_target(&ctx.layered, Some(&opts.remote))
+    } else {
+        resolve_target(&ctx.layered, Some(&opts.remote))
+    };
+    let target = match resolved {
         Ok(target) => target,
         Err(e) => return usage_error(&e),
     };
@@ -120,7 +129,12 @@ fn set(opts: &SetOpts) -> u8 {
             Ok(tx) => tx,
             Err(e) => return error(&e, exit::UNAVAILABLE),
         };
-        let repository = tx.repository().clone();
+        let Some(repository) = tx.repository() else {
+            return usage_error(
+                "visibility statements need a self-certifying `ed25519-`/`0x` namespace; authority-mode servers refuse them (SPEC-SERVER §6.2.2)",
+            );
+        };
+        let repository = repository.clone();
         let Some(namespace) = repository.namespace().copied() else {
             return usage_error(
                 "a visibility statement names a full <namespace>/<name> repository: use a remote URL that includes it",

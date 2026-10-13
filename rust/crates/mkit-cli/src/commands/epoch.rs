@@ -19,7 +19,9 @@ use crate::exit;
 use crate::format::{JsonObject, json_string_array};
 use crate::grants::cli::{Ctx, finish_wait, parse_namespace, parse_timeout, print_statement};
 use crate::grants::owner::{Kind, OwnerArgs, Produced, produce};
-use crate::grants::remote::{Driven, check_audiences, drive, interruptible_sleep, resolve_target};
+use crate::grants::remote::{
+    Driven, check_audiences, drive, interruptible_sleep, resolve_strict_target,
+};
 use crate::grants::spec::{build_epoch, canonical_audiences, statement_lifetime_ms};
 use crate::grants::store::{GrantStore, StoredGrant};
 use crate::grants::{now_ms, scope_text};
@@ -104,7 +106,7 @@ fn show(opts: &ShowOpts) -> u8 {
         Ok(ctx) => ctx,
         Err(code) => return code,
     };
-    let target = match resolve_target(&ctx.layered, opts.remote.as_deref()) {
+    let target = match resolve_strict_target(&ctx.layered, opts.remote.as_deref()) {
         Ok(target) => target,
         Err(e) => return usage_error(&e),
     };
@@ -218,7 +220,7 @@ pub(crate) fn bump(opts: &BumpOpts, revoke: Option<&RevokeExtras>) -> u8 {
     let Some(remote) = opts.remote.as_deref() else {
         return usage_error("mkit epoch bump needs a remote (name or mkit+https:// URL)");
     };
-    let target = match resolve_target(&ctx.layered, Some(remote)) {
+    let target = match resolve_strict_target(&ctx.layered, Some(remote)) {
         Ok(target) => target,
         Err(e) => return usage_error(&e),
     };

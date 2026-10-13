@@ -4,8 +4,10 @@
 use std::time::Duration;
 
 use mkit_attest::grant::{Namespace, is_loopback_origin};
-use mkit_core::repo_identity::RepositoryIdentity;
-use mkit_transport_connect::{Completion, audience_from_url, repository_identity_from_url};
+use mkit_core::repo_identity::{RemoteNamespace, RepositoryIdentity};
+use mkit_transport_connect::{
+    Completion, audience_from_url, remote_identity_from_url, repository_identity_from_url,
+};
 
 use crate::config::{self, LayeredConfig};
 
@@ -40,7 +42,9 @@ impl Target {
             .filter(|id| id.namespace().is_some())
     }
 
-    /// The namespace in the URL's repository, if any.
+    /// The self-certifying namespace in the URL's repository, if any. `None`
+    /// also for an authority-mode namespace, so use it only on a target from
+    /// [`resolve_strict_target`].
     #[must_use]
     pub fn namespace(&self) -> Option<Namespace> {
         self.repository().and_then(|id| id.namespace().copied())
@@ -61,6 +65,22 @@ impl Target {
 /// # Errors
 /// An unknown remote, or nothing to fall back on.
 pub fn resolve_target(cfg: &LayeredConfig, arg: Option<&str>) -> Result<Target, String> {
+    resolve_target_unchecked(cfg, arg)
+}
+
+/// [`resolve_target`] for commands that are self-certifying-only (grants and
+/// grant epochs): a remote naming an authority-mode namespace is refused
+/// rather than ignored.
+///
+/// # Errors
+/// As [`resolve_target`], or an authority-mode namespace in the endpoint.
+pub fn resolve_strict_target(cfg: &LayeredConfig, arg: Option<&str>) -> Result<Target, String> {
+    let target = resolve_target_unchecked(cfg, arg)?;
+    refuse_authority_namespace(&target.endpoint)?;
+    Ok(target)
+}
+
+fn resolve_target_unchecked(cfg: &LayeredConfig, arg: Option<&str>) -> Result<Target, String> {
     match arg {
         Some(url) if url.starts_with("mkit+") => Ok(Target {
             name: url.to_owned(),
@@ -323,5 +343,41 @@ mod tests {
         let outcome: Result<Driven<()>, &str> =
             drive(|| Err("boom"), Duration::from_secs(1), |_| true);
         assert_eq!(outcome, Err("boom"));
+    }
+}
+
+/// Grants, grant epochs and owner statements are self-certifying-only
+/// (SPEC-SERVER §6.2.2): refuse a URL naming an authority-mode namespace
+/// instead of falling back to the signer's own namespace.
+///
+/// # Errors
+/// The message to print.
+pub fn refuse_authority_namespace(endpoint: &str) -> Result<(), String> {
+    match remote_identity_from_url(endpoint)
+        .ok()
+        .as_ref()
+        .and_then(|id| id.namespace())
+    {
+        Some(RemoteNamespace::Opaque(ns)) => Err(format!(
+            "`{ns}` is an authority-mode namespace; grants, grant epochs and owner statements need a self-certifying `ed25519-`/`0x` namespace (SPEC-SERVER §6.2.2, SPEC-TRANSPORT-CONNECT §7.4)"
+        )),
+        _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod authority_namespace_tests {
+    use super::refuse_authority_namespace;
+
+    #[test]
+    fn opaque_namespace_urls_are_refused_and_strict_ones_pass() {
+        let uuid = "019c88c3-a904-7bd1-8a5d-3182a0c6978a";
+        let err = refuse_authority_namespace(&format!("mkit+https://vcs.example/{uuid}/repo"))
+            .unwrap_err();
+        assert!(err.contains(uuid) && err.contains("§6.2.2"), "{err}");
+        let ed = format!("mkit+https://vcs.example/ed25519-{}/repo", "ab".repeat(32));
+        assert!(refuse_authority_namespace(&ed).is_ok());
+        assert!(refuse_authority_namespace("mkit+https://vcs.example/repo").is_ok());
+        assert!(refuse_authority_namespace("not a url").is_ok());
     }
 }

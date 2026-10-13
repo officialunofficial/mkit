@@ -10,7 +10,7 @@ use mkit_core::layout::RepoLayout;
 use mkit_transport_connect::ConnectTransport;
 
 use super::owner::{self, NativeOwner, OwnerArgs, Plan, SignCtx};
-use super::remote::{Driven, Target, drive, interruptible_sleep};
+use super::remote::{Driven, Target, drive, interruptible_sleep, refuse_authority_namespace};
 use super::spec::parse_ttl;
 use crate::commands::{error, usage_error};
 use crate::config::{self, LayeredConfig};
@@ -74,6 +74,7 @@ impl Ctx {
     /// # Errors
     /// The message to print.
     pub fn open_unsigned(&self, target: &Target) -> Result<ConnectTransport, String> {
+        refuse_authority_namespace(&target.endpoint)?;
         self.open(target, false)
     }
 

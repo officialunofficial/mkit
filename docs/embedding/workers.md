@@ -71,7 +71,9 @@ grants, grant epochs, and visibility statements are refused; change visibility
 with a signed envelope authorized by the hook. Keep keyrings, commit-signer
 policy, and landing-time storage in the embedder. Under `any`, namespace
 discovery is incomplete and you cannot claim complete deployment-wide takedown.
-The mkit CLI retains its self-certifying addressing behavior. See
+The mkit CLI accepts both namespace grammars in `mkit+https://` remote URLs
+(SPEC-TRANSPORT-CONNECT §7.4), but builds grants, grant epochs and visibility
+statements only for self-certifying namespaces. See
 [the mode contract](../specs/SPEC-SERVER.md#622-opt-in-authority-owned-namespaces).
 
 ## Request routing and authority

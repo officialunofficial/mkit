@@ -38,7 +38,7 @@ use mkit_core::store::{ObjectStore, StoreError};
 use mkit_core::transfer::{self, PackListError};
 use mkit_transport_connect::admission::{AdmissionPolicy, is_reserved};
 use mkit_transport_connect::{
-    ConnectTransport, PENDING_INTERRUPTED_MESSAGE, repository_identity_from_url,
+    ConnectTransport, PENDING_INTERRUPTED_MESSAGE, remote_identity_from_url,
 };
 use mkit_transport_file::FileTransport;
 use mkit_transport_s3::S3Transport;
@@ -806,18 +806,39 @@ fn open_with_ssh_options(
     if url.starts_with("mkit+enc://") {
         return open_enc(url);
     }
+    if let Some((scheme, rest)) = url
+        .split_once("://")
+        .filter(|(scheme, _)| matches!(*scheme, "https" | "http"))
+    {
+        // Never echo URL userinfo or a query into an error message; a URL
+        // carrying userinfo gets the generic form instead of a rewrite.
+        let rest = rest.split(['?', '#']).next().unwrap_or(rest);
+        let shown = if rest.contains('@') {
+            "<host>/<namespace>/<name>"
+        } else {
+            rest
+        };
+        return Err(DispatchError::UnsupportedScheme(format!(
+            "`{scheme}://{shown}` is not a sync remote: at a server's origin, plain HTTP(S) serves objects by repository path (SPEC-HTTP-OBJECTS); sync remotes use `mkit+https://`, for example `mkit+https://{shown}`"
+        )));
+    }
     Err(DispatchError::MalformedUrl(url.to_string()))
 }
 
 fn validate_connect_repository(url: &str) -> Result<(), DispatchError> {
-    repository_identity_from_url(url).map_err(|reason| {
+    remote_identity_from_url(url).map_err(|reason| {
+        // Userinfo and queries are never echoed. A URL carrying either gets a
+        // generic message: its segments can't be trusted to exclude
+        // credential text.
+        if url.contains(['@', '?', '#']) {
+            return DispatchError::MalformedUrl(
+                "the remote URL is not a valid mkit+https:// remote; use mkit+https://<host>/<namespace>/<name> without userinfo or a query".to_owned(),
+            );
+        }
         let path = url
             .split_once("://")
             .and_then(|(_, rest)| rest.split_once('/'))
             .map_or("", |(_, path)| path)
-            .split(['?', '#'])
-            .next()
-            .unwrap_or("")
             .trim_matches('/');
         DispatchError::MalformedUrl(format!("repository identity `{path}` in {url}: {reason}"))
     })?;
@@ -2316,6 +2337,82 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("Uppercase"), "{message}");
         assert!(!message.contains("invalid response"), "{message}");
+    }
+
+    #[test]
+    fn plain_https_remote_is_refused_with_sync_remote_guidance() {
+        let uuid = "019c88c3-a904-7bd1-8a5d-3182a0c6978a";
+        let url = format!("https://vcs.example/{uuid}/repo");
+        let error = super::open(&url).err().expect("plain https must fail");
+        assert!(
+            matches!(error, super::DispatchError::UnsupportedScheme(_)),
+            "plain https is an unsupported scheme, not a malformed URL: {error:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("mkit+{url}")),
+            "{message} must suggest the mkit+ spelling"
+        );
+        assert!(message.contains("SPEC-HTTP-OBJECTS"), "{message}");
+
+        // Userinfo and queries are never echoed.
+        let error = super::open(&format!(
+            "http://user:secret@vcs.example/{uuid}/repo?k=q1#f"
+        ))
+        .err()
+        .expect("plain http must fail");
+        let message = error.to_string();
+        assert!(!message.contains("secret"), "{message}");
+        assert!(
+            !message.contains("q1") && !message.contains("#f"),
+            "{message}"
+        );
+        assert!(message.contains("mkit+https://"), "{message}");
+        let error = super::open(&format!("http://vcs.example/{uuid}/repo?k=q1"))
+            .err()
+            .expect("plain http must fail");
+        let message = error.to_string();
+        assert!(!message.contains("q1"), "{message}");
+        assert!(
+            message.contains(&format!("mkit+https://vcs.example/{uuid}/repo")),
+            "{message}"
+        );
+        // A rejected identity does not echo the URL's userinfo or query.
+        let error = super::open("mkit+https://user:secret@vcs.example/Bad/repo?k=q1")
+            .err()
+            .expect("bad namespace must fail");
+        let message = error.to_string();
+        assert!(
+            !message.contains("secret") && !message.contains("q1"),
+            "{message}"
+        );
+        for url in [
+            "mkit+https://user:pa/ss@vcs.example/Bad/repo",
+            "mkit+https://user:12/ss@vcs.example/Bad/repo",
+        ] {
+            let message = super::open(url).err().expect("must fail").to_string();
+            assert!(
+                !message.contains("ss@") && !message.contains("pa/"),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn connect_url_validation_names_the_offending_segment() {
+        let uuid = "019c88c3-a904-7bd1-8a5d-3182a0c6978a";
+        for (path, offending) in [("/Bad/repo", "`Bad`"), ("/repo/Name", "`Name`")] {
+            let url = format!("mkit+https://vcs.example{path}");
+            let error = super::open(&url)
+                .err()
+                .unwrap_or_else(|| panic!("{url} must fail"));
+            let message = error.to_string();
+            assert!(message.contains(offending), "{message}");
+            assert!(message.contains("§7.4"), "{message}");
+        }
+        // An opaque authority-mode namespace validates under the union
+        // grammar and builds a transport.
+        assert!(super::open(&format!("mkit+https://vcs.example/{uuid}/repo")).is_ok());
     }
 
     #[test]

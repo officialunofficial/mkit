@@ -332,6 +332,30 @@ collect the applicable entries between their old and new immutable pins.
   class. Backoff, timer outcomes, and test-faults telemetry remain unchanged;
   wipe: no.
 
+- Client addressing of authority-mode namespaces (SPEC-SERVER §6.2.2,
+  SPEC-TRANSPORT-CONNECT §7.4): `mkit+https://` and loopback `mkit+http://`
+  remote URLs now accept the union of the self-certifying grammars
+  (`ed25519-<64 lowercase hex>`, `0x<40 lowercase hex>`) and the opaque
+  authority-mode grammar `[a-z0-9][a-z0-9._-]{0,71}` other than `root`,
+  `ed25519-…` and `0x…`, so a `mkit+https://host/<uuidv7>/<name>` remote
+  clone, pulls and pushes against a `namespace_mode = authority` deployment.
+  `mkit-core` gains `repo_identity::OpaqueNamespace`, `RemoteNamespace` and
+  the owned `RemoteIdentity` (with `MAX_OPAQUE_NAMESPACE_LEN`), and
+  `mkit-server`'s authority validator delegates to `OpaqueNamespace::parse`
+  so client and server share the one grammar. `mkit-transport-connect` adds
+  `remote_identity_from_url` beside the strict `repository_identity_from_url`
+  and `ConnectTransport::remote_identity()`; `UrlIdentityError` gains
+  `Namespace`/`Name` variants that name the offending segment and the accepted grammars. The CLI
+  prints those clearer URL/identity errors, and a plain `https://` URL is
+  refused with guidance pointing at `mkit+https://` and explaining that plain
+  HTTP serves objects by repository path (SPEC-HTTP-OBJECTS). `mkit-client`'s
+  push `Destination` accepts the same union. Grants, grant
+  epochs and visibility statements keep the self-certifying grammar and are
+  never built for an opaque namespace: `mkit grant`, `mkit epoch` and
+  `mkit visibility set --statement` refuse such a URL with an error naming
+  SPEC-SERVER §6.2.2, while the envelope form of `visibility set` works. No
+  wire or server-behavior change; wipe: no.
+
 ### Fixed
 
 - History continuation tokens outlive the issuing signed request envelope.
@@ -897,6 +921,12 @@ stored shapes instead of upgrading or downgrading them.
 - [embedder: breaking API] `mkit_server::indexed::publication::{verify, verify_inspected}` are removed.
   They had no callers: the pipeline verifies within the request's publication
   ledger.
+
+- [embedder: breaking API] `mkit-transport-connect`:
+  `ConnectTransport::repository()` now returns `Option<&RepositoryIdentity>`
+  (`None` for an authority-mode namespace, which names no owner). Migration:
+  use `remote_identity()` for the addressed repository, or `repository()`
+  where a self-certifying identity is required. No stored-format change.
 
 ### Removed
 

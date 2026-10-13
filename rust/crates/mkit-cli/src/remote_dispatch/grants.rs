@@ -257,7 +257,10 @@ impl StepAuthority for ConnectAuthority {
         first: RefWriteCondition,
         later_steps: bool,
     ) -> Result<(), String> {
-        let repository = self.transport.repository();
+        let Some(repository) = self.transport.repository() else {
+            // Authority mode has no grants; the server decides.
+            return Ok(());
+        };
         match repository.namespace() {
             None => return Ok(()),
             Some(namespace) if namespace.to_string() == format!("ed25519-{}", self.signer_key) => {

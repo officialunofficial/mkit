@@ -2,7 +2,7 @@
 
 use crate::NamespaceKey;
 use mkit_core::repo_identity::{
-    IdentityError, MAX_IDENTITY_LEN, Namespace as OwnerNamespace, validate_name,
+    IdentityError, MAX_IDENTITY_LEN, Namespace as OwnerNamespace, OpaqueNamespace, validate_name,
 };
 use std::fmt;
 
@@ -47,17 +47,8 @@ impl NamespaceMode {
     pub fn namespace(self, text: &str) -> Result<Namespace, IdentityError> {
         match self {
             Self::SelfCertifying => OwnerNamespace::parse(text).map(Namespace::SelfCertifying),
-            Self::Authority => {
-                if text.len() > 72
-                    || text == "root"
-                    || text.starts_with("ed25519-")
-                    || text.starts_with("0x")
-                {
-                    return Err(IdentityError::Namespace);
-                }
-                validate_name(text).map_err(|_| IdentityError::Namespace)?;
-                Ok(Namespace::Authority(AuthorityName(text.to_owned())))
-            }
+            Self::Authority => OpaqueNamespace::parse(text)
+                .map(|name| Namespace::Authority(AuthorityName(name.as_str().to_owned()))),
         }
     }
 }
