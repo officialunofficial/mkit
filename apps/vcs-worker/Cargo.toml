@@ -29,6 +29,8 @@ worker = { version = "0.8", features = ["http"] }
 # The adapter: its default features keep `mkit-core`'s `pack-zstd`
 # (zstd-sys, C) out of this wasm32 graph.
 mkit-server-worker = { path = "../../rust/crates/mkit-server-worker" }
+# Core cache types are used only by the local runtime conformance opt-in.
+mkit-server = { path = "../../rust/crates/mkit-server", default-features = false, optional = true }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 getrandom = { version = "0.4", features = ["wasm_js"] }
@@ -47,7 +49,7 @@ launch = ["http-objects", "signed-http-hooks", "pack-ruzstd"]
 pack-ruzstd = ["mkit-server-worker/pack-ruzstd"]
 http-objects = ["mkit-server-worker/http-objects"]
 signed-http-hooks = ["mkit-server-worker/signed-http-hooks"]
-__test-faults = ["mkit-server-worker/__test-faults"]
+__test-faults = ["mkit-server-worker/__test-faults", "dep:mkit-server"]
 
 # Bound pure-Rust decoding in this independent workspace too.
 [patch.crates-io]
