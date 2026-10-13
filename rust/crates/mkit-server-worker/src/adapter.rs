@@ -2268,8 +2268,8 @@ pub(crate) use glue::build_ns_object;
 pub use glue::fetch_with_context;
 #[cfg(target_arch = "wasm32")]
 pub use glue::{
-    WorkerPipeline, fetch, fetch_with, ns_object, ns_object_with, pipeline as embedding_pipeline,
-    serve, serve_admin_with, serve_with,
+    WorkerPipeline, embedded_dispatch, fetch, fetch_with, ns_object, ns_object_with,
+    pipeline as embedding_pipeline, serve, serve_admin_with, serve_with,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -2296,11 +2296,7 @@ mod glue {
     use crate::ns_client::{StubTransport, WorkerNamespaceStore};
     use crate::ns_object::NsObject;
     use crate::r2::{EnvBucket, PACKS_KEYSPACE, R2BlobStore, WorkerBlobStore};
-    use crate::sharding_guard::{Outcome, Settled, check_addressing, check_mode};
-
-    thread_local! {
-        static SHARDING_GUARD: std::cell::RefCell<Option<Settled>> = const { std::cell::RefCell::new(None) };
-    }
+    use crate::sharding_guard::{Outcome, check_deployment};
 
     static BACKUPS_MISSING_LOG: Once = Once::new();
     static BACKUPS_INVALID_LOG: Once = Once::new();
@@ -2357,6 +2353,33 @@ mod glue {
             return Ok(Some(response));
         }
         Ok(None)
+    }
+
+    /// The embedded dispatch entry (`EmbeddedDispatch`) over the same
+    /// request-budgeted pipeline as [`pipeline`], with the deployment guard
+    /// of `cfg` on a store sharing `request_budget`.
+    /// # Errors
+    /// Invalid configuration or unavailable bindings.
+    pub fn embedded_dispatch<H: HookSet + 'static>(
+        env: &Env,
+        cfg: &WorkerConfig,
+        hooks: H,
+        request_budget: &mkit_server::indexed::budget::SliceBudget,
+    ) -> Result<
+        crate::embedded::EmbeddedDispatch<WorkerBlobStore, WorkerNamespaceStore, H>,
+        ConfigError,
+    > {
+        let pipe = pipeline(env, cfg, hooks, request_budget)?;
+        let store = WorkerNamespaceStore::new(
+            StubTransport::new(env.clone(), cfg.placement.clone()),
+            cfg.probe_partition(),
+        )
+        .with_budget(request_budget.clone());
+        Ok(crate::embedded::EmbeddedDispatch::new(
+            pipe,
+            store,
+            crate::sharding_guard::DeploymentGuard::of(cfg),
+        ))
     }
 
     /// The request-budgeted embedding pipeline for configured bindings/hooks.
@@ -2563,16 +2586,12 @@ mod glue {
             cfg.probe_partition(),
         )
         .with_budget(request_budget.clone());
-        let checked = match check_mode(&meta, cfg.sharding).await {
-            Ok(Outcome::Ok) => {
-                check_addressing(
-                    &meta,
-                    matches!(cfg.addressing, mkit_server::Addressing::Multi(_)),
-                )
-                .await
-            }
-            outcome => outcome,
-        };
+        let checked = check_deployment(
+            &meta,
+            cfg.sharding,
+            matches!(cfg.addressing, mkit_server::Addressing::Multi(_)),
+        )
+        .await;
         if let Err(error) = checked
             .map_err(crate::sharding_guard::GuardError::Storage)
             .and_then(Outcome::into_result)
@@ -2670,21 +2689,9 @@ mod glue {
             cfg.probe_partition(),
         )
         .with_budget(request_budget.clone());
-        let jurisdiction = cfg.placement.jurisdiction.as_deref();
-        let multi = matches!(cfg.addressing, mkit_server::Addressing::Multi(_));
-        let cached =
-            SHARDING_GUARD.with(|cache| Settled::cached(cache, cfg.sharding, multi, jurisdiction));
-        let checked = if let Some(outcome) = cached {
-            outcome.into_result()
-        } else {
-            // This request owns every await. Only settled data crosses requests.
-            let result = match check_mode(&meta, cfg.sharding).await {
-                Ok(Outcome::Ok) => check_addressing(&meta, multi).await,
-                settled => settled,
-            };
-            SHARDING_GUARD
-                .with(|cache| Settled::finish(cache, cfg.sharding, multi, jurisdiction, result))
-        };
+        let checked = crate::sharding_guard::DeploymentGuard::of(cfg)
+            .check(&meta)
+            .await;
         if let Err(error) = checked {
             if scanner_request {
                 return crate::scanner_retrieval::not_found();

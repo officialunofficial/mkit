@@ -28,6 +28,7 @@ pub mod clearance;
 mod coordinator;
 mod download;
 mod durable_outcome;
+mod embedded;
 mod epoch;
 #[cfg(feature = "__test-faults")]
 pub(crate) mod faults;
@@ -140,6 +141,7 @@ pub(crate) use admission::validate_decision;
 pub use auth::{AuthMode, Authenticated, HeaderValues, RequestMeta};
 pub use download::{DownloadChunk, DownloadStream};
 pub use durable_outcome::{DeliveryError, Outcome, OutcomeKind};
+pub use embedded::{EmbeddedGate, EmbeddedProcedure, Fork as EmbeddedFork, NoGate};
 #[cfg(feature = "__test-faults")]
 pub use faults::{
     BUMP_EPOCH_HEADER, CLOCK_SKEW_HEADER, FAULT_HEADER, FailOnce, FaultHooks, FaultPoint,

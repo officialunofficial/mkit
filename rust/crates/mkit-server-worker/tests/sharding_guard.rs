@@ -14,7 +14,7 @@ use mkit_server::{
 use mkit_server_worker::naming::do_target;
 use mkit_server_worker::ns_client::DoNamespaceStore;
 use mkit_server_worker::sharding_guard::{
-    GuardError, Outcome, Settled, check_addressing, check_mode,
+    GuardError, Outcome, Settled, check_addressing, check_deployment, check_mode,
 };
 
 // Same cache operations as the adapter; each returned future belongs to its
@@ -46,10 +46,7 @@ impl DeploymentGuard {
         if let Some(outcome) = Settled::cached(&self.0, mode, multi, None) {
             return outcome.into_result();
         }
-        let result = match check_mode(&store, mode).await {
-            Ok(Outcome::Ok) => check_addressing(&store, multi).await,
-            settled => settled,
-        };
+        let result = check_deployment(&store, mode, multi).await;
         Settled::finish(&self.0, mode, multi, None, result)
     }
 }

@@ -320,3 +320,74 @@ pub async fn check_addressing<S: NamespaceStore>(
         }
     })
 }
+
+/// Both deployment markers in order: the sharding mode, then (only if it
+/// holds) the addressing. The one composition every entry point uses.
+///
+/// # Errors
+/// Backend errors are returned separately from definitive marker outcomes.
+pub async fn check_deployment<S: NamespaceStore>(
+    store: &S,
+    sharding: Sharding,
+    multi: bool,
+) -> Result<Outcome, StoreError> {
+    match check_mode(store, sharding).await {
+        Ok(Outcome::Ok) => check_addressing(store, multi).await,
+        settled => settled,
+    }
+}
+
+thread_local! {
+    static SETTLED: RefCell<Option<Settled>> = const { RefCell::new(None) };
+}
+
+/// The deployment a request must be compatible with, checked the way the
+/// Worker's fetch path checks it: [`check_deployment`] once per isolate, the
+/// first definitive answer cached. The cache is per isolate and keyed by the
+/// deployment settings, not by store, exactly as on the fetch path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeploymentGuard {
+    sharding: Sharding,
+    multi: bool,
+    jurisdiction: Option<String>,
+}
+
+impl DeploymentGuard {
+    /// The guard for explicit deployment settings.
+    #[must_use]
+    pub fn new(sharding: Sharding, multi: bool, jurisdiction: Option<&str>) -> Self {
+        Self {
+            sharding,
+            multi,
+            jurisdiction: jurisdiction.map(str::to_owned),
+        }
+    }
+
+    /// The guard for a configured deployment.
+    #[must_use]
+    pub fn of(cfg: &crate::adapter::WorkerConfig) -> Self {
+        Self::new(
+            cfg.sharding,
+            matches!(cfg.addressing, mkit_server::Addressing::Multi(_)),
+            cfg.placement.jurisdiction.as_deref(),
+        )
+    }
+
+    /// Check `store` against the deployment, through the isolate's cache.
+    ///
+    /// # Errors
+    /// [`GuardError::Refused`] for a definitive incompatibility,
+    /// [`GuardError::Storage`] for a transient backend failure (never cached).
+    pub async fn check<S: NamespaceStore>(&self, store: &S) -> Result<(), GuardError> {
+        let jurisdiction = self.jurisdiction.as_deref();
+        let cached =
+            SETTLED.with(|cache| Settled::cached(cache, self.sharding, self.multi, jurisdiction));
+        if let Some(outcome) = cached {
+            return outcome.into_result();
+        }
+        // This request owns every await. Only settled data crosses requests.
+        let result = check_deployment(store, self.sharding, self.multi).await;
+        SETTLED
+            .with(|cache| Settled::finish(cache, self.sharding, self.multi, jurisdiction, result))
+    }
+}

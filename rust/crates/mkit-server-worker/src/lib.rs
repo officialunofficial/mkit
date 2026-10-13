@@ -73,6 +73,7 @@ pub mod classes;
 pub mod clock;
 pub mod do_sql;
 pub mod durable_objects;
+pub mod embedded;
 pub mod embedding;
 #[cfg(feature = "__test-faults")]
 pub mod faults;

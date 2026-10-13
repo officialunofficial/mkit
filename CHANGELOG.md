@@ -98,6 +98,25 @@ collect the applicable entries between their old and new immutable pins.
   mkit-core's synchronous `Transport`, so every existing scheme keeps
   working. `mkit clone`, `fetch` and `pull` are thin wrappers over it with
   unchanged output and exit codes. No wire or stored-format change.
+- Embedded dispatch for procedures with no Connect route, fork first
+  (SPEC-SERVER §9.9). `Pipeline::dispatch_fork` (generic form
+  `dispatch_embedded::<P, _>` over the new `EmbeddedProcedure` trait) takes the
+  request headers and the canonical body and authenticates as `Procedure::Fork`
+  (auth v2, body commitment), runs an `EmbeddedGate` (the embedder's deployment
+  check, then an optional pre-dispatch policy) and `fork_repo`, returning the
+  typed `ForkResult` or the pipeline's `ServerError` with its status,
+  `Retry-After` and details. The policy is skipped only for a replay of a
+  completed fork with consistent job evidence; the evidence check moved into
+  mkit (`fork::CompletedFork`, fail closed) and is also available as the
+  read-only `Pipeline::completed_fork`, which answers a witness and never a
+  result. The Workers adapter adds `embedded::EmbeddedDispatch` (and, on
+  wasm32, `adapter::embedded_dispatch`) which runs the fetch path's deployment
+  guard (`sharding_guard::DeploymentGuard`, now the one implementation behind
+  fetch, the admin mount and the embedded entry). Embedders no longer need
+  `store::adapter_spi::{keys, codec}`, `fork::decode_job` or `replay::classify`
+  to recognise a completed fork. An embedder can sign the fork request with
+  `mkit-client`'s `Client::sign_envelope`; no dependency is added. Additive;
+  no wire change, no stored-format change, no store reset.
 - Ticketless same-repository branch creation from an authoritative published
   pair: `AdvanceRefsRequest.source_ref` (field 11), optional `expected_tip`
   (field 12), and `Pipeline::advance_refs_from_published{,_with_meta}`.
