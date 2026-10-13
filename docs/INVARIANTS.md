@@ -2633,3 +2633,20 @@ select the outcome and misstate its cost.
 **Enforced by:** Decode admission, direct index writes, the inline verifier's pre-staging check, and the shared denial-wave helper;
 `inventory_stage_guard` covers a block landing during staging, and denial-wave
 unit tests cover latency, call charges, reservations, and mixed failures.
+
+## Native client headers and request budgets
+
+**Always:** `NativeHttp` preserves supplied user-agent and gzip/identity-only
+accept-encoding values, refuses unsupported or malformed negotiation before
+connecting, and bounds each HTTP exchange through response receipt. Metadata
+uses a 30-second default; UploadPack, UploadPart and DownloadPack use 300 seconds.
+The two budgets can be configured independently.
+
+**Because:** observer headers replace transport defaults, and metadata work
+must not inherit a pack-transfer deadline.
+
+**If violated:** host attempt policy could be silently replaced, unsupported
+responses negotiated, or metadata connections held open for too long.
+
+**Enforced by:** `mkit-sync::NativeHttp::send_typed`, `request_headers`, and the
+`native_http` header-preservation, negotiation-refusal and timeout tests.

@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use http::header::{ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_LENGTH, USER_AGENT};
-use http::{HeaderValue, Request, Response};
+use http::{HeaderMap, HeaderValue, Request, Response, Uri};
 use http_body_util::{BodyExt as _, Full};
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client as HyperClient;
@@ -24,8 +24,10 @@ use rustls::{ClientConfig, RootCertStore};
 
 use crate::client_source::Executor;
 
-/// Default wall-clock bound on one request, response body included.
-const DEFAULT_TIMEOUT: Duration = Duration::from_mins(10);
+/// Default wall-clock bound on metadata requests, response body included.
+pub const DEFAULT_METADATA_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default wall-clock bound on pack/part transfers, response body included.
+pub const DEFAULT_TRANSFER_TIMEOUT: Duration = Duration::from_secs(300);
 
 type Connector = hyper_rustls::HttpsConnector<HttpConnector>;
 
@@ -39,14 +41,16 @@ pub struct NativeHttp {
     // that drives them.
     client: HyperClient<Connector, Full<Bytes>>,
     runtime: tokio::runtime::Runtime,
-    timeout: Duration,
+    metadata_timeout: Duration,
+    transfer_timeout: Duration,
     allow_insecure_http: bool,
 }
 
 impl std::fmt::Debug for NativeHttp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NativeHttp")
-            .field("timeout", &self.timeout)
+            .field("metadata_timeout", &self.metadata_timeout)
+            .field("transfer_timeout", &self.transfer_timeout)
             .finish_non_exhaustive()
     }
 }
@@ -104,7 +108,8 @@ impl NativeHttp {
         Ok(Self {
             runtime,
             client,
-            timeout: DEFAULT_TIMEOUT,
+            metadata_timeout: DEFAULT_METADATA_TIMEOUT,
+            transfer_timeout: DEFAULT_TRANSFER_TIMEOUT,
             allow_insecure_http: false,
         })
     }
@@ -119,11 +124,36 @@ impl NativeHttp {
         self
     }
 
-    /// Bound one request, response body included. The default is ten minutes.
+    /// Bound both metadata and transfer requests, response bodies included.
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
+        self.metadata_timeout = timeout;
+        self.transfer_timeout = timeout;
         self
+    }
+
+    /// Bound metadata requests, response body included (default: 30 seconds).
+    #[must_use]
+    pub fn with_metadata_timeout(mut self, timeout: Duration) -> Self {
+        self.metadata_timeout = timeout;
+        self
+    }
+
+    /// Bound `UploadPack`, `UploadPart` and `DownloadPack`, response body
+    /// included (default: 300 seconds). Other procedures use the metadata bound.
+    #[must_use]
+    pub fn with_transfer_timeout(mut self, timeout: Duration) -> Self {
+        self.transfer_timeout = timeout;
+        self
+    }
+
+    fn request_timeout(&self, uri: &Uri) -> Duration {
+        match uri.path() {
+            mkit_client::procedures::UPLOAD_PACK
+            | mkit_client::procedures::UPLOAD_PART
+            | "/mkit.transport.v1.TransportService/DownloadPack" => self.transfer_timeout,
+            _ => self.metadata_timeout,
+        }
     }
 }
 
@@ -187,26 +217,92 @@ fn gunzip_bounded(compressed: &[u8], limit: usize) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-impl HttpTransport for NativeHttp {
-    async fn send(
+/// Native request refusal or exchange failure.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NativeHttpError {
+    /// Negotiation names a coding other than gzip/identity, or is malformed.
+    #[error("unsupported accept-encoding (gzip and identity only)")]
+    UnsupportedAcceptEncoding,
+    /// An HTTP, TLS, response-limit or timeout failure.
+    #[error("{0}")]
+    Exchange(String),
+}
+
+/// Preserve every supplied value. Refuse negotiation we cannot decode,
+/// including wildcards and unsupported codings even when their quality is zero.
+fn request_headers(headers: &mut HeaderMap) -> Result<(), NativeHttpError> {
+    for value in headers.get_all(ACCEPT_ENCODING) {
+        let value = value
+            .to_str()
+            .map_err(|_| NativeHttpError::UnsupportedAcceptEncoding)?;
+        if value.trim().is_empty() {
+            continue; // Empty negotiation requests identity only.
+        }
+        for entry in value.split(',') {
+            let mut fields = entry.trim().split(';');
+            let coding = fields.next().unwrap_or_default().trim();
+            if !coding.eq_ignore_ascii_case("gzip") && !coding.eq_ignore_ascii_case("identity") {
+                return Err(NativeHttpError::UnsupportedAcceptEncoding);
+            }
+            if let Some(parameter) = fields.next() {
+                let Some((name, quality)) = parameter.trim().split_once('=') else {
+                    return Err(NativeHttpError::UnsupportedAcceptEncoding);
+                };
+                let quality = quality.trim();
+                let valid_quality = match quality.split_once('.') {
+                    None => matches!(quality, "0" | "1"),
+                    Some((whole, fraction)) => {
+                        fraction.len() <= 3
+                            && fraction.bytes().all(|b| b.is_ascii_digit())
+                            && (whole == "0"
+                                || (whole == "1" && fraction.bytes().all(|b| b == b'0')))
+                    }
+                };
+                if !name.trim().eq_ignore_ascii_case("q")
+                    || !valid_quality
+                    || fields.next().is_some()
+                {
+                    return Err(NativeHttpError::UnsupportedAcceptEncoding);
+                }
+            }
+        }
+    }
+    headers
+        .entry(ACCEPT_ENCODING)
+        .or_insert(HeaderValue::from_static("gzip"));
+    headers
+        .entry(USER_AGENT)
+        .or_insert(HeaderValue::from_static(concat!(
+            "mkit-sync/",
+            env!("CARGO_PKG_VERSION")
+        )));
+    Ok(())
+}
+
+impl NativeHttp {
+    /// Send one request with typed native errors. The [`HttpTransport`] adapter
+    /// uses the same path, converting errors to its required string form.
+    ///
+    /// # Errors
+    /// Unsupported request negotiation is refused before connecting. Exchange
+    /// failures include TLS, redirects, response bounds and the request timeout.
+    pub async fn send_typed(
         &self,
         request: Request<Vec<u8>>,
         response_limit: usize,
-    ) -> Result<Response<Vec<u8>>, String> {
+    ) -> Result<Response<Vec<u8>>, NativeHttpError> {
+        let timeout = self.request_timeout(request.uri());
         let (mut parts, body) = request.into_parts();
         if parts.uri.scheme_str() == Some("http")
             && !self.allow_insecure_http
             && !parts.uri.host().is_some_and(is_loopback_host)
         {
-            return Err("cleartext http to a non-loopback host refused".to_owned());
+            return Err(NativeHttpError::Exchange(
+                "cleartext http to a non-loopback host refused".to_owned(),
+            ));
         }
-        parts
-            .headers
-            .insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
-        parts.headers.insert(
-            USER_AGENT,
-            HeaderValue::from_static(concat!("mkit-sync/", env!("CARGO_PKG_VERSION"))),
-        );
+        request_headers(&mut parts.headers)?;
         let request = Request::from_parts(parts, Full::new(Bytes::from(body)));
         let exchange = async {
             let response = self
@@ -243,9 +339,22 @@ impl HttpTransport for NativeHttp {
             parts.headers.remove(CONTENT_LENGTH);
             Ok(Response::from_parts(parts, bytes))
         };
-        tokio::time::timeout(self.timeout, exchange)
+        tokio::time::timeout(timeout, exchange)
             .await
-            .map_err(|_| "request timed out".to_owned())?
+            .map_err(|_| NativeHttpError::Exchange("request timed out".to_owned()))?
+            .map_err(NativeHttpError::Exchange)
+    }
+}
+
+impl HttpTransport for NativeHttp {
+    async fn send(
+        &self,
+        request: Request<Vec<u8>>,
+        response_limit: usize,
+    ) -> Result<Response<Vec<u8>>, String> {
+        self.send_typed(request, response_limit)
+            .await
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -273,5 +382,85 @@ impl Clock for NativeClock {
 
     async fn wait(&self, duration: Duration) {
         tokio::time::sleep(duration).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timeout_defaults_and_overrides_are_selected_by_exact_procedure() {
+        let http = NativeHttp::new().expect("native transport");
+        assert_eq!(DEFAULT_METADATA_TIMEOUT, Duration::from_secs(30));
+        assert_eq!(DEFAULT_TRANSFER_TIMEOUT, Duration::from_secs(300));
+        for procedure in [
+            "GetServerInfo",
+            "ListRefs",
+            "ReadRef",
+            "PackExists",
+            "UpdateRef",
+            "BeginUpload",
+            "CompleteUpload",
+            "AdvanceRefs",
+        ] {
+            let uri =
+                format!("https://example.invalid/mkit.transport.v1.TransportService/{procedure}")
+                    .parse::<Uri>()
+                    .expect("uri");
+            assert_eq!(http.request_timeout(&uri), DEFAULT_METADATA_TIMEOUT);
+        }
+        for procedure in ["DownloadPack", "UploadPack", "UploadPart"] {
+            let uri =
+                format!("https://example.invalid/mkit.transport.v1.TransportService/{procedure}")
+                    .parse::<Uri>()
+                    .expect("uri");
+            assert_eq!(http.request_timeout(&uri), DEFAULT_TRANSFER_TIMEOUT);
+        }
+        let metadata: Uri = "https://example.invalid/other/UploadPack"
+            .parse()
+            .expect("uri");
+        let transfer: Uri = "https://example.invalid/mkit.transport.v1.TransportService/UploadPart"
+            .parse()
+            .expect("uri");
+        let http = http
+            .with_timeout(Duration::from_secs(7))
+            .with_metadata_timeout(Duration::from_secs(1));
+        assert_eq!(http.request_timeout(&metadata), Duration::from_secs(1));
+        assert_eq!(http.request_timeout(&transfer), Duration::from_secs(7));
+        let http = http.with_transfer_timeout(Duration::from_secs(2));
+        assert_eq!(http.request_timeout(&metadata), Duration::from_secs(1));
+        assert_eq!(http.request_timeout(&transfer), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn defaults_and_compatible_negotiation_preserve_all_values() {
+        let mut headers = HeaderMap::new();
+        request_headers(&mut headers).expect("defaults");
+        assert_eq!(headers[ACCEPT_ENCODING], "gzip");
+        assert_eq!(
+            headers[USER_AGENT],
+            concat!("mkit-sync/", env!("CARGO_PKG_VERSION"))
+        );
+        for values in [
+            vec![""],
+            vec!["identity"],
+            vec!["GZip;q=1.000", "identity;q=0"],
+            vec!["gzip;q=0.5, identity;q=0.1"],
+        ] {
+            let mut headers = HeaderMap::new();
+            for value in &values {
+                headers.append(
+                    ACCEPT_ENCODING,
+                    HeaderValue::from_str(value).expect("header"),
+                );
+            }
+            let original = headers.clone();
+            request_headers(&mut headers).expect("compatible");
+            assert_eq!(
+                headers.get_all(ACCEPT_ENCODING),
+                original.get_all(ACCEPT_ENCODING)
+            );
+        }
     }
 }

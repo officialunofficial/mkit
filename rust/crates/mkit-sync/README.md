@@ -99,12 +99,21 @@ the server denies all come back as the same `SyncError::RepositoryNotFound`
 
 `NativeHttp` implements `mkit_client::HttpTransport` with hyper over rustls
 (`ring`) on a **current-thread** tokio runtime (DNS lookups use tokio's blocking pool), HTTP/1.1 only. It speaks
-**gzip as its only content coding** (`accept-encoding: gzip`; a response in any
+**gzip as its only compressed content coding** (`accept-encoding: gzip` by default; a response in any
 other coding is refused, and an inflated body is bounded by the same response
 limit as a plain one), refuses cleartext `http` to any host but loopback unless
 `allow_insecure_http(true)`, never follows a redirect (a signed request must not be
 replayed to another origin), bounds every response while receiving it, and
-bounds each request by a timeout (ten minutes by default). TLS trusts the
+bounds metadata requests by 30 seconds and `UploadPack`, `UploadPart` and
+`DownloadPack` by 300 seconds, including receipt of the response body. These
+defaults replace the previous ten-minute bound. Use `with_metadata_timeout` and
+`with_transfer_timeout` to tune them independently, or `with_timeout` to set both.
+Supplied `user-agent` and gzip/identity-compatible `accept-encoding` values are
+preserved. Negotiation naming another coding (including wildcards or a coding
+with quality zero), or malformed negotiation, is refused before connecting.
+`send_typed` returns `NativeHttpError::UnsupportedAcceptEncoding`; the
+`HttpTransport` adapter converts native errors to its string error contract.
+TLS trusts the
 built-in web PKI roots unless the caller passes a `rustls::ClientConfig`.
 `NativeClock` supplies the epoch clock, OS entropy for nonces and the tokio
 timer. Calling `NativeHttp` from inside another tokio runtime panics, as

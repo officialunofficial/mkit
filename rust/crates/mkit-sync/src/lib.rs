@@ -58,7 +58,10 @@ pub use error::SyncError;
 pub use fetch::FetchReport;
 pub use lock::{SERVE_LOCK, WORKTREE_LOCK, warn_if_served};
 #[cfg(feature = "connect-native")]
-pub use native::{NativeClock, NativeHttp, default_tls_config};
+pub use native::{
+    DEFAULT_METADATA_TIMEOUT, DEFAULT_TRANSFER_TIMEOUT, NativeClock, NativeHttp, NativeHttpError,
+    default_tls_config,
+};
 pub use observer::{NoopObserver, SyncEvent, SyncObserver};
 pub use pull::{PullOutcome, PullReport, fetch, pull};
 pub use source::{ErrorClassifier, RemoteSource, TransportSource};

@@ -42,8 +42,9 @@ Every signed call takes an optional `Identity` (the nonce, which is also the
 `Idempotency-Key`, plus the created and expiry times). The call uses it exactly
 and returns it in `Reply::identity`. Persist `Client::new_identity()` before a
 call, pass it, and after a restart replay the same call with the same identity:
-the request is byte-identical and, for a write, a server that saved the first
-reply returns it instead of applying the operation again (signed reads are
+the authenticated operation, body and identity are identical; unsigned observer
+headers may be regenerated. Exact-byte replay applies to a retained request.
+For a write, a server that saved the first reply returns it instead of applying the operation again (signed reads are
 idempotent and keep no reply). An identity past its expiry is rejected by the
 server. Without one, each call draws a fresh
 identity from the clock and returns it. The window is at most 300 s.
