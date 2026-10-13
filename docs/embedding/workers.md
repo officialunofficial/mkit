@@ -323,7 +323,10 @@ A read touches many Durable Objects (every storage partition is its own object),
 and objects idle for roughly 70-140 seconds are evicted, so the first read after
 a quiet period is slower. Use Workers automatic tracing, not custom telemetry;
 see [diagnosing slow and cold reads](../operations/workers.md#diagnosing-slow-and-cold-reads)
-for the expected object counts per read shape and placement guidance.
+for the expected object counts per read shape.
+Use an explicit Worker Placement Hint and matching hints for mkit storage,
+your own calling Durable Objects, and R2 buckets.
+See [placement](../operations/workers.md#placement) for configuration and trace verification.
 
 ## Decoder patch and per-pin upgrades
 
