@@ -372,11 +372,24 @@ pub async fn verify_ticketed<B: MultipartBlobStore, S: NamespaceStore>(
     ticket_ids: &[Hash],
     head: Hash,
     cfg: IndexedConfig,
+    takedown_denial: bool,
     clock: &dyn Clock,
     metrics: &dyn Metrics,
 ) -> Result<StagedCommits, ServerError> {
     verify_ticketed_optional(
-        blobs, store, shards, repo, source, tickets, ticket_ids, head, cfg, clock, metrics, None,
+        blobs,
+        store,
+        shards,
+        repo,
+        source,
+        tickets,
+        ticket_ids,
+        head,
+        cfg,
+        takedown_denial,
+        clock,
+        metrics,
+        None,
     )
     .await
 }
@@ -396,6 +409,7 @@ pub async fn verify_ticketed_inspected<B: MultipartBlobStore, S: NamespaceStore>
     ticket_ids: &[Hash],
     head: Hash,
     cfg: IndexedConfig,
+    takedown_denial: bool,
     clock: &dyn Clock,
     metrics: &dyn Metrics,
     inspection_limit: usize,
@@ -410,6 +424,7 @@ pub async fn verify_ticketed_inspected<B: MultipartBlobStore, S: NamespaceStore>
         ticket_ids,
         head,
         cfg,
+        takedown_denial,
         clock,
         metrics,
         Some(inspection_limit),
@@ -428,6 +443,7 @@ async fn verify_ticketed_optional<B: MultipartBlobStore, S: NamespaceStore>(
     ticket_ids: &[Hash],
     head: Hash,
     cfg: IndexedConfig,
+    takedown_denial: bool,
     clock: &dyn Clock,
     metrics: &dyn Metrics,
     inspection_limit: Option<usize>,
@@ -442,6 +458,8 @@ async fn verify_ticketed_optional<B: MultipartBlobStore, S: NamespaceStore>(
     } else {
         None
     };
+    let gated_store = crate::store::DenialReads::new(store, takedown_denial);
+    let store = &gated_store;
     let mut acquired = BTreeMap::new();
     let result = boxed_verify_ticketed_inner(
         blobs,
@@ -477,7 +495,7 @@ async fn verify_ticketed_optional<B: MultipartBlobStore, S: NamespaceStore>(
 #[allow(clippy::too_many_arguments)]
 fn boxed_verify_ticketed_inner<'a, B: MultipartBlobStore, S: NamespaceStore>(
     blobs: &'a B,
-    store: &'a S,
+    store: &'a crate::store::DenialReads<S>,
     shards: &'a dyn ShardMap,
     repo: &'a RepoId,
     source: &'a Partition,
@@ -510,7 +528,7 @@ fn boxed_verify_ticketed_inner<'a, B: MultipartBlobStore, S: NamespaceStore>(
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
     blobs: &B,
-    store: &S,
+    store: &crate::store::DenialReads<S>,
     shards: &dyn ShardMap,
     repo: &RepoId,
     source: &Partition,
@@ -970,7 +988,8 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
             }
         }
     }
-    crate::takedown::denial::require_clear_many(store, staged.keys().copied()).await?;
+    crate::takedown::denial::require_clear_many(store, store.enabled_ids(staged.keys().copied()))
+        .await?;
     for (id, (_, object, _)) in &staged {
         if verify_object_signature(object).is_err() {
             let owner = staged_owner[id];
@@ -1149,13 +1168,12 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
             let mut batch = Batch::new().require(Precondition::NotAfter(deadline(clock)));
             crate::takedown::denial::require_clear_many(
                 store,
-                direct
-                    .puts
-                    .iter()
-                    .filter_map(|(key, _)| match keys::parse(key) {
+                store.enabled_ids(direct.puts.iter().filter_map(|(key, _)| {
+                    match keys::parse(key) {
                         Some(keys::ParsedKey::ObjectIndex { object, .. }) => Some(object),
                         _ => None,
-                    }),
+                    }
+                })),
             )
             .await?;
             for (key, value) in direct.puts {

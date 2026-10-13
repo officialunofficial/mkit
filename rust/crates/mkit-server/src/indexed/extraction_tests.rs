@@ -169,6 +169,7 @@ fn extraction_handler(
 ) -> VerifyTimer<Shared<MemoryKv>, Shared<MemoryBlobStore>, Arc<Windows>, TestExtraction> {
     let h = rig.handler();
     VerifyTimer {
+        takedown_denial: true,
         remote: h.remote,
         blobs: h.blobs,
         windows: h.windows,
@@ -438,6 +439,7 @@ fn a_terminal_block_retains_progress_that_prevents_preeffect_reclaim() {
     assert!(read_blob(&rig.blobs, &BlobKey::object(id)).is_some());
     block_on(
         ContentIndex::new(crate::store::BorrowedStore(rig.store.as_ref())).block(
+            &crate::takedown::DenialCapability::for_test(),
             &id,
             &crate::store::BlockEntry::new("dmca", 1),
             u64::try_from(rig.clock.now_ms()).unwrap(),
@@ -733,6 +735,7 @@ fn native(
         &ids,
         head,
         rig.cfg,
+        true,
         rig.clock.as_ref(),
         rig.recorder.as_ref(),
     ))
@@ -1514,3 +1517,96 @@ fn extraction_effects_refuse_a_lost_source_lease_before_publication() {
 
 #[path = "geometry_tests.rs"]
 mod geometry_tests;
+
+#[test]
+fn denial_off_still_extracts_chunked_content_and_writes_holders_and_inventory() {
+    let chunks = [
+        Object::Blob(Blob {
+            data: vec![3; 4_000],
+        }),
+        Object::Blob(Blob {
+            data: vec![5; 9_000],
+        }),
+    ];
+    let chunk_ids: Vec<_> = chunks.iter().map(|object| object.id().unwrap()).collect();
+    let manifest = Object::ChunkedBlob(ChunkedBlob {
+        total_size: 13_000,
+        chunk_size: 0,
+        chunks: chunk_ids,
+    });
+    let id = manifest.id().unwrap();
+    let (tree, commit, head) = tree_head(&[id]);
+    let mut objects = chunks.to_vec();
+    objects.extend([manifest, tree, commit]);
+    let bytes = pack(&objects);
+    let mut holder_rows = Vec::new();
+    for takedown_denial in [false, true] {
+        let rig = Rig::new();
+        let ticket = rig.add(&bytes);
+        assert!(rig.check(&[(&ticket.0, ticket.1)], head).is_err());
+        let extension = TestExtraction::new(&rig);
+        let mut verifier = extraction_handler(&rig, extension);
+        verifier.takedown_denial = takedown_denial;
+        let registry =
+            TimerRegistry::new()
+                .register(verifier)
+                .register(crate::relay::RelayHandler {
+                    target: crate::store::DenialReads::new(
+                        Shared(rig.store.clone()),
+                        takedown_denial,
+                    ),
+                    hook: crate::relay::HolderRelayHook {
+                        clock: rig.clock.clone(),
+                    },
+                    budget: crate::relay::RelayBudget::default(),
+                });
+        for _ in 0..3_000 {
+            if rig.finished(&ticket.0.pack_id)
+                && !rig.job(&ticket.0.pack_id).unwrap().closure_retry()
+            {
+                break;
+            }
+            block_on(run_due(
+                rig.store.as_ref(),
+                &rig.source(),
+                &registry,
+                rig.clock.as_ref(),
+                u64::try_from(rig.clock.now_ms()).unwrap(),
+                &TickBudget::default(),
+            ))
+            .unwrap();
+            rig.clock.advance(1_000);
+        }
+        assert!(rig.finished(&ticket.0.pack_id));
+        assert_eq!(rig.job(&ticket.0.pack_id).unwrap().outcome, None);
+        assert_eq!(
+            read_blob(&rig.blobs, &BlobKey::object(id)),
+            Some([vec![3; 4_000], vec![5; 9_000]].concat())
+        );
+        assert_holder(&rig, id);
+        holder_rows.push(
+            block_on(rig.store.get(
+                &content_shard(&id),
+                &keys::holder(&id, &rig.repo.namespace, &rig.repo.name).unwrap(),
+            ))
+            .unwrap()
+            .unwrap(),
+        );
+        let count = std::sync::atomic::AtomicUsize::new(0);
+        block_on(crate::takedown::inventory::visit(
+            rig.store.as_ref(),
+            &ticket.0.pack_id,
+            false,
+            |_, _| async {
+                count.fetch_add(1, Ordering::SeqCst);
+                Ok(false)
+            },
+        ))
+        .unwrap();
+        assert_eq!(count.load(Ordering::SeqCst), objects.len());
+    }
+    assert_eq!(
+        holder_rows[0], holder_rows[1],
+        "holder encoding is independent of denial mode"
+    );
+}

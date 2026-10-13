@@ -203,6 +203,7 @@ async fn fixture(size: usize) -> Fixture {
             MemoryBlobStore::default(),
             config,
         )
+        .with_denial_capability(Some(crate::takedown::DenialCapability::for_test()))
     });
     let bytes: Vec<u8> = (0..size).map(|i| u8::try_from(i % 251).unwrap()).collect();
     let object = hash(&bytes);
@@ -1213,6 +1214,7 @@ fn restart_work<N: NamespaceStore + Clone>(
             f.work.preserved.clone(),
             config,
         )
+        .with_denial_capability(Some(crate::takedown::DenialCapability::for_test()))
     }
 }
 #[tokio::test]
@@ -1336,4 +1338,101 @@ async fn completed_takedown_replay_leaves_timer15_progress_for_restart() {
         (Phase::Acquire, 1),
         "reconstructed timer handler advances the durable action"
     );
+}
+
+#[derive(Clone)]
+struct CountAdminIo {
+    store: Arc<MemoryKv>,
+    calls: Arc<std::sync::atomic::AtomicU32>,
+    applies: Arc<std::sync::atomic::AtomicU32>,
+}
+impl NamespaceStore for CountAdminIo {
+    fn capabilities(&self) -> crate::StoreCapabilities {
+        self.store.capabilities()
+    }
+    async fn get(
+        &self,
+        partition: &Partition,
+        key: &Key,
+    ) -> Result<Option<crate::Value>, crate::StoreError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.store.get(partition, key).await
+    }
+    async fn scan(
+        &self,
+        partition: &Partition,
+        start: &Key,
+        end: &Key,
+        after: Option<&Cursor>,
+        limit: u32,
+    ) -> Result<crate::ScanPage, crate::StoreError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.store.scan(partition, start, end, after, limit).await
+    }
+    async fn apply(
+        &self,
+        partition: &Partition,
+        batch: Batch,
+    ) -> Result<BatchOutcome, crate::StoreError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.applies
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.store.apply(partition, batch).await
+    }
+    async fn stats(
+        &self,
+        partition: &Partition,
+    ) -> Result<crate::PartitionStats, crate::StoreError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.store.stats(partition).await
+    }
+    async fn probe(&self) -> Result<(), crate::StoreError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.store.probe().await
+    }
+}
+
+#[tokio::test]
+async fn signed_disabled_takedown_refuses_before_nonce_audit_or_action_writes() {
+    let clock = Arc::new(ManualClock::new(100));
+    let metadata = Arc::new(MemoryKv::with_clock(clock.clone()));
+    let store = CountAdminIo {
+        store: metadata.clone(),
+        calls: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        applies: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+    };
+    let root = Partition::Namespace(NamespaceKey::deployment_default());
+    let before = metadata.stats(&root).await.unwrap();
+    let work = Work::new(
+        store.clone(),
+        MemoryBlobStore::default(),
+        MemoryBlobStore::default(),
+        work::WorkConfig::new(
+            root.clone(),
+            Arc::new(SinglePartition),
+            Addressing::Multi(crate::repo::MultiAddressing::new()),
+            1_000,
+            clock,
+        ),
+    );
+    let service = Service::new(store.clone(), root.clone(), Arc::new(SinglePartition));
+    let operations: Vec<Arc<dyn AdminOperations>> = vec![Arc::new(service), Arc::new(work)];
+    let input = json!({"repository":"root/repo","objectIds":[STANDARD.encode([3;32])],"operationId":"disabled","reason":"policy review"});
+    let (headers, body) = request(admin::TAKEDOWN_PATH, &input, 90);
+    for operations in operations {
+        // Other admin paths retain their existing policy and storage behavior.
+        assert!(operations.pre_dispatch(admin::SET_LEGAL_HOLD_PATH).is_ok());
+        let engine = Engine::new(store.clone(), root.clone(), config("moderation"))
+            .with_operations(operations);
+        let response = engine
+            .handle(admin::TAKEDOWN_PATH, &headers, &body, 100)
+            .await;
+        assert_eq!(response.status, 400);
+        let error: Json = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(error["code"], "failed_precondition");
+        assert_eq!(error["message"], "takedown denial disabled");
+        assert_eq!(store.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(store.applies.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(metadata.stats(&root).await.unwrap(), before);
+    }
 }

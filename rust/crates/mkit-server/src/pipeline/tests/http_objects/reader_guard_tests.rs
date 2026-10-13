@@ -1,4 +1,5 @@
 //! Batched guards retain the storage/response boundary for both reader views.
+use super::read_rounds::assert_no_denial_rows;
 use super::*;
 use crate::pipeline::{ReaderSession, ReaderView};
 use futures::FutureExt as _;
@@ -28,6 +29,7 @@ fn queued_stop(fx: &Fx, target: Hash) -> MemoryKv {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One mode matrix preserves both final-boundary contracts.
 fn concurrent_relay_alarm_and_guard_fault_keep_the_stop_durable_and_reads_closed() {
     for global_proofs in [false, true] {
         let mut fx = fixture_tweaked(Hooks::new(), http_cfg(), |c| c.takedown_denial = false);
@@ -65,14 +67,27 @@ fn concurrent_relay_alarm_and_guard_fault_keep_the_stop_durable_and_reads_closed
             );
         }
         let source = queued_stop(&fx, target);
+        // Off-mode rows are injected into an otherwise impossible store state.
+        // Keep the relay's own write snapshots separate from reader IO while
+        // retaining its failed-apply retry; on-mode uses the original spy.
+        let relay_spy = Spy {
+            inner: fx.pipe.meta.inner.clone(),
+            ..Spy::new(MemoryKv::default())
+        };
+        let relay_target = if global_proofs {
+            fx.pipe.meta.as_ref()
+        } else {
+            &relay_spy
+        };
         let registry = crate::timers::TimerRegistry::new().register(crate::relay::RelayHandler {
-            target: crate::store::BorrowedStore(fx.pipe.meta.as_ref()),
+            target: crate::store::BorrowedStore(relay_target),
             hook: crate::relay::NoHook,
             budget: crate::relay::RelayBudget::default(),
         });
         let tick = crate::timers::TickBudget::default();
-        fx.pipe.meta.fail_next_apply.store(true, Ordering::SeqCst);
+        relay_target.fail_next_apply.store(true, Ordering::SeqCst);
         armed.store(true, Ordering::SeqCst);
+        fx.pipe.meta.seen.lock().unwrap().clear();
         let ids = [target];
         let (read, alarm) = block_on(futures::future::join(
             reader.read_canonical_in(&mut session, &ids),
@@ -85,10 +100,15 @@ fn concurrent_relay_alarm_and_guard_fault_keep_the_stop_durable_and_reads_closed
                 &tick,
             ),
         ));
-        assert_eq!(read.unwrap_err().code(), crate::Code::Unavailable);
+        if global_proofs {
+            assert_eq!(read.unwrap_err().code(), crate::Code::Unavailable);
+        } else {
+            assert_eq!(read.unwrap(), [Some(serialize(&leaf).unwrap())]);
+            assert_no_denial_rows(&fx.pipe.meta.seen());
+        }
         let alarm = alarm.unwrap();
         assert_eq!(alarm.fired, 1);
-        assert!(!fx.pipe.meta.fail_next_apply.load(Ordering::SeqCst));
+        assert!(!relay_target.fail_next_apply.load(Ordering::SeqCst));
         assert!(
             block_on(source.get(&ns(), &keys::relay(1)))
                 .unwrap()
@@ -115,18 +135,22 @@ fn concurrent_relay_alarm_and_guard_fault_keep_the_stop_durable_and_reads_closed
                 .is_none()
         );
         fx.clear_calls();
-        assert_eq!(
-            block_on(reader.read_canonical_in(&mut session, &ids)).unwrap(),
-            [None]
-        );
-        assert!(
-            fx.calls.lock().unwrap().is_empty(),
-            "a delivered stop precedes blob access"
-        );
+        let answer = block_on(reader.read_canonical_in(&mut session, &ids)).unwrap();
+        if global_proofs {
+            assert_eq!(answer, [None]);
+            assert!(
+                fx.calls.lock().unwrap().is_empty(),
+                "a delivered stop precedes blob access"
+            );
+        } else {
+            assert_eq!(answer, [Some(serialize(&leaf).unwrap())]);
+            assert_no_denial_rows(&fx.pipe.meta.seen());
+        }
     }
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One mode matrix preserves both final-boundary contracts.
 fn target_and_pack_blocks_at_the_final_wave_hide_canonical_and_metadata_outputs() {
     for denial in [false, true] {
         for pack_block in [false, true] {
@@ -205,25 +229,46 @@ fn target_and_pack_blocks_at_the_final_wave_hide_canonical_and_metadata_outputs(
                     }
                     fx.clear_calls();
                     armed.store(true, Ordering::SeqCst);
+                    fx.pipe.meta.seen.lock().unwrap().clear();
                     if sizes_only {
-                        assert_eq!(
+                        let answers =
                             block_on(reader.object_metadata_in(&mut session, &[target, target]))
-                                .unwrap(),
-                            [None, None]
-                        );
+                                .unwrap();
+                        if denial {
+                            assert_eq!(answers, [None, None]);
+                        } else {
+                            let metadata = crate::pipeline::ObjectMetadata {
+                                kind: ObjectType::Blob,
+                                canonical_len: serialize(&leaf).unwrap().len() as u64,
+                                logical_len: Some(b"guarded leaf".len() as u64),
+                            };
+                            assert_eq!(answers, [Some(metadata), Some(metadata)]);
+                        }
                         assert!(fx.calls.lock().unwrap().is_empty());
                     } else {
-                        assert_eq!(
+                        let answers =
                             block_on(reader.read_canonical_in(&mut session, &[target, target]))
-                                .unwrap(),
-                            [None, None]
-                        );
+                                .unwrap();
+                        if denial {
+                            assert_eq!(answers, [None, None]);
+                        } else {
+                            assert_eq!(
+                                answers,
+                                [
+                                    Some(serialize(&leaf).unwrap()),
+                                    Some(serialize(&leaf).unwrap())
+                                ]
+                            );
+                        }
                         assert!(
                             !fx.calls.lock().unwrap().is_empty(),
-                            "stop arrives after raw loading"
+                            "raw bytes loaded before output"
                         );
                     }
-                    assert_eq!(reads.load(Ordering::SeqCst), 2);
+                    assert_eq!(reads.load(Ordering::SeqCst), if denial { 2 } else { 0 });
+                    if !denial {
+                        assert_no_denial_rows(&fx.pipe.meta.seen());
+                    }
                 }
             }
         }
@@ -309,11 +354,15 @@ fn an_external_base_stop_after_reconstruction_is_checked_at_the_final_boundary()
             }
             fx.clear_calls();
             armed.store(true, Ordering::SeqCst);
-            assert_eq!(
-                block_on(reader.read_canonical_in(&mut session, &[target])).unwrap(),
-                [None]
-            );
-            assert_eq!(reads.load(Ordering::SeqCst), 2);
+            fx.pipe.meta.seen.lock().unwrap().clear();
+            let answers = block_on(reader.read_canonical_in(&mut session, &[target])).unwrap();
+            if denial {
+                assert_eq!(answers, [None]);
+            } else {
+                assert_eq!(answers, [Some(serialize(&derived).unwrap())]);
+                assert_no_denial_rows(&fx.pipe.meta.seen());
+            }
+            assert_eq!(reads.load(Ordering::SeqCst), if denial { 2 } else { 0 });
             assert!(
                 !fx.blob_calls(BlobKey::pack(old_pack)).is_empty(),
                 "base loaded before final guard"
@@ -323,7 +372,8 @@ fn an_external_base_stop_after_reconstruction_is_checked_at_the_final_boundary()
 }
 
 #[test]
-fn global_proof_switch_only_controls_directory_reads_not_live_block_guards() {
+#[allow(clippy::too_many_lines)] // One mode matrix preserves both final-boundary contracts.
+fn denial_mode_controls_directory_and_live_block_reads() {
     for global_proofs in [false, true] {
         for metadata_only in [false, true] {
             let mut fx = fixture_tweaked(Hooks::new(), http_cfg(), |c| c.takedown_denial = false);
@@ -380,7 +430,10 @@ fn global_proof_switch_only_controls_directory_reads_not_live_block_guards() {
                     );
                 }
             }
-            assert_eq!(target_reads.load(Ordering::SeqCst), 4);
+            assert_eq!(
+                target_reads.load(Ordering::SeqCst),
+                if global_proofs { 4 } else { 0 }
+            );
             assert_eq!(
                 directory_pages.load(Ordering::SeqCst),
                 if global_proofs { 32 } else { 0 },
@@ -391,22 +444,39 @@ fn global_proof_switch_only_controls_directory_reads_not_live_block_guards() {
                 Batch::new().put(keys::block(&target), Value::new(vec![255])),
             ))
             .unwrap();
-            let error = if metadata_only {
-                block_on(reader.object_metadata_in(&mut session, &[target])).unwrap_err()
+            if global_proofs {
+                let error = if metadata_only {
+                    block_on(reader.object_metadata_in(&mut session, &[target])).unwrap_err()
+                } else {
+                    block_on(reader.read_canonical_in(&mut session, &[target])).unwrap_err()
+                };
+                assert_eq!(error.code(), crate::Code::Unavailable);
+                assert!(target_reads.load(Ordering::SeqCst) > 4);
+                assert!(
+                    fx.pipe
+                        .meta
+                        .seen
+                        .lock()
+                        .unwrap()
+                        .contains(&keys::block(&pack))
+                );
             } else {
-                block_on(reader.read_canonical_in(&mut session, &[target])).unwrap_err()
-            };
-            assert_eq!(error.code(), crate::Code::Unavailable);
-            assert!(target_reads.load(Ordering::SeqCst) > 4);
-            // The pack guard is still part of every clean operation in both modes.
-            assert!(
-                fx.pipe
-                    .meta
-                    .seen
-                    .lock()
-                    .unwrap()
-                    .contains(&keys::block(&pack))
-            );
+                if metadata_only {
+                    let answer =
+                        block_on(reader.object_metadata_in(&mut session, &[target])).unwrap();
+                    assert_eq!(
+                        answer[0].unwrap().logical_len,
+                        Some(b"mode guard".len() as u64)
+                    );
+                } else {
+                    assert_eq!(
+                        block_on(reader.read_canonical_in(&mut session, &[target])).unwrap(),
+                        [Some(serialize(&leaf).unwrap())]
+                    );
+                }
+                assert_eq!(target_reads.load(Ordering::SeqCst), 0);
+                assert_no_denial_rows(&fx.pipe.meta.seen());
+            }
         }
     }
 }
@@ -458,19 +528,27 @@ fn fallback_manifest_block_between_target_and_body_prevents_child_proof() {
         .unwrap();
         let mut session = ReaderSession::default();
         let target = id(&chunks[0]);
-        assert_eq!(
-            block_on(reader.read_canonical_in(&mut session, &[target])).unwrap(),
-            [None]
-        );
-        assert!(
-            reads.load(Ordering::SeqCst) >= 3,
-            "post-load ancestor check reads live state"
-        );
+        fx.pipe.meta.seen.lock().unwrap().clear();
+        let answer = block_on(reader.read_canonical_in(&mut session, &[target])).unwrap();
+        if denial {
+            assert_eq!(answer, [None]);
+            assert!(
+                reads.load(Ordering::SeqCst) >= 3,
+                "post-load ancestor check reads live state"
+            );
+        } else {
+            assert_eq!(answer, [Some(serialize(&chunks[0]).unwrap())]);
+            assert_eq!(reads.load(Ordering::SeqCst), 0);
+            assert_no_denial_rows(&fx.pipe.meta.seen());
+        }
         assert!(!fx.blob_calls(BlobKey::pack(pack)).is_empty());
-        assert_eq!(
-            block_on(reader.read_canonical_in(&mut session, &[target])).unwrap(),
-            [None]
-        );
+        let answer = block_on(reader.read_canonical_in(&mut session, &[target])).unwrap();
+        if denial {
+            assert_eq!(answer, [None]);
+        } else {
+            assert_eq!(answer, [Some(serialize(&chunks[0]).unwrap())]);
+            assert_no_denial_rows(&fx.pipe.meta.seen());
+        }
     }
 }
 

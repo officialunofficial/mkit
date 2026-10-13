@@ -113,6 +113,7 @@ fn run(count: usize, len: usize, chunked: bool, delay: i64, custom_policy: bool)
     let source = env.pipe.shards.ref_shard(&auth.repo().repo, HEAD);
     let registry = crate::timers::TimerRegistry::new()
         .register(VerifyTimer {
+            takedown_denial: env.pipe.cfg.takedown_denial,
             remote: BorrowedStore(&env.pipe.meta),
             blobs: env.pipe.blobs.clone(),
             windows: crate::indexed::budget::BlobWindows(&env.pipe.blobs),

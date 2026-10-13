@@ -92,7 +92,7 @@ fn guard_waves_share_six_call_admission_and_reserve_before_dispatch() {
         let budget = SliceBudget::new(13);
         let io = ReadIo::new();
         let store = Budgeted::new(&backend, &budget).with_io(&io);
-        let checks = Checks::new(&store);
+        let checks = Checks::new(&store, true);
         let ids = ids(13);
         let start = tokio::time::Instant::now();
         checks.prefetch(&ids).await.unwrap();
@@ -108,7 +108,7 @@ fn guard_waves_share_six_call_admission_and_reserve_before_dispatch() {
         let budget = SliceBudget::new(5);
         let io = ReadIo::new();
         let store = Budgeted::new(&limited, &budget).with_io(&io);
-        assert!(Checks::new(&store).prefetch(&ids).await.is_err());
+        assert!(Checks::new(&store, true).prefetch(&ids).await.is_err());
         assert!(limited.batches.lock().unwrap().is_empty());
     });
 }
@@ -121,7 +121,7 @@ fn guard_groups_deduplicate_and_keep_pair_order() {
         let mut b = a;
         b[31] = 2;
         block(&backend, &b);
-        let checks = Checks::new(&backend);
+        let checks = Checks::new(&backend, true);
         checks.prefetch(&[b, a, b, a]).await.unwrap();
         assert!(!crate::takedown::denial::denied(&checks, &a).await.unwrap());
         assert!(crate::takedown::denial::denied(&checks, &b).await.unwrap());
@@ -142,7 +142,7 @@ fn final_guard_phase_observes_changed_targets_and_packs() {
     runtime().block_on(async {
         for changed in ids(2) {
             let backend = Backend::default();
-            let checks = Checks::new(&backend);
+            let checks = Checks::new(&backend, true);
             checks.prefetch(&ids(2)).await.unwrap();
             block(&backend, &changed);
             checks.reset();
@@ -168,7 +168,7 @@ fn failed_pack_guard_remains_lazy_and_short_replies_fail_closed() {
             .lock()
             .unwrap()
             .insert(crate::store::content_shard(&ids[1]));
-        let checks = Checks::new(&backend);
+        let checks = Checks::new(&backend, true);
         checks.prefetch(&ids).await.unwrap();
         assert!(
             crate::takedown::denial::denied(&checks, &ids[0])
@@ -201,7 +201,7 @@ fn cancelled_guard_wave_releases_shared_allowances_without_refunding_calls() {
         let budget = SliceBudget::new(6);
         let io = ReadIo::new();
         let store = Budgeted::new(&backend, &budget).with_io(&io);
-        let checks = Checks::new(&store);
+        let checks = Checks::new(&store, true);
         assert!(
             tokio::time::timeout(Duration::from_millis(1), checks.prefetch(&ids(6)))
                 .await
@@ -242,7 +242,7 @@ fn prefetched_guard_rows_and_retained_bytes_are_bounded() {
                 .unwrap()
                 .insert(crate::takedown::denial::action_key(id), value.clone());
         }
-        let checks = Checks::new(&backend);
+        let checks = Checks::new(&backend, true);
         checks.prefetch(&ids).await.unwrap();
         let cache = checks.cache.lock().unwrap();
         assert_eq!(cache.slots.len(), MAX_CHECKS);
@@ -268,7 +268,7 @@ fn inherited_wave_budget_refuses_before_any_dispatch_and_charges_once() {
             let outer = SliceBudget::new(100);
             let io = ReadIo::new();
             let store = Budgeted::new(&inner, &outer).with_io(&io);
-            let reply = Checks::new(&store).prefetch(&ids(6)).await;
+            let reply = Checks::new(&store, true).prefetch(&ids(6)).await;
             if allowance == 5 {
                 assert!(reply.is_err());
                 assert!(backend.batches.lock().unwrap().is_empty());

@@ -148,10 +148,13 @@ fn pending_membership_is_owner_only_and_held_membership_is_absent() {
 
 #[test]
 fn global_denial_filters_mixed_batches_for_both_views_after_cache_warming() {
-    let (fx, d) = published();
+    let fx = fixture_tweaked(Hooks::new(), http_cfg(), |c| c.takedown_denial = true);
+    let d = data();
+    fx.push("room", &d.refs(), d.head(), None);
     let ids = [id(&d.big), id(&d.small), [82; 32]];
     assert!(public_read(&fx, "room", &ids)[0].is_some());
     block_on(ContentIndex::new(BorrowedStore(&fx.pipe.meta)).block(
+        &crate::takedown::DenialCapability::for_test(),
         &ids[0],
         &crate::store::BlockEntry::new("manual", T0 as u64),
         T0 as u64,
@@ -807,9 +810,10 @@ fn assert_cyclic_size_bases_absent(fx: &Fx, derived: &Object, base: Hash, base_p
 }
 
 #[test]
-fn sizes_respect_denied_delta_bases_with_global_scan_disabled() {
+#[allow(clippy::too_many_lines)] // Both modes retain sizes guards and separate decoded-byte evidence.
+fn sizes_respect_denied_delta_bases_when_denial_is_enabled() {
     for block_pack in [false, true] {
-        let fx = fixture();
+        let mut fx = fixture_tweaked(Hooks::new(), http_cfg(), |c| c.takedown_denial = true);
         let base = blob(b"base object payload");
         let old_root = tree(&[("base", EntryMode::Blob, &base)]);
         let old_head = commit(&old_root, &[], "old");
@@ -841,6 +845,18 @@ fn sizes_respect_denied_delta_bases_with_global_scan_disabled() {
             (Match(id(&old_head)), Match(old_pack)),
         );
         assert_eq!(outcome, AdvanceOutcome::Committed);
+        // These corruption probes alter only index rows, so they use the mode
+        // that does not require matching immutable inventory proofs.
+        fx.pipe.cfg.takedown_denial = false;
+        // Warm the ordinary reachability cache before measuring metadata-only
+        // corruption handling, as the original off-mode fixture did.
+        assert_eq!(
+            public_read(&fx, "room", &[id(&derived)]),
+            vec![Some(serialize(&derived).unwrap())]
+        );
+        assert_unresolvable_size_bases_absent(&fx, &derived, derived_pack);
+        assert_cyclic_size_bases_absent(&fx, &derived, id(&base), old_pack);
+        fx.pipe.cfg.takedown_denial = true;
         let reader = block_on(
             fx.pipe
                 .object_reader(fx.repo_id("room"), ReaderView::Public),
@@ -850,9 +866,8 @@ fn sizes_respect_denied_delta_bases_with_global_scan_disabled() {
             block_on(reader.read_canonical(&[id(&derived)])).unwrap(),
             vec![Some(serialize(&derived).unwrap())]
         );
-        assert_unresolvable_size_bases_absent(&fx, &derived, derived_pack);
-        assert_cyclic_size_bases_absent(&fx, &derived, id(&base), old_pack);
         block_on(ContentIndex::new(BorrowedStore(&fx.pipe.meta)).block(
+            &crate::takedown::DenialCapability::for_test(),
             &if block_pack { old_pack } else { id(&base) },
             &crate::store::BlockEntry::new("manual", T0 as u64),
             T0 as u64,
@@ -869,21 +884,58 @@ fn sizes_respect_denied_delta_bases_with_global_scan_disabled() {
             vec![None]
         );
         assert!(
-            fx.calls.lock().unwrap().is_empty(),
-            "denied sizes use no object bytes"
+            !fx.blob_calls(BlobKey::pack(old_pack)).contains(&"get")
+                && !fx.blob_calls(BlobKey::object(id(&base))).contains(&"get"),
+            "denied sizes never reconstruct the external base"
         );
+        fx.clear_calls();
+        let mut session = crate::pipeline::ReaderSession::default();
+        assert_eq!(
+            block_on(reader.object_metadata_in(&mut session, &[id(&derived)])).unwrap(),
+            vec![None]
+        );
+        assert_eq!(
+            session.used().decoded_bytes,
+            u64::try_from(serialize(&head).unwrap().len() + serialize(&root).unwrap().len())
+                .unwrap(),
+            "denial-on metadata reads only reachability ancestors"
+        );
+        assert!(
+            !fx.blob_calls(BlobKey::pack(old_pack)).contains(&"get")
+                && !fx.blob_calls(BlobKey::object(id(&base))).contains(&"get"),
+            "denied metadata never reconstructs the external base"
+        );
+        fx.pipe.cfg.takedown_denial = false;
+        let reader = block_on(
+            fx.pipe
+                .object_reader(fx.repo_id("room"), ReaderView::Public),
+        )
+        .unwrap();
+        fx.clear_calls();
+        fx.pipe.meta.seen.lock().unwrap().clear();
+        assert_eq!(
+            block_on(reader.metadata_sizes(&[id(&derived)])).unwrap(),
+            vec![Some(
+                u64::try_from(b"derived object payload".len()).unwrap()
+            )]
+        );
+        assert!(
+            fx.calls.lock().unwrap().is_empty(),
+            "warmed off-mode metadata loads no object bytes"
+        );
+        super::read_rounds::assert_no_denial_rows(&fx.pipe.meta.seen());
     }
 }
 
 #[test]
 fn blocked_ancestor_pack_matches_http_absence() {
-    let fx = fixture();
+    let fx = fixture_tweaked(Hooks::new(), http_cfg(), |c| c.takedown_denial = true);
     let d = data();
     let old_pack = fx.push("room", &d.refs(), d.head(), None);
     let root = tree(&[("clear", EntryMode::Blob, &d.small)]);
     let head = commit(&root, &[], "new root pack");
     let mut writer = PackWriter::new_raw_only();
-    for object in [&root, &head] {
+    for object in [&d.small, &root, &head] {
         writer
             .push_raw(id(object), &serialize(object).unwrap())
             .unwrap();
@@ -897,6 +949,7 @@ fn blocked_ancestor_pack_matches_http_absence() {
     );
     assert_eq!(outcome, AdvanceOutcome::Committed);
     block_on(ContentIndex::new(BorrowedStore(&fx.pipe.meta)).block(
+        &crate::takedown::DenialCapability::for_test(),
         &pack,
         &crate::store::BlockEntry::new("manual", T0 as u64),
         T0 as u64,
@@ -920,7 +973,7 @@ fn blocked_ancestor_pack_matches_http_absence() {
 
 #[test]
 fn sizes_use_the_same_clear_in_pack_delta_base_as_canonical_reads() {
-    let fx = fixture();
+    let fx = fixture_tweaked(Hooks::new(), http_cfg(), |c| c.takedown_denial = false);
     let base = blob(b"base object payload");
     let old_root = tree(&[("base", EntryMode::Blob, &base)]);
     let old_head = commit(&old_root, &[], "old duplicate base");
@@ -964,11 +1017,13 @@ fn sizes_use_the_same_clear_in_pack_delta_base_as_canonical_reads() {
     );
     assert_eq!(outcome, AdvanceOutcome::Committed);
     block_on(ContentIndex::new(BorrowedStore(&fx.pipe.meta)).block(
+        &crate::takedown::DenialCapability::for_test(),
         &old_pack,
         &crate::store::BlockEntry::new("manual", T0 as u64),
         T0 as u64,
     ))
     .unwrap();
+    fx.pipe.meta.seen.lock().unwrap().clear();
     assert_eq!(fx.get(&fx.object_url("room", &id(&derived))).status, 200);
     let reader = block_on(
         fx.pipe
@@ -983,11 +1038,12 @@ fn sizes_use_the_same_clear_in_pack_delta_base_as_canonical_reads() {
         block_on(reader.metadata_sizes(&[id(&derived)])).unwrap(),
         vec![Some(22)]
     );
+    super::read_rounds::assert_no_denial_rows(&fx.pipe.meta.seen());
 }
 
 #[test]
 fn blocked_ancestor_keeps_earlier_proven_batch_targets() {
-    let fx = fixture();
+    let fx = fixture_tweaked(Hooks::new(), http_cfg(), |c| c.takedown_denial = true);
     let clear_tree = tree(&[]);
     let clear = commit(&clear_tree, &[], "directly published clear tip");
     let hidden = blob(b"hidden behind a blocked ancestor pack");
@@ -1002,12 +1058,13 @@ fn blocked_ancestor_keeps_earlier_proven_batch_targets() {
     );
     let (_, pack) = fx.push_ref(
         "room",
-        &[&root, &head],
+        &[&hidden, &root, &head],
         ("refs/heads/z-blocked", "refs/mkit/packmap/z-blocked"),
         id(&head),
         (Missing, Missing),
     );
     block_on(ContentIndex::new(BorrowedStore(&fx.pipe.meta)).block(
+        &crate::takedown::DenialCapability::for_test(),
         &pack,
         &crate::store::BlockEntry::new("manual", T0 as u64),
         T0 as u64,
@@ -1125,6 +1182,7 @@ fn issue_urls_matches_individual_rpc_claims_and_validity() {
 fn issue_urls_filters_denied_unreachable_and_private_public_view() {
     let fx = fixture_tweaked(Hooks::new(), http_cfg(), |c| {
         c.url_tokens = Some(super::private_tokens::tokens());
+        c.takedown_denial = true;
     });
     let d = data();
     let orphan = blob(b"unreachable member");
@@ -1146,6 +1204,7 @@ fn issue_urls_filters_denied_unreachable_and_private_public_view() {
         vec![true, false, false, false]
     );
     block_on(ContentIndex::new(BorrowedStore(&fx.pipe.meta)).block(
+        &crate::takedown::DenialCapability::for_test(),
         &id(&d.small),
         &crate::store::BlockEntry::new("manual", T0 as u64),
         T0 as u64,
@@ -1237,7 +1296,12 @@ fn owner_urls(
 
 #[test]
 fn issue_urls_owner_is_verified_private_and_still_published_only() {
-    let (fx, d) = url_fixture();
+    let fx = fixture_tweaked(Hooks::new(), http_cfg(), |c| {
+        c.url_tokens = Some(super::private_tokens::tokens());
+        c.takedown_denial = true;
+    });
+    let d = data();
+    fx.push("room", &d.refs(), d.head(), None);
     fx.make_private("room");
     let targets = [
         UrlTarget::Object(id(&d.small)),
@@ -1256,6 +1320,7 @@ fn issue_urls_owner_is_verified_private_and_still_published_only() {
             .all(Option::is_some)
     );
     block_on(ContentIndex::new(BorrowedStore(&fx.pipe.meta)).block(
+        &crate::takedown::DenialCapability::for_test(),
         &id(&d.small),
         &crate::store::BlockEntry::new("manual", T0 as u64),
         T0 as u64,
@@ -1466,7 +1531,10 @@ fn issue_urls_capped_preflight_hides_unreachable_and_denied_membership() {
                     max_walk_objects: cap,
                     ..http_cfg()
                 },
-                |c| c.url_tokens = Some(super::private_tokens::tokens()),
+                |c| {
+                    c.url_tokens = Some(super::private_tokens::tokens());
+                    c.takedown_denial = true;
+                },
             );
             let d = data();
             let orphan = blob(b"hidden unreachable member");
@@ -1475,6 +1543,7 @@ fn issue_urls_capped_preflight_hides_unreachable_and_denied_membership() {
             fx.push("room", &objects, d.head(), None);
             if blocked {
                 block_on(ContentIndex::new(BorrowedStore(&fx.pipe.meta)).block(
+                    &crate::takedown::DenialCapability::for_test(),
                     &id(&orphan),
                     &crate::store::BlockEntry::new("manual", T0 as u64),
                     T0 as u64,
@@ -1691,6 +1760,7 @@ fn denied_orphan_matches_missing_before_reader_budget(metadata: bool, whole_pack
     let pack = fx.push("room", &objects, d.head(), None);
     let denied = if whole_pack { pack } else { id(&orphan) };
     block_on(ContentIndex::new(BorrowedStore(&fx.pipe.meta)).block(
+        &crate::takedown::DenialCapability::for_test(),
         &denied,
         &crate::store::BlockEntry::new("manual", T0 as u64),
         T0 as u64,

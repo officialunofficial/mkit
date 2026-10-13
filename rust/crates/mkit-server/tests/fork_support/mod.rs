@@ -49,6 +49,8 @@ pub struct Counting {
     pub inner: Arc<MemoryKv>,
     pub clock: Arc<ManualClock>,
     pub calls: Arc<AtomicU64>,
+    /// Exact block and action reads on content shards.
+    pub denial_reads: Arc<AtomicU64>,
     pub crash: Arc<Crash>,
     pub log: Arc<Mutex<Vec<(Partition, Batch)>>>,
     pub record: Arc<std::sync::atomic::AtomicBool>,
@@ -69,6 +71,7 @@ impl Counting {
             inner: Arc::new(MemoryKv::with_clock(clock.clone())),
             clock,
             calls: Arc::default(),
+            denial_reads: Arc::default(),
             crash: Arc::default(),
             log: Arc::default(),
             record: Arc::default(),
@@ -81,6 +84,21 @@ impl Counting {
     fn tick(&self) {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.clock.advance(self.latency_ms.load(Ordering::SeqCst));
+    }
+    fn record_denial_reads(&self, p: &Partition, keys: &[Key]) {
+        if matches!(p, Partition::ContentShard(_)) {
+            let count = keys
+                .iter()
+                .filter(|key| {
+                    let bytes = key.as_bytes();
+                    bytes.starts_with(b"b\0")
+                        && (bytes.len() == 34
+                            || (bytes.len() == 42 && bytes.ends_with(b"\0actions")))
+                })
+                .count();
+            self.denial_reads
+                .fetch_add(u64::try_from(count).unwrap(), Ordering::SeqCst);
+        }
     }
     pub fn calls(&self) -> u64 {
         self.calls.load(Ordering::SeqCst)
@@ -98,6 +116,7 @@ impl NamespaceStore for Counting {
     }
     async fn get(&self, p: &Partition, k: &Key) -> Result<Option<Value>, StoreError> {
         self.tick();
+        self.record_denial_reads(p, std::slice::from_ref(k));
         if self.fail_reads.load(Ordering::SeqCst) {
             return Err(StoreError::Unavailable("injected read failure".into()));
         }
@@ -105,6 +124,7 @@ impl NamespaceStore for Counting {
     }
     async fn get_many(&self, p: &Partition, k: &[Key]) -> Result<Vec<Option<Value>>, StoreError> {
         self.tick();
+        self.record_denial_reads(p, k);
         if self.fail_reads.load(Ordering::SeqCst) {
             return Err(StoreError::Unavailable("injected read failure".into()));
         }
@@ -618,6 +638,7 @@ impl Source {
     pub fn registry(&self) -> TimerRegistry<'static, Counting> {
         TimerRegistry::new()
             .register(VerifyTimer {
+                takedown_denial: true,
                 remote: self.store.clone(),
                 blobs: self.blobs.clone(),
                 windows: Windows(self.blobs.clone()),

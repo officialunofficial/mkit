@@ -514,6 +514,7 @@ fn mount_app<H: HookSet + 'static>(
     preserved: MemoryBlobStore,
     pipeline: Arc<Pipeline<MemoryBlobStore, Arc<MemoryKv>, H>>,
 ) -> Result<axum::Router, String> {
+    let denial_capability = pipeline.denial_capability();
     let app = axum::Router::new()
         .fallback_service(mkit_server::connect::service(pipeline.clone()))
         .layer(connect_cors());
@@ -544,18 +545,21 @@ fn mount_app<H: HookSet + 'static>(
             Arc::new(mkit_server::pipeline::SinglePartition)
         };
         let root = Partition::Namespace(NamespaceKey::deployment_default());
-        let work = Arc::new(mkit_server::takedown::work::Work::new(
-            kv.clone(),
-            blobs,
-            preserved,
-            mkit_server::takedown::work::WorkConfig::new(
-                root.clone(),
-                shards,
-                routing.addressing,
-                3_600_000,
-                clock.clone(),
-            ),
-        ));
+        let work = Arc::new(
+            mkit_server::takedown::work::Work::new(
+                kv.clone(),
+                blobs,
+                preserved,
+                mkit_server::takedown::work::WorkConfig::new(
+                    root.clone(),
+                    shards,
+                    routing.addressing,
+                    3_600_000,
+                    clock.clone(),
+                ),
+            )
+            .with_denial_capability(denial_capability),
+        );
         let engine =
             Arc::new(mkit_server::admin::Engine::new(kv, root, config).with_operations(work));
         app.route(

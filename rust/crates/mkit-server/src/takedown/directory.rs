@@ -264,7 +264,12 @@ mod tests {
             let index = ContentIndex::new(BorrowedStore(&store));
             assert!(
                 index
-                    .block(&object, &BlockEntry::new("legal", 1), 1)
+                    .block(
+                        &crate::takedown::DenialCapability::for_test(),
+                        &object,
+                        &BlockEntry::new("legal", 1),
+                        1
+                    )
                     .await
                     .is_err()
             );
@@ -275,7 +280,12 @@ mod tests {
             assert!(descriptors(&store, &object).await.unwrap().is_empty());
             proof(&store, object).await.unwrap();
             index
-                .block(&object, &BlockEntry::new("legal", 1), 1)
+                .block(
+                    &crate::takedown::DenialCapability::for_test(),
+                    &object,
+                    &BlockEntry::new("legal", 1),
+                    1,
+                )
                 .await
                 .unwrap();
             assert_eq!(
@@ -294,7 +304,12 @@ mod tests {
             let index = ContentIndex::new(BorrowedStore(&store));
             assert!(
                 index
-                    .block(&object, &BlockEntry::new("legal", 1), 1)
+                    .block(
+                        &crate::takedown::DenialCapability::for_test(),
+                        &object,
+                        &BlockEntry::new("legal", 1),
+                        1
+                    )
                     .await
                     .is_err()
             );
@@ -308,7 +323,12 @@ mod tests {
                 crate::Code::PermissionDenied
             );
             index
-                .block(&object, &BlockEntry::new("legal", 1), 1)
+                .block(
+                    &crate::takedown::DenialCapability::for_test(),
+                    &object,
+                    &BlockEntry::new("legal", 1),
+                    1,
+                )
                 .await
                 .unwrap();
             assert_eq!(
@@ -324,7 +344,12 @@ mod tests {
                 .with_fault(MemoryFault::ApplyAfterCommit);
             let object = [0x80; 32];
             ContentIndex::new(BorrowedStore(&store))
-                .block(&object, &BlockEntry::new("legal", 1), 1)
+                .block(
+                    &crate::takedown::DenialCapability::for_test(),
+                    &object,
+                    &BlockEntry::new("legal", 1),
+                    1,
+                )
                 .await
                 .unwrap();
             assert_eq!(
@@ -352,13 +377,23 @@ mod tests {
             let index = ContentIndex::new(BorrowedStore(&store));
             assert!(
                 index
-                    .block(&object, &BlockEntry::new("legal", 1), 1)
+                    .block(
+                        &crate::takedown::DenialCapability::for_test(),
+                        &object,
+                        &BlockEntry::new("legal", 1),
+                        1
+                    )
                     .await
                     .is_err()
             );
             assert!(index.blocked(&object).await.unwrap().is_none());
             index
-                .block(&object, &BlockEntry::new("legal", 1), 1)
+                .block(
+                    &crate::takedown::DenialCapability::for_test(),
+                    &object,
+                    &BlockEntry::new("legal", 1),
+                    1,
+                )
                 .await
                 .unwrap();
             index.unblock(&object, 2).await.unwrap();

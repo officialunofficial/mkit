@@ -704,7 +704,12 @@ async fn blocked_content_is_the_same_not_found_as_an_absent_source() {
     let missing = call(&pipe, &dest, n, &absent).await.unwrap_err();
     let now = u64::try_from(source.clock.now_ms()).unwrap();
     ContentIndex::new(source.store.inner.clone())
-        .block(&blob(1, 8).0, &BlockEntry::new("takedown", now), now)
+        .block(
+            &denial_capability_for_test(),
+            &blob(1, 8).0,
+            &BlockEntry::new("takedown", now),
+            now,
+        )
         .await
         .unwrap();
     let n = dest.next_nonce();
@@ -787,4 +792,31 @@ async fn the_default_admission_counts_a_fork_against_the_namespace_cap() {
         .unwrap()
         .expect("the namespace counter is charged by the fork");
     assert!(codec::decode_namespace_usage(&usage).unwrap().ops >= 1);
+}
+
+fn denial_capability_for_test() -> mkit_server::takedown::DenialCapability {
+    use mkit_server::pipeline::{AuthMode, Hooks, Pipeline, PipelineConfig};
+    let mut cfg = PipelineConfig::new(
+        mkit_server::Addressing::Multi(mkit_server::MultiAddressing::new()),
+        AuthMode::AuthV2(
+            mkit_server::auth_v2::AuthV2Config::new("http://localhost", "default").unwrap(),
+        ),
+        mkit_server::upload::UploadLimits::new(1 << 20, 64),
+    );
+    cfg.indexed = Some(mkit_server::indexed::IndexedConfig::default());
+    cfg.ticket_keys =
+        Some(mkit_server::upload::token::TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap());
+    cfg.begin_upload_threshold_bytes = 0;
+    cfg.takedown_denial = true;
+    Pipeline::new(
+        mkit_server::MemoryBlobStore::default(),
+        mkit_server::MemoryKv::default(),
+        Hooks::new(),
+        cfg,
+        std::sync::Arc::new(mkit_server::SystemClock),
+        std::sync::Arc::new(mkit_server::NoopMetrics),
+    )
+    .unwrap()
+    .denial_capability()
+    .unwrap()
 }

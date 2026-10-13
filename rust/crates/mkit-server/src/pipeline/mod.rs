@@ -352,9 +352,10 @@ pub struct PipelineConfig {
     pub outbox_backlog_cap: Option<OutboxBacklogCap>,
     /// Indexed ingestion and pre-receive verification, off by default.
     pub indexed: Option<crate::indexed::IndexedConfig>,
-    /// Global takedown proofs; the Worker launch enables them with preservation.
-    /// Disabling these descriptor-based proofs does not disable direct strong
-    /// object/pack blocklist checks or reconstruction-base serving stops.
+    /// Global takedown denial, including object, pack and reconstruction-base checks.
+    /// When disabled, ingest and reads omit block and denial-action rows, and
+    /// this pipeline cannot authorize denial activation. Enabling it on an
+    /// existing store requires the inventory, holder and proof migration.
     pub takedown_denial: bool,
     /// Per-ref allowed signers and fast-forward-only rules (SPEC-SERVER
     /// §9.7). Native embedders and the Worker launch can configure them. A
@@ -608,6 +609,9 @@ fn internal(detail: &'static str) -> ServerError {
 
 /// Map a storage failure to a redacted `internal` and log its detail.
 fn store_error(op: StorageOp, err: StoreError) -> ServerError {
+    if matches!(err, StoreError::TakedownDenialDisabled) {
+        return ServerError::failed_precondition("takedown denial disabled");
+    }
     let op = match err {
         StoreError::Corrupt(_) => StorageOp::MetaDecode,
         _ => op,
@@ -699,6 +703,14 @@ fn validate_upload_ticket_config<H: HookSet>(
 }
 
 impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
+    /// Permission to install denial rows when deployment denial is enabled.
+    #[must_use]
+    pub fn denial_capability(&self) -> Option<crate::takedown::DenialCapability> {
+        self.cfg
+            .takedown_denial
+            .then(crate::takedown::DenialCapability::enabled)
+    }
+
     /// The deployment namespace grammar used to resolve request routes.
     #[must_use]
     pub fn namespace_mode(&self) -> crate::namespace::NamespaceMode {
@@ -3164,7 +3176,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         .await
         .map_err(meta_error)?;
         if member && self.cfg.indexed.is_some() {
-            match crate::takedown::denial::require_clear(&self.meta, &key.0).await {
+            match crate::takedown::denial::require_clear(
+                &crate::store::DenialReads::new(&self.meta, self.cfg.takedown_denial),
+                &key.0,
+            )
+            .await
+            {
                 Ok(()) => {}
                 Err(e) if e.public_message() == "object blocked" => return Ok(false),
                 Err(e) => return Err(e),
@@ -4025,10 +4042,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         // Pair verification and the inspection metadata share one slice of the
         // request's ledger; dependency visibility draws from the ledger itself.
         let slice = budget.verify_slice();
+        let denial_reads = crate::store::DenialReads::new(&self.meta, self.cfg.takedown_denial);
         if let Some(set) = inspected.as_deref_mut() {
             crate::indexed::publication::verify_inspected_within(
                 &self.blobs,
-                &self.meta,
+                &denial_reads,
                 self.shards.as_ref(),
                 &op.repo,
                 &prepared.value.clone(),
@@ -4045,7 +4063,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         } else if !resumed {
             crate::indexed::publication::verify_within(
                 &self.blobs,
-                &self.meta,
+                &denial_reads,
                 self.shards.as_ref(),
                 &op.repo,
                 &prepared.value.clone(),

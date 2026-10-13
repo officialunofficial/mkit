@@ -555,6 +555,7 @@ fn published_source_keeps_configured_coverage_denial_policy_and_quota_checks() {
         Code::ResourceExhausted
     );
     w.env.pipe.cfg.write_quota = None;
+    w.env.pipe.cfg.takedown_denial = true;
     w.block(&h.second.head, 42);
     assert_eq!(
         copy(&w, HEAD, "refs/heads/copy", None).unwrap_err().code(),

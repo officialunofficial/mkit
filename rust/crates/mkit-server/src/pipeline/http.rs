@@ -183,6 +183,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
 
         let denial_budget = crate::indexed::budget::SliceBudget::new(crate::limits::REQUEST_CALLS);
         let proof_meta = crate::indexed::budget::Budgeted::new(&self.meta, &denial_budget);
+        let proof_meta = crate::store::DenialReads::new(&proof_meta, self.cfg.takedown_denial);
         let proof_blobs = crate::indexed::budget::Budgeted::new(&self.blobs, &denial_budget);
         let view = crate::store::view::ViewStore {
             store: &proof_meta,

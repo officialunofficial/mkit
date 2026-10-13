@@ -1,8 +1,8 @@
 # Typed reads for embedding code
 
 Use `mkit_server::reads::ReadAccess` for trusted storage queries.
-`Pipeline::read_access()` supplies the pipeline's shard map and visibility default.
-You can also borrow a store, shard map, and matching default with `ReadAccess::new`.
+`Pipeline::read_access()` supplies the pipeline's shard map, visibility default, and takedown-denial mode.
+You can also borrow a store, shard map, matching visibility default, and matching `takedown_denial` value with `ReadAccess::new`.
 Both Single and D34 route through that map.
 No accessor returns storage keys, encoded rows, or codec types.
 
@@ -33,7 +33,10 @@ Each call reads storage again. No accessor caches rows or decoded bytes across c
 You can borrow a budgeted store to charge the existing invocation allowance.
 Member lookup retains the existing row, page, and membership caps.
 `locate_objects` preserves batched index routing and accepts at most `MAX_OBJECT_LOOKUP_IDS` IDs.
-Denial observations remain fresh per returned member and are not an atomic batch snapshot.
+When takedown denial is enabled, denial observations remain fresh per returned member and are not an atomic batch snapshot.
+When disabled, member locations report `denied = false` and canonical reads do not consult block or denial-action rows.
+Inventory and other metadata reads continue in both modes.
+Enabling denial on an existing store requires the migration and backfill described in the operations documentation.
 Canonical decoding uses your `MemberReadLimits` and a fresh operation-local memo.
 The canonical resolver keeps its live object and pack denial checks, including delta bases.
 A false `denied` observation never replaces a final serving guard.

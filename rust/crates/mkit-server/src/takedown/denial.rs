@@ -1167,7 +1167,12 @@ mod tests {
                 let store = ScanProbe::new(None, false);
                 let blocked_id = [255; 32];
                 ContentIndex::new(BorrowedStore(&store.inner))
-                    .install_block_action(&blocked_id, &action(1, vec![]), 1)
+                    .install_block_action(
+                        &crate::takedown::DenialCapability::for_test(),
+                        &blocked_id,
+                        &action(1, vec![]),
+                        1,
+                    )
                     .await
                     .unwrap();
                 assert!(matches!(
@@ -1187,7 +1192,12 @@ mod tests {
                 let mut second_id = blocked_id;
                 second_id[31] = 254;
                 ContentIndex::new(BorrowedStore(&store.inner))
-                    .install_block_action(&second_id, &action(2, vec![]), 1)
+                    .install_block_action(
+                        &crate::takedown::DenialCapability::for_test(),
+                        &second_id,
+                        &action(2, vec![]),
+                        1,
+                    )
                     .await
                     .unwrap();
                 store.scans.store(0, Ordering::SeqCst);
@@ -1245,7 +1255,12 @@ mod tests {
                 let chunk = [8; 32];
                 let r = repo("probe");
                 ContentIndex::new(BorrowedStore(&store.inner))
-                    .install_block_action(&manifest, &action(1, vec![chunk]), 1)
+                    .install_block_action(
+                        &crate::takedown::DenialCapability::for_test(),
+                        &manifest,
+                        &action(1, vec![chunk]),
+                        1,
+                    )
                     .await
                     .unwrap();
                 member_row(&store.inner, &r, [9; 32], manifest).await;
@@ -1361,15 +1376,30 @@ mod tests {
             let index = ContentIndex::new(BorrowedStore(&store));
             let object = [7; 32];
             index
-                .install_block_action(&object, &action(1, vec![]), 1)
+                .install_block_action(
+                    &crate::takedown::DenialCapability::for_test(),
+                    &object,
+                    &action(1, vec![]),
+                    1,
+                )
                 .await
                 .unwrap();
             index
-                .install_block_action(&object, &action(2, vec![]), 1)
+                .install_block_action(
+                    &crate::takedown::DenialCapability::for_test(),
+                    &object,
+                    &action(2, vec![]),
+                    1,
+                )
                 .await
                 .unwrap();
             index
-                .block(&object, &BlockEntry::new("legacy", 2), 2)
+                .block(
+                    &crate::takedown::DenialCapability::for_test(),
+                    &object,
+                    &BlockEntry::new("legacy", 2),
+                    2,
+                )
                 .await
                 .unwrap();
             index.unblock(&object, 3).await.unwrap();
@@ -1382,7 +1412,12 @@ mod tests {
             assert_eq!(decode_actions(Some(&raw)).unwrap().len(), 2);
             assert!(
                 index
-                    .install_block_action(&object, &action(1, vec![]), 4)
+                    .install_block_action(
+                        &crate::takedown::DenialCapability::for_test(),
+                        &object,
+                        &action(1, vec![]),
+                        4
+                    )
                     .await
                     .is_ok()
             );
@@ -1390,7 +1425,12 @@ mod tests {
             changed.reason = "other".into();
             assert!(
                 index
-                    .install_block_action(&object, &changed, 4)
+                    .install_block_action(
+                        &crate::takedown::DenialCapability::for_test(),
+                        &object,
+                        &changed,
+                        4
+                    )
                     .await
                     .is_err()
             );
@@ -1406,7 +1446,12 @@ mod tests {
                     let mut id = [0; 32];
                     id[30..].copy_from_slice(&u16::try_from(n).unwrap().to_be_bytes());
                     index
-                        .install_block_action(&id, &action(1, vec![]), 1)
+                        .install_block_action(
+                            &crate::takedown::DenialCapability::for_test(),
+                            &id,
+                            &action(1, vec![]),
+                            1,
+                        )
                         .await
                         .unwrap();
                 }
@@ -1450,7 +1495,12 @@ mod tests {
             let r = repo("a");
             let index = ContentIndex::new(BorrowedStore(&store));
             index
-                .install_block_action(&manifest, &action(1, vec![chunk]), 1)
+                .install_block_action(
+                    &crate::takedown::DenialCapability::for_test(),
+                    &manifest,
+                    &action(1, vec![chunk]),
+                    1,
+                )
                 .await
                 .unwrap();
             let entry = IndexEntry {
@@ -1522,7 +1572,12 @@ mod tests {
                 .collect();
             let index = ContentIndex::new(BorrowedStore(&store));
             index
-                .install_block_action(&manifest, &action(1, chunks.clone()), 1)
+                .install_block_action(
+                    &crate::takedown::DenialCapability::for_test(),
+                    &manifest,
+                    &action(1, chunks.clone()),
+                    1,
+                )
                 .await
                 .unwrap();
             let raw = store
@@ -1668,7 +1723,12 @@ mod tests {
             let blocked_id = [91; 32];
             member_row(&store, &repo, pack, blocked_id).await;
             ContentIndex::new(BorrowedStore(&store))
-                .install_block_action(&blocked_id, &action(92, vec![shared]), 1)
+                .install_block_action(
+                    &crate::takedown::DenialCapability::for_test(),
+                    &blocked_id,
+                    &action(92, vec![shared]),
+                    1,
+                )
                 .await
                 .unwrap();
             let budget = SliceBudget::new(crate::limits::REQUEST_CALLS);
@@ -1716,7 +1776,12 @@ mod tests {
             member_row(&store, &repo, pack, id).await;
             let index = ContentIndex::new(BorrowedStore(&store));
             index
-                .block(&id, &BlockEntry::new("policy", 1), 1)
+                .block(
+                    &crate::takedown::DenialCapability::for_test(),
+                    &id,
+                    &BlockEntry::new("policy", 1),
+                    1,
+                )
                 .await
                 .unwrap();
             index.release_hold(&id, &[84; 32], 1).await.unwrap();

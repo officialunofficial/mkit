@@ -201,12 +201,22 @@ fn v2_only_holder_delivery_uses_exact_existing_ct_codec_and_guards_overlaps() {
         let id = identity();
         let index = ContentIndex::new(BorrowedStore(store.as_ref()));
         index
-            .install_block_action(&id.object, &action(10), 101)
+            .install_block_action(
+                &crate::takedown::DenialCapability::for_test(),
+                &id.object,
+                &action(10),
+                101,
+            )
             .await
             .unwrap();
         let (preconditions, writes) = producer_plan(store.as_ref()).await;
         index
-            .install_block_action(&id.object, &action(20), 101)
+            .install_block_action(
+                &crate::takedown::DenialCapability::for_test(),
+                &id.object,
+                &action(20),
+                101,
+            )
             .await
             .unwrap();
         assert_ne!(

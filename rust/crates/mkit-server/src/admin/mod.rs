@@ -74,6 +74,13 @@ pub struct Prepared {
 
 /// Internal extension of the signed, audited operator lifecycle.
 pub trait AdminOperations: crate::MaybeSend + crate::MaybeSync {
+    /// Check authenticated deployment policy before nonce or audit ledger I/O.
+    /// This synchronous check must not read or write storage. The default permits
+    /// dispatch; extensions can refuse unavailable writer paths without effects.
+    fn pre_dispatch(&self, _path: &str) -> Result<(), ServerError> {
+        Ok(())
+    }
+
     /// Backend time for terminal preserved-stream failure audits.
     fn preserved_now_ms(&self) -> Result<i64, ServerError> {
         Err(ServerError::unavailable("preservation clock unavailable"))

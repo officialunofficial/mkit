@@ -10,6 +10,12 @@ use crate::{BoxFuture, MaybeSend, MaybeSync, NamespaceStore};
 /// timer-15 responsibility. Register only with a real audited takedown owner;
 /// this module does not provide or register that production workflow.
 pub trait LateAcceptance: MaybeSend + MaybeSync {
+    /// Check deployment policy before readiness updates or acceptance I/O.
+    /// The default permits external owners; this synchronous check has no effects.
+    fn precheck(&self) -> Result<(), StoreError> {
+        Ok(())
+    }
+
     /// Persist responsibility before the producer request can be removed.
     fn accept<'a, S: NamespaceStore>(
         &'a self,
@@ -45,6 +51,7 @@ impl<S: NamespaceStore, A: LateAcceptance> TimerHandler<S> for LateTimer<A> {
         timer: &'a DueTimer,
     ) -> BoxFuture<'a, Result<Fired, StoreError>> {
         Box::pin(async move {
+            self.acceptance.precheck()?;
             if timer.kind != kinds::CONTENT_TAKEDOWN_REQUEST {
                 return Err(bad());
             }

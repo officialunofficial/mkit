@@ -27,6 +27,7 @@ fn unavailable() -> StoreError {
 /// Audited owning request and timer responsibility, using the caller's local partition.
 #[derive(Clone)]
 pub struct LateOwner<N> {
+    denial_capability: Option<super::DenialCapability>,
     store: N,
     root: Partition,
     purge: Option<crate::purge::PurgeConfig>,
@@ -42,10 +43,17 @@ impl<N> LateOwner<N> {
     /// Construct the real callback over local-aware metadata and the owning root.
     pub fn new(store: N, root: Partition) -> Self {
         Self {
+            denial_capability: None,
             store,
             root,
             purge: None,
         }
+    }
+    /// Authorize denial writes using the deployment pipeline's capability.
+    #[must_use]
+    pub fn with_denial_capability(mut self, capability: Option<super::DenialCapability>) -> Self {
+        self.denial_capability = capability;
+        self
     }
     /// Attach automatic invalidation for durable late-holder ownership.
     #[must_use]
@@ -55,6 +63,13 @@ impl<N> LateOwner<N> {
     }
 }
 impl<N: NamespaceStore> LateAcceptance for LateOwner<N> {
+    fn precheck(&self) -> Result<(), StoreError> {
+        self.denial_capability
+            .as_ref()
+            .map(|_| ())
+            .ok_or(StoreError::TakedownDenialDisabled)
+    }
+
     #[allow(clippy::too_many_lines)] // Exact source, staged action and root acceptance form one replayable lifecycle.
     fn accept<'a, S: NamespaceStore>(
         &'a self,
@@ -65,6 +80,10 @@ impl<N: NamespaceStore> LateAcceptance for LateOwner<N> {
         budget: &'a SliceBudget,
     ) -> BoxFuture<'a, Result<(), StoreError>> {
         Box::pin(async move {
+            let capability = self
+                .denial_capability
+                .as_ref()
+                .ok_or(StoreError::TakedownDenialDisabled)?;
             let local_budget = crate::purge::SliceBudget::with_parent(64, budget.clone());
             let source = request.encode()?;
             ContentTakedownV1::decode(&source)?;
@@ -229,7 +248,7 @@ impl<N: NamespaceStore> LateAcceptance for LateOwner<N> {
             )
             .await?;
             ContentIndex::new(BorrowedStore(&store))
-                .install_stored_block_action_with_batch(&object, &staged, now, purge)
+                .install_stored_block_action_with_batch(capability, &object, &staged, now, purge)
                 .await?;
             crate::purge::automatic::invalidate_repository(
                 self.purge.as_ref(),

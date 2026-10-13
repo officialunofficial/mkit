@@ -166,7 +166,11 @@ pub(super) async fn prove<S: NamespaceStore>(
     let clear = if env.takedown_denial {
         denial::require_pack_clear_sealed(store, env.shards, source, id).await
     } else {
-        denial::require_clear(store, id).await
+        denial::require_clear(
+            &crate::store::DenialReads::new(store, env.takedown_denial),
+            id,
+        )
+        .await
     };
     clear.map_err(|e| {
         if e.public_message() == "object blocked" {

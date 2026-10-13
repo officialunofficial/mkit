@@ -481,6 +481,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             );
         }
         let meta = Budgeted::new(&self.pipe.meta, calls).flagging(capped);
+        let meta = crate::store::DenialReads::new(&meta, self.pipe.cfg.takedown_denial);
         let blobs = Budgeted::new(&self.pipe.blobs, calls).flagging(capped);
         let view = ViewStore {
             store: &meta,
@@ -692,7 +693,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             meta = meta.with_session(&io.calls);
             blobs = blobs.with_session(&io.calls).with_encoded(&io.encoded);
         }
-        let checks = super::reader_checks::Checks::new(&meta);
+        let budgeted_meta = meta;
+        let meta = crate::store::DenialReads::new(&budgeted_meta, pipe.cfg.takedown_denial);
+        let checks = super::reader_checks::Checks::new(&meta, pipe.cfg.takedown_denial);
         let view = ViewStore {
             store: &checks,
             repo: &self.repo,
@@ -743,7 +746,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         let mut fresh = BTreeSet::new();
         if proofs.is_none() && !writer && !pipe.cfg.takedown_denial {
             for id in &targets {
-                if meta.charge().is_err() {
+                if budgeted_meta.charge().is_err() {
                     if capped_as_absent {
                         absorb(capped);
                         break;
@@ -955,7 +958,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 {
                     continue;
                 }
-                meta.charge().map_err(|_| exhausted())?;
+                budgeted_meta.charge().map_err(|_| exhausted())?;
                 if matches!(
                     seams.takedown.check(&self.repo, &id).await?,
                     TakedownVerdict::Clear
@@ -987,7 +990,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             if !reached.contains(&id) || blocked.contains(&id) {
                 continue;
             }
-            meta.charge().map_err(|_| exhausted())?;
+            budgeted_meta.charge().map_err(|_| exhausted())?;
             if matches!(
                 seams.takedown.check(&self.repo, &id).await?,
                 TakedownVerdict::Clear

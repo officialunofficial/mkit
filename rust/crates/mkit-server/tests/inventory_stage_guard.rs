@@ -78,6 +78,8 @@ fn tree_heavy_pack(count: u16) -> (Vec<u8>, Hash) {
 /// What the pack under test looks like.
 #[derive(Clone, Copy, Default)]
 struct Shape {
+    /// The deployment omits denial while retaining every index write.
+    denial_off: bool,
     /// A takedown of one object lands just before the first batch's inventory
     /// apply, after the batch was decoded.
     race: bool,
@@ -146,6 +148,7 @@ async fn verifies_with(objects: u16, fault: Option<&'static str>, shape: Shape) 
     pipeline_cfg.write_policy = mkit_server::policy::WritePolicy::Owner;
     pipeline_cfg.sharding = mkit_server::pipeline::Sharding::D34;
     pipeline_cfg.indexed = Some(cfg);
+    pipeline_cfg.takedown_denial = !shape.denial_off;
     pipeline_cfg.ticket_keys =
         Some(mkit_server::upload::token::TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap());
     let pipe = Pipeline::new(
@@ -181,6 +184,7 @@ async fn verifies_with(objects: u16, fault: Option<&'static str>, shape: Shape) 
         .unwrap_err();
     assert_eq!(error.public_message(), "pack verification pending");
     let handler = VerifyTimer {
+        takedown_denial: !shape.denial_off,
         remote: store.clone(),
         blobs: blobs.clone(),
         windows: Windows {
@@ -201,14 +205,14 @@ async fn verifies_with(objects: u16, fault: Option<&'static str>, shape: Shape) 
         metrics: recorder.clone(),
         extension: FailClosedExtraction,
     };
-    let registry =
-        TimerRegistry::new()
-            .register(handler)
-            .register(mkit_server::relay::RelayHandler {
-                target: store.clone(),
-                hook: mkit_server::relay::NoHook,
-                budget: mkit_server::relay::RelayBudget::default(),
-            });
+    let registry = TimerRegistry::new()
+        .register(handler)
+        .register(mkit_server::relay::RelayHandler {
+            target: store.clone(),
+            hook: mkit_server::relay::NoHook,
+            budget: mkit_server::relay::RelayBudget::default(),
+        })
+        .register(mkit_server::timers::publication_recheck::PublicationRecheck::new(store.clone()));
     let mut waits = 0;
     let mut failed_waits = 0;
     let mut max_jobs = 0;
@@ -382,17 +386,47 @@ async fn verifies_with(objects: u16, fault: Option<&'static str>, shape: Shape) 
                 recorder.attempts.load(Ordering::SeqCst),
                 job.entries
             );
-            let auth = authenticate(&pipe, &clock, mkit_server::Procedure::AdvanceRefs, 4);
-            assert_eq!(
-                pipe.advance_refs_with_tickets(
-                    &auth,
-                    advance("refs/heads/main", head),
-                    advance("refs/mkit/packmap/main", map),
-                    tickets.clone()
+            // Decode is the modeled interval. Drive the resulting publication
+            // at the backend's normal clock so proof work has its own bounded
+            // request deadlines rather than spending the ingest latency model.
+            store.ledger.lock().unwrap().ingest_complete = true;
+            let mut committed = false;
+            for _ in 0..1024 {
+                let auth = authenticate(&pipe, &clock, mkit_server::Procedure::AdvanceRefs, 4);
+                match pipe
+                    .advance_refs_with_tickets(
+                        &auth,
+                        advance("refs/heads/main", head),
+                        advance("refs/mkit/packmap/main", map),
+                        tickets.clone(),
+                    )
+                    .await
+                {
+                    Ok(outcome) => {
+                        assert_eq!(outcome, mkit_core::protocol::AdvanceOutcome::Committed);
+                        committed = true;
+                        break;
+                    }
+                    Err(error) => assert!(
+                        error.code() == mkit_server::Code::Unavailable,
+                        "publication failed: {error:?}",
+                    ),
+                }
+                run_due(
+                    &store,
+                    &source,
+                    &registry,
+                    clock.as_ref(),
+                    u64::try_from(clock.now_ms()).unwrap(),
+                    &TickBudget::default(),
                 )
                 .await
-                .unwrap(),
-                mkit_core::protocol::AdvanceOutcome::Committed
+                .unwrap();
+                clock.advance(1);
+            }
+            assert!(
+                committed,
+                "publication did not finish its bounded continuation"
             );
             let mut publication_ticks = 0;
             loop {
@@ -455,8 +489,14 @@ async fn verifies_with(objects: u16, fault: Option<&'static str>, shape: Shape) 
                     &events,
                     objects,
                     !shape.tree_heavy && shape.blob_bytes.is_none(),
+                    !shape.denial_off,
                 );
                 eprintln!("{sums}");
+                let (decode_elapsed_ms, decode_calls, decode_slices) = decode_model(&events);
+                eprintln!(
+                    "DECODE_MODEL denial={} objects={objects} elapsed_ms={decode_elapsed_ms} calls={decode_calls} slices={decode_slices}",
+                    !shape.denial_off
+                );
             }
             eprintln!(
                 "INVENTORY objects={objects} reads={} applies={} total={} max_ops={}",
@@ -470,6 +510,14 @@ async fn verifies_with(objects: u16, fault: Option<&'static str>, shape: Shape) 
                 // take five applies where tiny ones take one. The plain 12-object
                 // shape applies 4 times in all; this one applies 8.
                 assert_eq!(ledger.inventory_applies, 8);
+            }
+            if shape.denial_off {
+                assert_eq!(ledger.block_reads, 0, "push never consults block rows");
+                assert_eq!(
+                    ledger.holder_writes, 0,
+                    "tiny blobs do not require extraction"
+                );
+                assert!(ledger.inventory_applies > 0);
             }
             return;
         }
@@ -486,8 +534,54 @@ async fn verifies_with(objects: u16, fault: Option<&'static str>, shape: Shape) 
     }
     panic!("{objects} objects exceeded 1024 alarm ticks");
 }
+/// Measure complete Decode slices between their existing start/result markers.
+/// Call counts come from each slice's progress event, rather than adding its
+/// component durations, which may overlap.
+fn decode_model(events: &Events) -> (u64, u64, u64) {
+    let logs = events.0.lock().unwrap();
+    let mut started = std::collections::BTreeMap::<String, (u64, u64)>::new();
+    let mut active = None;
+    let (mut elapsed_ms, mut calls, mut slices) = (0, 0, 0);
+    for event in logs.iter() {
+        match event.get("event").map(String::as_str) {
+            Some("verification_slice_start") => {
+                let pack = event["pack"].clone();
+                if event["old_phase"] == "Decode" {
+                    assert!(
+                        started
+                            .insert(pack.clone(), (event["now_ms"].parse().unwrap(), 0))
+                            .is_none()
+                    );
+                }
+                active = Some(pack);
+            }
+            Some("verification_inventory_progress") => {
+                if let Some((_, slice_calls)) =
+                    active.as_ref().and_then(|pack| started.get_mut(pack))
+                {
+                    *slice_calls += event["slice_calls"].parse::<u64>().unwrap();
+                }
+            }
+            Some("verification_slice_result") if event["old_phase"] == "Decode" => {
+                let (start, slice_calls) = started.remove(&event["pack"]).unwrap();
+                elapsed_ms += event["now_ms"]
+                    .parse::<u64>()
+                    .unwrap()
+                    .checked_sub(start)
+                    .unwrap();
+                calls += slice_calls;
+                slices += 1;
+            }
+            _ => {}
+        }
+    }
+    assert!(started.is_empty(), "Decode slice result marker missing");
+    assert!(slices > 0, "Decode model observed no complete slices");
+    (elapsed_ms, calls, slices)
+}
+
 /// Sum the per-slice Decode attribution; assert it accounts for every object.
-fn attribution(events: &Events, objects: u16, plain: bool) -> String {
+fn attribution(events: &Events, objects: u16, plain: bool, takedown_denial: bool) -> String {
     let logs = events.0.lock().unwrap();
     let mut sum = std::collections::BTreeMap::<&str, u64>::new();
     let mut decode_slices = 0_u64;
@@ -517,7 +611,11 @@ fn attribution(events: &Events, objects: u16, plain: bool) -> String {
     // The packmap's own MKPL facts are staged by its Decode slice too.
     assert_eq!(sum["entries_staged"], objects + 1);
     assert_eq!(sum["entries_checkpointed"], objects);
-    assert_eq!(sum["denial_calls"], objects, "one denial read per object");
+    assert_eq!(
+        sum["denial_calls"],
+        if takedown_denial { objects } else { 0 },
+        "one denial read per object only when enabled"
+    );
     // Hundredths of a remote call per object: denial plus staging.
     let per_entry = (sum["remote_inventory_calls"] + sum["denial_calls"]) * 100 / objects;
     // Main spent four calls per object and ended a slice after 48 objects.
@@ -530,12 +628,24 @@ fn attribution(events: &Events, objects: u16, plain: bool) -> String {
         );
     }
     format!(
-        "ATTRIBUTION objects={objects} decode_slices={decode_slices} remote_calls_per_entry_x100={per_entry} {sum:?}"
+        "ATTRIBUTION denial={takedown_denial} objects={objects} decode_slices={decode_slices} remote_calls_per_entry_x100={per_entry} {sum:?}"
     )
 }
 #[tokio::test(start_paused = true)]
 async fn decode_inventory_500_objects_at_50ms() {
     Box::pin(verifies(500, None)).await;
+}
+#[tokio::test(start_paused = true)]
+async fn decode_inventory_500_objects_denial_off_at_50ms() {
+    Box::pin(verifies_with(
+        500,
+        None,
+        Shape {
+            denial_off: true,
+            ..Shape::default()
+        },
+    ))
+    .await;
 }
 #[tokio::test(start_paused = true)]
 #[ignore = "large scheduled verification; exercised by the ignored-lane CI profile"]

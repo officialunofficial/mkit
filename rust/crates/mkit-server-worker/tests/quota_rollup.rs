@@ -69,7 +69,7 @@ fn rollup_is_registered_on_the_classes_that_hold_quota_rows_only() {
                 .apply(&partition, Batch::new().put(key.clone(), value.clone()))
                 .await
                 .unwrap();
-            let registry = timer_registry(class, Ok(target.clone()), None);
+            let registry = timer_registry(class, Ok(target.clone()), None, true);
             let report = run_due(
                 &source,
                 &partition,
@@ -91,7 +91,8 @@ fn rollup_is_registered_on_the_classes_that_hold_quota_rows_only() {
                 let wake =
                     retained_timer_backoff(&source, &partition, &registry, &key, &value, true)
                         .await;
-                let recovered = timer_registry(ShardClass::RefShard, Ok(target.clone()), None);
+                let recovered =
+                    timer_registry(ShardClass::RefShard, Ok(target.clone()), None, true);
                 let report = run_due(
                     &source,
                     &partition,
@@ -128,7 +129,7 @@ fn rollup_config_failure_retries_the_stored_timer() {
                 .unwrap();
             let target: Result<DoNamespaceStore<Loopback>, _> =
                 Err(ConfigError("AUTH_REPOSITORY is not configured".into()));
-            let registry = timer_registry(class, target, Some("free"));
+            let registry = timer_registry(class, target, Some("free"), true);
             let report = run_due(
                 &source,
                 &partition,
@@ -147,7 +148,7 @@ fn rollup_config_failure_retries_the_stored_timer() {
                 retained_timer_backoff(&source, &partition, &registry, &key, &value, false).await;
             let dir = tempfile::tempdir().unwrap();
             let target = Loopback::store(dir.path().to_path_buf(), DoConfig::default());
-            let recovered = timer_registry(class, Ok(target), Some("free"));
+            let recovered = timer_registry(class, Ok(target), Some("free"), true);
             let report = run_due(
                 &source,
                 &partition,
@@ -180,7 +181,7 @@ fn rollup_fires_are_capped_at_one_per_alarm_on_free_and_four_on_paid() {
                 batch = batch.put(key, value);
             }
             source.apply(&partition, batch).await.unwrap();
-            let registry = timer_registry(ShardClass::RefShard, Ok(target.clone()), plan);
+            let registry = timer_registry(ShardClass::RefShard, Ok(target.clone()), plan, true);
             let report = run_due(
                 &source,
                 &partition,

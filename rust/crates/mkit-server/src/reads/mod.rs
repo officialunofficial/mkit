@@ -17,7 +17,7 @@ pub use objects::*;
 mod tests;
 
 use crate::pipeline::{RepoVisibility, ShardMap};
-use crate::store::{NamespaceStore, codec, keys, publication};
+use crate::store::{DenialReads, NamespaceStore, codec, keys, publication};
 use crate::{RepoId, ServerError};
 use mkit_core::hash::Hash;
 
@@ -28,7 +28,7 @@ use mkit_core::hash::Hash;
 /// facade directly as an anonymous endpoint. Existing pipeline read paths
 /// retain their uniform absence, authorization, and final guards.
 pub struct ReadAccess<'a, N> {
-    pub(super) store: &'a N,
+    pub(super) store: DenialReads<&'a N>,
     pub(super) shards: &'a dyn ShardMap,
     default_visibility: RepoVisibility,
 }
@@ -77,11 +77,18 @@ pub(super) fn failure() -> ServerError {
 
 impl<'a, N: NamespaceStore> ReadAccess<'a, N> {
     /// Borrow a store and its routing configuration. The default must match
-    /// the pipeline's default repository visibility.
+    /// the pipeline's default repository visibility; `takedown_denial` must
+    /// match the deployment's denial mode. Disabled denial reports clear
+    /// without consulting block or denial-action rows.
     #[must_use]
-    pub fn new(store: &'a N, shards: &'a dyn ShardMap, default_visibility: RepoVisibility) -> Self {
+    pub fn new(
+        store: &'a N,
+        shards: &'a dyn ShardMap,
+        default_visibility: RepoVisibility,
+        takedown_denial: bool,
+    ) -> Self {
         Self {
-            store,
+            store: DenialReads::new(store, takedown_denial),
             shards,
             default_visibility,
         }
@@ -170,7 +177,7 @@ impl<'a, N: NamespaceStore> ReadAccess<'a, N> {
             return Err(ServerError::invalid_argument("invalid branch name"));
         }
         let state = publication::read(
-            self.store,
+            &self.store,
             &self.shards.ref_shard(repo, branch),
             &repo.name,
             branch,

@@ -1,5 +1,6 @@
 //! Real indexed fixtures for bounded history and exact commit/path reads.
 mod continuation_tests;
+use super::read_rounds::assert_no_denial_rows;
 use super::*;
 use crate::pipeline::{
     HistoryMode, HistoryOptions, ObjectReader, PathOptions, ReadLimits, ReaderSession, ReaderView,
@@ -709,6 +710,7 @@ fn exact_names_modes_roots_symlinks_and_expected_ids() {
 fn block_id(fx: &Fx, object: Hash) {
     block_on(
         crate::store::ContentIndex::new(crate::store::BorrowedStore(&fx.pipe.meta)).block(
+            &crate::takedown::DenialCapability::for_test(),
             &object,
             &crate::store::BlockEntry::new("manual", T0 as u64),
             T0 as u64,
@@ -975,16 +977,20 @@ fn custom_stops_direct_denial_cancellation_and_spent_budgets() {
                     "stopped node itself can be read"
                 );
                 block_id(&fx, pack);
-                assert!(
-                    block_on(reader.locate_commit_in(
-                        &mut ReaderSession::default(),
-                        HEAD,
-                        d.head(),
-                        HistoryOptions::default()
-                    ))
-                    .unwrap()
-                    .is_none()
-                );
+                fx.pipe.meta.seen.lock().unwrap().clear();
+                let found = block_on(reader.locate_commit_in(
+                    &mut ReaderSession::default(),
+                    HEAD,
+                    d.head(),
+                    HistoryOptions::default(),
+                ))
+                .unwrap();
+                if denial {
+                    assert!(found.is_none());
+                } else {
+                    assert!(found.is_some());
+                    assert_no_denial_rows(&fx.pipe.meta.seen());
+                }
             });
 
             let mut fx = fixture();
@@ -1118,6 +1124,7 @@ struct ChangeAfterBody {
     change: Box<dyn Fn() -> crate::BoxFuture<'static, ()> + Send + Sync>,
 }
 #[test]
+#[allow(clippy::too_many_lines)] // One mode/view matrix preserves the live final-boundary assertions.
 fn batch_final_callback_refreshes_target_and_source_pack_guards() {
     use std::sync::atomic::AtomicUsize;
     for denial in [false, true] {
@@ -1172,20 +1179,37 @@ fn batch_final_callback_refreshes_target_and_source_pack_guards() {
                             );
                         }
                         let before = session.used().output_bytes;
+                        fx.pipe.meta.seen.lock().unwrap().clear();
                         if sizes_only {
-                            assert_eq!(
+                            let answers =
                                 block_on(reader.object_metadata_in(&mut session, &[target]))
-                                    .unwrap(),
-                                [None]
-                            );
+                                    .unwrap();
+                            if denial {
+                                assert_eq!(answers, [None]);
+                            } else {
+                                assert_eq!(answers[0].unwrap().logical_len, Some(100));
+                            }
+                        } else {
+                            let answers =
+                                block_on(reader.read_canonical_in(&mut session, &[target]))
+                                    .unwrap();
+                            if denial {
+                                assert_eq!(answers, [None]);
+                            } else {
+                                assert_eq!(answers, [Some(serialize(&d.small).unwrap())]);
+                            }
+                        }
+                        if denial || sizes_only {
+                            assert_eq!(session.used().output_bytes, before);
                         } else {
                             assert_eq!(
-                                block_on(reader.read_canonical_in(&mut session, &[target]))
-                                    .unwrap(),
-                                [None]
+                                session.used().output_bytes - before,
+                                serialize(&d.small).unwrap().len() as u64
                             );
                         }
-                        assert_eq!(session.used().output_bytes, before);
+                        if !denial {
+                            assert_no_denial_rows(&fx.pipe.meta.seen());
+                        }
                         assert_eq!(observed.load(Ordering::SeqCst), final_check);
                     });
                 }
@@ -1207,6 +1231,25 @@ impl TakedownGate for ChangeAfterBody {
         })
     }
 }
+// On-mode injection retains the original counted writer path. Off-mode bypasses
+// the production writer API solely to test an impossible store state, without
+// including the injection's internal snapshot reads in reader IO assertions.
+async fn insert_test_stop(store: &Arc<Spy>, denial: bool, pack: Hash) {
+    let capability = crate::takedown::DenialCapability::for_test();
+    let entry = crate::store::BlockEntry::new("revoked", T0 as u64);
+    if denial {
+        crate::store::ContentIndex::new(crate::store::BorrowedStore(store))
+            .block(&capability, &pack, &entry, T0 as u64)
+            .await
+            .unwrap();
+    } else {
+        crate::store::ContentIndex::new(crate::store::BorrowedStore(&store.inner))
+            .block(&capability, &pack, &entry, T0 as u64)
+            .await
+            .unwrap();
+    }
+}
+
 #[test]
 #[allow(clippy::too_many_lines)] // One fixture matrix across owner/public and denial modes.
 fn authority_and_pack_revocation_after_body_io_prevent_output() {
@@ -1223,14 +1266,7 @@ fn authority_and_pack_revocation_after_body_io_prevent_output() {
                     change: Box::new(move || {
                         let store = store.clone();
                         Box::pin(async move {
-                            crate::store::ContentIndex::new(crate::store::BorrowedStore(&store))
-                                .block(
-                                    &pack,
-                                    &crate::store::BlockEntry::new("revoked", T0 as u64),
-                                    T0 as u64,
-                                )
-                                .await
-                                .unwrap();
+                            insert_test_stop(&store, denial, pack).await;
                         })
                     }),
                 });
@@ -1238,19 +1274,23 @@ fn authority_and_pack_revocation_after_body_io_prevent_output() {
             });
             in_view(&fx, writer, |reader| {
                 let mut session = ReaderSession::default();
-                assert!(
-                    block_on(reader.read_commit_path_in(
-                        &mut session,
-                        HEAD,
-                        d.head(),
-                        &[b"small.txt".to_vec()],
-                        None,
-                        PathOptions::default()
-                    ))
-                    .unwrap()
-                    .is_none()
-                );
-                assert_eq!(session.used().output_bytes, 0);
+                fx.pipe.meta.seen.lock().unwrap().clear();
+                let found = block_on(reader.read_commit_path_in(
+                    &mut session,
+                    HEAD,
+                    d.head(),
+                    &[b"small.txt".to_vec()],
+                    None,
+                    PathOptions::default(),
+                ))
+                .unwrap();
+                if denial {
+                    assert!(found.is_none());
+                    assert_eq!(session.used().output_bytes, 0);
+                } else {
+                    assert_eq!(found.unwrap().canonical, serialize(&d.small).unwrap());
+                    assert_no_denial_rows(&fx.pipe.meta.seen());
+                }
             });
             let az = Arc::new(Scripted::default());
             let mut fx = fixture_with(scripted(&az), http_cfg());
@@ -1331,14 +1371,7 @@ fn retained_singleton_history_rechecks_after_unavailable_parent() {
                     change: Box::new(move || {
                         let store = store.clone();
                         Box::pin(async move {
-                            crate::store::ContentIndex::new(crate::store::BorrowedStore(&store))
-                                .block(
-                                    &pack,
-                                    &crate::store::BlockEntry::new("revoked", T0 as u64),
-                                    T0 as u64,
-                                )
-                                .await
-                                .unwrap();
+                            insert_test_stop(&store, denial, pack).await;
                         })
                     }),
                 });
@@ -1347,23 +1380,42 @@ fn retained_singleton_history_rechecks_after_unavailable_parent() {
             in_view(&fx, writer, |reader| {
                 let mut session = ReaderSession::default();
                 let gets = get_count(&fx);
-                assert!(
-                    block_on(reader.walk_history_in(
-                        &mut session,
-                        HEAD,
-                        None,
-                        2,
-                        HistoryOptions::default()
-                    ))
-                    .unwrap()
-                    .is_none()
-                );
+                fx.pipe.meta.seen.lock().unwrap().clear();
+                let found = block_on(reader.walk_history_in(
+                    &mut session,
+                    HEAD,
+                    None,
+                    2,
+                    HistoryOptions::default(),
+                ))
+                .unwrap();
+                if denial {
+                    assert!(found.is_none());
+                } else {
+                    let page = found.unwrap();
+                    assert_eq!(
+                        page.commits
+                            .iter()
+                            .map(|c| c.canonical.clone())
+                            .collect::<Vec<_>>(),
+                        [serialize(&head).unwrap(), serialize(&parent).unwrap()]
+                    );
+                    assert_no_denial_rows(&fx.pipe.meta.seen());
+                }
                 assert_eq!(
                     get_count(&fx) - gets,
                     4,
                     "head retained before parent revocation"
                 );
-                assert_eq!(session.used().output_bytes, 0);
+                if denial {
+                    assert_eq!(session.used().output_bytes, 0);
+                } else {
+                    assert_eq!(
+                        session.used().output_bytes,
+                        (serialize(&head).unwrap().len() + serialize(&parent).unwrap().len())
+                            as u64
+                    );
+                }
                 assert_eq!(
                     session.used().decoded_bytes,
                     (serialize(&head).unwrap().len() + serialize(&parent).unwrap().len()) as u64
@@ -1429,16 +1481,7 @@ fn path_witness_rechecks_all_sources_and_reserves_all_output() {
                             // Revoke at the witness boundary after the leaf's
                             // own live checks have completed.
                             if checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
-                                crate::store::ContentIndex::new(crate::store::BorrowedStore(
-                                    &store,
-                                ))
-                                .block(
-                                    &pack,
-                                    &crate::store::BlockEntry::new("revoked", T0 as u64),
-                                    T0 as u64,
-                                )
-                                .await
-                                .unwrap();
+                                insert_test_stop(&store, denial, pack).await;
                             }
                         })
                     }),
@@ -1447,19 +1490,26 @@ fn path_witness_rechecks_all_sources_and_reserves_all_output() {
             });
             in_view(&fx, writer, |reader| {
                 let mut session = ReaderSession::default();
-                assert!(
-                    block_on(reader.read_commit_path_in(
-                        &mut session,
-                        HEAD,
-                        d.head(),
-                        &[b"small.txt".to_vec()],
-                        None,
-                        options
-                    ))
-                    .unwrap()
-                    .is_none()
-                );
-                assert_eq!(session.used().output_bytes, 0);
+                fx.pipe.meta.seen.lock().unwrap().clear();
+                let found = block_on(reader.read_commit_path_in(
+                    &mut session,
+                    HEAD,
+                    d.head(),
+                    &[b"small.txt".to_vec()],
+                    None,
+                    options,
+                ))
+                .unwrap();
+                if denial {
+                    assert!(found.is_none());
+                    assert_eq!(session.used().output_bytes, 0);
+                } else {
+                    let found = found.unwrap();
+                    assert_eq!(found.canonical, serialize(&d.small).unwrap());
+                    assert_eq!(found.witness.unwrap().commit.id, d.head());
+                    assert!(session.used().output_bytes > 0);
+                    assert_no_denial_rows(&fx.pipe.meta.seen());
+                }
             });
         }
     }
@@ -1741,10 +1791,15 @@ fn directed_chunked_leaf_preserves_live_manifest_provenance() {
                     "no snapshot traversal to acquire a chunk"
                 );
                 block_id(&fx, id(&d.manifest));
-                assert_eq!(
-                    block_on(reader.read_canonical_in(&mut session, &[id(&d.chunks[0])])).unwrap(),
-                    [None]
-                );
+                fx.pipe.meta.seen.lock().unwrap().clear();
+                let answers =
+                    block_on(reader.read_canonical_in(&mut session, &[id(&d.chunks[0])])).unwrap();
+                if denial {
+                    assert_eq!(answers, [None]);
+                } else {
+                    assert_eq!(answers, [Some(serialize(&d.chunks[0]).unwrap())]);
+                    assert_no_denial_rows(&fx.pipe.meta.seen());
+                }
             });
             // Each view starts with clear storage, rather than reusing denial
             // permission or graph evidence from the other view.
@@ -1832,6 +1887,7 @@ impl Authorizer for Arc<BlockingAuthorization> {
             if let Some(chunk) = self.shared_chunk {
                 crate::store::ContentIndex::new(crate::store::BorrowedStore(store.as_ref()))
                     .install_block_action(
+                        &crate::takedown::DenialCapability::for_test(),
                         &target,
                         &crate::takedown::denial::BlockAction {
                             id: [19; 32],
@@ -1847,6 +1903,7 @@ impl Authorizer for Arc<BlockingAuthorization> {
             } else {
                 crate::store::ContentIndex::new(crate::store::BorrowedStore(store.as_ref()))
                     .block(
+                        &crate::takedown::DenialCapability::for_test(),
                         &target,
                         &crate::store::BlockEntry::new("authorization stop", T0 as u64),
                         T0 as u64,
@@ -1909,36 +1966,48 @@ fn final_authorization_blocks_history_and_path_sources_before_output() {
                     });
                     in_view(&fx, writer, |reader| {
                         let mut session = ReaderSession::default();
+                        fx.pipe.meta.seen.lock().unwrap().clear();
                         if shape < 2 {
-                            assert!(
-                                block_on(reader.walk_history_in(
-                                    &mut session,
-                                    HEAD,
-                                    None,
-                                    if shape == 0 { 1 } else { 2 },
-                                    HistoryOptions::default(),
-                                ))
-                                .unwrap()
-                                .is_none()
-                            );
+                            let found = block_on(reader.walk_history_in(
+                                &mut session,
+                                HEAD,
+                                None,
+                                if shape == 0 { 1 } else { 2 },
+                                HistoryOptions::default(),
+                            ))
+                            .unwrap();
+                            if denial {
+                                assert!(found.is_none());
+                            } else {
+                                let page = found.unwrap();
+                                assert_eq!(page.commits[0].canonical, serialize(&tip).unwrap());
+                                assert_eq!(page.commits.len(), if shape == 0 { 1 } else { 2 });
+                            }
                         } else {
-                            assert!(
-                                block_on(reader.read_commit_path_in(
-                                    &mut session,
-                                    HEAD,
-                                    id(&tip),
-                                    &[b"leaf".to_vec()],
-                                    None,
-                                    PathOptions {
-                                        include_witness: shape == 3,
-                                        ..PathOptions::default()
-                                    },
-                                ))
-                                .unwrap()
-                                .is_none()
-                            );
+                            let found = block_on(reader.read_commit_path_in(
+                                &mut session,
+                                HEAD,
+                                id(&tip),
+                                &[b"leaf".to_vec()],
+                                None,
+                                PathOptions {
+                                    include_witness: shape == 3,
+                                    ..PathOptions::default()
+                                },
+                            ))
+                            .unwrap();
+                            if denial {
+                                assert!(found.is_none());
+                            } else {
+                                assert_eq!(found.unwrap().canonical, serialize(&leaf).unwrap());
+                            }
                         }
-                        assert_eq!(session.used().output_bytes, 0);
+                        if denial {
+                            assert_eq!(session.used().output_bytes, 0);
+                        } else {
+                            assert!(session.used().output_bytes > 0);
+                            assert_no_denial_rows(&fx.pipe.meta.seen());
+                        }
                         assert_eq!(az.applied.load(Ordering::SeqCst), 1);
                     });
                 }
@@ -2007,6 +2076,7 @@ fn final_authorization_refreshes_indirect_chunk_denials() {
                     });
                     in_view(&fx, writer, |reader| {
                         let mut session = ReaderSession::default();
+                        fx.pipe.meta.seen.lock().unwrap().clear();
                         let found = block_on(reader.read_commit_path_in(
                             &mut session,
                             HEAD,
@@ -2024,6 +2094,7 @@ fn final_authorization_refreshes_indirect_chunk_denials() {
                             assert_eq!(session.used().output_bytes, 0);
                         } else {
                             assert_eq!(found.unwrap().canonical, serialize(leaf).unwrap());
+                            assert_no_denial_rows(&fx.pipe.meta.seen());
                         }
                         assert_eq!(az.applied.load(Ordering::SeqCst), 1);
                     });

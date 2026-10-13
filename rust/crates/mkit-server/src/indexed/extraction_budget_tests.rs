@@ -77,6 +77,7 @@ fn changing_a_peers_member_body_cannot_reset_the_group_source_charge() {
         &ids,
         head,
         native_rig.cfg,
+        true,
         native_rig.clock.as_ref(),
         native_rig.recorder.as_ref(),
     ))
@@ -437,6 +438,7 @@ fn corrupt_frame_is_rejected_before_ranged_read(damage: BadFrame) {
     let maximum = Arc::new(Mutex::new(0));
     let h = extraction_handler(&rig, extension);
     let handler = VerifyTimer {
+        takedown_denial: true,
         windows: CountWindows {
             inner: h.windows,
             maximum: maximum.clone(),
@@ -613,6 +615,7 @@ type CountedExtraction =
 fn counted_extraction(rig: &Rig, calls: Arc<AtomicU32>, pack: Hash) -> CountedExtraction {
     let h = extraction_handler(rig, TestExtraction::new(rig));
     VerifyTimer {
+        takedown_denial: true,
         remote: Shared(Arc::new(CountReads {
             inner: rig.store.clone(),
             job: keys::verify_job(&rig.repo.name, &pack),
@@ -722,6 +725,7 @@ fn fifty_deep_member_chunk(payload_bytes: usize, window_bytes: u64, quota_shortf
         &[id],
         head,
         native.cfg,
+        true,
         native.clock.as_ref(),
         native.recorder.as_ref(),
     ));
@@ -1319,6 +1323,7 @@ fn a_large_single_pack_emits_within_budget_and_reschedules_metadata_progress_imm
         &[oracle_ticket.1],
         bad_head,
         oracle.cfg,
+        true,
         oracle.clock.as_ref(),
         oracle.recorder.as_ref(),
     ))
@@ -1479,6 +1484,7 @@ fn a_denial_after_source_descent_prevents_chunk_and_ancestor_reads() {
         let now = u64::try_from(rig.clock.now_ms()).unwrap();
         block_on(
             ContentIndex::new(crate::store::BorrowedStore(rig.store.as_ref())).block(
+                &crate::takedown::DenialCapability::for_test(),
                 &denied,
                 &crate::store::BlockEntry::new("manual", now),
                 now,
@@ -1494,6 +1500,7 @@ fn a_denial_after_source_descent_prevents_chunk_and_ancestor_reads() {
         let reads = Arc::new(AtomicU32::new(0));
         let h = extraction_handler(&rig, extension);
         let handler = VerifyTimer {
+            takedown_denial: true,
             blobs: CountBlobCalls {
                 inner: rig.blobs.clone(),
                 calls: reads.clone(),
@@ -1825,6 +1832,7 @@ fn extract_call_table(chunks_n: usize) -> (Rig, Hash, Hash, Vec<u8>, CallTable) 
     let window_calls = Arc::new(AtomicU32::new(0));
     let h = extraction_handler(&rig, TestExtraction::new(&rig));
     let handler: CountedExtraction = VerifyTimer {
+        takedown_denial: true,
         remote: Shared(Arc::new(CountReads {
             inner: rig.store.clone(),
             job: keys::verify_job(&rig.repo.name, &pack_id),
@@ -2262,6 +2270,7 @@ fn a_fused_walk_slice_protects_once_for_all_its_chunks() {
     };
     let h = extraction_handler(&rig, extension.clone());
     let handler = VerifyTimer {
+        takedown_denial: true,
         remote: Shared(Arc::new(record.clone())),
         blobs: h.blobs,
         windows: h.windows,
@@ -2368,6 +2377,7 @@ fn a_lost_source_lease_before_the_part_upload_commits_no_effects() {
     });
     let h = extraction_handler(&rig, extension.clone());
     let handler = VerifyTimer {
+        takedown_denial: true,
         remote: h.remote,
         blobs: h.blobs,
         windows: BreakLease {
@@ -2437,6 +2447,7 @@ impl PackWindows for BlockAfterReads {
             if self.reads.fetch_add(1, Ordering::SeqCst) + 1 == self.at {
                 ContentIndex::new(crate::store::BorrowedStore(self.store.as_ref()))
                     .block(
+                        &crate::takedown::DenialCapability::for_test(),
                         &self.blocked,
                         &crate::store::BlockEntry::new("test denial", self.now_ms),
                         self.now_ms,
@@ -2457,6 +2468,7 @@ fn blocked_windows_handler(
 ) -> VerifyTimer<Shared<MemoryKv>, Shared<MemoryBlobStore>, BlockAfterReads, TestExtraction> {
     let h = extraction_handler(rig, extension.clone());
     VerifyTimer {
+        takedown_denial: true,
         remote: h.remote,
         blobs: h.blobs,
         windows: BlockAfterReads {

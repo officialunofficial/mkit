@@ -11,6 +11,7 @@ fn service() -> Service<Arc<MemoryKv>> {
         Partition::Namespace(NamespaceKey::deployment_default()),
         Arc::new(SinglePartition),
     )
+    .with_denial_capability(Some(crate::takedown::DenialCapability::for_test()))
 }
 #[test]
 fn strict_registered_and_deployment_reason_tokens() {
@@ -561,7 +562,8 @@ mod accounting {
                 faults: Arc::new(Mutex::new(Faults::default())),
             };
             let observed = Observed {
-                service: Service::new(store.clone(), root(), Arc::new(SinglePartition)),
+                service: Service::new(store.clone(), root(), Arc::new(SinglePartition))
+                    .with_denial_capability(Some(crate::takedown::DenialCapability::for_test())),
                 phases: Arc::new(Mutex::new(Vec::new())),
             };
             let key = SigningKey::from_bytes(&[71; 32]);
@@ -681,7 +683,8 @@ mod accounting {
             self.store().calls.store(0, Ordering::SeqCst);
             let budget = SliceBudget::new(4000);
             let id = hash(&[b"mkit-takedown:v1\0".as_slice(), b"counted"].concat());
-            let service = Service::new(self.store().clone(), root(), Arc::new(SinglePartition));
+            let service = Service::new(self.store().clone(), root(), Arc::new(SinglePartition))
+                .with_denial_capability(Some(crate::takedown::DenialCapability::for_test()));
             let resumed = service.resume(id, 10, &budget).await;
             assert_eq!(
                 self.store().total(),
@@ -984,6 +987,7 @@ mod accounting {
                 crate::MemoryBlobStore::default(),
                 config,
             )
+            .with_denial_capability(Some(crate::takedown::DenialCapability::for_test()))
         };
         let registry = crate::timers::TimerRegistry::new().register(work);
         let fired = crate::timers::run_due(
@@ -1038,4 +1042,47 @@ mod accounting {
         assert_eq!(fixture.replay(7).await.0, first);
         assert_eq!(fixture.dispatch(8).await.0, first);
     }
+}
+
+#[tokio::test]
+async fn disabled_intake_and_activation_refuse_before_any_storage_call() {
+    use crate::admin::{AdminOperations, Response, TAKEDOWN_PATH};
+    use crate::indexed::budget::SliceBudget;
+    let service = service().with_denial_capability(None);
+    let budget = SliceBudget::new(100);
+    let before = service
+        .store
+        .stats(&Partition::Namespace(NamespaceKey::deployment_default()))
+        .await
+        .unwrap();
+    let error = service
+        .plan(TAKEDOWN_PATH, &json!({}), "digest", 10, &budget)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), crate::Code::FailedPrecondition);
+    assert_eq!(error.to_string(), "takedown denial disabled");
+    let error = service.resume([5; 32], 10, &budget).await.unwrap_err();
+    assert_eq!(error.code(), crate::Code::FailedPrecondition);
+    assert_eq!(error.to_string(), "takedown denial disabled");
+    let error = service
+        .after_commit(
+            TAKEDOWN_PATH,
+            &json!({}),
+            Response::json(&json!({})),
+            10,
+            &budget,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), crate::Code::FailedPrecondition);
+    assert_eq!(error.to_string(), "takedown denial disabled");
+    assert_eq!(budget.used(), 0);
+    assert_eq!(
+        service
+            .store
+            .stats(&Partition::Namespace(NamespaceKey::deployment_default()))
+            .await
+            .unwrap(),
+        before
+    );
 }

@@ -488,11 +488,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .new
                 .ok_or_else(|| ServerError::invalid_argument("delete consumes no tickets"))?;
             let ticket_ms = rows.iter().map(|ticket| ticket.created_at_ms).min();
+            let denial_reads = crate::store::DenialReads::new(&self.meta, self.cfg.takedown_denial);
             let staged = if let Some(limit) = self.inspection_max_objects() {
                 if indexed.verification == crate::indexed::VerificationMode::Scheduled {
                     crate::indexed::scheduled::check_inspected(
                         &self.blobs,
-                        &self.meta,
+                        &denial_reads,
                         self.shards.as_ref(),
                         &op.repo,
                         p,
@@ -516,6 +517,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                         tickets,
                         tip,
                         indexed,
+                        self.cfg.takedown_denial,
                         self.clock.as_ref(),
                         self.metrics.as_ref(),
                         limit as usize,
@@ -526,7 +528,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 // Kind-7 slices verify; the advance only checks their result.
                 crate::indexed::scheduled::check(
                     &self.blobs,
-                    &self.meta,
+                    &denial_reads,
                     self.shards.as_ref(),
                     &op.repo,
                     p,
@@ -549,6 +551,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     tickets,
                     tip,
                     indexed,
+                    self.cfg.takedown_denial,
                     self.clock.as_ref(),
                     self.metrics.as_ref(),
                 )

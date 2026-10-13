@@ -868,7 +868,12 @@ async fn canonical_manifest_keeps_order_duplicates_and_denied_acquisition_privil
     let (blobs, store, repo) = fixture(&pack, &[entry]).await;
     let content = ContentIndex::new(store.clone());
     content
-        .block(&id, &BlockEntry::new("policy", 1), 1)
+        .block(
+            &denial_capability_for_test(),
+            &id,
+            &BlockEntry::new("policy", 1),
+            1,
+        )
         .await
         .unwrap();
     let budget = SliceBudget::new(700);
@@ -1010,4 +1015,31 @@ async fn recursive_source_limit_rejects_false_size_before_preservation() {
     assert!(result.is_err());
     assert!(peak < 3 << 20, "oversized recursive source: {peak}");
     assert!(budget.used() < 20);
+}
+
+fn denial_capability_for_test() -> mkit_server::takedown::DenialCapability {
+    use mkit_server::pipeline::{AuthMode, Hooks, Pipeline, PipelineConfig};
+    let mut cfg = PipelineConfig::new(
+        mkit_server::Addressing::Multi(mkit_server::MultiAddressing::new()),
+        AuthMode::AuthV2(
+            mkit_server::auth_v2::AuthV2Config::new("http://localhost", "default").unwrap(),
+        ),
+        mkit_server::upload::UploadLimits::new(1 << 20, 64),
+    );
+    cfg.indexed = Some(mkit_server::indexed::IndexedConfig::default());
+    cfg.ticket_keys =
+        Some(mkit_server::upload::token::TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap());
+    cfg.begin_upload_threshold_bytes = 0;
+    cfg.takedown_denial = true;
+    Pipeline::new(
+        mkit_server::MemoryBlobStore::default(),
+        mkit_server::MemoryKv::default(),
+        Hooks::new(),
+        cfg,
+        std::sync::Arc::new(mkit_server::SystemClock),
+        std::sync::Arc::new(mkit_server::NoopMetrics),
+    )
+    .unwrap()
+    .denial_capability()
+    .unwrap()
 }

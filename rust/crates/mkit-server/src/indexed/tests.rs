@@ -93,6 +93,7 @@ fn verify_store<S: NamespaceStore>(
         &ticket_ids(tickets),
         head,
         cfg,
+        true,
         clock,
         &NoopMetrics,
     ))
@@ -239,6 +240,7 @@ impl NamespaceStore for TimedKv {
                 &ticket_ids(std::slice::from_ref(&ticket)),
                 head,
                 IndexedConfig::default(),
+                true,
                 self.clock.as_ref(),
                 &NoopMetrics,
             )
@@ -363,6 +365,7 @@ fn a_blocked_object_refuses_inline_verification_before_any_index_row() {
     upload(&blobs, &pack);
     let ticket = ticket(&repo, &pack, NOW as u64);
     block_on(crate::ContentIndex::new(store.clone()).block(
+        &crate::takedown::DenialCapability::for_test(),
         &head,
         &crate::store::BlockEntry::new("test", NOW as u64),
         NOW as u64,

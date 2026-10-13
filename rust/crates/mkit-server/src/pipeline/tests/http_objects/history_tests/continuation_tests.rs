@@ -385,6 +385,7 @@ fn measured_pages(fx: &Fx, commits: &[Object], size: usize, writer: bool, latenc
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One mode/view matrix preserves the live final-boundary assertions.
 fn continuation_replay_serves_same_page_and_reruns_live_checks() {
     for denial in [false, true] {
         for writer in [false, true] {
@@ -457,6 +458,7 @@ fn continuation_replay_serves_same_page_and_reruns_live_checks() {
                             &fx.pipe.meta.inner,
                         ))
                         .block(
+                            &crate::takedown::DenialCapability::for_test(),
                             &pack,
                             &crate::store::BlockEntry::new("replay", T0 as u64),
                             T0 as u64,
@@ -468,17 +470,23 @@ fn continuation_replay_serves_same_page_and_reruns_live_checks() {
                     if !block_source {
                         *az.verdict.lock().unwrap() = Some(Code::PermissionDenied);
                     }
-                    assert!(
-                        block_on(reader.walk_history_page_in(
-                            &mut ReaderSession::default(),
-                            HEAD,
-                            Some(&copied),
-                            1,
-                        ))
-                        .unwrap()
-                        .is_none(),
-                        "replay does not retain source or authority clearance"
-                    );
+                    fx.pipe.meta.seen.lock().unwrap().clear();
+                    let found = block_on(reader.walk_history_page_in(
+                        &mut ReaderSession::default(),
+                        HEAD,
+                        Some(&copied),
+                        1,
+                    ))
+                    .unwrap();
+                    if denial || !block_source {
+                        assert!(
+                            found.is_none(),
+                            "replay does not retain source or authority clearance"
+                        );
+                    } else {
+                        assert_eq!(found, expected);
+                        assert_no_denial_rows(&fx.pipe.meta.seen());
+                    }
                 });
             }
         }
@@ -720,6 +728,7 @@ fn continuation_closing_reads_precede_live_authorizer_and_source_checks() {
                                     store,
                                 ))
                                 .block(
+                                    &crate::takedown::DenialCapability::for_test(),
                                     &pack,
                                     &crate::store::BlockEntry::new("closed", T0 as u64),
                                     T0 as u64,
@@ -731,16 +740,22 @@ fn continuation_closing_reads_precede_live_authorizer_and_source_checks() {
                         }
                     }));
                 in_view(&fx, writer, |reader| {
-                    assert!(
-                        block_on(reader.walk_history_page_in(
-                            &mut ReaderSession::default(),
-                            HEAD,
-                            Some(token.token.expose()),
-                            1
-                        ))
-                        .unwrap()
-                        .is_none()
-                    );
+                    fx.pipe.meta.seen.lock().unwrap().clear();
+                    let found = block_on(reader.walk_history_page_in(
+                        &mut ReaderSession::default(),
+                        HEAD,
+                        Some(token.token.expose()),
+                        1,
+                    ))
+                    .unwrap();
+                    if denial || !block_source {
+                        assert!(found.is_none());
+                    } else {
+                        let page = found.unwrap();
+                        assert_eq!(page.commits[0].id, id(&middle));
+                        assert_eq!(page.commits[0].canonical, serialize(&middle).unwrap());
+                        assert_no_denial_rows(&fx.pipe.meta.seen());
+                    }
                 });
                 assert_eq!(reads.load(Ordering::SeqCst), 2);
             }

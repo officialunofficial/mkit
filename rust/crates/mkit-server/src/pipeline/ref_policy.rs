@@ -134,9 +134,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let Some(new) = head.new else {
             return Ok(());
         };
+        let denial_reads = crate::store::DenialReads::new(&self.meta, self.cfg.takedown_denial);
         verify_member_head(
             &self.blobs,
-            &self.meta,
+            &denial_reads,
             self.shards.as_ref(),
             &op.repo,
             new,
@@ -211,9 +212,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 current
             }
         };
+        let denial_reads = crate::store::DenialReads::new(&self.meta, self.cfg.takedown_denial);
         let walk = Walk {
             blobs: &self.blobs,
-            store: &self.meta,
+            store: &denial_reads,
             shards: self.shards.as_ref(),
             repo: &op.repo,
             cfg: indexed,

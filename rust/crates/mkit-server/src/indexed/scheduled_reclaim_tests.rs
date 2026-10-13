@@ -408,6 +408,7 @@ impl<S: NamespaceStore> crate::timers::TimerHandler<S> for ObservedVerification 
 fn tick_counting_members(rig: &Rig, lookups: &Arc<MemberLookups>) {
     let h = rig.handler();
     let handler = VerifyTimer {
+        takedown_denial: true,
         remote: Shared(lookups.clone()),
         blobs: h.blobs,
         windows: h.windows,

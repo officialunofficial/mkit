@@ -19,6 +19,10 @@ pub type BoxError = Box<dyn std::error::Error>;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum StoreError {
+    /// Denial activation or a guard requiring a denial row needs an enabled deployment.
+    /// Nothing was written; the public refusal is "takedown denial disabled".
+    #[error("takedown denial disabled")]
+    TakedownDenialDisabled,
     /// The request breaks the contract: an oversize key, value or batch, a
     /// scan `limit` of 0, a malformed byte range, or a blob whose bytes do
     /// not match its key or declared length. Nothing was written.

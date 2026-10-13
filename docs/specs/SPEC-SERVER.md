@@ -1592,7 +1592,8 @@ snapshot from the head read. Its planning deadline precedes the entry read.
 Entries with reference pages refresh the entry plan after staging those pages.
 The early replay exit and stored representation are unchanged.
 
-Scheduled Decode denial reads MUST follow completion of the batch's inventory
+When the deployment's `takedown_denial` mode is enabled (§14.2), scheduled Decode denial
+reads MUST follow completion of the batch's inventory
 staging and precede all of its frame, candidate, and index rows. Reads MAY run
 in bounded concurrent waves. A failed wave MUST report the first failing object
 in batch order among the reads it issued, whether blocked or unavailable, and
@@ -1604,6 +1605,9 @@ failing wave can issue up to fifteen reads after the first failing object.
 Scheduled and inline direct index writes use the same bounded waves,
 preserving ObjectIndex put order and rechecking denial before each apply.
 The earlier inline pre-staging check uses the same waves at its existing boundary.
+When denial is disabled, these checks MUST report clear without reading block
+or denial-action rows. Inventory staging, holder registration, membership, and
+index writes MUST still run.
 
 A scheduled Decode checkpoint MUST commit after, or atomically with, the completed
 entry's provisional writes and include its post-entry cursor, under the existing job and verification
@@ -3586,6 +3590,21 @@ bytes represented under a different id can evade that block.
 
 ### 14.2 Blocklist
 
+The deployment's `takedown_denial` option selects whether global content denial is
+enabled. When it is false, ingest and read paths MUST NOT consult block or
+denial-action rows; their denial checks MUST report clear without storage I/O.
+Holder, inventory, membership, index, and proof-structure writes MUST continue
+in this mode. Every path that creates or activates a block or denial action
+MUST refuse with `failed_precondition` and the exact public message
+`takedown denial disabled` before any write. Raw store writers MUST require a
+capability obtained from a pipeline with denial enabled.
+
+Enabling takedown on an existing store is a migration, not a configuration-only
+change. Objects ingested with denial disabled MUST be checked on read once
+denial is enabled. Holder, inventory, and proof structures require a backfill
+before activation. The following blocklist checks and denial-specific
+deduplication requirements apply when `takedown_denial` is true.
+
 The server MUST maintain a strongly consistent global blocklist with
 one row per object id. The row holds a set of active actions. Each
 action has a distinct `block_action_id`, source `takedown` or `manual`,
@@ -3613,7 +3632,7 @@ inspection occurs after an earlier check, the server MUST repeat the check
 at plan time. A write planned before the blocklist action but applied
 later remains bounded by `NotAfter` (§13.1); a write planned afterward
 MUST observe the action or fail closed.
-`AlreadyPresent` and every other pack-deduplication path MUST answer
+With denial enabled, `AlreadyPresent` and every other pack-deduplication path MUST answer
 as if a pack were absent when it contains a blocked id or has been
 superseded by a takedown. The resulting ticket forces indexed decode,
 which rejects the blocked object with the error below. Deduplication

@@ -2654,9 +2654,10 @@ split-vs-single-run equivalence.
 
 ## Denial waves preserve admission order
 
-**Always:** a Decode batch's inventory staging completes before its denial reads.
-Denial waves contain at most sixteen reads, matching the staging batch cap;
-the shared reader admission envelope remains six. Admitted readers reserve each wave's calls;
+**Always:** with `PipelineConfig.takedown_denial=true`, a Decode batch's inventory
+staging completes before its denial reads. Denial waves contain at most sixteen
+reads, matching the staging batch cap; the shared reader admission envelope
+remains six. Admitted readers reserve each wave's calls;
 ordinary mutation stores keep dispatch-time charging, so later budget exhaustion
 cannot mask an earlier object's denial. A wave whose all-or-nothing
 reservation is refused issues no reads and reports unavailable (fail-closed;
@@ -2678,6 +2679,27 @@ select the outcome and misstate its cost.
 **Enforced by:** Decode admission, direct index writes, the inline verifier's pre-staging check, and the shared denial-wave helper;
 `inventory_stage_guard` covers a block landing during staging, and denial-wave
 unit tests cover latency, call charges, reservations, and mixed failures.
+
+## Disabled global denial performs no denial I/O
+
+**Always:** when `PipelineConfig.takedown_denial=false`, ingest and read checks
+report clear without reading block or denial-action rows. Holder, inventory,
+membership, index, and proof-structure writes continue. Takedown writer paths
+refuse with typed `failed_precondition` and `takedown denial disabled` before
+any write. Raw block and denial-action writers require a capability that only
+a pipeline with denial enabled can provide.
+
+**Because:** skipping denial reads is safe only when every corresponding writer
+is disabled. Keeping other rows supports normal ingest and a later migration
+that backfills holder, inventory, and proof structures.
+
+**If violated:** a block could become invisible to ingest or serving, or disabling
+denial could lose holder and inventory information.
+
+**Enforced by:** the shared denial read gate, `Pipeline::denial_capability`,
+capability-bearing `ContentIndex` writers, and disabled-mode writer and ingest/read
+regressions. [SPEC-SERVER §14.2](specs/SPEC-SERVER.md#142-blocklist) defines the
+mode and activation migration.
 
 ## Native client headers and request budgets
 

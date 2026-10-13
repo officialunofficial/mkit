@@ -46,7 +46,7 @@ fn visibility_single_and_d34_absence_defaults_and_corruption() {
     for shards in maps() {
         let store = MemoryKv::with_clock(std::sync::Arc::new(crate::ManualClock::new(1)));
         let repo = repo();
-        let reads = ReadAccess::new(&store, shards.as_ref(), RepoVisibility::Private);
+        let reads = ReadAccess::new(&store, shards.as_ref(), RepoVisibility::Private, true);
         assert_eq!(block_on(reads.repository_visibility(&repo)).unwrap(), None);
         let p = shards.coordinator(&repo.namespace);
         put(
@@ -103,7 +103,7 @@ fn private_change_during_metadata_read_invalidates_visibility_revision() {
     for shards in maps() {
         let store = MemoryKv::with_clock(std::sync::Arc::new(crate::ManualClock::new(1)));
         let repo = repo();
-        let reads = ReadAccess::new(&store, shards.as_ref(), RepoVisibility::Public);
+        let reads = ReadAccess::new(&store, shards.as_ref(), RepoVisibility::Public, true);
         let p = shards.coordinator(&repo.namespace);
         put(
             &store,
@@ -155,7 +155,7 @@ fn published_branch_single_and_d34_absence_pair_and_corruption() {
     for shards in maps() {
         let store = MemoryKv::with_clock(std::sync::Arc::new(crate::ManualClock::new(1)));
         let repo = repo();
-        let reads = ReadAccess::new(&store, shards.as_ref(), RepoVisibility::Public);
+        let reads = ReadAccess::new(&store, shards.as_ref(), RepoVisibility::Public, true);
         let branch = "refs/heads/main";
         assert_eq!(
             block_on(reads.published_branch(&repo, branch)).unwrap(),
@@ -241,7 +241,7 @@ fn member_location_single_and_d34_absence_fresh_denial_and_corruption() {
     for shards in maps() {
         let store = MemoryKv::with_clock(std::sync::Arc::new(crate::ManualClock::new(1)));
         let repo = repo();
-        let reads = ReadAccess::new(&store, shards.as_ref(), RepoVisibility::Public);
+        let reads = ReadAccess::new(&store, shards.as_ref(), RepoVisibility::Public, true);
         let id = [10; 32];
         let pack = [11; 32];
         assert_eq!(block_on(reads.locate_object(&repo, &id)).unwrap(), None);
@@ -262,7 +262,13 @@ fn member_location_single_and_d34_absence_fresh_denial_and_corruption() {
         };
         assert_eq!(block_on(reads.locate_object(&foreign, &id)).unwrap(), None);
         let content = crate::ContentIndex::new(crate::store::BorrowedStore(&store));
-        block_on(content.block(&id, &crate::store::BlockEntry::new("policy", 1), 1)).unwrap();
+        block_on(content.block(
+            &crate::takedown::DenialCapability::for_test(),
+            &id,
+            &crate::store::BlockEntry::new("policy", 1),
+            1,
+        ))
+        .unwrap();
         assert!(
             block_on(reads.locate_object(&repo, &id))
                 .unwrap()
@@ -276,7 +282,13 @@ fn member_location_single_and_d34_absence_fresh_denial_and_corruption() {
                 .unwrap()
                 .denied
         );
-        block_on(content.block(&pack, &crate::store::BlockEntry::new("policy", 3), 3)).unwrap();
+        block_on(content.block(
+            &crate::takedown::DenialCapability::for_test(),
+            &pack,
+            &crate::store::BlockEntry::new("policy", 3),
+            3,
+        ))
+        .unwrap();
         assert!(
             block_on(reads.locate_object(&repo, &id))
                 .unwrap()
@@ -322,7 +334,13 @@ fn assert_live_canonical_denial(
     limits: MemberReadLimits,
 ) {
     let content = crate::ContentIndex::new(crate::store::BorrowedStore(store));
-    block_on(content.block(&id, &crate::store::BlockEntry::new("policy", 2), 2)).unwrap();
+    block_on(content.block(
+        &crate::takedown::DenialCapability::for_test(),
+        &id,
+        &crate::store::BlockEntry::new("policy", 2),
+        2,
+    ))
+    .unwrap();
     assert!(block_on(reads.read_member_canonical(blobs, repo, id, limits)).is_err());
     block_on(content.unblock(&id, 3)).unwrap();
     assert!(
@@ -337,7 +355,7 @@ fn inventory_and_canonical_single_and_d34_absence_corruption_and_bounds() {
     for shards in maps() {
         let store = MemoryKv::with_clock(std::sync::Arc::new(crate::ManualClock::new(1)));
         let repo = repo();
-        let reads = ReadAccess::new(&store, shards.as_ref(), RepoVisibility::Public);
+        let reads = ReadAccess::new(&store, shards.as_ref(), RepoVisibility::Public, true);
         let object = Object::Blob(Blob {
             data: b"example".to_vec(),
         });
@@ -423,7 +441,7 @@ fn batched_locations_route_order_absence_duplicates_bounds_and_corruption() {
     for shards in maps() {
         let store = MemoryKv::with_clock(std::sync::Arc::new(crate::ManualClock::new(1)));
         let repo = repo();
-        let reads = ReadAccess::new(&store, shards.as_ref(), RepoVisibility::Public);
+        let reads = ReadAccess::new(&store, shards.as_ref(), RepoVisibility::Public, true);
         let ids = [[12; 32], [14; 32], [13; 32], [12; 32]];
         assert_eq!(
             block_on(reads.locate_objects(&repo, &ids)).unwrap(),
@@ -450,5 +468,214 @@ fn batched_locations_route_order_absence_duplicates_bounds_and_corruption() {
             Value::new(vec![255]),
         );
         assert!(block_on(reads.locate_objects(&repo, &ids)).is_err());
+    }
+}
+
+mod denial_modes {
+    use super::*;
+    use crate::store::{
+        Cursor, Key, Partition, PartitionStats, ScanPage, StoreCapabilities, StoreError,
+    };
+    use std::sync::Mutex;
+
+    struct Recorded {
+        inner: MemoryKv,
+        denial_reads: Mutex<usize>,
+    }
+    impl Recorded {
+        fn observe(&self, p: &Partition, key: &Key) {
+            let bytes = key.as_bytes();
+            if bytes.starts_with(b"b\0")
+                && (bytes.len() == 34 || (bytes.len() == 42 && bytes.ends_with(b"\0actions")))
+            {
+                let id: Hash = bytes[2..34].try_into().unwrap();
+                if *p == crate::store::content_shard(&id) {
+                    *self.denial_reads.lock().unwrap() += 1;
+                }
+            }
+        }
+    }
+    impl NamespaceStore for Recorded {
+        fn capabilities(&self) -> StoreCapabilities {
+            self.inner.capabilities()
+        }
+        async fn get(&self, p: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
+            self.observe(p, key);
+            self.inner.get(p, key).await
+        }
+        async fn get_many(
+            &self,
+            p: &Partition,
+            keys: &[Key],
+        ) -> Result<Vec<Option<Value>>, StoreError> {
+            for key in keys {
+                self.observe(p, key);
+            }
+            self.inner.get_many(p, keys).await
+        }
+        async fn scan(
+            &self,
+            p: &Partition,
+            start: &Key,
+            end: &Key,
+            after: Option<&Cursor>,
+            limit: u32,
+        ) -> Result<ScanPage, StoreError> {
+            self.inner.scan(p, start, end, after, limit).await
+        }
+        async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+            self.inner.apply(p, batch).await
+        }
+        async fn stats(&self, p: &Partition) -> Result<PartitionStats, StoreError> {
+            self.inner.stats(p).await
+        }
+        async fn probe(&self) -> Result<(), StoreError> {
+            self.inner.probe().await
+        }
+    }
+
+    struct DeltaFixture {
+        store: Recorded,
+        blobs: MemoryBlobStore,
+        base: Hash,
+        base_pack: Hash,
+        id: Hash,
+        pack: Hash,
+        bytes: Vec<u8>,
+    }
+    fn delta_fixture(shards: &dyn ShardMap) -> DeltaFixture {
+        let store = Recorded {
+            inner: MemoryKv::with_clock(std::sync::Arc::new(crate::ManualClock::new(1))),
+            denial_reads: Mutex::new(0),
+        };
+        let blobs = MemoryBlobStore::new("typed-reads");
+        let base = Object::Blob(Blob {
+            data: b"external base".to_vec(),
+        });
+        let object = Object::Blob(Blob {
+            data: b"derived value".to_vec(),
+        });
+        let base_id = base.id().unwrap();
+        let id = object.id().unwrap();
+        let base_bytes = mkit_core::serialize::serialize(&base).unwrap();
+        let bytes = mkit_core::serialize::serialize(&object).unwrap();
+        let mut writer = PackWriter::new_raw_only();
+        writer.push_raw(base_id, &base_bytes).unwrap();
+        let base_pack_bytes = writer.finish().unwrap();
+        let base_pack = mkit_core::hash::hash(&base_pack_bytes);
+        upload(&blobs, base_pack, &base_pack_bytes);
+        seed_member(
+            &store.inner,
+            shards,
+            &repo(),
+            base_id,
+            base_pack,
+            u64::try_from(base_bytes.len()).unwrap(),
+        );
+        let mut writer = PackWriter::new();
+        writer
+            .push_delta(
+                &base_id,
+                &mkit_core::delta::encode(&base_bytes, &bytes).unwrap(),
+            )
+            .unwrap();
+        let pack_bytes = writer.finish().unwrap();
+        let pack = mkit_core::hash::hash(&pack_bytes);
+        upload(&blobs, pack, &pack_bytes);
+        seed_member(
+            &store.inner,
+            shards,
+            &repo(),
+            id,
+            pack,
+            u64::try_from(bytes.len()).unwrap(),
+        );
+        let row = index::IndexValue {
+            frame_offset: 12,
+            frame_length: u64::try_from(pack_bytes.len() - 12 - 32).unwrap(),
+            wire_type: pack_bytes[12],
+            decoded_size: u64::try_from(bytes.len()).unwrap(),
+            chain_depth: 1,
+            delta_base: Some(base_id),
+        };
+        put(
+            &store.inner,
+            &shards.object_index(&repo(), &id),
+            keys::object_index(&repo().name, &id, &pack),
+            codec::encode_object_index(&id, &row).unwrap(),
+        );
+        DeltaFixture {
+            store,
+            blobs,
+            base: base_id,
+            base_pack,
+            id,
+            pack,
+            bytes,
+        }
+    }
+
+    #[test]
+    fn direct_typed_read_modes_gate_rows_and_preserve_external_base_denial() {
+        for shards in maps() {
+            for enabled in [false, true] {
+                for blocked in 0..4 {
+                    let fx = delta_fixture(shards.as_ref());
+                    let reads = ReadAccess::new(
+                        &fx.store,
+                        shards.as_ref(),
+                        RepoVisibility::Public,
+                        enabled,
+                    );
+                    let limits = MemberReadLimits {
+                        max_delta_depth: 32,
+                        max_decode_bytes: 1024,
+                    };
+                    let before = block_on(reads.locate_object(&repo(), &fx.id))
+                        .unwrap()
+                        .unwrap();
+                    assert!(!before.denied);
+                    assert_eq!(
+                        block_on(reads.read_member_canonical(&fx.blobs, &repo(), fx.id, limits))
+                            .unwrap()
+                            .unwrap()
+                            .bytes
+                            .as_ref(),
+                        fx.bytes.as_slice()
+                    );
+                    let stopped = [fx.id, fx.pack, fx.base, fx.base_pack][blocked];
+                    block_on(
+                        crate::ContentIndex::new(crate::store::BorrowedStore(&fx.store.inner))
+                            .block(
+                                &crate::takedown::DenialCapability::for_test(),
+                                &stopped,
+                                &crate::store::BlockEntry::new("test stop", 1),
+                                1,
+                            ),
+                    )
+                    .unwrap();
+                    *fx.store.denial_reads.lock().unwrap() = 0;
+                    let member = block_on(reads.locate_object(&repo(), &fx.id))
+                        .unwrap()
+                        .unwrap();
+                    let batch = block_on(reads.locate_objects(&repo(), &[fx.id, fx.id])).unwrap();
+                    assert_eq!(batch, [Some(member), Some(member)]);
+                    assert_eq!(member.denied, enabled && blocked < 2);
+                    let canonical =
+                        block_on(reads.read_member_canonical(&fx.blobs, &repo(), fx.id, limits));
+                    if enabled {
+                        assert!(canonical.is_err(), "external-base denial remains live");
+                        assert!(*fx.store.denial_reads.lock().unwrap() > 0);
+                    } else {
+                        assert_eq!(member, before);
+                        assert_eq!(
+                            canonical.unwrap().unwrap().bytes.as_ref(),
+                            fx.bytes.as_slice()
+                        );
+                        assert_eq!(*fx.store.denial_reads.lock().unwrap(), 0);
+                    }
+                }
+            }
+        }
     }
 }

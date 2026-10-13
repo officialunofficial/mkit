@@ -516,6 +516,7 @@ fn action_after_final_clear_cannot_borrow_a_new_commit_window() {
             time.set(T0 + 11_000);
             now(
                 crate::store::ContentIndex::new(crate::store::BorrowedStore(store)).block(
+                    &crate::takedown::DenialCapability::for_test(),
                     &A,
                     &crate::store::BlockEntry::new("after proof", ms(T0 + 10_001)),
                     ms(T0 + 10_001),
@@ -675,7 +676,8 @@ fn signed_takedown_after_proof_cannot_publish_a_reused_canonical_pair() {
                 env.pipe.meta.inner.clone(),
                 root,
                 env.pipe.shards.clone(),
-            ),
+            )
+            .with_denial_capability(Some(crate::takedown::DenialCapability::for_test())),
         )),
     );
     let input = json!({"repository":identity,"operationId":"post-proof-pair",

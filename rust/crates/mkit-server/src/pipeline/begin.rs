@@ -317,6 +317,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .is_some()
         };
         let present = if present && self.cfg.indexed.is_some() {
+            let denial_reads = crate::store::DenialReads::new(&self.meta, self.cfg.takedown_denial);
             let clear = if self.cfg.takedown_denial {
                 crate::takedown::denial::require_pack_clear(
                     &self.meta,
@@ -326,7 +327,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 )
                 .await
             } else {
-                crate::takedown::denial::require_clear(&self.meta, &key.0).await
+                crate::takedown::denial::require_clear(&denial_reads, &key.0).await
             };
             match clear {
                 Ok(()) => true,

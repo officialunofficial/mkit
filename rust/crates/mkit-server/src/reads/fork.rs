@@ -205,7 +205,7 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
         {
             return Err(ServerError::invalid_argument("invalid fork specification"));
         }
-        let Some((job, _)) = fork::read_job(self.store, self.shards, &spec.dest)
+        let Some((job, _)) = fork::read_job(&self.store, self.shards, &spec.dest)
             .await
             .map_err(|_| failure())?
         else {
@@ -505,7 +505,7 @@ mod tests {
             for shards in [&SinglePartition as &dyn ShardMap, &D34Shards] {
                 let store = MemoryKv::default();
                 let spec = spec();
-                let reads = ReadAccess::new(&store, shards, RepoVisibility::Public);
+                let reads = ReadAccess::new(&store, shards, RepoVisibility::Public, true);
                 assert!(reads.fork_job_status(&spec).await.unwrap().is_none());
                 store
                     .apply(
@@ -541,7 +541,7 @@ mod tests {
                 assert!(clock.now_ms() > original().expires_at_ms);
                 let store = MemoryKv::with_clock(clock);
                 let spec = spec();
-                let reads = ReadAccess::new(&store, shards, RepoVisibility::Public);
+                let reads = ReadAccess::new(&store, shards, RepoVisibility::Public, true);
                 let original = original();
                 assert!(
                     reads
@@ -647,7 +647,7 @@ mod tests {
             let mut corrupt = valid;
             corrupt.binding = [0; 32];
             write_job(&store, &D34Shards, &spec, &corrupt).await;
-            let reads = ReadAccess::new(&store, &D34Shards, RepoVisibility::Public);
+            let reads = ReadAccess::new(&store, &D34Shards, RepoVisibility::Public, true);
             assert!(reads.fork_job_status(&spec).await.is_err());
             assert!(
                 reads
@@ -672,7 +672,7 @@ mod tests {
                     let store = MemoryKv::default();
                     write_job(&store, shards, &spec, &job(&spec)).await;
                     settle(&store, shards, &spec).await;
-                    let reads = ReadAccess::new(&store, shards, RepoVisibility::Public);
+                    let reads = ReadAccess::new(&store, shards, RepoVisibility::Public, true);
                     assert!(
                         reads
                             .recover_completed_fork(&spec, &original)
@@ -699,7 +699,7 @@ mod tests {
                 corrupt.settle.as_mut().unwrap().pending = vec![255];
                 write_job(&store, shards, &spec, &corrupt).await;
                 settle(&store, shards, &spec).await;
-                let reads = ReadAccess::new(&store, shards, RepoVisibility::Public);
+                let reads = ReadAccess::new(&store, shards, RepoVisibility::Public, true);
                 assert!(
                     reads
                         .recover_completed_fork(&spec, &original)
@@ -725,7 +725,7 @@ mod tests {
             for shards in [&SinglePartition as &dyn ShardMap, &D34Shards] {
                 let store = MemoryKv::default();
                 let spec = spec();
-                let reads = ReadAccess::new(&store, shards, RepoVisibility::Public);
+                let reads = ReadAccess::new(&store, shards, RepoVisibility::Public, true);
                 let mut pending = job(&spec);
                 pending.phase = Phase::Copy;
                 pending.result = None;

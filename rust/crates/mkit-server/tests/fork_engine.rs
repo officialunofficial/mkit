@@ -522,7 +522,12 @@ fn block_hook(source: &Source, id: Hash) -> Hook {
         let inner = inner.clone();
         Box::pin(async move {
             ContentIndex::new(inner)
-                .block(&id, &BlockEntry::new("takedown", now), now)
+                .block(
+                    &denial_capability_for_test(),
+                    &id,
+                    &BlockEntry::new("takedown", now),
+                    now,
+                )
                 .await
                 .unwrap();
         })
@@ -668,6 +673,61 @@ async fn storage_is_counted_once_with_one_change_outcome() {
         .await
         .unwrap();
     assert!(!again.progressed);
+}
+
+#[tokio::test]
+async fn holder_copy_uses_the_deployments_denial_mode() {
+    for denial in [false, true] {
+        let source = Source::build("source", 2).await;
+        let index = ContentIndex::new(source.store.inner.clone());
+        let from = Holder::new(source.repo.namespace.clone(), source.repo.name.clone());
+        let object = blob(1, 8).0;
+        index
+            .add_holder(
+                &object,
+                &from,
+                &[7; 32],
+                None,
+                u64::try_from(source.clock.now_ms()).unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut env = env(&source);
+        env.takedown_denial = denial;
+        env.extract_min_bytes = Some(1);
+        source
+            .store
+            .denial_reads
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        mkit_server::fork::start(&env, &spec(&source, "forked"), None)
+            .await
+            .unwrap();
+        let dest_id = dest(&source, "forked");
+        let mut finished = false;
+        for _ in 0..50 {
+            let job = mkit_server::fork::step(&env, &dest_id, &SliceBudget::new(600))
+                .await
+                .unwrap()
+                .job;
+            if job.finished() {
+                assert_eq!(job.phase, Phase::Done, "{:?}", job.failure);
+                finished = true;
+                break;
+            }
+        }
+        assert!(finished);
+        let to = Holder::new(dest_id.namespace.clone(), dest_id.name.clone());
+        assert!(index.holder_record(&object, &to).await.unwrap().is_some());
+        let reads = source
+            .store
+            .denial_reads
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if denial {
+            assert!(reads > 0);
+        } else {
+            assert_eq!(reads, 0, "fork keeps holder writes without denial reads");
+        }
+    }
 }
 
 #[tokio::test]
@@ -1456,9 +1516,8 @@ async fn the_per_pack_proof_with_active_descriptors_costs_the_same_at_every_size
 
 #[tokio::test]
 async fn without_pack_level_denial_the_cleared_set_is_not_honored() {
-    // With takedown_denial off an inspection-style policy still runs the
-    // canonical walk, whose per-object block check is all there is; the cleared
-    // set must not skip it.
+    // Denial off still walks the inherited closure instead of relying on the
+    // cleared set; the canonical walk requires membership but ignores blocks.
     let source = Source::build_policy("source", 20, 0, true, |cfg| cfg).await;
     let mut env = env(&source);
     env.takedown_denial = false;
@@ -1476,15 +1535,41 @@ async fn without_pack_level_denial_the_cleared_set_is_not_honored() {
             break;
         }
     }
-    // A blocked inherited blob stops the remix.
+    // Block rows are ignored while denial is disabled.
     block(&source, blob(7, 8).0).await;
     let mut remix = source.at("forked");
     let (bytes, head) = commit_pack(source.tree, vec![], b"remix");
     let pack = mkit_core::hash::hash(&bytes);
-    let refused = remix
+    let published = remix
         .try_push(bytes, head, Some(source.packmap), &[pack])
-        .await;
-    assert_eq!(refused.unwrap_err(), "object blocked");
+        .await
+        .unwrap();
+    // Removing a cleared inherited object's index must still close the next
+    // publication: the cleared set cannot bypass ordinary member lookup.
+    let id = blob(7, 8).0;
+    let partition = source.shards.object_index(&dest_id, &id);
+    let (start, end) = keys::object_index_range(&dest_id.name, &id);
+    let rows = source
+        .store
+        .inner
+        .scan(&partition, &start, &end, None, 100)
+        .await
+        .unwrap();
+    assert!(!rows.entries.is_empty());
+    let mut batch = mkit_server::Batch::new();
+    for (key, _) in rows.entries {
+        batch = batch.delete(key);
+    }
+    source.store.inner.apply(&partition, batch).await.unwrap();
+    let (bytes, next) = commit_pack(source.tree, vec![head], b"missing inherited member");
+    let pack = mkit_core::hash::hash(&bytes);
+    assert_eq!(
+        remix
+            .try_push(bytes, next, Some(published), &[pack])
+            .await
+            .unwrap_err(),
+        "open closure"
+    );
 }
 
 async fn fork_timers(store: &MemoryKv, coordinator: &mkit_server::Partition) -> usize {
@@ -2458,4 +2543,31 @@ async fn a_corrupt_job_row_keeps_its_timer_and_extra_index_rows_are_the_uniform_
         job.failure.unwrap().error().public_message(),
         "source not found"
     );
+}
+
+fn denial_capability_for_test() -> mkit_server::takedown::DenialCapability {
+    use mkit_server::pipeline::{AuthMode, Hooks, Pipeline, PipelineConfig};
+    let mut cfg = PipelineConfig::new(
+        mkit_server::Addressing::Multi(mkit_server::MultiAddressing::new()),
+        AuthMode::AuthV2(
+            mkit_server::auth_v2::AuthV2Config::new("http://localhost", "default").unwrap(),
+        ),
+        mkit_server::upload::UploadLimits::new(1 << 20, 64),
+    );
+    cfg.indexed = Some(mkit_server::indexed::IndexedConfig::default());
+    cfg.ticket_keys =
+        Some(mkit_server::upload::token::TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap());
+    cfg.begin_upload_threshold_bytes = 0;
+    cfg.takedown_denial = true;
+    Pipeline::new(
+        mkit_server::MemoryBlobStore::default(),
+        mkit_server::MemoryKv::default(),
+        Hooks::new(),
+        cfg,
+        std::sync::Arc::new(mkit_server::SystemClock),
+        std::sync::Arc::new(mkit_server::NoopMetrics),
+    )
+    .unwrap()
+    .denial_capability()
+    .unwrap()
 }

@@ -67,17 +67,28 @@ fn actual_owner_accepts_lagging_membership_and_keeps_exact_provenance_with_overl
         let partition = content_shard(&req.identity.object);
         let index = ContentIndex::new(BorrowedStore(store.as_ref()));
         index
-            .block(&req.identity.object, &req.blocked, 104)
+            .block(
+                &crate::takedown::DenialCapability::for_test(),
+                &req.identity.object,
+                &req.blocked,
+                104,
+            )
             .await
             .unwrap();
         for generation in [10, 20] {
             index
-                .install_block_action(&req.identity.object, &action(generation), 104)
+                .install_block_action(
+                    &crate::takedown::DenialCapability::for_test(),
+                    &req.identity.object,
+                    &action(generation),
+                    104,
+                )
                 .await
                 .unwrap();
         }
         let before = actions(store.as_ref(), &req.identity.object).await;
-        let owner = LateOwner::new(store.clone(), root());
+        let owner = LateOwner::new(store.clone(), root())
+            .with_denial_capability(Some(crate::takedown::DenialCapability::for_test()));
         let budget = SliceBudget::new(128);
         owner
             .accept(store.as_ref(), &partition, &req, 104, &budget)
@@ -234,7 +245,8 @@ fn actual_owner_root_failure_lost_reply_and_cold_restart_never_ack_a_marker() {
         let metadata = memory();
         let req = request();
         let partition = content_shard(&req.identity.object);
-        let failed = LateOwner::new(remote(metadata.clone(), true, false), root());
+        let failed = LateOwner::new(remote(metadata.clone(), true, false), root())
+            .with_denial_capability(Some(crate::takedown::DenialCapability::for_test()));
         assert!(
             failed
                 .accept(local.as_ref(), &partition, &req, 104, &SliceBudget::new(64))
@@ -255,7 +267,8 @@ fn actual_owner_root_failure_lost_reply_and_cold_restart_never_ack_a_marker() {
                 .unwrap()
                 .is_none()
         );
-        let lost = LateOwner::new(remote(metadata.clone(), false, true), root());
+        let lost = LateOwner::new(remote(metadata.clone(), false, true), root())
+            .with_denial_capability(Some(crate::takedown::DenialCapability::for_test()));
         assert!(
             lost.accept(local.as_ref(), &partition, &req, 104, &SliceBudget::new(64))
                 .await
@@ -292,7 +305,8 @@ fn actual_owner_root_failure_lost_reply_and_cold_restart_never_ack_a_marker() {
             .await
             .unwrap();
         assert!(head.is_some());
-        let cold = LateOwner::new(remote(metadata.clone(), false, false), root());
+        let cold = LateOwner::new(remote(metadata.clone(), false, false), root())
+            .with_denial_capability(Some(crate::takedown::DenialCapability::for_test()));
         cold.accept(local.as_ref(), &partition, &req, 105, &SliceBudget::new(64))
             .await
             .unwrap();
@@ -325,7 +339,8 @@ fn actual_owner_uses_one_budget_and_rejects_missing_provenance_on_replay() {
         let partition = content_shard(&req.identity.object);
         let backend = remote(metadata.clone(), false, false);
         let calls = backend.calls.clone();
-        let owner = LateOwner::new(backend, root());
+        let owner = LateOwner::new(backend, root())
+            .with_denial_capability(Some(crate::takedown::DenialCapability::for_test()));
         let budget = SliceBudget::new(2);
         assert!(
             owner
@@ -361,7 +376,9 @@ async fn late_owner_commits_automatic_cache_purge_with_ownership() {
         crate::purge::PurgeConfig::new("https://server.example".into(), true, true).with_audit(
             Arc::new(crate::admin::SystemAudit::new(store.clone(), root())),
         );
-    let owner = LateOwner::new(store.clone(), root()).with_purge(Some(config));
+    let owner = LateOwner::new(store.clone(), root())
+        .with_denial_capability(Some(crate::takedown::DenialCapability::for_test()))
+        .with_purge(Some(config));
     owner
         .accept(
             store.as_ref(),
@@ -391,4 +408,78 @@ async fn late_owner_commits_automatic_cache_purge_with_ownership() {
         serde_json::from_slice(page.entries[0].1.as_bytes()).unwrap();
     assert_eq!(purge.repository, "root/late");
     assert_eq!(purge.trigger, crate::purge::Trigger::Takedown);
+}
+
+#[test]
+fn disabled_late_owner_refuses_before_staging_or_acceptance() {
+    block_on(async {
+        let store = memory();
+        let req = request();
+        let partition = content_shard(&req.identity.object);
+        let before_root = store.stats(&root()).await.unwrap();
+        let before_content = store.stats(&partition).await.unwrap();
+        let budget = SliceBudget::new(128);
+        let owner = LateOwner::new(store.clone(), root());
+        assert!(matches!(
+            owner
+                .accept(store.as_ref(), &partition, &req, 104, &budget)
+                .await,
+            Err(StoreError::TakedownDenialDisabled)
+        ));
+        assert_eq!(budget.used(), 0);
+        assert_eq!(store.stats(&root()).await.unwrap(), before_root);
+        assert_eq!(store.stats(&partition).await.unwrap(), before_content);
+    });
+}
+
+#[test]
+fn disabled_late_timer_refuses_before_readiness_or_acceptance_batches() {
+    use crate::timers::{DueTimer, TimerCtx, TimerHandler, registry::kinds};
+    block_on(async {
+        for ready in [None, Some(103)] {
+            let store = memory();
+            let mut req = request();
+            req.ready_at_ms = ready;
+            let partition = content_shard(&req.identity.object);
+            let key = keys::content_takedown(&req.identity.object, &req.identity.intent);
+            let raw = req.encode().unwrap();
+            store
+                .apply(&partition, Batch::new().put(key.clone(), raw.clone()))
+                .await
+                .unwrap();
+            let before_root = store.stats(&root()).await.unwrap();
+            let before_content = store.stats(&partition).await.unwrap();
+            let budget = SliceBudget::new(100);
+            let counted = Budgeted::new(store.as_ref(), &budget);
+            let timer = DueTimer {
+                due_at_ms: 104,
+                kind: kinds::CONTENT_TAKEDOWN_REQUEST,
+                reference: [
+                    req.identity.object.as_slice(),
+                    req.identity.intent.as_slice(),
+                ]
+                .concat()
+                .into(),
+                value: Value::default(),
+            };
+            let handler = super::super::late::LateTimer {
+                acceptance: LateOwner::new(store.clone(), root()),
+                max_subrequests: 128,
+            };
+            let context = TimerCtx {
+                store: &counted,
+                partition: &partition,
+                now_ms: 104,
+                continuation_deadline_ms: None,
+            };
+            assert!(matches!(
+                handler.fire(&context, &timer).await,
+                Err(StoreError::TakedownDenialDisabled)
+            ));
+            assert_eq!(budget.used(), 0, "readiness={ready:?}");
+            assert_eq!(store.get(&partition, &key).await.unwrap(), Some(raw));
+            assert_eq!(store.stats(&root()).await.unwrap(), before_root);
+            assert_eq!(store.stats(&partition).await.unwrap(), before_content);
+        }
+    });
 }

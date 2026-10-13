@@ -379,6 +379,7 @@ fn global_block_denial_is_enforced_even_when_public_denial_flag_is_off() {
     assert!(fetch(&env, &identity, &token, &hash(&bytes), None).is_ok());
     block_on(
         ContentIndex::new(BorrowedStore(&env.pipe.meta)).install_block_action(
+            &crate::takedown::DenialCapability::for_test(),
             &hash(&bytes),
             &crate::takedown::denial::BlockAction {
                 id: [50; 32],
@@ -431,6 +432,7 @@ fn a_blocked_manifest_suppresses_its_chunk_in_an_otherwise_unblocked_raw_pack() 
         assert!(fetch(&env, &identity, &token, &hash(&chunk_pack), None).is_ok());
         block_on(
             ContentIndex::new(BorrowedStore(&env.pipe.meta)).install_block_action(
+                &crate::takedown::DenialCapability::for_test(),
                 &held_manifest.id().unwrap(),
                 &crate::takedown::denial::BlockAction {
                     id: [53; 32],

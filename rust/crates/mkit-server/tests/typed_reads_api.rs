@@ -50,7 +50,7 @@ pub async fn embedding_queries<N: NamespaceStore, B: BlobStore>(
     replay: &ForkReplayIdentity,
     retained: &RetainedLanding,
 ) -> Result<(), ServerError> {
-    let reads = ReadAccess::new(store, shards, RepoVisibility::Public);
+    let reads = ReadAccess::new(store, shards, RepoVisibility::Public, true);
     let before = reads.repository_visibility(repo).await?;
     let pair = reads.published_branch(repo, "refs/heads/main").await?;
     let after = reads.repository_visibility(repo).await?;

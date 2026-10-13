@@ -1731,6 +1731,7 @@ fn ticketless_reuse_rechecks_file_in_another_source_pack_with_and_without_policy
             block_on(
                 crate::store::ContentIndex::new(crate::store::BorrowedStore(&env.pipe.meta))
                     .install_block_action(
+                        &crate::takedown::DenialCapability::for_test(),
                         &file_id,
                         &crate::takedown::denial::BlockAction {
                             id: [31; 32],

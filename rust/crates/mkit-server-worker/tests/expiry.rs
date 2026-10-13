@@ -70,6 +70,7 @@ async fn single_and_ref_shard_expiry_timers_fire() {
             Ok::<_, ConfigError>(MemoryKv::default()),
             Some("free"),
             MemoryBlobStore::default(),
+            true,
         );
         let report = run_due(
             &store,
@@ -145,6 +146,7 @@ async fn outcome_delivery_and_reconcile_fire_on_every_outcome_class() {
                 Ok::<_, ConfigError>(MemoryKv::default()),
                 Some("free"),
                 MemoryBlobStore::default(),
+                true,
             ),
             class,
             Ok("https://server.example".to_owned()),

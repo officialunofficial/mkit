@@ -30,6 +30,7 @@ fn verifier(
     env: &Env,
 ) -> VerifyTimer<Ref<'_, Spy>, Ref<'_, MemoryBlobStore>, BlobWindows<'_, MemoryBlobStore>> {
     VerifyTimer {
+        takedown_denial: env.pipe.cfg.takedown_denial,
         remote: Ref(&env.pipe.meta),
         blobs: Ref(&env.pipe.blobs),
         windows: BlobWindows(&env.pipe.blobs),
@@ -68,6 +69,7 @@ fn inventory_progress_attributes_only_staging_including_failed_calls() {
         let events = Events::default();
         let _subscriber = tracing::subscriber::set_default(events.clone());
         let (mut env, owner, identity) = environment_with(Sharding::D34, scheduled());
+        env.pipe.cfg.takedown_denial = true;
         let (bytes, head) = pack();
         let pack_id = hash(&bytes);
         let content = crate::store::content_shard(&pack_id);
