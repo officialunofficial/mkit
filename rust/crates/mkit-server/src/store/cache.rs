@@ -204,7 +204,8 @@ impl MemoryState {
 
 impl MemoryImmutableCache {
     /// Bound retained key/value bytes plus 128 bytes of accounting overhead per
-    /// entry. A zero capacity or TTL disables retention. Invalid clocks miss.
+    /// entry, with at most one MiB per value. A zero capacity or TTL disables
+    /// retention. Invalid clocks miss.
     #[must_use]
     pub fn new(max_bytes: usize, ttl: Duration, clock: Arc<dyn Clock>) -> Self {
         Self {
@@ -253,7 +254,11 @@ impl ImmutableCache for MemoryImmutableCache {
         else {
             return Ok(());
         };
-        if now < 0 || self.ttl.is_zero() || size > self.max_bytes {
+        if now < 0
+            || self.ttl.is_zero()
+            || size > self.max_bytes
+            || value.len() > MAX_IMMUTABLE_CACHE_ENTRY_BYTES
+        {
             return Ok(());
         }
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);

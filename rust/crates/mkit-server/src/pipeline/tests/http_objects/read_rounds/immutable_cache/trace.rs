@@ -60,10 +60,14 @@ fn describe(key: &Key) -> serde_json::Value {
 
 impl TraceKv {
     fn record(&self, p: &Partition, method: &str, details: serde_json::Value) {
-        self.trace.lock().unwrap().push(serde_json::json!({
+        let mut call = serde_json::json!({
             "store": "namespace", "step": read_probe::current_step(), "partition": p.kind(),
-            "partition_hex": hex(&p.encode().unwrap()), "method": method, "details": details,
-        }));
+            "partition_hex": hex(&p.encode().unwrap()), "method": method,
+        });
+        call.as_object_mut()
+            .unwrap()
+            .insert("details".into(), details);
+        self.trace.lock().unwrap().push(call);
     }
 }
 

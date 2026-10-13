@@ -72,7 +72,7 @@ use mkit_server_worker::{clock::WorkerClock, sleep::WorkerSleep};
 
 let cache = MemoryImmutableCache::new(
     8 * 1024 * 1024,
-    Duration::from_secs(60),
+    Duration::from_mins(1),
     Arc::new(WorkerClock),
 );
 let cache_config = CacheConfig::new(

@@ -2,7 +2,7 @@
 #![allow(clippy::unwrap_used)] // Invalid fixtures must fail immediately.
 use super::*;
 use crate::memory::{MemoryBlobStore, MemoryKv, MemoryPackSink};
-use crate::store::PackSink;
+use crate::store::{PackSink, Precondition};
 use crate::{ManualClock, ManualSleep};
 use futures::executor::block_on;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -69,7 +69,7 @@ fn config() -> CacheConfig {
 fn memory(clock: Arc<ManualClock>) -> MemoryImmutableCache {
     MemoryImmutableCache::new(
         4 * MAX_IMMUTABLE_CACHE_ENTRY_BYTES,
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         clock,
     )
 }
@@ -110,16 +110,16 @@ impl BlobStore for SpyBlobs {
     ) -> Result<Option<BlobBody>, StoreError> {
         self.gets.fetch_add(1, Ordering::SeqCst);
         let body = self.inner.get(key, range).await?;
-        if self.stream {
-            if let Some(BlobBody::Bytes(bytes)) = body {
-                let len = bytes.len() as u64;
-                let split = bytes.len() / 2;
-                let pieces = vec![Ok(bytes.slice(..split)), Ok(bytes.slice(split..))];
-                return Ok(Some(BlobBody::Stream {
-                    len,
-                    stream: Box::pin(futures::stream::iter(pieces)),
-                }));
-            }
+        if self.stream
+            && let Some(BlobBody::Bytes(bytes)) = body
+        {
+            let len = bytes.len() as u64;
+            let split = bytes.len() / 2;
+            let pieces = vec![Ok(bytes.slice(..split)), Ok(bytes.slice(split..))];
+            return Ok(Some(BlobBody::Stream {
+                len,
+                stream: Box::pin(futures::stream::iter(pieces)),
+            }));
         }
         Ok(body)
     }
@@ -656,5 +656,21 @@ fn malformed_and_unsatisfiable_ranges_match_uncached_reads() {
                 .is_none()
         );
         assert!(store.get(&key, Some(malformed)).await.unwrap().is_none());
+    });
+}
+
+#[test]
+fn memory_backend_never_retains_an_oversized_response() {
+    block_on(async {
+        let cache = memory(Arc::new(ManualClock::new(0)));
+        cache
+            .put(
+                Bytes::from_static(b"large"),
+                Bytes::from(vec![0; MAX_IMMUTABLE_CACHE_ENTRY_BYTES + 1]),
+            )
+            .await
+            .unwrap();
+        assert!(cache.get(b"large").await.unwrap().is_none());
+        assert_eq!(cache.state.lock().unwrap().bytes, 0);
     });
 }

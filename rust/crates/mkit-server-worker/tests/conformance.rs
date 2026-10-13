@@ -111,7 +111,7 @@ fn cache_config() -> mkit_server::store::CacheConfig {
 fn cache_backend() -> mkit_server::store::MemoryImmutableCache {
     mkit_server::store::MemoryImmutableCache::new(
         8 * 1024 * 1024,
-        std::time::Duration::from_secs(60),
+        std::time::Duration::from_mins(1),
         Arc::new(mkit_server::ManualClock::new(0)),
     )
 }

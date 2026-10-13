@@ -54,7 +54,7 @@ async fn serve_cached(req: Request, env: Env, ctx: Context) -> Result<Response> 
     thread_local! {
         static CACHE: MemoryImmutableCache = MemoryImmutableCache::new(
             8 * 1024 * 1024,
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             Arc::new(WorkerClock),
         );
     }

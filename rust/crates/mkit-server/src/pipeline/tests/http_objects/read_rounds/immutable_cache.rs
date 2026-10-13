@@ -17,7 +17,7 @@ type CachedPipe<H = Hooks> = Pipeline<
 fn cached<H: HookSet>(shape: &Shape, hooks: H) -> CachedPipe<H> {
     let fx = &shape.fx;
     let cache =
-        MemoryImmutableCache::new(16 * 1024 * 1024, Duration::from_secs(60), fx.clock.clone());
+        MemoryImmutableCache::new(16 * 1024 * 1024, Duration::from_mins(1), fx.clock.clone());
     let config = CacheConfig::new(
         "read-probe",
         Arc::new(crate::ManualSleep::new()),

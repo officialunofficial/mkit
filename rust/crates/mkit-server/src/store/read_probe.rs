@@ -143,11 +143,17 @@ pub(crate) fn summary(events: &[Event]) -> serde_json::Value {
 tokio::task_local! { static READ_STEP: String; }
 
 #[cfg(feature = "http-objects")]
-pub(crate) async fn step<F: core::future::Future>(name: &'static str, future: F) -> F::Output {
-    let name = READ_STEP
-        .try_with(|parent| format!("{parent}/{name}"))
-        .unwrap_or_else(|_| name.to_owned());
-    READ_STEP.scope(name, future).await
+pub(crate) fn step<F: core::future::Future>(
+    name: &'static str,
+    future: F,
+) -> impl core::future::Future<Output = F::Output> {
+    let future = Box::pin(future);
+    async move {
+        let name = READ_STEP
+            .try_with(|parent| format!("{parent}/{name}"))
+            .unwrap_or_else(|_| name.to_owned());
+        READ_STEP.scope(name, future).await
+    }
 }
 
 #[cfg(feature = "http-objects")]
