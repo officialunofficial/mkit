@@ -18,7 +18,7 @@
     "pretest": "npm run runtime:stage"
   },
   "dependencies": {
-    "@cloudflare/sandbox": "0.12.10",
+    "@cloudflare/sandbox": "1.0.0",
     "nanocodex": "0.6.7",
     "tiktoken": "1.0.22"
   },
