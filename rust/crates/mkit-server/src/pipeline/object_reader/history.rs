@@ -504,14 +504,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             if locations.is_empty() {
                 return Ok(all_none());
             }
+            let guarded_locations: Vec<_> = locations.iter().map(|(id, loc)| (*id, *loc)).collect();
             crate::store::probe_read_step!(
                 "denial_prefetch",
-                checks.prefetch_locations(
-                    &locations
-                        .iter()
-                        .map(|(id, loc)| (*id, *loc))
-                        .collect::<Vec<_>>(),
-                )
+                checks.prefetch_locations(&guarded_locations)
             )
             .await
             .map_err(failure)?;
@@ -738,9 +734,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         admission: &crate::store::read_io::ReadIo,
         operation: &mut Budget,
     ) -> Result<Option<Node>, ServerError> {
+        let ids = [id];
         Ok(crate::store::probe_read_step!(
             "history_node_proof",
-            self.proved_nodes(session, &[id], role, calls, admission, operation)
+            self.proved_nodes(session, &ids, role, calls, admission, operation)
         )
         .await?
         .into_iter()

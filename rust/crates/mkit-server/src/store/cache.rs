@@ -229,12 +229,13 @@ impl ImmutableCache for MemoryImmutableCache {
         let now = self.clock.now_ms();
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.evict_expired(now, self.ttl);
-        let Some((bytes, _)) = state.entries.get(key) else {
+        let Some((retained_key, (bytes, _))) = state.entries.get_key_value(key) else {
             return Ok(None);
         };
+        let retained_key = retained_key.clone();
         let bytes = bytes.clone();
         state.order.retain(|entry| entry.as_ref() != key);
-        state.order.push_back(Bytes::copy_from_slice(key));
+        state.order.push_back(retained_key);
         Ok(Some(bytes))
     }
 

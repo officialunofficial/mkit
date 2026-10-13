@@ -901,12 +901,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         if prove_first {
             // Do not locate inaccessible targets: membership-dependent work can
             // distinguish a stored orphan from a missing ID near the call cap.
-            crate::store::probe_read_step!(
-                "denial_prefetch",
-                checks.prefetch(&reached.iter().copied().collect::<Vec<_>>())
-            )
-            .await
-            .map_err(failure)?;
+            let reached_ids: Vec<_> = reached.iter().copied().collect();
+            crate::store::probe_read_step!("denial_prefetch", checks.prefetch(&reached_ids))
+                .await
+                .map_err(failure)?;
             let mut accessible = Vec::new();
             for id in &reached {
                 if !denied(&checks, id).await.map_err(failure)? {
@@ -1012,14 +1010,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 .filter(|n| *n <= output_left)
                 .ok_or_else(exhausted)?;
             let _ = output; // Admission precedes every independently allocated canonical result.
+            let uncached_locations = checks.uncached_locations(&permitted);
             loaded = crate::store::probe_read_step!(
                 "load_decode",
-                load_permitted(
-                    &env,
-                    &permitted,
-                    &checks.uncached_locations(&permitted),
-                    decode,
-                )
+                load_permitted(&env, &permitted, &uncached_locations, decode,)
             )
             .await
             .map_err(resolution_failure)?;
