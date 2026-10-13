@@ -5151,3 +5151,13 @@ purge slices share `budget::SliceBudget` without changing their accounting.
 The Cargo fault-injection feature is internal (`__test-faults`); its wire test
 capability retains the existing `test-faults` spelling. This API boundary does
 not change wire behavior or stored bytes.
+
+Trusted embedding queries use `reads::ReadAccess` or `Pipeline::read_access()`.
+The [typed read guide](../embedding/typed-reads.md) lists accessors and migration paths.
+These queries route through the configured shard map and never return encoded rows.
+Callers retain repository authorization, their own policy journal, and final disclosure checks.
+Existing authorized pipeline readers keep uniform absence and their final guards.
+A visibility revision compares stored observations; it is not a monotonic policy journal.
+Fork recovery checks original replay and reservation evidence without authenticating an expired envelope.
+The caller verifies current destination authority and its trusted retained landing evidence.
+This additive surface changes no wire or stored format and requires no reset.

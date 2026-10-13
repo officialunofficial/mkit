@@ -88,6 +88,7 @@ mod shard;
 mod staging;
 #[cfg(test)]
 mod tests;
+mod typed_reads;
 mod upload;
 mod visibility_hooks;
 mod watermark;

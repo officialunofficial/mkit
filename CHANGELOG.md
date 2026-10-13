@@ -73,6 +73,15 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Added
 
+- Typed, uncached `reads::ReadAccess` queries for repository visibility, published
+  branch pairs, member locations and denial, validated inventory, bounded
+  canonical reads, fork status, and retained completion recovery.
+  `Pipeline::read_access` borrows the configured routing and visibility default.
+  Replace direct codec, key, index resolver, publication, and fork row reads with
+  these accessors; see [typed read migration](docs/embedding/typed-reads.md).
+  Callers retain repository authorization and final disclosure checks.
+  Additive API; no wire or stored-format change and no store reset.
+
 - Opt-in `just cargo-cached`, `just build-dir-env`, and `just worktree-gc` recipes
   share sccache compilation results, isolate intermediates per worktree, and
   reclaim merged/gone worktrees' build output without removing source.

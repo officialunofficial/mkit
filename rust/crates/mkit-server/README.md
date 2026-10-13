@@ -55,9 +55,12 @@ such as `pipeline::OBJECT_READER_CALLS` keep their current paths.
 The doc-hidden `store::adapter_spi` exposes only the storage modules used by
 adapter and conformance implementations: `keys`, `codec`, `index`, `tickets`,
 `outbox`, `publication` and `watermark`. These layouts and codecs are an adapter
-SPI, outside the supported embedder API. Core-only typed readers and serving
-views are crate-private. Unintegrated inspection/restore planning stays in
-private test support; the live recovery marker and portable import API remain
+SPI for storage adapters, outside the supported embedder API. Trusted business
+logic uses `reads::ReadAccess` or `Pipeline::read_access()` for typed visibility,
+publication, member, and fork queries. Callers retain authorization and final
+disclosure guards. See the [typed read migration guide](../../../docs/embedding/typed-reads.md).
+Core-only serving views remain crate-private. Unintegrated inspection/restore
+planning stays in private test support; the live recovery marker and portable import API remain
 in core. The internal `__test-faults` feature is for repository tests, and is
 not a supported deployment feature. The wire test capability remains named
 `test-faults`.
