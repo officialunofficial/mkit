@@ -15,6 +15,11 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Changed
 
+- Share pure packmap advance planning between the protocol client and CLI in
+  `mkit-core::transfer::packmap`. Node bytes, CAS conditions, retries, and
+  driver-specific limits and errors are unchanged. No wire or stored-format
+  change; no wipe.
+
 - Re-vendor ruzstd 0.9.1 for RUSTSEC-2026-0344, retaining the stricter RFC 8878
   bounds on compressed bodies, regenerated literals and sequence output before
   allocation. Independent workspaces resolve the patched 0.9.1 source.

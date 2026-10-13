@@ -15,9 +15,8 @@ use buffa::Message;
 use mkit_core::hash::{hash, to_hex};
 use mkit_core::{
     hash::Hash,
-    pack,
     refs::{self, RefWriteCondition},
-    transfer,
+    transfer::packmap::{ChainState, PlanError, plan_advance},
     upload_parts::{PartPlan, part_subtree_cv},
     write_auth::{ContentCommitment, PartCommitment},
 };
@@ -165,43 +164,44 @@ impl Push {
         let keys: Vec<_> = self.plan.pack_ids().copied().collect();
         for _ in 0..8 {
             let prior = read_ref(&rpc, &self.packmap_ref).await?;
-            let prev = match self.mode {
-                PackmapMode::ResetSelfContained => None,
+            let state = match self.mode {
+                PackmapMode::ResetSelfContained => ChainState::Reset { prior },
                 PackmapMode::Append { self_contained } => match prior {
-                    None => None,
+                    None => ChainState::Missing,
                     Some(root) => match walk_chain(&rpc, root, &self.head_ref).await {
-                        Ok(held) if keys.iter().all(|key| held.contains(key)) => {
-                            return commit_head(&rpc, &self.head_ref, self.condition, self.tip)
-                                .await;
+                        Ok(packs) => ChainState::Append { head: root, packs },
+                        Err(Error::Packlist(_) | Error::Invalid(_)) if self_contained => {
+                            ChainState::Reset { prior }
                         }
-                        Ok(_) => Some(root),
-                        Err(Error::Packlist(_) | Error::Invalid(_)) if self_contained => None,
                         Err(Error::Remote(error))
                             if self_contained && error.code == "not_found" =>
                         {
-                            None
+                            ChainState::Reset { prior }
                         }
                         Err(error) => return Err(error),
                     },
                 },
             };
-            let bytes = transfer::encode_packlist(prev, &keys)?;
-            if bytes.len() as u64 > self.plan.limits.max_pack_bytes {
-                return Err(Error::Limit("packmap node"));
-            }
-            let node = pack::pack_key(&bytes);
+            let node = plan_advance(state, &keys, Some(self.plan.limits.max_pack_bytes)).map_err(
+                |error| match error {
+                    PlanError::Packlist(error) => Error::Packlist(error),
+                    PlanError::NodeTooLarge => Error::Limit("packmap node"),
+                },
+            )?;
+            let Some(node) = node else {
+                return commit_head(&rpc, &self.head_ref, self.condition, self.tip).await;
+            };
             let node_ticket = upload(
                 &mut rpc,
                 &self.head_ref,
-                &node,
-                &bytes,
+                &node.key,
+                &node.bytes,
                 None,
                 self.plan.limits,
             )
             .await?;
             let (head_expectation, head_expected_id) = condition(self.condition);
-            let (packmap_expectation, packmap_expected_id) =
-                condition(prior.map_or(RefWriteCondition::Missing, RefWriteCondition::Match));
+            let (packmap_expectation, packmap_expected_id) = condition(node.condition);
             let request = AdvanceRefsRequest {
                 head_ref: Some(self.head_ref.clone()),
                 head_expectation: Some(head_expectation.into()),
@@ -210,7 +210,7 @@ impl Push {
                 packmap_ref: Some(self.packmap_ref.clone()),
                 packmap_expectation: Some(packmap_expectation.into()),
                 packmap_expected_id,
-                packmap_new_id: Some(node.to_vec()),
+                packmap_new_id: Some(node.key.to_vec()),
                 ticket_ids: tickets
                     .iter()
                     .copied()
