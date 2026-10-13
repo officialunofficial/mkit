@@ -29,7 +29,8 @@ use url::{Host, Url};
 use crate::admission::{AdmissionPolicy, respond_to_challenge, retry_once};
 use crate::envelope::{EnvelopeSigner, EnvelopeTransport, RetryIdentity};
 use crate::error::{
-    ErrorContext, map_connect_error, pending_retry_after, pending_verification_delay,
+    ErrorContext, is_membership_lag, map_connect_error, pending_retry_after,
+    pending_verification_delay,
 };
 use crate::executor::TokioExecutor;
 use crate::grant::{GrantCondition, GrantOperation, GrantRef, GrantRequest, GrantSource};
@@ -1686,10 +1687,7 @@ impl ConnectTransport {
                                 {
                                     return Ok(Ok(CommitOutcome::PacklistNotInRepository));
                                 }
-                                if err.code == connectrpc::ErrorCode::Unavailable
-                                    && err.message.as_deref()
-                                        == Some("repository membership not yet visible")
-                                {
+                                if is_membership_lag(&err) {
                                     return Ok(Err((Duration::from_secs(2), true)));
                                 }
                             }

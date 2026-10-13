@@ -10480,6 +10480,113 @@ pub const __PENDING_VERIFICATION_JSON_ANY: ::buffa::type_registry::JsonAnyEntry 
     from_json: ::buffa::type_registry::any_from_json::<PendingVerification>,
     is_wkt: false,
 };
+/// Detail on an `unavailable` answer whose repository membership is not yet
+/// visible inside the relay-lag window (SPEC-SERVER §9.4; SPEC-TRANSPORT-CONNECT
+/// §5). The condition is carried by the type; the message has no fields and
+/// retrying with the same nonce is safe.
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct MembershipNotVisible {
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for MembershipNotVisible {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("MembershipNotVisible").finish()
+    }
+}
+impl MembershipNotVisible {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.MembershipNotVisible";
+}
+::buffa::impl_default_instance!(MembershipNotVisible);
+impl ::buffa::MessageName for MembershipNotVisible {
+    const PACKAGE: &'static str = "mkit.transport.v1";
+    const NAME: &'static str = "MembershipNotVisible";
+    const FULL_NAME: &'static str = "mkit.transport.v1.MembershipNotVisible";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.MembershipNotVisible";
+}
+impl ::buffa::Message for MembershipNotVisible {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for MembershipNotVisible {
+    const PROTO_FQN: &'static str = "mkit.transport.v1.MembershipNotVisible";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for MembershipNotVisible {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __MEMBERSHIP_NOT_VISIBLE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/mkit.transport.v1.MembershipNotVisible",
+    to_json: ::buffa::type_registry::any_to_json::<MembershipNotVisible>,
+    from_json: ::buffa::type_registry::any_from_json::<MembershipNotVisible>,
+    is_wkt: false,
+};
 /// Signed takedown notice used as a Connect error detail and on visible refs.
 /// The sole field is the exact DSSE JSON envelope (SPEC-SERVER §14.6).
 #[derive(Clone, PartialEq, Default)]

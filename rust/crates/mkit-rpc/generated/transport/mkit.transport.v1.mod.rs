@@ -81,6 +81,7 @@ pub mod __buffa {
         reg.register_json_any(super::__ADMISSION_CHALLENGE_JSON_ANY);
         reg.register_json_any(super::__CHALLENGE_JSON_ANY);
         reg.register_json_any(super::__PENDING_VERIFICATION_JSON_ANY);
+        reg.register_json_any(super::__MEMBERSHIP_NOT_VISIBLE_JSON_ANY);
         reg.register_json_any(super::__REDACTION_NOTICE_JSON_ANY);
         reg.register_json_any(super::__GET_AUTHORITY_GENERATION_REQUEST_JSON_ANY);
         reg.register_json_any(super::__GET_AUTHORITY_GENERATION_RESPONSE_JSON_ANY);
@@ -284,6 +285,10 @@ pub use self::__buffa::view::ChallengeOwnedView;
 pub use self::__buffa::view::PendingVerificationView;
 #[doc(inline)]
 pub use self::__buffa::view::PendingVerificationOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::MembershipNotVisibleView;
+#[doc(inline)]
+pub use self::__buffa::view::MembershipNotVisibleOwnedView;
 #[doc(inline)]
 pub use self::__buffa::view::RedactionNoticeView;
 #[doc(inline)]

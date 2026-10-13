@@ -793,6 +793,7 @@ fn lag_miss_mid_walk_is_retryable_inside_the_window_and_permanent_after() {
     let error = attempt(&w).unwrap_err();
     assert_eq!(error.code(), Code::Unavailable);
     assert_eq!(error.public_message(), NOT_VISIBLE);
+    crate::error::assert_membership_not_visible(&error);
     // Not stored: once the row is visible the same nonce commits.
     w.restore(&id2, row);
     assert_eq!(attempt(&w).unwrap(), UpdateRefResult::Committed);

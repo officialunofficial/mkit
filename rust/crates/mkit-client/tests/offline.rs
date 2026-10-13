@@ -303,6 +303,11 @@ fn per_rpc_calls_return_typed_resumable_outcomes_without_waiting() {
         ),
         (
             503,
+            vec![],
+            r#"{"code":"unavailable","message":"lag","details":[{"type":"mkit.transport.v1.MembershipNotVisible"}]}"#.into(),
+        ),
+        (
+            503,
             vec![("retry-after", "7")],
             r#"{"code":"unavailable"}"#.into(),
         ),
@@ -318,9 +323,9 @@ fn per_rpc_calls_return_typed_resumable_outcomes_without_waiting() {
             (0, Error::PendingVerification { retry_after }) => {
                 assert_eq!(retry_after, Duration::from_secs(5));
             }
-            (1, Error::MembershipNotVisible) => {}
-            (2, Error::RetryAfter { ms }) => assert_eq!(ms, 7000),
-            (3, Error::Remote(error)) => assert_eq!(error.code, "unavailable"),
+            (1 | 2, Error::MembershipNotVisible) => {}
+            (3, Error::RetryAfter { ms }) => assert_eq!(ms, 7000),
+            (4, Error::Remote(error)) => assert_eq!(error.code, "unavailable"),
             (index, error) => panic!("case {index}: {error:?}"),
         }
     }

@@ -21,6 +21,9 @@ pub(crate) const RESPONSE_LIMIT: usize = 1024 * 1024;
 pub(crate) const LIST_REFS_LIMIT: usize = 2 * 1024 * 1024;
 const CHALLENGE_TYPE: &str = "mkit.transport.v1.AdmissionChallenge";
 const PENDING_TYPE: &str = "mkit.transport.v1.PendingVerification";
+const MEMBERSHIP_TYPE: &str = "mkit.transport.v1.MembershipNotVisible";
+/// Public message older servers send for a membership lag without the typed
+/// detail. Only the fallback in [`membership_lag`] reads it.
 const MEMBERSHIP_LAG: &str = "repository membership not yet visible";
 
 /// Injectable HTTP channel. Bound the response while receiving it, refuse
@@ -267,7 +270,7 @@ impl Error {
             return Self::PendingVerification { retry_after };
         }
         if error.code == "unavailable" {
-            if error.message == MEMBERSHIP_LAG {
+            if membership_lag(&error) {
                 return Self::MembershipNotVisible;
             }
             if let Some(ms) = retry_after_ms(&error.headers) {
@@ -819,6 +822,20 @@ fn retry_after_ms(headers: &HeaderMap) -> Option<u64> {
         return None;
     }
     Some(value.parse::<u64>().ok()?.clamp(1, 60) * 1000)
+}
+
+/// Whether an `unavailable` answer is the membership-lag condition. The typed
+/// `MembershipNotVisible` detail decides; the exact public message is a
+/// fallback for servers that predate the detail.
+pub(crate) fn membership_lag(error: &RemoteError) -> bool {
+    error.code == "unavailable"
+        && (error.details.iter().any(|detail| {
+            detail
+                .type_url
+                .strip_prefix("type.googleapis.com/")
+                .unwrap_or(&detail.type_url)
+                == MEMBERSHIP_TYPE
+        }) || error.message == MEMBERSHIP_LAG)
 }
 
 pub(crate) fn pending_delay(error: &RemoteError) -> Option<Duration> {

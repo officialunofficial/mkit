@@ -15,6 +15,10 @@ use crate::telemetry::{REDACTED_VALUE, is_never_echo, is_never_log};
 /// (SPEC-TRANSPORT-CONNECT §5.1).
 pub const ADMISSION_CHALLENGE_TYPE: &str = "mkit.transport.v1.AdmissionChallenge";
 
+/// Type name of the empty detail that marks a repository-membership lag
+/// answer (SPEC-SERVER §9.4).
+pub const MEMBERSHIP_NOT_VISIBLE_TYPE: &str = "mkit.transport.v1.MembershipNotVisible";
+
 /// Error category: the 16 Connect codes, one-to-one.
 ///
 /// A missed `NotAfter` commit deadline, a full shard, outbox backpressure
@@ -410,6 +414,18 @@ impl ServerError {
         Self::new(Code::Unavailable, public)
     }
 
+    /// The §9.4 membership-lag answer: [`Code::Unavailable`] with the public
+    /// message `repository membership not yet visible` and one empty
+    /// [`MEMBERSHIP_NOT_VISIBLE_TYPE`] detail. A retry with the same nonce is
+    /// safe; no status or `Retry-After` hint is added.
+    #[must_use]
+    pub fn membership_not_visible() -> Self {
+        Self::unavailable("repository membership not yet visible").with_detail(ErrorDetail {
+            type_name: MEMBERSHIP_NOT_VISIBLE_TYPE.to_owned(),
+            value: bytes::Bytes::new(),
+        })
+    }
+
     /// [`Code::Unimplemented`].
     #[must_use]
     pub fn unimplemented(public: impl Into<Cow<'static, str>>) -> Self {
@@ -589,9 +605,38 @@ fn check_header(name: &str, value: &str) -> Result<(), InvalidHeader> {
     Ok(())
 }
 
+/// Assert `error` is the §9.4 membership-lag answer with its typed detail,
+/// the unchanged code and message, and no status or retry hint.
+#[cfg(test)]
+pub(crate) fn assert_membership_not_visible(error: &ServerError) {
+    assert_eq!(error.code(), Code::Unavailable);
+    assert_eq!(
+        error.public_message(),
+        "repository membership not yet visible"
+    );
+    assert_eq!(error.http_status(), None);
+    assert!(error.headers().is_empty());
+    assert_eq!(
+        error.details(),
+        &[ErrorDetail {
+            type_name: MEMBERSHIP_NOT_VISIBLE_TYPE.to_owned(),
+            value: bytes::Bytes::new(),
+        }]
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn membership_not_visible_carries_the_empty_typed_detail() {
+        assert_eq!(
+            MEMBERSHIP_NOT_VISIBLE_TYPE,
+            "mkit.transport.v1.MembershipNotVisible"
+        );
+        assert_membership_not_visible(&ServerError::membership_not_visible());
+    }
 
     const SECRET: &str = "r2 put failed: bucket=prod-packs key=packs/abc token=s3cr3t";
 
