@@ -1598,8 +1598,11 @@ in bounded concurrent waves. A failed wave MUST report the first failing object
 in batch order among the reads it issued, whether blocked or unavailable, and
 MUST NOT admit the batch. A wave whose all-or-nothing read reservation is
 refused issues no reads and reports unavailable.
-Informative: scheduled and inline direct index writes use the same bounded
-waves, preserving ObjectIndex put order and rechecking denial before each apply.
+Informative: denial waves contain at most sixteen per-object reads, matching
+the inventory staging batch cap, without changing other read parallelism. A
+failing wave can issue up to fifteen reads after the first failing object.
+Scheduled and inline direct index writes use the same bounded waves,
+preserving ObjectIndex put order and rechecking denial before each apply.
 The earlier inline pre-staging check uses the same waves at its existing boundary.
 
 A scheduled Decode checkpoint MUST commit after, or atomically with, the completed
