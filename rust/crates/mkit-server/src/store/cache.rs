@@ -86,6 +86,8 @@ impl<C: ImmutableCache + ?Sized> ImmutableCache for Arc<C> {
 /// Maximum bytes the wrapper buffers or accepts in one cache entry.
 pub const MAX_IMMUTABLE_CACHE_ENTRY_BYTES: usize = MAX_BLOB_PIECE_BYTES;
 
+const MAX_CACHE_STREAM_PIECES: usize = 64;
+
 /// Explicit deployment identity and deadline for optional cache I/O.
 #[derive(Clone)]
 pub struct CacheConfig {
@@ -522,8 +524,19 @@ impl<B: BlobStore, C: ImmutableCache> BlobStore for CachingBlobStore<B, C> {
                     StoreError::Invalid("cache byte length exceeds platform bounds".into())
                 })?;
                 let mut bytes = Vec::with_capacity(len);
+                let mut pieces = 0;
                 while let Some(piece) = stream.next().await {
                     let piece = piece?;
+                    if pieces == MAX_CACHE_STREAM_PIECES {
+                        return Ok(Some(BlobBody::Stream {
+                            len: len as u64,
+                            stream: Box::pin(
+                                futures::stream::iter([Ok(Bytes::from(bytes)), Ok(piece)])
+                                    .chain(stream),
+                            ),
+                        }));
+                    }
+                    pieces += 1;
                     if piece.len() > MAX_BLOB_PIECE_BYTES || bytes.len() + piece.len() > len {
                         return Err(StoreError::Invalid(
                             "blob stream exceeds declared length".into(),

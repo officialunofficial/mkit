@@ -2679,3 +2679,7 @@ sweeps expired entries on lookup, insertion, or `evict_expired`. An idle host
 schedules that sweep or drops every backend clone; TTL plus the maximum sweep
 interval fits the SLA. Hits do not refresh TTL. External cache I/O charges the
 same invocation budget as the physical stores before dispatch.
+Streamed cache fills buffer at most 64 pieces and poll at most one additional
+piece for completion. Further pieces return through the ordinary stream with
+the consumed prefix restored; repeated empty pieces cannot make the wrapper's
+optional buffering run indefinitely.

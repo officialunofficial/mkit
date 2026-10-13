@@ -472,6 +472,7 @@ fn memory_cache_disabled_capacity_ttl_and_invalid_clocks_miss() {
 struct StreamFixture {
     len: u64,
     pieces: Vec<Bytes>,
+    endless_empty: bool,
 }
 
 impl BlobStore for StreamFixture {
@@ -480,11 +481,17 @@ impl BlobStore for StreamFixture {
         Err(StoreError::Unsupported("read-only fixture".into()))
     }
     async fn get(&self, _: &BlobKey, _: Option<ByteRange>) -> Result<Option<BlobBody>, StoreError> {
+        let stream: crate::rt::BoxStream<'static, Result<Bytes, StoreError>> = if self.endless_empty
+        {
+            Box::pin(futures::stream::repeat_with(|| Ok(Bytes::new())))
+        } else {
+            Box::pin(futures::stream::iter(
+                self.pieces.clone().into_iter().map(Ok),
+            ))
+        };
         Ok(Some(BlobBody::Stream {
             len: self.len,
-            stream: Box::pin(futures::stream::iter(
-                self.pieces.clone().into_iter().map(Ok),
-            )),
+            stream,
         }))
     }
     async fn head(&self, _: &BlobKey) -> Result<Option<BlobMeta>, StoreError> {
@@ -507,8 +514,15 @@ fn bounded_stream_buffering_rejects_short_and_excess_bodies() {
             (0, vec![Bytes::from(vec![0; MAX_BLOB_PIECE_BYTES + 1])]),
         ] {
             let cache = Arc::new(AdversarialCache::new(Reply::Miss));
-            let store =
-                CachingBlobStore::new(StreamFixture { len, pieces }, cache.clone(), config());
+            let store = CachingBlobStore::new(
+                StreamFixture {
+                    len,
+                    pieces,
+                    endless_empty: false,
+                },
+                cache.clone(),
+                config(),
+            );
             assert!(matches!(
                 store.get(&BlobKey::pack([0; 32]), None).await,
                 Err(StoreError::Invalid(_))
@@ -526,6 +540,7 @@ fn unverified_store_bytes_are_returned_without_cache_publication() {
             StreamFixture {
                 len: 3,
                 pieces: vec![Bytes::from_static(b"abc")],
+                endless_empty: false,
             },
             cache.clone(),
             config(),
@@ -672,5 +687,53 @@ fn memory_backend_never_retains_an_oversized_response() {
             .unwrap();
         assert!(cache.get(b"large").await.unwrap().is_none());
         assert_eq!(cache.state.lock().unwrap().bytes, 0);
+    });
+}
+
+#[test]
+fn fragmented_pack_preserves_bytes_when_cache_buffering_piece_limit_is_reached() {
+    block_on(async {
+        let expected = Bytes::from((0..128).collect::<Vec<u8>>());
+        let pieces = expected
+            .iter()
+            .map(|byte| Bytes::copy_from_slice(&[*byte]))
+            .collect();
+        let cache = Arc::new(AdversarialCache::new(Reply::Miss));
+        let store = CachingBlobStore::new(
+            StreamFixture {
+                len: expected.len() as u64,
+                pieces,
+                endless_empty: false,
+            },
+            cache.clone(),
+            config(),
+        );
+        let key = BlobKey::pack(*blake3::hash(&expected).as_bytes());
+        let body = store.get(&key, None).await.unwrap();
+        assert!(matches!(&body, Some(BlobBody::Stream { len: 128, .. })));
+        assert_eq!(bytes(body).await, expected);
+        assert_eq!(cache.calls(), (1, 0));
+    });
+}
+
+#[test]
+fn endless_empty_pack_stream_returns_without_unbounded_cache_buffering() {
+    block_on(async {
+        let cache = Arc::new(AdversarialCache::new(Reply::Miss));
+        let store = CachingBlobStore::new(
+            StreamFixture {
+                len: 0,
+                pieces: Vec::new(),
+                endless_empty: true,
+            },
+            cache.clone(),
+            config(),
+        );
+        let key = BlobKey::pack(*blake3::hash(b"").as_bytes());
+        // Do not consume the returned body: the authoritative stream is endless.
+        // Completing this get proves the wrapper's optional buffering terminates.
+        let body = store.get(&key, None).await.unwrap();
+        assert!(matches!(body, Some(BlobBody::Stream { len: 0, .. })));
+        assert_eq!(cache.calls(), (1, 0));
     });
 }

@@ -147,7 +147,11 @@ raise any request, byte, decode, or platform limit.
 The wrapper populates entries only from a complete pack of at most 1 MiB whose
 BLAKE3 matches its id. Larger packs keep the streaming store path. A ranged read
 can reuse a previously cached complete pack; a range miss stays a store read
-and does not populate an entry.
+and does not populate an entry. A streamed fill buffers at most 64 pieces,
+including empty pieces, then polls once more for completion. If another piece
+arrives, it returns a pass-through stream with the consumed prefix restored
+and does not fill the cache. This bounds work even for streams that repeatedly
+yield empty chunks.
 
 Every pack hit rehashes the complete entry and reads authoritative `head`.
 Garbage or mismatched cache bytes fall back to `get`. Missing physical content
