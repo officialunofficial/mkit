@@ -37,9 +37,10 @@ impl Executor for FuturesExecutor {
 }
 
 /// Most pages of a branch listing followed before the listing is refused.
-const MAX_LIST_PAGES: u32 = 4096;
-/// Most branches a listing may name before it is refused.
-const MAX_LISTED_BRANCHES: usize = 1_000_000;
+const MAX_LIST_PAGES: u32 = 100_000;
+/// Cumulative size (names plus 32-byte ids) a listing may reach before it is
+/// refused, as in the Connect transport.
+const MAX_LISTED_BYTES: usize = 128 * 1024 * 1024;
 /// A packmap node is small; this is the response cap `mkit-client` uses.
 const NODE_LIMIT: u64 = 1024 * 1024;
 
@@ -103,25 +104,45 @@ impl<T: HttpTransport, S: Signer, C: Clock, E: Executor> RemoteSource
     for ClientSource<'_, T, S, C, E>
 {
     fn list_branches(&self) -> Result<Vec<Ref>, TransportError> {
+        // The same checks as the Connect transport's listing: names strictly
+        // ascending within and across pages (so no duplicate branch reaches the
+        // engine), a cumulative size cap, and no repeated cursor.
         let mut out: Vec<Ref> = Vec::new();
         let mut token = String::new();
         let mut seen = std::collections::HashSet::new();
+        let mut listed_bytes = 0usize;
         for _ in 0..MAX_LIST_PAGES {
-            let page = self
+            let reply = self
                 .executor
                 .block_on(self.client.list_refs("refs/heads/", 0, &token, None))
                 .map_err(transport_error)?
                 .value;
-            out.extend(page.refs.into_iter().map(|named| Ref {
-                name: named.name,
-                hash: Some(named.id),
-            }));
-            if out.len() > MAX_LISTED_BRANCHES {
+            let next = reply.next_page_token;
+            let page: Vec<Ref> = reply
+                .refs
+                .into_iter()
+                .map(|named| Ref {
+                    name: named.name,
+                    hash: Some(named.id),
+                })
+                .collect();
+            let overlaps = matches!(
+                (out.last(), page.first()),
+                (Some(last), Some(first)) if first.name <= last.name
+            );
+            if overlaps || page.windows(2).any(|pair| pair[0].name >= pair[1].name) {
                 return Err(TransportError::InvalidResponse);
             }
-            match page.next_page_token {
+            listed_bytes = page.iter().fold(listed_bytes, |total, r| {
+                total.saturating_add(r.name.len()).saturating_add(32)
+            });
+            if listed_bytes > MAX_LISTED_BYTES {
+                return Err(TransportError::InvalidResponse);
+            }
+            out.extend(page);
+            match next {
                 None => return Ok(out),
-                // A token seen before would loop forever, accumulating pages.
+                // Any repeated cursor, not only the previous one, is a cycle.
                 Some(next) if !seen.insert(next.clone()) => {
                     return Err(TransportError::InvalidResponse);
                 }
@@ -274,6 +295,23 @@ mod tests {
             .map(|r| r.name)
             .collect();
         assert_eq!(names, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn duplicate_or_unordered_names_are_refused() {
+        for pages in [
+            vec![page(&["a", "b"], Some("t1")), page(&["b", "c"], None)],
+            vec![page(&["b", "a"], None)],
+            vec![page(&["a", "a"], None)],
+        ] {
+            let (transport, dest) = source_over(pages);
+            let client = Client::anonymous(&transport, dest);
+            let source = ClientSource::new(&client, &FuturesExecutor);
+            assert!(matches!(
+                source.list_branches(),
+                Err(TransportError::InvalidResponse)
+            ));
+        }
     }
 
     #[test]

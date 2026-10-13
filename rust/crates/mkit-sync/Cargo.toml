@@ -80,3 +80,8 @@ ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] 
 base64 = "0.22"
 buffa = "0.9.1"
 mkit-attest = { path = "../mkit-attest", features = ["grants"] }
+
+[[example]]
+name = "gen_zstd_fixture"
+# Writes a compressed pack, which needs the C zstd backend.
+required-features = ["pack-zstd"]

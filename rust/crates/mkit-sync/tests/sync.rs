@@ -836,6 +836,12 @@ const ZSTD_PACK: &[u8] = include_bytes!("fixtures/zstd.pack");
 const ZSTD_TIP: &str = "8c6b7803b11c2e4325369f93927a180c80cb97bdec7708cf30c0f541d2ae8787";
 
 fn remote_with_zstd_pack() -> Remote {
+    // The blob alone is about 9.7 KB; the pack is far smaller only because an
+    // entry is zstd-compressed.
+    assert!(
+        ZSTD_PACK.len() < 1024,
+        "the fixture must carry a compressed entry"
+    );
     let remote = Remote::new();
     let pack_key = pack::pack_key(ZSTD_PACK);
     remote

@@ -13,34 +13,38 @@ use http::{Request, StatusCode};
 use mkit_client::HttpTransport;
 use mkit_sync::{Executor as _, NativeHttp};
 
+/// Read a whole request (headers plus the declared body) before answering, so
+/// closing never resets a connection that still has unread data.
+fn read_request(stream: &mut std::net::TcpStream) {
+    let mut request = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = stream.read(&mut buf).unwrap_or(0);
+        if n == 0 {
+            break;
+        }
+        request.extend_from_slice(&buf[..n]);
+        if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+            let want = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            if request.len() >= end + 4 + want {
+                break;
+            }
+        }
+    }
+}
+
 /// Serve exactly one canned HTTP response, then close. Returns the base URL.
 fn respond_once(response: Vec<u8>, stall_after_headers: bool) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        // Read the whole request (headers plus the declared body) before
-        // answering, so closing never resets a connection with unread data.
-        let mut request = Vec::new();
-        let mut buf = [0u8; 4096];
-        loop {
-            let n = stream.read(&mut buf).unwrap_or(0);
-            if n == 0 {
-                break;
-            }
-            request.extend_from_slice(&buf[..n]);
-            if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
-                let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
-                let want = head
-                    .lines()
-                    .find_map(|l| l.strip_prefix("content-length:"))
-                    .and_then(|v| v.trim().parse::<usize>().ok())
-                    .unwrap_or(0);
-                if request.len() >= end + 4 + want {
-                    break;
-                }
-            }
-        }
+        read_request(&mut stream);
         let _ = stream.write_all(&response);
         let _ = stream.flush();
         if stall_after_headers {
@@ -201,8 +205,7 @@ fn two_sequential_requests_work_against_a_server_that_closes_each_connection() {
     std::thread::spawn(move || {
         for _ in 0..2 {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 4096];
-            let _ = stream.read(&mut buf);
+            read_request(&mut stream);
             let _ = stream.write_all(&response("200 OK", &[], b"ok"));
         }
     });
