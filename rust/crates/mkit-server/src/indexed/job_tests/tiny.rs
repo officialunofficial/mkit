@@ -169,7 +169,7 @@ fn tiny_slices_do_not_refresh_a_small_call_allowance() {
     let (pack, _) = tree_pack(1, 36);
     let mut rig = Rig::new();
     rig.limits.tiny_chain_slices = 8;
-    rig.limits.max_subrequests = 64;
+    rig.limits.max_subrequests = 96;
     let (ticket, id) = rig.add(&pack);
     rig.create(&ticket, id);
     let report = rig.tick();
