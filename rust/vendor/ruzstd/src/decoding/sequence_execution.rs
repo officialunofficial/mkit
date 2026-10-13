@@ -2,22 +2,23 @@ use super::scratch::DecoderScratch;
 use crate::decoding::errors::ExecuteSequencesError;
 
 /// Take the provided decoder and execute the sequences stored within
-pub fn execute_sequences(scratch: &mut DecoderScratch) -> Result<(), ExecuteSequencesError> {
-    // RFC 8878: bound the entire regenerated block before any sequence
-    // appends literals or matches to the history buffer. Checked arithmetic
-    // also keeps this preflight correct on 32-bit targets.
-    let maximum = scratch
-        .buffer
-        .window_size
-        .min(crate::common::MAX_BLOCK_SIZE as usize);
+pub fn execute_sequences(
+    scratch: &mut DecoderScratch,
+    max_block_decoded_len: usize,
+) -> Result<(), ExecuteSequencesError> {
+    // Bound the whole block, including trailing literals, before any match
+    // grows history. Checked addition also fails closed on 32-bit targets.
     let regenerated = scratch
         .sequences
         .iter()
         .try_fold(scratch.literals_buffer.len(), |size, sequence| {
             size.checked_add(sequence.ml as usize)
         });
-    if regenerated.is_none_or(|size| size > maximum) {
-        return Err(ExecuteSequencesError::BlockSizeTooLarge { maximum });
+    if regenerated.is_none_or(|size| size > max_block_decoded_len) {
+        return Err(ExecuteSequencesError::TooManyBytesGenerated {
+            max: max_block_decoded_len,
+            decoded: regenerated.unwrap_or(usize::MAX),
+        });
     }
 
     let mut literals_copy_counter = 0;
@@ -53,6 +54,7 @@ pub fn execute_sequences(scratch: &mut DecoderScratch) -> Result<(), ExecuteSequ
 
         seq_sum += seq.ml;
         seq_sum += seq.ll;
+
     }
     if literals_copy_counter < scratch.literals_buffer.len() {
         let rest_literals = &scratch.literals_buffer[literals_copy_counter..];
@@ -85,7 +87,10 @@ fn do_offset_history(offset_value: u32, lit_len: u32, scratch: &mut [u32; 3]) ->
     } else {
         match offset_value {
             1..=2 => scratch[offset_value as usize],
-            3 => scratch[0] - 1,
+            // A malformed dictionary can seed scratch[0] with 0; saturate so this
+            // resolves to 0 (rejected upstream as ZeroOffset) instead of
+            // underflowing. See #115.
+            3 => scratch[0].saturating_sub(1),
             _ => {
                 //new offset
                 offset_value - 3
@@ -129,4 +134,20 @@ fn do_offset_history(offset_value: u32, lit_len: u32, scratch: &mut [u32; 3]) ->
     }
 
     actual_offset
+}
+
+#[cfg(test)]
+mod tests {
+    use super::do_offset_history;
+
+    #[test]
+    fn repeat_offset_minus_one_with_zero_history_does_not_underflow() {
+        // A malformed dictionary can seed offset history slot 0 with 0. With
+        // literal length 0 and offset code 3 ("repeat the most recent offset,
+        // minus one"), `scratch[0] - 1` must not underflow; it should resolve to
+        // 0, which the caller rejects as ExecuteSequencesError::ZeroOffset rather
+        // than panicking (debug) or wrapping to u32::MAX (release). See #115.
+        let mut scratch = [0u32, 4, 8];
+        assert_eq!(do_offset_history(3, 0, &mut scratch), 0);
+    }
 }

@@ -254,13 +254,14 @@ impl core::fmt::Display for BlockSizeError {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum DecompressBlockError {
-    BlockSizeTooLarge {
-        maximum: usize,
-    },
     BlockContentReadError(Error),
     MalformedSectionHeader {
         expected_len: usize,
         remaining_bytes: usize,
+    },
+    DecompressedSizeTooLarge {
+        max: usize,
+        at_least: usize,
     },
     DecompressLiteralsError(DecompressLiteralsError),
     LiteralsSectionParseError(LiteralsSectionParseError),
@@ -287,9 +288,6 @@ impl std::error::Error for DecompressBlockError {
 impl core::fmt::Display for DecompressBlockError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            DecompressBlockError::BlockSizeTooLarge { maximum } => {
-                write!(f, "Regenerated block exceeds maximum size {maximum}")
-            }
             DecompressBlockError::BlockContentReadError(e) => {
                 write!(f, "Error while reading the block content: {e}")
             }
@@ -300,6 +298,9 @@ impl core::fmt::Display for DecompressBlockError {
                 write!(f,
                     "Malformed section header. Says literals would be this long: {expected_len} but there are only {remaining_bytes} bytes left",
                 )
+            }
+            DecompressBlockError::DecompressedSizeTooLarge { max, at_least } => {
+                write!(f, "Malformed block wanted to generate {at_least} bytes of decompressed content, maximun is: {max}")
             }
             DecompressBlockError::DecompressLiteralsError(e) => write!(f, "{e:?}"),
             DecompressBlockError::LiteralsSectionParseError(e) => write!(f, "{e:?}"),
@@ -687,18 +688,15 @@ impl From<HuffmanTableError> for DecompressLiteralsError {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ExecuteSequencesError {
-    BlockSizeTooLarge { maximum: usize },
     DecodebufferError(DecodeBufferError),
     NotEnoughBytesForSequence { wanted: usize, have: usize },
+    TooManyBytesGenerated { max: usize, decoded: usize },
     ZeroOffset,
 }
 
 impl core::fmt::Display for ExecuteSequencesError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            ExecuteSequencesError::BlockSizeTooLarge { maximum } => {
-                write!(f, "Regenerated block exceeds maximum size {maximum}")
-            }
             ExecuteSequencesError::DecodebufferError(e) => {
                 write!(f, "{e:?}")
             }
@@ -706,6 +704,12 @@ impl core::fmt::Display for ExecuteSequencesError {
                 write!(
                     f,
                     "Sequence wants to copy up to byte {wanted}. Bytes in literalsbuffer: {have}"
+                )
+            }
+            ExecuteSequencesError::TooManyBytesGenerated { max, decoded } => {
+                write!(
+                    f,
+                    "Executing sequences produced more decoded bytes than allowed for one block: {decoded}, maximum is: {max}"
                 )
             }
             ExecuteSequencesError::ZeroOffset => {
