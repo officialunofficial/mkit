@@ -2443,7 +2443,7 @@ mod glue {
     where
         H: HookSet + 'static,
         B: mkit_server::MultipartBlobStore + 'static,
-        N: mkit_server::NamespaceStore + 'static,
+        N: mkit_server::NamespaceStore + Clone + 'static,
         F: FnOnce(WorkerBlobStore, WorkerNamespaceStore) -> (B, N),
     {
         cfg.validate_runtime(env)?;
@@ -2715,7 +2715,7 @@ mod glue {
         H: HookSet + 'static,
         F: FnOnce(&Env, &WorkerConfig) -> Result<H, ConfigError>,
         B: mkit_server::MultipartBlobStore + 'static,
-        N: mkit_server::NamespaceStore + 'static,
+        N: mkit_server::NamespaceStore + Clone + 'static,
         P: FnOnce(
             &Env,
             &WorkerConfig,
@@ -2780,7 +2780,7 @@ mod glue {
         H: HookSet + 'static,
         F: FnOnce(&Env, &WorkerConfig) -> Result<H, ConfigError>,
         B: mkit_server::MultipartBlobStore + 'static,
-        N: mkit_server::NamespaceStore + 'static,
+        N: mkit_server::NamespaceStore + Clone + 'static,
         P: FnOnce(
             &Env,
             &WorkerConfig,
@@ -2881,7 +2881,7 @@ mod glue {
     where
         H: HookSet + 'static,
         B: mkit_server::MultipartBlobStore + 'static,
-        N: mkit_server::NamespaceStore + 'static,
+        N: mkit_server::NamespaceStore + Clone + 'static,
     {
         let watch = BodyWatch::default();
         let http_req = http_request(req, cfg.max_body_bytes, &watch)?;

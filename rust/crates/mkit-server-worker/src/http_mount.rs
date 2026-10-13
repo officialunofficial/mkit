@@ -391,7 +391,7 @@ pub(crate) mod glue {
     where
         H: HookSet + 'static,
         B: mkit_server::MultipartBlobStore + 'static,
-        N: mkit_server::NamespaceStore + 'static,
+        N: mkit_server::NamespaceStore + Clone + 'static,
     {
         let url = req.inner().url();
         let (raw_path, raw_query) = raw_path_query(&url)
