@@ -179,6 +179,8 @@ pub fn response_header_plan(headers: &http::HeaderMap) -> Vec<(String, String, b
 #[cfg_attr(not(feature = "http-objects"), derive(PartialEq, Eq))]
 #[non_exhaustive]
 pub struct WorkerConfig {
+    /// `ADVANCE_REFS_HOLD_MS`: optional verification hold, 0..=2000 ms.
+    pub pending_advance_hold_ms: u64,
     /// Explicit Paid indexed launch selection; absent retains the default adapter.
     pub launch: Option<crate::launch::LaunchConfig>,
     /// Default-off signed operator keys, independent of client credentials.
@@ -268,6 +270,27 @@ pub struct WorkerConfig {
     /// wait out real ticket expiry).
     #[cfg(feature = "__test-faults")]
     pub test_ticket_ttl_ms: Option<u64>,
+}
+
+/// A conservative hold-only allowance; never extends a transport timeout.
+/// Malformed or gRPC timeout inputs disable waiting rather than guessing.
+#[cfg(any(target_arch = "wasm32", test))]
+fn pending_hold_deadline(start_ms: u64, connect_ms: Option<&str>, grpc: bool) -> u64 {
+    let budget = if grpc {
+        0
+    } else {
+        connect_ms.map_or(15_000, |value| {
+            if !value.is_empty()
+                && value.len() <= 10
+                && value.bytes().all(|byte| byte.is_ascii_digit())
+            {
+                value.parse::<u64>().unwrap_or(0).min(15_000)
+            } else {
+                0
+            }
+        })
+    };
+    start_ms.saturating_add(budget)
 }
 
 /// A missing or malformed var. The adapter answers every RPC
@@ -483,6 +506,9 @@ impl WorkerConfig {
     /// # Errors
     /// Invalid policy, incomplete opt-ins or unavailable prerequisites.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.pending_advance_hold_ms > 2_000 {
+            return Err(ConfigError("ADVANCE_REFS_HOLD_MS must be 0..=2000".into()));
+        }
         self.pipeline_config().map(|_| ())
     }
 
@@ -755,7 +781,13 @@ impl WorkerConfig {
                 return Err(ConfigError("receipt key repeats URL-token key".into()));
             }
         }
+        let pending_advance_hold_ms = var("ADVANCE_REFS_HOLD_MS").map_or(Ok(0), |value| {
+            value
+                .parse::<u64>()
+                .map_err(|_| ConfigError("ADVANCE_REFS_HOLD_MS must be 0..=2000".into()))
+        })?;
         let mut cfg = Self {
+            pending_advance_hold_ms,
             admin_on_public_path: true,
             ref_policy: None,
             takedown_denial: launch.as_ref().is_some_and(|cfg| cfg.takedown),
@@ -794,6 +826,9 @@ impl WorkerConfig {
             #[cfg(feature = "__test-faults")]
             test_ticket_ttl_ms: test_ticket_ttl(&var)?,
         };
+        if cfg.pending_advance_hold_ms > 2_000 {
+            return Err(ConfigError("ADVANCE_REFS_HOLD_MS must be 0..=2000".into()));
+        }
         crate::launch::validate(&mut cfg, &var)?;
         if cfg.scanner_retrieval.is_some()
             || cfg.namespace_mode == mkit_server::namespace::NamespaceMode::Authority
@@ -2372,8 +2407,8 @@ mod glue {
     use super::{
         BodyWatch, CORS_ALLOW_METHODS, ConfigError, LimitedBody, MeasuredBody, PLAN_VAR,
         SINGLE_PUT_MAX_BYTES, WorkerConfig, body_too_large_json, cors_allow_headers,
-        cors_expose_headers, dispatch_oneshot_body, over_cap_response, plan_capacity,
-        response_header_plan, unavailable_json,
+        cors_expose_headers, dispatch_oneshot_body, over_cap_response, pending_hold_deadline,
+        plan_capacity, response_header_plan, unavailable_json,
     };
     use crate::backup::{BACKUPS_BINDING, BackupConfig, BackupDrain, BackupHandler};
     use crate::clock::WorkerClock;
@@ -2476,6 +2511,11 @@ mod glue {
         hooks: H,
         request_budget: &mkit_server::indexed::budget::SliceBudget,
     ) -> Result<WorkerPipeline<H>, ConfigError> {
+        let hold_deadline = pending_hold_deadline(
+            u64::try_from(mkit_server::Clock::now_ms(&WorkerClock)).unwrap_or(0),
+            None,
+            false,
+        );
         cfg.validate_runtime(env)?;
         let bad = |e: &dyn core::fmt::Display| ConfigError(e.to_string());
         let mut config = cfg.pipeline_config()?;
@@ -2505,7 +2545,12 @@ mod glue {
             Arc::new(WorkerClock),
             Arc::new(ConsoleMetrics::default()),
         )
-        .map_err(|e| bad(&e))?;
+        .map_err(|e| bad(&e))?
+        .with_pending_advance_hold(
+            std::time::Duration::from_millis(cfg.pending_advance_hold_ms),
+            Arc::new(crate::sleep::WorkerSleep),
+            hold_deadline,
+        );
         let pipe = if let Some(vars) = cfg.hooks.as_ref().filter(|v| v.roles.inspect) {
             pipe.with_inspectors(
                 crate::hooks::build::inspectors_from_env(env, cfg)?,
@@ -2765,6 +2810,11 @@ mod glue {
         #[cfg(feature = "__test-faults")]
         let mut req = req;
         install();
+        let hold_deadline = pending_hold_deadline(
+            u64::try_from(mkit_server::Clock::now_ms(&WorkerClock)).unwrap_or(0),
+            req.headers().get("connect-timeout-ms")?.as_deref(),
+            req.headers().has("grpc-timeout")?,
+        );
         if let Some(response) = receipt_keys(&req, cfg)? {
             return Ok(response);
         }
@@ -2823,7 +2873,11 @@ mod glue {
         let pipe = match make_hooks(&env, cfg)
             .and_then(|hooks| pipeline(&env, cfg, hooks, &request_budget))
         {
-            Ok(pipe) => pipe,
+            Ok(pipe) => pipe.with_pending_advance_hold(
+                std::time::Duration::from_millis(cfg.pending_advance_hold_ms),
+                Arc::new(crate::sleep::WorkerSleep),
+                hold_deadline,
+            ),
             Err(_) if scanner_request => return crate::scanner_retrieval::not_found(),
             Err(e) => return Ok(cors(json_response(unavailable_json(&e.0), 503)?)),
         };
@@ -3451,6 +3505,39 @@ mod tests {
     use http_body_util::{BodyExt as _, Full, StreamBody};
 
     use super::*;
+
+    #[test]
+    fn pending_hold_configuration_and_deadlines_are_bounded() {
+        assert_eq!(pending_hold_deadline(100, None, false), 15_100);
+        assert_eq!(pending_hold_deadline(100, Some("500"), false), 600);
+        assert_eq!(pending_hold_deadline(100, Some("99999"), false), 15_100);
+        assert_eq!(pending_hold_deadline(100, Some("invalid"), false), 100);
+        assert_eq!(pending_hold_deadline(100, None, true), 100);
+        let base = [
+            ("AUTH_AUDIENCE", "https://example.com"),
+            ("AUTH_REPOSITORY", "test"),
+        ];
+        let cfg = WorkerConfig::from_vars(vars(&base)).unwrap();
+        assert_eq!(cfg.pending_advance_hold_ms, 0);
+        for value in ["0", "100", "2000"] {
+            let mut pairs = base.to_vec();
+            pairs.push(("ADVANCE_REFS_HOLD_MS", value));
+            assert_eq!(
+                WorkerConfig::from_vars(vars(&pairs))
+                    .unwrap()
+                    .pending_advance_hold_ms,
+                value.parse::<u64>().unwrap()
+            );
+        }
+        for value in ["-1", "2001", "invalid"] {
+            let mut pairs = base.to_vec();
+            pairs.push(("ADVANCE_REFS_HOLD_MS", value));
+            assert!(WorkerConfig::from_vars(vars(&pairs)).is_err());
+        }
+        let mut cfg = cfg;
+        cfg.pending_advance_hold_ms = 2001;
+        assert!(cfg.validate().is_err());
+    }
 
     fn vars(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> + use<> {
         let map: HashMap<String, String> = pairs

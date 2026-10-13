@@ -1623,6 +1623,23 @@ consumed pack is still unverified, `AdvanceRefs` MUST fail with
 requires. This answer MUST NOT be stored as a replay result, under
 STC §7.1; a retry must be able to observe verification progress.
 
+A deployment MAY hold a pending ticketed advance before returning, with a
+zero default and a 2,000 ms maximum. The wait MUST release all attempt-local
+observations and hold no lease, reservation, or guard. Its allowance MUST
+end before both the request deadline and signed envelope expiry, with a
+safety margin. Durable job readiness is only a wake signal: a woken request
+MUST repeat the full normal advance path, including replay lookup and all
+live authorization, admission, denial, CAS, and final guards. A timed-out
+hold returns the original pending answer and typed hint. Cancellation adds
+no durable continuation or replay result; a retry follows normal semantics.
+
+Informative: the implementation polls all consumed job rows in one batched
+KV call every 100 ms. At the 2,000 ms cap it adds one ticket-resolution call
+and at most nineteen job reads before the timeout, for twenty KV calls.
+Each batch has at most seven rows. A woken attempt adds the ordinary advance
+path's calls. The injected host deadline and envelope expiry leave a 250 ms
+margin; less than 100 ms remaining disables the hold.
+
 `PendingVerification.retry_after_ms` is the server's suggested poll
 interval in milliseconds. The server SHOULD send at least 1,000, except when
 bounded tiny-pack work is expected to finish sooner. For a

@@ -2831,3 +2831,20 @@ could exceed the invocation allowance, or hints could substitute for fresh check
 prewake claim and reservation, width/TTL/budget/failure tests, the canonical cold
 model, and enabled/disabled Workers wire conformance. The default storage hook
 performs no work; single sharding and anonymous reads skip activation.
+
+## Pending advance waits precede fresh guarded attempts
+
+**Always:** an optional ticketed verification hold retains no attempt snapshot,
+lease, reservation, or write gate. Its timer covers ticket resolution and job
+polling, ends within two seconds and the host deadline and envelope expiry
+minus 250 ms, and leaves the pending response unchanged on timeout. Usable
+job rows only trigger a full new advance attempt.
+
+**Because:** asynchronous readiness cannot authorize mutation or prolong a
+signed request's validity. Cancellation must leave normal retries possible.
+
+**If violated:** stale authorization could commit, concurrent requests could
+stall, or an expired envelope could remain held.
+
+**Enforced by:** `pipeline::pending_hold` and scheduled hold regressions for
+expiry, elapsed budget, completion, cancellation, replay, and concurrent CAS.

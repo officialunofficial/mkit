@@ -43,6 +43,7 @@ mod http_admission;
 mod http_tokens;
 #[cfg(feature = "http-objects")]
 mod object_reader;
+mod pending_hold;
 mod published_source;
 #[cfg(feature = "http-objects")]
 mod read_limits;
@@ -575,6 +576,7 @@ pub struct Pipeline<B, N, H = Hooks> {
     #[cfg(feature = "__test-faults")]
     test_timer_gate: Option<Arc<tokio::sync::Mutex<()>>>,
     gate: Option<Arc<gate::WriteGate>>,
+    pending_hold: Option<pending_hold::PendingHold>,
     #[cfg(feature = "http-objects")]
     http_seams: Option<crate::http_objects::HttpSeams>,
 }
@@ -1011,6 +1013,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             #[cfg(feature = "__test-faults")]
             test_timer_gate: None,
             gate: None,
+            pending_hold: None,
             #[cfg(feature = "http-objects")]
             http_seams,
         })
@@ -1151,6 +1154,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         )?;
         sibling.shards = Arc::clone(&self.shards);
         sibling.gate.clone_from(&self.gate);
+        sibling.pending_hold.clone_from(&self.pending_hold);
         #[cfg(feature = "remote-hooks")]
         {
             sibling.inspectors.clone_from(&self.inspectors);
@@ -2466,7 +2470,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         kind: OpKind,
         implicit: Option<&'a [PendingPack]>,
     ) -> crate::rt::BoxFuture<'a, Result<(StoredResult, ResponseMeta), ServerError>> {
-        Box::pin(self.write_inner(a, kind, implicit, None))
+        Box::pin(self.write_with_pending_hold(a, kind, implicit))
     }
 
     #[allow(clippy::too_many_lines)] // Stage order and multipart session cleanup share this entry point.

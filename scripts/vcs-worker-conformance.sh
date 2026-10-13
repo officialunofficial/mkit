@@ -55,6 +55,9 @@
 #                  PendingVerification until scheduled alarm slices verify it,
 #                  one slice failing mid-pack on purpose, and the same signed
 #                  advance then commits (`indexed.async_verification_commits`).
+#                  Runs fresh state with the pending hold off and at 2,000 ms;
+#                  the held run also reads the same RefShard concurrently.
+#                  A real small-pack fixture reports pending replies and wall time.
 #                  The wrangler log must show the injected slice failure.
 #   --indexed-only run only the injected indexed phase, with test faults.
 #   --no-build    reuse the runner and Worker built with the same flags (local repeats).
@@ -621,6 +624,24 @@ if [ "${multi}" -eq 1 ]; then
 fi
 fi
 if [ "${indexed}" -eq 1 ]; then
+    # Existing wire guards also run with the hold configured. Their opaque
+    # pack fixtures use the ordinary non-indexed profile; the real indexed
+    # jobs below exercise waiting and concurrent reads independently.
+    start_server held-wire-guards "${vars[@]}" --var "ADVANCE_REFS_HOLD_MS:2000"
+    for filter in refs.concurrent_ replay. tickets.advance_; do
+        run_suite "${features}" --filter "${filter}"
+        case "${filter}" in
+            refs.concurrent_) require_pass refs.concurrent_missing_one_winner refs.concurrent_match_one_winner ;;
+            replay.) require_pass replay.same_op_returns_saved_result_after_ref_moved \
+                replay.concurrent_duplicates_all_succeed replay.nonce_reuse_different_op_invalid_argument \
+                replay.conflict_result_replayed replay.advance_replay_equals_first_result \
+                replay.upload_replay_succeeds replay.expired_retry_rejected ;;
+            tickets.advance_) require_pass tickets.advance_ticket_id_errors \
+                tickets.advance_marker_then_upload tickets.advance_conflicts_keep_ticket \
+                tickets.advance_ticket_bindings tickets.advance_expired_ticket ;;
+        esac
+    done
+    stop_server
     # The indexed phase (WP-4.8): the Multi allowlist of the run's fixed seed,
     # INDEXED_MODE enabled in this test-faults profile and a Paid plan, so
     # the RefShard registers the kind-7 verifier. The Worker fails the fourth
@@ -632,45 +653,65 @@ if [ "${indexed}" -eq 1 ]; then
         --repository "${REPOSITORY}" --signer-seed-hex "${indexed_seed}" \
         --run-id "${indexed_run_id}")"
     indexed_allowlist="$(printf '%s' "${indexed_allowlist}" | tr '\n' ',')"
-    start_server indexed "${vars[@]}" \
-        --var "ADDRESSING:multi" --var "NAMESPACE_ALLOWLIST:${indexed_allowlist}" \
-        --var "INDEXED_MODE:true" --var "WORKERS_PLAN:paid"
-    echo ">> running the indexed wire case (features: ${indexed_features})"
-    status=0
-    capture "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
-        --repository "${REPOSITORY}" --signer-seed-hex "${indexed_seed}" \
-        --run-id "${indexed_run_id}" --atomic-advance --fresh-target --milestone M4 \
-        --max-pack-bytes "${MAX_PACK_BYTES}" --features "${indexed_features}" \
-        --sharding d34 --filter indexed.async \
-        ${runner_args[@]+"${runner_args[@]}"}
-    if [ "${status}" -ne 0 ]; then
-        echo "indexed wire case failed (exit ${status}); wrangler log tail:" >&2
-        tail -n 80 "${log}" >&2
-        exit "${status}"
-    fi
-    require_pass indexed.async_verification_commits
-    cp "${work}/last.tap" "${work}/indexed/producer.tap"
-    if ! grep -q "verification slice failed" "${work}/indexed/wrangler.log"; then
-        echo "the injected mid-pack slice failure never showed in the wrangler log" >&2
-        tail -n 80 "${log}" >&2
-        exit 1
-    fi
-    echo ">> indexed phase passed: pending until verified, the failed slice resumed, then committed"
-    echo ">> running indexed branch creation from a published pair"
-    capture "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
-        --repository "${REPOSITORY}" --signer-seed-hex "${indexed_seed}" \
-        --run-id "${indexed_run_id}" --atomic-advance --fresh-target --milestone M4 \
-        --max-pack-bytes "${MAX_PACK_BYTES}" --features "${indexed_features}" \
-        --sharding d34 --filter indexed.from_published \
-        ${runner_args[@]+"${runner_args[@]}"}
-    if [ "${status}" -ne 0 ]; then
-        echo "indexed published-source case failed (exit ${status}); wrangler log tail:" >&2
-        tail -n 80 "${log}" >&2
-        exit "${status}"
-    fi
-    require_pass indexed.from_published
-    cp "${work}/last.tap" "${work}/indexed/published-source.tap"
-    stop_server
+    # Both configurations use fresh state and the same actual indexed jobs.
+    for advance_hold_ms in 0 2000; do
+        indexed_phase="indexed-hold-${advance_hold_ms}"
+        held_features="${indexed_features}"
+        if [ "${advance_hold_ms}" -gt 0 ]; then held_features="${held_features},advance-hold"; fi
+        start_server "${indexed_phase}" "${vars[@]}" \
+            --var "ADDRESSING:multi" --var "NAMESPACE_ALLOWLIST:${indexed_allowlist}" \
+            --var "INDEXED_MODE:true" --var "WORKERS_PLAN:paid" \
+            --var "ADVANCE_REFS_HOLD_MS:${advance_hold_ms}"
+        echo ">> running the indexed wire case (features: ${held_features}; hold ${advance_hold_ms} ms)"
+        status=0
+        capture "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
+            --repository "${REPOSITORY}" --signer-seed-hex "${indexed_seed}" \
+            --run-id "${indexed_run_id}" --atomic-advance --fresh-target --milestone M4 \
+            --max-pack-bytes "${MAX_PACK_BYTES}" --features "${held_features}" \
+            --sharding d34 --filter indexed.async \
+            ${runner_args[@]+"${runner_args[@]}"}
+        if [ "${status}" -ne 0 ]; then
+            echo "indexed wire case failed (exit ${status}); wrangler log tail:" >&2
+            tail -n 80 "${log}" >&2
+            exit "${status}"
+        fi
+        require_pass indexed.async_verification_commits
+        cp "${work}/last.tap" "${phase}/producer.tap"
+        if ! grep -q "verification slice failed" "${log}"; then
+            echo "the injected mid-pack slice failure never showed in the wrangler log" >&2
+            tail -n 80 "${log}" >&2
+            exit 1
+        fi
+        echo ">> indexed phase passed: pending until verified, the failed slice resumed, then committed"
+        echo ">> running indexed branch creation from a published pair"
+        capture "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
+            --repository "${REPOSITORY}" --signer-seed-hex "${indexed_seed}" \
+            --run-id "${indexed_run_id}" --atomic-advance --fresh-target --milestone M4 \
+            --max-pack-bytes "${MAX_PACK_BYTES}" --features "${held_features}" \
+            --sharding d34 --filter indexed.from_published \
+            ${runner_args[@]+"${runner_args[@]}"}
+        if [ "${status}" -ne 0 ]; then
+            echo "indexed published-source case failed (exit ${status}); wrangler log tail:" >&2
+            tail -n 80 "${log}" >&2
+            exit "${status}"
+        fi
+        require_pass indexed.from_published
+        cp "${work}/last.tap" "${phase}/published-source.tap"
+        echo ">> running small real indexed-pack verification (hold ${advance_hold_ms} ms)"
+        capture "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
+            --repository "${REPOSITORY}" --signer-seed-hex "${indexed_seed}" \
+            --run-id "${indexed_run_id}" --atomic-advance --fresh-target --milestone M4 \
+            --max-pack-bytes "${MAX_PACK_BYTES}" --features "${held_features}" \
+            --sharding d34 --filter indexed.small_pack_verification_commits \
+            ${runner_args[@]+"${runner_args[@]}"}
+        if [ "${status}" -ne 0 ]; then
+            tail -n 80 "${log}" >&2
+            exit "${status}"
+        fi
+        require_pass indexed.small_pack_verification_commits
+        cp "${work}/last.tap" "${phase}/small-pack.tap"
+        stop_server
+    done
 fi
 if [ "${hooks}" -eq 1 ]; then bash scripts/vcs-worker-hooks.sh; fi
 echo ">> vcs-worker conformance passed"

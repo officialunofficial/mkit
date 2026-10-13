@@ -1534,6 +1534,16 @@ After that it signs a new operation.
 **Pending verification.** In indexed mode, an `AdvanceRefs` that
 consumes a pack still under verification MUST fail with `unavailable`
 and exactly one `PendingVerification` detail (SPEC-SERVER §9.5).
+Before returning this answer, a server MAY hold a ticketed call for a
+configured duration, default zero and at most 2,000 milliseconds. Waiting
+MUST stay within the request's remaining elapsed allowance and the signed
+envelope's validity window minus a safety margin. It MUST NOT hold leases,
+reservations, or guarded state. If verification becomes usable, the server
+MUST run the full normal advance path with fresh authorization, admission,
+denial, replay, CAS, and final guards. If waiting times out, it MUST return
+the original pending answer, including its typed hint. This option adds no
+wire fields and does not change lost-reply or replay behavior.
+
 Its `retry_after_ms` field is the server's suggested poll interval.
 The server SHOULD send at least 1,000 milliseconds, except for bounded
 tiny-pack work expected to finish sooner (SPEC-SERVER §9.5). The client MUST

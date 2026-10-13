@@ -58,6 +58,38 @@ An AwaitDelivery timer for a tiny job can advertise a millisecond poll hint belo
 keep the 1,000 ms floor. The HTTP Retry-After header rounds up to seconds.
 Clients that clamp polling to one second retain their existing behavior.
 
+### Optional verification hold
+
+Set `ADVANCE_REFS_HOLD_MS` to a value from 0 through 2,000 to hold a ticketed
+`AdvanceRefs` briefly while scheduled verification finishes. The default is 0.
+The request returns the original pending answer and millisecond hint if the
+hold expires. A usable job wakes a complete new advance attempt; authorization,
+admission, denial, CAS, and final guards run again.
+
+The adapter gives waiting a conservative 15-second allowance from request
+entry, shortened by `connect-timeout-ms`. Malformed timeout values or a
+`grpc-timeout` header disable the hold. Waiting stops 250 ms before that
+allowance or the signed envelope expiry. This bounds the optional wait; it
+does not change the dispatcher's existing deadline policy. An embedder with a
+shorter invocation budget must call `Pipeline::with_pending_advance_hold`
+with its absolute request deadline on the injected clock. The embedding
+pipeline's default allowance starts when it is constructed.
+
+No process-local completion signal exists. Polling durable job rows also works
+after a verifier restart. Every 100 ms poll makes one batched KV request, with
+at most seven job rows. A full timeout adds at most twenty KV calls: one ticket
+resolution and nineteen polls. Readiness adds the full normal advance attempt.
+Hold-off paths issue no extra calls. No lease, reservation, write gate, or
+snapshot survives into the wait.
+
+The stock adapter runs the advance in fetch and sends storage RPCs to Durable
+Objects, so waiting occupies no DO handler. An embedder may host the pipeline
+inside a DO: the asynchronous timer permits other requests to enter. Do not
+wrap the hold in `blockConcurrencyWhile`. Cloudflare's [Durable Object rules](https://developers.cloudflare.com/durable-objects/best-practices/rules-of-durable-objects/)
+allow interleaving during non-storage awaits. [Input and output gates](https://developers.cloudflare.com/durable-objects/reference/glossary/)
+protect outstanding storage operations and writes, respectively; neither stays
+closed during this timer-only wait once the preceding operations finish.
+
 ### Latency model and harness
 
 The small-pack latency harness advances its injected clock by 50 ms per storage
