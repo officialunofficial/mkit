@@ -19,7 +19,7 @@ use mkit_server::fork::{ForkRequest, ForkResult};
 use mkit_server::pipeline::{
     EmbeddedFork, EmbeddedGate, EmbeddedProcedure, HookSet, Pipeline, ResponseMeta,
 };
-use mkit_server::{BoxFuture, MultipartBlobStore, NamespaceStore, ServerError};
+use mkit_server::{BoxFuture, MaybeSync, MultipartBlobStore, NamespaceStore, ServerError};
 
 use crate::sharding_guard::DeploymentGuard;
 
@@ -91,14 +91,16 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> EmbeddedDispatch<B, N
 
     /// Dispatch procedure `P`. `header` looks a request header up by its
     /// lowercase name; `body` is the exact canonical body that was signed;
-    /// `gate` carries the embedder's pre-dispatch policy.
+    /// `gate` carries the embedder's pre-dispatch policy. The header callback
+    /// must be `Sync` on native targets; wasm32 has no such bound. The
+    /// returned future is `Send` on native targets.
     ///
     /// # Errors
     /// Those of `Pipeline::dispatch_embedded`, plus `unavailable` with the
     /// guard's public text when the stored layout is incompatible.
     pub async fn dispatch<P, G>(
         &self,
-        header: &dyn Fn(&str) -> Option<String>,
+        header: &(impl Fn(&str) -> Option<String> + MaybeSync + ?Sized),
         body: &[u8],
         gate: &G,
     ) -> Result<(P::Output, ResponseMeta), ServerError>
@@ -122,7 +124,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> EmbeddedDispatch<B, N
     /// Those of [`Self::dispatch`] and `Pipeline::fork_repo`.
     pub async fn dispatch_fork<G: EmbeddedGate<ForkRequest>>(
         &self,
-        header: &dyn Fn(&str) -> Option<String>,
+        header: &(impl Fn(&str) -> Option<String> + MaybeSync + ?Sized),
         body: &[u8],
         gate: &G,
     ) -> Result<(ForkResult, ResponseMeta), ServerError> {
