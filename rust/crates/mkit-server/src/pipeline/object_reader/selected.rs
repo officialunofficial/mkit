@@ -19,13 +19,23 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         memo: &mut ReadProofs,
         reference: &str,
     ) -> Result<bool, ServerError> {
-        let anchor = match self.continuation_anchor(meta, reference).await {
+        let anchor = match crate::store::probe_read_step!(
+            "publication_capture",
+            self.continuation_anchor(meta, reference)
+        )
+        .await
+        {
             Ok(anchor) => anchor,
             Err(error) if error.code() == Code::NotFound => return Ok(false),
             Err(error) => return Err(error),
         };
         // Activation precedes capture so the digest covers the revision row.
-        let security = match self.history_security(meta, true).await {
+        let security = match crate::store::probe_read_step!(
+            "security_digest",
+            self.history_security(meta, true)
+        )
+        .await
+        {
             Ok(security) => security,
             Err(error) if error.code() == Code::NotFound => return Ok(false),
             Err(error) => return Err(error),
@@ -64,7 +74,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         let result = async {
             let started = ms(self.pipe.clock.now_ms());
             session.io.calls.charge_many(2).map_err(|_| exhausted())?;
-            let authority = self.authorize(&calls).await?;
+            let authority =
+                crate::store::probe_read_step!("authorize", self.authorize(&calls)).await?;
             session
                 .proofs
                 .bind(&self.identity, authority, started, self.cfg)?;
@@ -78,9 +89,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 .with_session(&session.io.calls)
                 .flagging(&capped)
                 .with_io(&admission);
-            if !self
-                .install_selected(&meta, &mut session.proofs, &reference)
-                .await?
+            if !crate::store::probe_read_step!(
+                "publication_capture",
+                self.install_selected(&meta, &mut session.proofs, &reference)
+            )
+            .await?
             {
                 return Ok(None);
             }
@@ -125,7 +138,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
     ) -> Result<Option<(Arc<Checkpoint>, Option<crate::pipeline::Authenticated>)>, ServerError>
     {
         session.io.calls.charge_many(2).map_err(|_| exhausted())?;
-        let authority = self.authorize(calls).await?;
+        let authority = crate::store::probe_read_step!("authorize", self.authorize(calls)).await?;
         session.proofs.bind(
             &self.identity,
             authority.clone(),
@@ -149,12 +162,22 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             .with_session(&session.io.calls)
             .flagging(capped)
             .with_io(admission);
-        let anchor = match self.continuation_anchor(&meta, reference).await {
+        let anchor = match crate::store::probe_read_step!(
+            "publication_capture",
+            self.continuation_anchor(&meta, reference)
+        )
+        .await
+        {
             Ok(anchor) => anchor,
             Err(error) if error.code() == Code::NotFound => return Ok(None),
             Err(error) => return Err(error),
         };
-        let security = match self.history_security(&meta, false).await {
+        let security = match crate::store::probe_read_step!(
+            "security_digest",
+            self.history_security(&meta, false)
+        )
+        .await
+        {
             Ok(security) => security,
             Err(error) if error.code() == Code::NotFound => return Ok(None),
             Err(error) => return Err(error),

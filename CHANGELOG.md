@@ -45,6 +45,17 @@ collect the applicable entries between their old and new immutable pins.
   `with_transfer_timeout` budgets and `send_typed` for native errors, including
   `NativeHttpError::UnsupportedAcceptEncoding`. `with_timeout` sets both budgets.
 
+- Optional immutable read-cache wrappers for namespace and blob stores, with an
+  embedder-supplied byte backend and a bounded in-memory LRU reference backend.
+  Every current namespace key and scan remains Live. Only complete verified
+  packs of at most 1 MiB populate the cache; cached ranges reuse those packs.
+  Cache hits verify BLAKE3 and check authoritative physical presence. Live
+  authorization, visibility, membership, denial, and ref checks remain current.
+  Backend failures and bounded cache-I/O timeouts fall back to storage. Workers
+  embedders opt in through `embedding_pipeline_with_cache` or `serve_with_cache`;
+  existing constructors keep caching off. No breaking API, wire, stored-format,
+  or store-reset change. See the [embedding guide](docs/embedding/immutable-cache.md).
+
 - Typed `mkit.transport.v1.MembershipNotVisible` Connect error detail (an empty
   message) on the repository-membership-lag `unavailable`, emitted at every
   site that answers `repository membership not yet visible` (delta-base,

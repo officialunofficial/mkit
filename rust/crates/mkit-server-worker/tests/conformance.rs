@@ -87,6 +87,78 @@ multipart_suite!(
     heap = common::multipart_allocator::probe
 );
 
+/// The same simulated Workers wire stores with opt-in caching enabled.
+struct CachedWorkers(Workers);
+
+type CachedNamespace = mkit_server::store::CachingNamespaceStore<
+    DoNamespaceStore<Loopback>,
+    mkit_server::store::MemoryImmutableCache,
+>;
+type CachedBlob = mkit_server::store::CachingBlobStore<
+    R2BlobStore<SimBucket>,
+    mkit_server::store::MemoryImmutableCache,
+>;
+
+fn cache_config() -> mkit_server::store::CacheConfig {
+    mkit_server::store::CacheConfig::new(
+        "workers-conformance",
+        Arc::new(mkit_server::ManualSleep::new()),
+        std::time::Duration::from_millis(10),
+    )
+    .unwrap()
+}
+
+fn cache_backend() -> mkit_server::store::MemoryImmutableCache {
+    mkit_server::store::MemoryImmutableCache::new(
+        8 * 1024 * 1024,
+        std::time::Duration::from_secs(60),
+        Arc::new(mkit_server::ManualClock::new(0)),
+    )
+}
+
+fn cached_namespace(store: DoNamespaceStore<Loopback>) -> CachedNamespace {
+    mkit_server::store::CachingNamespaceStore::new(store, cache_backend(), cache_config())
+}
+
+impl KvHarness for CachedWorkers {
+    type Store = CachedNamespace;
+
+    fn store(&self) -> Self::Store {
+        cached_namespace(self.0.store())
+    }
+
+    fn store_with_clock(&self, clock: Arc<dyn Clock>) -> Option<Self::Store> {
+        self.0.store_with_clock(clock).map(cached_namespace)
+    }
+
+    fn store_with_capacity(&self, bytes: u64) -> Option<Self::Store> {
+        self.0.store_with_capacity(bytes).map(cached_namespace)
+    }
+
+    fn open_at(&self, dir: &Path) -> Option<Self::Store> {
+        self.0.open_at(dir).map(cached_namespace)
+    }
+
+    fn refresh_stats(&self, store: &Self::Store) -> impl Future<Output = ()> + Send {
+        self.0.refresh_stats(store.inner())
+    }
+}
+
+fn cached_r2() -> CachedBlob {
+    mkit_server::store::CachingBlobStore::new(r2(), cache_backend(), cache_config())
+}
+
+storage_suite!(
+    workers_cached,
+    kv = CachedWorkers(Workers::new()),
+    blob = cached_r2
+);
+multipart_suite!(
+    workers_cached_multipart,
+    store = cached_r2,
+    heap = common::multipart_allocator::probe
+);
+
 #[test]
 fn scan_many_real_json_wire_obeys_combined_reply_bytes() {
     use futures::executor::block_on;

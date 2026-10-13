@@ -220,8 +220,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         let calls = SliceBudget::new(OBJECT_READER_CALLS);
         let admission = crate::store::read_io::ReadIo::new();
         let mut decode = Budget(self.cfg.http_decode_budget);
-        let result = self
-            .history_nodes(
+        let result = crate::store::probe_read_step!(
+            "history_proof",
+            self.history_nodes(
                 session,
                 reference,
                 start,
@@ -231,7 +232,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 &admission,
                 &mut decode,
             )
-            .await;
+        )
+        .await;
         let Some((nodes, complete)) = self.discovery_result(result)? else {
             return Ok(None);
         };
@@ -368,7 +370,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
     ) -> Result<Option<Hash>, ServerError> {
         let started = ms(self.pipe.clock.now_ms());
         session.io.calls.charge_many(2).map_err(|_| exhausted())?;
-        let authority = self.authorize(calls).await?;
+        let authority = crate::store::probe_read_step!("authorize", self.authorize(calls)).await?;
         let writer = authority.is_some();
         session
             .proofs
@@ -388,9 +390,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             policy: self.pipe.publication_policy.as_deref(),
         };
         let shard = self.pipe.shards.ref_shard(&self.repo, reference);
-        let result = crate::store::read::read_ref(&view, &shard, &self.repo.name, reference)
-            .await
-            .map_err(failure);
+        let result = crate::store::probe_read_step!(
+            "ref_capture",
+            crate::store::read::read_ref(&view, &shard, &self.repo.name, reference)
+        )
+        .await
+        .map_err(failure);
         let tip = settle(result, &capped)?;
         session.proofs.capture_selected(tip);
         Ok(tip)
@@ -419,7 +424,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             "proved_nodes requires deduplicated ids"
         );
         session.io.calls.charge_many(2).map_err(|_| exhausted())?;
-        let authority = self.authorize(calls).await?;
+        let authority = crate::store::probe_read_step!("authorize", self.authorize(calls)).await?;
         let writer = authority.is_some();
         session.proofs.bind(
             &self.identity,
@@ -454,9 +459,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 .into_iter()
                 .collect();
             let targets: BTreeSet<Hash> = unique.iter().copied().collect();
-            proofs
-                .revalidate(&meta, &self.repo, self.seams.takedown.as_ref(), &targets)
-                .await?;
+            crate::store::probe_read_step!(
+                "live_security_revalidation",
+                proofs.revalidate(&meta, &self.repo, self.seams.takedown.as_ref(), &targets)
+            )
+            .await?;
             if !proofs.current(ms(self.pipe.clock.now_ms())) {
                 return Err(exhausted());
             }
@@ -486,23 +493,28 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 metrics: self.pipe.metrics.as_ref(),
                 caps: Caps::Reader,
             };
-            let (located, _) = resolve::locate_ids(&env, &contained, resolve::OnCap::Fail)
-                .await
-                .map_err(resolution_failure)?;
+            let (located, _) = crate::store::probe_read_step!(
+                "locate",
+                resolve::locate_ids(&env, &contained, resolve::OnCap::Fail)
+            )
+            .await
+            .map_err(resolution_failure)?;
             let mut locations: BTreeMap<Hash, crate::store::index::LocatedObject> =
                 located.into_iter().collect();
             if locations.is_empty() {
                 return Ok(all_none());
             }
-            checks
-                .prefetch_locations(
+            crate::store::probe_read_step!(
+                "denial_prefetch",
+                checks.prefetch_locations(
                     &locations
                         .iter()
                         .map(|(id, loc)| (*id, *loc))
                         .collect::<Vec<_>>(),
                 )
-                .await
-                .map_err(failure)?;
+            )
+            .await
+            .map_err(failure)?;
             let mut denied_ids = BTreeSet::new();
             for (id, location) in &locations {
                 if denied(&checks, id).await? || denied(&checks, &location.pack).await? {
@@ -521,7 +533,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 .partition(|(_, loc)| loc.value.delta_base.is_none());
             let mut bytes: BTreeMap<Hash, Arc<[u8]>> = BTreeMap::new();
             if let [(id, location)] = raw.as_slice() {
-                match resolve::load(&env, *id, *location, &mut decode.charge.budget).await {
+                match crate::store::probe_read_step!(
+                    "load_decode",
+                    resolve::load(&env, *id, *location, &mut decode.charge.budget)
+                )
+                .await
+                {
                     Ok(found) => {
                         bytes.insert(*id, found);
                     }
@@ -532,12 +549,20 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 let guards = checks.uncached_locations(
                     &locations.iter().map(|(i, l)| (*i, *l)).collect::<Vec<_>>(),
                 );
-                bytes = resolve::load_raw_many(&env, &raw, &guards, &mut decode.charge.budget)
-                    .await
-                    .map_err(resolution_failure)?;
+                bytes = crate::store::probe_read_step!(
+                    "load_decode",
+                    resolve::load_raw_many(&env, &raw, &guards, &mut decode.charge.budget)
+                )
+                .await
+                .map_err(resolution_failure)?;
             }
             for (id, location) in deltas {
-                match resolve::load(&env, id, location, &mut decode.charge.budget).await {
+                match crate::store::probe_read_step!(
+                    "load_decode",
+                    resolve::load(&env, id, location, &mut decode.charge.budget)
+                )
+                .await
+                {
                     Ok(found) => {
                         bytes.insert(id, found);
                     }
@@ -565,16 +590,19 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 return Ok(all_none());
             }
             io.calls.charge_many(2).map_err(|_| exhausted())?;
-            let current = self.authorize(calls).await?;
+            let current =
+                crate::store::probe_read_step!("authorize", self.authorize(calls)).await?;
             proofs.bind(
                 &self.identity,
                 current,
                 ms(self.pipe.clock.now_ms()),
                 self.cfg,
             )?;
-            proofs
-                .revalidate(&meta, &self.repo, self.seams.takedown.as_ref(), &targets)
-                .await?;
+            crate::store::probe_read_step!(
+                "live_security_revalidation",
+                proofs.revalidate(&meta, &self.repo, self.seams.takedown.as_ref(), &targets)
+            )
+            .await?;
             serving.retain(|(id, _)| proofs.contains(id));
             if serving.is_empty() {
                 return Ok(all_none());
@@ -588,9 +616,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 policy: self.pipe.publication_policy.as_deref(),
             };
             let facts = if self.pipe.cfg.takedown_denial {
-                inventory::located_entries(&live_view, &serving)
-                    .await
-                    .map_err(failure)?
+                crate::store::probe_read_step!(
+                    "denial_inventory",
+                    inventory::located_entries(&live_view, &serving)
+                )
+                .await
+                .map_err(failure)?
             } else {
                 BTreeMap::new()
             };
@@ -600,14 +631,17 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     store: &quiet_meta,
                     ..live_view
                 };
-                let blocked = crate::takedown::denial::object_denials_in(
-                    &live_view,
-                    &quiet_view,
-                    self.pipe.shards.as_ref(),
-                    &self.repo,
-                    &serving,
-                    &facts,
-                    self.indexed,
+                let blocked = crate::store::probe_read_step!(
+                    "denial",
+                    crate::takedown::denial::object_denials_in(
+                        &live_view,
+                        &quiet_view,
+                        self.pipe.shards.as_ref(),
+                        &self.repo,
+                        &serving,
+                        &facts,
+                        self.indexed,
+                    )
                 )
                 .await?;
                 serving.retain(|(id, _)| !blocked.contains(id));
@@ -623,7 +657,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             // precedence over the membership answer.
             checks.reset();
             let packs: Vec<Hash> = serving.iter().map(|(_, loc)| loc.pack).collect();
-            let (guards, present) =
+            let (guards, present) = crate::store::probe_read_step!(
+                "final_guard",
                 futures::future::join(checks.prefetch_locations(&serving), async {
                     if let [(_, location)] = serving.as_slice() {
                         // Retain the actual body source, not a different
@@ -636,7 +671,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                         self.packs_present(&view, &packs).await
                     }
                 })
-                .await;
+            )
+            .await;
             guards.map_err(failure)?;
             let present = present.map_err(failure)?;
             let mut nodes = BTreeMap::new();
@@ -702,12 +738,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         admission: &crate::store::read_io::ReadIo,
         operation: &mut Budget,
     ) -> Result<Option<Node>, ServerError> {
-        Ok(self
-            .proved_nodes(session, &[id], role, calls, admission, operation)
-            .await?
-            .into_iter()
-            .next()
-            .flatten())
+        Ok(crate::store::probe_read_step!(
+            "history_node_proof",
+            self.proved_nodes(session, &[id], role, calls, admission, operation)
+        )
+        .await?
+        .into_iter()
+        .next()
+        .flatten())
     }
     fn link_node(
         &self,
@@ -807,7 +845,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 // A singleton here is the node just validated, with no await
                 // afterward. Retained pages must refresh their earlier nodes.
                 if output.len() > 1 {
-                    self.final_nodes(session, &output, calls, admission).await?;
+                    crate::store::probe_read_step!(
+                        "final_guard",
+                        self.final_nodes(session, &output, calls, admission)
+                    )
+                    .await?;
                 }
                 return Ok(Some((output, complete)));
             }
@@ -832,7 +874,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         if !emitting {
             return Ok(None);
         }
-        self.final_nodes(session, &output, calls, admission).await?;
+        crate::store::probe_read_step!(
+            "final_guard",
+            self.final_nodes(session, &output, calls, admission)
+        )
+        .await?;
         Ok(Some((output, true)))
     }
     #[allow(clippy::too_many_arguments)] // Exact path target and operation context.
@@ -851,8 +897,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         if path.len() > options.max_depth {
             return Err(exhausted());
         }
-        let Some((mut commits, _)) = self
-            .history_nodes(
+        let Some((mut commits, _)) = crate::store::probe_read_step!(
+            "history_proof",
+            self.history_nodes(
                 session,
                 reference,
                 Some(commit),
@@ -862,7 +909,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 admission,
                 decode,
             )
-            .await?
+        )
+        .await?
         else {
             return Ok(None);
         };
@@ -914,8 +962,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         };
         if options.include_witness {
             ancestors.push(node);
-            self.final_nodes(session, &ancestors, calls, admission)
-                .await?;
+            crate::store::probe_read_step!(
+                "final_guard",
+                self.final_nodes(session, &ancestors, calls, admission)
+            )
+            .await?;
             let leaf = ancestors.pop().ok_or_else(|| failure(()))?;
             Ok(Some((leaf, mode, ancestors)))
         } else {
@@ -936,7 +987,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             return Ok(());
         }
         session.io.calls.charge_many(2).map_err(|_| exhausted())?;
-        let authority = self.authorize(calls).await?;
+        let authority = crate::store::probe_read_step!("authorize", self.authorize(calls)).await?;
         let writer = authority.is_some();
         session.proofs.bind(
             &self.identity,
@@ -958,10 +1009,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 policy: self.pipe.publication_policy.as_deref(),
             };
             let ids: BTreeSet<_> = nodes.iter().map(|node| node.id).collect();
-            session
-                .proofs
-                .revalidate(&meta, &self.repo, self.seams.takedown.as_ref(), &ids)
-                .await?;
+            crate::store::probe_read_step!(
+                "live_security_revalidation",
+                session
+                    .proofs
+                    .revalidate(&meta, &self.repo, self.seams.takedown.as_ref(), &ids)
+            )
+            .await?;
             if !session.proofs.current(ms(self.pipe.clock.now_ms())) {
                 return Err(exhausted());
             }
@@ -979,17 +1033,21 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 }
             }
             session.io.calls.charge_many(2).map_err(|_| exhausted())?;
-            let authority = self.authorize(calls).await?;
+            let authority =
+                crate::store::probe_read_step!("authorize", self.authorize(calls)).await?;
             session.proofs.bind(
                 &self.identity,
                 authority,
                 ms(self.pipe.clock.now_ms()),
                 self.cfg,
             )?;
-            session
-                .proofs
-                .revalidate(&meta, &self.repo, self.seams.takedown.as_ref(), &ids)
-                .await?;
+            crate::store::probe_read_step!(
+                "live_security_revalidation",
+                session
+                    .proofs
+                    .revalidate(&meta, &self.repo, self.seams.takedown.as_ref(), &ids)
+            )
+            .await?;
             if ids.iter().any(|id| !session.proofs.contains(id)) {
                 return Err(ServerError::not_found("object reader unavailable"));
             }
@@ -1002,9 +1060,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 policy: self.pipe.publication_policy.as_deref(),
             };
             let facts = if self.pipe.cfg.takedown_denial {
-                inventory::located_entries(&live_view, &locations)
-                    .await
-                    .map_err(failure)?
+                crate::store::probe_read_step!(
+                    "denial_inventory",
+                    inventory::located_entries(&live_view, &locations)
+                )
+                .await
+                .map_err(failure)?
             } else {
                 BTreeMap::new()
             };
@@ -1014,14 +1075,17 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 ..live_view
             };
             if self.pipe.cfg.takedown_denial
-                && !crate::takedown::denial::object_denials_in(
-                    &live_view,
-                    &quiet_view,
-                    self.pipe.shards.as_ref(),
-                    &self.repo,
-                    &locations,
-                    &facts,
-                    self.indexed,
+                && !crate::store::probe_read_step!(
+                    "denial",
+                    crate::takedown::denial::object_denials_in(
+                        &live_view,
+                        &quiet_view,
+                        self.pipe.shards.as_ref(),
+                        &self.repo,
+                        &locations,
+                        &facts,
+                        self.indexed,
+                    )
                 )
                 .await?
                 .is_empty()
@@ -1033,9 +1097,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             // this final phase: all of them share the guards' rounds. Results are
             // consumed below in node order, so precedence is unchanged.
             let packs: Vec<Hash> = nodes.iter().map(|node| node.location.pack).collect();
-            let (guards, present) = futures::future::join(
-                checks.prefetch_locations(&locations),
-                self.packs_present(&view, &packs),
+            let (guards, present) = crate::store::probe_read_step!(
+                "final_guard",
+                futures::future::join(
+                    checks.prefetch_locations(&locations),
+                    self.packs_present(&view, &packs),
+                )
             )
             .await;
             guards.map_err(failure)?;

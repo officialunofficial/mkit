@@ -111,6 +111,10 @@ anonymous HTTP bytes. See [caller views](../specs/SPEC-SERVER.md#101-callers-vie
 [all reader surfaces](../specs/SPEC-SERVER.md#103-every-reader-surface-uses-the-published-view)
 and [URL tokens](../specs/SPEC-HTTP-OBJECTS.md#6-url-tokens-and-key-publication).
 
+For optional cross-request pack-byte caching, see
+[embedding an immutable read cache](immutable-cache.md). It keeps every metadata
+and policy read live and leaves the default constructors uncached.
+
 ## One reader and one session per request
 
 Create one `embedding_pipeline` with a shared physical `SliceBudget`, one

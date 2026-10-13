@@ -137,3 +137,22 @@ pub(crate) fn summary(events: &[Event]) -> serde_json::Value {
     }
     serde_json::Value::Object(result)
 }
+
+// Nested task-local scopes distinguish final guards from their earlier proofs.
+#[cfg(feature = "http-objects")]
+tokio::task_local! { static READ_STEP: String; }
+
+#[cfg(feature = "http-objects")]
+pub(crate) async fn step<F: core::future::Future>(name: &'static str, future: F) -> F::Output {
+    let name = READ_STEP
+        .try_with(|parent| format!("{parent}/{name}"))
+        .unwrap_or_else(|_| name.to_owned());
+    READ_STEP.scope(name, future).await
+}
+
+#[cfg(feature = "http-objects")]
+pub(crate) fn current_step() -> String {
+    READ_STEP
+        .try_with(Clone::clone)
+        .unwrap_or_else(|_| "unattributed".into())
+}

@@ -25,6 +25,7 @@ enum Op {
     Page1(usize),
     CanonicalLog(usize),
     SelectedLog(usize),
+    GetReadGate,
 }
 
 struct Shape {
@@ -115,8 +116,9 @@ fn shape(commits: usize, files: usize, nested: bool, changed: impl Fn(usize) -> 
 }
 
 #[allow(clippy::too_many_lines)] // One probe driver covering every shape.
-async fn run(
+async fn run<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>(
     shape: &Shape,
+    pipe: &Pipeline<B, N, H>,
     owner: bool,
     op: Op,
     session: &mut ReaderSession,
@@ -148,12 +150,11 @@ async fn run(
             Req::unsigned(Procedure::ListRefs).header("x-repository", &fx.identity("room"))
         };
         let auth = fx.auth(&request);
-        let refs = fx.pipe.list_refs(&auth, "").await?;
+        let refs = pipe.list_refs(&auth, "").await?;
         assert!(!refs.is_empty());
         return Ok(());
     }
-    let reader = fx
-        .pipe
+    let reader = pipe
         .object_reader(
             fx.repo_id("room"),
             if owner {
@@ -214,6 +215,13 @@ async fn run(
             assert_eq!(page.commits.len(), size.min(shape.commits));
         }
         Op::CanonicalLog(count) => canonical_log(&reader, session, shape.head, count).await?,
+        Op::GetReadGate => {
+            // The gate probe captures the current ref and verifies its tip is readable.
+            let reader = reader.with_selected_ref(HEAD)?;
+            let capture = reader.selected_capture_in(session).await?.unwrap();
+            assert_eq!(capture.tip(), shape.head);
+            assert!(reader.read_canonical_in(session, &[capture.tip()]).await?[0].is_some());
+        }
         Op::SelectedLog(count) => {
             let reader = reader.with_selected_ref(HEAD)?;
             let checkpoint = reader.selected_capture_in(session).await?.unwrap();
@@ -225,8 +233,8 @@ async fn run(
 }
 
 /// The embedder's page-1 loop: walk first parents through canonical reads.
-async fn canonical_log(
-    reader: &ObjectReader<'_, SpyBlobs, Arc<Spy>, Hooks>,
+async fn canonical_log<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>(
+    reader: &ObjectReader<'_, B, N, H>,
     session: &mut ReaderSession,
     head: Hash,
     count: usize,
@@ -260,6 +268,19 @@ fn measure_latency(
     cold: Option<u64>,
     warm_packs: bool,
 ) -> (f64, u32, usize) {
+    measure_on(shape, &shape.fx.pipe, owner, op, latency, cold, warm_packs)
+}
+
+#[allow(clippy::too_many_arguments)] // Mirror the existing probe's modeled latency knobs.
+fn measure_on<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>(
+    shape: &Shape,
+    pipe: &Pipeline<B, N, H>,
+    owner: bool,
+    op: Op,
+    latency: u32,
+    cold: Option<u64>,
+    warm_packs: bool,
+) -> (f64, u32, usize) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .start_paused(true)
@@ -284,7 +305,15 @@ fn measure_latency(
             concurrency: crate::store::read_io::PARALLELISM,
             trace: trace.clone(),
         },
-        Box::pin(run(shape, owner, op, &mut session)),
+        Box::pin(read_probe::step(
+            match op {
+                Op::Show { .. } => "show",
+                Op::Log(_) => "log",
+                Op::GetReadGate => "get_read_gate",
+                _ => "read_shape",
+            },
+            run(shape, pipe, owner, op, &mut session),
+        )),
     );
     let warm_partitions = if warm_packs {
         shape
@@ -502,3 +531,5 @@ fn first_parent_log_models_cold_first_touches() {
         }
     }
 }
+
+mod immutable_cache;

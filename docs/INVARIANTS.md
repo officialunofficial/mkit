@@ -2650,3 +2650,32 @@ responses negotiated, or metadata connections held open for too long.
 
 **Enforced by:** `mkit-sync::NativeHttp::send_typed`, `request_headers`, and the
 `native_http` header-preservation, negotiation-refusal and timeout tests.
+
+## Immutable byte caches never become serving authority
+
+**Always:** every current namespace key and scan stays Live. Only complete,
+hash-verified pack bytes qualify for cross-request caching. A hit rechecks the
+pack hash and authoritative physical presence. Authorization, visibility,
+membership, publication, denial, ref state, and final guards remain live.
+Absent results, writes, guarded batches, and their preconditions bypass the
+cache. Backend errors and bounded timeouts fall back to storage. Cache keys
+separate deployments, storage kinds, partitions, and authoritative keys.
+
+**Because:** immutable bytes can outlive the policy that permits serving them,
+and purge can delete authoritative content while a backend retains a copy.
+
+**If violated:** stale state could serve revoked or deleted content, a negative
+entry could hide newly available data, a cache failure could fail a valid read,
+or a guarded apply could commit against a stale precondition.
+
+**Enforced by:** `store::cache` classification and store wrappers;
+`store::cache_classification_tests` enumerates every key constructor, range,
+partition kind, and blob kind. The immutable-cache conformance cases cover
+memory and adversarial backends, integrity, absence, writes, and fallback;
+reader warm-cache regressions preserve live security and ref observations.
+The deployment bounds physical backend retention to its purge SLA. The reference
+LRU uses insertion-time TTL, copies inserted bytes into owned allocations, and
+sweeps expired entries on lookup, insertion, or `evict_expired`. An idle host
+schedules that sweep or drops every backend clone; TTL plus the maximum sweep
+interval fits the SLA. Hits do not refresh TTL. External cache I/O charges the
+same invocation budget as the physical stores before dispatch.

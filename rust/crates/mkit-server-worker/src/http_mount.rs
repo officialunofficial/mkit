@@ -250,10 +250,6 @@ pub(crate) mod glue {
     use super::{HttpMountOptions, bridge_chunks, prepare_response};
     use super::{early_object_error, raw_path_query};
     use crate::adapter::WorkerConfig;
-    #[cfg(target_arch = "wasm32")]
-    use crate::ns_client::WorkerNamespaceStore;
-    #[cfg(target_arch = "wasm32")]
-    use crate::r2::WorkerBlobStore;
 
     /// Only a configured HTTP mount can select this dispatcher.
     #[cfg(target_arch = "wasm32")]
@@ -388,10 +384,15 @@ pub(crate) mod glue {
     }
 
     #[cfg(target_arch = "wasm32")]
-    pub(crate) async fn serve<H: HookSet + 'static>(
-        pipe: &Pipeline<WorkerBlobStore, WorkerNamespaceStore, H>,
+    pub(crate) async fn serve<H, B, N>(
+        pipe: &Pipeline<B, N, H>,
         req: &Request,
-    ) -> worker::Result<Response> {
+    ) -> worker::Result<Response>
+    where
+        H: HookSet + 'static,
+        B: mkit_server::MultipartBlobStore + 'static,
+        N: mkit_server::NamespaceStore + 'static,
+    {
         let url = req.inner().url();
         let (raw_path, raw_query) = raw_path_query(&url)
             .map_err(|_| worker::Error::RustError("invalid request URL".into()))?;

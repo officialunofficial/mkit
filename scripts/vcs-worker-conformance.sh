@@ -5,7 +5,7 @@
 # apps/vcs-worker on a direct workerd socket: the M0 "nothing changes on
 # the wire" exit check for the vcs-worker port (WP-M0-17).
 #
-#   scripts/vcs-worker-conformance.sh [--test-faults] [--hooks] [--sharding single|d34] [--multi] [--indexed] [-- <extra runner args>]
+#   scripts/vcs-worker-conformance.sh [--test-faults] [--immutable-cache] [--hooks] [--sharding single|d34] [--multi] [--indexed] [-- <extra runner args>]
 #
 #   (default)      a release-optimized build; the whole suite once.
 #   --test-faults  an `__test-faults` build, with each case/phase on a fresh
@@ -57,6 +57,7 @@
 #                  advance then commits (`indexed.async_verification_commits`).
 #                  The wrangler log must show the injected slice failure.
 #   --indexed-only run only the injected indexed phase, with test faults.
+#   --immutable-cache opt into the bounded memory cache (requires --test-faults).
 #   --no-build    reuse the runner and Worker built with the same flags (local repeats).
 #   -- ARGS        passed to every `mkit-server-conformance wire` run (e.g.
 #                  `-- --filter refs.`, `-- --list-refs 1000`).
@@ -106,6 +107,7 @@ multi=0
 hooks=0
 indexed=0
 indexed_only=0
+immutable_cache=0
 no_build=0
 runner_args=()
 # Under D34 a ListRefs page scans 16 buckets and each lag poll re-lists, so the
@@ -116,6 +118,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --hooks) hooks=1 ;;
         --test-faults) test_faults=1 ;;
+        --immutable-cache) immutable_cache=1 ;;
         --multi) multi=1 ;;
         --hooks) hooks=1 ;;
         --indexed) indexed=1 ;;
@@ -129,13 +132,17 @@ while [ $# -gt 0 ]; do
             d34_list_args=()
             if [ "${sharding}" = d34 ]; then d34_list_args=(--list-refs 1000); fi ;;
         --) shift; runner_args=("$@"); break ;;
-        *) echo "usage: $0 [--test-faults] [--hooks] [--sharding single|d34] [--multi] [--indexed] [-- <runner args>]" >&2; exit 2 ;;
+        *) echo "usage: $0 [--test-faults] [--immutable-cache] [--hooks] [--sharding single|d34] [--multi] [--indexed] [-- <runner args>]" >&2; exit 2 ;;
     esac
     shift
 done
 
 if [ "${indexed}" -eq 1 ] && { [ "${test_faults}" -ne 1 ] || [ "${sharding}" != d34 ]; }; then
     echo "--indexed needs --test-faults and --sharding d34" >&2; exit 2
+fi
+
+if [ "${immutable_cache}" -eq 1 ] && [ "${test_faults}" -ne 1 ]; then
+    echo "--immutable-cache requires --test-faults" >&2; exit 2
 fi
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/vcs-worker-conformance.XXXXXX")"
@@ -396,6 +403,9 @@ features="health,strict-gzip-auth,tickets,multipart"
 if [ "${sharding}" = d34 ]; then features="${features},epoch-leases"; fi
 build_args=(--release)
 vars=(--var "AUTH_AUDIENCE:${ORIGIN}" --var "AUTH_REPOSITORY:${REPOSITORY}" --var "SHARDING:${sharding}")
+if [ "${immutable_cache}" -eq 1 ]; then
+    vars+=(--var "TEST_IMMUTABLE_CACHE:true")
+fi
 if [ "${test_faults}" -eq 1 ]; then
     features="${features},test-faults,timers"
     build_args+=(--features __test-faults)

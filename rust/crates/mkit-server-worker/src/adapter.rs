@@ -2268,8 +2268,10 @@ pub(crate) use glue::build_ns_object;
 pub use glue::fetch_with_context;
 #[cfg(target_arch = "wasm32")]
 pub use glue::{
-    WorkerPipeline, embedded_dispatch, fetch, fetch_with, ns_object, ns_object_with,
-    pipeline as embedding_pipeline, serve, serve_admin_with, serve_with,
+    CachedWorkerPipeline, WorkerPipeline, embedded_dispatch, fetch, fetch_with, ns_object,
+    ns_object_with, pipeline as embedding_pipeline,
+    pipeline_with_cache as embedding_pipeline_with_cache, serve, serve_admin_with, serve_with,
+    serve_with_cache,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -2303,6 +2305,13 @@ mod glue {
 
     /// The pipeline a request runs on, over the hooks `H`.
     pub type WorkerPipeline<H> = Pipeline<WorkerBlobStore, WorkerNamespaceStore, H>;
+
+    /// A request pipeline with an explicitly supplied immutable cache backend.
+    pub type CachedWorkerPipeline<H, C> = Pipeline<
+        mkit_server::store::CachingBlobStore<WorkerBlobStore, C>,
+        mkit_server::store::CachingNamespaceStore<WorkerNamespaceStore, C>,
+        H,
+    >;
 
     /// `Access-Control-Allow-Origin` and the admission `Expose-Headers` on
     /// every response, so a browser reads a challenge or a receipt.
@@ -2391,6 +2400,52 @@ mod glue {
         hooks: H,
         request_budget: &mkit_server::indexed::budget::SliceBudget,
     ) -> Result<WorkerPipeline<H>, ConfigError> {
+        pipeline_with_stores(env, cfg, hooks, request_budget, |blobs, meta| (blobs, meta))
+    }
+
+    /// Build a request pipeline with an embedder-owned immutable cache.
+    /// Reuse the backend across requests, with a deployment-specific cache configuration.
+    /// Existing constructors leave caching disabled.
+    ///
+    /// # Errors
+    /// Invalid configuration or unavailable bindings.
+    pub fn pipeline_with_cache<H, C>(
+        env: &Env,
+        cfg: &WorkerConfig,
+        hooks: H,
+        request_budget: &mkit_server::indexed::budget::SliceBudget,
+        cache: C,
+        cache_config: mkit_server::store::CacheConfig,
+    ) -> Result<CachedWorkerPipeline<H, C>, ConfigError>
+    where
+        H: HookSet + 'static,
+        C: mkit_server::store::ImmutableCache + Clone + 'static,
+    {
+        pipeline_with_stores(env, cfg, hooks, request_budget, |blobs, meta| {
+            (
+                mkit_server::store::CachingBlobStore::new(
+                    blobs,
+                    cache.clone(),
+                    cache_config.clone(),
+                ),
+                mkit_server::store::CachingNamespaceStore::new(meta, cache, cache_config),
+            )
+        })
+    }
+
+    fn pipeline_with_stores<H, B, N, F>(
+        env: &Env,
+        cfg: &WorkerConfig,
+        hooks: H,
+        request_budget: &mkit_server::indexed::budget::SliceBudget,
+        wrap: F,
+    ) -> Result<Pipeline<B, N, H>, ConfigError>
+    where
+        H: HookSet + 'static,
+        B: mkit_server::MultipartBlobStore + 'static,
+        N: mkit_server::NamespaceStore + 'static,
+        F: FnOnce(WorkerBlobStore, WorkerNamespaceStore) -> (B, N),
+    {
         cfg.validate_runtime(env)?;
         let bad = |e: &dyn core::fmt::Display| ConfigError(e.to_string());
         let mut config = cfg.pipeline_config()?;
@@ -2407,6 +2462,7 @@ mod glue {
         config.purge = crate::admin::purge_config(cfg, meta.clone(), Some(request_budget))?;
         #[cfg(feature = "__test-faults")]
         let faulted = blobs.clone();
+        let (blobs, meta) = wrap(blobs, meta);
         let pipe = Pipeline::new(
             blobs,
             meta,
@@ -2618,6 +2674,55 @@ mod glue {
         H: HookSet + 'static,
         F: FnOnce(&Env, &WorkerConfig) -> Result<H, ConfigError>,
     {
+        serve_using(req, env, cfg, make_hooks, pipeline).await
+    }
+
+    /// Serve with an embedder's immutable cache backend factory.
+    /// The factory receives this request's shared storage budget, which backends
+    /// making platform calls must also charge. Shared cache state and deployment
+    /// configuration can be retained across requests.
+    ///
+    /// # Errors
+    /// Only when the runtime fails to build a response.
+    pub async fn serve_with_cache<H, F, C, FC>(
+        req: Request,
+        env: Env,
+        cfg: &WorkerConfig,
+        make_hooks: F,
+        make_cache: FC,
+        cache_config: mkit_server::store::CacheConfig,
+    ) -> worker::Result<Response>
+    where
+        H: HookSet + 'static,
+        F: FnOnce(&Env, &WorkerConfig) -> Result<H, ConfigError>,
+        C: mkit_server::store::ImmutableCache + Clone + 'static,
+        FC: FnOnce(&mkit_server::indexed::budget::SliceBudget) -> C,
+    {
+        serve_using(req, env, cfg, make_hooks, move |env, cfg, hooks, budget| {
+            pipeline_with_cache(env, cfg, hooks, budget, make_cache(budget), cache_config)
+        })
+        .await
+    }
+
+    async fn serve_using<H, F, B, N, P>(
+        req: Request,
+        env: Env,
+        cfg: &WorkerConfig,
+        make_hooks: F,
+        make_pipeline: P,
+    ) -> worker::Result<Response>
+    where
+        H: HookSet + 'static,
+        F: FnOnce(&Env, &WorkerConfig) -> Result<H, ConfigError>,
+        B: mkit_server::MultipartBlobStore + 'static,
+        N: mkit_server::NamespaceStore + 'static,
+        P: FnOnce(
+            &Env,
+            &WorkerConfig,
+            H,
+            &mkit_server::indexed::budget::SliceBudget,
+        ) -> Result<Pipeline<B, N, H>, ConfigError>,
+    {
         if let Err(error) = cfg.validate_runtime(&env) {
             let response = json_response(unavailable_json(&error.0), 503)?;
             #[cfg(feature = "http-objects")]
@@ -2643,10 +2748,12 @@ mod glue {
             let origin = req.headers().get("Origin")?;
             let response = match crate::http_mount::glue::early_worker(&req, cfg) {
                 Ok(Some(response)) => response,
-                Ok(None) => match serve_inner_with(req, env, cfg, make_hooks).await {
-                    Ok(response) => response,
-                    Err(_) => Response::error("HTTP object adapter failed", 503)?,
-                },
+                Ok(None) => {
+                    match serve_inner_with(req, env, cfg, make_hooks, make_pipeline).await {
+                        Ok(response) => response,
+                        Err(_) => Response::error("HTTP object adapter failed", 503)?,
+                    }
+                }
                 Err(_) => Response::error("HTTP object adapter failed", 503)?,
             };
             if let Some(mount) = &cfg.http_mount {
@@ -2659,18 +2766,27 @@ mod glue {
             }
             return Ok(response);
         }
-        serve_inner_with(req, env, cfg, make_hooks).await
+        serve_inner_with(req, env, cfg, make_hooks, make_pipeline).await
     }
 
-    async fn serve_inner_with<H, F>(
+    async fn serve_inner_with<H, F, B, N, P>(
         req: Request,
         env: Env,
         cfg: &WorkerConfig,
         make_hooks: F,
+        make_pipeline: P,
     ) -> worker::Result<Response>
     where
         H: HookSet + 'static,
         F: FnOnce(&Env, &WorkerConfig) -> Result<H, ConfigError>,
+        B: mkit_server::MultipartBlobStore + 'static,
+        N: mkit_server::NamespaceStore + 'static,
+        P: FnOnce(
+            &Env,
+            &WorkerConfig,
+            H,
+            &mkit_server::indexed::budget::SliceBudget,
+        ) -> Result<Pipeline<B, N, H>, ConfigError>,
     {
         #[cfg(feature = "__test-faults")]
         let mut req = req;
@@ -2731,7 +2847,7 @@ mod glue {
             return Ok(cors(json_response(body, 400)?));
         }
         let pipe = match make_hooks(&env, cfg)
-            .and_then(|hooks| pipeline(&env, cfg, hooks, &request_budget))
+            .and_then(|hooks| make_pipeline(&env, cfg, hooks, &request_budget))
         {
             Ok(pipe) => pipe,
             Err(_) if scanner_request => return crate::scanner_retrieval::not_found(),
@@ -2757,11 +2873,16 @@ mod glue {
     }
 
     /// Dispatch Connect and bridge its streaming response with request-cap accounting.
-    async fn serve_connect<H: HookSet + 'static>(
+    async fn serve_connect<H, B, N>(
         req: &Request,
         cfg: &WorkerConfig,
-        pipe: WorkerPipeline<H>,
-    ) -> worker::Result<Response> {
+        pipe: Pipeline<B, N, H>,
+    ) -> worker::Result<Response>
+    where
+        H: HookSet + 'static,
+        B: mkit_server::MultipartBlobStore + 'static,
+        N: mkit_server::NamespaceStore + 'static,
+    {
         let watch = BodyWatch::default();
         let http_req = http_request(req, cfg.max_body_bytes, &watch)?;
         // The binding takes an `Arc` and holds it in a `SendWrapper` on

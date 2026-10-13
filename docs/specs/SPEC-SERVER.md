@@ -65,7 +65,8 @@ not weaken today's holder/hold safety, notice-key or admin contracts.
 | Implemented safety groundwork | Content holders, pending-holder protection, extraction holds and deadlines derived from §13.4. Launch retains bytes permanently and runs no collector. |
 | Retained, unintegrated groundwork | `store::inspection_mode`, `inspection_flags` and `inspection_holds`, plus reserved timer kind 14. Kept by owner decision; neither pipeline nor adapter installs these records or runs their continuations. Storage tests do not establish async-inspection support. |
 | Future integration | Async inspection/holds/review (§§10–11), leases and lifecycle Events (§12), GC (§13), takedown rewrite/substitution/completion/notices (§14), and storage receipt issuance (§15). |
-| Future deployment facilities | Edge caching and the exhaustive namespace catalog. Current purge delivery and known-holder/finite-root discovery remain implemented; discovery under open namespace policy remains incomplete (§18). |
+| Implemented, opt-in | Immutable pack-byte caching (§17.1), supplied by the deployment; metadata and policy reads remain live. |
+| Future deployment facilities | The exhaustive namespace catalog. Current purge delivery and known-holder/finite-root discovery remain implemented; discovery under open namespace policy remains incomplete (§18). |
 
 The hosted embedding acceptance selects Paid/indexed/D34, in-process hooks and
 URL tokens, with takedown off and no inspection. Single/Free remains supported;
@@ -4720,12 +4721,107 @@ inspection hit uses `TAKEDOWN`. `PurgeCache` selects the `MANUAL` trigger and is
 automatic purges are audited with their system actor. §14
 **Interaction with GC, restore and caches** governs takedown ordering.
 
-## 17. Custom backends, backup and migrations (reserved, M5)
+## 17. Custom backends, backup and migrations
 
 Stored formats are not yet a compatibility contract before 1.0; a store may
 need a reset across versions.
 
-Reserved: this section is specified with M5 (see the version history).
+Backup and migration details remain reserved for M5 (see the version history).
+
+### 17.1 Immutable read caching
+
+Caching is optional and disabled unless the deployment supplies a backend.
+A cache is an optimization of byte retrieval, never a source of authority.
+It changes no wire message or authoritative stored format and requires no
+store reset.
+
+A key is **Immutable** only when every supported writer guarantees that the
+same key cannot acquire different bytes. A key is **Live** when its bytes can
+change, when its presence or absence carries policy, or when the immutable
+proof is incomplete. Unknown key families MUST default to Live. Hashes in a
+metadata key alone do not establish immutability: import and index-planning
+writers can replace metadata under an existing key.
+
+The current classification is:
+
+| Namespace key families (class tags) | Class | Reason |
+|---|---|---|
+| Layout and deployment markers (`v`, `sm`, `am`) | Live | Admission depends on current configuration and presence. |
+| Inspection mode, flags, versions, holds, hold indexes, and release manifests (`im`, `if`, `iv`, `ih`, `ia`, `ir`) | Live | Current inspection policy and release ownership must be observed. |
+| Namespace and repository records, listing, visibility, visibility revision, and registration (`nr`, `rr`, `rl`, `rv`, `rj`, `rk`) | Live | Records and visibility change; listing membership changes. |
+| Repository byte counters and counted-pack markers (`rb`, `rn`) | Live | Accounting and membership can change. |
+| Refs and ref-name indexes (`r`, `x`) | Live | Ref moves and deletions must be visible. |
+| Publication, retained advances, published refs, published indexes, and published membership (`pp`, `av`, `pr`, `py`, `pm`) | Live | Clearance, publication boundaries, and membership can change. |
+| Replay records and expiry indexes (`p`, `px`) | Live | Replay outcomes, expiry, and cleanup are authoritative. |
+| Quota state, windows, shard usage, views, contributions, and totals (`q`, `qx`, `qs`, `qv`, `qc`, `qt`) | Live | Limits, accounting, and window membership change. |
+| Tickets, ticket indexes, and open-ticket counters (`t`, `ti`, `tc`, `tu`) | Live | Consumption, expiry, and admission must be current. |
+| Fork jobs and all working-set kinds (`fj`, `fo`) | Live | Jobs advance and rollback removes working state. |
+| Local membership and verification state (`m`, `vs`) | Live | Membership, clearance, and verification lifecycle change. |
+| Verification jobs and every checkpoint sub-kind (`vc`) | Live | Provisional frames, closure children, charged bases, candidates, history edges, and source dependencies can be rebuilt or cleaned up. |
+| Object indexes (`i`) | Live | Supported merge imports and index planners can replace values under an existing key. |
+| Reservations, outcomes, pending outcomes, relay queues, watermarks, progress, sequence, and backlog (`o`, `oq`, `or`, `rh`, `rs`, `os`, `oc`) | Live | Delivery, replay, and work ownership are authoritative. |
+| Authority generation, revocation cursors, grant epochs, epoch leases, leased shards, recovery, and reconciliation (`ag`, `fc`, `e`, `el`, `ls`, `lr`, `lrc`) | Live | Authorization and revocation fences must be current. |
+| Backup state and timers, including retry timers (`bk`, `w`) | Live | Scheduling, retry, and backup progress change. |
+| Holders, GC holds, pending holders, takedown intents, blocks, and object state (`h`, `g`, `gp`, `ct`, `b`, `c`) | Live | Deletion safety and denial depend on current state. |
+| Pending cache purges and refill fences (`cp`, `cg`) | Live | Delivery obligations and invalidation generations change. |
+| Admin audit, nonce, operation, automatic-event, and snapshot rows (`ah`, `an`, `ao`, `ae`, `ai`, `ps`); reserved tombstone, lease, and namespace-list rows (`tb`, `l`, `nl`); private backend rows | Live | No immutable read contract is established for these families. |
+| All class, prefix, repository, object, expiry, window, holder, hold, and takedown ranges | Live | Insertions, deletions, and continuation membership remain mutable. |
+| Unknown, new, or malformed keys | Live | No audited immutable proof exists. |
+
+No partition is wholly immutable. Namespace, coordinator, ref, repository-index,
+ref-index, and content-shard partitions all contain Live state. Partition
+identity MUST be part of a metadata cache key; it MUST NOT substitute for
+per-key classification.
+
+| Blob kind | Class | Reason and deletion behavior |
+|---|---|---|
+| Packs | Immutable | Complete pack bytes hash to the pack id with BLAKE3, and every committing writer verifies that hash. GC, purge, or maintenance may delete the pack; a cached hit requires an authoritative physical-presence check before return. |
+| Upload markers | Live | Presence proves a ticket holder completed upload and is part of ticket-consumption policy, even though marker bytes are hash-verified. |
+| Extracted objects and chunks | Live | Verification uses a separately supplied content root; the object id alone does not bind every supported write to the same bytes. |
+| Chunk-offset sidecars for manifests | Live | The manifest id and separately supplied verification root do not establish an unconditional same-key byte invariant. |
+| Staged multipart parts, sessions, receipts, and private backend metadata | Live | Upload, abort, completion, expiry, and cleanup change state or presence. |
+| Other or future blob kinds | Live | No audited immutable proof exists. |
+
+A wrapper MUST cache only present Immutable values. It MUST NOT cache absent
+results, including misses for Immutable keys. Live reads, writes, deletes,
+guarded batches, and every precondition observation inside a guarded batch
+MUST bypass the cache. A scan MAY use cached results only if its entire range,
+including membership and continuation, is proven immutable. Every current
+namespace scan bypasses the cache.
+
+Cache keys MUST separate deployment/storage identity, storage kind, partition,
+and authoritative key. Deployment/storage identity MUST change after a reset
+or restore that could reuse an earlier cache namespace. Global pack keys have
+no metadata partition; they remain deployment-scoped.
+
+A cached pack hit MUST verify BLAKE3 against the requested pack id and check
+current physical presence and length in the authoritative store. Invalid bytes
+MUST fall back to the store. A missing authoritative pack MUST remain absent,
+and a failed authoritative presence check MUST fail the read. Authorization,
+visibility, ref state, membership, publication, denial, and final guards MUST
+still run at their existing live read boundaries. Cached bytes grant no
+permission and cannot replace these checks.
+
+This cache profile retains only complete packs of at most 1 MiB. A ranged
+read can use a previously cached complete pack; a range miss does not populate
+the cache. Larger packs retain the ordinary streaming path. Cache I/O MUST have
+a finite deadline and bounded response allocation. Each backend get or put
+MUST complete or time out within at most 100 ms; errors and timeouts fall back to the
+store and do not fail an otherwise successful read. Backends MUST support
+cancellation and bound retained bytes. A put already completed when canceled
+may leave a retained copy. External cache I/O MUST reserve capacity from the
+same invocation budget as authoritative storage before dispatch.
+
+Takedown denial stops serving immediately through the live guards. Physical
+purge does not by itself erase copies already held by an immutable cache.
+Deployments MUST bound physical cache retention to their purge SLA, including
+copies left by a racing or canceled put. Lookup expiry alone does not prove
+physical erasure. A backend that removes expired entries only during activity
+MUST also receive scheduled expiry sweeps or be dropped within the retention
+bound. The insertion-time TTL plus the maximum sweep interval MUST fit the
+purge SLA. A hit MUST NOT extend the insertion-time retention bound. Cache invalidation and purge acknowledgements remain governed
+by §§14.9 and 16.7; an immutable cache MUST NOT claim deletion completion for
+copies its backend still retains.
 
 ## 18. Conformance scope
 

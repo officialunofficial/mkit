@@ -213,7 +213,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
         };
         if matches!(reader.view, ReaderView::Owner(_)) {
             let calls = SliceBudget::new(OBJECT_READER_CALLS);
-            reader.authorize(&calls).await?;
+            crate::store::probe_read_step!("authorize", reader.authorize(&calls)).await?;
         }
         Ok(reader)
     }
@@ -343,9 +343,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         session: &mut ReaderSession,
         ids: &[Hash],
     ) -> Result<Vec<Option<Vec<u8>>>, ServerError> {
-        let (bytes, _) = self
-            .batch_limited_in(ids, false, None, Some(session))
-            .await?;
+        let (bytes, _) = crate::store::probe_read_step!(
+            "publication_proof",
+            self.batch_limited_in(ids, false, None, Some(session))
+        )
+        .await?;
         Ok(ids.iter().map(|id| bytes.get(id).cloned()).collect())
     }
     /// Read verified metadata while charging proof work to a shared session.
@@ -357,9 +359,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         session: &mut ReaderSession,
         ids: &[Hash],
     ) -> Result<Vec<Option<ObjectMetadata>>, ServerError> {
-        let (_, metadata) = self
-            .batch_limited_in(ids, true, None, Some(session))
-            .await?;
+        let (_, metadata) = crate::store::probe_read_step!(
+            "publication_proof",
+            self.batch_limited_in(ids, true, None, Some(session))
+        )
+        .await?;
         Ok(ids.iter().map(|id| metadata.get(id).copied()).collect())
     }
     /// Verified object metadata without fetching requested canonical bytes.
@@ -406,7 +410,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         calls: &SliceBudget,
         capped: &AtomicBool,
     ) -> Result<Vec<Option<IssuedUrl>>, ServerError> {
-        match self.authorize(calls).await {
+        match crate::store::probe_read_step!("authorize", self.authorize(calls)).await {
             Err(e) if e.code() == Code::NotFound && matches!(self.view, ReaderView::Public) => {
                 return Ok(vec![None; targets.len()]);
             }
@@ -595,12 +599,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         if let Some(session) = &session {
             session.io.calls.charge_many(2).map_err(|_| exhausted())?;
         }
-        let authority = match self.authorize(&calls).await {
-            Err(e) if e.code() == Code::NotFound && matches!(self.view, ReaderView::Public) => {
-                return Ok((BTreeMap::new(), BTreeMap::new()));
-            }
-            other => other?,
-        };
+        let authority =
+            match crate::store::probe_read_step!("authorize", self.authorize(&calls)).await {
+                Err(e) if e.code() == Code::NotFound && matches!(self.view, ReaderView::Public) => {
+                    return Ok((BTreeMap::new(), BTreeMap::new()));
+                }
+                other => other?,
+            };
         let writer = authority.is_some();
         if let Some(session) = &mut session {
             session
@@ -716,14 +721,19 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         let mut located = if prove_first {
             Vec::new()
         } else {
-            resolve::locate_ids(&env, ids, resolve::OnCap::Fail)
-                .await
-                .map_err(resolution_failure)?
-                .0
+            crate::store::probe_read_step!(
+                "locate",
+                resolve::locate_ids(&env, ids, resolve::OnCap::Fail)
+            )
+            .await
+            .map_err(resolution_failure)?
+            .0
         };
         // Directly denied members are absent even when their reachability
         // cannot be proved within the caller's byte or walk budget.
-        checks.prefetch_locations(&located).await.map_err(failure)?;
+        crate::store::probe_read_step!("denial_prefetch", checks.prefetch_locations(&located))
+            .await
+            .map_err(failure)?;
         let mut clear = Vec::with_capacity(located.len());
         for (id, location) in located {
             if !denied(&checks, &id).await.map_err(failure)?
@@ -770,7 +780,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                         Err(exhausted())
                     };
                 }
-                match self.install_selected(&meta, memo, reference).await {
+                match crate::store::probe_read_step!(
+                    "publication_capture",
+                    self.install_selected(&meta, memo, reference)
+                )
+                .await
+                {
                     Ok(true) => {}
                     Ok(false) => return Ok((BTreeMap::new(), BTreeMap::new())),
                     Err(error)
@@ -782,9 +797,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     Err(error) => return Err(error),
                 }
             }
-            match memo
-                .revalidate(&meta, &self.repo, seams.takedown.as_ref(), &targets)
-                .await
+            match crate::store::probe_read_step!(
+                "live_security_revalidation",
+                memo.revalidate(&meta, &self.repo, seams.takedown.as_ref(), &targets)
+            )
+            .await
             {
                 Err(_) if capped_as_absent && absorb(capped) => {
                     return Ok((BTreeMap::new(), BTreeMap::new()));
@@ -814,8 +831,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             } else if let Some(tips) = proofs.as_ref().and_then(|memo| memo.tips.as_ref()) {
                 Ok((tips.clone(), false))
             } else {
-                pipe.reader_tips(&meta, &self.repo, cfg.max_walk_objects, writer)
-                    .await
+                crate::store::probe_read_step!(
+                    "root_capture",
+                    pipe.reader_tips(&meta, &self.repo, cfg.max_walk_objects, writer)
+                )
+                .await
             };
             // A spent call budget is an unprovable proof, not a store fault.
             let (tips, truncated) = match tips {
@@ -850,13 +870,16 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     metrics: pipe.metrics.as_ref(),
                     caps: Caps::Reader,
                 };
-                let walked = reach::walk_many_memo(
-                    &walk_env,
-                    seams.takedown.as_ref(),
-                    &tips,
-                    &targets,
-                    decode,
-                    proofs.as_deref_mut(),
+                let walked = crate::store::probe_read_step!(
+                    "publication_ancestry_proof",
+                    reach::walk_many_memo(
+                        &walk_env,
+                        seams.takedown.as_ref(),
+                        &tips,
+                        &targets,
+                        decode,
+                        proofs.as_deref_mut(),
+                    )
                 )
                 .await;
                 let (found, incomplete) = match walked {
@@ -878,19 +901,24 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         if prove_first {
             // Do not locate inaccessible targets: membership-dependent work can
             // distinguish a stored orphan from a missing ID near the call cap.
-            checks
-                .prefetch(&reached.iter().copied().collect::<Vec<_>>())
-                .await
-                .map_err(failure)?;
+            crate::store::probe_read_step!(
+                "denial_prefetch",
+                checks.prefetch(&reached.iter().copied().collect::<Vec<_>>())
+            )
+            .await
+            .map_err(failure)?;
             let mut accessible = Vec::new();
             for id in &reached {
                 if !denied(&checks, id).await.map_err(failure)? {
                     accessible.push(*id);
                 }
             }
-            let (members, skipped) = resolve::locate_ids(&env, &accessible, resolve::OnCap::Skip)
-                .await
-                .map_err(resolution_failure)?;
+            let (members, skipped) = crate::store::probe_read_step!(
+                "locate",
+                resolve::locate_ids(&env, &accessible, resolve::OnCap::Skip)
+            )
+            .await
+            .map_err(resolution_failure)?;
             if skipped && !capped_as_absent {
                 return Err(exhausted());
             }
@@ -898,7 +926,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             reached = located.iter().map(|(id, _)| *id).collect();
         }
         located.retain(|(id, _)| reached.contains(id));
-        checks.prefetch_locations(&located).await.map_err(failure)?;
+        crate::store::probe_read_step!("denial_prefetch", checks.prefetch_locations(&located))
+            .await
+            .map_err(failure)?;
         let mut clear = Vec::new();
         for (id, loc) in located {
             if denied(&checks, &id).await.map_err(failure)?
@@ -908,15 +938,18 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             }
             if sizes_only
                 && !pipe.cfg.takedown_denial
-                && !crate::indexed::resolve::member_dependencies_clear(
-                    &view,
-                    pipe.shards.as_ref(),
-                    &self.repo,
-                    id,
-                    loc,
-                    indexed.max_delta_chain_depth,
-                    pipe.metrics.as_ref(),
-                    Caps::Reader,
+                && !crate::store::probe_read_step!(
+                    "dependency_membership",
+                    crate::indexed::resolve::member_dependencies_clear(
+                        &view,
+                        pipe.shards.as_ref(),
+                        &self.repo,
+                        id,
+                        loc,
+                        indexed.max_delta_chain_depth,
+                        pipe.metrics.as_ref(),
+                        Caps::Reader,
+                    )
                 )
                 .await?
             {
@@ -926,20 +959,26 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         }
         located = clear;
         let facts = if (pipe.cfg.takedown_denial || sizes_only) && !located.is_empty() {
-            inventory::located_entries(&view, &located)
-                .await
-                .map_err(failure)?
+            crate::store::probe_read_step!(
+                "denial_inventory",
+                inventory::located_entries(&view, &located)
+            )
+            .await
+            .map_err(failure)?
         } else {
             BTreeMap::new()
         };
         let blocked = if pipe.cfg.takedown_denial && !located.is_empty() {
-            object_denials(
-                &view,
-                pipe.shards.as_ref(),
-                &self.repo,
-                &located,
-                &facts,
-                indexed,
+            crate::store::probe_read_step!(
+                "denial",
+                object_denials(
+                    &view,
+                    pipe.shards.as_ref(),
+                    &self.repo,
+                    &located,
+                    &facts,
+                    indexed,
+                )
             )
             .await?
         } else {
@@ -973,11 +1012,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 .filter(|n| *n <= output_left)
                 .ok_or_else(exhausted)?;
             let _ = output; // Admission precedes every independently allocated canonical result.
-            loaded = load_permitted(
-                &env,
-                &permitted,
-                &checks.uncached_locations(&permitted),
-                decode,
+            loaded = crate::store::probe_read_step!(
+                "load_decode",
+                load_permitted(
+                    &env,
+                    &permitted,
+                    &checks.uncached_locations(&permitted),
+                    decode,
+                )
             )
             .await
             .map_err(resolution_failure)?;
@@ -998,8 +1040,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         // Loading and final callbacks may yield or revoke a source. Refresh
         // target/pack guards afterward, before dependencies and output.
         checks.reset();
-        checks
-            .prefetch_locations(&final_locations)
+        crate::store::probe_read_step!("final_guard", checks.prefetch_locations(&final_locations))
             .await
             .map_err(failure)?;
         let (mut bytes, mut sizes) = (BTreeMap::new(), BTreeMap::new());
@@ -1014,15 +1055,18 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     .reachability
                     .record(&self.repo, &id, ms(pipe.clock.now_ms()));
             }
-            if !crate::indexed::resolve::member_dependencies_clear(
-                &view,
-                pipe.shards.as_ref(),
-                &self.repo,
-                id,
-                located,
-                indexed.max_delta_chain_depth,
-                pipe.metrics.as_ref(),
-                Caps::Reader,
+            if !crate::store::probe_read_step!(
+                "final_guard/dependency_membership",
+                crate::indexed::resolve::member_dependencies_clear(
+                    &view,
+                    pipe.shards.as_ref(),
+                    &self.repo,
+                    id,
+                    located,
+                    indexed.max_delta_chain_depth,
+                    pipe.metrics.as_ref(),
+                    Caps::Reader,
+                )
             )
             .await?
             {

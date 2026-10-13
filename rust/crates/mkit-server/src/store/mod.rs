@@ -14,6 +14,14 @@
 #[doc(hidden)]
 pub mod adapter_spi;
 mod blob;
+mod cache;
+pub use cache::{
+    CacheConfig, Cacheability, CachingBlobStore, CachingNamespaceStore, ImmutableCache,
+    MAX_IMMUTABLE_CACHE_ENTRY_BYTES, MemoryImmutableCache, blob_cacheability, cacheability,
+    scan_cacheability,
+};
+#[cfg(test)]
+mod cache_classification_tests;
 pub(crate) use adapter_spi::{codec, index, keys, outbox, publication, tickets, watermark};
 pub use codec::{AbortReason, OutcomeRef, PendingOp, ReservationV1, StoredProcedure};
 pub use tickets::TicketCaps;
@@ -37,6 +45,23 @@ mod kv;
 pub(crate) mod read_io;
 #[cfg(test)]
 pub(crate) mod read_probe;
+// Read-boundary telemetry exists only in tests; production awaits the original future.
+#[cfg(feature = "http-objects")]
+macro_rules! probe_read_step {
+    ($step:expr, $future:expr) => {{
+        #[cfg(test)]
+        {
+            $crate::store::read_probe::step($step, $future)
+        }
+        #[cfg(not(test))]
+        {
+            $future
+        }
+    }};
+}
+#[cfg(feature = "http-objects")]
+pub(crate) use probe_read_step;
+
 #[doc(hidden)]
 pub use read_io::{ReadCredits, ReadReservation};
 mod maintenance;
