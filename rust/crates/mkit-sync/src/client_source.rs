@@ -38,6 +38,8 @@ impl Executor for FuturesExecutor {
 
 /// Most pages of a branch listing followed before the listing is refused.
 const MAX_LIST_PAGES: u32 = 4096;
+/// Most branches a listing may name before it is refused.
+const MAX_LISTED_BRANCHES: usize = 1_000_000;
 /// A packmap node is small; this is the response cap `mkit-client` uses.
 const NODE_LIMIT: u64 = 1024 * 1024;
 
@@ -66,6 +68,10 @@ impl<'a, T, S, C, E> ClientSource<'a, T, S, C, E> {
 }
 
 /// Map a client failure to the transport vocabulary the engine reports in.
+/// A transport failure keeps its cause as `RemoteError("transport: ...")`, not
+/// a retryable connection failure: the channel's refusals (an oversized or
+/// undecodable body, a refused redirect) are deterministic, so match on
+/// `RemoteError` rather than expecting `ConnectionFailed`.
 /// A missing or invisible repository is `not_found` on the wire and maps to
 /// [`TransportError::PackNotFound`], which the engine turns into a
 /// repository-not-found error with the address.
@@ -74,7 +80,6 @@ fn transport_error(error: ClientError) -> TransportError {
         ClientError::Remote(remote) => match remote.code.as_str() {
             "not_found" => TransportError::PackNotFound,
             "unauthenticated" | "permission_denied" => TransportError::AccessDenied,
-            "failed_precondition" => TransportError::RefConflict,
             _ => TransportError::RemoteError(remote.message),
         },
         // Keep the cause: a refused redirect, an oversized or undecodable body,
@@ -97,17 +102,32 @@ impl<T: HttpTransport, S: Signer, C: Clock, E: Executor> RemoteSource
     for ClientSource<'_, T, S, C, E>
 {
     fn list_branches(&self) -> Result<Vec<Ref>, TransportError> {
-        let listed = self
-            .executor
-            .block_on(self.client.list_all_refs("refs/heads/", MAX_LIST_PAGES))
-            .map_err(transport_error)?;
-        Ok(listed
-            .into_iter()
-            .map(|named| Ref {
+        let mut out: Vec<Ref> = Vec::new();
+        let mut token = String::new();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..MAX_LIST_PAGES {
+            let page = self
+                .executor
+                .block_on(self.client.list_refs("refs/heads/", 0, &token, None))
+                .map_err(transport_error)?
+                .value;
+            out.extend(page.refs.into_iter().map(|named| Ref {
                 name: named.name,
                 hash: Some(named.id),
-            })
-            .collect())
+            }));
+            if out.len() > MAX_LISTED_BRANCHES {
+                return Err(TransportError::InvalidResponse);
+            }
+            match page.next_page_token {
+                None => return Ok(out),
+                // A token seen before would loop forever, accumulating pages.
+                Some(next) if !seen.insert(next.clone()) => {
+                    return Err(TransportError::InvalidResponse);
+                }
+                Some(next) => token = next,
+            }
+        }
+        Err(TransportError::InvalidResponse)
     }
 
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, TransportError> {
@@ -153,5 +173,121 @@ impl<T: HttpTransport, S: Signer, C: Clock, E: Executor> RemoteSource
             destination.repository().to_owned(),
             destination.origin().to_owned(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use buffa::Message as _;
+    use http::{Request, Response};
+    use mkit_client::{Destination, proto};
+    use std::cell::RefCell;
+
+    fn remote(code: &str, message: &str) -> ClientError {
+        ClientError::Remote(Box::new(mkit_client::RemoteError {
+            code: code.to_owned(),
+            message: message.to_owned(),
+            details: Vec::new(),
+            status: 0,
+            headers: http::HeaderMap::new(),
+        }))
+    }
+
+    #[test]
+    fn remote_codes_map_to_the_engines_vocabulary() {
+        assert!(matches!(
+            transport_error(remote("not_found", "x")),
+            TransportError::PackNotFound
+        ));
+        for code in ["unauthenticated", "permission_denied"] {
+            assert!(matches!(
+                transport_error(remote(code, "x")),
+                TransportError::AccessDenied
+            ));
+        }
+        assert!(matches!(
+            transport_error(remote("internal", "boom")),
+            TransportError::RemoteError(m) if m == "boom"
+        ));
+        assert!(matches!(
+            transport_error(ClientError::Invalid("x")),
+            TransportError::InvalidResponse
+        ));
+        assert!(matches!(
+            transport_error(ClientError::Transport("redirect refused".to_owned())),
+            TransportError::RemoteError(m) if m == "transport: redirect refused"
+        ));
+    }
+
+    // Scripted pages for the listing tests.
+    struct Pages(RefCell<Vec<Vec<u8>>>);
+    impl HttpTransport for Pages {
+        async fn send(
+            &self,
+            _request: Request<Vec<u8>>,
+            _limit: usize,
+        ) -> Result<Response<Vec<u8>>, String> {
+            let body = self.0.borrow_mut().remove(0);
+            Ok(Response::builder()
+                .status(200)
+                .header("content-type", "application/proto")
+                .body(body)
+                .unwrap())
+        }
+    }
+
+    fn page(names: &[&str], next: Option<&str>) -> Vec<u8> {
+        proto::ListRefsResponse {
+            refs: names
+                .iter()
+                .map(|n| proto::RefEntry {
+                    name: Some((*n).to_owned()),
+                    object_id: Some(vec![7; 32]),
+                    ..Default::default()
+                })
+                .collect(),
+            next_page_token: next.map(str::to_owned),
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
+    fn source_over(pages: Vec<Vec<u8>>) -> (Pages, Destination) {
+        (
+            Pages(RefCell::new(pages)),
+            Destination::new("https://vcs.example.org".into(), "default".into()).unwrap(),
+        )
+    }
+
+    #[test]
+    fn a_listing_follows_page_tokens() {
+        let (transport, dest) =
+            source_over(vec![page(&["a", "b"], Some("t1")), page(&["c"], None)]);
+        let client = Client::anonymous(&transport, dest);
+        let source = ClientSource::new(&client, &FuturesExecutor);
+        let names: Vec<String> = source
+            .list_branches()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+        assert_eq!(names, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn a_repeated_page_token_is_refused_not_looped() {
+        let pages = vec![
+            page(&["a"], Some("t")),
+            page(&["b"], Some("t")),
+            page(&["c"], None),
+        ];
+        let (transport, dest) = source_over(pages);
+        let client = Client::anonymous(&transport, dest);
+        let source = ClientSource::new(&client, &FuturesExecutor);
+        assert!(matches!(
+            source.list_branches(),
+            Err(TransportError::InvalidResponse)
+        ));
     }
 }

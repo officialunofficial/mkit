@@ -98,10 +98,11 @@ the server denies all come back as the same `SyncError::RepositoryNotFound`
 ### `connect-native`: a small native HTTP channel
 
 `NativeHttp` implements `mkit_client::HttpTransport` with hyper over rustls
-(`ring`) on a **current-thread** tokio runtime, HTTP/1.1 only. It speaks
+(`ring`) on a **current-thread** tokio runtime (DNS lookups use tokio's blocking pool), HTTP/1.1 only. It speaks
 **gzip as its only content coding** (`accept-encoding: gzip`; a response in any
 other coding is refused, and an inflated body is bounded by the same response
-limit as a plain one), never follows a redirect (a signed request must not be
+limit as a plain one), refuses cleartext `http` to any host but loopback unless
+`allow_insecure_http(true)`, never follows a redirect (a signed request must not be
 replayed to another origin), bounds every response while receiving it, and
 bounds each request by a timeout (ten minutes by default). TLS trusts the
 built-in web PKI roots unless the caller passes a `rustls::ClientConfig`.

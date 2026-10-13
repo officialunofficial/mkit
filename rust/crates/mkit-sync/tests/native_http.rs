@@ -19,9 +19,30 @@ fn respond_once(response: Vec<u8>, stall_after_headers: bool) -> String {
     let addr = listener.local_addr().unwrap();
     std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
+        // Read the whole request (headers plus the declared body) before
+        // answering, so closing never resets a connection with unread data.
+        let mut request = Vec::new();
         let mut buf = [0u8; 4096];
-        let _ = stream.read(&mut buf);
+        loop {
+            let n = stream.read(&mut buf).unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            request.extend_from_slice(&buf[..n]);
+            if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                let want = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if request.len() >= end + 4 + want {
+                    break;
+                }
+            }
+        }
         let _ = stream.write_all(&response);
+        let _ = stream.flush();
         if stall_after_headers {
             std::thread::sleep(Duration::from_secs(5));
         }
@@ -169,4 +190,40 @@ fn cleartext_http_to_a_non_loopback_host_is_refused_unless_allowed() {
         .with_timeout(Duration::from_millis(200));
     let err = send(&allowed, "http://203.0.113.9/", 1024).unwrap_err();
     assert!(!err.contains("non-loopback"), "{err}");
+}
+
+#[test]
+fn two_sequential_requests_work_against_a_server_that_closes_each_connection() {
+    // The server answers one request per connection and closes it. With an
+    // idle pool the second request could be written to the dead socket.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let _ = stream.write_all(&response("200 OK", &[], b"ok"));
+        }
+    });
+    let http = NativeHttp::new().unwrap();
+    let url = format!("http://{addr}/");
+
+    assert_eq!(send(&http, &url, 1024).unwrap().body(), b"ok");
+    // Time for the server to have closed the first connection.
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(send(&http, &url, 1024).unwrap().body(), b"ok");
+}
+
+#[test]
+fn a_content_encoding_list_is_refused() {
+    let url = respond_once(
+        response("200 OK", &[("content-encoding", "gzip, identity")], b"x"),
+        false,
+    );
+    let http = NativeHttp::new().unwrap();
+
+    let err = send(&http, &url, 1024).unwrap_err();
+
+    assert!(err.contains("gzip only"), "{err}");
 }

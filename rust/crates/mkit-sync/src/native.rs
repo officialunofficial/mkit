@@ -93,7 +93,13 @@ impl NativeHttp {
             .https_or_http()
             .enable_http1()
             .build();
-        let client = HyperClient::builder(TokioExecutor::new()).build(connector);
+        // No idle pool: connection tasks only run while a call is inside
+        // `block_on`, so an idle connection the server closes between calls
+        // would go unnoticed and the next signed POST could be written to a
+        // dead socket. One connection per request costs little next to a pack.
+        let client = HyperClient::builder(TokioExecutor::new())
+            .pool_max_idle_per_host(0)
+            .build(connector);
         Ok(Self {
             runtime,
             client,
@@ -127,6 +133,7 @@ impl Executor for NativeHttp {
 }
 
 /// Loopback hosts, the same set the Connect transport admits for plain HTTP.
+/// `localhost` is trusted by name, as there; the resolver is not consulted.
 fn is_loopback_host(host: &str) -> bool {
     let host = host.trim_start_matches('[').trim_end_matches(']');
     host.eq_ignore_ascii_case("localhost")
@@ -199,13 +206,18 @@ impl HttpTransport for NativeHttp {
             }
             let (mut parts, body) = response.into_parts();
             let wire = read_bounded(body, response_limit).await?;
-            let coding = match parts.headers.get(CONTENT_ENCODING) {
-                None => None,
-                Some(v) => Some(
+            let mut codings = parts.headers.get_all(CONTENT_ENCODING).iter();
+            let coding = match (codings.next(), codings.next()) {
+                (None, _) => None,
+                (Some(v), None) => Some(
                     v.to_str()
                         .map_err(|_| "unreadable content-encoding".to_owned())?
+                        .trim()
                         .to_ascii_lowercase(),
                 ),
+                (Some(_), Some(_)) => {
+                    return Err("unsupported content-encoding (gzip only)".to_owned());
+                }
             };
             let bytes = match coding.as_deref() {
                 None | Some("identity") => wire,
@@ -230,6 +242,8 @@ impl HttpTransport for NativeHttp {
 pub struct NativeClock;
 
 impl Clock for NativeClock {
+    /// A system clock set before 1970 reads as 0, which a server rejects as
+    /// an expired request.
     fn now_ms(&self) -> i64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

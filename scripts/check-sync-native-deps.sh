@@ -33,19 +33,22 @@ err() {
 }
 
 banned=(zstd zstd-safe zstd-sys aws-lc-rs aws-lc-sys openssl openssl-sys native-tls
-  rustls-native-certs brotli h2 connectrpc reqwest)
+  rustls-native-certs brotli async-compression brotli-decompressor libz-sys hyper-tls h2 connectrpc reqwest)
 
 check_row() {
   local features=$1 want_ruzstd=$2
   local tree feats count
   tree=$(cd rust && cargo tree --locked -p mkit-sync --no-default-features \
     --features "$features" -e normal --target all --prefix none)
+  # Bans also cover build edges, so a build-time zstd cannot hide.
+  built=$(cd rust && cargo tree --locked -p mkit-sync --no-default-features \
+    --features "$features" -e normal,build --target all --prefix none)
   feats=$(cd rust && cargo tree --locked -p mkit-sync --no-default-features \
     --features "$features" -e normal,features --target all --prefix none)
   count=$(printf '%s\n' "$tree" | awk '{print $1}' | sort -u | wc -l | tr -d ' ')
   echo "check-sync-native-deps: [$features] $count unique crates"
   for pkg in "${banned[@]}"; do
-    if grep -q "^$pkg " <<<"$tree"; then
+    if grep -q "^$pkg " <<<"$built"; then
       err "[$features] the graph contains $pkg"
     fi
   done

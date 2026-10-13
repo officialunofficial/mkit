@@ -53,7 +53,10 @@ impl Clock for NoClock {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Visibility {
+    /// Readable by anyone.
     Public,
+    /// Readable only by callers the server's authorizer admits; everyone else
+    /// sees the same answer as for a missing repository.
     Private,
 }
 

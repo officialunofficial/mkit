@@ -36,7 +36,7 @@ futures-executor = { version = "0.3", optional = true }
 # current-thread runtime only: no scheduler threads.
 tokio = { version = "1", default-features = false, features = ["rt", "net", "time"], optional = true }
 hyper = { version = "1", default-features = false, features = ["client", "http1"], optional = true }
-hyper-util = { version = "=0.1.20", default-features = false, features = ["client-legacy", "http1", "tokio"], optional = true }
+hyper-util = { version = "0.1.20", default-features = false, features = ["client-legacy", "http1", "tokio"], optional = true }
 # ring, not aws-lc: no second C crypto library. No http2.
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "ring"], optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
@@ -78,4 +78,5 @@ connectrpc = { version = "0.9.0", default-features = false, features = ["server"
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "time", "sync"] }
 ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] }
 base64 = "0.22"
+buffa = "0.9.1"
 mkit-attest = { path = "../mkit-attest", features = ["grants"] }

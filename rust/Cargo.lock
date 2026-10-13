@@ -3593,6 +3593,7 @@ name = "mkit-sync"
 version = "0.5.0"
 dependencies = [
  "base64 0.22.1",
+ "buffa",
  "bytes",
  "connectrpc",
  "ed25519-dalek",
