@@ -737,3 +737,45 @@ fn endless_empty_pack_stream_returns_without_unbounded_cache_buffering() {
         assert_eq!(cache.calls(), (1, 0));
     });
 }
+
+#[test]
+fn cached_small_range_does_not_retain_full_pack_allocation_after_eviction() {
+    block_on(async {
+        let clock = Arc::new(ManualClock::new(0));
+        let cache = memory(clock.clone());
+        let config = config();
+        let store = CachingBlobStore::new(SpyBlobs::new(false), cache.clone(), config.clone());
+        let expected = Bytes::from(vec![37; MAX_IMMUTABLE_CACHE_ENTRY_BYTES]);
+        let key = upload(&store, expected).await;
+        assert!(store.get(&key, None).await.unwrap().is_some());
+        let cache_key = config.key(b"blob:pack", b"", key.hash());
+        let retained_full = cache.get(&cache_key).await.unwrap().unwrap();
+        assert_eq!(retained_full.len(), MAX_IMMUTABLE_CACHE_ENTRY_BYTES);
+        let range = bytes(
+            store
+                .get(
+                    &key,
+                    Some(ByteRange {
+                        start: 0,
+                        end_inclusive: 0,
+                    }),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(range.as_ref(), &[37]);
+        assert_eq!(range.len(), 1);
+        // The full allocation remains alive in the backend and retained_full.
+        // A unique buffer with a different pointer cannot share that allocation.
+        assert!(range.is_unique());
+        assert_ne!(range.as_ptr(), retained_full.as_ptr());
+        assert_eq!(store.inner().calls(), (1, 1));
+        drop(retained_full);
+        clock.advance(60_000);
+        cache.evict_expired();
+        assert_eq!(cache.state.lock().unwrap().bytes, 0);
+        assert_eq!(range.as_ref(), &[37]);
+        assert!(range.is_unique());
+    });
+}

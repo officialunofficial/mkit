@@ -4804,8 +4804,10 @@ permission and cannot replace these checks.
 
 This cache profile retains only complete packs of at most 1 MiB. A ranged
 read can use a previously cached complete pack; a range miss does not populate
-the cache. A streamed fill buffers at most 64 pieces and polls at most one more
-piece to confirm completion; more fragmented streams pass through with their
+the cache. Ranged hits copy only the selected bytes so a response does not retain
+the complete entry's backing allocation. A streamed fill buffers at most 64
+pieces and polls at most one more piece to confirm completion; more fragmented
+streams pass through with their
 consumed prefix restored and do not populate the cache. Larger packs retain
 the ordinary streaming path. Cache I/O MUST have
 a finite deadline and bounded response allocation. Each backend get or put

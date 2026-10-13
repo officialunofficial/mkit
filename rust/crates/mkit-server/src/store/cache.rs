@@ -504,7 +504,7 @@ impl<B: BlobStore, C: ImmutableCache> BlobStore for CachingBlobStore<B, C> {
                     let end = usize::try_from(range.end).map_err(|_| {
                         StoreError::Invalid("cache range exceeds platform bounds".into())
                     })?;
-                    bytes.slice(start..end)
+                    Bytes::copy_from_slice(&bytes[start..end])
                 } else {
                     bytes
                 };

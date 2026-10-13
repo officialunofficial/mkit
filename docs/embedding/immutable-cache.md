@@ -152,6 +152,8 @@ including empty pieces, then polls once more for completion. If another piece
 arrives, it returns a pass-through stream with the consumed prefix restored
 and does not fill the cache. This bounds work even for streams that repeatedly
 yield empty chunks.
+Ranged hits copy the selected bytes so a small response cannot retain the
+complete cached entry after eviction.
 
 Every pack hit rehashes the complete entry and reads authoritative `head`.
 Garbage or mismatched cache bytes fall back to `get`. Missing physical content
