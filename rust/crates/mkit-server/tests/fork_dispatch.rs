@@ -96,15 +96,28 @@ async fn dispatch<G: EmbeddedGate<ForkRequest>>(
 ) -> Result<ForkResult, ServerError> {
     let body = request.canonical_body();
     let headers = dest.signed_headers(Procedure::Fork, nonce, &body);
+    // wasm32 also accepts a callback that captures thread-local state.
+    #[cfg(target_arch = "wasm32")]
+    let headers = std::rc::Rc::new(headers);
     let header = |name: &str| {
         headers
             .iter()
             .find(|(key, _)| key == name)
             .map(|(_, value)| value.clone())
     };
-    Box::pin(source.pipe.dispatch_fork(&header, &body, gate))
-        .await
-        .map(|(result, _)| result)
+    #[cfg(not(target_arch = "wasm32"))]
+    let header: &(dyn Fn(&str) -> Option<String> + Sync) = &header;
+    #[cfg(target_arch = "wasm32")]
+    let header: &dyn Fn(&str) -> Option<String> = &header;
+    let future = source.pipe.dispatch_fork(header, &body, gate);
+    #[cfg(not(target_arch = "wasm32"))]
+    let future = {
+        fn assert_send<T: Send>(value: T) -> T {
+            value
+        }
+        assert_send(future)
+    };
+    Box::pin(future).await.map(|(result, _)| result)
 }
 
 fn in_progress(error: &ServerError) -> bool {

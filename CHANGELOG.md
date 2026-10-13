@@ -756,6 +756,15 @@ collect the applicable entries between their old and new immutable pins.
   refused before connecting instead of overwritten. Migration: request only
   gzip/identity codings. No stored-format change or store reset is required.
 
+- [embedder: breaking API] Embedded dispatch header callbacks now require
+  `MaybeSync` (`Sync` on native targets), allowing native dispatch futures to
+  be `Send`. This covers `Pipeline::{dispatch_embedded, dispatch_fork}` and
+  the Workers adapter's `EmbeddedDispatch::{dispatch, dispatch_fork}`.
+  Migration: use a thread-safe callback on native targets; replace erased
+  `&dyn Fn(&str) -> Option<String>` with `&(dyn Fn(&str) -> Option<String> + Sync)`.
+  Concrete `Sync` callbacks and wasm32 callbacks need no changes. Dispatch
+  behavior and order are unchanged. No wire or stored-format change; wipe: no.
+
 - [embedder: breaking API] `mkit-push` (never published to crates.io) is
   renamed to `mkit-client`; there is no shim. Migration: depend on
   `mkit-client` and rename `mkit_push` to `mkit_client`. The old names

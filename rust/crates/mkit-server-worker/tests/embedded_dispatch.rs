@@ -183,6 +183,9 @@ impl Fixture {
     }
 
     fn fork(&self, signed_body: &[u8], policy: &Policy) -> Result<(), ServerError> {
+        fn assert_send<T: Send>(value: T) -> T {
+            value
+        }
         let headers = self.headers(1, signed_body);
         let header = |name: &str| {
             headers
@@ -190,10 +193,11 @@ impl Fixture {
                 .find(|(key, _)| key == name)
                 .map(|(_, value)| value.clone())
         };
-        block_on(
-            self.dispatch
-                .dispatch_fork(&header, &self.request.canonical_body(), policy),
-        )
+        block_on(assert_send(self.dispatch.dispatch_fork(
+            &header,
+            &self.request.canonical_body(),
+            policy,
+        )))
         .map(|_| ())
     }
 }

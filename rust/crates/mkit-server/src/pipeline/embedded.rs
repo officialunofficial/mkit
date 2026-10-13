@@ -150,7 +150,9 @@ impl<R> EmbeddedGate<R> for NoGate {}
 impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// Dispatch procedure `P` for an embedder, in the order of the module
     /// docs. `header` looks a request header up by its lowercase name;
-    /// `body` is the exact canonical body the request signed.
+    /// `body` is the exact canonical body the request signed. The header
+    /// callback must be `Sync` on native targets; wasm32 has no such bound.
+    /// The returned future is `Send` on native targets.
     ///
     /// # Errors
     /// `unauthenticated` for missing or invalid credentials,
@@ -159,7 +161,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// read or is inconsistent, and the procedure's own errors.
     pub async fn dispatch_embedded<P, G>(
         &self,
-        header: &dyn Fn(&str) -> Option<String>,
+        header: &(impl Fn(&str) -> Option<String> + MaybeSync + ?Sized),
         body: &[u8],
         gate: &G,
     ) -> Result<(P::Output, ResponseMeta), ServerError>
@@ -169,7 +171,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     {
         let a = self.authenticate(&RequestMeta {
             procedure: P::PROCEDURE,
-            header,
+            header: &|name| header(name),
             header_values: None,
             unary_body: Some(body),
             transport_principal: None,
@@ -189,7 +191,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// Those of [`Self::dispatch_embedded`] and [`Self::fork_repo`].
     pub async fn dispatch_fork<G: EmbeddedGate<ForkRequest>>(
         &self,
-        header: &dyn Fn(&str) -> Option<String>,
+        header: &(impl Fn(&str) -> Option<String> + MaybeSync + ?Sized),
         body: &[u8],
         gate: &G,
     ) -> Result<(ForkResult, ResponseMeta), ServerError> {

@@ -2085,7 +2085,10 @@ MUST record them through the same helper as an advance.
 it in process through one typed entry, `Pipeline::dispatch_fork` (the Workers
 adapter wraps it as `EmbeddedDispatch::dispatch_fork`, adding the deployment
 guard of the fetch path). The entry takes the request headers and the exact
-canonical body and runs, in this order: authentication as `Procedure::Fork`
+canonical body. Header callbacks implement `Fn(&str) -> Option<String>` plus
+`MaybeSync`: native callbacks must be `Sync`, and native dispatch futures are
+`Send`; wasm32 callbacks remain unrestricted. The entry runs, in this order:
+authentication as `Procedure::Fork`
 (auth v2, body commitment; no storage is read, so an unauthenticated or
 mis-signed request is refused before anything below runs); the deployment
 check (the Workers adapter runs the same sharding and addressing marker guard
