@@ -115,9 +115,8 @@ collect the applicable entries between their old and new immutable pins.
   fetch, the admin mount and the embedded entry). Embedders no longer need
   `store::adapter_spi::{keys, codec}`, `fork::decode_job` or `replay::classify`
   to recognise a completed fork. An embedder can sign the fork request with
-  `mkit-client`'s `Client::sign_envelope`; no dependency is added. Additive; no wire change, no stored-format
-  change, no store reset.
-
+  `mkit-client`'s `Client::sign_envelope`; no dependency is added. Additive;
+  no wire change, no stored-format change, no store reset.
 - Ticketless same-repository branch creation from an authoritative published
   pair: `AdvanceRefsRequest.source_ref` (field 11), optional `expected_tip`
   (field 12), and `Pipeline::advance_refs_from_published{,_with_meta}`.

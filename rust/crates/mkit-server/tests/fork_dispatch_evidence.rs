@@ -165,6 +165,26 @@ async fn every_inconsistent_job_field_and_a_missing_job_fail_closed() {
             matches!(error.code(), Code::Unavailable | Code::Internal),
             "{error:?}"
         );
+        // Through the entry the policy neither runs nor is skipped.
+        let policy = CountPolicy::default();
+        let body = req.canonical_body();
+        let headers = dest.signed_headers(Procedure::Fork, nonce, &body);
+        let header = |name: &str| {
+            headers
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        };
+        let error = source
+            .pipe
+            .dispatch_fork(&header, &body, &policy)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error.code(), Code::Unavailable | Code::Internal),
+            "{error:?}"
+        );
+        assert_eq!(policy.0.load(Ordering::SeqCst), 0);
     }
 
     // Restored, the evidence is accepted again.

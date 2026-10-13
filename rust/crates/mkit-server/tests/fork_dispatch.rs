@@ -108,7 +108,16 @@ async fn dispatch<G: EmbeddedGate<ForkRequest>>(
 }
 
 fn in_progress(error: &ServerError) -> bool {
-    error.code() == Code::Unavailable && error.public_message() == "fork in progress"
+    let pending = error.code() == Code::Unavailable && error.public_message() == "fork in progress";
+    if pending {
+        // The pending fork keeps the transport path's status and retry hint.
+        assert_eq!(error.http_status(), Some(503));
+        assert_eq!(
+            error.headers(),
+            [("Retry-After".to_owned(), "1".to_owned())]
+        );
+    }
+    pending
 }
 
 /// Dispatch with a fresh nonce each time until the fork finishes, running the

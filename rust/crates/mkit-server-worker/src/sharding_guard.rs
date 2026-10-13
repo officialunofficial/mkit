@@ -343,7 +343,8 @@ thread_local! {
 
 /// The deployment a request must be compatible with, checked the way the
 /// Worker's fetch path checks it: [`check_deployment`] once per isolate, the
-/// first definitive answer cached.
+/// first definitive answer cached. The cache is per isolate and keyed by the
+/// deployment settings, not by store, exactly as on the fetch path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeploymentGuard {
     sharding: Sharding,

@@ -48,6 +48,10 @@ pub trait EmbeddedProcedure {
 
     /// Whether `request` replays a completed run of the procedure with
     /// consistent evidence.
+    ///
+    /// `true` skips the embedder's policy, so an implementation must answer
+    /// from verified, fail-closed evidence (an error, never `true`, when the
+    /// evidence cannot be read or disagrees).
     fn completed<'a, B, N, H>(
         pipeline: &'a Pipeline<B, N, H>,
         a: &'a Authenticated,
