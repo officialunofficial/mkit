@@ -98,6 +98,7 @@ webpki-roots = "1"
 rustls = { version = "0.23", features = ["ring"] }
 
 [dev-dependencies]
+mkit-test-util = { path = "../mkit-test-util" }
 serde_json = "1"
 mkit-transport-memory = { version = "0.5", path = "../mkit-transport-memory" }
 # Test-only: `envelope::tests::parity` independently re-verifies the write

@@ -36,11 +36,6 @@ impl Executor for FuturesExecutor {
     }
 }
 
-/// Most pages of a branch listing followed before the listing is refused.
-const MAX_LIST_PAGES: u32 = 100_000;
-/// Cumulative size (names plus 32-byte ids) a listing may reach before it is
-/// refused, as in the Connect transport.
-const MAX_LISTED_BYTES: usize = 128 * 1024 * 1024;
 /// A packmap node is small; this is the response cap `mkit-client` uses.
 const NODE_LIMIT: u64 = 1024 * 1024;
 
@@ -100,25 +95,19 @@ fn transport_error(error: ClientError) -> TransportError {
     }
 }
 
-impl<T: HttpTransport, S: Signer, C: Clock, E: Executor> RemoteSource
-    for ClientSource<'_, T, S, C, E>
-{
-    fn list_branches(&self) -> Result<Vec<Ref>, TransportError> {
-        // The same checks as the Connect transport's listing: names strictly
-        // ascending within and across pages (so no duplicate branch reaches the
-        // engine), a cumulative size cap, and no repeated cursor.
-        let mut out: Vec<Ref> = Vec::new();
-        let mut token = String::new();
-        let mut seen = std::collections::HashSet::new();
-        let mut listed_bytes = 0usize;
-        for _ in 0..MAX_LIST_PAGES {
+impl<T: HttpTransport, S: Signer, C: Clock, E: Executor> ClientSource<'_, T, S, C, E> {
+    fn list_branches_with_page_limit(&self, max_pages: u32) -> Result<Vec<Ref>, TransportError> {
+        let mut listing = mkit_core::ref_listing::RefListing::new(max_pages);
+        while listing.can_request() {
             let reply = self
                 .executor
-                .block_on(self.client.list_refs("refs/heads/", 0, &token, None))
+                .block_on(
+                    self.client
+                        .list_refs("refs/heads/", 0, listing.cursor(), None),
+                )
                 .map_err(transport_error)?
                 .value;
-            let next = reply.next_page_token;
-            let page: Vec<Ref> = reply
+            let page = reply
                 .refs
                 .into_iter()
                 .map(|named| Ref {
@@ -126,30 +115,26 @@ impl<T: HttpTransport, S: Signer, C: Clock, E: Executor> RemoteSource
                     hash: Some(named.id),
                 })
                 .collect();
-            let overlaps = matches!(
-                (out.last(), page.first()),
-                (Some(last), Some(first)) if first.name <= last.name
-            );
-            if overlaps || page.windows(2).any(|pair| pair[0].name >= pair[1].name) {
-                return Err(TransportError::InvalidResponse);
-            }
-            listed_bytes = page.iter().fold(listed_bytes, |total, r| {
-                total.saturating_add(r.name.len()).saturating_add(32)
-            });
-            if listed_bytes > MAX_LISTED_BYTES {
-                return Err(TransportError::InvalidResponse);
-            }
-            out.extend(page);
-            match next {
-                None => return Ok(out),
-                // Any repeated cursor, not only the previous one, is a cycle.
-                Some(next) if !seen.insert(next.clone()) => {
-                    return Err(TransportError::InvalidResponse);
-                }
-                Some(next) => token = next,
+            if listing
+                .push(page, reply.next_page_token, |entry: &mut Ref| {
+                    &mut entry.name
+                })
+                .map_err(|_| TransportError::InvalidResponse)?
+            {
+                return listing
+                    .finish()
+                    .map_err(|_| TransportError::InvalidResponse);
             }
         }
         Err(TransportError::InvalidResponse)
+    }
+}
+
+impl<T: HttpTransport, S: Signer, C: Clock, E: Executor> RemoteSource
+    for ClientSource<'_, T, S, C, E>
+{
+    fn list_branches(&self) -> Result<Vec<Ref>, TransportError> {
+        self.list_branches_with_page_limit(mkit_core::ref_listing::MAX_PAGES)
     }
 
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, TransportError> {
@@ -243,14 +228,14 @@ mod tests {
     }
 
     // Scripted pages for the listing tests.
-    struct Pages(RefCell<Vec<Vec<u8>>>);
+    struct Pages(RefCell<std::collections::VecDeque<Vec<u8>>>);
     impl HttpTransport for Pages {
         async fn send(
             &self,
             _request: Request<Vec<u8>>,
             _limit: usize,
         ) -> Result<Response<Vec<u8>>, String> {
-            let body = self.0.borrow_mut().remove(0);
+            let body = self.0.borrow_mut().pop_front().unwrap();
             Ok(Response::builder()
                 .status(200)
                 .header("content-type", "application/proto")
@@ -277,7 +262,7 @@ mod tests {
 
     fn source_over(pages: Vec<Vec<u8>>) -> (Pages, Destination) {
         (
-            Pages(RefCell::new(pages)),
+            Pages(RefCell::new(pages.into())),
             Destination::new("https://vcs.example.org".into(), "default".into()).unwrap(),
         )
     }
@@ -328,5 +313,40 @@ mod tests {
             source.list_branches(),
             Err(TransportError::InvalidResponse)
         ));
+    }
+    use mkit_test_util::ref_listing::listing_cases;
+    #[test]
+    fn shared_listing_adversaries() {
+        for case in listing_cases() {
+            let pages = case
+                .pages
+                .iter()
+                .map(|(names, token)| {
+                    page(
+                        &names.iter().map(String::as_str).collect::<Vec<_>>(),
+                        token.as_deref(),
+                    )
+                })
+                .collect();
+            let (transport, dest) = source_over(pages);
+            let client = Client::anonymous(&transport, dest);
+            let result = ClientSource::new(&client, &FuturesExecutor)
+                .list_branches_with_page_limit(case.max_pages);
+            assert!(transport.0.borrow().is_empty(), "{}", case.name);
+            if case.valid {
+                let refs = result.unwrap();
+                assert!(refs.iter().all(|entry| entry.hash == Some([7; 32])));
+                assert_eq!(
+                    refs.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+                    ["a", "b", "c"]
+                );
+            } else {
+                assert!(
+                    matches!(result, Err(TransportError::InvalidResponse)),
+                    "{}",
+                    case.name
+                );
+            }
+        }
     }
 }

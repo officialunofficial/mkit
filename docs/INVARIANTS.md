@@ -2702,3 +2702,21 @@ unrelated output or source.
 through `just check-local-build` and the existing local `just ci-scripts` gate.
 No CI caching configuration changes. Stop concurrent edits before applying GC;
 Git status is rechecked but editors do not participate in a shared lock.
+
+## Complete ref listings retain bounded, strictly ordered state
+
+**Always:** all three listing drivers use `mkit_core::ref_listing::RefListing`.
+Names increase strictly within and across pages, including empty intervening
+pages. Each nonempty cursor is at most 4 KiB and appears once. Cursor history
+retains only BLAKE3 digests. A listing accepts at most 100,000 pages and charges
+names, ref entries, digest history, and the active cursor to 128 MiB. A caller's
+lower page limit still applies. Invalid state fails before the page is retained.
+
+**Because:** a remote server controls page contents and continuation tokens.
+Empty pages must not bypass resource limits or cursor-cycle detection.
+
+**If violated:** a remote can exhaust memory, loop a listing, or expose duplicate
+or inconsistent refs to a caller.
+
+**Enforced by:** the shared accumulator, `Client::list_refs` page validation,
+core budget/page-cap tests, and `shared_listing_adversaries` in each driver.

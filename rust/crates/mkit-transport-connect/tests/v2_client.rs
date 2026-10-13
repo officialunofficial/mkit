@@ -257,6 +257,8 @@ impl generated::TransportService for TestService {
         }
         let index = if token.is_empty() {
             0
+        } else if let Some(index) = token.strip_prefix("shared-page-") {
+            index.parse::<usize>().unwrap()
         } else {
             state
                 .pages
@@ -2374,4 +2376,47 @@ fn begin_402_precedes_open_ticket_cap_message() {
         .unwrap();
     assert_eq!(helper_calls.load(Ordering::SeqCst), 1);
     assert_eq!(served.calls("BeginUpload"), 2);
+}
+
+use mkit_test_util::ref_listing::listing_cases;
+#[test]
+fn shared_listing_adversaries() {
+    for case in listing_cases() {
+        let expected_pages = case.pages.len();
+        let served = Served::new(State {
+            pages: case
+                .pages
+                .iter()
+                .map(|(names, token)| {
+                    let mut response = page(
+                        &names.iter().map(String::as_str).collect::<Vec<_>>(),
+                        token.as_deref(),
+                    );
+                    for entry in &mut response.refs {
+                        entry.object_id = Some(vec![7; 32]);
+                    }
+                    response
+                })
+                .collect(),
+            ..Default::default()
+        });
+        let result = served
+            .client()
+            .list_refs_with_page_limit("", case.max_pages);
+        assert_eq!(served.calls("ListRefs"), expected_pages, "{}", case.name);
+        if case.valid {
+            let refs = result.unwrap();
+            assert!(refs.iter().all(|entry| entry.hash == Some([7; 32])));
+            assert_eq!(
+                refs.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+                ["a", "b", "c"]
+            );
+        } else {
+            assert!(
+                matches!(result, Err(TransportError::InvalidResponse)),
+                "{}",
+                case.name
+            );
+        }
+    }
 }

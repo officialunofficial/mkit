@@ -173,6 +173,13 @@ received: 1 MiB by default, 2 MiB for a `ListRefs` page, and for
 `download_pack` the caller's `max_bytes` plus framing; the returned pack is a
 second copy, so a download peaks near twice `max_bytes`.
 
+Complete ref listings validate strict name ordering across pages, reject cursor
+cycles, and retain at most 128 MiB of charged state (names, entries, cursor
+digests, collection overhead, and the active cursor). Cursors are limited to
+4 KiB. `list_all_refs` uses the smaller of your page cap and 100,000 pages;
+invalid or excessive listings return `Error::Invalid`. `list_refs` also checks
+ordering and duplicates within a page and rejects oversized continuation tokens.
+
 ## Whole-push
 
 The host supplies ordered canonical objects or delta streams to `Plan::prepare`,
