@@ -10,7 +10,7 @@
 //! the protocol they apply (`refs::evaluate_cas`, `quota::evaluate_quota`).
 //! The storage contract lives in [`store`]: its contract types are also
 //! re-exported at the root. Key layouts and value codecs live in the
-//! doc-hidden `store::adapter_spi`; typed readers remain crate-private.
+//! doc-hidden `store::adapter_spi`; trusted typed reads live in [`reads`].
 //! Portable maintenance and content-index contracts remain in `store`
 //! (`store::export_partition`, `store::Holder`).
 //! The `memory` feature adds the in-memory reference backends; the native
@@ -50,6 +50,7 @@ pub mod policy;
 mod principal;
 pub mod purge;
 pub mod quota;
+pub mod reads;
 pub mod refs;
 pub mod relay;
 mod replay;

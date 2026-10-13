@@ -348,3 +348,5 @@ entry says explicitly whether a fresh store is required. This project is
 pre-production: reset unsupported stores, with no legacy conversion path.
 The host records its chosen old/new pins, applies the actions, repeats its
 acceptance flow and keeps that upgrade note with its deployment configuration.
+
+For trusted metadata queries, see [typed reads and migration](typed-reads.md).
