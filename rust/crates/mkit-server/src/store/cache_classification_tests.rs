@@ -221,6 +221,11 @@ fn every_namespace_key_constructor_and_range_is_live() {
             );
         }
     }
+    // This helper maps an expiry-window key back to the existing Live quota family.
+    assert_eq!(
+        cacheability(&keys::quota_for_window(&keys::quota_window(1, &quota)).unwrap()),
+        Cacheability::Live
+    );
     for public in [false, true] {
         assert_eq!(
             cacheability(&keys::repo_listing(&repo, public)),
