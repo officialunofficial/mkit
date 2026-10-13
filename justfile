@@ -152,6 +152,7 @@ ci-proto baseline="origin/main":
 ci-scripts:
     #!/usr/bin/env bash
     set -euo pipefail
+    just check-local-build
     bash scripts/check-spec-status.sh
     just ci-proto
     python3 scripts/golden/url_token_ref.py rust/tests/golden/url-token --no-b3sum
@@ -448,3 +449,22 @@ formal-conformance:
 # Re-derive the MKIT-22 fixtures with the pinned quint and diff them.
 formal-fixtures: (_formal-pins "quint")
     CHECK=1 bash formal/scripts/gen-refs-traces.sh
+
+# Opt-in local builds; CI and Docker retain their existing cache setup.
+[positional-arguments]
+cargo-cached *args:
+    python3 scripts/local-build.py cargo "$@"
+
+# Print a shell-profile export for per-worktree intermediate output.
+build-dir-env:
+    python3 scripts/local-build.py env
+
+# Dry run by default; --apply cleans output from merged/gone worktrees.
+[positional-arguments]
+worktree-gc *args:
+    python3 scripts/local-build.py gc "$@"
+
+# Local build configuration guard and fixture tests (also in ci-scripts).
+check-local-build:
+    python3 scripts/check-build-dir-authority.py
+    bash scripts/tests/local-build.test.sh
