@@ -176,26 +176,24 @@ struct StaleListing<'a> {
 }
 
 impl RemoteSource for StaleListing<'_> {
-    fn list_branches(
-        &self,
-    ) -> Result<Vec<mkit_core::refs::Ref>, mkit_core::protocol::TransportError> {
+    fn list_branches(&self) -> Result<Vec<mkit_core::refs::Ref>, mkit_sync::SourceError> {
         Ok(self.listing.clone())
     }
-    fn read_ref(&self, name: &str) -> Result<Option<Hash>, mkit_core::protocol::TransportError> {
+    fn read_ref(&self, name: &str) -> Result<Option<Hash>, mkit_sync::SourceError> {
         self.inner.read_ref(name)
     }
     fn download_blob_via_ref(
         &self,
         key: &PackKey,
         ref_name: &str,
-    ) -> Result<Vec<u8>, mkit_core::protocol::TransportError> {
+    ) -> Result<Vec<u8>, mkit_sync::SourceError> {
         self.inner.download_blob_via_ref(key, ref_name)
     }
     fn download_pack_via_ref(
         &self,
         key: &PackKey,
         ref_name: &str,
-    ) -> Result<Vec<u8>, mkit_core::protocol::TransportError> {
+    ) -> Result<Vec<u8>, mkit_sync::SourceError> {
         self.inner.download_pack_via_ref(key, ref_name)
     }
 }

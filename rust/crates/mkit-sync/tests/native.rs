@@ -191,7 +191,9 @@ fn a_missing_repository_is_reported_with_its_address() {
     )
     .unwrap_err();
 
-    let mkit_sync::CloneError::Sync(SyncError::RepositoryNotFound { identity, origin }) = err
+    let mkit_sync::CloneError::Sync(SyncError::RepositoryNotFound {
+        identity, origin, ..
+    }) = err
     else {
         panic!("expected RepositoryNotFound");
     };
@@ -217,9 +219,5 @@ fn an_unknown_pack_is_reported_not_found() {
     let missing = mkit_core::protocol::PackKey::from_hash([0xEE; 32]);
     let err = mkit_sync::RemoteSource::download_pack_via_ref(&source, &missing, "refs/heads/main")
         .unwrap_err();
-    assert!(
-        matches!(err, mkit_core::protocol::TransportError::PackNotFound),
-        "{err:?} for tip {}",
-        to_hex(&tip)
-    );
+    assert!(err.is_not_found(), "{err:?} for tip {}", to_hex(&tip));
 }

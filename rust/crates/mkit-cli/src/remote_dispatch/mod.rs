@@ -64,7 +64,11 @@ pub enum DispatchError {
     #[error(
         "repository `{identity}` not found at {origin}; check the remote URL path against the server's configured name (an empty path selects `default` on a single-repository deployment)"
     )]
-    RepositoryNotFound { identity: String, origin: String },
+    RepositoryNotFound {
+        identity: String,
+        origin: String,
+        source: mkit_sync::SourceError,
+    },
     #[error("no HEAD branch to push")]
     NoHead,
     /// A poll-loop checkpoint observed `signal::is_shutdown() == true`
@@ -78,6 +82,8 @@ pub enum DispatchError {
     UploadInterrupted(String),
     #[error("transport: {0}")]
     Transport(#[from] TransportError),
+    #[error("transport: {0}")]
+    Source(#[source] mkit_sync::SourceError),
     #[error("refs: {0}")]
     Refs(#[from] refs::RefError),
     #[error("repo lock: {0}")]
@@ -130,7 +136,10 @@ pub enum DispatchError {
     /// a cycle, or a node could not be downloaded/decoded. Indicates a
     /// corrupt or hostile remote.
     #[error("pack map chain for branch '{branch}' is malformed (too deep, cyclic, or unreadable)")]
-    PackChainInvalid { branch: String },
+    PackChainInvalid {
+        branch: String,
+        source: Option<mkit_sync::SourceError>,
+    },
     /// The remote advertised a branch ref but no packmap
     /// (`refs/mkit/packmap/<branch>`) for it. mkit speaks a single,
     /// packmap-only transfer dialect: the push path ALWAYS advertises a
@@ -143,7 +152,11 @@ pub enum DispatchError {
     /// closure cannot be reconstructed, so the fetch is aborted rather than
     /// publishing a ref to an incomplete history.
     #[error("remote advertised pack {pack} for branch '{branch}' but does not hold it")]
-    AdvertisedPackMissing { branch: String, pack: String },
+    AdvertisedPackMissing {
+        branch: String,
+        pack: String,
+        source: mkit_sync::SourceError,
+    },
     /// After unpacking the branch's whole packmap chain, an object
     /// reachable from the fetched tip is still absent from the local store —
     /// the chain did not deliver the full closure. This is a pure integrity
@@ -338,7 +351,7 @@ impl DispatchError {
 /// Interpret a missing result as a repository failure only for repository-level
 /// operations. Pack downloads retain their content-specific missing errors.
 fn repository_operation_error(tx: &dyn Transport, error: TransportError) -> DispatchError {
-    cli_source(tx).repository_error(error).into()
+    cli_source(tx).repository_error(error.into()).into()
 }
 
 /// Open a transport for `endpoint` only after the per-endpoint
@@ -2219,8 +2232,8 @@ impl mkit_sync::SyncObserver for CliObserver {
 /// Recognise the Connect client's two interruption messages on a
 /// repository-level call; everything else falls through to the default
 /// classification.
-fn classify_repository_error(error: &TransportError) -> Option<mkit_sync::SyncError> {
-    if let TransportError::RemoteError(message) = error {
+fn classify_repository_error(error: &mkit_sync::SourceError) -> Option<mkit_sync::SyncError> {
+    if let mkit_sync::SourceError::RemoteError(message) = error {
         if message.starts_with("upload interrupted; ") {
             return Some(mkit_sync::SyncError::UploadInterrupted(message.clone()));
         }
@@ -2236,16 +2249,48 @@ fn cli_source(tx: &dyn Transport) -> mkit_sync::TransportSource<'_> {
     mkit_sync::TransportSource::new(tx).with_error_classifier(&classify_repository_error)
 }
 
+// Preserve CLI handling as well as display for existing transport failures.
+impl From<mkit_sync::SourceError> for DispatchError {
+    fn from(error: mkit_sync::SourceError) -> Self {
+        use mkit_sync::SourceError as S;
+        let transport = match error {
+            S::PackNotFound => TransportError::PackNotFound,
+            S::AccessDenied => TransportError::AccessDenied,
+            S::AdmissionConfiguration(value) => TransportError::AdmissionConfiguration(value),
+            S::TlsConfiguration(value) => TransportError::TlsConfiguration(value),
+            S::AdmissionHelperFailed(value) => TransportError::AdmissionHelperFailed(value),
+            S::RemoteError(value) => TransportError::RemoteError(value),
+            S::RefConflict => TransportError::RefConflict,
+            S::InvalidRef(value) => TransportError::InvalidRef(value),
+            S::ConnectionFailed => TransportError::ConnectionFailed,
+            S::ServerError { status } => TransportError::ServerError { status },
+            S::InvalidResponse => TransportError::InvalidResponse,
+            S::ProtocolError => TransportError::ProtocolError,
+            S::PayloadTooLarge(value) => TransportError::PayloadTooLarge(value),
+            S::InsecureScheme => TransportError::InsecureScheme,
+            S::PaymentRequired { challenges } => TransportError::AdmissionRequired(challenges),
+            other => return Self::Source(other),
+        };
+        Self::Transport(transport)
+    }
+}
+
 impl From<mkit_sync::SyncError> for DispatchError {
     fn from(error: mkit_sync::SyncError) -> Self {
         use mkit_sync::SyncError as S;
         match error {
             S::Interrupted => Self::Interrupted,
             S::UploadInterrupted(message) => Self::UploadInterrupted(message),
-            S::RepositoryNotFound { identity, origin } => {
-                Self::RepositoryNotFound { identity, origin }
-            }
-            S::Transport(e) => Self::Transport(e),
+            S::RepositoryNotFound {
+                identity,
+                origin,
+                source,
+            } => Self::RepositoryNotFound {
+                identity,
+                origin,
+                source,
+            },
+            S::Source(e) => e.into(),
             S::Refs(e) => Self::Refs(e),
             S::RepoLock(e) => Self::RepoLock(e),
             S::Discover(e) => Self::Discover(e),
@@ -2259,11 +2304,17 @@ impl From<mkit_sync::SyncError> for DispatchError {
             S::RestoreSafety(m) => Self::RestoreSafety(m),
             S::NotCommit => Self::NotCommit,
             S::Restore(e) => Self::Restore(e),
-            S::PackChainInvalid { branch } => Self::PackChainInvalid { branch },
+            S::PackChainInvalid { branch, source } => Self::PackChainInvalid { branch, source },
             S::PackmapMissing(b) => Self::PackmapMissing(b),
-            S::AdvertisedPackMissing { branch, pack } => {
-                Self::AdvertisedPackMissing { branch, pack }
-            }
+            S::AdvertisedPackMissing {
+                branch,
+                pack,
+                source,
+            } => Self::AdvertisedPackMissing {
+                branch,
+                pack,
+                source,
+            },
             S::RemoteMissingObject(h) => Self::RemoteMissingObject(h),
             S::ClosureTooLarge(n) => Self::ClosureTooLarge(n),
             S::UnsignedOrInvalidObject { hash, reason } => {
@@ -2282,6 +2333,110 @@ mod tests {
     use mkit_core::pack::{PreparedDelta, PreparedRaw};
     use mkit_core::store::ObjectStore;
     use mkit_core::transfer;
+
+    #[test]
+    fn sync_context_mapping_preserves_remote_evidence_and_output_bytes() {
+        use super::DispatchError;
+        use mkit_sync::{RemoteDetail, RemoteFailure, SourceError, SyncError};
+
+        fn remote() -> SourceError {
+            SourceError::Remote(Box::new(RemoteFailure {
+                code: "not_found".into(),
+                message: "not visible".into(),
+                details: vec![RemoteDetail {
+                    type_url: "type.example/detail".into(),
+                    value: Some("eA==".into()),
+                }],
+                status: 404,
+                headers: vec![("x-evidence".into(), b"retained".to_vec())],
+            }))
+        }
+
+        for (error, expected) in [
+            (
+                SyncError::Source(remote()),
+                "transport: pack not found on remote",
+            ),
+            (
+                SyncError::RepositoryNotFound {
+                    identity: "repo".into(),
+                    origin: "https://remote.example".into(),
+                    source: remote(),
+                },
+                "repository `repo` not found at https://remote.example; check the remote URL path against the server's configured name (an empty path selects `default` on a single-repository deployment)",
+            ),
+            (
+                SyncError::PackChainInvalid {
+                    branch: "main".into(),
+                    source: Some(remote()),
+                },
+                "pack map chain for branch 'main' is malformed (too deep, cyclic, or unreadable)",
+            ),
+            (
+                SyncError::AdvertisedPackMissing {
+                    branch: "main".into(),
+                    pack: "abc".into(),
+                    source: remote(),
+                },
+                "remote advertised pack abc for branch 'main' but does not hold it",
+            ),
+        ] {
+            let error = DispatchError::from(error);
+            assert_eq!(error.to_string().as_bytes(), expected.as_bytes());
+            let source = std::error::Error::source(&error)
+                .expect("CLI mapping must retain the source cause")
+                .downcast_ref::<SourceError>()
+                .expect("the source cause must stay typed");
+            let SourceError::Remote(remote) = source else {
+                panic!("CLI mapping lost remote evidence")
+            };
+            assert_eq!(remote.code, "not_found");
+            assert_eq!(remote.message, "not visible");
+            assert_eq!(remote.status, 404);
+            assert_eq!(remote.details[0].type_url, "type.example/detail");
+            assert_eq!(remote.details[0].value.as_deref(), Some("eA=="));
+            assert_eq!(
+                remote.headers,
+                vec![("x-evidence".into(), b"retained".to_vec())]
+            );
+        }
+    }
+
+    #[test]
+    fn sync_source_mapping_preserves_transport_output_bytes() {
+        use super::DispatchError;
+        use mkit_core::protocol::{AdmissionRequired, TransportError};
+        for error in [
+            TransportError::PackNotFound,
+            TransportError::AccessDenied,
+            TransportError::AdmissionRequired(Box::new(AdmissionRequired::new(
+                Vec::new(),
+                "pay".into(),
+                Vec::new(),
+                Vec::new(),
+            ))),
+            TransportError::AdmissionConfiguration("bad".into()),
+            TransportError::TlsConfiguration("bad".into()),
+            TransportError::AdmissionHelperFailed("bad".into()),
+            TransportError::RemoteError("bad".into()),
+            TransportError::RefConflict,
+            TransportError::InvalidRef("bad".into()),
+            TransportError::ConnectionFailed,
+            TransportError::ServerError { status: 429 },
+            TransportError::ServerError { status: 503 },
+            TransportError::InvalidResponse,
+            TransportError::ProtocolError,
+            TransportError::PayloadTooLarge(42),
+            TransportError::InsecureScheme,
+        ] {
+            let expected = format!("transport: {error}");
+            let error = DispatchError::from(mkit_sync::SyncError::from(
+                mkit_sync::SourceError::from(error),
+            ));
+            assert_eq!(error.to_string().as_bytes(), expected.as_bytes());
+            assert!(matches!(error, DispatchError::Transport(_)));
+        }
+    }
 
     // =================================================================
     // `size_capped_batch_lens` — the batch-boundary arithmetic

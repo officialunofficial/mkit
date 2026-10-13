@@ -35,6 +35,15 @@ pub use crate::refs::RefWriteCondition;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum TransportError {
+    /// Verification is still pending. Scheduling belongs to the caller.
+    #[error("remote error: verification pending, retry after {retry_after:?}")]
+    PendingVerification { retry_after: Duration },
+    /// Repository membership has not become visible yet.
+    #[error("remote error: repository membership not yet visible")]
+    MembershipNotVisible,
+    /// A remote supplied a bounded delay hint, in milliseconds.
+    #[error("remote error: retry after {ms} ms")]
+    RetryAfter { ms: u64 },
     /// `download_pack` called on a digest the remote does not hold.
     #[error("pack not found on remote")]
     PackNotFound,

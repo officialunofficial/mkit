@@ -8,7 +8,7 @@ use std::io::{Read as _, Write as _};
 
 use mkit_core::hash::Hash;
 use mkit_core::pack::PackReader;
-use mkit_core::protocol::{PackKey, TransportError};
+use mkit_core::protocol::PackKey;
 use mkit_core::store::ObjectStore;
 
 use crate::applied_packs::AppliedPacks;
@@ -66,6 +66,7 @@ pub(crate) fn download_pack_chain_with_limits(
     if chain.len() > MAX_FETCH_PACKS {
         return Err(SyncError::PackChainInvalid {
             branch: branch.to_owned(),
+            source: None,
         });
     }
     let directory = match stage_parent {
@@ -90,10 +91,11 @@ pub(crate) fn download_pack_chain_with_limits(
         }
         let pack = match source.download_pack_via_ref(&key, &ref_name) {
             Ok(b) => b,
-            Err(TransportError::PackNotFound) => {
+            Err(error) if error.is_not_found() => {
                 return Err(SyncError::AdvertisedPackMissing {
                     branch: branch.to_owned(),
                     pack: mkit_core::hash::to_hex(&pk),
+                    source: error,
                 });
             }
             Err(e) => return Err(e.into()),
@@ -101,9 +103,9 @@ pub(crate) fn download_pack_chain_with_limits(
         #[cfg(test)]
         observe_retained_pack_bytes(pack.capacity());
         if pack.len() as u64 > mkit_core::protocol::PACK_BODY_LIMIT {
-            return Err(TransportError::PayloadTooLarge(pack.len()).into());
+            return Err(crate::SourceError::PayloadTooLarge(pack.len()).into());
         }
-        key.verify_bytes(&pack)?;
+        key.verify_bytes(&pack).map_err(crate::SourceError::from)?;
         let next_bytes = staged
             .bytes
             .checked_add(pack.len() as u64)
@@ -166,9 +168,12 @@ pub(crate) fn unpack_downloaded_packs(
         // independently requested digest is rechecked before store effects.
         file.take(entry.bytes as u64 + 1).read_to_end(&mut pack)?;
         if pack.len() != entry.bytes {
-            return Err(TransportError::InvalidResponse.into());
+            return Err(crate::SourceError::InvalidResponse.into());
         }
-        entry.key.verify_bytes(&pack)?;
+        entry
+            .key
+            .verify_bytes(&pack)
+            .map_err(crate::SourceError::from)?;
         let report = PackReader::read(&pack, store)?;
         let unpacked = (report.raw_count + report.delta_count) as usize;
         total += unpacked;
@@ -248,7 +253,7 @@ mod tests {
                 &applied,
                 None
             ),
-            Err(SyncError::Transport(TransportError::InvalidResponse))
+            Err(SyncError::Source(crate::SourceError::InvalidResponse))
         ));
         assert!(!applied.contains(&PackKey::from_hash(key)));
     }
@@ -262,7 +267,7 @@ mod tests {
         tx.upload_blob(&b, &PackKey::from_hash(key)).unwrap();
         assert!(matches!(
             download_packlist_node(&TransportSource::new(&tx), key, "refs/heads/main"),
-            Err(SyncError::Transport(TransportError::InvalidResponse))
+            Err(SyncError::Source(crate::SourceError::InvalidResponse))
         ));
     }
 
@@ -372,7 +377,7 @@ mod tests {
                 1024,
                 Some(td.path())
             ),
-            Err(SyncError::Transport(TransportError::InvalidResponse))
+            Err(SyncError::Source(crate::SourceError::InvalidResponse))
         ));
         assert_eq!(std::fs::read_dir(td.path()).unwrap().count(), 0);
     }

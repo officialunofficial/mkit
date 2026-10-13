@@ -1,9 +1,9 @@
 //! The error type of every fallible `mkit-sync` call.
 
+use crate::SourceError;
 use mkit_core::layout::DiscoverError;
 use mkit_core::ops::restore::RestoreError;
 use mkit_core::pack::PackError;
-use mkit_core::protocol::TransportError;
 use mkit_core::refs::RefError;
 use mkit_core::repo_lock::LockError;
 use mkit_core::store::StoreError;
@@ -30,9 +30,13 @@ pub enum SyncError {
     #[error(
         "repository `{identity}` not found at {origin}; check the remote URL path against the server's configured name (an empty path selects `default` on a single-repository deployment)"
     )]
-    RepositoryNotFound { identity: String, origin: String },
+    RepositoryNotFound {
+        identity: String,
+        origin: String,
+        source: SourceError,
+    },
     #[error("transport: {0}")]
-    Transport(#[from] TransportError),
+    Source(#[from] SourceError),
     #[error("refs: {0}")]
     Refs(#[from] RefError),
     #[error("repo lock: {0}")]
@@ -66,13 +70,20 @@ pub enum SyncError {
     /// A packmap chain was malformed: too deep, cyclic, or a node could not
     /// be downloaded or decoded. A corrupt or hostile remote.
     #[error("pack map chain for branch '{branch}' is malformed (too deep, cyclic, or unreadable)")]
-    PackChainInvalid { branch: String },
+    PackChainInvalid {
+        branch: String,
+        source: Option<SourceError>,
+    },
     /// The remote advertised a branch but no packmap for it.
     #[error("remote advertised branch '{0}' but no pack map to reconstruct it")]
     PackmapMissing(String),
     /// The packmap names a pack the remote does not hold.
     #[error("remote advertised pack {pack} for branch '{branch}' but does not hold it")]
-    AdvertisedPackMissing { branch: String, pack: String },
+    AdvertisedPackMissing {
+        branch: String,
+        pack: String,
+        source: SourceError,
+    },
     /// After unpacking the whole chain an object reachable from the tip is
     /// still absent locally.
     #[error("remote is missing object {0} needed to reconstruct the ref")]

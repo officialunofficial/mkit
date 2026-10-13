@@ -10,11 +10,14 @@
 
 use std::future::Future;
 
-use mkit_client::{Client, Clock, Error as ClientError, HttpTransport, Signer};
+use mkit_client::{
+    Client, Clock, Error as ClientError, HttpTransport, NoObserver, Observer, Signer,
+};
 use mkit_core::hash::Hash;
-use mkit_core::protocol::{PackKey, TransportError};
+use mkit_core::protocol::PackKey;
 use mkit_core::refs::Ref;
 
+use crate::SourceError;
 use crate::source::RemoteSource;
 
 /// Drives one future to completion on the calling thread.
@@ -41,12 +44,12 @@ const NODE_LIMIT: u64 = 1024 * 1024;
 
 /// The read side of a remote repository reached through a [`Client`]. The
 /// engine calls it one operation at a time.
-pub struct ClientSource<'a, T, S, C, E> {
-    client: &'a Client<'a, T, S, C>,
+pub struct ClientSource<'a, T, S, C, E, O = NoObserver> {
+    client: &'a Client<'a, T, S, C, O>,
     executor: &'a E,
 }
 
-impl<T, S, C, E> std::fmt::Debug for ClientSource<'_, T, S, C, E> {
+impl<T, S, C, E, O> std::fmt::Debug for ClientSource<'_, T, S, C, E, O> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClientSource")
             .field("client", &self.client)
@@ -54,49 +57,66 @@ impl<T, S, C, E> std::fmt::Debug for ClientSource<'_, T, S, C, E> {
     }
 }
 
-impl<'a, T, S, C, E> ClientSource<'a, T, S, C, E> {
+impl<'a, T, S, C, E, O> ClientSource<'a, T, S, C, E, O> {
     /// `executor` drives every call. When the transport is built on an async
     /// runtime, pass the transport itself if it is an [`Executor`].
     #[must_use]
-    pub fn new(client: &'a Client<'a, T, S, C>, executor: &'a E) -> Self {
+    pub fn new(client: &'a Client<'a, T, S, C, O>, executor: &'a E) -> Self {
         Self { client, executor }
     }
 }
 
-/// Map a client failure to the transport vocabulary the engine reports in.
-///
-/// A transport failure keeps its cause as `RemoteError("transport: ...")`, not
-/// a retryable connection failure: the channel's refusals (an oversized or
-/// undecodable body, a refused redirect) are deterministic, so match on
-/// `RemoteError` rather than expecting `ConnectionFailed`.
-/// A missing or invisible repository is `not_found` on the wire and maps to
-/// [`TransportError::PackNotFound`], which the engine turns into a
-/// repository-not-found error with the address.
-fn transport_error(error: ClientError) -> TransportError {
+/// Preserve client outcomes without scheduling work in the sync engine.
+fn source_error(error: ClientError) -> SourceError {
     match error {
-        ClientError::Remote(remote) => match remote.code.as_str() {
-            "not_found" => TransportError::PackNotFound,
-            "unauthenticated" | "permission_denied" => TransportError::AccessDenied,
-            _ => TransportError::RemoteError(remote.message),
-        },
-        // Keep the cause: a refused redirect, an oversized or undecodable body,
-        // a TLS failure and a timeout are different problems, and the first
-        // two are deterministic, so they must not look like a retryable
-        // connection failure.
-        ClientError::Transport(cause) => TransportError::RemoteError(format!("transport: {cause}")),
-        ClientError::PaymentRequired(required) => TransportError::AdmissionRequired(required),
+        ClientError::Remote(remote) => SourceError::Remote(Box::new(crate::RemoteFailure {
+            code: remote.code,
+            message: remote.message,
+            details: remote
+                .details
+                .into_iter()
+                .map(|detail| crate::RemoteDetail {
+                    type_url: detail.type_url,
+                    value: detail.value,
+                })
+                .collect(),
+            status: remote.status,
+            headers: remote
+                .headers
+                .iter()
+                .map(|(name, value)| (name.as_str().to_owned(), value.as_bytes().to_vec()))
+                .collect(),
+        })),
+        // HttpTransport does not classify its string errors. Refused redirects
+        // and malformed/oversized responses must not become transient failures.
+        ClientError::Transport(cause) => SourceError::RemoteError(format!("transport: {cause}")),
+        ClientError::PaymentRequired(challenges) => SourceError::PaymentRequired { challenges },
+        ClientError::PendingVerification { retry_after } => {
+            SourceError::PendingVerification { retry_after }
+        }
+        ClientError::MembershipNotVisible => SourceError::MembershipNotVisible,
+        ClientError::RetryAfter { ms } => SourceError::RetryAfter { ms },
+        ClientError::Signing(reason) => SourceError::Signing(reason),
+        ClientError::SignerRefused(reason) => SourceError::SignerRefused(reason),
+        ClientError::Vetoed(reason) => SourceError::Vetoed(reason),
+        ClientError::ReservedHeader(name) => SourceError::ReservedHeader(name),
+        ClientError::EnvelopeExpired => SourceError::EnvelopeExpired,
+        ClientError::Deadline => SourceError::Deadline,
         ClientError::Limit(_)
         | ClientError::Invalid(_)
         | ClientError::Pack(_)
         | ClientError::Packlist(_)
         | ClientError::Sink(_)
-        | ClientError::Signature { .. } => TransportError::InvalidResponse,
-        other => TransportError::RemoteError(other.to_string()),
+        | ClientError::Signature { .. } => SourceError::InvalidResponse,
+        // A future unclassified client variant is terminal, never retryable.
+        other => SourceError::RemoteError(other.to_string()),
     }
 }
 
-impl<T: HttpTransport, S: Signer, C: Clock, E: Executor> ClientSource<'_, T, S, C, E> {
-    fn list_branches_with_page_limit(&self, max_pages: u32) -> Result<Vec<Ref>, TransportError> {
+impl<T: HttpTransport, S: Signer, C: Clock, E: Executor, O: Observer>
+    ClientSource<'_, T, S, C, E, O>
+{
+    fn list_branches_with_page_limit(&self, max_pages: u32) -> Result<Vec<Ref>, SourceError> {
         let mut listing = mkit_core::ref_listing::RefListing::new(max_pages);
         while listing.can_request() {
             let reply = self
@@ -105,7 +125,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, E: Executor> ClientSource<'_, T, S, 
                     self.client
                         .list_refs("refs/heads/", 0, listing.cursor(), None),
                 )
-                .map_err(transport_error)?
+                .map_err(source_error)?
                 .value;
             let page = reply
                 .refs
@@ -119,50 +139,40 @@ impl<T: HttpTransport, S: Signer, C: Clock, E: Executor> ClientSource<'_, T, S, 
                 .push(page, reply.next_page_token, |entry: &mut Ref| {
                     &mut entry.name
                 })
-                .map_err(|_| TransportError::InvalidResponse)?
+                .map_err(|_| SourceError::InvalidResponse)?
             {
-                return listing
-                    .finish()
-                    .map_err(|_| TransportError::InvalidResponse);
+                return listing.finish().map_err(|_| SourceError::InvalidResponse);
             }
         }
-        Err(TransportError::InvalidResponse)
+        Err(SourceError::InvalidResponse)
     }
 }
 
-impl<T: HttpTransport, S: Signer, C: Clock, E: Executor> RemoteSource
-    for ClientSource<'_, T, S, C, E>
+impl<T: HttpTransport, S: Signer, C: Clock, E: Executor, O: Observer> RemoteSource
+    for ClientSource<'_, T, S, C, E, O>
 {
-    fn list_branches(&self) -> Result<Vec<Ref>, TransportError> {
+    fn list_branches(&self) -> Result<Vec<Ref>, SourceError> {
         self.list_branches_with_page_limit(mkit_core::ref_listing::MAX_PAGES)
     }
 
-    fn read_ref(&self, name: &str) -> Result<Option<Hash>, TransportError> {
+    fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError> {
         self.executor
             .block_on(self.client.read_ref(name, None))
             .map(|reply| reply.value)
-            .map_err(transport_error)
+            .map_err(source_error)
     }
 
-    fn download_blob_via_ref(
-        &self,
-        key: &PackKey,
-        ref_name: &str,
-    ) -> Result<Vec<u8>, TransportError> {
+    fn download_blob_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
         self.executor
             .block_on(
                 self.client
                     .download_pack(&key.into_hash(), Some(ref_name), NODE_LIMIT, None),
             )
             .map(|reply| reply.value)
-            .map_err(transport_error)
+            .map_err(source_error)
     }
 
-    fn download_pack_via_ref(
-        &self,
-        key: &PackKey,
-        ref_name: &str,
-    ) -> Result<Vec<u8>, TransportError> {
+    fn download_pack_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
         self.executor
             .block_on(self.client.download_pack(
                 &key.into_hash(),
@@ -171,7 +181,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, E: Executor> RemoteSource
                 None,
             ))
             .map(|reply| reply.value)
-            .map_err(transport_error)
+            .map_err(source_error)
     }
 
     fn repository_address(&self) -> Option<(String, String)> {
@@ -191,40 +201,237 @@ mod tests {
     use mkit_client::{Destination, proto};
     use std::cell::RefCell;
 
-    fn remote(code: &str, message: &str) -> ClientError {
-        ClientError::Remote(Box::new(mkit_client::RemoteError {
-            code: code.to_owned(),
-            message: message.to_owned(),
-            details: Vec::new(),
-            status: 0,
-            headers: http::HeaderMap::new(),
-        }))
+    struct TestSigner;
+    impl Signer for TestSigner {
+        fn public_key(&self) -> [u8; 32] {
+            [1; 32]
+        }
+        async fn sign(&self, _: &Hash) -> Result<[u8; 64], String> {
+            Ok([2; 64])
+        }
+    }
+    struct TestClock;
+    impl Clock for TestClock {
+        fn now_ms(&self) -> i64 {
+            1000
+        }
+        fn nonce(&self) -> Result<Hash, String> {
+            Ok([3; 32])
+        }
+        async fn wait(&self, _: std::time::Duration) {
+            panic!("source must never wait")
+        }
+    }
+    struct ReadObserver;
+    impl Observer for ReadObserver {
+        async fn before_dispatch(
+            &self,
+            _: &mkit_client::WriteIntent<'_>,
+            _: &mkit_client::Attempt,
+        ) -> Result<mkit_client::AttemptHeaders, mkit_client::Veto> {
+            panic!("reads must not invoke the write observer")
+        }
     }
 
     #[test]
-    fn remote_codes_map_to_the_engines_vocabulary() {
-        assert!(matches!(
-            transport_error(remote("not_found", "x")),
-            TransportError::PackNotFound
-        ));
-        for code in ["unauthenticated", "permission_denied"] {
-            assert!(matches!(
-                transport_error(remote(code, "x")),
-                TransportError::AccessDenied
-            ));
+    fn observed_signed_client_composes_as_source() {
+        let (transport, dest) = source_over(vec![page(&["main"], None)]);
+        let client =
+            Client::signed(&transport, dest, &TestSigner, &TestClock).with_observer(&ReadObserver);
+        let source = ClientSource::new(&client, &FuturesExecutor);
+        assert_eq!(source.list_branches().unwrap()[0].name, "main");
+    }
+
+    struct FailureResponse(RefCell<Option<Response<Vec<u8>>>>);
+    impl HttpTransport for FailureResponse {
+        async fn send(&self, _: Request<Vec<u8>>, _: usize) -> Result<Response<Vec<u8>>, String> {
+            Ok(self.0.borrow_mut().take().expect("source must never retry"))
         }
-        assert!(matches!(
-            transport_error(remote("internal", "boom")),
-            TransportError::RemoteError(m) if m == "boom"
-        ));
-        assert!(matches!(
-            transport_error(ClientError::Invalid("x")),
-            TransportError::InvalidResponse
-        ));
-        assert!(matches!(
-            transport_error(ClientError::Transport("redirect refused".to_owned())),
-            TransportError::RemoteError(m) if m == "transport: redirect refused"
-        ));
+    }
+
+    fn failure_response(body: &str, retry_after: Option<&str>) -> Response<Vec<u8>> {
+        let mut response = Response::builder()
+            .status(503)
+            .header("content-type", "application/json");
+        if let Some(value) = retry_after {
+            response = response.header("retry-after", value);
+        }
+        response.body(body.as_bytes().to_vec()).unwrap()
+    }
+
+    #[test]
+    fn every_resumable_outcome_survives_client_source_and_sync() {
+        use crate::{FailureClass, SyncError};
+        use std::time::Duration;
+        // A PendingVerification proto with retry_after_ms = 2000 (field 1).
+        use base64::Engine as _;
+        let pending = base64::engine::general_purpose::STANDARD.encode(
+            proto::PendingVerification {
+                retry_after_ms: Some(2000),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        );
+        let bodies = [
+            format!(r#"{{"code":"unavailable","details":[{{"type":"mkit.transport.v1.PendingVerification","value":"{pending}"}}]}}"#),
+            r#"{"code":"unavailable","details":[{"type":"mkit.transport.v1.MembershipNotVisible","value":""}]}"#.into(),
+            r#"{"code":"unavailable","message":"busy"}"#.into(),
+        ];
+        for (i, body) in bodies.iter().enumerate() {
+            let transport = FailureResponse(RefCell::new(Some(failure_response(
+                body,
+                (i == 2).then_some("3"),
+            ))));
+            let dest =
+                Destination::new("https://vcs.example.org".into(), "default".into()).unwrap();
+            let client = Client::signed(&transport, dest, &TestSigner, &TestClock);
+            let source = ClientSource::new(&client, &FuturesExecutor);
+            let error = source.list_branches().unwrap_err();
+            assert_eq!(error.class(), FailureClass::Resumable);
+            let SyncError::Source(error) = source.repository_error(error) else {
+                panic!("outcome flattened")
+            };
+            match (i, error) {
+                (0, SourceError::PendingVerification { retry_after }) => {
+                    assert_eq!(retry_after, Duration::from_secs(2));
+                }
+                (1, SourceError::MembershipNotVisible) => (),
+                (2, SourceError::RetryAfter { ms }) => assert_eq!(ms, 3000),
+                other => panic!("unexpected {other:?}"),
+            }
+            assert!(transport.0.borrow().is_none());
+        }
+        let response = Response::builder()
+            .status(402)
+            .header("www-authenticate", "Payment opaque")
+            .header("payment-required", "opaque-payment")
+            .body(Vec::new())
+            .unwrap();
+        let transport = FailureResponse(RefCell::new(Some(response)));
+        let dest = Destination::new("https://vcs.example.org".into(), "default".into()).unwrap();
+        let client = Client::anonymous(&transport, dest);
+        let source = ClientSource::new(&client, &FuturesExecutor);
+        let SyncError::Source(SourceError::PaymentRequired { challenges }) =
+            source.repository_error(source.list_branches().unwrap_err())
+        else {
+            panic!("payment flattened")
+        };
+        assert_eq!(challenges.www_authenticate, ["Payment opaque"]);
+        assert_eq!(challenges.payment_required, ["opaque-payment"]);
+    }
+
+    #[test]
+    fn client_source_preserves_all_payment_challenges() {
+        use base64::Engine as _;
+        let detail = mkit_core::admission::encode_admission_challenge(
+            &[("mpp", "first"), ("x402", "second")],
+            "pay to read",
+        );
+        let value = base64::engine::general_purpose::STANDARD.encode(detail);
+        let body = format!(
+            r#"{{"code":"permission_denied","details":[{{"type":"mkit.transport.v1.AdmissionChallenge","value":"{value}"}}]}}"#
+        );
+        let mut response = failure_response(&body, None);
+        *response.status_mut() = http::StatusCode::PAYMENT_REQUIRED;
+        let transport = FailureResponse(RefCell::new(Some(response)));
+        let dest = Destination::new("https://vcs.example.org".into(), "default".into()).unwrap();
+        let client = Client::anonymous(&transport, dest);
+        let source = ClientSource::new(&client, &FuturesExecutor);
+        let crate::SyncError::Source(SourceError::PaymentRequired { challenges }) =
+            source.repository_error(source.read_ref("refs/heads/main").unwrap_err())
+        else {
+            panic!("payment flattened")
+        };
+        assert_eq!(challenges.description, "pay to read");
+        assert_eq!(
+            challenges
+                .challenges
+                .iter()
+                .map(|entry| (entry.scheme.as_str(), entry.value.as_str()))
+                .collect::<Vec<_>>(),
+            [("mpp", "first"), ("x402", "second")]
+        );
+    }
+
+    #[test]
+    fn remote_evidence_and_overload_classification_survive() {
+        use crate::{FailureClass, SyncError};
+        for code in [
+            "resource_exhausted",
+            "unavailable",
+            "aborted",
+            "permission_denied",
+            "not_found",
+            "internal",
+        ] {
+            let body = format!(
+                r#"{{"code":"{code}","message":"message","details":[{{"type":"example.Detail","value":"opaque"}}]}}"#
+            );
+            let mut response = failure_response(&body, None);
+            response
+                .headers_mut()
+                .append("x-evidence", "one".parse().unwrap());
+            response
+                .headers_mut()
+                .append("x-evidence", "two".parse().unwrap());
+            let transport = FailureResponse(RefCell::new(Some(response)));
+            let dest =
+                Destination::new("https://vcs.example.org".into(), "default".into()).unwrap();
+            let client = Client::anonymous(&transport, dest);
+            let source = ClientSource::new(&client, &FuturesExecutor);
+            let error = source.repository_error(source.list_branches().unwrap_err());
+            let source = match error {
+                SyncError::Source(source) | SyncError::RepositoryNotFound { source, .. } => source,
+                other => panic!("metadata lost: {other:?}"),
+            };
+            let SourceError::Remote(remote) = source else {
+                panic!("metadata flattened")
+            };
+            assert_eq!(remote.code, code);
+            assert_eq!(remote.message, "message");
+            assert_eq!(remote.status, 503);
+            assert_eq!(remote.details[0].value.as_deref(), Some("opaque"));
+            assert_eq!(
+                remote
+                    .headers
+                    .iter()
+                    .filter(|(name, _)| name == "x-evidence")
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                [
+                    ("x-evidence".into(), b"one".to_vec()),
+                    ("x-evidence".into(), b"two".to_vec())
+                ]
+            );
+            let error = SourceError::Remote(remote);
+            assert_eq!(
+                error.class(),
+                if matches!(code, "resource_exhausted" | "unavailable" | "aborted") {
+                    FailureClass::Transient
+                } else {
+                    FailureClass::Refusal
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn signing_and_channel_refusals_are_terminal_and_typed() {
+        use crate::FailureClass;
+        assert!(
+            matches!(source_error(ClientError::Signing("key unavailable".into())), SourceError::Signing(reason) if reason == "key unavailable")
+        );
+        assert!(
+            matches!(source_error(ClientError::SignerRefused("policy".into())), SourceError::SignerRefused(reason) if reason == "policy")
+        );
+        for error in [
+            ClientError::Transport("redirect refused".into()),
+            ClientError::Invalid("body"),
+            ClientError::SignerRefused("policy".into()),
+            ClientError::Signing("key".into()),
+        ] {
+            assert_eq!(source_error(error).class(), FailureClass::Refusal);
+        }
     }
 
     // Scripted pages for the listing tests.
@@ -294,7 +501,7 @@ mod tests {
             let source = ClientSource::new(&client, &FuturesExecutor);
             assert!(matches!(
                 source.list_branches(),
-                Err(TransportError::InvalidResponse)
+                Err(SourceError::InvalidResponse)
             ));
         }
     }
@@ -311,7 +518,7 @@ mod tests {
         let source = ClientSource::new(&client, &FuturesExecutor);
         assert!(matches!(
             source.list_branches(),
-            Err(TransportError::InvalidResponse)
+            Err(SourceError::InvalidResponse)
         ));
     }
     use mkit_test_util::ref_listing::listing_cases;
@@ -342,7 +549,7 @@ mod tests {
                 );
             } else {
                 assert!(
-                    matches!(result, Err(TransportError::InvalidResponse)),
+                    matches!(result, Err(SourceError::InvalidResponse)),
                     "{}",
                     case.name
                 );

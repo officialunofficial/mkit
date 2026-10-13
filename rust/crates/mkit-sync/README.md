@@ -86,7 +86,8 @@ use mkit_client::Client;
 use mkit_sync::{ClientSource, NativeClock, NativeHttp, NoopObserver, SyncOptions, clone};
 
 let http = NativeHttp::new()?;                       // feature `connect-native`
-let client = Client::signed(&http, destination, &my_signer, &NativeClock);
+let client = Client::signed(&http, destination, &my_signer, &NativeClock)
+    .with_observer(&my_observer);
 let source = ClientSource::new(&client, &http);
 clone(&dir, &source, &remote, &SyncOptions::default(), &NoopObserver)?;
 ```
@@ -94,6 +95,38 @@ clone(&dir, &source, &remote, &SyncOptions::default(), &NoopObserver)?;
 A missing repository, a private one read anonymously and one read by a signer
 the server denies all come back as the same `SyncError::RepositoryNotFound`
 (the wire answer is a uniform `not_found`).
+
+### Source failures and host scheduling
+
+Every source read returns `SourceError`, carried by `SyncError::Source`.
+`PendingVerification { retry_after }`, `MembershipNotVisible`,
+`RetryAfter { ms }`, and `PaymentRequired { challenges }` preserve the host's
+next action. Payment challenges retain the full `AdmissionRequired` record,
+including helper headers and terminal admission reasons. The library returns
+these outcomes immediately and never sleeps or retries them.
+
+`SourceError::class()` returns `FailureClass::Resumable` for these outcomes
+(except a terminal admission reason), `Transient` for classified connection
+failures, HTTP 429/5xx transport failures, and Connect `resource_exhausted`,
+`unavailable`, or `aborted`, and `Refusal` otherwise. This is evidence for host
+policy, not an automatic retry instruction. Signing and signer refusals remain
+separate typed variants. Unclassified `HttpTransport` string failures are
+terminal: that seam also reports refused redirects and malformed responses.
+
+Raw Connect failures keep code, message, opaque details, actual HTTP status,
+and every response header value as bytes in `RemoteFailure`. Treat these fields
+as untrusted and potentially sensitive. Display text omits details and headers.
+`TransportSource` explicitly maps core's classified errors; its metadata is
+limited to what the underlying transport supplies. Core transports may return
+the three scheduling variants directly; existing Connect transport polling
+behavior remains inside that transport. Core's generic backoff does not retry
+the new scheduling outcomes.
+
+Migration toward 0.6: change custom `RemoteSource` results and classifiers to
+`SourceError`, map core errors with `SourceError::from`, and replace matches on
+`SyncError::Transport` with `SyncError::Source`. The observer parameter on
+`ClientSource` defaults to `NoObserver`; inferred construction also accepts
+`Client::with_observer`. Read calls do not invoke the write observer.
 
 ### `connect-native`: a small native HTTP channel
 
