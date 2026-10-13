@@ -2656,11 +2656,12 @@ responses negotiated, or metadata connections held open for too long.
 **Always:** local cache recipes give each workspace its own Cargo build directory
 under `~/.cache/mkit/build/{workspace-path-hash}` (overridable by
 `MKIT_BUILD_ROOT`). Never share `CARGO_TARGET_DIR` across worktrees. Tracked
-Cargo, Docker, and CI inputs never set `build-dir`; CI retains its own caches.
+TOML, Docker, and CI inputs never set `build-dir`; CI retains its own caches.
 GC defaults to dry run and runs only `cargo clean` for clean, merged/gone linked
 worktrees. It keeps main/current, detached, locked, and dirty checkouts and
 refuses external, symlinked, or tracked target output and build directories
-that overlap source checkouts. Worktrees, branches, and source stay intact.
+that overlap source checkouts. Neither output directory contains a registered
+source checkout. Worktrees, branches, and source stay intact.
 
 **Because:** shared compilation results save CPU without sharing Cargo's locked
 output directories. A committed build-dir setting would redirect CI's caches;

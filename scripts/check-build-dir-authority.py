@@ -10,8 +10,8 @@ import sys
 
 def is_input(path):
     name = path.name.lower()
-    return ((".cargo" in path.parts and (name == "config" or path.suffix == ".toml"))
-            or name in ("cargo.toml", "rust-toolchain.toml")
+    # Cargo includes may point outside .cargo; scan every tracked TOML file.
+    return (path.suffix == ".toml" or (path.parent.name == ".cargo" and name == "config")
             or name.startswith("dockerfile") or name.endswith(".dockerfile")
             or (path.suffix in (".yml", ".yaml")
                 and path.parts[0] in (".github", "cloudbuild")))

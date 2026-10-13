@@ -40,7 +40,7 @@ It does not enable sccache or disable incremental compilation for plain Cargo.
 Remove the export when reproducing CI or Docker builds locally.
 
 GitHub Actions retains its existing Cargo cache behavior. Cloud Build retains
-its existing sccache backend. No tracked Cargo configuration, manifest,
+its existing sccache backend. No tracked TOML (including Cargo configuration includes),
 Dockerfile, GitHub YAML (including composite actions), or Cloud Build YAML may
 set `build-dir`. The conservative text guard rejects references even in comments
 in those inputs. `just check-local-build` runs the guard and shell fixture tests;
@@ -62,6 +62,7 @@ worktrees, and branches. It never cleans the main checkout, the current checkout
 untracked, or submodule changes. It ignores inherited target-directory variables
 and refuses external, symlinked, or tracked target output. It also refuses
 symlinked build directories and build directories overlapping source checkouts.
+Neither output directory may contain a registered source checkout.
 Unsafe configurations or failed Git/Cargo commands return a nonzero status.
 
 Use the same `MKIT_BUILD_ROOT` you used for builds. GC does not sweep orphaned

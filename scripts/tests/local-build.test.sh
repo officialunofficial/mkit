@@ -95,6 +95,35 @@ done
 test -f "$fixture/repo/rust/target/sentinel"
 test -f "$fixture/shared/sentinel"
 test -f "$fixture/shared-build/sentinel"
+# Never clean an output directory containing any registered source checkout,
+# including a current checkout or one whose dirty status caused it to be skipped.
+for output_kind in target build; do
+    parent="$fixture/nested-$output_kind-parent"
+    git worktree add -qb "nested-$output_kind-parent" "$parent" merged
+    mkdir -p "$parent/rust/target"
+    printf 'parent output\n' > "$parent/rust/target/parent-output"
+    if [ "$output_kind" = target ]; then
+        output="$parent/rust/target"
+    else
+        output=$(cd "$parent/rust" && cargo metadata --offline --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["build_directory"])')
+        mkdir -p "$output"
+    fi
+    git worktree add -qb "nested-$output_kind-dirty" "$output/dirty-source" merged
+    git worktree add -qb "nested-$output_kind-current" "$output/current-source" merged
+    printf 'uncommitted source\n' > "$output/dirty-source/uncommitted"
+    for action in dry apply; do
+        if [ "$action" = apply ]; then set -- --apply; else set --; fi
+        if (cd "$output/current-source" && python3 "$scripts/local-build.py" gc "$@") > "$fixture/nested-$output_kind-$action" 2>&1; then
+            echo 'nested source checkout should prevent cleanup' >&2; exit 1
+        fi
+        grep -Fq "skip $parent: output directory contains a source checkout" "$fixture/nested-$output_kind-$action"
+        grep -Fq "skip $output/dirty-source: uncommitted changes" "$fixture/nested-$output_kind-$action"
+        grep -Fq "skip $output/current-source: main or current checkout" "$fixture/nested-$output_kind-$action"
+        test -f "$output/dirty-source/uncommitted"
+        test -f "$output/current-source/rust/src/lib.rs"
+        test -f "$parent/rust/target/parent-output"
+    done
+done
 # Export quoting survives whitespace and single quotes.
 export MKIT_BUILD_ROOT="$fixture/cache root's"
 eval "$(python3 "$scripts/local-build.py" env)"
@@ -127,7 +156,7 @@ fi
 grep -Fq 'never share targets' "$fixture/target-error"
 # Guard coverage includes nested workspaces, legacy config, composite actions,
 # quoted/dotted keys, CLI overrides, and environment assignments.
-for file in rust/.cargo/config rust/.cargo/config.toml rust/.cargo/included.toml rust/Cargo.toml cloudbuild/Dockerfile.ci apps/test.Dockerfile .github/actions/test/action.yml cloudbuild/test.yaml; do
+for file in rust/.cargo/config rust/.cargo/config.toml rust/.cargo/included.toml rust/cargo-options.toml rust/Cargo.toml cloudbuild/Dockerfile.ci apps/test.Dockerfile .github/actions/test/action.yml cloudbuild/test.yaml; do
     for setting in 'build-dir = "cache"' 'build.build-dir="cache"' '"build-dir" = "cache"' 'CARGO_BUILD_BUILD_DIR=cache' 'MKIT_BUILD_ROOT=cache'; do
         mkdir -p "$(dirname "$file")"
         cp "$file" "$fixture/saved" 2>/dev/null || : > "$fixture/saved"
@@ -141,5 +170,19 @@ for file in rust/.cargo/config rust/.cargo/config.toml rust/.cargo/included.toml
         git add -f "$file"
     done
 done
+# Includes outside .cargo are real Cargo inputs too.
+git restore --staged rust/.cargo/config
+rm rust/.cargo/config
+mkdir -p rust/.cargo
+printf 'include = ["../cargo-options.toml"]\n' > rust/.cargo/config.toml
+printf '[build]\nbuild-dir = "%s"\n' "$fixture/included-output" > rust/cargo-options.toml
+git add -f rust/.cargo/config.toml rust/cargo-options.toml
+resolved=$(cd rust && env -u CARGO_BUILD_BUILD_DIR cargo metadata --offline --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["build_directory"])')
+test "$resolved" = "$fixture/included-output"
+if python3 "$scripts/check-build-dir-authority.py" --root . > "$fixture/include-guard" 2>&1; then
+    echo 'guard missed a Cargo include outside .cargo' >&2; exit 1
+fi
+grep -Fq 'rust/cargo-options.toml:2:' "$fixture/include-guard"
+printf '' > rust/cargo-options.toml
 python3 "$scripts/check-build-dir-authority.py" --root .
 echo 'ok: local build and worktree GC fixtures'

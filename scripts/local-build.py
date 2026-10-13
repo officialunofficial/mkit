@@ -91,7 +91,10 @@ def output_dirs(path, env, root, records):
         raise ValueError("build directory is symlinked")
     for record in records:
         source = Path(record["worktree"]).resolve()
-        if build.resolve() == source or source in build.resolve().parents:
+        for output in (target.resolve(), build.resolve()):
+            if output == source or output in source.parents:
+                raise ValueError("output directory contains a source checkout")
+        if source in build.resolve().parents:
             raise ValueError("build directory overlaps a source checkout")
     if git(path, "ls-files", "--", "rust/target"):
         raise ValueError("target directory contains tracked files")
