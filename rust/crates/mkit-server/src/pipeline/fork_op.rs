@@ -93,6 +93,99 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         self.observe(a, self.fork_stages(a, request)).await
     }
 
+    /// The preamble both `fork_repo` and [`Self::completed_fork`] share: the
+    /// deployment can fork, no grant is presented, and the request is the
+    /// signed auth v2 body.
+    fn fork_signed<'a>(
+        &self,
+        a: &'a Authenticated,
+        request: &ForkRequest,
+    ) -> Result<&'a crate::op::VerifiedAuth, ServerError> {
+        self.require_fork_deployment()?;
+        if a.write_grant.is_some() {
+            return Err(ServerError::permission_denied(
+                "a grant never authorizes ForkRepo",
+            ));
+        }
+        let auth = a
+            .auth
+            .as_ref()
+            .ok_or_else(|| ServerError::unauthenticated("fork requires auth v2 authorization"))?;
+        if auth.commitment != Commitment::Body(hash(&request.canonical_body())) {
+            return Err(ServerError::unauthenticated(
+                "request differs from the signed body",
+            ));
+        }
+        Ok(auth)
+    }
+
+    /// The stage-0 read: the request's replay record and the destination's
+    /// job, in one call.
+    async fn fork_stage0_rows(
+        &self,
+        p: &crate::store::Partition,
+        auth: &crate::op::VerifiedAuth,
+        dest: &RepoId,
+    ) -> Result<(Option<crate::replay::ReplayRecord>, Option<fork::ForkJobV1>), ServerError> {
+        let replay_key = keys::replay(&auth.replay_scope);
+        let rows = self
+            .meta
+            .get_many(p, &[replay_key, keys::fork_job(&dest.name)])
+            .await
+            .map_err(meta_error)?;
+        let [record, job] = rows.try_into().map_err(|_| internal("fork replay read"))?;
+        // A destination the job registered is that job's: the start decides
+        // whether this request is the same fork.
+        let job = job
+            .as_ref()
+            .map(fork::decode_job)
+            .transpose()
+            .map_err(meta_error)?;
+        let record = record
+            .as_ref()
+            .map(codec::decode_replay_record)
+            .transpose()
+            .map_err(meta_error)?;
+        Ok((record, job))
+    }
+
+    /// Whether `request` replays a fork that already finished, from the
+    /// stored replay record and the destination's job, without running
+    /// anything. `Some` only when the record is committed for this very
+    /// signed request and the job agrees with the request on every field it
+    /// binds (see [`fork::CompletedFork`]). Any other state, including an
+    /// in-flight or failed job, is `None`: [`Self::fork_repo`] decides.
+    ///
+    /// The answer is a witness and never a result; the result of the fork
+    /// always comes from [`Self::fork_repo`]. `a` must come from
+    /// [`Self::authenticate`] with `Procedure::Fork` over
+    /// [`ForkRequest::canonical_body`].
+    ///
+    /// # Errors
+    /// The signed-body refusals of [`Self::fork_repo`]; the pipeline's
+    /// storage error when the rows cannot be read or decoded; and
+    /// `unavailable "fork evidence inconsistent"` when a committed replay
+    /// record has job evidence that is missing or disagrees with the request.
+    /// Every error is a refusal to vouch for the replay, never a bypass.
+    pub async fn completed_fork(
+        &self,
+        a: &Authenticated,
+        request: &ForkRequest,
+    ) -> Result<Option<fork::CompletedFork>, ServerError> {
+        let auth = self.fork_signed(a, request)?;
+        let dest = a.repo().repo.clone();
+        let p = self.shards.coordinator(&dest.namespace);
+        let (record, job) = self.fork_stage0_rows(&p, auth, &dest).await?;
+        match classify(record.as_ref(), &auth.fingerprint) {
+            ReplayDecision::Return(StoredResult::Fork) => job
+                .as_ref()
+                .and_then(|job| fork::CompletedFork::check(job, &request.spec_for(dest)))
+                .map(Some)
+                .ok_or_else(|| ServerError::unavailable("fork evidence inconsistent")),
+            _ => Ok(None),
+        }
+    }
+
     fn require_fork_deployment(&self) -> Result<(), ServerError> {
         if matches!(self.cfg.addressing, Addressing::Multi(_))
             && self.cfg.sharding == Sharding::D34
@@ -123,21 +216,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         a: &Authenticated,
         request: ForkRequest,
     ) -> Result<(ForkResult, ResponseMeta), ServerError> {
-        self.require_fork_deployment()?;
-        if a.write_grant.is_some() {
-            return Err(ServerError::permission_denied(
-                "a grant never authorizes ForkRepo",
-            ));
-        }
-        let auth = a
-            .auth
-            .as_ref()
-            .ok_or_else(|| ServerError::unauthenticated("fork requires auth v2 authorization"))?;
-        if auth.commitment != Commitment::Body(hash(&request.canonical_body())) {
-            return Err(ServerError::unauthenticated(
-                "request differs from the signed body",
-            ));
-        }
+        let auth = self.fork_signed(a, &request)?;
         let dest = a.repo().repo.clone();
         if request.source == dest {
             return Err(ServerError::invalid_argument(
@@ -156,25 +235,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let p = self.shards.coordinator(&dest.namespace);
 
         // Stage 0: a finished fork replays its stored result.
-        let replay_key = keys::replay(&auth.replay_scope);
-        let rows = self
-            .meta
-            .get_many(&p, &[replay_key, keys::fork_job(&dest.name)])
-            .await
-            .map_err(meta_error)?;
-        let [record, job] = rows.try_into().map_err(|_| internal("fork replay read"))?;
-        // A destination the job registered is that job's: the start decides
-        // whether this request is the same fork.
-        let job = job
-            .as_ref()
-            .map(fork::decode_job)
-            .transpose()
-            .map_err(meta_error)?;
-        let record = record
-            .as_ref()
-            .map(codec::decode_replay_record)
-            .transpose()
-            .map_err(meta_error)?;
+        let (record, job) = self.fork_stage0_rows(&p, auth, &dest).await?;
         match classify(record.as_ref(), &auth.fingerprint) {
             ReplayDecision::New => {}
             ReplayDecision::Return(StoredResult::Fork) => {

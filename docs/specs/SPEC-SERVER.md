@@ -2081,6 +2081,37 @@ do not alter the destination, and mkit cannot revoke a completed fork.
 Packs have no holders today (§13.4); when pack holders are produced the fork
 MUST record them through the same helper as an advance.
 
+**Embedded dispatch.** A fork has no Connect route, so an embedder dispatches
+it in process through one typed entry, `Pipeline::dispatch_fork` (the Workers
+adapter wraps it as `EmbeddedDispatch::dispatch_fork`, adding the deployment
+guard of the fetch path). The entry takes the request headers and the exact
+canonical body and runs, in this order: authentication as `Procedure::Fork`
+(auth v2, body commitment; no storage is read, so an unauthenticated or
+mis-signed request is refused before anything below runs); the deployment
+check (the Workers adapter runs the same sharding and addressing marker guard
+as the fetch path, `unavailable` on an incompatible stored layout); a
+completed-replay check; the embedder's optional pre-dispatch policy; and
+`fork_repo`. The policy is skipped only when the request is a replay of a
+fork that already finished: the replay record is committed for this very
+signed request, and the destination's job is `Done`, has no failure, and
+agrees with the request on its binding, destination, source, branch, tip,
+packmap and source sequence, and its stored result agrees with the job on
+source, branch, tip, packmap and source sequence. The check fails closed: a
+storage failure, a record whose job is missing, corrupt or disagrees, is an
+error (`unavailable "fork evidence inconsistent"` for a disagreement) and the
+policy neither runs nor is skipped. `Pipeline::completed_fork` exposes the same
+check as a read-only query that answers a witness (`CompletedFork`), never a
+result: the result of a fork always comes from `fork_repo`, so no result is
+returned past the pipeline's authorization and admission. Every error is the
+pipeline's `ServerError` unchanged (code, HTTP status, `Retry-After` of a
+pending fork, admission challenge details), and success carries the
+admission response headers. The entry is generic over the procedure
+(`EmbeddedProcedure`) so another procedure without a Connect route can use it.
+An embedder that signs with `mkit-client` can produce the request headers
+with `Client::sign_envelope`, which signs a procedure that has no Connect
+route; the entry has no dependency on that crate. It adds no wire change and
+no stored row.
+
 ## 10. Published view
 
 ### 10.1 Caller's view
@@ -4934,6 +4965,7 @@ client-visible error contract.
 | Version | Status | Change |
 |---|---|---|
 | 1 | draft | The membership-lag `unavailable` (§9.4, §9.7) carries an empty `MembershipNotVisible` detail; code, message and status are unchanged. Additive; no stored-format change. |
+| 1 | draft | Embedded dispatch for a fork (§9.9): a typed in-process entry that authenticates, runs the deployment guard, recognises a completed replay with fail-closed evidence and runs the embedder's pre-dispatch policy before `fork_repo`. Additive API; no wire change, no stored-row change. |
 | 1 | draft | Document scoped heavy extraction regression scheduling in §20; no runtime, wire, or conformance requirement change. |
 | 1 | draft | Server-side fork (§9.9): a durable, resumable job that gives an empty destination the published membership of one source branch (packmap chain, listed packs and external-base packs), the cleared set and the flagged packmap head that bound later publication walks, and admission bound to the job. Additive: witness boundary flag (`m`/`pm` value of 20 bytes), `fj` and `fo` rows, timer kind 16, `Procedure::Fork`; the embedder-facing `ForkRequest` with its canonical signed body, `Pipeline::fork_repo`, the source-read and destination-write authorization, a hard-bound admission charge, and additive hook fields (`Operation.fork`, `AdmitRequest.fork`). No Connect wire change; no stored-row version change. |
 | 1 | draft | Authority-generation setter and getter without a namespace record under `any`; authority-mode registration and the refusal of unregistered writes (§6.2.2); the `ag` guard on the fenced namespace-creation batch; one-batch replacement of a stale-generation upload ticket (§6.2.1). No wire change; no stored row changes. |

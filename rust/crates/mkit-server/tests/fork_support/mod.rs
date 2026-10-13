@@ -58,6 +58,8 @@ pub struct Counting {
     pub latency_ms: Arc<AtomicI64>,
     /// Runs once, before the first apply that writes a key of this class.
     pub trigger: Arc<Mutex<Option<(&'static str, Hook)>>>,
+    /// Fail every read with a transient error while set.
+    pub fail_reads: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub type Hook = Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>;
@@ -73,6 +75,7 @@ impl Counting {
             scans: Arc::default(),
             latency_ms: Arc::default(),
             trigger: Arc::default(),
+            fail_reads: Arc::default(),
         }
     }
     fn tick(&self) {
@@ -95,10 +98,16 @@ impl NamespaceStore for Counting {
     }
     async fn get(&self, p: &Partition, k: &Key) -> Result<Option<Value>, StoreError> {
         self.tick();
+        if self.fail_reads.load(Ordering::SeqCst) {
+            return Err(StoreError::Unavailable("injected read failure".into()));
+        }
         self.inner.get(p, k).await
     }
     async fn get_many(&self, p: &Partition, k: &[Key]) -> Result<Vec<Option<Value>>, StoreError> {
         self.tick();
+        if self.fail_reads.load(Ordering::SeqCst) {
+            return Err(StoreError::Unavailable("injected read failure".into()));
+        }
         self.inner.get_many(p, k).await
     }
     async fn scan_many(&self, p: &Partition, r: &[RangeScan]) -> Result<Vec<ScanPage>, StoreError> {
@@ -659,6 +668,31 @@ impl Source {
         nonce: u32,
         body: &[u8],
     ) -> mkit_server::pipeline::Authenticated {
+        let headers = self.signed_headers(procedure, nonce, body);
+        self.pipe
+            .authenticate(&mkit_server::pipeline::RequestMeta {
+                procedure,
+                header: &|name| {
+                    headers
+                        .iter()
+                        .find(|(key, _)| key == name)
+                        .map(|(_, value)| value.clone())
+                },
+                header_values: None,
+                unary_body: Some(body),
+                transport_principal: None,
+            })
+            .unwrap()
+    }
+
+    /// The auth v2 request headers of a call to this repository over `body`,
+    /// signed by the namespace owner.
+    pub fn signed_headers(
+        &self,
+        procedure: mkit_server::Procedure,
+        nonce: u32,
+        body: &[u8],
+    ) -> Vec<(String, String)> {
         use ed25519_dalek::{Signer, SigningKey};
         use mkit_core::{
             hash::{to_hex, to_hex_bytes},
@@ -683,7 +717,7 @@ impl Source {
             nonce: &nonce,
         };
         let signature = owner.sign(&envelope.digest().unwrap());
-        let headers = [
+        [
             ("x-envelope-version", "2".to_owned()),
             ("x-audience", AUDIENCE.to_owned()),
             ("x-repository", identity),
@@ -694,21 +728,10 @@ impl Source {
             ("x-created-at", now.to_string()),
             ("x-expires-at", expires.to_string()),
             ("idempotency-key", nonce),
-        ];
-        self.pipe
-            .authenticate(&mkit_server::pipeline::RequestMeta {
-                procedure,
-                header: &|name| {
-                    headers
-                        .iter()
-                        .find(|(key, _)| *key == name)
-                        .map(|(_, value)| value.clone())
-                },
-                header_values: None,
-                unary_body: Some(body),
-                transport_principal: None,
-            })
-            .unwrap()
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value))
+        .collect()
     }
 
     async fn upload(&mut self, bytes: Vec<u8>, nonce: u32, branch: &str) -> Hash {

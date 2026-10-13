@@ -3563,6 +3563,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "connectrpc",
+ "ed25519-dalek",
  "futures",
  "http",
  "http-body",

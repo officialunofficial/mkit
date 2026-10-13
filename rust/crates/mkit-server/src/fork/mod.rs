@@ -13,6 +13,7 @@
 
 pub mod boundary;
 mod closure;
+mod completed;
 mod copy;
 mod job;
 mod plan;
@@ -24,6 +25,7 @@ mod settle;
 pub(crate) use plan::read_published;
 
 pub(crate) use crate::store::CONTENT_APPLY_WINDOW_MS as CONTENT_WINDOW;
+pub use completed::CompletedFork;
 pub use job::{ForkTimer, StartOutcome, StepReport, plan_bytes, start, start_with, step};
 pub use request::ForkRequest;
 pub use settle::SettleV1;

@@ -76,6 +76,7 @@ mkit-worker-common = { path = "../../../apps/mkit-worker-common" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 mkit-attest = { path = "../mkit-attest" }
+ed25519-dalek = { version = "3", default-features = false, features = ["alloc", "zeroize"] }
 mkit-server = { version = "0.5", path = "../mkit-server", features = ["memory"] }
 mkit-server-conformance = { path = "../mkit-server-conformance" }
 # `RusqliteConn` under the simulated Durable Object connection.
