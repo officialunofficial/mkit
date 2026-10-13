@@ -40,6 +40,15 @@ collect the applicable entries between their old and new immutable pins.
   and clients that clamp to one second behave as before. No wire or stored-format
   change and no store reset. Upload-time job creation remains a design follow-up.
 
+- Ref listings in `mkit-client`, `mkit-sync`, and `mkit-transport-connect`
+  share ordering, duplicate, cursor-cycle, and resource checks. Cursors are
+  capped at 4 KiB; retained state is charged to a 128 MiB budget, including
+  cursor digests, names, and collection overhead. Complete listings stop at
+  100,000 pages or a caller's lower cap. Invalid listings return each
+  driver's invalid-response error (`mkit-client::Error::Invalid`, including
+  page-cap exhaustion that previously returned `Error::Limit`). Entry-point
+  signatures and wire formats stay unchanged; no store reset is required.
+
 - Scheduled Decode, EmitIndex, and inline index writes share per-object takedown
   denial waves of at most six, after inventory staging and before provisional
   rows or the direct index apply. The first failing object in batch order still
@@ -61,6 +70,10 @@ collect the applicable entries between their old and new immutable pins.
 - `NativeHttp` exposes independent `with_metadata_timeout` and
   `with_transfer_timeout` budgets and `send_typed` for native errors, including
   `NativeHttpError::UnsupportedAcceptEncoding`. `with_timeout` sets both budgets.
+
+- `ConnectTransport::list_refs_with_page_limit` accepts a lower caller page cap,
+  clamped to the fixed 100,000-page ceiling. Existing listing entry points keep
+  their fixed cursor and retained-state caps.
 
 - Typed `mkit.transport.v1.MembershipNotVisible` Connect error detail (an empty
   message) on the repository-membership-lag `unavailable`, emitted at every

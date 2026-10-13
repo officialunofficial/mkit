@@ -244,6 +244,15 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Client<'_, T, S, C, O> 
                 })
             })
             .collect::<Result<Vec<_>, Error>>()?;
+        mkit_core::ref_listing::validate_page(refs.iter().map(|entry| entry.name.as_str()))
+            .map_err(|_| Error::Invalid("ref listing order"))?;
+        if page
+            .next_page_token
+            .as_ref()
+            .is_some_and(|token| token.len() > mkit_core::ref_listing::MAX_CURSOR_BYTES)
+        {
+            return Err(Error::Invalid("ref listing cursor"));
+        }
         let next_page_token = page.next_page_token.filter(|token| !token.is_empty());
         reply(Ok((
             RefPage {
@@ -258,23 +267,28 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Client<'_, T, S, C, O> 
     /// Every ref under `prefix`, following page tokens for at most `max_pages`.
     ///
     /// # Errors
-    /// A failed page, or [`Error::Limit`] if the listing is longer.
+    /// A failed page, or [`Error::Invalid`] for ordering, cursor, or resource violations.
     pub async fn list_all_refs(
         &self,
         prefix: &str,
         max_pages: u32,
     ) -> Result<Vec<NamedRef>, Error> {
-        let mut out = Vec::new();
-        let mut token = String::new();
-        for _ in 0..max_pages {
-            let page = self.list_refs(prefix, 0, &token, None).await?.value;
-            out.extend(page.refs);
-            match page.next_page_token {
-                Some(next) => token = next,
-                None => return Ok(out),
+        let mut listing = mkit_core::ref_listing::RefListing::new(max_pages);
+        while listing.can_request() {
+            let page = self
+                .list_refs(prefix, 0, listing.cursor(), None)
+                .await?
+                .value;
+            if listing
+                .push(page.refs, page.next_page_token, |entry: &mut NamedRef| {
+                    &mut entry.name
+                })
+                .map_err(|_| Error::Invalid("ref listing"))?
+            {
+                return listing.finish().map_err(|_| Error::Invalid("ref listing"));
             }
         }
-        Err(Error::Limit("ref listing pages"))
+        Err(Error::Invalid("ref listing pages"))
     }
 
     /// `ReadRef`: the ref's object id, or `None` if it does not exist.

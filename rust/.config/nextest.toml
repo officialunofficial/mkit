@@ -399,3 +399,16 @@ slow-timeout = { period = "1800s", terminate-after = 1 }
 [[profile.ignored-lane.overrides]]
 filter = 'binary(=inventory_stage_guard) and test(=decode_inventory_3000_objects_at_50ms)'
 slow-timeout = { period = "300s", terminate-after = 1 }
+
+# These new regressions exercise the full 128 MiB listing budget, including
+# real loopback HTTP. Reserve the run's threads to avoid overlapping their
+# large fixtures with other suites.
+[[profile.default.overrides]]
+filter = '(package(mkit-client) or package(mkit-sync) or package(mkit-transport-connect)) and test(shared_listing_adversaries)'
+threads-required = "num-test-threads"
+slow-timeout = { period = "300s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = '(package(mkit-client) or package(mkit-sync) or package(mkit-transport-connect)) and test(shared_listing_adversaries)'
+threads-required = "num-test-threads"
+slow-timeout = { period = "300s", terminate-after = 1 }

@@ -38,4 +38,5 @@ thiserror = "2"
 
 
 [dev-dependencies]
+mkit-test-util = { path = "../mkit-test-util" }
 ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] }

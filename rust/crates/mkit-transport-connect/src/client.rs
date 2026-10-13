@@ -303,14 +303,6 @@ fn ref_hint(options: CallOptions, ref_name: Option<&str>) -> CallOptions {
     }
 }
 
-/// A generous termination bound: at most 100,000 pages per listing.
-/// This prevents cyclic cursors from holding a client forever.
-const MAX_LIST_REFS_PAGES: usize = 100_000;
-
-/// Bound on one listing's accumulated ref names plus 32-byte ids, so a server
-/// cannot grow a paged listing without limit.
-const MAX_LIST_REFS_BYTES: usize = 128 * 1024 * 1024;
-
 const MAX_PENDING_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
 const MIN_RENEWAL_MARGIN_MS: i64 = 30_000;
 /// Returned when a pending observer asks the poll loop to stop.
@@ -489,6 +481,64 @@ fn validate_http_scheme(url: &Url) -> TransportResult<()> {
 }
 
 impl ConnectTransport {
+    /// List refs with a caller's lower page cap, clamped to 100,000 pages.
+    /// The cursor and retained-state limits stay fixed.
+    ///
+    /// # Errors
+    /// Transport errors or `InvalidResponse` for invalid or excessive listings.
+    pub fn list_refs_with_page_limit(
+        &self,
+        prefix: &str,
+        max_pages: u32,
+    ) -> TransportResult<Vec<Ref>> {
+        let mut listing = mkit_core::ref_listing::RefListing::new(max_pages);
+        while listing.can_request() {
+            let response = self.retrying(|| {
+                self.executor.block_on(async {
+                    self.client
+                        .list_refs_with_options(
+                            ListRefsRequest {
+                                prefix: Some(prefix.to_owned()),
+                                page_token: (!listing.cursor().is_empty())
+                                    .then(|| listing.cursor().to_owned()),
+                                // The server chooses its configured page cap.
+                                ..Default::default()
+                            },
+                            self.read_options(
+                                CallOptions::default().with_timeout(self.unary_timeout),
+                            )?,
+                        )
+                        .await
+                        .map(|r| r.into_owned())
+                        .map_err(|e| map_connect_error(e, ErrorContext::Ref))
+                })
+            })?;
+            let page: Vec<Ref> = response
+                .refs
+                .into_iter()
+                .map(|entry| {
+                    Ok(Ref {
+                        name: entry.name.ok_or(TransportError::InvalidResponse)?,
+                        hash: Some(bytes_to_hash(
+                            &entry.object_id.ok_or(TransportError::InvalidResponse)?,
+                        )?),
+                    })
+                })
+                .collect::<TransportResult<_>>()?;
+            if listing
+                .push(page, response.next_page_token, |entry: &mut Ref| {
+                    &mut entry.name
+                })
+                .map_err(|_| TransportError::InvalidResponse)?
+            {
+                return listing
+                    .finish()
+                    .map_err(|_| TransportError::InvalidResponse);
+            }
+        }
+        Err(TransportError::InvalidResponse)
+    }
+
     /// Parse `mkit+https://host/project` (or loopback-only
     /// `mkit+http://…`), strip the `mkit+` prefix, and build the transport.
     ///
@@ -2370,67 +2420,7 @@ impl Transport for ConnectTransport {
     }
 
     fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>> {
-        let mut refs: Vec<Ref> = Vec::new();
-        let mut page_token = None;
-        let mut seen_tokens = std::collections::HashSet::new();
-        let mut listed_bytes = 0usize;
-        for _ in 0..MAX_LIST_REFS_PAGES {
-            let response = self.retrying(|| {
-                self.executor.block_on(async {
-                    self.client
-                        .list_refs_with_options(
-                            ListRefsRequest {
-                                prefix: Some(prefix.to_owned()),
-                                page_token: page_token.clone(),
-                                // The server chooses its configured page cap (R-105).
-                                ..Default::default()
-                            },
-                            self.read_options(
-                                CallOptions::default().with_timeout(self.unary_timeout),
-                            )?,
-                        )
-                        .await
-                        .map(|r| r.into_owned())
-                        .map_err(|e| map_connect_error(e, ErrorContext::Ref))
-                })
-            })?;
-            let page: Vec<Ref> = response
-                .refs
-                .into_iter()
-                .map(|entry| {
-                    Ok(Ref {
-                        name: entry.name.ok_or(TransportError::InvalidResponse)?,
-                        hash: Some(bytes_to_hash(
-                            &entry.object_id.ok_or(TransportError::InvalidResponse)?,
-                        )?),
-                    })
-                })
-                .collect::<TransportResult<_>>()?;
-            if let (Some(last), Some(first)) = (refs.last(), page.first())
-                && first.name <= last.name
-            {
-                return Err(TransportError::InvalidResponse);
-            }
-            if page.windows(2).any(|pair| pair[0].name >= pair[1].name) {
-                return Err(TransportError::InvalidResponse);
-            }
-            listed_bytes = page.iter().fold(listed_bytes, |acc, r| {
-                acc.saturating_add(r.name.len()).saturating_add(32)
-            });
-            if listed_bytes > MAX_LIST_REFS_BYTES {
-                return Err(TransportError::InvalidResponse);
-            }
-            refs.extend(page);
-            let Some(next) = response.next_page_token.filter(|token| !token.is_empty()) else {
-                return Ok(refs);
-            };
-            // Any repeated cursor, not only the previous one, is a cycle.
-            if !seen_tokens.insert(next.clone()) {
-                return Err(TransportError::InvalidResponse);
-            }
-            page_token = Some(next);
-        }
-        Err(TransportError::InvalidResponse)
+        self.list_refs_with_page_limit(prefix, mkit_core::ref_listing::MAX_PAGES)
     }
 
     fn advance_refs(
