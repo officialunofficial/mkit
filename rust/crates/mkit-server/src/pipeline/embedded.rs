@@ -22,6 +22,10 @@
 //!
 //! The error is the pipeline's own [`ServerError`], so status, headers
 //! (`Retry-After`) and details are those of the transport path.
+//!
+//! The pipeline records only an authentication failure and the procedure's
+//! outcome; a refusal between them (a parse, gate or evidence error) reaches
+//! the embedder unrecorded — the embedder owns telemetry for its own checks.
 
 use super::{Authenticated, HookSet, Pipeline, RequestMeta, ResponseMeta};
 use crate::error::ServerError;

@@ -4,9 +4,10 @@
 //! coordinator's storage to recognise a completed replay.
 //!
 //! [`EmbeddedDispatch`] runs, in order: authentication (no storage read), the
-//! same [`DeploymentGuard`] the fetch path runs, the pipeline's own completed
-//! replay check, the embedder's optional pre-dispatch policy (skipped only
-//! for a completed replay with consistent evidence) and the procedure. See
+//! same [`DeploymentGuard`] the fetch path runs followed by the embedder's own
+//! deployment check, the pipeline's own completed replay check, the
+//! embedder's optional pre-dispatch policy (skipped only for a completed
+//! replay with consistent evidence) and the procedure. See
 //! [`mkit_server::pipeline::EmbeddedGate`] for the contract of the two
 //! embedder checks and `Pipeline::dispatch_embedded` for the order.
 //!
