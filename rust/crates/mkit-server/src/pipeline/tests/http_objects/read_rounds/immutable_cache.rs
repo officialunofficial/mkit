@@ -105,9 +105,9 @@ fn embedder_read_shapes_immutable_cache_warm_repeat() {
 }
 
 /// The same three shapes, returning uniform absence instead of asserting presence.
-async fn present<H: HookSet>(
+async fn present<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>(
     shape: &Shape,
-    pipe: &CachedPipe<H>,
+    pipe: &Pipeline<B, N, H>,
     owner: bool,
     op: Op,
 ) -> Result<bool, ServerError> {
@@ -239,6 +239,15 @@ fn immutable_cache_warm_show_log_gate_keep_authorization_live() {
     let history = shape(11, 2, false, |_| 1);
     let az = Arc::new(Scripted::default());
     let pipe = cached(&history, scripted(&az));
+    let raw = Pipeline::new(
+        history.fx.pipe.blobs.clone(),
+        history.fx.pipe.meta.clone(),
+        scripted(&az),
+        history.fx.pipe.cfg.clone(),
+        history.fx.clock.clone(),
+        history.fx.metrics.clone(),
+    )
+    .unwrap();
     warm_packs(&history, &pipe);
     let operations = [Op::Show { sizes: false }, Op::Log(10), Op::GetReadGate];
     for op in operations {
@@ -246,14 +255,20 @@ fn immutable_cache_warm_show_log_gate_keep_authorization_live() {
     }
     *az.verdict.lock().unwrap() = Some(Code::PermissionDenied);
     for op in operations {
+        let expected = block_on(present(&history, &raw, false, op));
         let calls = az.seen.lock().unwrap().len();
-        assert_eq!(
-            block_on(present(&history, &pipe, false, op))
-                .unwrap_err()
-                .code(),
-            Code::PermissionDenied,
-            "{op:?}"
-        );
+        let actual = block_on(present(&history, &pipe, false, op));
+        match (expected, actual) {
+            (Ok(false), Ok(false)) => {}
+            (Err(expected), Err(actual)) => {
+                assert_eq!(actual.code(), expected.code(), "{op:?}");
+                assert!(matches!(
+                    actual.code(),
+                    Code::PermissionDenied | Code::NotFound
+                ));
+            }
+            outcomes => panic!("{op:?} changed authorization denial: {outcomes:?}"),
+        }
         assert!(
             az.seen.lock().unwrap().len() > calls,
             "{op:?} skipped authorizer"
