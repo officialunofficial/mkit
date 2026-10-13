@@ -151,17 +151,23 @@ automatically on every PR (`--in-diff`, scoped to `mkit-core`/
 of `mkit-attest` alone — see that workflow's header comment for why the
 full sweep doesn't (yet) cover `mkit-core`/`mkit-keystore`.
 
-Optional but recommended for repeated local rebuilds:
+For repeated local builds across Git worktrees, install sccache and use the
+opt-in recipes from the repository root:
 
 ```sh
-cargo install sccache                          # compile-output cache
-export RUSTC_WRAPPER=sccache                   # in your shell rc / .envrc
+cargo install sccache --locked
+just cargo-cached check -p mkit-core
+just build-dir-env             # print an export line for your shell profile
+just worktree-gc               # dry run for merged/gone worktrees
+just worktree-gc --apply       # clean their build output; keep source and branches
+sccache --show-stats
 ```
 
-CI does not currently use sccache (the GitHub Actions cache backend
-that powers `SCCACHE_GHA_ENABLED` has had transient outages this
-project doesn't want to gate the build on). Local sccache still gives you faster
-incremental rebuilds.
+Each worktree gets separate intermediate output under `~/.cache/mkit/build/`.
+Set `MKIT_BUILD_ROOT` to change that root. Never share `CARGO_TARGET_DIR` across
+worktrees. See [Local build cache](docs/build/local-cache.md) for requirements,
+shell setup, and cleanup safety. GitHub Actions retains its existing Cargo cache
+behavior; Cloud Build already uses sccache with its durable backend.
 
 ### Workspace layout
 

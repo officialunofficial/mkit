@@ -41,6 +41,11 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Added
 
+- Opt-in `just cargo-cached`, `just build-dir-env`, and `just worktree-gc` recipes
+  share sccache compilation results, isolate intermediates per worktree, and
+  reclaim merged/gone worktrees' build output without removing source.
+  A local configuration guard keeps CI and Docker cache paths unchanged.
+
 - `NativeHttp` exposes independent `with_metadata_timeout` and
   `with_transfer_timeout` budgets and `send_typed` for native errors, including
   `NativeHttpError::UnsupportedAcceptEncoding`. `with_timeout` sets both budgets.
