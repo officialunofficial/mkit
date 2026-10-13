@@ -105,7 +105,7 @@ fn cache_config() -> mkit_server::store::CacheConfig {
         Arc::new(mkit_server::ManualSleep::new()),
         std::time::Duration::from_millis(10),
     )
-    .unwrap()
+    .expect("valid cache conformance configuration")
 }
 
 fn cache_backend() -> mkit_server::store::MemoryImmutableCache {
