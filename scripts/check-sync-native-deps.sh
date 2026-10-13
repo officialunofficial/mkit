@@ -20,7 +20,8 @@
 # Rows checked:
 #   --no-default-features --features pack-ruzstd,connect-native  (the addon build)
 #   --no-default-features --features connect-native
-# Both are printed with their crate counts so a reviewer sees the footprint.
+# Both are printed with their crate counts so a reviewer sees the footprint,
+# and both are compiled (`cargo check --lib`).
 
 set -euo pipefail
 
@@ -64,6 +65,10 @@ check_row() {
   if [ "$want_ruzstd" = yes ]; then
     grep -q '^ruzstd ' <<<"$tree" || err "[$features] the graph lacks ruzstd"
   fi
+  # The graph is not the build: compile the row so a cfg or feature break
+  # specific to it cannot merge unnoticed.
+  (cd rust && cargo check --locked -p mkit-sync --no-default-features \
+    --features "$features" --lib) || err "[$features] does not compile"
 }
 
 check_row pack-ruzstd,connect-native yes

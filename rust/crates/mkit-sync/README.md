@@ -110,7 +110,7 @@ built-in web PKI roots unless the caller passes a `rustls::ClientConfig`.
 timer. Calling `NativeHttp` from inside another tokio runtime panics, as
 `block_on` does.
 
-There is no zstd anywhere in this feature's tree: pack decode goes through
+The channel adds no zstd: with `--no-default-features` the tree has none, and pack decode goes through
 mkit-core's `pack-ruzstd`. `scripts/check-sync-native-deps.sh` runs in CI and
 fails if `zstd`, `zstd-safe`, `zstd-sys`, `aws-lc-*`, `openssl*`,
 `native-tls`, `rustls-native-certs`, `brotli` and other compression crates,
@@ -133,7 +133,7 @@ command line's `checkout`, `reset` and `restore` use the same functions.
 | `pack-ruzstd` | no | Pure-Rust decode of v2 pack entries, for builds without `pack-zstd`. |
 | `history-mmr` | no | Publish versioned first-parent ancestry snapshots with branch writes. |
 | `client` | no | `ClientSource`, `Executor`, `FuturesExecutor`: the `mkit-client` backend. |
-| `connect-native` | no | `client` plus `NativeHttp`, `NativeClock`, `default_tls_config`. Gzip only, no zstd. |
+| `connect-native` | no | `client` plus `NativeHttp`, `NativeClock`, `default_tls_config`. Gzip only; adds no zstd of its own (build with `--no-default-features` for a tree without it). |
 
 The embedding native addon builds `--no-default-features --features
 pack-ruzstd,connect-native`.

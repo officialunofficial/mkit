@@ -197,23 +197,27 @@ fn cleartext_http_to_a_non_loopback_host_is_refused_unless_allowed() {
 }
 
 #[test]
-fn two_sequential_requests_work_against_a_server_that_closes_each_connection() {
-    // The server answers one request per connection and closes it. With an
-    // idle pool the second request could be written to the dead socket.
+fn two_sequential_requests_work_against_a_server_that_closes_after_each_response() {
+    // Keep-alive on the wire (no `connection: close`), then the server closes
+    // the socket: the second request must still succeed. (hyper also notices a
+    // closed idle connection at checkout, so this is a behaviour check, not a
+    // guard for the disabled pool, which is a conservative choice.)
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     std::thread::spawn(move || {
         for _ in 0..2 {
             let (mut stream, _) = listener.accept().unwrap();
             read_request(&mut stream);
-            let _ = stream.write_all(&response("200 OK", &[], b"ok"));
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok");
+            let _ = stream.flush();
+            // Dropped here: the connection closes although it was keep-alive.
         }
     });
     let http = NativeHttp::new().unwrap();
     let url = format!("http://{addr}/");
 
     assert_eq!(send(&http, &url, 1024).unwrap().body(), b"ok");
-    // Time for the server to have closed the first connection.
+    // Time for the server's close to reach the client.
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(send(&http, &url, 1024).unwrap().body(), b"ok");
 }
@@ -233,11 +237,15 @@ fn a_content_encoding_list_is_refused() {
 
 #[test]
 fn a_connection_failure_keeps_its_cause() {
-    // Nothing listens on port 1: the message must say why, not just
+    // Nothing listens on the port: the message must say why, not just
     // "client error (Connect)".
     let http = NativeHttp::new().unwrap();
 
-    let err = send(&http, "http://127.0.0.1:1/", 1024).unwrap_err();
+    let closed = {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let err = send(&http, &format!("http://127.0.0.1:{closed}/"), 1024).unwrap_err();
 
     assert!(err.starts_with("request failed: "), "{err}");
     assert!(

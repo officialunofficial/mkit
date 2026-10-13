@@ -21,7 +21,7 @@
 //! every transport scheme keeps working. With the `client` feature,
 //! `ClientSource` reads `mkit+https` and `mkit+http` remotes through
 //! `mkit_client::Client` with an injected signer; with `connect-native`,
-//! `NativeHttp` is a small native HTTP channel (gzip only, no zstd) for it.
+//! `NativeHttp` is a small native HTTP channel (gzip only, adding no zstd) for it.
 
 #![deny(unsafe_code)]
 #![deny(clippy::print_stdout, clippy::print_stderr)]

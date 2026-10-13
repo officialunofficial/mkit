@@ -3,7 +3,8 @@
 //!
 //! The footprint is deliberate. There is no multi-thread scheduler, no HTTP/2,
 //! no connect-RPC runtime and no zstd: a response may be `gzip` or identity
-//! and anything else is refused, so the zstd C library is never linked. The
+//! and anything else is refused, so the zstd C library is never linked by this feature (a default `pack-zstd`
+//! build links it for pack decode; build without default features). The
 //! `connect-native` dependency gate in CI enforces that.
 
 use std::sync::Arc;
@@ -34,8 +35,8 @@ type Connector = hyper_rustls::HttpsConnector<HttpConnector>;
 /// runtime that drives them. Do not call it from inside another tokio
 /// runtime.
 pub struct NativeHttp {
-    // Declared first so the pooled connections drop before the runtime that
-    // drives them.
+    // Declared first so in-flight connection tasks drop before the runtime
+    // that drives them.
     client: HyperClient<Connector, Full<Bytes>>,
     runtime: tokio::runtime::Runtime,
     timeout: Duration,
