@@ -915,6 +915,238 @@ fn push_fixture() -> (Push, Hash) {
         id,
     )
 }
+
+/// Runs the real push driver. The compact output can be captured on the former
+/// implementation and compared after extraction; it is not a planner oracle.
+#[test]
+fn packmap_driver_capture_matrix() {
+    use mkit_core::{hash::to_hex, transfer::encode_packlist};
+
+    let entries = [blob(1), blob(2)];
+    let Entry::Raw { bytes, .. } = &entries[0] else {
+        unreachable!()
+    };
+    let mut limits = Limits::from_server_info(&info(), bytes.len() as u64, 1 << 20).unwrap();
+    limits.ticket_threshold_bytes = info().begin_upload_threshold_bytes.unwrap();
+    let plan = Plan::prepare(entries, limits).unwrap();
+    let keys: Vec<Hash> = plan.pack_ids().copied().collect();
+    assert_eq!(keys.len(), 2);
+    println!("capture packs {} {}", to_hex(&keys[0]), to_hex(&keys[1]));
+
+    for (label, held, reset, conflict) in [
+        ("first", None, false, false),
+        ("append", Some(vec![[9; 32]]), false, false),
+        ("partial", Some(vec![keys[0]]), false, false),
+        ("full", Some(keys.clone()), false, false),
+        ("rollover", Some(keys.clone()), true, false),
+        ("changed-prior", Some(vec![[9; 32]]), false, true),
+    ] {
+        let prior_bytes = held
+            .as_ref()
+            .map(|packs| encode_packlist(None, packs).unwrap());
+        let prior = prior_bytes.as_deref().map(pack_key);
+        let retry_bytes = prior.map(|head| encode_packlist(Some(head), &[[8; 32]]).unwrap());
+        let retry = retry_bytes.as_deref().map(pack_key);
+        let prior_reads = Cell::new(0);
+        let advances = Cell::new(0);
+        let prior_data = prior_bytes.clone();
+        let retry_data = retry_bytes.clone();
+        let script = Script::new(&log(), move |_, request| match method(request).as_str() {
+            "GetServerInfo" => unary(&info()),
+            "UploadPack" => stream(&proto::UploadPackResponse::default()),
+            "UpdateRef" => unary(&proto::UpdateRefResponse::default()),
+            "ReadRef" => {
+                prior_reads.set(prior_reads.get() + 1);
+                let current = if conflict && prior_reads.get() > 1 {
+                    retry
+                } else {
+                    prior
+                };
+                unary(&proto::ReadRefResponse {
+                    exists: Some(current.is_some()),
+                    object_id: current.map(|id| id.to_vec()),
+                    ..Default::default()
+                })
+            }
+            "DownloadPack" => {
+                let asked =
+                    proto::DownloadPackRequest::decode_from_slice(&request.body()[5..]).unwrap();
+                let key: Hash = asked.pack_id.unwrap().try_into().unwrap();
+                let data = if Some(key) == prior {
+                    prior_data.as_ref().unwrap()
+                } else {
+                    assert_eq!(Some(key), retry);
+                    retry_data.as_ref().unwrap()
+                };
+                capture_download_reply(key, data)
+            }
+            "AdvanceRefs" => {
+                advances.set(advances.get() + 1);
+                unary(&proto::AdvanceRefsResponse {
+                    outcome: Some(if conflict && advances.get() == 1 {
+                        proto::AdvanceOutcome::PackmapConflict.into()
+                    } else {
+                        proto::AdvanceOutcome::Committed.into()
+                    }),
+                    ..Default::default()
+                })
+            }
+            other => panic!("unexpected {other}"),
+        });
+        let push = Push::new(
+            destination(),
+            "main",
+            RefWriteCondition::Match([6; 32]),
+            [4; 32],
+            if reset {
+                PackmapMode::ResetSelfContained
+            } else {
+                PackmapMode::Append {
+                    self_contained: true,
+                }
+            },
+            plan.clone(),
+            i64::MAX,
+        )
+        .unwrap();
+        assert_eq!(
+            block_on(push.run(&script, &PolicySigner::new(&log()), &TestClock::new())).unwrap(),
+            mkit_client::Outcome::Committed
+        );
+        let sent = script.seen.borrow();
+        let uploads: Vec<_> = sent
+            .iter()
+            .filter(|request| method(request) == "UploadPack")
+            .map(capture_uploaded_pack)
+            .filter(|(_, bytes)| bytes.starts_with(b"MKPL"))
+            .collect();
+        let moves: Vec<_> = sent
+            .iter()
+            .filter(|request| method(request) == "AdvanceRefs")
+            .map(|request| proto::AdvanceRefsRequest::decode_from_slice(request.body()).unwrap())
+            .collect();
+        if label == "full" {
+            assert!(uploads.is_empty());
+            assert!(moves.is_empty());
+            let update = sent
+                .iter()
+                .find(|request| method(request) == "UpdateRef")
+                .unwrap();
+            let update = proto::UpdateRefRequest::decode_from_slice(update.body()).unwrap();
+            assert_eq!(update.name.as_deref(), Some("refs/heads/main"));
+            assert_eq!(
+                update.expectation,
+                Some(proto::RefExpectation::Match.into())
+            );
+            assert_eq!(update.expected_id, Some(vec![6; 32]));
+            assert_eq!(update.new_id, Some(vec![4; 32]));
+            println!(
+                "capture {label} prior={} head-only",
+                to_hex(&prior.unwrap())
+            );
+            continue;
+        }
+        assert_eq!(uploads.len(), if conflict { 2 } else { 1 });
+        assert_eq!(moves.len(), uploads.len());
+        for (attempt, ((id, bytes), advance)) in uploads.iter().zip(&moves).enumerate() {
+            let current = if attempt == 0 { prior } else { retry };
+            let expected = encode_packlist(if reset { None } else { current }, &keys).unwrap();
+            assert_eq!(*bytes, expected, "{label}: bytes");
+            assert_eq!(*id, pack_key(&expected), "{label}: node id");
+            assert_eq!(advance.head_ref.as_deref(), Some("refs/heads/main"));
+            assert_eq!(
+                advance.head_expectation,
+                Some(proto::RefExpectation::Match.into())
+            );
+            assert_eq!(advance.head_expected_id, Some(vec![6; 32]));
+            assert_eq!(advance.head_new_id, Some(vec![4; 32]));
+            assert_eq!(
+                advance.packmap_ref.as_deref(),
+                Some("refs/mkit/packmap/main")
+            );
+            assert_eq!(
+                advance.packmap_expectation,
+                Some(if current.is_some() {
+                    proto::RefExpectation::Match.into()
+                } else {
+                    proto::RefExpectation::Missing.into()
+                })
+            );
+            assert_eq!(advance.packmap_expected_id, current.map(|id| id.to_vec()));
+            assert_eq!(advance.packmap_new_id, Some(id.to_vec()));
+            println!(
+                "capture {label} attempt={attempt} prior={} node={} cas={}",
+                current.as_ref().map_or_else(|| "missing".into(), to_hex),
+                to_hex(id),
+                if current.is_some() {
+                    "match"
+                } else {
+                    "missing"
+                }
+            );
+        }
+    }
+}
+
+fn capture_uploaded_pack(request: &Request<Vec<u8>>) -> (Hash, Vec<u8>) {
+    let mut body = request.body().as_slice();
+    let mut key = None;
+    let mut bytes = Vec::new();
+    while !body.is_empty() {
+        let length = u32::from_be_bytes(body[1..5].try_into().unwrap()) as usize;
+        let message = proto::UploadPackRequest::decode_from_slice(&body[5..5 + length]).unwrap();
+        match message.body.unwrap() {
+            proto::upload_pack_request::Body::Header(header) => {
+                key = Some(header.pack_id.unwrap().try_into().unwrap());
+            }
+            proto::upload_pack_request::Body::Chunk(chunk) => bytes.extend(chunk.data.unwrap()),
+        }
+        body = &body[5 + length..];
+    }
+    (key.unwrap(), bytes)
+}
+
+fn capture_download_reply(key: Hash, bytes: &[u8]) -> Result<Response<Vec<u8>>, String> {
+    let messages = [
+        proto::DownloadPackResponse {
+            body: Some(
+                proto::DownloadPackHeader {
+                    total_bytes: Some(bytes.len() as u64),
+                    ..Default::default()
+                }
+                .into(),
+            ),
+            ..Default::default()
+        },
+        proto::DownloadPackResponse {
+            body: Some(
+                proto::PackChunk {
+                    pack_id: Some(key.to_vec()),
+                    offset: Some(0),
+                    data: Some(bytes.to_vec()),
+                    last: Some(true),
+                    ..Default::default()
+                }
+                .into(),
+            ),
+            ..Default::default()
+        },
+    ];
+    let mut body = Vec::new();
+    for message in messages {
+        let bytes = message.encode_to_vec();
+        body.push(0);
+        body.extend_from_slice(&u32::try_from(bytes.len()).unwrap().to_be_bytes());
+        body.extend(bytes);
+    }
+    body.extend_from_slice(&[2, 0, 0, 0, 2, b'{', b'}']);
+    Ok(Response::builder()
+        .status(200)
+        .header("content-type", "application/connect+proto")
+        .body(body)
+        .unwrap())
+}
+
 fn server(
     log: &Log,
     advance: impl Fn(usize) -> Result<Response<Vec<u8>>, String> + 'static,

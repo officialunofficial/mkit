@@ -6,8 +6,7 @@
 use mkit_client::{Entry, Limits, Plan};
 use mkit_core::{
     hash::{Hash, hash, to_hex},
-    pack::pack_key,
-    transfer::encode_packlist,
+    transfer::packmap::{ChainState, plan_advance},
 };
 
 /// Entries stay under 64 bytes, so no build (with or without a zstd writer)
@@ -40,8 +39,10 @@ fn fixture() -> Vec<Entry> {
 fn ids(limits: Limits) -> (Vec<String>, String) {
     let plan = Plan::prepare(fixture(), limits).unwrap();
     let keys: Vec<Hash> = plan.pack_ids().copied().collect();
-    let node = encode_packlist(None, &keys).unwrap();
-    (keys.iter().map(to_hex).collect(), to_hex(&pack_key(&node)))
+    let node = plan_advance(ChainState::Missing, &keys, Some(limits.max_pack_bytes))
+        .unwrap()
+        .unwrap();
+    (keys.iter().map(to_hex).collect(), to_hex(&node.key))
 }
 
 #[test]

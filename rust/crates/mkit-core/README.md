@@ -100,3 +100,12 @@ For wasm32, depend on `mkit-core` with `default-features = false` to disable
 C-backed `pack-zstd`. The `ci-scripts` gate compiles that configuration and runs
 merge/revert/cherry-pick plus ancestry with `MemorySource` and `MemoryOverlay`
 on wasm32 through the existing `mkit-core-wasm-check` harness.
+
+## Packmap advance planning
+
+`transfer::packmap::plan_advance` takes a resolved chain state, new pack ids in
+apply order, and an optional node byte limit. It returns the encoded node, its
+content id, and its packmap CAS condition, or no node when only the head needs
+to move. The caller owns chain validation, self-contained reset authorization,
+rollover policy, head leases, and I/O. This pure helper adds no runtime or
+transport dependency and is available with default features disabled on wasm32.

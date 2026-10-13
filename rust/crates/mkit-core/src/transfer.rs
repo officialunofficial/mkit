@@ -26,6 +26,8 @@
 //! BMT root for a `Tree`/`ChunkedBlob` — see `crate::merkle`) is
 //! re-verified by `PackReader` before storing.
 
+pub mod packmap;
+
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::delta;

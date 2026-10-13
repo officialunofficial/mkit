@@ -2010,7 +2010,10 @@ to retained requests; reconstructing a request with the same identity preserves
 its authenticated operation and body. No result claims eternal replay retention
 or proves
 that an earlier ambiguous attempt never wrote. The native CLI retains its
-existing push path. See [the client guide](../../rust/crates/mkit-client/README.md)
+existing push I/O path. Both push drivers use the pure
+`mkit-core::transfer::packmap` planner for node bytes, idempotency, and packmap
+CAS conditions. Chain validation, rollover policy, upload, and conflict handling
+remain in the drivers; no wire or stored-format change results. See [the client guide](../../rust/crates/mkit-client/README.md)
 for bounds and the API. This library adds no wire change.
 
 The native `mkit-sync` source adapters preserve per-RPC resumable outcomes in

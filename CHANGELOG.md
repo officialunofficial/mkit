@@ -15,6 +15,11 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Changed
 
+- Share pure packmap advance planning between the protocol client and CLI in
+  `mkit-core::transfer::packmap`. Node bytes, CAS conditions, retries, and
+  driver-specific limits and errors are unchanged. No wire or stored-format
+  change; no wipe.
+
 - Workers deployment guidance recommends explicit region placement, matching
   Durable Object and R2 location hints, and caller-versus-object trace checks.
   No runtime, API, wire, or stored-format change; no store reset is required.
