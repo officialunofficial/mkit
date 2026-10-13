@@ -309,3 +309,64 @@ fn destination_accepts_both_namespace_grammars_and_refuses_others() {
         assert!(Destination::new(origin(), repository.into()).is_err());
     }
 }
+
+fn lag(code: &str, message: &str, type_urls: &[&str]) -> RemoteError {
+    RemoteError {
+        code: code.into(),
+        message: message.into(),
+        details: type_urls
+            .iter()
+            .map(|type_url| Detail {
+                type_url: (*type_url).into(),
+                value: None,
+            })
+            .collect(),
+        status: 503,
+        headers: HeaderMap::new(),
+    }
+}
+
+#[test]
+fn membership_lag_is_classified_by_the_typed_detail_alone() {
+    for url in [
+        "mkit.transport.v1.MembershipNotVisible",
+        "type.googleapis.com/mkit.transport.v1.MembershipNotVisible",
+    ] {
+        // Whatever the message says, the detail decides.
+        let error = lag("unavailable", "something else", &[url]);
+        assert!(membership_lag(&error), "{url}");
+        assert!(matches!(
+            Error::Remote(Box::new(error)).typed(),
+            Error::MembershipNotVisible
+        ));
+    }
+}
+
+#[test]
+fn membership_lag_falls_back_to_the_exact_message_for_older_servers() {
+    let error = lag("unavailable", MEMBERSHIP_LAG, &[]);
+    assert!(membership_lag(&error));
+    assert!(matches!(
+        Error::Remote(Box::new(error)).typed(),
+        Error::MembershipNotVisible
+    ));
+}
+
+#[test]
+fn membership_lag_needs_unavailable_and_a_matching_signal() {
+    for error in [
+        lag(
+            "failed_precondition",
+            MEMBERSHIP_LAG,
+            &["mkit.transport.v1.MembershipNotVisible"],
+        ),
+        lag("unavailable", "repository membership not yet visible.", &[]),
+        lag(
+            "unavailable",
+            "",
+            &["mkit.transport.v1.PendingVerification"],
+        ),
+    ] {
+        assert!(!membership_lag(&error), "{error:?}");
+    }
+}

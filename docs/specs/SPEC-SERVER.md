@@ -1530,9 +1530,14 @@ Each check reads only the membership of the same repository.
 
 For a membership-dependent miss, while the consuming ticket is younger
 than the deployment's relay-lag bound, the server MUST return retryable
-`unavailable` with public message `repository membership not yet visible`.
-The same message applies to all three checks. This temporary response
-is permitted only within that interval.
+`unavailable` with public message `repository membership not yet visible`
+and exactly one `MembershipNotVisible` detail (`mkit.transport.v1`, an
+empty message). The same message and detail apply to all three checks, and
+the ref-policy fast-forward walk (§9.7) uses them too. The response adds
+no HTTP status or `Retry-After`. This temporary response is permitted only
+within that interval. A client SHOULD classify the condition by the detail;
+it MAY fall back to the exact message for a server that predates the
+detail. No permanent response carries the detail.
 
 Once the consuming ticket is older than that bound, the server MUST
 return the permanent error of the check that missed:
@@ -1797,7 +1802,8 @@ reads and the bytes it decodes. A check that cannot prove the ancestry
 within those bounds fails closed as the policy's `permission_denied`. A
 membership-dependent miss inside §9.4's lag window, with no other path to
 the current value, is the retryable `unavailable`
-`repository membership not yet visible` and is not stored; after the
+`repository membership not yet visible` with its `MembershipNotVisible`
+detail (§9.4) and is not stored; after the
 window it is the policy denial. The window runs from the creation of the earliest consumed
 ticket, or from the signed `x-created-at` (clamped to now)
 when the write consumes no ticket. `REF_EXPECTATION_ANY` on a present
@@ -4927,6 +4933,7 @@ client-visible error contract.
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | The membership-lag `unavailable` (§9.4, §9.7) carries an empty `MembershipNotVisible` detail; code, message and status are unchanged. Additive; no stored-format change. |
 | 1 | draft | Document scoped heavy extraction regression scheduling in §20; no runtime, wire, or conformance requirement change. |
 | 1 | draft | Server-side fork (§9.9): a durable, resumable job that gives an empty destination the published membership of one source branch (packmap chain, listed packs and external-base packs), the cleared set and the flagged packmap head that bound later publication walks, and admission bound to the job. Additive: witness boundary flag (`m`/`pm` value of 20 bytes), `fj` and `fo` rows, timer kind 16, `Procedure::Fork`; the embedder-facing `ForkRequest` with its canonical signed body, `Pipeline::fork_repo`, the source-read and destination-write authorization, a hard-bound admission charge, and additive hook fields (`Operation.fork`, `AdmitRequest.fork`). No Connect wire change; no stored-row version change. |
 | 1 | draft | Authority-generation setter and getter without a namespace record under `any`; authority-mode registration and the refusal of unregistered writes (§6.2.2); the `ag` guard on the fenced namespace-creation batch; one-batch replacement of a stale-generation upload ticket (§6.2.1). No wire change; no stored row changes. |

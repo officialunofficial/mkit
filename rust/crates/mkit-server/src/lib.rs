@@ -67,8 +67,8 @@ pub mod upload;
 pub mod url_token;
 
 pub use error::{
-    ADMISSION_CHALLENGE_TYPE, Code, ErrorDetail, HistoryStateLimit, InvalidHeader, Redacted,
-    ServerError,
+    ADMISSION_CHALLENGE_TYPE, Code, ErrorDetail, HistoryStateLimit, InvalidHeader,
+    MEMBERSHIP_NOT_VISIBLE_TYPE, Redacted, ServerError,
 };
 #[cfg(any(test, feature = "memory"))]
 pub use memory::{MemoryBlobStore, MemoryFault, MemoryKv, MemoryPackSink};

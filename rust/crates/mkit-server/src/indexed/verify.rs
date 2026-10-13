@@ -52,14 +52,14 @@ fn decode_failure(error: ServerError, already_verified: bool, pack: &Hash) -> Se
 }
 pub(super) fn closure_error(now: u64, created: u64, bound: u64) -> ServerError {
     if resolve::lagged(now, created, bound) {
-        ServerError::unavailable("repository membership not yet visible")
+        ServerError::membership_not_visible()
     } else {
         ServerError::invalid_argument("open closure")
     }
 }
 pub(super) fn packlist_error(now: u64, created: u64, bound: u64) -> ServerError {
     if resolve::lagged(now, created, bound) {
-        ServerError::unavailable("repository membership not yet visible")
+        ServerError::membership_not_visible()
     } else {
         ServerError::invalid_argument("packlist lists a pack that is not in this repository")
     }

@@ -28,6 +28,16 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Added
 
+- Typed `mkit.transport.v1.MembershipNotVisible` Connect error detail (an empty
+  message) on the repository-membership-lag `unavailable`, emitted at every
+  site that answers `repository membership not yet visible` (delta-base,
+  closure and packlist checks, and the ref-policy fast-forward walk). Code,
+  message and HTTP status are unchanged, and no `Retry-After` is added.
+  `mkit-client` and `mkit-transport-connect` classify by the detail first and
+  keep the exact message match as a documented fallback for older servers.
+  `mkit-server` gains `ServerError::membership_not_visible()` and
+  `MEMBERSHIP_NOT_VISIBLE_TYPE`. The proto change is additive (`buf breaking`
+  clean). No stored-format change and no store reset.
 - `mkit-client`: host policy seams (additive API). `Signer::sign_operation`
   (defaults to `sign`) receives a `SigningRequest` (procedure, audience, repository,
   parsed `ContentCommitment`, attempt) and may refuse with `SignError::Refused`;

@@ -1,6 +1,6 @@
 const MAX_CHAIN_PACKS: usize = crate::read::MAX_CHAIN_PACKS;
 use crate::calls;
-use crate::connect::{Built, Opts, RESPONSE_LIMIT, Rpc, pending_delay};
+use crate::connect::{Built, Opts, RESPONSE_LIMIT, Rpc, membership_lag, pending_delay};
 use crate::seams::{NoObserver, Observer};
 use crate::{
     Clock, Destination, Error, HttpTransport, Plan, Signer,
@@ -569,10 +569,7 @@ pub(crate) async fn advance<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
                     lag_start = None;
                     renewed_after_unauthenticated = false;
                     delay
-                } else if !message.ticket_ids.is_empty()
-                    && error.code == "unavailable"
-                    && error.message == "repository membership not yet visible"
-                {
+                } else if !message.ticket_ids.is_empty() && membership_lag(&error) {
                     let start = *lag_start.get_or_insert(now);
                     if now.saturating_sub(start) >= 60_000 {
                         return Err(Error::Remote(error));

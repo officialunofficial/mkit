@@ -513,10 +513,7 @@ fn unknown_type_and_foreign_packlist_follow_exact_errors() {
         &clock,
     )
     .unwrap_err();
-    assert_eq!(
-        error.public_message(),
-        "repository membership not yet visible"
-    );
+    crate::error::assert_membership_not_visible(&error);
     // The unavailable attempt releases its lease. The same ticket reaches
     // the permanent answer exactly at the lag boundary.
     clock.advance(i64::try_from(IndexedConfig::default().relay_lag_bound_ms).unwrap());
@@ -1420,4 +1417,21 @@ fn every_surplus_consumed_delta_exports_its_external_source_pack() {
     )
     .unwrap();
     assert_eq!(staged.external_bases, BTreeSet::from([base_pack]));
+}
+
+#[test]
+fn indexed_membership_lag_sites_carry_the_typed_detail() {
+    use crate::error::assert_membership_not_visible as assert_lag;
+    // Inside the lag bound, every indexed miss is the typed answer; at the
+    // bound it becomes the permanent, detail-free refusal.
+    assert_lag(&super::resolve::missing_base(0, 0, 10));
+    assert_lag(&super::verify::closure_error(0, 0, 10));
+    assert_lag(&super::verify::packlist_error(0, 0, 10));
+    for permanent in [
+        super::resolve::missing_base(10, 0, 10),
+        super::verify::closure_error(10, 0, 10),
+        super::verify::packlist_error(10, 0, 10),
+    ] {
+        assert!(permanent.details().is_empty());
+    }
 }

@@ -160,6 +160,20 @@ pub(crate) fn pending_verification_delay(err: &ConnectError) -> Option<std::time
     )))
 }
 
+/// Whether `err` is the membership-lag `unavailable`. The typed
+/// `MembershipNotVisible` detail decides; the exact public message is a
+/// fallback for servers that predate the detail.
+pub(crate) fn is_membership_lag(err: &ConnectError) -> bool {
+    err.code == ErrorCode::Unavailable
+        && (err.details.iter().any(|detail| {
+            detail
+                .type_url
+                .strip_prefix("type.googleapis.com/")
+                .unwrap_or(&detail.type_url)
+                == "mkit.transport.v1.MembershipNotVisible"
+        }) || err.message.as_deref() == Some("repository membership not yet visible"))
+}
+
 /// Longest wait `Retry-After` can ask for; the shortest is 1 s.
 const RETRY_AFTER_MIN: std::time::Duration = std::time::Duration::from_secs(1);
 const RETRY_AFTER_MAX: std::time::Duration = std::time::Duration::from_secs(60);
@@ -554,6 +568,31 @@ mod tests {
             pending_verification_delay(&pending_error(None)),
             Some(std::time::Duration::from_millis(1_000))
         );
+    }
+
+    #[test]
+    fn membership_lag_is_the_typed_detail_or_the_legacy_message() {
+        let detail = |type_url: &str| connectrpc::ErrorDetail {
+            type_url: type_url.to_owned(),
+            value: None,
+            debug: None,
+        };
+        // The detail alone decides, bare or prefixed, whatever the message.
+        for url in [
+            "mkit.transport.v1.MembershipNotVisible",
+            "type.googleapis.com/mkit.transport.v1.MembershipNotVisible",
+        ] {
+            let typed = ConnectError::unavailable("other").with_detail(detail(url));
+            assert!(is_membership_lag(&typed), "{url}");
+        }
+        // The exact message alone is the fallback for older servers.
+        let legacy = ConnectError::unavailable("repository membership not yet visible");
+        assert!(is_membership_lag(&legacy));
+        // Neither signal, or a different code, is not a lag.
+        assert!(!is_membership_lag(&ConnectError::unavailable("other")));
+        let wrong_code = ConnectError::new(ErrorCode::Internal, "other")
+            .with_detail(detail("mkit.transport.v1.MembershipNotVisible"));
+        assert!(!is_membership_lag(&wrong_code));
     }
 
     #[test]

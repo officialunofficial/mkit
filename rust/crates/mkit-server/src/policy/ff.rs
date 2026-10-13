@@ -231,9 +231,7 @@ impl<B: BlobStore, S: NamespaceStore> Walk<'_, B, S> {
         }
         let now = u64::try_from(self.clock.now_ms()).unwrap_or(0);
         if missed && resolve::lagged(now, created_ms, self.cfg.relay_lag_bound_ms) {
-            return Err(ServerError::unavailable(
-                "repository membership not yet visible",
-            ));
+            return Err(ServerError::membership_not_visible());
         }
         Ok(Verdict::NotDescendant)
     }

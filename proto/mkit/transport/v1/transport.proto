@@ -555,6 +555,12 @@ message PendingVerification {
   uint32 retry_after_ms = 1;   // server's suggested poll interval, 1000..=60000
 }
 
+// Detail on an `unavailable` answer whose repository membership is not yet
+// visible inside the relay-lag window (SPEC-SERVER §9.4; SPEC-TRANSPORT-CONNECT
+// §5). The condition is carried by the type; the message has no fields and
+// retrying with the same nonce is safe.
+message MembershipNotVisible {}
+
 // Signed takedown notice used as a Connect error detail and on visible refs.
 // The sole field is the exact DSSE JSON envelope (SPEC-SERVER §14.6).
 message RedactionNotice {

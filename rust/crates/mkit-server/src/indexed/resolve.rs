@@ -66,7 +66,7 @@ pub fn lagged(now_ms: u64, created_at_ms: u64, bound_ms: u64) -> bool {
 #[must_use]
 pub fn missing_base(now_ms: u64, created_at_ms: u64, bound_ms: u64) -> ServerError {
     if lagged(now_ms, created_at_ms, bound_ms) {
-        ServerError::unavailable("repository membership not yet visible")
+        ServerError::membership_not_visible()
     } else {
         ServerError::failed_precondition("delta base not available in this repository")
     }
