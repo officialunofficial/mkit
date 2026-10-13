@@ -2012,3 +2012,11 @@ or proves
 that an earlier ambiguous attempt never wrote. The native CLI retains its
 existing push path. See [the client guide](../../rust/crates/mkit-client/README.md)
 for bounds and the API. This library adds no wire change.
+
+The native `mkit-sync` source adapters preserve per-RPC resumable outcomes in
+backend-neutral `SourceError`, carried by `SyncError::Source`; they never sleep
+or retry them. Raw Connect failures retain code, message, details, HTTP status,
+and response headers for host policy. An observed signed `Client` also works
+as a `ClientSource`; reads do not invoke its write observer. This adapter API
+does not change the wire contract or the synchronous Connect transport's own
+polling policy.

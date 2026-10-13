@@ -72,6 +72,7 @@ connect-native = [
 
 [dev-dependencies]
 mkit-test-util = { path = "../mkit-test-util" }
+http = "1"
 mkit-transport-memory = { path = "../mkit-transport-memory" }
 # The local-server tests (feature `connect-native`): a real in-process
 # mkit-server pipeline served over loopback.

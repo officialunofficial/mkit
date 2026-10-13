@@ -791,6 +791,28 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Breaking (toward 0.6)
 
+- [embedder: breaking API] `mkit-sync::RemoteSource` read methods now return
+  backend-neutral `SourceError`; `SyncError::Transport` is replaced by
+  `SyncError::Source`, and `ErrorClassifier` receives `&SourceError`.
+  Contextual `RepositoryNotFound` and `AdvertisedPackMissing` errors gain a
+  source cause; `PackChainInvalid` gains an optional source cause. The CLI
+  library's public `DispatchError` gains `Source` and retains the same
+  contextual causes: `RepositoryNotFound` and `AdvertisedPackMissing` gain
+  `source`, and `PackChainInvalid` gains an optional `source`.
+  Migration: update source implementations and exhaustive error matches;
+  adapt core transport failures with `SourceError::from`. Update CLI error
+  constructors and matches for the new variants and cause fields. No shims,
+  wire or stored-format change; wipe: no. Pending verification, membership lag,
+  retry hints, payment challenges, and signing failures remain typed. Raw
+  Connect failures retain code, message, details, status, and response headers.
+  `SourceError::class()` separates refusal, transient failure, and resumable
+  host action; sync never sleeps or retries these outcomes. Core's
+  non-exhaustive `TransportError` gains `PendingVerification`,
+  `MembershipNotVisible`, and `RetryAfter` for host-driven transports;
+  existing transport retry behavior is unchanged. `ClientSource` gains a
+  defaulted observer parameter and accepts observed signed clients. Existing
+  CLI error output and exit codes stay unchanged; no printed-text changes.
+
 - `NativeHttp` now defaults to 30 seconds for metadata and 300 seconds for
   `UploadPack`, `UploadPart` and `DownloadPack`, including response receipt,
   instead of ten minutes for every request. Migration: set the independent

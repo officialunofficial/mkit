@@ -43,6 +43,7 @@ mod pull;
 #[doc(hidden)]
 pub mod restore_fanout;
 mod source;
+mod source_error;
 mod stage;
 mod verify;
 pub mod worktree;
@@ -65,6 +66,7 @@ pub use native::{
 pub use observer::{NoopObserver, SyncEvent, SyncObserver};
 pub use pull::{PullOutcome, PullReport, fetch, pull};
 pub use source::{ErrorClassifier, RemoteSource, TransportSource};
+pub use source_error::{FailureClass, RemoteDetail, RemoteFailure, SourceError};
 
 use mkit_core::store::SyncPolicy;
 

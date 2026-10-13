@@ -7,7 +7,7 @@
 //! already in the store when its pack is unpacked.
 
 use mkit_core::hash::Hash;
-use mkit_core::protocol::{PackKey, TransportError};
+use mkit_core::protocol::PackKey;
 use mkit_core::transfer;
 
 use crate::error::SyncError;
@@ -61,7 +61,9 @@ pub(crate) fn download_packlist_node(
 ) -> Result<transfer::PackListNode, SyncError> {
     let requested = PackKey::from_hash(key);
     let bytes = source.download_blob_via_ref(&requested, ref_name)?;
-    requested.verify_bytes(&bytes)?;
+    requested
+        .verify_bytes(&bytes)
+        .map_err(crate::SourceError::from)?;
     Ok(transfer::decode_packlist(&bytes)?)
 }
 
@@ -83,6 +85,7 @@ pub fn walk_pack_chain(
 ) -> Result<Vec<transfer::PackListNode>, SyncError> {
     let invalid = || SyncError::PackChainInvalid {
         branch: branch.to_owned(),
+        source: None,
     };
     let mut nodes = Vec::new();
     let mut pack_count = 0usize;
@@ -101,12 +104,15 @@ pub fn walk_pack_chain(
             Ok(n) => n,
             // A referenced-but-undeliverable / undecodable node = broken
             // chain (distinct from a transient transport error).
-            Err(
-                SyncError::Transport(
-                    TransportError::PackNotFound | TransportError::InvalidResponse,
-                )
-                | SyncError::PackList(_),
-            ) => return Err(invalid()),
+            Err(SyncError::Source(error))
+                if error.is_not_found() || error.is_invalid_response() =>
+            {
+                return Err(SyncError::PackChainInvalid {
+                    branch: branch.to_owned(),
+                    source: Some(error),
+                });
+            }
+            Err(SyncError::PackList(_)) => return Err(invalid()),
             Err(e) => return Err(e),
         };
         pack_count = pack_count

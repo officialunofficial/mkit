@@ -2721,3 +2721,23 @@ or inconsistent refs to a caller.
 
 **Enforced by:** the shared accumulator, `Client::list_refs` page validation,
 core budget/page-cap tests, and `shared_listing_adversaries` in each driver.
+
+## Sync source outcomes retain host scheduling evidence
+
+**Always:** `RemoteSource` returns backend-neutral `SourceError`. Verification
+and visibility waits, retry hints, payment challenges, signing failures, and raw
+Connect code/message/details/status/headers survive the client adapter and
+`SyncError::Source`. Classified core transport errors map explicitly. Sync
+returns resumable outcomes without sleeping or retrying; refusal and transient
+failure remain distinct. Observed signed clients compose without read callbacks.
+
+**Because:** the host owns scheduling and admission policy, and deterministic
+channel refusals must not become retryable connection failures.
+
+**If violated:** hosts lose recovery evidence or retry terminal refusals, and
+configured clients cannot be used through the sync adapter.
+
+**Enforced by:** `mkit-sync` source adapter tests for both backends, remote
+metadata/overload tests, and `observed_signed_client_composes_as_source`.
+CLI transport display parity and the existing CLI golden suites retain output
+and exit-code behavior. No authorization, wire, or stored-format boundary moves.

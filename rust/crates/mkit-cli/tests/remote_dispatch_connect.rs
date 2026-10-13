@@ -1011,6 +1011,7 @@ fn list_refs_not_found_names_the_repository_and_origin() {
     let remote_dispatch::DispatchError::RepositoryNotFound {
         identity,
         origin: observed,
+        ..
     } = &error
     else {
         panic!("expected repository-not-found error, got {error:?}");
@@ -1056,6 +1057,7 @@ fn push_not_found_names_the_repository_for_each_write() {
         let remote_dispatch::DispatchError::RepositoryNotFound {
             identity,
             origin: observed,
+            ..
         } = &error
         else {
             panic!("{procedure}: expected repository-not-found error, got {error:?}");
