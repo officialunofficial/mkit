@@ -2094,9 +2094,9 @@ completed-replay check; the embedder's optional pre-dispatch policy; and
 `fork_repo`. The policy is skipped only when the request is a replay of a
 fork that already finished: the replay record is committed for this very
 signed request, and the destination's job is `Done`, has no failure, and
-agrees with the request on its binding, destination, source, branch, tip,
-packmap and source sequence, and its stored result agrees with the job on
-source, branch, tip, packmap and source sequence. The check fails closed: a
+agrees with the request on its binding, destination, source, branch and tip,
+and its stored result agrees with the job on source, branch, tip, packmap and
+source sequence. The check fails closed: a
 storage failure, a record whose job is missing, corrupt or disagrees, is an
 error (`unavailable "fork evidence inconsistent"` for a disagreement) and the
 policy neither runs nor is skipped. `Pipeline::completed_fork` exposes the same
