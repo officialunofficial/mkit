@@ -2,6 +2,7 @@
 #![allow(clippy::unwrap_used)] // Invalid fixtures must fail immediately.
 use super::*;
 use crate::memory::{MemoryBlobStore, MemoryKv, MemoryPackSink};
+use crate::store::PackSink;
 use crate::{ManualClock, ManualSleep};
 use futures::executor::block_on;
 use std::sync::atomic::{AtomicUsize, Ordering};

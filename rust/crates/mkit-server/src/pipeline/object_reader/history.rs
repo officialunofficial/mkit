@@ -5,6 +5,7 @@ use super::{
     ServerError, SliceBudget, TakedownVerdict, ViewStore, denied, exhausted, failure, inventory,
     ms, resolution_failure, resolve, settle,
 };
+use crate::store::probe_read_step as read_step;
 use mkit_core::object::{EntryMode, Object, TreeEntry};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -220,7 +221,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         let calls = SliceBudget::new(OBJECT_READER_CALLS);
         let admission = crate::store::read_io::ReadIo::new();
         let mut decode = Budget(self.cfg.http_decode_budget);
-        let result = crate::store::probe_read_step!(
+        let result = read_step!(
             "history_proof",
             self.history_nodes(
                 session,
@@ -370,7 +371,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
     ) -> Result<Option<Hash>, ServerError> {
         let started = ms(self.pipe.clock.now_ms());
         session.io.calls.charge_many(2).map_err(|_| exhausted())?;
-        let authority = crate::store::probe_read_step!("authorize", self.authorize(calls)).await?;
+        let authority = read_step!("authorize", self.authorize(calls)).await?;
         let writer = authority.is_some();
         session
             .proofs
@@ -390,7 +391,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             policy: self.pipe.publication_policy.as_deref(),
         };
         let shard = self.pipe.shards.ref_shard(&self.repo, reference);
-        let result = crate::store::probe_read_step!(
+        let result = read_step!(
             "ref_capture",
             crate::store::read::read_ref(&view, &shard, &self.repo.name, reference)
         )
@@ -424,7 +425,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             "proved_nodes requires deduplicated ids"
         );
         session.io.calls.charge_many(2).map_err(|_| exhausted())?;
-        let authority = crate::store::probe_read_step!("authorize", self.authorize(calls)).await?;
+        let authority = read_step!("authorize", self.authorize(calls)).await?;
         let writer = authority.is_some();
         session.proofs.bind(
             &self.identity,
@@ -459,7 +460,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 .into_iter()
                 .collect();
             let targets: BTreeSet<Hash> = unique.iter().copied().collect();
-            crate::store::probe_read_step!(
+            read_step!(
                 "live_security_revalidation",
                 proofs.revalidate(&meta, &self.repo, self.seams.takedown.as_ref(), &targets)
             )
@@ -493,7 +494,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 metrics: self.pipe.metrics.as_ref(),
                 caps: Caps::Reader,
             };
-            let (located, _) = crate::store::probe_read_step!(
+            let (located, _) = read_step!(
                 "locate",
                 resolve::locate_ids(&env, &contained, resolve::OnCap::Fail)
             )
@@ -505,7 +506,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 return Ok(all_none());
             }
             let guarded_locations: Vec<_> = locations.iter().map(|(id, loc)| (*id, *loc)).collect();
-            crate::store::probe_read_step!(
+            read_step!(
                 "denial_prefetch",
                 checks.prefetch_locations(&guarded_locations)
             )
@@ -529,7 +530,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 .partition(|(_, loc)| loc.value.delta_base.is_none());
             let mut bytes: BTreeMap<Hash, Arc<[u8]>> = BTreeMap::new();
             if let [(id, location)] = raw.as_slice() {
-                match crate::store::probe_read_step!(
+                match read_step!(
                     "load_decode",
                     resolve::load(&env, *id, *location, &mut decode.charge.budget)
                 )
@@ -545,7 +546,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 let guards = checks.uncached_locations(
                     &locations.iter().map(|(i, l)| (*i, *l)).collect::<Vec<_>>(),
                 );
-                bytes = crate::store::probe_read_step!(
+                bytes = read_step!(
                     "load_decode",
                     resolve::load_raw_many(&env, &raw, &guards, &mut decode.charge.budget)
                 )
@@ -553,7 +554,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 .map_err(resolution_failure)?;
             }
             for (id, location) in deltas {
-                match crate::store::probe_read_step!(
+                match read_step!(
                     "load_decode",
                     resolve::load(&env, id, location, &mut decode.charge.budget)
                 )
@@ -586,15 +587,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 return Ok(all_none());
             }
             io.calls.charge_many(2).map_err(|_| exhausted())?;
-            let current =
-                crate::store::probe_read_step!("authorize", self.authorize(calls)).await?;
+            let current = read_step!("authorize", self.authorize(calls)).await?;
             proofs.bind(
                 &self.identity,
                 current,
                 ms(self.pipe.clock.now_ms()),
                 self.cfg,
             )?;
-            crate::store::probe_read_step!(
+            read_step!(
                 "live_security_revalidation",
                 proofs.revalidate(&meta, &self.repo, self.seams.takedown.as_ref(), &targets)
             )
@@ -612,7 +612,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 policy: self.pipe.publication_policy.as_deref(),
             };
             let facts = if self.pipe.cfg.takedown_denial {
-                crate::store::probe_read_step!(
+                read_step!(
                     "denial_inventory",
                     inventory::located_entries(&live_view, &serving)
                 )
@@ -627,7 +627,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     store: &quiet_meta,
                     ..live_view
                 };
-                let blocked = crate::store::probe_read_step!(
+                let blocked = read_step!(
                     "denial",
                     crate::takedown::denial::object_denials_in(
                         &live_view,
@@ -653,7 +653,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             // precedence over the membership answer.
             checks.reset();
             let packs: Vec<Hash> = serving.iter().map(|(_, loc)| loc.pack).collect();
-            let (guards, present) = crate::store::probe_read_step!(
+            let (guards, present) = read_step!(
                 "final_guard",
                 futures::future::join(checks.prefetch_locations(&serving), async {
                     if let [(_, location)] = serving.as_slice() {
@@ -735,7 +735,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         operation: &mut Budget,
     ) -> Result<Option<Node>, ServerError> {
         let ids = [id];
-        Ok(crate::store::probe_read_step!(
+        Ok(read_step!(
             "history_node_proof",
             self.proved_nodes(session, &ids, role, calls, admission, operation)
         )
@@ -842,11 +842,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 // A singleton here is the node just validated, with no await
                 // afterward. Retained pages must refresh their earlier nodes.
                 if output.len() > 1 {
-                    crate::store::probe_read_step!(
-                        "final_guard",
-                        self.final_nodes(session, &output, calls, admission)
-                    )
-                    .await?;
+                    let final_check = self.final_nodes(session, &output, calls, admission);
+                    read_step!("final_guard", final_check).await?;
                 }
                 return Ok(Some((output, complete)));
             }
@@ -871,11 +868,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         if !emitting {
             return Ok(None);
         }
-        crate::store::probe_read_step!(
-            "final_guard",
-            self.final_nodes(session, &output, calls, admission)
-        )
-        .await?;
+        let final_check = self.final_nodes(session, &output, calls, admission);
+        read_step!("final_guard", final_check).await?;
         Ok(Some((output, true)))
     }
     #[allow(clippy::too_many_arguments)] // Exact path target and operation context.
@@ -894,7 +888,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         if path.len() > options.max_depth {
             return Err(exhausted());
         }
-        let Some((mut commits, _)) = crate::store::probe_read_step!(
+        let Some((mut commits, _)) = read_step!(
             "history_proof",
             self.history_nodes(
                 session,
@@ -959,7 +953,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         };
         if options.include_witness {
             ancestors.push(node);
-            crate::store::probe_read_step!(
+            read_step!(
                 "final_guard",
                 self.final_nodes(session, &ancestors, calls, admission)
             )
@@ -984,7 +978,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             return Ok(());
         }
         session.io.calls.charge_many(2).map_err(|_| exhausted())?;
-        let authority = crate::store::probe_read_step!("authorize", self.authorize(calls)).await?;
+        let authority = read_step!("authorize", self.authorize(calls)).await?;
         let writer = authority.is_some();
         session.proofs.bind(
             &self.identity,
@@ -1006,7 +1000,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 policy: self.pipe.publication_policy.as_deref(),
             };
             let ids: BTreeSet<_> = nodes.iter().map(|node| node.id).collect();
-            crate::store::probe_read_step!(
+            read_step!(
                 "live_security_revalidation",
                 session
                     .proofs
@@ -1030,15 +1024,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 }
             }
             session.io.calls.charge_many(2).map_err(|_| exhausted())?;
-            let authority =
-                crate::store::probe_read_step!("authorize", self.authorize(calls)).await?;
+            let authority = read_step!("authorize", self.authorize(calls)).await?;
             session.proofs.bind(
                 &self.identity,
                 authority,
                 ms(self.pipe.clock.now_ms()),
                 self.cfg,
             )?;
-            crate::store::probe_read_step!(
+            read_step!(
                 "live_security_revalidation",
                 session
                     .proofs
@@ -1057,7 +1050,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 policy: self.pipe.publication_policy.as_deref(),
             };
             let facts = if self.pipe.cfg.takedown_denial {
-                crate::store::probe_read_step!(
+                read_step!(
                     "denial_inventory",
                     inventory::located_entries(&live_view, &locations)
                 )
@@ -1072,7 +1065,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 ..live_view
             };
             if self.pipe.cfg.takedown_denial
-                && !crate::store::probe_read_step!(
+                && !read_step!(
                     "denial",
                     crate::takedown::denial::object_denials_in(
                         &live_view,
@@ -1094,7 +1087,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             // this final phase: all of them share the guards' rounds. Results are
             // consumed below in node order, so precedence is unchanged.
             let packs: Vec<Hash> = nodes.iter().map(|node| node.location.pack).collect();
-            let (guards, present) = crate::store::probe_read_step!(
+            let (guards, present) = read_step!(
                 "final_guard",
                 futures::future::join(
                     checks.prefetch_locations(&locations),

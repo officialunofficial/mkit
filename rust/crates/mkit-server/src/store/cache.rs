@@ -12,7 +12,12 @@ use bytes::Bytes;
 use futures::StreamExt as _;
 use mkit_core::upload_parts::PartPlan;
 
-use super::*;
+use super::{
+    Batch, BatchOutcome, BlobBody, BlobKey, BlobMeta, BlobNamespace, BlobStore, ByteRange,
+    CommitOutcome, Cursor, Key, MAX_BLOB_PIECE_BYTES, MAX_VALUE_BYTES, MultipartBlobStore,
+    NamespaceStore, PartRef, Partition, PartitionStats, RangeScan, ReadReservation, ScanPage,
+    StoreCapabilities, StoreError, Value,
+};
 use crate::{Clock, MaybeSend, MaybeSync, Sleep, with_timeout};
 
 /// Whether a present value can survive across operations in an immutable cache.
