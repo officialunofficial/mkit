@@ -111,6 +111,21 @@ mod tests {
     use crate::error::ErrorDetail;
 
     #[test]
+    fn membership_lag_maps_to_the_bare_typed_detail() {
+        let wire = ConnectError::from(ServerError::membership_not_visible());
+        assert_eq!(
+            wire.message.as_deref(),
+            Some("repository membership not yet visible")
+        );
+        assert_eq!(wire.details.len(), 1);
+        assert_eq!(
+            wire.details[0].type_url,
+            crate::error::MEMBERSHIP_NOT_VISIBLE_TYPE
+        );
+        assert_eq!(wire.details[0].value.as_deref(), Some(""));
+    }
+
+    #[test]
     fn every_code_keeps_its_name() {
         let codes = [
             Code::Canceled,
