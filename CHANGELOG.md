@@ -15,6 +15,10 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Changed
 
+- Workers deployment guidance recommends explicit region placement, matching
+  Durable Object and R2 location hints, and caller-versus-object trace checks.
+  No runtime, API, wire, or stored-format change; no store reset is required.
+
 - Re-vendor ruzstd 0.9.1 for RUSTSEC-2026-0344, retaining the stricter RFC 8878
   bounds on compressed bodies, regenerated literals and sequence output before
   allocation. Independent workspaces resolve the patched 0.9.1 source.
