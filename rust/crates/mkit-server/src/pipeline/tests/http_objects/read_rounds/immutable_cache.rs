@@ -247,8 +247,11 @@ fn immutable_cache_warm_show_log_gate_keep_authorization_live() {
     *az.verdict.lock().unwrap() = Some(Code::PermissionDenied);
     for op in operations {
         let calls = az.seen.lock().unwrap().len();
-        assert!(
-            !block_on(present(&history, &pipe, false, op)).unwrap(),
+        assert_eq!(
+            block_on(present(&history, &pipe, false, op))
+                .unwrap_err()
+                .code(),
+            Code::PermissionDenied,
             "{op:?}"
         );
         assert!(
