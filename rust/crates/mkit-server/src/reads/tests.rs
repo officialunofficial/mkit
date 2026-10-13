@@ -190,7 +190,17 @@ fn published_branch_single_and_d34_absence_pair_and_corruption() {
         );
         row.value.packmap = None;
         put(&store, &p, key.clone(), row.encode().unwrap());
-        assert!(block_on(reads.published_branch(&repo, branch)).is_err());
+        assert_eq!(
+            block_on(reads.published_branch(&repo, branch)).unwrap(),
+            None
+        );
+        row.value.head = None;
+        row.value.packmap = Some([2; 32]);
+        put(&store, &p, key.clone(), row.encode().unwrap());
+        assert_eq!(
+            block_on(reads.published_branch(&repo, branch)).unwrap(),
+            None
+        );
         put(&store, &p, key, Value::new(vec![255]));
         assert!(block_on(reads.published_branch(&repo, branch)).is_err());
     }

@@ -185,8 +185,7 @@ impl<'a, N: NamespaceStore> ReadAccess<'a, N> {
                 published_sequence: state.published,
                 generation: state.generation,
             })),
-            (None, None) => Ok(None),
-            _ => Err(failure()),
+            _ => Ok(None),
         }
     }
 }
