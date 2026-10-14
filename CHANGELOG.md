@@ -25,6 +25,11 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Changed
 
+- `ReadAccess::recover_completed_fork` now recovers a completed fork that created
+  its destination namespace (a first fork into a new namespace) instead of failing
+  closed. Replay, reservation and settlement checks are unchanged; the namespace
+  record must also be present and well formed. Grant-epoch forks still fail
+  closed. No wire or stored-format change; no wipe.
 - Extract shares one etag-bound pack window across each slice's staged
   non-delta chunks, capped at 4 MiB plus 240 bytes of frame headers and the
   configured window limit. Frames outside the buffer use bounded per-frame
