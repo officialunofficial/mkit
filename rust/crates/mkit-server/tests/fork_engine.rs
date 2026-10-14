@@ -2694,3 +2694,618 @@ async fn a_fork_that_created_its_namespace_is_recovered_by_the_typed_read() {
         }
     }
 }
+
+// ---- Round cuts: no walk without denial, a carried plan, publish waves ----
+
+fn no_denial(
+    mut cfg: mkit_server::pipeline::PipelineConfig,
+) -> mkit_server::pipeline::PipelineConfig {
+    cfg.takedown_denial = false;
+    cfg
+}
+
+fn env_denial(source: &Source, takedown_denial: bool) -> ForkEnv<'_, Counting> {
+    ForkEnv {
+        takedown_denial,
+        ..env(source)
+    }
+}
+
+/// A source with `more` commits after the first, each a data pack and a
+/// packmap node: `2 * (more + 1)` packs.
+async fn long_source(
+    more: u32,
+    tweak: fn(mkit_server::pipeline::PipelineConfig) -> mkit_server::pipeline::PipelineConfig,
+) -> Source {
+    long_chain(more, tweak).await.0
+}
+
+/// [`long_source`] and its packs: the packmap nodes and the data packs, oldest
+/// first.
+async fn long_chain(
+    more: u32,
+    tweak: fn(mkit_server::pipeline::PipelineConfig) -> mkit_server::pipeline::PipelineConfig,
+) -> (Source, Vec<Hash>, Vec<Hash>) {
+    let mut source = Source::build_with("source", 4, tweak).await;
+    let (mut map, mut parent) = (source.packmap, source.head);
+    let (mut nodes, mut data) = (vec![map], vec![source.pack]);
+    for n in 0..more {
+        let (bytes, head, _) = tree_pack(3, 8, 1_000 + n * 10, vec![parent], b"more");
+        let pack = mkit_core::hash::hash(&bytes);
+        map = source.push(bytes, head, Some(map), &[pack]).await;
+        parent = head;
+        nodes.push(map);
+        data.push(pack);
+    }
+    (source.head, source.packmap) = (parent, map);
+    (source, nodes, data)
+}
+
+async fn drop_source_member(source: &Source, pack: Hash) {
+    source
+        .store
+        .inner
+        .apply(
+            &source.shards.membership(&source.repo, &BlobKey::pack(pack)),
+            mkit_server::Batch::new().delete(keys::published_member(&source.repo.name, &pack)),
+        )
+        .await
+        .unwrap();
+}
+
+async fn drive(
+    env: &ForkEnv<'_, Counting>,
+    dest: &RepoId,
+) -> Result<mkit_server::fork::ForkJobV1, mkit_server::fork::ForkError> {
+    for _ in 0..500 {
+        let report = mkit_server::fork::step(env, dest, &SliceBudget::new(600)).await?;
+        if report.job.finished() {
+            return Ok(report.job);
+        }
+    }
+    panic!("fork did not finish");
+}
+
+/// Plan, start (carrying the plan if asked) and drive to the end.
+async fn fork_to_end(
+    source: &Source,
+    env: &ForkEnv<'_, Counting>,
+    name: &str,
+    carry: bool,
+) -> mkit_server::fork::ForkJobV1 {
+    let spec = spec(source, name);
+    let planned = if carry {
+        mkit_server::fork::plan_fork(env, &spec).await.unwrap()
+    } else {
+        None
+    };
+    assert_eq!(
+        planned.is_some(),
+        carry,
+        "a plan is carried exactly when asked"
+    );
+    mkit_server::fork::start_planned(env, &spec, None, None, planned)
+        .await
+        .unwrap();
+    drive(env, &dest(source, name)).await.unwrap()
+}
+
+async fn job_of(source: &Source, id: &RepoId) -> mkit_server::fork::ForkJobV1 {
+    mkit_server::fork::read_job(source.store.inner.as_ref(), source.shards.as_ref(), id)
+        .await
+        .unwrap()
+        .unwrap()
+        .0
+}
+
+async fn member(source: &Source, repo: &RepoId, pack: Hash) -> Option<mkit_server::Value> {
+    source
+        .store
+        .inner
+        .get(
+            &source.shards.membership(repo, &BlobKey::pack(pack)),
+            &keys::membership(&repo.name, &pack),
+        )
+        .await
+        .unwrap()
+}
+
+async fn set_row(source: &Source, id: &RepoId, set: u8) -> Option<mkit_server::Value> {
+    source
+        .store
+        .inner
+        .get(
+            &source.shards.coordinator(&id.namespace),
+            &keys::fork_set(&id.name, set),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn without_denial_no_cleared_set_is_built_and_the_trees_phase_still_runs() {
+    for takedown_denial in [false, true] {
+        let source = Source::build_with(
+            "source",
+            10,
+            if takedown_denial { denial } else { no_denial },
+        )
+        .await;
+        let mut env = env_denial(&source, takedown_denial);
+        env.extract_min_bytes = Some(65_536);
+        let dest_id = dest(&source, "forked");
+        *source.store.mark_key.lock().unwrap() = Some(keys::fork_job(&dest_id.name));
+        let job = fork_to_end(&source, &env, "forked", true).await;
+        assert_eq!(job.phase, Phase::Done, "{:?}", job.failure);
+        let phases: Vec<_> = source
+            .store
+            .marks
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, bytes, _)| {
+                mkit_server::fork::decode_job(&mkit_server::Value::new(bytes.clone()))
+                    .unwrap()
+                    .phase
+            })
+            .collect();
+        // The manifest set is collected by the Trees phase under both modes.
+        assert!(phases.contains(&Phase::Register), "{phases:?}");
+        assert_eq!(phases.contains(&Phase::Walk), takedown_denial, "{phases:?}");
+        // Only a deployment with denial builds the cleared set; this source
+        // has no external-base packs, so no base set exists either way, and
+        // the walk queue is gone once the fork is done.
+        for set in [0_u8, 2, 3] {
+            assert_eq!(
+                set_row(&source, &dest_id, set).await.is_some(),
+                takedown_denial && set == 0,
+                "set {set} with denial {takedown_denial}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_destination_forked_without_denial_still_proves_every_inherited_pack_when_denial_is_enabled()
+ {
+    // The fork ran while denial was off, so the destination carries the
+    // boundary flag and no cleared set. A deployment that turns denial on
+    // later takes a full first walk, and the advance-time proof of every
+    // inherited pack still stops a takedown.
+    let walk_calls = |forked_with_sets: bool| async move {
+        let source = Source::build_with("source", 8, denial).await;
+        let env = env_denial(&source, forked_with_sets);
+        let job = fork_to_end(&source, &env, "forked", true).await;
+        assert_eq!(job.phase, Phase::Done, "{:?}", job.failure);
+        let id = dest(&source, "forked");
+        assert_eq!(set_row(&source, &id, 0).await.is_some(), forked_with_sets);
+        let mut remix = source.at("forked");
+        let (bytes, head) = commit_pack(source.tree, vec![], b"remix");
+        let pack = mkit_core::hash::hash(&bytes);
+        let before = source.store.calls();
+        remix.push(bytes, head, Some(source.packmap), &[pack]).await;
+        source.store.calls() - before
+    };
+    let with_sets = walk_calls(true).await;
+    let without_sets = walk_calls(false).await;
+    assert!(
+        without_sets > with_sets,
+        "{without_sets} calls without the set, {with_sets} with it"
+    );
+    for victim in ["blob", "tree", "commit", "data pack"] {
+        let source = Source::build_with("source", 8, denial).await;
+        let env = env_denial(&source, false);
+        let job = fork_to_end(&source, &env, "forked", true).await;
+        assert_eq!(job.phase, Phase::Done, "{:?}", job.failure);
+        assert!(
+            set_row(&source, &dest(&source, "forked"), 0)
+                .await
+                .is_none()
+        );
+        assert!(
+            set_row(&source, &dest(&source, "forked"), 3)
+                .await
+                .is_none()
+        );
+        let target = match victim {
+            "blob" => blob(5, 8).0,
+            "tree" => source.tree,
+            "commit" => source.head,
+            _ => source.pack,
+        };
+        block(&source, target).await;
+        let mut remix = source.at("forked");
+        let (bytes, head) = commit_pack(source.tree, vec![], b"remix");
+        let pack = mkit_core::hash::hash(&bytes);
+        assert_eq!(
+            remix
+                .try_push(bytes, head, Some(source.packmap), &[pack])
+                .await
+                .unwrap_err(),
+            "object blocked",
+            "{victim}"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn publish_waves_end_where_the_serial_publish_does_and_write_the_head_last() {
+    let source = long_source(5, no_denial).await;
+    let env = env_denial(&source, false);
+    // The store reports no read allowance: the serial path.
+    let serial = fork_to_end(&source, &env, "serial", true).await;
+    assert_eq!(serial.phase, Phase::Done, "{:?}", serial.failure);
+    source
+        .store
+        .sleep_ms
+        .store(10, std::sync::atomic::Ordering::SeqCst);
+    source
+        .store
+        .waves
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    source
+        .store
+        .record
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let waved = fork_to_end(&source, &env, "waved", true).await;
+    assert_eq!(waved.phase, Phase::Done, "{:?}", waved.failure);
+    assert_eq!(waved.result, serial.result);
+    assert_eq!(waved.packs.len(), 12);
+    let (serial_id, waved_id) = (dest(&source, "serial"), dest(&source, "waved"));
+    for pack in waved.packs.iter().map(|p| p.id) {
+        let flagged = pack == source.packmap;
+        let (a, b) = (
+            member(&source, &serial_id, pack).await.unwrap(),
+            member(&source, &waved_id, pack).await.unwrap(),
+        );
+        assert_eq!(a, b);
+        assert_eq!(Witness::decode(&b).unwrap().boundary, flagged);
+    }
+    // The head's rows are the last membership rows written.
+    let written: Vec<Hash> = source
+        .store
+        .log
+        .lock()
+        .unwrap()
+        .iter()
+        .flat_map(|(_, batch)| batch.writes.iter())
+        .filter_map(|write| match write {
+            mkit_server::Write::Put(key, _) => waved
+                .packs
+                .iter()
+                .map(|p| p.id)
+                .find(|id| *key == keys::membership(&waved_id.name, id)),
+            mkit_server::Write::Delete(_) => None,
+        })
+        .collect();
+    assert_eq!(written.len(), 12, "{written:?}");
+    assert_eq!(written.last(), Some(&source.packmap));
+    assert!(!written[..11].contains(&source.packmap));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_publish_wave_reports_its_first_failure_in_input_order_and_never_writes_the_head() {
+    use std::sync::atomic::Ordering;
+    for missing_first in [true, false] {
+        let source = long_source(4, no_denial).await;
+        source.store.sleep_ms.store(10, Ordering::SeqCst);
+        source.store.waves.store(true, Ordering::SeqCst);
+        let env = env_denial(&source, false);
+        let spec = spec(&source, "forked");
+        let planned = mkit_server::fork::plan_fork(&env, &spec).await.unwrap();
+        // The pair is planned. Nothing reads a source member again until the
+        // Publish phase, so what changes now is found there, in one wave.
+        mkit_server::fork::start_planned(&env, &spec, None, None, planned)
+            .await
+            .unwrap();
+        let dest_id = dest(&source, "forked");
+        let mut order: Vec<Hash> = job_of(&source, &dest_id)
+            .await
+            .packs
+            .iter()
+            .map(|p| p.id)
+            .filter(|id| *id != source.packmap)
+            .collect();
+        order.sort_unstable();
+        // One member is gone from the source (a fork-ending refusal); a later
+        // or an earlier one fails to read (a retryable error that completes
+        // first, since it skips the modeled latency).
+        let (gone, flaky) = if missing_first {
+            (order[1], order[3])
+        } else {
+            (order[3], order[1])
+        };
+        source
+            .store
+            .inner
+            .apply(
+                &source.shards.membership(&source.repo, &BlobKey::pack(gone)),
+                mkit_server::Batch::new().delete(keys::published_member(&source.repo.name, &gone)),
+            )
+            .await
+            .unwrap();
+        source
+            .store
+            .fail_keys
+            .lock()
+            .unwrap()
+            .push(keys::published_member(&source.repo.name, &flaky));
+        let outcome = drive(&env, &dest_id).await;
+        if missing_first {
+            let job = outcome.unwrap();
+            assert_eq!(job.phase, Phase::Failed);
+            assert_eq!(job.failure, Some(mkit_server::fork::Failure::NotFound));
+        } else {
+            assert!(
+                matches!(outcome, Err(mkit_server::fork::ForkError::Unavailable(_))),
+                "{outcome:?}"
+            );
+            let job = job_of(&source, &dest_id).await;
+            assert_eq!(job.phase, Phase::Publish);
+            // A retryable failure commits nothing of its slice: the units
+            // before it are repeated, and find their rows.
+            assert_eq!(job.cursor, 0);
+        }
+        assert!(
+            member(&source, &dest_id, source.packmap).await.is_none(),
+            "the head is written after every other member"
+        );
+        // The retryable failure ends once the read works.
+        if !missing_first {
+            source.store.fail_keys.lock().unwrap().clear();
+            let job = drive(&env, &dest_id).await.unwrap();
+            assert_eq!(job.failure, Some(mkit_server::fork::Failure::NotFound));
+            assert!(member(&source, &dest_id, source.packmap).await.is_none());
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_slice_cut_inside_a_publish_wave_resumes_with_any_driver() {
+    use std::sync::atomic::Ordering;
+    let source = long_source(5, no_denial).await;
+    source.store.sleep_ms.store(10, Ordering::SeqCst);
+    let env = env_denial(&source, false);
+    let whole = fork_to_end(&source, &env, "whole", true).await;
+    assert_eq!(whole.phase, Phase::Done, "{:?}", whole.failure);
+    let mut seen = std::collections::BTreeSet::new();
+    for (n, slice) in (70_u32..300).step_by(3).enumerate() {
+        for serial_after_cut in [false, true] {
+            source.store.waves.store(true, Ordering::SeqCst);
+            let name = format!("cut-{n}-{serial_after_cut}");
+            let spec = spec(&source, &name);
+            let planned = mkit_server::fork::plan_fork(&env, &spec).await.unwrap();
+            mkit_server::fork::start_planned(&env, &spec, None, None, planned)
+                .await
+                .unwrap();
+            let id = dest(&source, &name);
+            let mut steps = 0;
+            let job = loop {
+                steps += 1;
+                assert!(steps < 500);
+                let report = mkit_server::fork::step(&env, &id, &SliceBudget::new(slice))
+                    .await
+                    .unwrap();
+                if report.job.finished() {
+                    break report.job;
+                }
+                if report.job.phase == Phase::Publish && report.job.part >= 2 {
+                    seen.insert((report.job.part, report.job.cursor > 0));
+                    if serial_after_cut {
+                        // The driver that resumes cannot run waves.
+                        source.store.waves.store(false, Ordering::SeqCst);
+                    }
+                }
+            };
+            assert_eq!(job.phase, Phase::Done, "{:?}", job.failure);
+            assert_eq!(job.result, whole.result, "slice {slice}");
+            for pack in whole.packs.iter().map(|p| p.id) {
+                assert_eq!(
+                    member(&source, &id, pack)
+                        .await
+                        .map(|v| v.as_bytes().to_vec()),
+                    member(&source, &dest(&source, "whole"), pack)
+                        .await
+                        .map(|v| v.as_bytes().to_vec()),
+                    "slice {slice}"
+                );
+            }
+        }
+    }
+    // Cuts landed inside the write stage and inside the check stage.
+    assert!(seen.contains(&(2, true)), "{seen:?}");
+    assert!(seen.contains(&(3, true)), "{seen:?}");
+}
+
+#[tokio::test]
+async fn a_takedown_in_the_gap_between_the_plan_and_the_publish_fails_the_fork_there() {
+    // The carried plan proves no pack again until Publish, so a member that
+    // leaves the source after the plan fails the fork after registration (the
+    // destination stays registered, as for any later refusal). A job that
+    // plans itself finds the same change in its Plan phase, before anything
+    // is written.
+    for carry in [true, false] {
+        let source = Source::build_with("source", 6, no_denial).await;
+        let env = env_denial(&source, false);
+        let spec = spec(&source, "forked");
+        let planned = if carry {
+            mkit_server::fork::plan_fork(&env, &spec).await.unwrap()
+        } else {
+            None
+        };
+        source
+            .store
+            .inner
+            .apply(
+                &source
+                    .shards
+                    .membership(&source.repo, &BlobKey::pack(source.pack)),
+                mkit_server::Batch::new()
+                    .delete(keys::published_member(&source.repo.name, &source.pack)),
+            )
+            .await
+            .unwrap();
+        mkit_server::fork::start_planned(&env, &spec, None, None, planned)
+            .await
+            .unwrap();
+        let dest_id = dest(&source, "forked");
+        let job = drive(&env, &dest_id).await.unwrap();
+        assert_eq!(job.failure, Some(mkit_server::fork::Failure::NotFound));
+        let registered = source
+            .store
+            .inner
+            .get(
+                &source.shards.coordinator(&dest_id.namespace),
+                &keys::repo_record(&dest_id.name),
+            )
+            .await
+            .unwrap()
+            .is_some();
+        assert_eq!(registered, carry, "carry {carry}");
+        assert!(member(&source, &dest_id, source.packmap).await.is_none());
+    }
+}
+
+#[tokio::test]
+async fn a_plan_that_does_not_fit_one_slice_is_made_by_the_job() {
+    let source = long_source(2, no_denial).await;
+    let spec = spec(&source, "forked");
+    // Cap the calls the scratch plan may spend from above, as a request's own
+    // allowance would: a plan that cannot finish is not carried.
+    let mut found = None;
+    for limit in 3..200_u32 {
+        let outer = SliceBudget::new(limit);
+        let capped = mkit_server::indexed::budget::Budgeted::new(&source.store, &outer);
+        let env = ForkEnv {
+            store: &capped,
+            shards: source.shards.as_ref(),
+            clock: source.clock.as_ref(),
+            takedown_denial: false,
+            extract_min_bytes: None,
+            limits: ForkLimits::default(),
+        };
+        if matches!(mkit_server::fork::plan_fork(&env, &spec).await, Ok(None)) {
+            found = Some(limit);
+            break;
+        }
+    }
+    assert!(found.is_some(), "some allowance ends the plan unfinished");
+    let env = env_denial(&source, false);
+    // The job plans it itself and ends where a carried plan does.
+    mkit_server::fork::start_planned(&env, &spec, None, None, None)
+        .await
+        .unwrap();
+    let dest_id = dest(&source, "forked");
+    assert_eq!(job_of(&source, &dest_id).await.phase, Phase::Plan);
+    let planned = drive(&env, &dest_id).await.unwrap();
+    assert_eq!(planned.phase, Phase::Done, "{:?}", planned.failure);
+    let carried = fork_to_end(&source, &env, "carried", true).await;
+    assert_eq!(carried.result, planned.result);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_plan_wave_reports_its_first_failure_in_input_order() {
+    use std::sync::atomic::Ordering;
+    // The head (wave one) names its predecessor node and its data pack, which
+    // the second wave reads together, in that order.
+    for gone_first in [true, false] {
+        let (source, nodes, data) = long_chain(2, no_denial).await;
+        source.store.sleep_ms.store(10, Ordering::SeqCst);
+        source.store.waves.store(true, Ordering::SeqCst);
+        let (node, pack) = (nodes[nodes.len() - 2], data[data.len() - 1]);
+        let (gone, flaky) = if gone_first {
+            (node, pack)
+        } else {
+            (pack, node)
+        };
+        drop_source_member(&source, gone).await;
+        source
+            .store
+            .fail_keys
+            .lock()
+            .unwrap()
+            .push(keys::published_member(&source.repo.name, &flaky));
+        let outcome =
+            mkit_server::fork::plan_fork(&env_denial(&source, false), &spec(&source, "forked"))
+                .await;
+        if gone_first {
+            assert_eq!(outcome.unwrap_err(), mkit_server::fork::ForkError::NotFound);
+        } else {
+            assert!(
+                matches!(outcome, Err(mkit_server::fork::ForkError::Unavailable(_))),
+                "{outcome:?}"
+            );
+        }
+        // Without waves the same members fail the same way: the allowance
+        // changes how many reads overlap, not which failure is reported.
+        source.store.waves.store(false, Ordering::SeqCst);
+        let serial =
+            mkit_server::fork::plan_fork(&env_denial(&source, false), &spec(&source, "forked"))
+                .await;
+        assert!(
+            if gone_first {
+                matches!(serial, Err(mkit_server::fork::ForkError::NotFound))
+            } else {
+                matches!(serial, Err(mkit_server::fork::ForkError::Unavailable(_)))
+            },
+            "{serial:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_start_refuses_a_plan_whose_source_pair_moved_and_leaves_nothing() {
+    let source = Source::build_with("source", 6, no_denial).await;
+    let env = env_denial(&source, false);
+    let spec = spec(&source, "forked");
+    let planned = mkit_server::fork::plan_fork(&env, &spec).await.unwrap();
+    assert!(planned.is_some());
+    // The source's membership generation moves (a lifecycle invalidation)
+    // while its tip and packmap head stay: the plan is no longer the set the
+    // pair publishes.
+    let p = source.shards.ref_shard(&source.repo, "refs/heads/main");
+    let sequence = mkit_server::store::adapter_spi::publication::sequence_ref("refs/heads/main");
+    let key = keys::publication(&source.repo.name, &sequence);
+    let mut row = mkit_server::store::adapter_spi::publication::read(
+        source.store.inner.as_ref(),
+        &p,
+        &source.repo.name,
+        "refs/heads/main",
+    )
+    .await
+    .unwrap();
+    row.generation += 1;
+    source
+        .store
+        .inner
+        .apply(
+            &p,
+            mkit_server::Batch::new().put(key, row.encode().unwrap()),
+        )
+        .await
+        .unwrap();
+    let refused = mkit_server::fork::start_planned(&env, &spec, None, None, planned)
+        .await
+        .unwrap_err();
+    assert_eq!(refused, mkit_server::fork::ForkError::TipChanged);
+    let dest_id = dest(&source, "forked");
+    let coordinator = source.shards.coordinator(&dest_id.namespace);
+    for key in [
+        keys::fork_job(&dest_id.name),
+        keys::repo_record(&dest_id.name),
+    ] {
+        assert!(
+            source
+                .store
+                .inner
+                .get(&coordinator, &key)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    assert_eq!(
+        fork_timers(source.store.inner.as_ref(), &coordinator).await,
+        0
+    );
+}

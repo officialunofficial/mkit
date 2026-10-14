@@ -78,9 +78,10 @@ pub(crate) async fn trees<S: NamespaceStore>(
     let mut batch = trees.write(Batch::new(), &name, set::TREES, env.limits.max_set_ids)?;
     batch = manifests.write(batch, &name, set::MANIFESTS, env.limits.max_set_ids)?;
     let done = job.cursor as usize >= job.packs.len();
-    if done {
+    if done && env.takedown_denial {
         // Seed the walk and record the inherited external-base packs, which
-        // stay dependencies of any skipped object.
+        // stay dependencies of any skipped object. Without denial there is
+        // no walk, and nothing reads either set.
         let [mut queue, mut bases] =
             sets::read(&store, &coordinator, &name, [set::QUEUE, set::BASES]).await?;
         queue.insert(job.tip);
