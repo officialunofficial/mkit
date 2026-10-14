@@ -1531,6 +1531,15 @@ fn cli_http_and_real_https_match_file_push_goldens_and_fetch_pull_clone_bytes() 
         assert_eq!(rejected.status.code(), Some(1), "{scheme}: {rejected:?}");
         assert!(rejected.stdout.is_empty());
         transcript.push(endpoint_transcript(&rejected, &endpoint));
+        if let Some(proxy) = &proxy {
+            // The up-to-date and rejected pushes resolve from local tracking
+            // state. The other five commands each make several remote RPCs.
+            assert_eq!(
+                proxy.connections(),
+                5,
+                "each CLI operation must reuse its TLS connection across RPCs"
+            );
+        }
         if let Some(expected) = &expected_transcript {
             assert_eq!(&transcript, expected, "{scheme} CLI bytes");
         } else {
@@ -1544,5 +1553,193 @@ fn cli_http_and_real_https_match_file_push_goldens_and_fetch_pull_clone_bytes() 
         drop(proxy);
         shutdown.send(()).unwrap();
         server.join().unwrap();
+    }
+}
+
+// Opt in with MKIT_HTTPS_BENCH_OLD_BIN and MKIT_HTTPS_BENCH_NEW_BIN pointing
+// to separately built CLI binaries. CI still exercises the existing TLS matrix;
+// wall-clock comparisons are reported, never asserted on a shared runner.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn cli_https_latency_comparison() {
+    use mkit_core::{layout::RepoLayout, refs, store::ObjectStore};
+    use std::{
+        path::Path,
+        time::{Duration, Instant},
+    };
+    type LatencySample = (Duration, usize, usize);
+
+    let Some(old) = std::env::var_os("MKIT_HTTPS_BENCH_OLD_BIN") else {
+        return;
+    };
+    let new = std::env::var_os("MKIT_HTTPS_BENCH_NEW_BIN")
+        .expect("both CLI binaries are required for the comparison");
+    let variants = [("old", old), ("new", new)];
+    let samples: usize =
+        std::env::var("MKIT_HTTPS_BENCH_SAMPLES").map_or(5, |value| value.parse().unwrap());
+    assert!((1..=20).contains(&samples));
+    let one_way = Duration::from_millis(25);
+    let template = common::Repo::new();
+    let layout = RepoLayout::single(template.path());
+    let mut commits = Vec::new();
+    for index in 0..7 {
+        template.commit_file(
+            "file.txt",
+            format!("commit {index}\n").as_bytes(),
+            &format!("commit {index}"),
+        );
+        commits.push(refs::read_ref(&layout, "main").unwrap().unwrap());
+    }
+    let template_store = ObjectStore::open(&layout).unwrap();
+    let objects = template_store
+        .iter_object_hashes()
+        .unwrap()
+        .into_iter()
+        .map(|id| (id, template_store.read(&id).unwrap()))
+        .collect::<Vec<_>>();
+    let mut observations: BTreeMap<(&str, &str), Vec<LatencySample>> = BTreeMap::new();
+    let mut expected_transcripts = None;
+    let mut expected_packs = None;
+
+    for sample in 0..samples {
+        // Alternate order so warming and background load do not consistently
+        // favor one binary. Every operation starts in a fresh CLI process.
+        for variant in 0..variants.len() {
+            let (label, binary) = &variants[(sample + variant) % variants.len()];
+            let backend = Arc::new(MemoryTransport::new());
+            let (port, shutdown, server, _) = spawn_server(Arc::clone(&backend));
+            let proxy = https::Proxy::with_latency(port, one_way);
+            let endpoint = format!("mkit+https://localhost:{}/latency", proxy.port);
+            let seed_endpoint = format!("mkit+http://127.0.0.1:{port}/latency");
+            let source = common::Repo::new();
+            let source_layout = RepoLayout::single(source.path());
+            let source_store = ObjectStore::open(&source_layout).unwrap();
+            for (id, bytes) in &objects {
+                assert_eq!(source_store.write(bytes).unwrap(), *id);
+            }
+            let config_path = source.path().join(".mkit/config");
+            let base_config = std::fs::read_to_string(&config_path).unwrap_or_default();
+            let configure = |url: &str| {
+                std::fs::write(
+                    &config_path,
+                    format!(
+                        "{base_config}\nremote.origin.url = {url}\nremote.origin.type = http\n"
+                    ),
+                )
+                .unwrap();
+            };
+            let run = |cwd: &Path, args: &[&str]| {
+                Command::new(binary)
+                    .args(args)
+                    .current_dir(cwd)
+                    .env("XDG_CONFIG_HOME", source.xdg())
+                    .env("HOME", source.xdg())
+                    .env("MKIT_SSL_CA_FILE", https::ca_file())
+                    .env("MKIT_PACK_REBASELINE_DEPTH", "1000")
+                    .env_remove("MKIT_API_TOKEN")
+                    .output()
+                    .unwrap()
+            };
+            configure(&seed_endpoint);
+            for commit in &commits[..6] {
+                refs::write_ref(&source_layout, "main", commit).unwrap();
+                let output = run(source.path(), &["push", "origin"]);
+                assert!(output.status.success(), "seed {label}: {output:?}");
+            }
+            // Assert that clone really follows six independently published
+            // packmap nodes, rather than accidentally benchmarking one snapshot.
+            let mut node = backend.read_ref("refs/mkit/packmap/main").unwrap();
+            let mut depth = 0;
+            while let Some(id) = node {
+                let bytes = backend
+                    .download_blob_via_ref(&PackKey::from(id), "refs/heads/main")
+                    .unwrap();
+                node = mkit_core::transfer::decode_packlist(&bytes).unwrap().prev;
+                depth += 1;
+            }
+            assert_eq!(depth, 6);
+            configure(&endpoint);
+            let checkout_root = tempfile::tempdir().unwrap();
+            let checkout = checkout_root.path().join("checkout");
+            let mut transcripts = Vec::new();
+            let mut measure = |operation, cwd: &Path, args: &[&str]| {
+                let connections = proxy.connections();
+                let http2_connections = proxy.http2_connections();
+                let started = Instant::now();
+                let output = run(cwd, args);
+                let elapsed = started.elapsed();
+                assert!(output.status.success(), "{label} {operation}: {output:?}");
+                observations.entry((*label, operation)).or_default().push((
+                    elapsed,
+                    proxy.connections() - connections,
+                    proxy.http2_connections() - http2_connections,
+                ));
+                transcripts.push(endpoint_transcript(&output, &endpoint));
+            };
+            measure(
+                "clone (6-node chain)",
+                checkout_root.path(),
+                &["clone", "-o", "origin", &endpoint, "checkout"],
+            );
+            let checkout_layout = RepoLayout::single(&checkout);
+            assert_eq!(
+                refs::read_ref(&checkout_layout, "main").unwrap(),
+                Some(commits[5])
+            );
+            measure("pull (no-op)", &checkout, &["pull", "origin"]);
+            refs::write_ref(&source_layout, "main", &commits[6]).unwrap();
+            measure("push (small commit)", source.path(), &["push", "origin"]);
+            measure("pull (one commit)", &checkout, &["pull", "origin"]);
+            assert_eq!(
+                refs::read_ref(&checkout_layout, "main").unwrap(),
+                Some(commits[6])
+            );
+            assert_eq!(
+                backend.read_ref("refs/heads/main").unwrap(),
+                Some(commits[6])
+            );
+            let checkout_store = ObjectStore::open(&checkout_layout).unwrap();
+            for (id, bytes) in &objects {
+                assert_eq!(checkout_store.read(id).unwrap(), *bytes);
+            }
+            let packs = published_pack_bytes(backend.as_ref());
+            if let Some(expected) = &expected_transcripts {
+                assert_eq!(&transcripts, expected, "{label} CLI bytes and exit codes");
+                assert_eq!(
+                    &packs,
+                    expected_packs.as_ref().unwrap(),
+                    "{label} pack/packmap ids and bytes"
+                );
+            } else {
+                expected_transcripts = Some(transcripts);
+                expected_packs = Some(packs);
+            }
+            drop(proxy);
+            shutdown.send(()).unwrap();
+            server.join().unwrap();
+        }
+    }
+    println!(
+        "HTTPS: 50 ms injected RTT, verified TLS, six-node clone, {samples} samples per binary"
+    );
+    println!(
+        "| Binary | Operation | Median ms | Min–max ms | New TLS connections (min–max) | HTTP/2 connections (min–max) |"
+    );
+    println!("|---|---|---:|---:|---:|---:|");
+    for ((binary, operation), mut rows) in observations {
+        rows.sort_by_key(|row| row.0);
+        let (min_connections, max_connections) =
+            rows.iter().fold((usize::MAX, 0), |(min, max), row| {
+                (min.min(row.1), max.max(row.1))
+            });
+        let (min_http2, max_http2) = rows.iter().fold((usize::MAX, 0), |(min, max), row| {
+            (min.min(row.2), max.max(row.2))
+        });
+        println!(
+            "| {binary} | {operation} | {} | {}–{} | {min_connections}–{max_connections} | {min_http2}–{max_http2} |",
+            rows[rows.len() / 2].0.as_millis(),
+            rows[0].0.as_millis(),
+            rows[rows.len() - 1].0.as_millis()
+        );
     }
 }

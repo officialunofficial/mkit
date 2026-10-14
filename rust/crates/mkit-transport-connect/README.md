@@ -78,7 +78,7 @@ checkpoints. HTTP request budgets are clipped to the remaining advance deadline.
 | Uploads | Generated streaming calls and a part producer thread | Pull frames through a bounded channel; no producer thread |
 | Downloads | Generated streaming decoder | Incremental bounded Connect and protobuf decoding into the final pack buffer |
 | Runtime | Dedicated runtime with multiple worker threads | Current-thread runtime, driven by the synchronous caller |
-| Connections | Pooled unary connections with one stale-socket retry | Fresh connection for each exchange; the host applies the ordinary retry ladder |
+| Connections | Pooled unary connections with one stale-socket retry; fresh streamed transfers | One idle connection per origin, including streams, with a ten-second idle timeout; hyper retries only untouched requests canceled before writing starts |
 | HTTP and content coding | HTTP/1.1 or HTTP/2, gzip or zstd | HTTP/1.1, gzip or identity |
 | Request budgets | 30 seconds for metadata, 300 seconds for transfers; signing consumes the local budget | Same budgets, including signing, bounded by remaining advance time; the timeout header advertises the locally clamped remaining budget |
 | Channel failures | Connect status mapping and ordinary retry ladder | Host-owned mappings retain HTTP diagnostics, status classes, and retry counts; body-read failures and deadlines remain terminal; metadata-bound failures retain 429 retries |
@@ -90,6 +90,15 @@ next to the final pack. Generic `HttpTransport` implementations can use the
 buffered streaming fallback; the native adapter implements bounded streaming.
 Pack bytes and ids, ref conditions and moves, receipt records, CLI output, and
 exit codes remain unchanged. No server, wire, stored-format change, or wipe occurs.
+
+Reads and signed writes both reuse connections on the same owned current-thread
+runtime. Hyper's cancellation retry can recover only a request that has not
+started writing; it preserves the original request, including signed headers,
+nonce, body, and streaming receiver. A failure after writing starts returns to
+the host's existing recovery policy. Idle checkout checks elapsed monotonic time
+even when the runtime is paused, and TCP_NODELAY matches the previous adapter.
+See the [CLI HTTPS latency comparison](../../../docs/operations/connect-cli-latency.md)
+for measured clone, pull, and push behavior and reproduction instructions.
 
 The host response profile retains the previous metadata limit of 4 MiB and its
 acceptance of successful 2xx responses, missing content types, protobuf content

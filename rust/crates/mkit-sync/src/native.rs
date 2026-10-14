@@ -20,7 +20,7 @@ use http_body_util::{BodyExt as _, Full};
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client as HyperClient;
 use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::rt::TokioExecutor;
+use hyper_util::rt::{TokioExecutor, TokioTimer};
 use mkit_client::{
     AdvertiseRequestTimeout, ChannelError, Clock, Error, FailureDiagnostic, FailureKind,
     FailureObserver, HttpTransport, RequestStream, RequestTimeout, ResponseStream,
@@ -138,17 +138,24 @@ impl NativeHttp {
             .enable_io()
             .enable_time()
             .build()?;
+        let mut http = HttpConnector::new();
+        http.enforce_http(false);
+        http.set_nodelay(true);
         let connector = HttpsConnectorBuilder::new()
             .with_tls_config(tls.clone())
             .https_or_http()
             .enable_http1()
-            .build();
-        // No idle pool: connection tasks only run while a call is inside
-        // `block_on`, so an idle connection the server closes between calls
-        // would go unnoticed and the next signed POST could be written to a
-        // dead socket. A fresh connection keeps that failure out of signed writes.
+            .wrap_connector(http);
+        // Keep one idle connection per origin for sequential RPCs. Checkout
+        // checks elapsed idle time even while this runtime is paused. Hyper
+        // retries a canceled request only if it has not started writing it;
+        // this preserves signed bytes and also the streaming body's receiver.
+        // Failures after writing begins return to the existing host recovery.
         let client = HyperClient::builder(TokioExecutor::new())
-            .pool_max_idle_per_host(0)
+            .pool_max_idle_per_host(1)
+            .pool_idle_timeout(Duration::from_secs(10))
+            .pool_timer(TokioTimer::new())
+            .retry_canceled_requests(true)
             .build(connector);
         Ok(Self {
             runtime,

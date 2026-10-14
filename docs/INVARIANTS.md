@@ -69,6 +69,25 @@ the multipart process-kill test, and native streaming and response compatibility
 tests. Session locks release before host callbacks; receipt observation precedes
 successful ticket cleanup.
 
+## Native connection reuse never replays a started request
+
+**Always:** reads and signed writes reuse at most one idle HTTP connection per
+origin for ten seconds on the same current-thread runtime. Automatic connection
+recovery uses only hyper's recovered, untouched request, before writing starts;
+signed headers, nonce, and buffered or streamed body remain identical. Failures
+after writing starts return to caller-owned recovery. Partial responses and
+cancellation do not make an incomplete exchange eligible for reuse.
+
+**Because:** connection reuse removes repeated TLS handshakes, while only an
+untouched request establishes that no mutation could have reached the server.
+
+**If violated:** a pooled retry could duplicate a write, change its identity,
+reuse an expired connection, or expose bytes from an interrupted response.
+
+**Enforced by:** `NativeHttp`'s bounded idle pool, hyper's pre-start cancellation
+retry, native connection reuse/idle expiration/post-write disconnect/streamed
+idle-close/partial-response tests, and the real HTTPS CLI latency comparison.
+
 ## Custom ref admission fences the committed presence delta
 
 **Always:** a configured custom Admission sees every ref write's resolved

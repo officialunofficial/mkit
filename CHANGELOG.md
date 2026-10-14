@@ -40,6 +40,9 @@ collect the applicable entries between their old and new immutable pins.
   through bounded frames. Metadata/transfer budgets and recovery limits remain;
   attempts are clipped to remaining advance time. The adapter guide records
   HTTP, coding, runtime, connection, and stricter failure-validation differences.
+  Reads and signed writes reuse one idle connection per origin for ten seconds;
+  automatic stale-connection retries are limited to untouched requests before
+  writing starts. The current-thread scheduler and dependency bounds remain.
   Pack and packmap bytes and ids, receipts, CLI output, and exit codes stay
   unchanged. No server, wire, or stored-format change; wipe: no.
 

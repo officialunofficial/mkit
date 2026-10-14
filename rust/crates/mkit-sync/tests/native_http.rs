@@ -200,9 +200,9 @@ fn cleartext_http_to_a_non_loopback_host_is_refused_unless_allowed() {
 #[test]
 fn two_sequential_requests_work_against_a_server_that_closes_after_each_response() {
     // Keep-alive on the wire (no `connection: close`), then the server closes
-    // the socket: the second request must still succeed. (hyper also notices a
-    // closed idle connection at checkout, so this is a behaviour check, not a
-    // guard for the disabled pool, which is a conservative choice.)
+    // the socket: the second request must still succeed when the current-thread
+    // runtime resumes. A closed idle connection is discarded at checkout or
+    // recovered through hyper's untouched-request cancellation retry.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     std::thread::spawn(move || {
@@ -221,6 +221,135 @@ fn two_sequential_requests_work_against_a_server_that_closes_after_each_response
     // Time for the server's close to reach the client.
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(send(&http, &url, 1024).unwrap().body(), b"ok");
+}
+
+#[test]
+fn sequential_reads_and_signed_writes_reuse_a_connection() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let mut connections = 0;
+        let mut requests = Vec::new();
+        while requests.len() < 3 {
+            let (mut socket, _) = listener.accept().unwrap();
+            connections += 1;
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            loop {
+                let request = read_request(&mut socket);
+                if request.is_empty() {
+                    break;
+                }
+                requests.push(request);
+                socket
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+                    .unwrap();
+                if requests.len() == 3 {
+                    return (connections, requests);
+                }
+            }
+        }
+        (connections, requests)
+    });
+    let http = NativeHttp::new().unwrap();
+    for procedure in ["ListRefs", "ReadRef", "UpdateRef"] {
+        let request = Request::post(format!(
+            "http://{address}/mkit.transport.v1.TransportService/{procedure}"
+        ))
+        .header("x-signature", "fixed-signature")
+        .header("idempotency-key", "fixed-nonce")
+        .body(b"same signed bytes".to_vec())
+        .unwrap();
+        assert_eq!(
+            http.block_on(http.send(request, 1024)).unwrap().body(),
+            b"ok"
+        );
+    }
+    drop(http);
+    let (connections, requests) = server.join().unwrap();
+    assert_eq!(connections, 1, "each RPC must not pay another handshake");
+    assert_eq!(requests.len(), 3);
+    for request in requests {
+        assert!(request.ends_with(b"same signed bytes"));
+        assert!(String::from_utf8_lossy(&request).contains("x-signature: fixed-signature"));
+    }
+}
+
+#[test]
+fn a_signed_request_received_before_disconnect_is_not_replayed_by_the_pool() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        read_request(&mut socket);
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+            .unwrap();
+        // The write is deliberately received in full, then loses its reply.
+        // Allow a separate connection on the unfixed transport so this also
+        // tests the parent without hanging.
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut written = read_request(&mut socket);
+        if written.is_empty() {
+            (socket, _) = listener.accept().unwrap();
+            written = read_request(&mut socket);
+        }
+        drop(socket);
+        listener.set_nonblocking(true).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(listener.accept().is_err(), "a written request was replayed");
+        written
+    });
+    let http = NativeHttp::new()
+        .unwrap()
+        .with_timeout(Duration::from_secs(2));
+    assert_eq!(
+        send(&http, &format!("http://{address}/"), 1024)
+            .unwrap()
+            .body(),
+        b"ok"
+    );
+    let request = Request::post(format!(
+        "http://{address}/mkit.transport.v1.TransportService/UpdateRef"
+    ))
+    .header("x-signature", "fixed-signature")
+    .header("idempotency-key", "fixed-nonce")
+    .body(b"signed mutation".to_vec())
+    .unwrap();
+    assert!(http.block_on(http.send(request, 1024)).is_err());
+    let written = server.join().unwrap();
+    assert!(written.ends_with(b"signed mutation"));
+    assert!(String::from_utf8_lossy(&written).contains("idempotency-key: fixed-nonce"));
+}
+
+#[test]
+fn an_idle_connection_expires_while_the_current_thread_runtime_is_paused() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut first, _) = listener.accept().unwrap();
+        read_request(&mut first);
+        first
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+            .unwrap();
+        // Keep the old connection open: only expiration can force checkout
+        // onto the second connection, even with no runtime driving idle tasks.
+        let (mut second, _) = listener.accept().unwrap();
+        read_request(&mut second);
+        second.write_all(&response("200 OK", &[], b"new")).unwrap();
+        drop(first);
+    });
+    let http = NativeHttp::new()
+        .unwrap()
+        .with_timeout(Duration::from_secs(2));
+    let url = format!("http://{address}/");
+    assert_eq!(send(&http, &url, 1024).unwrap().body(), b"ok");
+    std::thread::sleep(Duration::from_millis(10_100));
+    assert_eq!(send(&http, &url, 1024).unwrap().body(), b"new");
+    server.join().unwrap();
 }
 
 #[test]
@@ -528,6 +657,80 @@ fn streaming_upload_delivers_each_pulled_chunk_without_changing_bytes() {
         server.join().unwrap(),
         [vec![1; 8192], vec![2; 8192], vec![3; 8192]].concat()
     );
+}
+
+#[test]
+fn a_streamed_signed_write_survives_an_idle_close_without_changing_its_body() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut first, _) = listener.accept().unwrap();
+        read_request(&mut first);
+        first
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+            .unwrap();
+        drop(first);
+        closed_tx.send(()).unwrap();
+        let (mut second, _) = listener.accept().unwrap();
+        let bytes = read_chunked_request(&mut second);
+        second.write_all(&response("200 OK", &[], b"done")).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(listener.accept().is_err(), "streamed request was replayed");
+        bytes
+    });
+    let http = NativeHttp::new()
+        .unwrap()
+        .with_timeout(Duration::from_secs(2));
+    assert_eq!(
+        send(&http, &format!("http://{address}/"), 1024)
+            .unwrap()
+            .body(),
+        b"ok"
+    );
+    // The owned current-thread runtime is paused while the server closes.
+    closed_rx.recv().unwrap();
+    let chunks = vec![vec![1; 8192], vec![2; 8192], vec![3; 8192]];
+    let mut body = StreamingBody(chunks.clone().into_iter());
+    let request = Request::post(format!(
+        "http://{address}/mkit.transport.v1.TransportService/UploadPack"
+    ))
+    .header("x-signature", "fixed-signature")
+    .header("idempotency-key", "fixed-nonce")
+    .body(())
+    .unwrap();
+    let mut reply = StreamingReply::default();
+    http.block_on(http.send_stream(request, &mut body, 1024, &mut reply))
+        .unwrap();
+    assert_eq!(reply.bytes, b"done");
+    assert_eq!(server.join().unwrap(), chunks.concat());
+}
+
+#[test]
+fn a_partial_response_does_not_contaminate_the_next_exchange() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut first, _) = listener.accept().unwrap();
+        read_request(&mut first);
+        first
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 8\r\n\r\nshort")
+            .unwrap();
+        drop(first);
+        let (mut second, _) = listener.accept().unwrap();
+        read_request(&mut second);
+        second
+            .write_all(&response("200 OK", &[], b"clean"))
+            .unwrap();
+    });
+    let http = NativeHttp::new()
+        .unwrap()
+        .with_timeout(Duration::from_secs(2));
+    let url = format!("http://{address}/");
+    assert!(send(&http, &url, 1024).is_err());
+    assert_eq!(send(&http, &url, 1024).unwrap().body(), b"clean");
+    server.join().unwrap();
 }
 
 #[test]

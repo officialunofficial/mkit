@@ -293,6 +293,14 @@ built-in web PKI roots unless the caller passes a `rustls::ClientConfig`.
 timer. Calling `NativeHttp` from inside another tokio runtime panics, as
 `block_on` does.
 
+The owned runtime and HTTP pool survive between operations. The pool keeps at
+most one idle connection per origin for ten seconds, with TCP_NODELAY enabled.
+Reads and signed writes, including streamed transfers, reuse the connection.
+Hyper automatically retries only an untouched request canceled before writing
+starts; it retains the same body and identity. An exchange failure after writing
+starts is returned to the caller. Pool checkout checks elapsed idle time even
+when the current-thread runtime is paused. No scheduler thread is added.
+
 The channel adds no zstd: with `--no-default-features` the tree has none, and pack decode goes through
 mkit-core's `pack-ruzstd`. `scripts/check-sync-native-deps.sh` runs in CI and
 fails if `zstd`, `zstd-safe`, `zstd-sys`, `aws-lc-*`, `openssl*`,
