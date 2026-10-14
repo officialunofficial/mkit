@@ -18,7 +18,7 @@ No accessor returns storage keys, encoded rows, or codec types.
 | What canonical kind does a member have? | `member_inventory` | Validated kind, canonical and logical lengths, and delta base |
 | What are a member's canonical bytes? | `read_member_canonical` | Verified bytes, delta depth, and aggregate decoded bytes |
 | What happened to the exact accepted fork? | `fork_job_status` | Phase, failure, completed result, inventory, authority, replay, and reservation identity |
-| Did the original owner-admitted fork complete and settle? | `recover_completed_fork` | Completed result and inventory with live original replay and reservation evidence |
+| Did the original owner-admitted fork complete and settle? | `recover_completed_fork` | Completed result and inventory verified against the Done job; replay and reservation rows are checked when present and may be absent after acknowledgement or expiry |
 | Does an authenticated retry replay a completed fork? | `Pipeline::completed_fork` | Existing request-bound witness; obtain the result through `fork_repo` |
 
 ## Authorization and freshness
