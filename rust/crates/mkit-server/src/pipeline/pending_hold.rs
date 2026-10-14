@@ -46,7 +46,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     ) -> Result<(StoredResult, ResponseMeta), ServerError> {
         // The entire attempt returns before waiting: no snapshot, admission
         // reservation, lease grant, or write gate survives this boundary.
-        let result = self.write_inner(a, kind.clone(), implicit, None).await;
+        // Blob-head observations do survive: marker and pack heads are
+        // immutable within a request, so the retry does not head again.
+        let mut heads = super::advance::TicketHeads::default();
+        let result = self
+            .write_inner(a, kind.clone(), implicit, None, &mut heads)
+            .await;
         let (Some(hold), Err(error), Some(auth)) = (&self.pending_hold, &result, &a.auth) else {
             return result;
         };
@@ -129,7 +134,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             // guards, including the durable replay lookup for a lost reply.
             let mut fresh = a.clone();
             fresh.business_now_ms = self.clock.now_ms().saturating_add(a.business_skew_ms);
-            self.write_inner(&fresh, kind, implicit, None).await
+            self.write_inner(&fresh, kind, implicit, None, &mut heads)
+                .await
         } else {
             // Preserve the original pending bytes and typed millisecond hint.
             result

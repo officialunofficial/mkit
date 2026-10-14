@@ -124,6 +124,15 @@ enum Proof {
     PackMissing,
 }
 
+/// One request's marker and pack HEAD observations, keyed by ticket id.
+/// A pending-hold retry and every in-loop re-plan reuse an entry whose
+/// stored ticket row still matches; a changed row or a lost ticket's guard
+/// race drops it so the next pass HEADs again. Entries die with the request.
+#[derive(Default)]
+pub(super) struct TicketHeads {
+    proofs: std::collections::BTreeMap<Hash, (TicketV1, Result<Proof, ServerError>)>,
+}
+
 async fn ticket_proofs<B: crate::BlobStore>(
     blobs: &B,
     ids: &[Hash],
@@ -286,6 +295,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         a: &Authenticated,
         p: &Partition,
         snap: &mut Snapshot,
+        heads: &mut TicketHeads,
     ) -> Result<Option<super::StoredResult>, ServerError> {
         let OpKind::AdvanceRefs {
             head, tickets: ids, ..
@@ -310,9 +320,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             shards: self.shards.as_ref(),
             count_storage: matches!(self.cfg.addressing, crate::repo::Addressing::Multi(_)),
         };
-        // A re-plan keeps proofs for unchanged ticket rows. Only a guard race
-        // involving a ticket invalidates that ticket's blob observations.
-        let mut proofs: Vec<Option<(TicketV1, Result<Proof, ServerError>)>> = vec![None; ids.len()];
+        // A re-plan or a hold retry keeps proofs for unchanged ticket rows.
+        // Only a guard race involving a ticket invalidates that ticket's
+        // blob observations.
         for _ in 0..super::MAX_REPLAN {
             let mut first = ids.iter().map(keys::ticket).collect::<Vec<_>>();
             first.push(keys::replay(&auth.replay_scope));
@@ -340,21 +350,25 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .enumerate()
                 .filter_map(|(i, row)| {
                     let t = row.as_ref().ok()?;
-                    if proofs[i].as_ref().is_some_and(|(prior, _)| prior == t) {
-                        None
-                    } else {
-                        Some((i, t))
+                    match heads.proofs.get(&ids[i]) {
+                        Some((prior, _)) if prior == t => None,
+                        _ => Some((i, t)),
                     }
                 })
                 .collect::<Vec<_>>();
             for (i, t, proof) in ticket_proofs(&self.blobs, ids, pending).await {
-                proofs[i] = Some((t, proof));
+                heads.proofs.insert(ids[i], (t, proof));
             }
             let first_failure = (0..ids.len()).find_map(|i| {
                 if let Err(err) = &rows[i] {
                     return Some((i, err.clone()));
                 }
-                match &proofs[i].as_ref().expect("valid ticket has a proof").1 {
+                match &heads
+                    .proofs
+                    .get(&ids[i])
+                    .expect("valid ticket has a proof")
+                    .1
+                {
                     Ok(Proof::Ready) => None,
                     Ok(Proof::MarkerMissing | Proof::PackMissing) => {
                         Some((i, ServerError::failed_precondition(INCOMPLETE)))
@@ -371,7 +385,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     // A row that failed validation this pass may keep a stale proof from an
                     // earlier pass; only a currently valid ticket can be aborted.
                     rows[i].is_ok()
-                        && matches!(proofs[i].as_ref(), Some((_, Ok(Proof::PackMissing))))
+                        && matches!(heads.proofs.get(&ids[i]), Some((_, Ok(Proof::PackMissing))))
                 })
                 .collect::<Vec<_>>();
             if lost.is_empty() {
@@ -444,7 +458,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 BatchOutcome::PreconditionFailed { index, .. } => {
                     for (i, range) in ticket_guards {
                         if range.contains(&index) {
-                            proofs[i] = None;
+                            heads.proofs.remove(&ids[i]);
                         }
                     }
                     // Refresh only ticket-dependent observations. Preserve

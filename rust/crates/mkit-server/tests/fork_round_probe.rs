@@ -213,33 +213,36 @@ macro_rules! probe {
 //
 // With denial off, 142 becomes 101 rounds (the walk 13, the job's plan 15,
 // the pre-admission plan 3, publication 10) and 219 becomes 178. The job's
-// plan is gone with denial on too; waves and the walk skip are denial-off only.
+// plan is gone with denial on too. Partition waves then collapse the copy
+// stage in both modes: six lanes read a page each under one reservation, and
+// larger pages cut the 3,000-file stage to 58 calls. Copy lands at 9 rounds
+// for 500 files and 15 for 3,000.
 probe!(
     files_500_denial_off,
     500,
     false,
-    "plan_bytes 13/10 start 37/11 Trees 8/8 Register 52/13 Copy 35/35 Count 3/3 Publish 38/15",
-    "192/101 finished=true"
+    "plan_bytes 13/10 start 37/11 Trees 8/8 Register 52/13 Copy 35/9 Count 3/3 Publish 38/15",
+    "192/75 finished=true"
 );
 probe!(
     files_3000_denial_off,
     3_000,
     false,
-    "plan_bytes 13/10 start 37/11 Trees 8/8 Register 52/13 Copy 112/112 Count 3/3 Publish 38/15",
-    "269/178 finished=true"
+    "plan_bytes 13/10 start 37/11 Trees 8/8 Register 52/13 Copy 58/15 Count 3/3 Publish 38/15",
+    "215/81 finished=true"
 );
 probe!(
     files_500_denial_on,
     500,
     true,
-    "plan_bytes 89/41 start 37/11 Trees 9/9 Walk 14/13 Register 52/13 Copy 35/35 Count 3/3 Publish 190/81",
-    "435/212 finished=true"
+    "plan_bytes 89/41 start 37/11 Trees 9/9 Walk 14/13 Register 52/13 Copy 35/9 Count 3/3 Publish 190/81",
+    "435/186 finished=true"
 );
 probe!(
     #[ignore = "large fork fixture; exercised by the ignored-lane CI profile"]
     files_3000_denial_on,
     3_000,
     true,
-    "plan_bytes 89/41 start 37/11 Trees 9/9 Walk 14/13 Register 52/13 Copy 112/112 Count 3/3 Publish 190/81",
-    "512/289 finished=true"
+    "plan_bytes 89/41 start 37/11 Trees 9/9 Walk 14/13 Register 52/13 Copy 58/15 Count 3/3 Publish 190/81",
+    "458/192 finished=true"
 );

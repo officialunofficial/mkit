@@ -387,6 +387,45 @@ fn a_generation_bump_while_the_creation_batch_is_in_flight_creates_nothing() {
 }
 
 #[test]
+fn a_generation_bump_between_begins_fence_read_and_its_apply_creates_no_ticket() {
+    let shared = Shared::new();
+    let fired = Arc::new(AtomicBool::new(false));
+    let hook: ApplyHook = {
+        let fired = fired.clone();
+        Box::new(move |kv, p, batch| {
+            if batch.writes.iter().any(|write| {
+                matches!(write, Write::Put(key, _)
+                    if matches!(keys::parse(key), Some(keys::ParsedKey::Ticket(_))))
+            }) && !fired.swap(true, Ordering::SeqCst)
+            {
+                now(kv.apply(
+                    p,
+                    Batch::new().put(keys::authority_generation(), codec::encode_u64(3)),
+                ))
+                .unwrap();
+            }
+        })
+    };
+    let env = shared.pipe(config(), Some(hook));
+    register(&env, NS, 2);
+    shared.generation.store(2, Ordering::SeqCst);
+    expect_denied(
+        &begin(&env, 1).unwrap_err(),
+        "namespace authority generation changed",
+    );
+    assert!(fired.load(Ordering::SeqCst));
+    // The earlier creation batch committed; the ticket write was refused.
+    assert_eq!(registry_rows(&shared, NS), [true; 3]);
+    let repo = RepoName::new(REPO).unwrap();
+    assert!(
+        shared
+            .row(NS, &keys::tickets_per_ref(&repo, HEAD).unwrap())
+            .is_none(),
+        "no ticket counter exists"
+    );
+}
+
+#[test]
 fn self_certifying_deployments_can_register_before_their_first_write() {
     let owner = format!("ed25519-{}", to_hex(key(1).verifying_key().as_bytes()));
     let shared = Shared::new();
@@ -466,9 +505,10 @@ fn a_bump_replaces_the_stale_ticket_at_once_with_one_aborted_outcome() {
         claims(&env, begin(&env, 4).unwrap()).ticket_id,
         second.ticket_id
     );
-    let moved = now(env
-        .pipe
-        .check_ticket_generation(&partition_key(), first.authority_generation))
+    let moved = now(env.pipe.check_ticket_generation(
+        &mut crate::pipeline::authority::TicketFence::new(partition_key()),
+        first.authority_generation,
+    ))
     .unwrap_err();
     expect_denied(&moved, "namespace authority generation changed");
 }

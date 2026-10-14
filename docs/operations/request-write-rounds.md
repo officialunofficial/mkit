@@ -75,50 +75,51 @@ settles. Steps are per-request or out-of-band (`settle` runs on timers).
 
 | Shard | Denial | Hold | Step | KV | Blobs | Warm ms | Cold ms |
 | --- | --- | ---: | --- | ---: | ---: | ---: | ---: |
-| Single | off | 0 | upload | 13 | 6 | 570 | 840 |
+| Single | off | 0 | upload | 7 | 6 | 390 | 660 |
 | Single | off | 0 | advance (pending) | 5 | 2 | 210 | 210 |
 | Single | off | 0 | settle (out of band) | 62 | 1 | 1890 | 2160 |
 | Single | off | 0 | advance (commit) | 9 | 2 | 330 | 330 |
-| Single | on | 0 | upload | 23 | 12 | 1050 | 1320 |
+| Single | on | 0 | upload | 11 | 12 | 690 | 960 |
 | Single | on | 0 | advance (pending) | 5 | 4 | 210 | 210 |
 | Single | on | 0 | settle (out of band) | 90 | 2 | 2700 | 3510 |
 | Single | on | 0 | advance (commit) | 54 | 4 | 1320 | 2400 |
-| D34 | off | 0 | upload | 13 | 6 | 570 | 840 |
+| D34 | off | 0 | upload | 7 | 6 | 390 | 660 |
 | D34 | off | 0 | advance (pending) | 5 | 2 | 210 | 210 |
 | D34 | off | 0 | settle (out of band) | 97 | 1 | 2940 | 3750 |
 | D34 | off | 0 | advance (commit) | 9 | 2 | 330 | 330 |
-| D34 | on | 0 | upload | 23 | 12 | 1050 | 1320 |
+| D34 | on | 0 | upload | 11 | 12 | 690 | 960 |
 | D34 | on | 0 | advance (pending) | 5 | 4 | 210 | 210 |
 | D34 | on | 0 | settle (out of band) | 123 | 2 | 3720 | 5070 |
 | D34 | on | 0 | advance (commit) | 54 | 4 | 1320 | 2400 |
 | Single | off | 1000 | advance (parked) | 6 | 2 | 270 | 270 |
-| Single | off | 1000 | advance (commit) | 10 | 2 | 360 | 360 |
+| Single | off | 1000 | advance (commit) | 10 | 0 | 300 | 300 |
 | Single | on | 1000 | advance (parked) | 6 | 4 | 270 | 270 |
-| Single | on | 1000 | advance (commit) | 55 | 4 | 1350 | 2430 |
+| Single | on | 1000 | advance (commit) | 55 | 0 | 1290 | 2370 |
 | D34 | off | 1000 | advance (parked) | 6 | 2 | 270 | 270 |
-| D34 | off | 1000 | advance (commit) | 10 | 2 | 360 | 360 |
+| D34 | off | 1000 | advance (commit) | 10 | 0 | 300 | 300 |
 | D34 | on | 1000 | advance (parked) | 6 | 4 | 270 | 270 |
-| D34 | on | 1000 | advance (commit) | 55 | 4 | 1350 | 2430 |
+| D34 | on | 1000 | advance (commit) | 55 | 0 | 1290 | 2370 |
 
 Hold cells share the upload and settle rows of their 0 ms sibling. The hold's
 own 1000 ms of parking is not backend time; the parked attempt costs one more
 KV call than the client-retry answer.
 
-End-to-end the embedder's write costs 89 KV calls on Single without denial —
-only 27 of them on request paths (upload + both advances); the other 62 are the
+End-to-end the embedder's write costs 83 KV calls on Single without denial —
+only 21 of them on request paths (upload + both advances); the other 62 are the
 out-of-band verification pump. With denial the request path nearly triples
-(82 calls, 2580 ms warm modeled) because the committing advance pays the full
+(70 calls, 2220 ms warm modeled) because the committing advance pays the full
 denial price. Against a reported multi-second per-write latency, mkit's
-request-path model is ~1.1 s warm without denial and ~2.6 s with it; cold
+request-path model is ~0.9 s warm without denial and ~2.2 s with it; cold
 first touches add ~0.3 s more without denial and ~1.4 s with it. Anything
 beyond that needs numbers from the real store's per-call latency — the probe's
 30 ms unit is deliberately conservative, and the dependent chains below are
 what scale with it.
 
-## Findings (measurement only — fixes belong to a follow-up lane)
+## Findings
 
 Each entry lists what the probe observed and the modeled saving. Savings are
 warm-model upper bounds for the serialized work, not predicted wall-clock.
+Findings 2, 4 and 9 are fixed; the rest remain open.
 
 1. **Denial turns a 4-call write into ~50.** The denied `UpdateRef Match` on
    Single spends 46 of 48 calls in `PlanSnapshot`: a ~19-call serial member /
@@ -148,8 +149,8 @@ warm-model upper bounds for the serialized work, not predicted wall-clock.
      ~22 calls ≈ 15 dependent rounds; overlapping the per-hop denial reads
      with the index lookups could cut roughly a third of the 37 rounds.
 
-2. **Every upload-session RPC re-reads the authority fence pair.** One
-   `BeginUpload` + `UploadPack` session issues seven identical serial
+2. **Every upload-session RPC re-reads the authority fence pair.** *(Fixed.)*
+   One `BeginUpload` + `UploadPack` session issues seven identical serial
    `get_many(ag, lr)` calls — `check_ticket_generation` →
    `ensure_authority_activation` reads both rows per call site
    (`pipeline/authority.rs:37-42`, `authority.rs:61-96`), reached from the
@@ -157,6 +158,11 @@ warm-model upper bounds for the serialized work, not predicted wall-clock.
    On Single with fencing disabled the read still runs and early-returns.
    ~180 ms warm per uploaded object; one read per request would save 6 calls
    and 6 rounds per session.
+   - Fixed by a request-scoped `TicketFence` (`pipeline/authority.rs`) owned
+     by each `UploadSession`/`PartUploadSession`: the unfenced
+     activation probe runs once per request; fenced mode still reads the
+     generation row live on every check, and the apply keeps its
+     `authority_generation`/`lease_recovery` guards.
 
 3. **A pending advance is not free.** The first ticketed `AdvanceRefs` that
    answers `pack verification pending` still does a `GuardedApply` writing the
@@ -164,11 +170,18 @@ warm-model upper bounds for the serialized work, not predicted wall-clock.
    That is the scheduling write doing its job — but embedders counting a
    "pending" reply as cheap should note it costs a full plan+apply.
 
-4. **The commit retry re-reads verify-job rows serially.** The retry's
-   usability check does `get_many(vc,vs)` then `scan(vc)` ranges plus
+4. **The commit retry re-reads verify-job rows serially.** *(Fixed.)* The
+   retry's usability check does `get_many(vc,vs)` then `scan(vc)` ranges plus
    per-member `get` reads per ticket (`indexed/scheduled.rs:809-821`,
    `scheduled.rs:952-1012`, `scheduled.rs:200-228`) — ~6 serial calls ≈ 180 ms
    warm per ticket before the fused re-read.
+   - Fixed in `indexed/scheduled.rs`: the member rows `failed_group` and
+     `finished_peers` evaluate now arrive in one `get_many` (skipped entirely
+     when no job can reach a member check), the dependency and owed-children
+     first pages arrive in one `scan_many`, per-commit history rows across
+     consumed packs fuse into one `get_many`, member-body hydration is one
+     `get_many` after the pending check, and the head-type frame lookup is
+     batched across packs.
 
 5. **Duplicate whole-pack blob reads on the request path.** `Tag create`
    Single/denial fetches the target commit's pack **four times** and the
@@ -207,12 +220,16 @@ warm-model upper bounds for the serialized work, not predicted wall-clock.
    request's wall clock, but the same serial chain decides how soon the retry
    can commit: 62–123 calls and 1890–3720 modeled ms for this two-pack flow.
 
-9. **Upload markers double blob writes and are re-checked per advance.** Each
-   `upload()` writes the pack *and* an `UploadMarker` blob (begin/write/commit
-   = 6 blob calls), and each ticketed advance then `blob_head`s every ticket's
-   marker and pack — once when it answers pending, again on the commit retry.
-   Blob-side: 12 calls to upload two small packs under denial, then 4 head
-   calls per advance attempt.
+9. **Upload markers double blob writes and are re-checked per advance.**
+   *(Head checks fixed.)* Each `upload()` writes the pack *and* an
+   `UploadMarker` blob (begin/write/commit = 6 blob calls), and each ticketed
+   advance then `blob_head`s every ticket's marker and pack — once when it
+   answers pending, again on the commit retry. Blob-side: 12 calls to upload
+   two small packs under denial, then 4 head calls per advance attempt.
+   - Fixed on the head-check side by a request-scoped `TicketHeads`
+     (`pipeline/advance.rs`): marker/pack proofs are memoized per ticket row
+     across replans and shared with the pending-hold retry, so the commit
+     retry issues no repeated heads. Marker writes are unchanged.
 
 10. **Admission hooks cost nothing on the wire.** The AD1 effect-recording
     hook measures call-for-call identical to the default hooks in all 48

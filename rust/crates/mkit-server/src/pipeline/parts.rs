@@ -53,7 +53,8 @@ fn multipart_error(op: StorageOp, err: StoreError) -> ServerError {
 pub struct PartUploadSession<'p, B: MultipartBlobStore, N, H> {
     pipe: &'p Pipeline<B, N, H>,
     ticket: [u8; 32],
-    namespace: crate::repo::NamespaceKey,
+    /// The fence one request resolved; part sessions check it per stage.
+    fence: super::authority::TicketFence,
     generation: Option<u64>,
     index: u32,
     subtree: [u8; 32],
@@ -117,7 +118,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> PartUploadSession<'_,
 
     async fn stage(&mut self, bytes: Bytes) -> Result<(), ServerError> {
         self.pipe
-            .check_ticket_generation(&self.namespace, self.generation)
+            .check_ticket_generation(&mut self.fence, self.generation)
             .await?;
         self.sink
             .as_mut()
@@ -126,7 +127,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> PartUploadSession<'_,
             .await
             .map_err(|e| multipart_error(StorageOp::MultipartPart, e))?;
         self.pipe
-            .check_ticket_generation(&self.namespace, self.generation)
+            .check_ticket_generation(&mut self.fence, self.generation)
             .await?;
         Ok(())
     }
@@ -159,7 +160,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> PartUploadSession<'_,
             self.stage(bytes).await?;
         }
         self.pipe
-            .check_ticket_generation(&self.namespace, self.generation)
+            .check_ticket_generation(&mut self.fence, self.generation)
             .await?;
         let sink = self
             .sink
@@ -172,7 +173,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> PartUploadSession<'_,
             other => multipart_error(StorageOp::MultipartPart, other),
         })?;
         self.pipe
-            .check_ticket_generation(&self.namespace, self.generation)
+            .check_ticket_generation(&mut self.fence, self.generation)
             .await?;
         let keys = self.pipe.cfg.ticket_keys.as_ref().ok_or_else(|| {
             ServerError::internal("upload tickets are not configured", "ticket keys vanished")
@@ -214,6 +215,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         a: &Authenticated,
         expected: Procedure,
         token: &[u8],
+        fence: &mut super::authority::TicketFence,
     ) -> Result<TicketClaims, ServerError> {
         if a.procedure() != expected {
             return Err(ServerError::unauthenticated(
@@ -245,7 +247,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             &a.repo().identity,
             &auth.signer,
         )?;
-        self.check_ticket_generation(&a.repo().repo.namespace, claims.authority_generation)
+        self.check_ticket_generation(fence, claims.authority_generation)
             .await?;
         Ok(claims)
     }
@@ -263,7 +265,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     ) -> Result<PartUploadSession<'_, B, N, H>, ServerError> {
         let mut outcome = self.outcome(a);
         let opened = async {
-            let claims = self.part_ticket(a, Procedure::UploadPart, token).await?;
+            let mut fence = super::authority::TicketFence::new(a.repo().repo.namespace.clone());
+            let claims = self
+                .part_ticket(a, Procedure::UploadPart, token, &mut fence)
+                .await?;
             let Some(auth) = &a.auth else {
                 return Err(ServerError::unauthenticated(
                     "missing auth v2 authorization",
@@ -300,19 +305,26 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .await
                 .map_err(|e| multipart_error(StorageOp::MultipartPart, e))?;
             if let Err(err) = self
-                .check_ticket_generation(&a.repo().repo.namespace, claims.authority_generation)
+                .check_ticket_generation(&mut fence, claims.authority_generation)
                 .await
             {
                 sink.abort().await;
                 return Err(err);
             }
-            Ok((ticket, subtree, len, sink, claims.authority_generation))
+            Ok((
+                ticket,
+                subtree,
+                len,
+                sink,
+                fence,
+                claims.authority_generation,
+            ))
         }
         .await;
         match opened {
-            Ok((ticket, subtree, len, sink, generation)) => Ok(PartUploadSession {
+            Ok((ticket, subtree, len, sink, fence, generation)) => Ok(PartUploadSession {
                 pipe: self,
-                namespace: a.repo().repo.namespace.clone(),
+                fence,
                 generation,
                 ticket,
                 index,
@@ -343,8 +355,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         receipts: &[Vec<u8>],
     ) -> Result<(), ServerError> {
         self.observe(a, async {
+            let mut fence = super::authority::TicketFence::new(a.repo().repo.namespace.clone());
             let claims = self
-                .part_ticket(a, Procedure::CompleteUpload, token)
+                .part_ticket(a, Procedure::CompleteUpload, token, &mut fence)
                 .await?;
             let plan = PartPlan::new(claims.bytes, claims.part_size, self.cfg.max_parts)
                 .map_err(part_error)?;
@@ -396,7 +409,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     "merged part root does not match the ticket",
                 ));
             }
-            self.publish_verified_upload(&a.repo().repo.namespace, &claims, &plan, &parts)
+            self.publish_verified_upload(&mut fence, &claims, &plan, &parts)
                 .await
         })
         .await
@@ -406,7 +419,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// have been checked without accessing storage.
     async fn publish_verified_upload(
         &self,
-        namespace: &crate::repo::NamespaceKey,
+        fence: &mut super::authority::TicketFence,
         claims: &TicketClaims,
         plan: &PartPlan,
         parts: &[PartRef],
@@ -455,7 +468,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 Err(e) => return Err(multipart_error(StorageOp::MultipartSession, e)),
             }
         }
-        self.check_ticket_generation(namespace, claims.authority_generation)
+        self.check_ticket_generation(fence, claims.authority_generation)
             .await?;
         write_upload_marker(
             &self.blobs,
@@ -468,7 +481,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         .map_err(|e| store_error(StorageOp::BlobPut, e))?;
         // The marker is a shared proof, not repository membership. A revoked
         // ticket cannot consume it, and this call must not report acceptance.
-        self.check_ticket_generation(namespace, claims.authority_generation)
+        self.check_ticket_generation(fence, claims.authority_generation)
             .await?;
         Ok(())
     }

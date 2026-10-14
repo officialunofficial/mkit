@@ -2505,7 +2505,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         implicit: Option<&'a [PendingPack]>,
     ) -> crate::rt::BoxFuture<'a, Result<(StoredResult, ResponseMeta), ServerError>> {
         if self.pending_hold.is_none() {
-            Box::pin(self.write_inner(a, kind, implicit, None))
+            Box::pin(async move {
+                let mut heads = advance::TicketHeads::default();
+                self.write_inner(a, kind, implicit, None, &mut heads).await
+            })
         } else {
             Box::pin(self.write_with_pending_hold(a, kind, implicit))
         }
@@ -2518,6 +2521,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         kind: OpKind,
         implicit: Option<&[PendingPack]>,
         source: Option<(&str, Option<Hash>)>,
+        heads: &mut advance::TicketHeads,
     ) -> Result<(StoredResult, ResponseMeta), ServerError> {
         let mut op = self.identify(a, kind)?;
         fault!(self, AfterAuthenticate, &op, a);
@@ -2596,7 +2600,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             let snap = ahead
                 .as_mut()
                 .ok_or_else(|| internal("ticket advance requires atomic metadata"))?;
-            if let Some(stored) = self.ticket_decision(&op, a, &p, snap).await? {
+            if let Some(stored) = self.ticket_decision(&op, a, &p, snap, heads).await? {
                 return Ok((stored, ResponseMeta::default()));
             }
             // Pending scheduled jobs remain admission-free polling answers.
