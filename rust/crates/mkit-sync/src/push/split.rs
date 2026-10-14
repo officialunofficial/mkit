@@ -1,5 +1,4 @@
-//! Splitting an oversized ticketed push along first-parent history (WP-1.17b,
-//! R-164).
+//! Splitting an oversized ticketed push along first-parent history.
 //!
 //! A Connect advance may consume at most seven tickets, one of them for the
 //! packmap node, so a push whose new data needs more than six packs cannot land
@@ -35,18 +34,18 @@ use mkit_core::store::{ObjectStore, StoreError};
 use mkit_core::transfer::{self, PackPlan};
 
 use super::{
-    DispatchError, PackSink, build_and_upload_packs, effective_payload_cap,
+    PackSink, PushError, build_and_upload_packs, effective_payload_cap,
     encode_delta_candidates_batch, estimate_pack_sizes,
 };
 
-/// Most advances one push may be split into (B2).
+/// Most advances one push may be split into.
 pub const MAX_SPLIT_STEPS: usize = 1_000;
 
 /// Most first-parent commits the chain walk visits before it gives up.
 pub const MAX_CHAIN_COMMITS: usize = 1_000_000;
 
 /// Grants a caller can check for every advance of a split push before
-/// anything is uploaded (B5).
+/// anything is uploaded.
 pub trait StepAuthority: Send + Sync {
     /// Refuse the push unless the caller may perform the first advance under
     /// `first` and, when `later_steps` is set, every following advance, each
@@ -64,6 +63,8 @@ pub trait StepAuthority: Send + Sync {
 
 /// The knobs and hooks of one branch push. The default is the production one.
 pub struct PushControl<'a> {
+    /// Progress and cancellation checkpoints for this push.
+    pub observer: &'a dyn crate::SyncObserver,
     /// Checked before the first upload of a split push. `None` skips it.
     pub authority: Option<&'a dyn StepAuthority>,
     /// Refuse a split into more advances than this.
@@ -89,6 +90,7 @@ impl std::fmt::Debug for PushControl<'_> {
 impl Default for PushControl<'_> {
     fn default() -> Self {
         Self {
+            observer: &crate::NoopObserver,
             authority: None,
             max_steps: MAX_SPLIT_STEPS,
             max_chain: MAX_CHAIN_COMMITS,
@@ -98,7 +100,7 @@ impl Default for PushControl<'_> {
 }
 
 /// Data packs one advance may carry: the ticket allowance minus the packmap
-/// node's ticket (R-142). Six unless the transport advertises less.
+/// node's ticket. Six unless the transport advertises less.
 pub(super) fn data_pack_budget(limits: UploadLimits) -> usize {
     limits
         .tickets_per_advance
@@ -127,7 +129,7 @@ fn first_parent(obj: &Object) -> Option<Hash> {
 /// same degradation as `plan_pack_with`). A closure too large to enumerate
 /// is refused: a truncated one would send the walk past commits the remote
 /// holds and rewind its branch.
-fn held_closure(store: &ObjectStore, root: Option<Hash>) -> Result<HashSet<Hash>, DispatchError> {
+fn held_closure(store: &ObjectStore, root: Option<Hash>) -> Result<HashSet<Hash>, PushError> {
     let Some(root) = root.filter(|root| store.contains(root)) else {
         return Ok(HashSet::new());
     };
@@ -139,8 +141,8 @@ fn held_closure(store: &ObjectStore, root: Option<Hash>) -> Result<HashSet<Hash>
     }
 }
 
-fn too_large_to_split() -> DispatchError {
-    DispatchError::PushSplitLimit(format!(
+fn too_large_to_split() -> PushError {
+    PushError::PushSplitLimit(format!(
         "the history is too large to split ({MAX_REACHABLE} objects or more); no advance of this branch was published"
     ))
 }
@@ -152,7 +154,7 @@ fn walk_chain(
     tip: Hash,
     remote_tip: Option<Hash>,
     ctl: &PushControl<'_>,
-) -> Result<Chain, DispatchError> {
+) -> Result<Chain, PushError> {
     let held = held_closure(store, remote_tip)?;
     let mut commits = Vec::new();
     let mut base = None;
@@ -163,13 +165,13 @@ fn walk_chain(
             break;
         }
         if commits.len() >= ctl.max_chain {
-            return Err(DispatchError::PushSplitLimit(format!(
+            return Err(PushError::PushSplitLimit(format!(
                 "the first-parent history between the remote and the local tip is longer than {} commits, too long to split; no advance of this branch was published",
                 ctl.max_chain
             )));
         }
-        if crate::signal::is_shutdown() {
-            return Err(DispatchError::Interrupted);
+        if ctl.observer.cancelled() {
+            return Err(PushError::Sync(crate::SyncError::Interrupted));
         }
         commits.push(cursor);
         if ctl.shallow.contains(&cursor) {
@@ -196,14 +198,14 @@ fn cumulative_weights(
     store: &ObjectStore,
     chain: &Chain,
     ctl: &PushControl<'_>,
-) -> Result<Vec<u64>, DispatchError> {
+) -> Result<Vec<u64>, PushError> {
     let mut seen = chain.seed.clone();
     let mut cumulative = Vec::with_capacity(chain.commits.len() + 1);
     let mut total = 0_u64;
     cumulative.push(0);
     for commit in &chain.commits {
-        if crate::signal::is_shutdown() {
-            return Err(DispatchError::Interrupted);
+        if ctl.observer.cancelled() {
+            return Err(PushError::Sync(crate::SyncError::Interrupted));
         }
         let mut stack = vec![*commit];
         while let Some(hash) = stack.pop() {
@@ -246,6 +248,7 @@ fn pack_weight_cap(payload_cap: u64, max_pack_bytes: Option<u64>) -> u64 {
 }
 
 struct Cutter<'a> {
+    observer: &'a dyn crate::SyncObserver,
     store: &'a ObjectStore,
     chain: &'a Chain,
     weights: &'a [u64],
@@ -260,9 +263,9 @@ struct Cutter<'a> {
 impl Cutter<'_> {
     /// The real plan for advancing from chain position `from` to `to`, with
     /// its estimated pack count. `from == 0` diffs against the remote head.
-    fn probe(&self, from: usize, to: usize) -> Result<(PackPlan, usize), DispatchError> {
-        if crate::signal::is_shutdown() {
-            return Err(DispatchError::Interrupted);
+    fn probe(&self, from: usize, to: usize) -> Result<(PackPlan, usize), PushError> {
+        if self.observer.cancelled() {
+            return Err(PushError::Sync(crate::SyncError::Interrupted));
         }
         let base = match from {
             0 => self.remote_tip,
@@ -291,7 +294,7 @@ impl Cutter<'_> {
     }
 
     /// The end position of the step that starts at `from`.
-    fn cut(&self, from: usize) -> Result<usize, DispatchError> {
+    fn cut(&self, from: usize) -> Result<usize, PushError> {
         let wcap = pack_weight_cap(self.cap, self.limits.max_pack_bytes);
         // Two consecutive packs weigh more than one cap, so `budget / 2` caps
         // of weight never need more than `budget` packs.
@@ -336,22 +339,29 @@ impl Cutter<'_> {
         from: usize,
         to: usize,
         holds_remote_head: bool,
-    ) -> Result<(), DispatchError> {
+    ) -> Result<(), PushError> {
         let (plan, packs) = self.probe(from, to)?;
         if packs <= self.budget {
             return Ok(());
         }
-        build_and_upload_packs(PackSink::Count, self.store, plan, self.cap, self.limits)
-            .map(drop)
-            .map_err(|error| match error {
-                DispatchError::PushTooLarge { packs, limit, .. } => DispatchError::PushTooLarge {
-                    packs,
-                    limit,
-                    commit: Some(self.describe(self.chain.commits[to - 1])),
-                    holds_remote_head,
-                },
-                other => other,
-            })
+        build_and_upload_packs(
+            PackSink::Count,
+            self.store,
+            plan,
+            self.cap,
+            self.limits,
+            self.observer,
+        )
+        .map(drop)
+        .map_err(|error| match error {
+            PushError::PushTooLarge { packs, limit, .. } => PushError::PushTooLarge {
+                packs,
+                limit,
+                commit: Some(self.describe(self.chain.commits[to - 1])),
+                holds_remote_head,
+            },
+            other => other,
+        })
     }
 
     fn describe(&self, commit: Hash) -> String {
@@ -374,7 +384,7 @@ fn positions_to_reach(
     store: &ObjectStore,
     chain: &Chain,
     remote_tip: Option<Hash>,
-) -> Result<usize, DispatchError> {
+) -> Result<usize, PushError> {
     let Some(remote) = remote_tip.filter(|remote| store.contains(remote)) else {
         return Ok(0);
     };
@@ -401,8 +411,8 @@ fn positions_to_reach(
 /// one containing a single commit that cannot fit in an advance.
 ///
 /// # Errors
-/// [`DispatchError::PushSplitLimit`], [`DispatchError::PushNotAuthorized`],
-/// [`DispatchError::PushTooLarge`], or a store or planning failure.
+/// [`PushError::PushSplitLimit`], [`PushError::PushNotAuthorized`],
+/// [`PushError::PushTooLarge`], or a store or planning failure.
 #[allow(clippy::too_many_arguments)]
 pub fn plan_push_steps(
     store: &ObjectStore,
@@ -413,7 +423,7 @@ pub fn plan_push_steps(
     ctl: &PushControl<'_>,
     condition: RefWriteCondition,
     branch: &str,
-) -> Result<Vec<Hash>, DispatchError> {
+) -> Result<Vec<Hash>, PushError> {
     let cap = effective_payload_cap(pack_payload_cap, limits.max_pack_bytes)?;
     let chain = walk_chain(store, tip, remote_tip, ctl)?;
     if chain.commits.is_empty() {
@@ -422,10 +432,11 @@ pub fn plan_push_steps(
     if let Some(authority) = ctl.authority {
         authority
             .authorize(branch, condition, chain.commits.len() > 1)
-            .map_err(DispatchError::PushNotAuthorized)?;
+            .map_err(PushError::PushNotAuthorized)?;
     }
     let weights = cumulative_weights(store, &chain, ctl)?;
     let cutter = Cutter {
+        observer: ctl.observer,
         store,
         chain: &chain,
         weights: &weights,
@@ -439,7 +450,7 @@ pub fn plan_push_steps(
     let mut from = 0;
     while from < chain.commits.len() {
         if steps.len() >= ctl.max_steps {
-            return Err(DispatchError::PushSplitLimit(format!(
+            return Err(PushError::PushSplitLimit(format!(
                 "this push would need more than {} advances; no advance of this branch was published. Ask the operator to raise max_pack_bytes, or push an ancestor commit first",
                 ctl.max_steps
             )));
@@ -600,10 +611,7 @@ mod tests {
             ..PushControl::default()
         };
         let error = walk_chain(&store, c[5], None, &control).err().unwrap();
-        assert!(
-            matches!(error, DispatchError::PushSplitLimit(_)),
-            "{error:?}"
-        );
+        assert!(matches!(error, PushError::PushSplitLimit(_)), "{error:?}");
     }
 
     #[test]
@@ -652,7 +660,7 @@ mod tests {
         assert!(
             matches!(
                 &error,
-                DispatchError::PushTooLarge {
+                PushError::PushTooLarge {
                     holds_remote_head: true,
                     ..
                 }
@@ -722,7 +730,7 @@ mod tests {
             };
             let cap = effective_payload_cap(payload_cap, max_pack).unwrap();
             let estimate = estimate_pack_sizes(&store, &plan, cap, max_pack).unwrap().len();
-            let keys = build_and_upload_packs(PackSink::Count, &store, plan, cap, limits)
+            let keys = build_and_upload_packs(PackSink::Count, &store, plan, cap, limits, &crate::NoopObserver)
                 .map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
             prop_assert!(keys.len() <= estimate, "{} > {estimate}", keys.len());
             let chain = Chain { commits: vec![tip], seed };

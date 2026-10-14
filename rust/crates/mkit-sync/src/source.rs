@@ -1,10 +1,10 @@
-//! The remote-source abstraction the fetch engine reads through.
+//! Remote repository reads and optional native push operations.
 //!
-//! The engine needs five read operations from a remote: list the branches,
-//! read one ref, and download a packmap node or a pack by digest. A
-//! [`RemoteSource`] provides them. The first backend is
-//! [`TransportSource`], over mkit-core's synchronous [`Transport`], so every
-//! existing scheme (file, ssh, s3, http, connect) keeps working unchanged.
+//! Reads list branches, read refs, and download packmap nodes and packs.
+//! Push adds bounded uploads and conditioned head/packmap advances.
+//! [`TransportSource`] delegates these operations to mkit-core's synchronous
+//! [`Transport`], preserving every existing scheme. Read-only sources retain
+//! the default push refusal.
 
 use mkit_core::hash::Hash;
 use mkit_core::protocol::{PackKey, Transport};
@@ -13,7 +13,7 @@ use mkit_core::refs::Ref;
 use crate::SourceError;
 use crate::error::SyncError;
 
-/// The read side of a remote repository.
+/// A remote repository. Read-only backends keep the default push refusal.
 pub trait RemoteSource {
     /// Every branch (`refs/heads/*`) with its tip, named without the prefix.
     fn list_branches(&self) -> Result<Vec<Ref>, SourceError>;
@@ -24,6 +24,73 @@ pub trait RemoteSource {
     fn download_blob_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError>;
     /// Download a pack. `ref_name` is the branch hint.
     fn download_pack_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError>;
+
+    /// Whether this source implements the native push operations. Read-only
+    /// sources refuse push before any local tracking or remote mutation.
+    fn supports_push(&self) -> bool {
+        false
+    }
+    /// Upload a sealed pack using the head ref as its authorization hint.
+    fn upload_pack_via_ref(
+        &self,
+        bytes: &[u8],
+        key: &PackKey,
+        name: &str,
+    ) -> Result<(), SourceError> {
+        let _ = (bytes, key, name);
+        Err(SourceError::ProtocolError)
+    }
+    /// Upload a packmap node using the head ref as its authorization hint.
+    fn upload_blob_via_ref(
+        &self,
+        bytes: &[u8],
+        key: &PackKey,
+        name: &str,
+    ) -> Result<(), SourceError> {
+        let _ = (bytes, key, name);
+        Err(SourceError::ProtocolError)
+    }
+    /// Advance a head under its lease.
+    fn update_ref(
+        &self,
+        name: &str,
+        condition: mkit_core::refs::RefWriteCondition,
+        tip: &Hash,
+    ) -> Result<(), SourceError> {
+        let _ = (name, condition, tip);
+        Err(SourceError::ProtocolError)
+    }
+    /// Advance the packmap and head, consuming their upload commitments.
+    #[allow(clippy::too_many_arguments)]
+    fn advance_refs_committing(
+        &self,
+        head: &str,
+        head_condition: mkit_core::refs::RefWriteCondition,
+        tip: &Hash,
+        packmap: &str,
+        packmap_condition: mkit_core::refs::RefWriteCondition,
+        node: &Hash,
+        keys: &[PackKey],
+    ) -> Result<mkit_core::protocol::CommitOutcome, SourceError> {
+        let _ = (
+            head,
+            head_condition,
+            tip,
+            packmap,
+            packmap_condition,
+            node,
+            keys,
+        );
+        Err(SourceError::ProtocolError)
+    }
+    /// Remote upload bounds, unchanged from the transport contract.
+    fn upload_limits(&self) -> mkit_core::protocol::UploadLimits {
+        mkit_core::protocol::UploadLimits::default()
+    }
+    /// Both conditioned refs can advance atomically.
+    fn supports_atomic_advance(&self) -> bool {
+        false
+    }
     /// Identity and origin of the repository, for error context.
     fn repository_address(&self) -> Option<(String, String)> {
         None
@@ -87,6 +154,68 @@ impl<'a> TransportSource<'a> {
 }
 
 impl RemoteSource for TransportSource<'_> {
+    fn supports_push(&self) -> bool {
+        true
+    }
+    fn upload_pack_via_ref(
+        &self,
+        bytes: &[u8],
+        key: &PackKey,
+        name: &str,
+    ) -> Result<(), SourceError> {
+        self.transport
+            .upload_pack_via_ref(bytes, key, name)
+            .map_err(Into::into)
+    }
+    fn upload_blob_via_ref(
+        &self,
+        bytes: &[u8],
+        key: &PackKey,
+        name: &str,
+    ) -> Result<(), SourceError> {
+        self.transport
+            .upload_blob_via_ref(bytes, key, name)
+            .map_err(Into::into)
+    }
+    fn update_ref(
+        &self,
+        name: &str,
+        condition: mkit_core::refs::RefWriteCondition,
+        tip: &Hash,
+    ) -> Result<(), SourceError> {
+        self.transport
+            .update_ref(name, condition, tip)
+            .map_err(Into::into)
+    }
+    fn advance_refs_committing(
+        &self,
+        head: &str,
+        head_condition: mkit_core::refs::RefWriteCondition,
+        tip: &Hash,
+        packmap: &str,
+        packmap_condition: mkit_core::refs::RefWriteCondition,
+        node: &Hash,
+        keys: &[PackKey],
+    ) -> Result<mkit_core::protocol::CommitOutcome, SourceError> {
+        self.transport
+            .advance_refs_committing(
+                head,
+                head_condition,
+                tip,
+                packmap,
+                packmap_condition,
+                node,
+                keys,
+            )
+            .map_err(Into::into)
+    }
+    fn upload_limits(&self) -> mkit_core::protocol::UploadLimits {
+        self.transport.upload_limits()
+    }
+    fn supports_atomic_advance(&self) -> bool {
+        self.transport.supports_atomic_advance()
+    }
+
     fn list_branches(&self) -> Result<Vec<Ref>, SourceError> {
         self.transport
             .list_refs("refs/heads/")
@@ -147,7 +276,7 @@ mod tests {
     }
     impl Transport for Failure {
         fn upload_pack(&self, _: &[u8], _: &PackKey) -> TransportResult<()> {
-            unreachable!()
+            self.take()
         }
         fn download_pack(&self, _: &PackKey) -> TransportResult<Vec<u8>> {
             self.take()
@@ -156,7 +285,7 @@ mod tests {
             unreachable!()
         }
         fn update_ref(&self, _: &str, _: RefWriteCondition, _: &Hash) -> TransportResult<()> {
-            unreachable!()
+            self.take()
         }
         fn read_ref(&self, _: &str) -> TransportResult<Option<Hash>> {
             self.take()
@@ -219,6 +348,129 @@ mod tests {
                     other => panic!("unexpected {other:?}"),
                 }
             }
+        }
+    }
+
+    fn write_error(source: &TransportSource<'_>, verb: usize) -> SourceError {
+        let key = PackKey::new([0; 32]);
+        match verb {
+            0 => source
+                .upload_pack_via_ref(b"pack", &key, "refs/heads/main")
+                .unwrap_err(),
+            1 => source
+                .upload_blob_via_ref(b"node", &key, "refs/heads/main")
+                .unwrap_err(),
+            2 => source
+                .update_ref("refs/heads/main", RefWriteCondition::Missing, &[1; 32])
+                .unwrap_err(),
+            _ => source
+                .advance_refs_committing(
+                    "refs/heads/main",
+                    RefWriteCondition::Missing,
+                    &[1; 32],
+                    "refs/mkit/packmap/main",
+                    RefWriteCondition::Missing,
+                    &[2; 32],
+                    &[key],
+                )
+                .unwrap_err(),
+        }
+    }
+
+    #[test]
+    fn every_resumable_write_outcome_survives_transport_source_and_sync() {
+        let required = AdmissionRequired::new(
+            vec![AdmissionChallengeEntry {
+                scheme: "payment".into(),
+                value: "opaque".into(),
+            }],
+            "pay".into(),
+            vec!["challenge".into()],
+            vec!["payment".into()],
+        );
+        for index in 0..4 {
+            for verb in 0..4 {
+                let error = match index {
+                    0 => TransportError::PendingVerification {
+                        retry_after: Duration::from_secs(2),
+                    },
+                    1 => TransportError::MembershipNotVisible,
+                    2 => TransportError::RetryAfter { ms: 3000 },
+                    _ => TransportError::AdmissionRequired(Box::new(required.clone())),
+                };
+                assert!(!mkit_core::protocol::is_retryable(&error));
+                let transport = Failure(Mutex::new(Some(error)));
+                let source = TransportSource::new(&transport);
+                let error = write_error(&source, verb);
+                // The default advance stops at the failed packmap write;
+                // a retry or head write would exhaust Failure and panic.
+                assert!(transport.0.lock().unwrap().is_none());
+                assert_eq!(error.class(), FailureClass::Resumable);
+                let SyncError::Source(error) = source.repository_error(error) else {
+                    panic!("write outcome flattened")
+                };
+                match (index, error) {
+                    (0, SourceError::PendingVerification { retry_after }) => {
+                        assert_eq!(retry_after, Duration::from_secs(2));
+                    }
+                    (1, SourceError::MembershipNotVisible) => (),
+                    (2, SourceError::RetryAfter { ms }) => assert_eq!(ms, 3000),
+                    (3, SourceError::PaymentRequired { challenges }) => {
+                        assert_eq!(*challenges, required);
+                    }
+                    other => panic!("unexpected {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn write_refusals_and_transient_failures_keep_display_and_class() {
+        for verb in 0..4 {
+            for error in [
+                TransportError::AccessDenied,
+                TransportError::RemoteError("deterministic refusal".into()),
+                TransportError::ConnectionFailed,
+                TransportError::ServerError { status: 429 },
+                TransportError::ServerError { status: 503 },
+                TransportError::ServerError { status: 400 },
+                TransportError::AdmissionRequired(Box::new(
+                    AdmissionRequired::new(Vec::new(), "pay".into(), Vec::new(), Vec::new())
+                        .with_reason("helper failed"),
+                )),
+            ] {
+                let expected = error.to_string();
+                let class = if mkit_core::protocol::is_retryable(&error) {
+                    FailureClass::Transient
+                } else {
+                    FailureClass::Refusal
+                };
+                let transport = Failure(Mutex::new(Some(error)));
+                let source = TransportSource::new(&transport);
+                let error = write_error(&source, verb);
+                assert_eq!(error.to_string(), expected);
+                assert_eq!(error.class(), class);
+                let SyncError::Source(error) = source.repository_error(error) else {
+                    panic!("write failure flattened")
+                };
+                assert_eq!(error.to_string(), expected);
+                assert_eq!(error.class(), class);
+            }
+        }
+    }
+
+    #[test]
+    fn repository_classifier_can_recognize_typed_write_errors() {
+        let classify = |error: &SourceError| {
+            matches!(error, SourceError::ConnectionFailed).then_some(SyncError::Interrupted)
+        };
+        for verb in 0..4 {
+            let transport = Failure(Mutex::new(Some(TransportError::ConnectionFailed)));
+            let source = TransportSource::new(&transport).with_error_classifier(&classify);
+            assert!(matches!(
+                source.repository_error(write_error(&source, verb)),
+                SyncError::Interrupted
+            ));
         }
     }
 

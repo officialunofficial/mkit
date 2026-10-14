@@ -1,7 +1,7 @@
-//! Native clone, fetch and pull for `.mkit` repositories.
+//! Native clone, fetch, pull and push for `.mkit` repositories.
 //!
 //! `mkit-sync` is the filesystem layer behind the `mkit` command line's
-//! `clone`, `fetch` and `pull`, as a library. Every call returns a typed
+//! `clone`, `fetch`, `pull` and `push`, as a library. Every call returns a typed
 //! report or a typed error and prints nothing: warnings and progress go to a
 //! [`SyncObserver`], and cancellation is polled through it.
 //!
@@ -40,6 +40,8 @@ mod native;
 mod observer;
 pub mod packmap;
 mod pull;
+pub mod push;
+pub use push::{PushError, PushLease, PushOptions, PushReport, PushTarget, push};
 #[doc(hidden)]
 pub mod restore_fanout;
 mod source;

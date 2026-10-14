@@ -2009,8 +2009,11 @@ buffered (bounded per part by the ticket part size). Exact-byte replay applies
 to retained requests; reconstructing a request with the same identity preserves
 its authenticated operation and body. No result claims eternal replay retention
 or proves
-that an earlier ambiguous attempt never wrote. The native CLI retains its
-existing push I/O path. Both push drivers use the pure
+that an earlier ambiguous attempt never wrote. Native repository push lives in
+`mkit-sync::push(dir, source, options)`, which returns `PushReport` or typed
+`PushError` and sends progress through `SyncObserver`. The CLI delegates the
+repository mechanics while retaining configuration, trust gates, grants,
+admission policy, output, and exit codes. Both push drivers use the pure
 `mkit-core::transfer::packmap` planner for node bytes, idempotency, and packmap
 CAS conditions. Chain validation, rollover policy, upload, and conflict handling
 remain in the drivers; no wire or stored-format change results. See [the client guide](../../rust/crates/mkit-client/README.md)
@@ -2023,3 +2026,12 @@ and response headers for host policy. An observed signed `Client` also works
 as a `ClientSource`; reads do not invoke its write observer. This adapter API
 does not change the wire contract or the synchronous Connect transport's own
 polling policy.
+
+Native push runs through `RemoteSource`. `TransportSource` supports every
+existing scheme, including `mkit+https`. `ClientSource` remains read-only and
+reports `supports_push() == false`: grants, admission and 402 helpers, durable
+receipt persistence, and resumable parts still need adapter parity. Native
+extra-CA and configuration wiring remain host-owned. The extraction preserves
+pack and packmap ids, ref moves, CAS retries, limits, and resumability; it changes
+no wire or stored format and requires no wipe. Push backend failures remain
+`SourceError`, carried by `PushError::Sync(SyncError::Source(_))`.
