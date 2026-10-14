@@ -1351,8 +1351,10 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
         // The first step is the unchained step: its result, error included,
         // is returned exactly as before.
         let started = now_ms(self.h.clock.as_ref());
+        // Keep the stage's backend futures out of every enclosing slice future.
+        // Their nested poll frames otherwise exhaust a small stack during decode.
         #[cfg(not(feature = "perf-metrics"))]
-        let mut result = self.stage(st, job, &mut x).await;
+        let mut result = Box::pin(self.stage(st, job, &mut x)).await;
         #[cfg(feature = "perf-metrics")]
         let mut result = self.observed_stage(st, job, &mut x).await;
         let mut steps = 1;
@@ -1375,7 +1377,7 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
             let before = (x.clone(), job.phase, job.outcome);
             let (guards, settled) = (st.guards.len(), st.settled.len());
             #[cfg(not(feature = "perf-metrics"))]
-            let next = self.stage(st, job, &mut x).await;
+            let next = Box::pin(self.stage(st, job, &mut x)).await;
             #[cfg(feature = "perf-metrics")]
             let next = self.observed_stage(st, job, &mut x).await;
             steps += 1;
@@ -1588,6 +1590,59 @@ fn step_ops(stage: u8) -> usize {
 // A chained slice's one commit stays within the apply limits: the cap, the
 // widest single step (a head reconstruction) and the five fixed operations.
 const _: () = assert!(CHAIN_MAX_OPS + 5 <= crate::store::MAX_BATCH_OPS);
+
+#[cfg(all(test, feature = "memory"))]
+impl<R: NamespaceStore, B: BlobStore, W: PackWindows, X: SliceExtension>
+    super::VerifyTimer<R, B, W, X>
+{
+    pub(in crate::indexed) fn extraction_future_sizes<S: NamespaceStore>(
+        &self,
+        local: &S,
+        source: &Partition,
+        repo: crate::RepoId,
+    ) -> [(&'static str, usize); 5] {
+        use std::mem::size_of_val;
+        let budget = super::SliceBudget::new(self.limits.max_subrequests);
+        let budgeted_remote = super::Budgeted::new(&self.remote, &budget);
+        let remote = crate::store::DenialReads::new(&budgeted_remote, self.takedown_denial);
+        let blobs = super::Budgeted::new(&self.blobs, &budget);
+        let run = Run {
+            h: self,
+            local,
+            source,
+            repo,
+            pack: [0; 32],
+            budget: &budget,
+            remote: &remote,
+            blobs: &blobs,
+            now: 0,
+            continuation_deadline_ms: None,
+        };
+        let mut st = SliceState::default();
+        let mut job = VerifyJobV1::default();
+        let mut x = ExtractionV1::default();
+        let p = Projection {
+            owner: [0; 32],
+            kind: 0,
+            size: 0,
+            references: 0,
+            digest: [0; 32],
+        };
+        let extraction = size_of_val(&run.extraction(&mut st, &mut job));
+        let stage = size_of_val(&run.stage(&mut st, &mut job, &mut x));
+        let walk_source = size_of_val(&run.walk_source(&mut st, &job, &mut x));
+        let walk_chunk = size_of_val(&run.walk_chunk(&mut st, &mut x, [0; 32], &[0; 32], &p));
+        let incremental_member =
+            size_of_val(&run.incremental_member(&mut st, &mut x, [0; 32], true));
+        [
+            ("extraction", extraction),
+            ("stage", stage),
+            ("walk_source", walk_source),
+            ("walk_chunk", walk_chunk),
+            ("incremental_member", incremental_member),
+        ]
+    }
+}
 
 #[cfg(test)]
 mod chain_bounds {

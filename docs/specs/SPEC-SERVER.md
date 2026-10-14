@@ -1879,7 +1879,10 @@ reconstruction. It retains at most the configured number of pending delta
 metadata entries, plus one active member; call-stack use does not grow with
 chain depth. Encoded frames and canonical bytes remain subject to the existing
 source and decode budgets. This implementation preserves the checks, charging
-order, and concurrent raw-member prefix/frame reads described above.
+order, and concurrent raw-member prefix/frame reads described above. Scheduled
+extraction boxes each serial stage future to bound the storage carried through
+enclosing slice futures, leaving stack space for frame decoding. This changes
+neither the durable cursor nor the check and charging order.
 
 When indexed mode is off, the server MUST advertise
 `max_delta_chain_depth = 0`. That value indicates that the indexed
