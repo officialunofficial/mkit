@@ -68,6 +68,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     },
                     None,
                     Some((&source_ref, expected_tip)),
+                    &mut super::advance::TicketHeads::default(),
                 )
                 .await?
             {

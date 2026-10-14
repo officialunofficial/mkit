@@ -437,7 +437,9 @@ fn member_id(bytes: &[u8]) -> Hash {
     h.update(bytes);
     h.finalize()
 }
-fn member_key(repo: &RepoName, pack: &Hash, id: &Hash) -> crate::Key {
+
+/// The row key of a job's content-addressed member body.
+pub(crate) fn member_key(repo: &RepoName, pack: &Hash, id: &Hash) -> crate::Key {
     keys::verify_row(repo, pack, keys::VC_CANDIDATE, Some(id))
 }
 
@@ -493,6 +495,31 @@ pub fn write_job(
     Ok(batch.put(keys::verify_job(repo, pack), header))
 }
 
+/// Check one fetched member body against `job` and load its lists. Bodies are
+/// content addressed: a wrong version, digest or size is corrupt storage.
+pub(crate) fn apply_member_body(job: &mut VerifyJobV1, raw: &Value) -> Result<(), StoreError> {
+    let Some(id) = job.member_body_id else {
+        return Err(StoreError::Corrupt("job names no member body".into()));
+    };
+    let Some((&CODEC_V1, bytes)) = raw.as_bytes().split_first() else {
+        return Err(StoreError::Corrupt("bad job member body version".into()));
+    };
+    if member_id(raw.as_bytes()) != id {
+        return Err(StoreError::Corrupt("bad job member body digest".into()));
+    }
+    let lists: MemberLists = serde_json::from_slice(bytes)
+        .map_err(|_| StoreError::Corrupt("bad job member body".into()))?;
+    if lists.satisfying.len() > crate::store::index::MAX_LOOKUP_IDS
+        || lists.packlist.len()
+            > crate::store::index::MAX_LOOKUP_IDS + crate::store::outbox::MAX_TICKETS_PER_ADVANCE
+    {
+        return Err(StoreError::Corrupt("oversized job member body".into()));
+    }
+    job.satisfying = lists.satisfying;
+    job.packlist = lists.packlist;
+    Ok(())
+}
+
 /// Hydrate a header without expanding any peer's guarded value. Bodies are
 /// content addressed and remain immutable until the job's guarded cleanup.
 pub async fn hydrate_job<S: NamespaceStore>(
@@ -509,23 +536,7 @@ pub async fn hydrate_job<S: NamespaceStore>(
             .get(source, &member_key(repo, pack, &id))
             .await?
             .ok_or_else(|| StoreError::Unavailable("job member body disappeared".into()))?;
-        let Some((&CODEC_V1, bytes)) = raw.as_bytes().split_first() else {
-            return Err(StoreError::Corrupt("bad job member body version".into()));
-        };
-        if member_id(raw.as_bytes()) != id {
-            return Err(StoreError::Corrupt("bad job member body digest".into()));
-        }
-        let lists: MemberLists = serde_json::from_slice(bytes)
-            .map_err(|_| StoreError::Corrupt("bad job member body".into()))?;
-        if lists.satisfying.len() > crate::store::index::MAX_LOOKUP_IDS
-            || lists.packlist.len()
-                > crate::store::index::MAX_LOOKUP_IDS
-                    + crate::store::outbox::MAX_TICKETS_PER_ADVANCE
-        {
-            return Err(StoreError::Corrupt("oversized job member body".into()));
-        }
-        job.satisfying = lists.satisfying;
-        job.packlist = lists.packlist;
+        apply_member_body(job, &raw)?;
     }
     job.members_loaded = true;
     Ok(())

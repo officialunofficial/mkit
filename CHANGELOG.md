@@ -33,6 +33,24 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Changed
 
+- Small pushes, including the commit right after a fork, no longer repeat
+  identical backend reads inside one request. Each upload session now latches
+  its unfenced authority-activation probe instead of re-reading the fence pair
+  at every stage, finish and completion check (fenced namespaces still read
+  the authority generation live on every check, and every apply keeps its
+  generation and lease-recovery guards). The ticketed advance memoizes each
+  ticket's marker/pack head proof per request, shared across the planner's
+  replans and the pending-hold retry. The scheduled-verification usability
+  check fetches the member rows its failed-group and finished-peer guards
+  need in one batched read, batches the first pages of dependency and
+  owed-children scans, and fuses per-commit history and head-type frame
+  lookups across consumed packs. The write-round probe's embedder upload step
+  drops from 13 to 7 KV calls without denial (23 to 11 with), and the held
+  commit retry issues no repeated blob heads. Admission, replay, verification,
+  denial and abort semantics are unchanged. No API, wire or stored-format
+  change; no wipe. See the
+  [request write rounds](docs/operations/request-write-rounds.md) probe.
+
 - The reachability walk behind object reads now expands trees first and then
   alternates history with a small, doubling file batch, instead of locating every
   file entry of a tree before following any commit parent. Reading an older

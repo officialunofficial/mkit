@@ -14,6 +14,25 @@ use crate::{
 };
 use mkit_attest::grant::EpochTransition;
 
+/// One request's persisted-fence probe latch. On an unfenced deployment the
+/// first ticket-generation check runs the activation probe (`get_many` of the
+/// generation and lease-recovery pair) and every later check in the request
+/// reuses it; on a fenced one each check reads the stored generation live, so
+/// a mid-request bump still stops the next physical write. Nothing is cached
+/// across requests, and a failed probe is not recorded — the next check
+/// re-runs it.
+pub(super) struct TicketFence {
+    ns: NamespaceKey,
+    probed: bool,
+}
+
+impl TicketFence {
+    /// A ticket fence for one request's namespace, probed lazily on first check.
+    pub(super) fn new(ns: NamespaceKey) -> Self {
+        Self { ns, probed: false }
+    }
+}
+
 impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     pub(super) async fn stored_authority_generation(
         &self,
@@ -167,9 +186,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     }
 
     // Keep streaming-session futures small while the authoritative read is pending.
+    /// The fence is still established by a live read on every request; the
+    /// `TicketFence` a session passes in just stops repeating the probe.
     pub(super) fn check_ticket_generation<'a>(
         &'a self,
-        ns: &'a NamespaceKey,
+        fence: &'a mut TicketFence,
         generation: Option<u64>,
     ) -> crate::BoxFuture<'a, Result<(), ServerError>> {
         Box::pin(async move {
@@ -179,13 +200,19 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                         "fenced ticket requires enabled executor",
                     ));
                 }
-                Box::pin(self.ensure_authority_activation(ns)).await?;
+                if !fence.probed {
+                    Box::pin(self.ensure_authority_activation(&fence.ns)).await?;
+                    fence.probed = true;
+                }
             } else {
                 // A generation-bearing authenticated ticket is issued only after
                 // activation. Do not repeat the activation scan on every chunk.
                 let current = self
                     .meta
-                    .get(&self.shards.coordinator(ns), &keys::authority_generation())
+                    .get(
+                        &self.shards.coordinator(&fence.ns),
+                        &keys::authority_generation(),
+                    )
                     .await
                     .map_err(meta_error)?;
                 let current = current

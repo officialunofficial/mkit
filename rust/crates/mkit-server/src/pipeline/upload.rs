@@ -83,6 +83,8 @@ pub struct UploadSession<'p, B: BlobStore, N, H> {
     failed: Option<ServerError>,
     outcome: Outcome,
     ticket_id: Option<Hash>,
+    /// The fence one request resolved; ticketed sessions check it per stage.
+    fence: super::authority::TicketFence,
     staging: super::staging::StagingBuffer,
 }
 
@@ -103,6 +105,7 @@ struct Opened<S> {
     validator: UploadValidator,
     target: Target<S>,
     ticket_id: Option<Hash>,
+    fence: super::authority::TicketFence,
 }
 
 /// The replay record a signed operation commits.
@@ -170,6 +173,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
                 failed: None,
                 outcome,
                 ticket_id: o.ticket_id,
+                fence: o.fence,
                 staging: super::staging::StagingBuffer::default(),
             }),
             Err(err) => {
@@ -288,6 +292,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
             Target::Sink(sink.map_err(|e| store_error(StorageOp::BlobPut, e))?)
         };
         Ok(Opened {
+            fence: super::authority::TicketFence::new(op.repo.namespace.clone()),
             op,
             p,
             mode,
@@ -334,6 +339,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
             check_pack_commitment(auth, &key.0, declared)
                 .map_err(|e| ServerError::unauthenticated(e.to_string()))?;
             let now_ms = ms(pipe.clock.now_ms().saturating_add(a.business_skew_ms));
+            let mut fence = super::authority::TicketFence::new(op.repo.namespace.clone());
             let claims = verify_ticket(
                 keys,
                 token,
@@ -342,7 +348,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
                 &a.repo().identity,
                 &auth.signer,
             )?;
-            pipe.check_ticket_generation(&op.repo.namespace, claims.authority_generation)
+            pipe.check_ticket_generation(&mut fence, claims.authority_generation)
                 .await?;
             op.authz.authority_generation = claims.authority_generation;
             if claims.pack_id != key.0 || claims.bytes != declared {
@@ -358,7 +364,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
                 .await
                 .map_err(|e| store_error(StorageOp::BlobPut, e))?;
             if let Err(err) = pipe
-                .check_ticket_generation(&op.repo.namespace, claims.authority_generation)
+                .check_ticket_generation(&mut fence, claims.authority_generation)
                 .await
             {
                 sink.abort().await;
@@ -371,6 +377,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
                 validator,
                 target: Target::Sink(sink),
                 ticket_id: Some(claims.ticket_id),
+                fence,
             })
         }
         .instrument(outcome.span.clone())
@@ -387,6 +394,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
                 failed: None,
                 outcome,
                 ticket_id: o.ticket_id,
+                fence: o.fence,
                 staging: super::staging::StagingBuffer::default(),
             }),
             Err(err) => {
@@ -476,7 +484,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
 
     async fn stage(&mut self, bytes: Bytes) -> Result<(), ServerError> {
         self.pipe
-            .check_ticket_generation(&self.op.repo.namespace, self.op.authz.authority_generation)
+            .check_ticket_generation(&mut self.fence, self.op.authz.authority_generation)
             .await?;
         let Some(Target::Sink(sink)) = self.target.as_mut() else {
             return Err(internal("ticketed upload sink gone"));
@@ -485,7 +493,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
             .await
             .map_err(|e| store_error(StorageOp::BlobPut, e))?;
         self.pipe
-            .check_ticket_generation(&self.op.repo.namespace, self.op.authz.authority_generation)
+            .check_ticket_generation(&mut self.fence, self.op.authz.authority_generation)
             .await
     }
 
@@ -494,11 +502,8 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
         let pipe = self.pipe;
         let done = self.validator.clone().finish()?;
         if self.ticket_id.is_some() {
-            pipe.check_ticket_generation(
-                &self.op.repo.namespace,
-                self.op.authz.authority_generation,
-            )
-            .await?;
+            pipe.check_ticket_generation(&mut self.fence, self.op.authz.authority_generation)
+                .await?;
         }
         match self.target.take() {
             Some(Target::Sink(sink)) => match sink.commit().await {
@@ -515,11 +520,8 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
         }
         super::fault!(pipe, AfterBlobCommit, &self.op, &self.a);
         if let Some(ticket_id) = self.ticket_id {
-            pipe.check_ticket_generation(
-                &self.op.repo.namespace,
-                self.op.authz.authority_generation,
-            )
-            .await?;
+            pipe.check_ticket_generation(&mut self.fence, self.op.authz.authority_generation)
+                .await?;
             write_upload_marker(
                 &pipe.blobs,
                 &ticket_id,
@@ -529,11 +531,8 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
             )
             .await
             .map_err(|e| store_error(StorageOp::BlobPut, e))?;
-            pipe.check_ticket_generation(
-                &self.op.repo.namespace,
-                self.op.authz.authority_generation,
-            )
-            .await?;
+            pipe.check_ticket_generation(&mut self.fence, self.op.authz.authority_generation)
+                .await?;
             pipe.metrics.incr(METRIC_UPLOAD_BYTES, &[], done.total);
             return Ok(());
         }
