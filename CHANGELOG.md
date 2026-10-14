@@ -23,6 +23,15 @@ collect the applicable entries between their old and new immutable pins.
   embedders' tests should use it instead of `adapter_spi` codecs.
   APIs are additive. No wire or stored-format change; no wipe.
 
+- Opt-in `perf-metrics` builds emit one `fork_step` event per fork slice and
+  one `fork_step_summary` per job reaching a terminal phase, attributing step
+  executions, storage calls and serial rounds per partition kind, and
+  precondition losses to the request or alarm driver. The conformance probe
+  `fork.driver_probe` forks a fresh source over the `__test-faults` Worker
+  route at configurable file counts (`MKIT_FORK_PROBE_FILES`, default
+  `500,3000`). Default builds are unchanged. No wire or stored-format
+  change; no wipe.
+
 ### Fixed
 
 - Scheduled indexed extraction boxes each stage future so nested backend reads
@@ -93,6 +102,14 @@ collect the applicable entries between their old and new immutable pins.
   across fresh client or transport instances. Unsigned clients with an explicit
   clock retain write nonce and expiry metadata without a signer. Client additions
   are additive. No wire or stored-format change; wipe: no.
+
+- A pending `PendingVerification` answer now carries the scheduled job's
+  actual timer wake in milliseconds for every phase of a tiny job (the
+  existing SP2 `VerifyJobV1::tiny` bound), with the 100 ms floor and the
+  existing seconds cap retained — previously sub-second hints applied only
+  in `AwaitDelivery`. Larger jobs keep whole-second rounding. The wire
+  field already carries milliseconds; no wire or stored-format change; no
+  wipe.
 
 - Fork emptiness scans, source index statistics and holder
   copies run in bounded waves. Per-pack write denial proofs use four concurrent

@@ -408,6 +408,18 @@ pub async fn step<S: NamespaceStore>(
     dest: &RepoId,
     budget: &SliceBudget,
 ) -> Result<StepReport, ForkError> {
+    #[cfg(feature = "perf-metrics")]
+    return super::trace::step(env, dest, budget).await;
+    #[cfg(not(feature = "perf-metrics"))]
+    step_inner(env, dest, budget).await
+}
+
+pub(super) async fn step_inner<S: NamespaceStore>(
+    env: &ForkEnv<'_, S>,
+    dest: &RepoId,
+    budget: &SliceBudget,
+    #[cfg(feature = "perf-metrics")] trace: &super::trace::StepTrace,
+) -> Result<StepReport, ForkError> {
     let p = env.shards.coordinator(&dest.namespace);
     let key = keys::fork_job(&dest.name);
     let store = Budgeted::new(env.store, budget);
@@ -425,6 +437,8 @@ pub async fn step<S: NamespaceStore>(
         }
         .ok_or(ForkError::Unavailable("fork job missing"))?;
         let mut job = decode_job(&raw).map_err(|_| ForkError::Unavailable("fork job corrupt"))?;
+        #[cfg(feature = "perf-metrics")]
+        trace.note_phase_in(job.phase);
         if job.finished() || spent {
             return Ok(StepReport { job, progressed });
         }

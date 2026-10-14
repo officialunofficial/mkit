@@ -725,6 +725,23 @@ if [ "${indexed}" -eq 1 ]; then
         fi
         require_pass indexed.small_pack_verification_commits
         cp "${work}/last.tap" "${phase}/small-pack.tap"
+        # The fork driver probe (Lane RX2): 500- and 3,000-file forks through
+        # `POST /__mkit_test/fork`, so the kind-16 timer and the request driver
+        # race on real storage. Under MKIT_PERF_METRICS the `fork_step` rows in
+        # this phase's wrangler log are the measurement.
+        echo ">> running the fork driver probe (hold ${advance_hold_ms} ms)"
+        capture "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
+            --repository "${REPOSITORY}" --signer-seed-hex "${indexed_seed}" \
+            --run-id "${indexed_run_id}" --atomic-advance --fresh-target --milestone M4 \
+            --max-pack-bytes "${MAX_PACK_BYTES}" --features "${held_features}" \
+            --sharding d34 --filter fork.driver_probe \
+            ${runner_args[@]+"${runner_args[@]}"}
+        if [ "${status}" -ne 0 ]; then
+            tail -n 80 "${log}" >&2
+            exit "${status}"
+        fi
+        require_pass fork.driver_probe
+        cp "${work}/last.tap" "${phase}/fork-probe.tap"
         stop_server
         if [ "${MKIT_PERF_METRICS:-0}" = 1 ]; then
             python3 - "${phase}/wrangler.log" <<'PYINFO'

@@ -21,6 +21,8 @@ mod publish;
 mod request;
 mod sets;
 mod settle;
+#[cfg(feature = "perf-metrics")]
+mod trace;
 
 #[cfg(test)]
 mod wave_tests;

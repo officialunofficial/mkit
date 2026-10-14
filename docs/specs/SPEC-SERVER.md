@@ -1960,7 +1960,9 @@ and a visibility the owner declared for the name before it existed stands
 
 **Job.** The fork is a durable job in the destination's coordinator, advanced
 in slices of at most 600 storage calls by the request that started it and
-then by the fork timer (timer kind 16). Every effect is repeatable (a put of
+then by the fork timer (timer kind 16). The timer row is due at job
+creation: on a request-driven runtime the alarm is a second driver from
+t=0, which `fork_step` events attribute per driver. Every effect is repeatable (a put of
 the same value, or a holder write that only raises a sequence), so a crash or
 a lost reply at any write resumes by repeating the state's slice. Order of effects: the destination is registered first (a
 takedown sweep enumerates the registry, so every destination that holds
