@@ -45,6 +45,14 @@ collect the applicable entries between their old and new immutable pins.
   clock retain write nonce and expiry metadata without a signer. Client additions
   are additive; the CLI routing stays unchanged. No wire or stored-format change; wipe: no.
 
+- Fork emptiness scans, source index statistics and holder
+  copies run in bounded waves. Per-pack write denial proofs use four concurrent
+  directory reads when takedown denial is enabled. Successful work uses the same
+  storage calls and slice allowances; failures retain input-order precedence,
+  and unfinished units resume through the existing checkpoints. No public API,
+  wire, or stored-format change; no wipe. See
+  [fork wave bounds and latency model](docs/operations/fork-waves.md).
+
 - Ingest and read paths skip block and denial-action reads when
   `PipelineConfig.takedown_denial` is false. Holder, inventory, membership,
   index, and proof-structure writes continue. Takedown-enabled checks retain

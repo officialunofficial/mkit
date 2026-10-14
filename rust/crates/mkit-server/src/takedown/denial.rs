@@ -475,6 +475,7 @@ const WRITE_PROOF_CONCURRENCY: usize = 4;
 // At most 4 MiB of raw descriptor values, plus bounded key/cursor overhead;
 // nested proof allocations remain serial.
 const _: () = assert!(SCANNER_PROOF_CONCURRENCY * crate::store::MAX_VALUE_BYTES <= 4 * 1024 * 1024);
+const _: () = assert!(WRITE_PROOF_CONCURRENCY * crate::store::MAX_VALUE_BYTES <= 4 * 1024 * 1024);
 
 async fn prove_shards<S: NamespaceStore>(
     store: &S,
@@ -903,6 +904,16 @@ pub async fn require_pack_clear<S: NamespaceStore>(
     require_pack_clear_with_concurrency(store, shards, repo, pack, 1).await
 }
 
+/// Write admission's directory wave; pack-serving proofs remain serial.
+pub(crate) async fn require_pack_clear_for_write<S: NamespaceStore>(
+    store: &S,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    pack: &Hash,
+) -> Result<(), ServerError> {
+    require_pack_clear_with_concurrency(store, shards, repo, pack, WRITE_PROOF_CONCURRENCY).await
+}
+
 /// The fork's per-pack proof: the pack id is not blocked, its inventory is
 /// sealed, and no active descriptor intersects it. Unlike
 /// [`require_pack_clear`] it does not re-read the inventory rows, so its cost
@@ -942,7 +953,16 @@ pub async fn require_pack_clear_sealed<S: NamespaceStore>(
         manifests: &[],
         packs: vec![*pack],
     };
-    prove_shards(&remote, shards, repo, &target, &start, &end, 1).await?;
+    prove_shards(
+        &remote,
+        shards,
+        repo,
+        &target,
+        &start,
+        &end,
+        WRITE_PROOF_CONCURRENCY,
+    )
+    .await?;
     for id in target.ids {
         require_clear(&remote, id).await?;
     }
@@ -1140,6 +1160,84 @@ mod tests {
             concurrency,
         )
         .await
+    }
+
+    #[test]
+    fn pack_write_proofs_keep_early_block_before_later_directory_failure() {
+        block_on(async {
+            let pack = [42; 32];
+            for sealed in [false, true] {
+                let store = ScanProbe::new(Some(2), false);
+                store
+                    .inner
+                    .apply(
+                        &content_shard(&pack),
+                        Batch::new().put(
+                            keys::block(&pack),
+                            crate::store::codec::encode_block_entry(
+                                &crate::store::BlockEntry::new("blocked", 0),
+                            ),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+                let budget = SliceBudget::new(600);
+                let remote = Budgeted::new(&store, &budget);
+                let error = if sealed {
+                    require_pack_clear_sealed(&remote, &D34Shards, &repo("pack"), &pack).await
+                } else {
+                    require_pack_clear_for_write(&remote, &D34Shards, &repo("pack"), &pack).await
+                }
+                .unwrap_err();
+                assert_eq!(error.code(), crate::Code::PermissionDenied);
+                assert_eq!(budget.used(), 1);
+                assert_eq!(store.scans.load(Ordering::SeqCst), 0);
+            }
+        });
+    }
+
+    #[test]
+    fn pack_write_proofs_use_four_waves_without_extra_calls() {
+        block_on(async {
+            let pack = [42; 32];
+            for sealed in [false, true] {
+                let store = ScanProbe::new(None, false);
+                super::super::inventory::complete(&store.inner, &pack, 1, 0)
+                    .await
+                    .unwrap();
+                let budget = SliceBudget::new(600);
+                let remote = Budgeted::new(&store, &budget);
+                if sealed {
+                    require_pack_clear_sealed(&remote, &D34Shards, &repo("pack"), &pack)
+                        .await
+                        .unwrap();
+                    assert_eq!(budget.used(), 19);
+                } else {
+                    let baseline = ScanProbe::new(None, false);
+                    super::super::inventory::complete(&baseline.inner, &pack, 1, 0)
+                        .await
+                        .unwrap();
+                    let before = SliceBudget::new(600);
+                    require_pack_clear(
+                        &Budgeted::new(&baseline, &before),
+                        &D34Shards,
+                        &repo("pack"),
+                        &pack,
+                    )
+                    .await
+                    .unwrap();
+                    require_pack_clear_for_write(&remote, &D34Shards, &repo("pack"), &pack)
+                        .await
+                        .unwrap();
+                    assert_eq!(budget.used(), before.used());
+                    assert_eq!(baseline.peak.load(Ordering::SeqCst), 1);
+                    assert_eq!(budget.used(), 21);
+                }
+                assert_eq!(store.scans.load(Ordering::SeqCst), 16);
+                assert_eq!(store.peak.load(Ordering::SeqCst), WRITE_PROOF_CONCURRENCY);
+                assert_eq!(store.active.load(Ordering::SeqCst), 0);
+            }
+        });
     }
 
     #[test]

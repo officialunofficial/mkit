@@ -343,15 +343,20 @@ pub(super) async fn require_empty<S: NamespaceStore>(
     if partitions.is_empty() {
         return Err(ForkError::Unavailable("fork shard map"));
     }
-    for (p, start, end) in partitions {
-        if !env
-            .store
-            .scan(&p, &start, &end, None, 1)
-            .await?
-            .entries
-            .is_empty()
-        {
-            return Err(ForkError::NotEmpty);
+    for wave in partitions.chunks(6) {
+        let replies = futures::future::join_all(wave.iter().map(|(p, start, end)| async {
+            let reservation = env.store.reserve_read_calls(1)?;
+            crate::store::ReadReservation::scope(
+                &[reservation],
+                env.store.scan(p, start, end, None, 1),
+            )
+            .await
+        }))
+        .await;
+        for reply in replies {
+            if !reply?.entries.is_empty() {
+                return Err(ForkError::NotEmpty);
+            }
         }
     }
     Ok(())
