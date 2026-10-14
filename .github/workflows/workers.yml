@@ -461,7 +461,7 @@ jobs:
           VCS_CONFORMANCE_KEEP: '1'
         run: scripts/vcs-worker-conformance.sh --test-faults --sharding single
 
-      - name: Paid indexed slice failure, resume and commit
+      - name: Paid indexed verification, hold off/on and same-shard concurrency
         timeout-minutes: 20
         env:
           TMPDIR: ${{ runner.temp }}/wire-logs

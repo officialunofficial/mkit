@@ -49,6 +49,12 @@ collect the applicable entries between their old and new immutable pins.
   the earliest source error. Complete ref coverage, pagination, response bounds,
   and wire/stored formats are unchanged; no store reset is required.
 
+- Add a default-off, bounded ticketed `AdvanceRefs` verification hold. Workers
+  configure `ADVANCE_REFS_HOLD_MS` from 0 through 2,000; core embedders inject
+  a timer and absolute request deadline with `with_pending_advance_hold`.
+  Readiness repeats all normal guards. Timeout preserves the pending bytes and
+  typed hint. No breaking API, wire, or stored-format change; no store reset.
+
 - Share pure packmap advance planning between the protocol client and CLI in
   `mkit-core::transfer::packmap`. Node bytes, CAS conditions, retries, and
   driver-specific limits and errors are unchanged. No wire or stored-format

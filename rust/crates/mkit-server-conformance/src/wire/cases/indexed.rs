@@ -345,6 +345,91 @@ pub(super) async fn async_verification_commits(ctx: Ctx) -> CaseResult {
     Ok(())
 }
 
+/// A small real scheduled job can complete within the optional hold.
+pub(super) async fn small_pack_verification_commits(ctx: Ctx) -> CaseResult {
+    let (pack, head) = pack_with_blob(Some(b"small scheduled verification"))?;
+    let (repository, _) = commit_pack(&ctx, &pack, head, false).await?;
+    let signer = ctx.v2_signer("repository-a")?;
+    for (name, id) in [
+        (ctx.head("async"), head),
+        (ctx.packmap("async"), hash(&pack)),
+    ] {
+        let read = sign_unary(
+            &signer,
+            Rpc::ReadRef,
+            &ReadRefRequest {
+                name: Some(name),
+                ..Default::default()
+            },
+            |env| repository.clone_into(&mut env.repository),
+        );
+        let response: ReadRefResponse = want_ok(ctx.send(&read).await?, "small-pack ref")?;
+        ensure!(
+            response.object_id.as_deref() == Some(id.as_slice()),
+            "small-pack ref differs"
+        );
+    }
+    Ok(())
+}
+
+/// Exercise the real `RefShard` while the large-pack advance waits. Reading the
+/// same branch routes to the same DO; health and repository-index reads would
+/// not establish that its fetch handler remains available.
+async fn advance_with_concurrent_read(
+    ctx: &Ctx,
+    repository: &str,
+    advance: &Signed,
+    expected_head: Hash,
+) -> Result<Result<AdvanceRefsResponse, RpcError>, Failure> {
+    let started = std::time::Instant::now();
+    let held = ctx.send::<AdvanceRefsResponse>(advance);
+    tokio::pin!(held);
+    tokio::select! {
+        biased;
+        reply = &mut held => {
+            return Err(format!("advance finished before the concurrency probe: {reply:?}").into());
+        }
+        () = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+    }
+    let read = sign_unary(
+        &ctx.v2_signer("repository-a")?,
+        Rpc::ReadRef,
+        &ReadRefRequest {
+            name: Some(ctx.head("async")),
+            ..Default::default()
+        },
+        |env| repository.clone_into(&mut env.repository),
+    );
+    let read_started = std::time::Instant::now();
+    tokio::select! {
+        biased;
+        reply = &mut held => {
+            return Err(format!("held advance finished before the same-shard read: {reply:?}").into());
+        }
+        reply = ctx.send::<ReadRefResponse>(&read) => {
+            let response = want_ok(reply?, "same-shard concurrent read")?;
+            // The commit may linearize before its HTTP reply arrives. Either
+            // snapshot is valid; an unrelated head is never valid.
+            let id = response.object_id.as_deref().unwrap_or_default();
+            ensure!(
+                (response.exists != Some(true) && id.is_empty())
+                    || (response.exists == Some(true) && id == expected_head.as_slice()),
+                "same-shard concurrent read returned an unexpected head: {response:?}"
+            );
+        }
+    }
+    ctx.set_note(format!(
+        "concurrent_same_ref_read_ms={}",
+        read_started.elapsed().as_millis()
+    ));
+    let response = held.await?;
+    ensure!(
+        response.is_ok() || started.elapsed() >= std::time::Duration::from_millis(1_900),
+        "pending advance returned before the configured hold cap"
+    );
+    Ok(response)
+}
+
 async fn commit_large_pack(ctx: &Ctx, pack: &[u8], head: Hash) -> Result<(String, u32), Failure> {
     ensure!(
         pack.len() > 33 << 20,
@@ -394,19 +479,44 @@ async fn commit_pack(
     head: Hash,
     canonical: bool,
 ) -> Result<(String, u32), Failure> {
+    // Client-visible timing includes ticket creation and upload, so it starts
+    // before the server creates the scheduled job. Stop at the committed reply.
+    let upload_started = std::time::Instant::now();
     let (repository, advance) = ticketed_pair(ctx, pack, head, "async", canonical).await?;
     let mut pending = 0;
-    for _ in 0..240 {
-        match send_launch_retry::<AdvanceRefsResponse>(ctx, &advance).await? {
+    for attempt in 0..240 {
+        let reply = if attempt == 0
+            && ctx.case == "indexed.async_verification_commits"
+            && ctx.profile().features.contains(&Feature::AdvanceHold)
+        {
+            advance_with_concurrent_read(ctx, &repository, &advance, head).await?
+        } else {
+            send_launch_retry::<AdvanceRefsResponse>(ctx, &advance).await?
+        };
+        match reply {
             Ok(response) => {
                 ensure!(
-                    pending > 0,
+                    pending > 0
+                        || ctx.case == "indexed.small_pack_verification_commits"
+                        || ctx.profile().features.contains(&Feature::AdvanceHold),
                     "the first advance committed before any slice ran"
                 );
                 want_outcome(
                     Ok(response.outcome.map_or(0, |outcome| outcome.to_i32())),
                     AdvanceOutcome::ADVANCE_OUTCOME_COMMITTED,
                 )?;
+                if ctx.case == "indexed.small_pack_verification_commits" {
+                    ctx.set_note(format!(
+                        "pending={pending}; upload_start_to_committed_ms={}",
+                        upload_started.elapsed().as_millis()
+                    ));
+                    let stored: AdvanceRefsResponse =
+                        want_ok(ctx.send(&advance).await?, "small-pack replay")?;
+                    want_outcome(
+                        Ok(stored.outcome.map_or(0, |outcome| outcome.to_i32())),
+                        AdvanceOutcome::ADVANCE_OUTCOME_COMMITTED,
+                    )?;
+                }
                 return Ok((repository, pending));
             }
             Err(error) => {

@@ -80,7 +80,7 @@ class ServerGates(unittest.TestCase):
         self.assertIn(signer_tool, conformance)
         self.assertIn(deadline_test, conformance)
         self.assertLess(conformance.index(signer_tool), conformance.index(deadline_test))
-        self.assertIn("timeout-minutes: 20", section(conformance, "- name: Paid indexed slice failure, resume and commit"))
+        self.assertIn("timeout-minutes: 20", section(conformance, "- name: Paid indexed verification, hold off/on and same-shard concurrency"))
         self.assertIn("run: scripts/vcs-worker-conformance.sh --indexed-only", conformance)
         self.assertIn("run: scripts/vcs-worker-conformance.sh --test-faults --sharding single", conformance)
         self.assertIn("path: ${{ runner.temp }}/wire-logs/**", conformance)

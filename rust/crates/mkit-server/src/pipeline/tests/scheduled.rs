@@ -682,6 +682,7 @@ fn lower_pack_cap_stops_scheduled_decode_before_blob_work() {
 }
 
 mod latency;
+mod pending_hold;
 
 #[test]
 fn ticketless_member_reuse_observes_the_deployments_denial_mode() {

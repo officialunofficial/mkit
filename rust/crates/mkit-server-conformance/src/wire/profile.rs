@@ -154,6 +154,9 @@ pub enum Feature {
     /// Indexed mode whose packs verify asynchronously in scheduled slices,
     /// answering `PendingVerification` until they finish (WP-4.8, Workers).
     IndexedAsync,
+    /// Runner fixture configured with a 2,000 ms pending-verification hold.
+    /// This selects timing probes; it is not a wire capability.
+    AdvanceHold,
     /// Plain-HTTP object serving (M4).
     HttpObjects,
     /// Fixture explicitly configured with synchronous inspection refusal.
@@ -172,7 +175,7 @@ pub enum Feature {
     Admin,
 }
 
-const FEATURE_NAMES: [(Feature, &str); 30] = [
+const FEATURE_NAMES: [(Feature, &str); 31] = [
     (Feature::Bearer, "bearer"),
     (Feature::AuthV2, "auth-v2"),
     (Feature::AtomicAdvance, "atomic-advance"),
@@ -199,6 +202,7 @@ const FEATURE_NAMES: [(Feature, &str); 30] = [
     ),
     (Feature::IndexedMode, "indexed-mode"),
     (Feature::IndexedAsync, "indexed-async"),
+    (Feature::AdvanceHold, "advance-hold"),
     (Feature::HttpObjects, "http-objects"),
     (Feature::SyncInspection, "sync-inspection"),
     (Feature::LaunchReadFixture, "launch-read-fixture"),
