@@ -25,6 +25,8 @@ struct Probe {
     lost_reply: AtomicBool,
     stats_keys: Option<u64>,
     opaque_allowance: bool,
+    retry_object: Option<Hash>,
+    retry_attempts: AtomicUsize,
 }
 
 impl Default for Probe {
@@ -41,6 +43,8 @@ impl Default for Probe {
             lost_reply: AtomicBool::new(false),
             stats_keys: None,
             opaque_allowance: false,
+            retry_object: None,
+            retry_attempts: AtomicUsize::new(0),
         }
     }
 }
@@ -140,6 +144,30 @@ impl NamespaceStore for Probe {
     }
     async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
         self.delay().await;
+        if let Some(object) = self.retry_object
+            && *p == content_shard(&object)
+        {
+            let attempt = self.retry_attempts.fetch_add(1, Ordering::SeqCst);
+            if attempt < 7 {
+                if attempt == 6 {
+                    self.inner
+                        .apply(
+                            p,
+                            Batch::new().put(
+                                keys::block(&object),
+                                codec::encode_block_entry(&crate::store::BlockEntry::new(
+                                    "blocked", 0,
+                                )),
+                            ),
+                        )
+                        .await?;
+                }
+                return Ok(BatchOutcome::PreconditionFailed {
+                    index: 2,
+                    observed: None,
+                });
+            }
+        }
         let outcome = self.inner.apply(p, batch).await?;
         if self.lost_reply.swap(false, Ordering::SeqCst) {
             return Err(StoreError::unavailable("lost apply reply"));
@@ -290,7 +318,7 @@ async fn holder_waves_count_reads_and_writes_and_reenter_idempotently() {
     let job = job();
     for _ in 0..2 {
         let before = store.calls.load(Ordering::SeqCst);
-        let budget = crate::budget::SliceBudget::new(100);
+        let budget = crate::budget::SliceBudget::new(400);
         copy::copy_holders(
             &env(&store, &clock),
             &Budgeted::new(&store, &budget),
@@ -353,7 +381,7 @@ async fn holder_waves_keep_blocked_before_later_io_error() {
         .unwrap();
     let clock = ManualClock::new(0);
     let job = job();
-    for calls in [100, 8] {
+    for calls in [400, 8] {
         let budget = crate::budget::SliceBudget::new(calls);
         let error = copy::copy_holders(
             &env(&store, &clock),
@@ -527,5 +555,48 @@ async fn holder_waves_keep_blocked_precedence_under_an_opaque_inherited_cap() {
     assert_eq!(parent_calls.used(), 8);
     assert_eq!(store.calls.load(Ordering::SeqCst), 8);
     assert!(!parent_calls.refused());
+    assert_eq!(store.peak.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn holder_waves_keep_a_retrying_block_before_an_aliased_cap() {
+    let objects = [[0x10; 32], [0x20; 32]];
+    let store = Probe {
+        retry_object: Some(objects[0]),
+        ..Probe::default()
+    };
+    source_holders(&store.inner, &objects).await;
+    let shared_calls = crate::budget::SliceBudget::new(50);
+    let inner = Budgeted::new(&store, &shared_calls);
+    let outer = Budgeted::new(&inner, &shared_calls);
+    let local_calls = crate::budget::SliceBudget::new(600);
+    let remote = Budgeted::new(&outer, &local_calls);
+    let clock = ManualClock::new(0);
+    let env = ForkEnv {
+        store: &outer,
+        shards: &D34Shards,
+        clock: &clock,
+        takedown_denial: true,
+        extract_min_bytes: Some(1),
+        limits: ForkLimits::default(),
+    };
+    let job = job();
+    let error = copy::copy_holders(
+        &env,
+        &remote,
+        &local_calls,
+        &job,
+        &job.source().unwrap(),
+        &job.dest().unwrap(),
+        &objects,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, ForkError::NotFound), "{error:?}");
+    assert_eq!(store.retry_attempts.load(Ordering::SeqCst), 8);
+    assert_eq!(store.calls.load(Ordering::SeqCst), 25);
+    assert_eq!(local_calls.used(), 25);
+    assert_eq!(shared_calls.used(), 50);
+    assert!(!shared_calls.refused());
     assert_eq!(store.peak.load(Ordering::SeqCst), 1);
 }

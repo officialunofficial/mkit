@@ -406,36 +406,53 @@ pub(super) async fn copy_holders<S: NamespaceStore>(
         // serial, preserving call counts without introducing CAS races.
         // One holder read plus up to eight three-call mutation attempts.
         // With less headroom, retain serial error precedence.
-        // A known allowance includes every inherited debit. An opaque cap
-        // cannot promise a whole mutation wave.
+        // Reserve the first existing read before inspecting its accounting
+        // layers. Each layer can charge two ledgers, whose ancestors may alias;
+        // leave one more debit for an opaque leaf. Unknown caps stay serial.
+        let first_reservation = store.reserve_read_calls(1)?;
+        let layers = first_reservation
+            .as_ref()
+            .map_or(0, crate::store::ReadReservation::accounting_layers);
+        let debits = layers.saturating_mul(2).saturating_add(1);
         let allowance = store
             .read_call_allowance()
             .unwrap_or(0)
             .min(budget.remaining());
-        let cap = usize::try_from(allowance / 25).unwrap_or(4).clamp(1, 4);
+        let cap = usize::try_from(allowance / 25_u32.saturating_mul(debits))
+            .unwrap_or(4)
+            .clamp(1, 4);
         let mut width = 0;
         while width < pending.len().min(cap) && !pending[..width].contains(&pending[width]) {
             width += 1;
         }
         let (wave, rest) = pending.split_at(width);
         pending = rest;
-        let replies = futures::future::join_all(wave.iter().map(|object| async {
-            let reservation = store.reserve_read_calls(1)?;
-            let held = crate::store::ReadReservation::scope(
-                &[reservation],
-                index.holder_record(object, &from),
-            )
-            .await?;
-            if held.is_none() {
-                return Ok(());
-            }
-            let outcome = index
-                .add_holder_unless_blocked(object, &to, &job.binding, None, env.now())
+        let mut first_reservation = Some(first_reservation);
+        let replies = futures::future::join_all(wave.iter().map(|object| {
+            let reservation = if let Some(first) = first_reservation.take() {
+                Ok(first)
+            } else {
+                store.reserve_read_calls(1)
+            };
+            let (index, from, to) = (&index, &from, &to);
+            async move {
+                let reservation = reservation?;
+                let held = crate::store::ReadReservation::scope(
+                    &[reservation],
+                    index.holder_record(object, from),
+                )
                 .await?;
-            if outcome.blocked.is_some() {
-                return Err(ForkError::NotFound);
+                if held.is_none() {
+                    return Ok(());
+                }
+                let outcome = index
+                    .add_holder_unless_blocked(object, to, &job.binding, None, env.now())
+                    .await?;
+                if outcome.blocked.is_some() {
+                    return Err(ForkError::NotFound);
+                }
+                Ok(())
             }
-            Ok(())
         }))
         .await;
         for reply in replies {

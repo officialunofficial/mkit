@@ -10,10 +10,15 @@ Source index statistics use six concurrent calls. Holder copies use four
 distinct object IDs at a time
 within a page, reducing the width when the remaining allowance cannot cover
 all eight possible mutation attempts per ID (25 calls including the holder
-read). An unknown inherited allowance keeps holder copies serial. A known allowance
-must account for every inherited debit; the fork creates an independent local
-slice ledger. Wrappers that debit an aliased ledger more than once must report
-an allowance corrected for that multiplicity, or report it as unknown.
+read). An unknown inherited allowance keeps holder copies serial. The first
+holder read reserves its existing call before the width is selected. Its
+reservation exposes the number of accounting layers, without spending extra
+calls. Each layer can debit two ledgers, and their ancestors can overlap.
+The width uses a conservative `2 * layers + 1` debit multiplier, including an
+opaque leaf, so shared ledgers cannot let a later holder starve an earlier one.
+The actual calls remain charged once per existing ledger; this multiplier
+only narrows scheduling. The metadata accessor is private and does not change
+reader accounting or admission.
 Repeated IDs start another wave, retaining the original calls
 and avoiding new contention on the same object state.
 
@@ -64,14 +69,19 @@ every call in a loop costs 300 ms when cold or 40 ms when
 warm. Independent calls in one wave finish together. It excludes unchanged
 setup, location lookup, cursor writes, retries, and descriptor continuations.
 The holder case has a source holder and succeeds without a CAS retry.
-These are models, not network timings.
+The holder model starts with a fresh 600-call slice and one inherited
+reservation layer beneath the local counter. The debit multiplier is five:
+seven waves of four IDs, ten of three, then three of two. Each holder has four
+serial calls, so those twenty waves take eighty rounds. Less initial headroom
+or more accounting layers narrows waves further. These are models, not
+network timings.
 
 | Loop | Calls | Serial rounds | Wave rounds | Cold before / after | Warm before / after |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Empty destination, refs and members | 32 | 32 | 6 | 9.60 s / 1.80 s | 1.28 s / 0.24 s |
 | Empty destination, refs only | 16 | 16 | 3 | 4.80 s / 0.90 s | 0.64 s / 0.12 s |
 | Source index statistics | 16 | 16 | 3 | 4.80 s / 0.90 s | 0.64 s / 0.12 s |
-| Holder page, 64 distinct IDs | 256 | 256 | 64 | 76.80 s / 19.20 s | 10.24 s / 2.56 s |
+| Holder page, 64 distinct IDs | 256 | 256 | 80 | 76.80 s / 24.00 s | 10.24 s / 3.20 s |
 | Pack denial directory | 16 | 16 | 4 | 4.80 s / 1.20 s | 0.64 s / 0.16 s |
 
 Two full emptiness checks and one refs-only check total 80 calls: 24.00 s

@@ -2893,6 +2893,8 @@ holder waves contain at most four IDs. Repeated holder IDs run in
 separate waves. Replies are drained and consumed in input order. Successful
 units retain their storage call counts and existing slice limits. Reads reserve
 credit before dispatch; variable holder retries charge each actual call.
+Holder width accounts conservatively for repeated debits across inherited
+reservation layers, including shared ledger ancestors.
 
 **Because:** completion order must not select a different refusal, and parallel
 writes to the same object state would introduce avoidable CAS retries.
