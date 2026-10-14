@@ -218,10 +218,12 @@ clock limitation still applies to synchronous work within the slice.
 ## Fork step events
 
 With the feature enabled, every `fork::step` execution — one per request
-attempt and one per kind-16 timer fire — emits one `fork_step` row, and the
-step that runs the job to `Done` or `Failed` emits one `fork_step_summary`
+attempt and one per kind-16 timer fire that reaches a step — emits one
+`fork_step` row, and the step whose apply committed `Done` or `Failed` emits
+one `fork_step_summary`
 row. A timer fire that lands on an already-terminal job emits its own
-`fork_step` row but no second summary. Events carry constant labels, counts,
+`fork_step` row but no second summary; a fire on a deleted job emits none.
+Events carry constant labels, counts,
 and durations only: `job` is the truncated request-binding hash, never a
 repository name or object id.
 
@@ -231,7 +233,8 @@ repository name or object id.
 | `fork_step_summary` | `job`, `request_steps`, `alarm_steps`, `cas_losses`: totals over every step that ran the job to its terminal phase |
 
 Phase names are `plan`, `trees`, `walk`, `register`, `copy`, `count`,
-`publish`, `done`, `failed`, and `absent` (no job row on entry). The `driver`
+`publish`, `done`, `failed`, and `absent` (no job row on entry); `phase_out`
+is `-` when the step errored before reporting. The `driver`
 split and `cas_losses` answer the dual-driver question directly: an alarm
 that fires while the request's slices run the job appears as interleaved
 `request`/`alarm` rows for one `job`, and each `PreconditionFailed` apply is

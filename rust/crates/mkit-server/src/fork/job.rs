@@ -438,7 +438,7 @@ pub(super) async fn step_inner<S: NamespaceStore>(
         .ok_or(ForkError::Unavailable("fork job missing"))?;
         let mut job = decode_job(&raw).map_err(|_| ForkError::Unavailable("fork job corrupt"))?;
         #[cfg(feature = "perf-metrics")]
-        trace.note_phase_in(job.phase);
+        trace.note_job(job.phase, job.binding);
         if job.finished() || spent {
             return Ok(StepReport { job, progressed });
         }
@@ -500,6 +500,8 @@ pub(super) async fn step_inner<S: NamespaceStore>(
         match applied {
             BatchOutcome::Committed => {
                 progressed = true;
+                #[cfg(feature = "perf-metrics")]
+                trace.note_committed(job.phase);
                 if job.finished() {
                     return Ok(StepReport { job, progressed });
                 }

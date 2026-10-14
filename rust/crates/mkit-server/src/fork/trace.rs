@@ -4,8 +4,9 @@
 //! One `fork_step` event per [`super::step`] execution carries the driver
 //! (`request` or `alarm`), the phases seen, storage calls split by partition
 //! kind, serial rounds, apply and precondition-loss counts, the slice budget
-//! spend and the step's wall time. A `fork_step_summary` event at a terminal
-//! step sums step executions and precondition losses per driver for the job.
+//! spend and the step's wall time. A `fork_step_summary` event on the step
+//! whose apply committed the terminal phase sums step executions and
+//! precondition losses per driver for the job.
 //!
 //! All fields are constant labels, counts, durations and a truncated hash of
 //! the request binding: no names, keys, values or ids are recorded. The
@@ -40,7 +41,10 @@ const KINDS: [&str; 6] = [
 ];
 
 fn kind_index(kind: &str) -> usize {
-    KINDS.iter().position(|k| *k == kind).unwrap_or(0)
+    KINDS
+        .iter()
+        .position(|k| *k == kind)
+        .expect("Partition::kind stays inside KINDS")
 }
 
 /// The counters one step execution fills. Shared with the [`Traced`] store
@@ -54,8 +58,13 @@ pub(super) struct StepTrace {
     applies: AtomicU64,
     /// Applies lost to `PreconditionFailed` (another driver wrote first).
     cas_losses: AtomicU64,
-    /// The phase of the first job row the step read.
-    phase_in: Mutex<Option<Phase>>,
+    /// The phase and request binding of the first job row the step read;
+    /// errored steps still attribute when a row decoded.
+    seen: Mutex<Option<(Phase, Hash)>>,
+    /// The phase the step's last committed apply produced. A step that lost
+    /// the job-row CAS and re-read the winner's `Done` row did not commit it
+    /// and emits no summary — only the committer does.
+    committed: Mutex<Option<Phase>>,
 }
 
 impl StepTrace {
@@ -66,7 +75,8 @@ impl StepTrace {
             in_flight: AtomicU64::new(0),
             applies: AtomicU64::new(0),
             cas_losses: AtomicU64::new(0),
-            phase_in: Mutex::new(None),
+            seen: Mutex::new(None),
+            committed: Mutex::new(None),
         }
     }
 
@@ -86,12 +96,22 @@ impl StepTrace {
         }
     }
 
-    /// `job.phase` at the step's first row read; later re-reads do not move it.
-    pub(super) fn note_phase_in(&self, phase: Phase) {
-        self.phase_in
+    /// `job.phase` and `job.binding` at the step's first row read; later
+    /// re-reads do not move it.
+    pub(super) fn note_job(&self, phase: Phase, binding: Hash) {
+        self.seen
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get_or_insert(phase);
+            .get_or_insert((phase, binding));
+    }
+
+    /// The phase of the job row this step just committed; only a commit can
+    /// own a terminal transition.
+    pub(super) fn note_committed(&self, phase: Phase) {
+        *self
+            .committed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(phase);
     }
 
     fn calls(&self) -> [u64; KINDS.len()] {
@@ -253,11 +273,12 @@ pub(super) async fn step<S: NamespaceStore>(
 
     let driver = if timer.is_some() { "alarm" } else { "request" };
     let report = result.as_ref().ok();
-    let job = report.map(|report| to_hex_bytes(&report.job.binding[..8]));
-    let phase_in = *trace
-        .phase_in
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let seen = *trace.seen.lock().unwrap_or_else(PoisonError::into_inner);
+    let phase_in = seen.map(|(phase, _)| phase);
+    let binding = report
+        .map(|report| report.job.binding)
+        .or(seen.map(|(_, b)| b));
+    let job = binding.map(|binding| to_hex_bytes(&binding[..8]));
     let calls = trace.calls();
     let cas_losses = trace.cas_losses.load(Ordering::Relaxed);
     let error = result.as_ref().err().map(|error| match error {
@@ -277,7 +298,9 @@ pub(super) async fn step<S: NamespaceStore>(
         driver,
         job = job.as_deref().unwrap_or("-"),
         phase_in = phase_name(phase_in),
-        phase_out = phase_name(report.map(|report| report.job.phase)),
+        // The exit phase is observed only through a returned report; an
+        // errored step reports "-" rather than claiming `absent`.
+        phase_out = report.map_or("-", |report| phase_name(Some(report.job.phase))),
         wall_ms,
         calls = calls.iter().sum::<u64>(),
         calls_coordinator = calls[kind_index("coordinator")],
@@ -293,13 +316,14 @@ pub(super) async fn step<S: NamespaceStore>(
         progressed = report.is_some_and(|report| report.progressed),
         finished = report.is_some_and(|report| report.job.finished()),
         error = error.unwrap_or("none"),
-        timer_scheduled_ms = timer.map_or(0, |timer| timer.scheduled_ms),
-        logical_due_ms = timer.map_or(0, |timer| timer.logical_due_ms),
-        timer_retry_attempt = timer.map_or(0, |timer| u64::from(timer.retry_attempt)),
-        timer_delay_ms = timer.map_or(0, |timer| started_ms.saturating_sub(timer.scheduled_ms)),
+        // Absent on request rows: zero is a measurement, not unavailable
+        // evidence.
+        timer_scheduled_ms = timer.map(|timer| timer.scheduled_ms),
+        logical_due_ms = timer.map(|timer| timer.logical_due_ms),
+        timer_retry_attempt = timer.map(|timer| u64::from(timer.retry_attempt)),
+        timer_delay_ms = timer.map(|timer| started_ms.saturating_sub(timer.scheduled_ms)),
     );
-    if let Some(report) = report {
-        let binding = report.job.binding;
+    if let Some(binding) = binding {
         let mut jobs = JOBS.lock().unwrap_or_else(PoisonError::into_inner);
         let mut per_job = jobs.remove(&binding).unwrap_or_default();
         match driver {
@@ -307,12 +331,20 @@ pub(super) async fn step<S: NamespaceStore>(
             _ => per_job.request_steps += 1,
         }
         per_job.cas_losses += cas_losses;
-        // The summary belongs to the step that ran the job terminal. A stale
-        // timer that lands on `Done`/`Failed` did not make it so and emits no
-        // second summary; its `fork_step` row still records the no-op.
-        let made_terminal =
-            report.job.finished() && !matches!(phase_in, Some(Phase::Done | Phase::Failed));
-        if made_terminal {
+        // The summary belongs to the step whose apply committed the job's
+        // terminal phase. A stale timer or a CAS loser that re-read the
+        // winner's `Done`/`Failed` row emits its `fork_step` row but no
+        // second summary; its counts stay merged so the committer's summary
+        // still includes them. The first step that *entered* on a terminal
+        // row drops the entry — the guaranteed stale fire after `Done`
+        // bounds the accumulator.
+        let finished = report.is_some_and(|report| report.job.finished());
+        let entered_terminal = matches!(phase_in, Some(Phase::Done | Phase::Failed));
+        let committed = *trace
+            .committed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if finished && committed == report.map(|report| report.job.phase) {
             tracing::info!(
                 event = "fork_step_summary",
                 job = %to_hex_bytes(&binding[..8]),
@@ -320,7 +352,7 @@ pub(super) async fn step<S: NamespaceStore>(
                 alarm_steps = per_job.alarm_steps,
                 cas_losses = per_job.cas_losses,
             );
-        } else if !report.job.finished() {
+        } else if !entered_terminal {
             jobs.insert(binding, per_job);
         }
     }

@@ -158,15 +158,14 @@ fn fork_timer_due<H: HookSet>(fx: &Fx<H>, dest: &RepoId) -> Option<u64> {
     let p = fx.pipe.shards.coordinator(&dest.namespace);
     let (start, end) = keys::class_range(keys::TAG_TIMER);
     let page = block_on(fx.pipe.meta.scan(&p, &start, &end, None, 100)).unwrap();
-    page.entries.iter().find_map(|(key, _)| match keys::parse(key) {
-        Some(keys::ParsedKey::Timer {
-            due_at_ms, kind, ..
-        }) if kind == crate::timers::registry::kinds::FORK.get() =>
-        {
-            Some(due_at_ms)
-        }
-        _ => None,
-    })
+    page.entries
+        .iter()
+        .find_map(|(key, _)| match keys::parse(key) {
+            Some(keys::ParsedKey::Timer {
+                due_at_ms, kind, ..
+            }) if kind == crate::timers::registry::kinds::FORK.get() => Some(due_at_ms),
+            _ => None,
+        })
 }
 
 /// A fork's kind-16 timer row arms at job creation — the alarm is a second

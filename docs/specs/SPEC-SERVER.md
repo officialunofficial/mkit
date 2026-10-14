@@ -1679,9 +1679,9 @@ misses found when the advance checks the consumed set, and a base that is
 still absent after the window is the permanent §9.4 answer, as inline.
 
 Informative. Scheduled verification polling hints use the consumed job's
-persisted timer with a 3,000 ms cap. Tiny decoded packs awaiting relay delivery
-use a 100 ms floor and preserve millisecond precision in the typed detail.
-Other phases round up to whole seconds with a 1,000 ms floor. A missing job or a
+persisted timer with a 3,000 ms cap. Tiny decoded packs use a 100 ms floor and
+preserve millisecond precision in the typed detail. Other phases round up to
+whole seconds with a 1,000 ms floor. A missing job or a
 wake not found within bounded inspection uses 1,000 ms. The HTTP Retry-After
 header always rounds the detail up to whole seconds; neither value promises
 completion. Clients retain STC's one-second polling clamp.

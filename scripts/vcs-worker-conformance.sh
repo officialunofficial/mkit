@@ -763,6 +763,22 @@ assert any(row.get("runtime_is_retry") is False and row.get("runtime_retry_count
            and isinstance(row.get("alarm_fired_ms"), int) for row in rows), \
     "indexed slice rows did not receive runtime alarm metadata"
 print("Indexed slice runtime alarm metadata: passed")
+fork_rows = []
+for line in Path(sys.argv[1]).read_text(errors="replace").splitlines():
+    start = line.find("{")
+    if start < 0:
+        continue
+    try:
+        row, _ = json.JSONDecoder().raw_decode(line[start:])
+    except json.JSONDecodeError:
+        continue
+    if isinstance(row, dict) and row.get("event") in ("fork_step", "fork_step_summary"):
+        fork_rows.append(row)
+assert any(row.get("driver") == "request" for row in fork_rows), \
+    "the fork probe emitted no request fork_step rows"
+assert any(row.get("event") == "fork_step_summary" for row in fork_rows), \
+    "the fork probe emitted no fork_step_summary"
+print("Fork driver events: passed")
 PYINFO
         fi
     done

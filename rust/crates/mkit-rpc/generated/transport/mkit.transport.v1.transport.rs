@@ -10344,7 +10344,7 @@ pub const __CHALLENGE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct PendingVerification {
-    /// server's suggested poll interval, 1000..=60000
+    /// server's suggested poll interval; bounded tiny-pack work may send under 1000 (SPEC-SERVER §9.5)
     ///
     /// Field 1: `retry_after_ms`
     #[serde(
