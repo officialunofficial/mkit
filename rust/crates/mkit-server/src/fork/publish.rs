@@ -36,10 +36,6 @@ pub(crate) fn order(job: &ForkJobV1) -> Vec<Hash> {
     ids
 }
 
-/// The most storage calls one unit costs without a takedown proof: the
-/// source pair, the proof's reads, the destination rows and the guarded write.
-const WAVE_UNIT_CALLS: u32 = 8;
-
 /// `job.part` while the members other than the head are written in waves.
 const WRITES: u16 = 2;
 /// `job.part` while those members are proved again in waves.
@@ -69,7 +65,7 @@ pub(crate) async fn slice<S: NamespaceStore>(
         && job.part == 0
         && order.len() > 2
         && !env.takedown_denial
-        && super::wave_width(env.store, budget, WAVE_UNIT_CALLS) > 1
+        && super::wave_width(env.store, budget, super::WAVE_UNIT_CALLS) > 1
     {
         job.part = WRITES;
     }
@@ -142,7 +138,7 @@ async fn wave<S: NamespaceStore>(
 ) -> (usize, Option<ForkError>) {
     let last = order.len() - 1;
     let start = job.cursor as usize;
-    let width = super::wave_width(env.store, budget, WAVE_UNIT_CALLS);
+    let width = super::wave_width(env.store, budget, super::WAVE_UNIT_CALLS);
     let units = &order[start..last.min(start + width)];
     let stage = job.part;
     let replies = {

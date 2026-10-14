@@ -81,6 +81,12 @@ pub const MAX_PACK_DEPS: u64 = 1_800;
 /// Most units of one wave that run at once.
 pub(crate) const WAVE_WIDTH: usize = 6;
 
+/// The most storage calls one plan or publication unit costs without a
+/// takedown proof. Plan: the member row, the proof's two reads and the sealed
+/// head. Publication: the source pair, the proof's reads, the destination's
+/// rows and the guarded write.
+pub(crate) const WAVE_UNIT_CALLS: u32 = 8;
+
 /// How many units that each cost at most `unit_calls` storage calls may run
 /// at once, up to [`WAVE_WIDTH`]. The slice and the store's read allowance
 /// must cover every unit's calls before dispatch, at `2 * layers + 1` debits

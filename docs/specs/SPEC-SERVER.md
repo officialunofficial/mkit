@@ -2048,6 +2048,9 @@ copied, and:
   cleared objects and no recorded base packs, so it visits every object and
   discovers every external base itself. That first advance is slower and
   exactly as strict, since the denial proof covers every pack the walk reaches.
+  It is also bound by the walk's usual per-advance item capacity, so a
+  deployment that may enable denial later and forks repositories whose closure
+  exceeds that capacity should fork with denial on.
 
 **Request.** `ForkRequest` names the source repository, the branch
 `refs/heads/<x>`, the `expected_tip` (required) and the destination

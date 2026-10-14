@@ -67,10 +67,6 @@ pub(crate) async fn read_published<S: NamespaceStore>(
     }
 }
 
-/// The most storage calls one pack's reads cost without a takedown proof: its
-/// member row, the proof's two reads and the sealed head.
-const WAVE_UNIT_CALLS: u32 = 8;
-
 /// Run plan units until the slice budget is spent or the set is complete.
 /// `true` when the plan is complete and within bounds.
 ///
@@ -98,7 +94,7 @@ pub(crate) async fn slice<S: NamespaceStore>(
             let width = if env.takedown_denial {
                 1
             } else {
-                super::wave_width(env.store, budget, WAVE_UNIT_CALLS)
+                super::wave_width(env.store, budget, super::WAVE_UNIT_CALLS)
             };
             if width > 1 {
                 inspect_wave(env, &store, job, &source, width).await

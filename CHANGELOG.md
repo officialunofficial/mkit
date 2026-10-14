@@ -36,7 +36,7 @@ collect the applicable entries between their old and new immutable pins.
 - A fork takes fewer serial storage rounds. Without pack-level takedown denial it
   skips the closure walk and writes no cleared set (nothing read it; enabling
   denial later makes the first advance of such a destination a full walk, slower
-  but equally strict). A plan that fits one slice is computed once, before
+  but equally strict, and bound by the usual per-advance item capacity). A plan that fits one slice is computed once, before
   admission, and carried into the job, which refuses it unless the source
   still publishes the same tip, packmap head and membership generation; the
   first proof of each pack after admission now precedes its membership write, so
