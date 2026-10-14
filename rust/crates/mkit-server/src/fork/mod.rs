@@ -477,8 +477,9 @@ pub struct CopyLane {
     /// Resume cursor of the next page; `None` is the partition's start.
     pub after: Option<Vec<u8>>,
     /// Source key of the last holder candidate of the current page whose
-    /// holder was copied. The page's rows are already written; a page with
-    /// more candidates than one wave may copy resumes after this key.
+    /// holder was copied, or empty when none is yet. The page's rows are
+    /// already written; a page with more candidates than one wave may copy
+    /// resumes after this key.
     pub held: Option<Vec<u8>>,
 }
 

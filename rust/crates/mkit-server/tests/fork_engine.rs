@@ -1425,7 +1425,7 @@ async fn a_ref_created_during_the_job_stops_it_before_registration() {
 
 #[tokio::test]
 async fn a_copy_of_many_holders_cut_by_small_slices_matches_one_slice() {
-    let files = 150_u32;
+    let files = 1_100_u32;
     let source = Source::build("source", files).await;
     let index = ContentIndex::new(source.store.inner.clone());
     let from = Holder::new(source.repo.namespace.clone(), source.repo.name.clone());
@@ -1445,6 +1445,7 @@ async fn a_copy_of_many_holders_cut_by_small_slices_matches_one_slice() {
     let mut env = env(&source);
     env.extract_min_bytes = Some(1);
     let mut finished = Vec::new();
+    let mut marked = false;
     for (name, calls) in [("forked", 600), ("forked-small", 330)] {
         let spec = spec(&source, name);
         mkit_server::fork::start(&env, &spec, None).await.unwrap();
@@ -1456,6 +1457,8 @@ async fn a_copy_of_many_holders_cut_by_small_slices_matches_one_slice() {
                 .await
                 .unwrap();
             assert!(slices < 500, "{:?}", report.job.phase);
+            // A slice that ends inside a page leaves the holder mark behind.
+            marked |= report.job.lanes.iter().any(|lane| lane.held.is_some());
             if report.job.finished() {
                 break report.job;
             }
@@ -1469,6 +1472,7 @@ async fn a_copy_of_many_holders_cut_by_small_slices_matches_one_slice() {
     }
     assert_eq!(finished[0].0, finished[1].0);
     assert!(finished[1].1 > finished[0].1, "{finished:?}");
+    assert!(marked, "no slice ended inside a page of holders");
 }
 
 #[tokio::test]

@@ -61,7 +61,10 @@ next page of each of the first open partitions. The width follows the same
 rule as the emptiness scans: the first read is reserved before the width is
 chosen, the known remaining calls must cover `2 * layers + 1` debits per scan,
 and an unknown allowance keeps the copy to one partition at a time. A wave also
-narrows to the calls left in the slice.
+narrows to the calls left in the slice, and once its pages are read it keeps only
+the leading partitions whose writes the slice can still pay for (the first
+always stays); the others, and a failure that belonged to one of them, wait for
+the next wave.
 
 A wave runs in three stages, each finishing for the whole wave before the next:
 the scans, the index writes (at most six at once), then the holders. Replies are
@@ -77,7 +80,8 @@ the repeat is safe.
 Pages hold 500 rows, or 256 where holders are copied. Holder candidates do not
 bound the page: a wave copies at most 64 holders in all, in partition and key
 order, and the lane records the source key of the last candidate it finished
-(`held`). The page's rows are already written, so the next wave scans the same
+(`held`; an empty mark means the rows are written and no candidate is done, for
+a partition the wave had no holder room for). The page's rows are already written, so the next wave scans the same
 page, skips the written rows, and continues after that key; the page is counted
 and its cursor advances only when its last candidate is done. A repeat of a
 holder write is safe for the reason above.

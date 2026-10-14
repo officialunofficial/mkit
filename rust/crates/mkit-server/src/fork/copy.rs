@@ -380,8 +380,9 @@ async fn copy_wave<S: NamespaceStore>(
 ) -> Result<bool, ForkError> {
     let (wave, replies) = scan_wave(store, job, page, open).await?;
 
-    // Fold the replies in lane order. The totals run across the wave so each
-    // bound is checked as the serial walk would check it.
+    // Fold the replies in lane order. The totals run across the wave, pages
+    // that wait for holders included, so a bound can trip a wave before the
+    // serial walk would reach it; the outcome is the same failure.
     let (mut scanned, mut copied) = (job.scanned, job.copied);
     let mut ready: Vec<Fetched> = Vec::new();
     let mut failure = None;
@@ -400,6 +401,40 @@ async fn copy_wave<S: NamespaceStore>(
                 break;
             }
         }
+    }
+
+    // Keep the lanes whose writes the slice can still pay for (the first
+    // always stays: a wave of one is the serial walk). The rest wait for the
+    // next wave, and so does a failure that belonged to one of them.
+    let mut room = page
+        .budget
+        .remaining()
+        .saturating_sub(if page.holders.is_some() {
+            2 * HOLDER_CALLS
+        } else {
+            0
+        });
+    let mut keep = 0;
+    for lane in &ready {
+        let calls = if job.lanes[lane.lane].held.is_some() {
+            0
+        } else {
+            let chunks: usize = lane
+                .writes
+                .values()
+                .map(|puts| puts.len().div_ceil(page.per_batch))
+                .sum();
+            u32::try_from(chunks).unwrap_or(u32::MAX)
+        };
+        if keep > 0 && calls > room {
+            break;
+        }
+        room = room.saturating_sub(calls);
+        keep += 1;
+    }
+    if keep < ready.len() {
+        ready.truncate(keep);
+        failure = None;
     }
 
     if let Some((index, error)) = write_wave(env, store, job, page, &ready).await {
@@ -444,6 +479,10 @@ async fn copy_wave<S: NamespaceStore>(
         } else if step.take > 0 {
             cursor.held = step.last;
             moved = true;
+        } else if cursor.held.is_none() {
+            // The wave had no room for this lane's holders, but its rows are
+            // written: an empty mark keeps the next wave from writing them again.
+            cursor.held = Some(Vec::new());
         }
     }
     Ok(moved)
@@ -580,6 +619,7 @@ fn holder_steps(
         let waiting: Vec<&(crate::store::Key, Hash)> = lane
             .candidates
             .iter()
+            // Scan order is key byte order, so "after the mark" is a prefix cut.
             .filter(|(key, _)| held.is_none_or(|held| key.as_bytes() > held))
             .collect();
         let take = waiting.len().min(room);

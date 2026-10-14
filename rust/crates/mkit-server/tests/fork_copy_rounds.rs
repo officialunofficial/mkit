@@ -170,7 +170,7 @@ async fn measure(files: u32, extract: Option<u64>) -> (u128, u64, u32, u64) {
 #[tokio::test(start_paused = true)]
 async fn copy_rounds_500() {
     let (rounds, calls, slices, copied) = measure(500, Some(65_536)).await;
-    println!("RX4 500 files: copy rounds={rounds} calls={calls} slices={slices} copied={copied}");
+    println!("copy 500 files: copy rounds={rounds} calls={calls} slices={slices} copied={copied}");
     assert!(
         rounds <= 12 && calls <= 40 && slices == 1,
         "{rounds} {calls} {slices}"
@@ -180,7 +180,7 @@ async fn copy_rounds_500() {
 #[tokio::test(start_paused = true)]
 async fn copy_rounds_3000() {
     let (rounds, calls, slices, copied) = measure(3_000, Some(65_536)).await;
-    println!("RX4 3000 files: copy rounds={rounds} calls={calls} slices={slices} copied={copied}");
+    println!("copy 3000 files: copy rounds={rounds} calls={calls} slices={slices} copied={copied}");
     assert!(
         rounds <= 20 && calls <= 70 && slices == 1,
         "{rounds} {calls} {slices}"
@@ -190,7 +190,9 @@ async fn copy_rounds_3000() {
 #[tokio::test(start_paused = true)]
 async fn a_fork_of_ten_thousand_files_copies_within_one_slice() {
     let (rounds, calls, slices, copied) = measure(10_000, Some(65_536)).await;
-    println!("RX4 10000 files: copy rounds={rounds} calls={calls} slices={slices} copied={copied}");
+    println!(
+        "copy 10000 files: copy rounds={rounds} calls={calls} slices={slices} copied={copied}"
+    );
     assert!(
         rounds <= 45 && calls <= 200 && slices == 1,
         "{rounds} {calls} {slices}"

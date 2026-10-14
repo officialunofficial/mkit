@@ -23,6 +23,7 @@ struct Probe {
     partition_failures: Vec<u16>,
     partition_exhausted: Option<u16>,
     scan_exhausted: std::sync::atomic::AtomicI32,
+    apply_failures: Vec<u16>,
     key_failure: Option<Key>,
     lost_reply: AtomicBool,
     stats_keys: Option<u64>,
@@ -44,6 +45,7 @@ impl Default for Probe {
             partition_failures: Vec::new(),
             partition_exhausted: None,
             scan_exhausted: std::sync::atomic::AtomicI32::new(-1),
+            apply_failures: Vec::new(),
             key_failure: None,
             lost_reply: AtomicBool::new(false),
             stats_keys: None,
@@ -159,6 +161,10 @@ impl NamespaceStore for Probe {
     }
     async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
         self.delay().await;
+        if matches!(p, Partition::RepoIndex { prefix, .. } if self.apply_failures.contains(prefix))
+        {
+            return Err(StoreError::unavailable("injected apply"));
+        }
         if let Some(object) = self.retry_object
             && *p == content_shard(&object)
         {
@@ -864,6 +870,9 @@ async fn a_page_of_many_holder_candidates_resumes_inside_the_page() {
     assert!(held.is_some(), "the cut left the page");
     assert!(!job.lanes[0].done);
     assert_eq!((job.scanned, job.copied), (0, 0));
+    // The mark survives the job row's own encoding between slices.
+    let mut job = decode_job(&encode_job(&job).unwrap()).unwrap();
+    assert_eq!(job.lanes[0].held, held);
     assert!(finish_copy(&env, &mut job, 200).await > 1);
     assert_eq!((job.scanned, job.copied), (200, 200));
     for object in &objects {
@@ -969,4 +978,171 @@ async fn an_unknown_read_allowance_copies_one_partition_at_a_time() {
     );
     assert_eq!(store.peak.load(Ordering::SeqCst), 1);
     assert_eq!(copied_rows(&store.inner).await, 160);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_lane_the_wave_has_no_holder_room_for_is_not_written_twice() {
+    // Two partitions of 100 candidates each; the slice pays for few holders,
+    // so the first partition takes them all and the second gets none.
+    let (store, clock) = (Probe::default(), ManualClock::new(0));
+    seed(&store.inner, &[100, 100], 10).await;
+    let objects: Vec<Hash> = (0..2)
+        .flat_map(|lane| (0..100).map(move |n| object_of(lane, n)))
+        .collect();
+    source_holders(&store.inner, &objects).await;
+    let mut job = copy_job(200);
+    let env = env_with(&store, &clock, Some(1));
+    assert!(
+        !copy::copy(&env, &mut job, &crate::budget::SliceBudget::new(120))
+            .await
+            .unwrap()
+    );
+    assert!(
+        job.lanes[0]
+            .held
+            .as_ref()
+            .is_some_and(|mark| !mark.is_empty())
+    );
+    assert_eq!(job.lanes[1].held, Some(Vec::new()));
+    assert_eq!(copied_rows(&store.inner).await, 200);
+    let before = store.calls.load(Ordering::SeqCst);
+    // Neither partition rewrites its rows now: writes stay at their count.
+    assert!(finish_copy(&env, &mut job, 600).await >= 1);
+    assert_eq!((job.scanned, job.copied), (200, 200));
+    assert!(store.calls.load(Ordering::SeqCst) > before);
+    let dest = job.dest().unwrap();
+    let to = Holder::new(dest.namespace.clone(), dest.name.clone());
+    let index = ContentIndex::new(BorrowedStore(&store.inner));
+    for object in &objects {
+        assert!(index.holder_record(object, &to).await.unwrap().is_some());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_write_failure_in_one_partition_ends_the_wave_after_the_ones_before_it() {
+    // Partition 1's write fails; partition 2 holds the excess rows. The
+    // earlier partition decides: the write error, not the count.
+    let clock = ManualClock::new(0);
+    let store = Probe {
+        apply_failures: vec![1],
+        ..Probe::default()
+    };
+    seed(&store.inner, &[3, 3, 3], 1).await;
+    let mut job = copy_job(7);
+    let error = copy::copy(
+        &env_with(&store, &clock, None),
+        &mut job,
+        &crate::budget::SliceBudget::new(500),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error, ForkError::Unavailable("fork storage unavailable"));
+    assert_eq!(job.lanes, vec![CopyLane::default(); 16]);
+
+    // A blocked holder of partition 0 is reported before partition 1's
+    // write failure, as in the serial walk.
+    let store = Probe {
+        apply_failures: vec![1],
+        ..Probe::default()
+    };
+    seed(&store.inner, &[3, 3], 10).await;
+    let objects: Vec<Hash> = (0..3).map(|n| object_of(0, n)).collect();
+    source_holders(&store.inner, &objects).await;
+    store
+        .inner
+        .apply(
+            &content_shard(&objects[1]),
+            Batch::new().put(
+                keys::block(&objects[1]),
+                codec::encode_block_entry(&crate::store::BlockEntry::new("blocked", 0)),
+            ),
+        )
+        .await
+        .unwrap();
+    let mut job = copy_job(6);
+    let error = copy::copy(
+        &env_with(&store, &clock, Some(1)),
+        &mut job,
+        &crate::budget::SliceBudget::new(500),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error, ForkError::NotFound);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_wave_narrows_to_the_writes_the_slice_can_pay_for() {
+    // Under a map that spreads one source partition over many destination
+    // partitions, a page needs a write per row. Six such pages outgrow a fresh
+    // slice, so the wave keeps only the lanes that fit and the copy finishes.
+    let (store, clock) = (Probe::default(), ManualClock::new(0));
+    let source = repo("source");
+    let wide = Spread;
+    let partitions = wide.object_index_partitions(&source);
+    assert_eq!(partitions.len(), 16);
+    for (lane, partition) in partitions.iter().enumerate().take(6) {
+        let mut batch = Batch::new();
+        for n in 0..100 {
+            let object = object_of(lane, n);
+            let value = codec::encode_object_index(
+                &object,
+                &crate::store::index::IndexValue {
+                    frame_offset: 0,
+                    frame_length: 10,
+                    wire_type: 0,
+                    decoded_size: 1,
+                    chain_depth: 0,
+                    delta_base: None,
+                },
+            )
+            .unwrap();
+            batch = batch.put(keys::object_index(&source.name, &object, &PACK), value);
+        }
+        store.inner.apply(partition, batch).await.unwrap();
+    }
+    let mut job = copy_job(600);
+    let env = ForkEnv {
+        shards: &wide,
+        ..env_with(&store, &clock, None)
+    };
+    for slices in 1..20 {
+        let budget = crate::budget::SliceBudget::new(600);
+        if copy::copy(&env, &mut job, &budget).await.unwrap() {
+            assert!(slices > 1, "six pages of 100 writes cannot share one slice");
+            break;
+        }
+    }
+    assert_eq!((job.scanned, job.copied), (600, 600));
+}
+
+/// Sixteen listed index partitions whose rows are routed over 4,096 by their
+/// second and third bytes, so one source page writes to a partition per row.
+struct Spread;
+
+impl ShardMap for Spread {
+    fn ref_shard(&self, repo: &RepoId, ref_name: &str) -> Partition {
+        D34Shards.ref_shard(repo, ref_name)
+    }
+    fn coordinator(&self, ns: &NamespaceKey) -> Partition {
+        D34Shards.coordinator(ns)
+    }
+    fn ref_index(&self, repo: &RepoId, ref_name: &str) -> Partition {
+        D34Shards.ref_index(repo, ref_name)
+    }
+    fn ref_index_partitions(&self, repo: &RepoId) -> Vec<Partition> {
+        D34Shards.ref_index_partitions(repo)
+    }
+    fn membership(&self, repo: &RepoId, pack: &crate::BlobKey) -> Partition {
+        D34Shards.membership(repo, pack)
+    }
+    fn object_index(&self, repo: &RepoId, object: &Hash) -> Partition {
+        Partition::RepoIndex {
+            ns: repo.namespace.clone(),
+            repo: repo.name.clone(),
+            prefix: u16::from_be_bytes([object[1], object[2]]) % 4096,
+        }
+    }
+    fn object_index_partitions(&self, repo: &RepoId) -> Vec<Partition> {
+        D34Shards.object_index_partitions(repo)
+    }
 }
