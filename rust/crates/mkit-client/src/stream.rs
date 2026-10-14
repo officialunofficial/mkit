@@ -4,7 +4,7 @@ use buffa::Message as _;
 use http::{HeaderMap, HeaderValue, Request, Response};
 use mkit_core::hash::Hash;
 
-use crate::connect::{Error, decode_response_diagnosed, end_error};
+use crate::connect::{Error, decode_response_diagnosed, end_error_diagnosed};
 use crate::{FailureDiagnostic, FailureKind, FailureObserver, ResponseProfile};
 pub(crate) struct NoDiagnostics;
 impl FailureObserver for NoDiagnostics {}
@@ -51,6 +51,14 @@ pub trait ResponseStream {
     /// # Errors
     /// Returns an incomplete-stream or content-verification failure.
     fn finish(&mut self) -> Result<(), Error>;
+    /// Finish with optional failure mapping. The callback is synchronous and
+    /// existing sinks retain their normal finish behavior.
+    ///
+    /// # Errors
+    /// Returns the finish callback's error, optionally mapped by the observer.
+    fn finish_diagnosed(&mut self, _observer: &dyn FailureObserver) -> Result<(), Error> {
+        self.finish()
+    }
 }
 
 pub(crate) async fn buffered<
@@ -221,7 +229,10 @@ impl<S: ResponseStream, D: FailureObserver + ?Sized> ResponseStream for Checked<
             .as_ref()
             .ok_or(Error::Invalid("missing HTTP response"))?;
         if response.status().is_success() {
-            self.sink.finish()
+            self.sink.finish_diagnosed(&HeadObserver {
+                inner: self.diagnostics,
+                head: response,
+            })
         } else {
             let mut error = Response::new(std::mem::take(&mut self.error_body));
             *error.status_mut() = response.status();
@@ -253,6 +264,8 @@ pub(crate) struct Decoder<S> {
     header_bytes: usize,
     payload: Vec<u8>,
     end: Option<Vec<u8>>,
+    response: Option<Response<()>>,
+    profile: ResponseProfile,
 }
 impl<S> Decoder<S> {
     #[cfg(test)]
@@ -274,6 +287,8 @@ impl<S> Decoder<S> {
             header_bytes: 0,
             payload: Vec::new(),
             end: None,
+            response: None,
+            profile,
         }
     }
 }
@@ -342,8 +357,33 @@ impl<S: FrameSink> Decoder<S> {
         Ok(())
     }
 }
+impl<S: FrameSink> Decoder<S> {
+    fn finish_context(&mut self, observer: &dyn FailureObserver) -> Result<(), Error> {
+        if self.header_bytes > 0 {
+            return Err(Error::Invalid(if self.header_bytes < 5 {
+                "Connect frame header"
+            } else {
+                "truncated Connect frame"
+            }));
+        }
+        let end = self
+            .end
+            .as_deref()
+            .ok_or(Error::Invalid("missing Connect end frame"))?;
+        let empty_headers = HeaderMap::new();
+        let (status, headers) = self
+            .response
+            .as_ref()
+            .map_or((http::StatusCode::OK, &empty_headers), |response| {
+                (response.status(), response.headers())
+            });
+        end_error_diagnosed(end, status, headers, self.profile, observer)?;
+        self.sink.finish()
+    }
+}
 impl<S: FrameSink> ResponseStream for Decoder<S> {
-    fn start(&mut self, _: Response<()>) -> Result<(), Error> {
+    fn start(&mut self, response: Response<()>) -> Result<(), Error> {
+        self.response = Some(response);
         Ok(())
     }
     fn chunk(&mut self, bytes: &[u8]) -> Result<(), Error> {
@@ -357,19 +397,10 @@ impl<S: FrameSink> ResponseStream for Decoder<S> {
         self.receive(bytes, Some(observer))
     }
     fn finish(&mut self) -> Result<(), Error> {
-        if self.header_bytes > 0 {
-            return Err(Error::Invalid(if self.header_bytes < 5 {
-                "Connect frame header"
-            } else {
-                "truncated Connect frame"
-            }));
-        }
-        let end = self
-            .end
-            .as_deref()
-            .ok_or(Error::Invalid("missing Connect end frame"))?;
-        end_error(end)?;
-        self.sink.finish()
+        self.finish_context(&NoDiagnostics)
+    }
+    fn finish_diagnosed(&mut self, observer: &dyn FailureObserver) -> Result<(), Error> {
+        self.finish_context(observer)
     }
 }
 

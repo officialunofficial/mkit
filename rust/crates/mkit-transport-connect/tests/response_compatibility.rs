@@ -17,6 +17,20 @@ struct Fixture {
 }
 impl Fixture {
     fn new(status: &str, headers: &str, body: Vec<u8>) -> Self {
+        Self::responses(vec![(status.into(), headers.into(), body)])
+    }
+    fn responses(responses: Vec<(String, String, Vec<u8>)>) -> Self {
+        assert!(!responses.is_empty());
+        let responses: Vec<_> = responses
+            .into_iter()
+            .map(|(status, headers, body)| {
+                let head = format!(
+                    "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                (head, body)
+            })
+            .collect();
         RETRIES.with(|count| count.set(0));
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -25,10 +39,6 @@ impl Fixture {
         let captured = requests.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = stop.clone();
-        let head = format!(
-            "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
-            body.len()
-        );
         let thread = std::thread::spawn(move || {
             'connections: while !stopped.load(Ordering::SeqCst) {
                 let (mut socket, _) = match listener.accept() {
@@ -74,13 +84,16 @@ impl Fixture {
                 if !drain_request_body(&mut socket, &mut request, header_end) {
                     continue 'connections;
                 }
-                captured
-                    .lock()
-                    .unwrap()
-                    .push(String::from_utf8_lossy(&request).into_owned());
+                let index = {
+                    let mut requests = captured.lock().unwrap();
+                    let index = requests.len();
+                    requests.push(String::from_utf8_lossy(&request).into_owned());
+                    index
+                };
+                let (head, body) = &responses[index.min(responses.len() - 1)];
                 if socket.write_all(head.as_bytes()).is_ok() {
                     // A bounded client may close before the remaining body.
-                    let _ = socket.write_all(&body);
+                    let _ = socket.write_all(body);
                 }
             }
         });
@@ -336,4 +349,77 @@ fn signing_time_is_charged_to_the_existing_attempt_timeout() {
         matches!(fixture.client.read_ref("heads/main"), Err(TransportError::RemoteError(message)) if message == "client-side deadline exceeded")
     );
     assert!(fixture.requests.lock().unwrap().is_empty());
+}
+
+struct PaymentResponder(std::sync::atomic::AtomicUsize);
+impl mkit_transport_connect::admission::AdmissionResponder for PaymentResponder {
+    fn respond(
+        &self,
+        context: &mkit_transport_connect::admission::AdmissionContext<'_>,
+    ) -> Result<Vec<(String, String)>, mkit_transport_connect::admission::AdmissionResponderError>
+    {
+        assert!(context.procedure.ends_with("/UpdateRef"));
+        assert_eq!(
+            context.required.www_authenticate,
+            ["Payment realm=repository"]
+        );
+        assert_eq!(context.required.payment_required, ["opaque-challenge"]);
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![(
+            "Payment-Authorization".into(),
+            "helper-response".into(),
+        )])
+    }
+}
+#[test]
+fn malformed_gzip_402_runs_admission_helper_and_retries_both_facade_paths() {
+    for via_source in [false, true] {
+        let mut fixture = Fixture::responses(vec![
+            ("402 Payment Required".into(),
+             "Content-Encoding: gzip\r\nWWW-Authenticate: Payment realm=repository\r\nPayment-Required: opaque-challenge\r\n".into(),
+             b"malformed gzip".to_vec()),
+            ("200 OK".into(), "Content-Type: application/proto\r\n".into(), Vec::new()),
+        ]);
+        let helper = Arc::new(PaymentResponder(std::sync::atomic::AtomicUsize::new(0)));
+        fixture.client =
+            ConnectTransport::connect_for_test(fixture.client.origin().parse().unwrap())
+                .with_admission(mkit_transport_connect::admission::AdmissionPolicy::new(
+                    helper.clone(),
+                ));
+        if via_source {
+            fixture
+                .client
+                .with_source(|source| {
+                    source.update_ref(
+                        "refs/heads/main",
+                        mkit_core::protocol::RefWriteCondition::Missing,
+                        &[2; 32],
+                    )
+                })
+                .unwrap()
+                .unwrap();
+        } else {
+            fixture
+                .client
+                .update_ref(
+                    "refs/heads/main",
+                    mkit_core::protocol::RefWriteCondition::Missing,
+                    &[2; 32],
+                )
+                .unwrap();
+        }
+        assert_eq!(helper.0.load(Ordering::SeqCst), 1);
+        let requests = fixture.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            !requests[0]
+                .to_ascii_lowercase()
+                .contains("payment-authorization:")
+        );
+        assert!(
+            requests[1]
+                .to_ascii_lowercase()
+                .contains("payment-authorization: helper-response\r\n")
+        );
+    }
 }

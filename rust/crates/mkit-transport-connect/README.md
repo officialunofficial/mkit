@@ -101,11 +101,14 @@ client's default validation and response limits remain unchanged.
 
 ## Remaining adapter users
 
-The CLI's epoch and visibility commands retain this concrete adapter for their
-native configuration and legacy `Completion` result. In-process transport tests
-and conformance consumers retain `Transport`. `EnvelopeTransport`, pooled HTTP
-utilities, generated type aliases, and admission/TLS/progress types remain public
-utilities. They do not constitute a second per-RPC protocol driver.
+The CLI retains this adapter for TLS and bearer configuration, envelope signers,
+per-request grants, admission helpers, durable receipt storage, and progress.
+Its epoch and visibility commands also retain the concrete adapter's legacy
+`Completion` result. Config validates admission header names through its public
+helper. In-process sync tests retain `Transport`; server conformance retains that
+facade and generated aliases. `EnvelopeTransport`, pooled HTTP utilities, and
+generated aliases remain published compatibility APIs. None retains a second
+per-RPC protocol driver.
 
 ## Testing
 

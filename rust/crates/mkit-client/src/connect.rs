@@ -1597,23 +1597,61 @@ impl<'a> Iterator for Frames<'a> {
     }
 }
 
-/// The end frame of a stream: `{}` or `{"error": ...}`. A challenge error
-/// becomes `PaymentRequired`, like a unary one.
+/// The end frame of a stream under default response rules.
+#[cfg(test)]
 pub(crate) fn end_error(frame: &[u8]) -> Result<(), Error> {
+    end_error_diagnosed(
+        frame,
+        http::StatusCode::OK,
+        &HeaderMap::new(),
+        ResponseProfile::default(),
+        &PolicyObserver::<NoRequestPolicy> {
+            policy: None,
+            procedure: "",
+        },
+    )
+}
+
+/// Interpret a terminal error with the same host-selected envelope rules and
+/// admission headers as a unary response. Terminal JSON never supplies its own
+/// HTTP status or replaces the actual response headers.
+pub(crate) fn end_error_diagnosed<D: FailureObserver + ?Sized>(
+    frame: &[u8],
+    status: http::StatusCode,
+    headers: &HeaderMap,
+    profile: ResponseProfile,
+    observer: &D,
+) -> Result<(), Error> {
     let end: serde_json::Value =
         serde_json::from_slice(frame).map_err(|_| Error::Invalid("Connect end JSON"))?;
     let Some(error) = end.get("error") else {
         return Ok(());
     };
-    let remote: RemoteError =
-        serde_json::from_value(error.clone()).map_err(|_| Error::Invalid("Connect end error"))?;
+    if error.is_null() && profile.allow_incomplete_error_fields {
+        return Ok(());
+    }
+    let bytes = serde_json::to_vec(error).map_err(|_| Error::Invalid("Connect end error"))?;
+    let mut remote = parse_remote_error(&bytes, status, profile)
+        .map_err(|_| Error::Invalid("Connect end error"))?;
     if challenged(Some(&remote)) {
         return Err(Error::PaymentRequired(Box::new(admission_required(
             Some(&remote),
-            &HeaderMap::new(),
+            headers,
         )?)));
     }
-    Err(Error::Remote(Box::new(remote)))
+    remote.status = status.as_u16();
+    remote.headers = headers.clone();
+    let mapped = observer.map_failure(&FailureDiagnostic {
+        procedure: "",
+        kind: FailureKind::Http,
+        status: Some(status),
+        headers: Some(headers),
+        body: Some(frame),
+        parsed_error: Some(&remote),
+        cause: &remote.message,
+        limit: None,
+    });
+    Err(mapped.unwrap_or_else(|| Error::Remote(Box::new(remote))))
 }
 
 #[cfg(test)]

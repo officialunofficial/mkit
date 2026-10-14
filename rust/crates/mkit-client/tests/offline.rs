@@ -697,10 +697,20 @@ fn a_stream_end_frame_challenge_is_a_typed_payment_required() {
         body.push(2);
         body.extend_from_slice(&u32::try_from(end.len()).unwrap().to_be_bytes());
         body.extend_from_slice(end.as_bytes());
-        proto_reply("application/connect+proto", body)
+        Ok(Response::builder()
+            .header("content-type", "application/connect+proto")
+            .header("www-authenticate", "Payment id=\"p\"")
+            .header("payment-required", "abc")
+            .body(body)
+            .unwrap())
     });
     let error = block_on(anonymous(&script).download_pack(&key, None, 1 << 20, None)).unwrap_err();
-    assert!(matches!(error, Error::PaymentRequired(r) if r.challenges.len() == 1));
+    let Error::PaymentRequired(required) = error else {
+        panic!("expected admission challenge");
+    };
+    assert_eq!(required.challenges.len(), 1);
+    assert_eq!(required.www_authenticate, ["Payment id=\"p\""]);
+    assert_eq!(required.payment_required, ["abc"]);
 }
 
 #[test]
@@ -809,5 +819,71 @@ fn primitive_rejects_duplicate_and_unordered_names() {
             block_on(anonymous(&script).list_refs("", 0, "", None)),
             Err(Error::Invalid(_))
         ));
+    }
+}
+
+#[test]
+fn streamed_challenge_headers_keep_the_admission_bounds() {
+    let (key, _) = sample_pack(1);
+    let script = Script::new(move |_| {
+        let terminal = serde_json::json!({"error": serde_json::from_str::<serde_json::Value>(&challenge_body()).unwrap()}).to_string();
+        let mut body = vec![2];
+        body.extend_from_slice(&u32::try_from(terminal.len()).unwrap().to_be_bytes());
+        body.extend_from_slice(terminal.as_bytes());
+        Ok(Response::builder()
+            .header("content-type", "application/connect+proto")
+            .header(
+                "www-authenticate",
+                "x".repeat(mkit_core::admission::MAX_VALUE_BYTES + 1),
+            )
+            .body(body)
+            .unwrap())
+    });
+    let error = block_on(anonymous(&script).download_pack(&key, None, 1 << 20, None)).unwrap_err();
+    assert!(matches!(error, Error::Invalid("admission header")));
+}
+
+struct TerminalCompatibility;
+impl mkit_client::RequestPolicy for TerminalCompatibility {
+    fn headers(
+        &self,
+        _: &mkit_client::RequestContext<'_>,
+    ) -> Result<mkit_client::RequestHeaders, mkit_client::Veto> {
+        Ok(mkit_client::RequestHeaders::new())
+    }
+    fn response_profile(&self, _: &str) -> mkit_client::ResponseProfile {
+        let mut profile = mkit_client::ResponseProfile::default();
+        profile.allow_incomplete_error_fields = true;
+        profile
+    }
+}
+#[test]
+fn streamed_terminal_error_compatibility_is_explicit_and_defaults_stay_strict() {
+    for terminal in ["{\"error\":null}", "{\"error\":{}}"] {
+        let (key, pack) = sample_pack(1);
+        let script = Script::new(move |_| {
+            let mut response = download_reply(&key, pack.len() as u64, &pack, pack.len()).unwrap();
+            let length = response.body().len();
+            response.body_mut().truncate(length - 7);
+            response.body_mut().push(2);
+            response
+                .body_mut()
+                .extend_from_slice(&u32::try_from(terminal.len()).unwrap().to_be_bytes());
+            response.body_mut().extend_from_slice(terminal.as_bytes());
+            Ok(response)
+        });
+        assert!(matches!(
+            block_on(anonymous(&script).download_pack(&key, None, 1 << 20, None)),
+            Err(Error::Invalid("Connect end error"))
+        ));
+        let client = anonymous(&script).with_request_policy(&TerminalCompatibility);
+        let result = block_on(client.download_pack(&key, None, 1 << 20, None));
+        if terminal.contains("null") {
+            assert!(result.is_ok());
+        } else {
+            assert!(
+                matches!(result, Err(Error::Remote(error)) if error.code == "unknown" && error.message.is_empty())
+            );
+        }
     }
 }

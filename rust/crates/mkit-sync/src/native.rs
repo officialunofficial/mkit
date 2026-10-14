@@ -398,6 +398,25 @@ async fn read_bounded<D: FailureObserver + ?Sized>(
     Ok(out)
 }
 
+/// Preserve a host-opted-in HTTP admission response even when its bounded
+/// body cannot be read. The protocol client still validates challenge headers.
+async fn read_response_body<D: FailureObserver + ?Sized>(
+    body: hyper::body::Incoming,
+    limit: usize,
+    diagnostics: Diagnostics<'_, D>,
+    profile: mkit_client::ResponseProfile,
+) -> Result<Vec<u8>, ExchangeFailure> {
+    match read_bounded(body, limit, diagnostics).await {
+        Err(_)
+            if profile.expose_error_responses
+                && diagnostics.status == Some(http::StatusCode::PAYMENT_REQUIRED) =>
+        {
+            Ok(Vec::new())
+        }
+        result => result,
+    }
+}
+
 /// Inflate a gzip body, refusing one that expands past `limit`.
 enum GzipFailure {
     Coding(std::io::Error),
@@ -565,6 +584,15 @@ fn decode_body<D: FailureObserver + ?Sized>(
     })();
     match bytes {
         Ok(bytes) => Ok(bytes),
+        Err(_)
+            if profile.expose_error_responses
+                && diagnostics.status == Some(http::StatusCode::PAYMENT_REQUIRED) =>
+        {
+            // A diagnostic mapper may already have classified a body failure.
+            // Admission takes precedence so the central client emits the typed
+            // challenge and applies its existing validation bounds.
+            Ok(Vec::new())
+        }
         Err(ExchangeFailure::Native(_))
             if profile.expose_error_responses
                 && diagnostics
@@ -664,7 +692,7 @@ impl NativeHttp {
                 headers: Some(&parts.headers),
                 ..initial
             };
-            let wire = read_bounded(body, response_limit, diagnostics).await?;
+            let wire = read_response_body(body, response_limit, diagnostics, profile).await?;
             let bytes = decode_body(wire, &parts.headers, response_limit, profile, diagnostics)?;
             parts.headers.remove(CONTENT_ENCODING);
             parts.headers.remove(CONTENT_LENGTH);
@@ -788,7 +816,7 @@ async fn stream_error_response<S: ResponseStream + ?Sized, D: FailureObserver + 
         ..initial
     };
     let limit = profile.end_frame_limit.unwrap_or(limit).min(limit);
-    let wire = read_bounded(body, limit, diagnostics)
+    let wire = read_response_body(body, limit, diagnostics, profile)
         .await
         .map_err(ExchangeFailure::into_client)?;
     let bytes = decode_body(wire, &parts.headers, limit, profile, diagnostics)
