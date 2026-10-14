@@ -233,6 +233,8 @@ pub struct WorkerConfig {
     pub placement: Placement,
     /// Default-off repository index activation; TTL in milliseconds (1..=120000).
     pub repo_index_prewake_ttl_ms: Option<u64>,
+    /// Anonymous activation after readability; defaults true, master switch still applies.
+    pub repo_index_prewake_anonymous: bool,
     /// The request body cap, [`DEFAULT_MAX_BODY_BYTES`].
     pub max_body_bytes: usize,
     /// The R2 bucket binding ([`crate::r2::STORAGE_BINDING`]). Durable
@@ -802,6 +804,7 @@ impl WorkerConfig {
             sharding,
             placement,
             repo_index_prewake_ttl_ms: crate::prewake::parse(&var)?,
+            repo_index_prewake_anonymous: crate::prewake::parse_anonymous(&var)?,
             audience,
             repository,
             addressing,
@@ -2536,7 +2539,8 @@ mod glue {
             cfg.repo_index_prewake_ttl_ms
         } else {
             None
-        });
+        })
+        .with_anonymous_index_prewake(cfg.repo_index_prewake_anonymous);
         config.purge = crate::admin::purge_config(cfg, meta.clone(), Some(request_budget))?;
         #[cfg(feature = "__test-faults")]
         let faulted = blobs.clone();
@@ -4064,6 +4068,13 @@ mod tests {
         pairs.push(("REPO_INDEX_PREWAKE", "true"));
         let mut config = WorkerConfig::from_vars(vars(&pairs)).unwrap();
         assert_eq!(config.repo_index_prewake_ttl_ms, Some(90_000));
+        assert!(config.repo_index_prewake_anonymous);
+        pairs.push(("REPO_INDEX_PREWAKE_ANONYMOUS", "false"));
+        assert!(
+            !WorkerConfig::from_vars(vars(&pairs))
+                .unwrap()
+                .repo_index_prewake_anonymous
+        );
         config.repo_index_prewake_ttl_ms = Some(0);
         assert!(config.validate().is_err());
         pairs.push(("REPO_INDEX_PREWAKE_TTL_SECONDS", "120"));

@@ -723,3 +723,146 @@ fn repository_index_prewake_skips_single_addressing_pack_reads() {
     );
     assert_eq!(env.pipe.meta.warm_calls.load(Ordering::SeqCst), 0);
 }
+
+#[test]
+fn anonymous_repository_index_prewake_models_cold_reads_and_warm_rounds() {
+    let shape = shape(11, 8, true, |_| 1);
+    shape
+        .fx
+        .pipe
+        .meta
+        .anonymous_prewake
+        .store(true, Ordering::SeqCst);
+    for op in [
+        Op::GetReadGate,
+        Op::Show { sizes: true },
+        Op::CanonicalLog(10),
+        Op::Log(10),
+        Op::Page1(10),
+        Op::SelectedLog(10),
+    ] {
+        shape.fx.pipe.meta.prewake.store(false, Ordering::SeqCst);
+        // Page-1 security installs a durable revision once; compare the same
+        // initialized repository state, with partition coldness reset per run.
+        measure(&shape, false, op);
+        let before = measure_latency(&shape, false, op, 40, Some(400), true);
+        shape.fx.pipe.meta.prewake.store(true, Ordering::SeqCst);
+        shape
+            .fx
+            .pipe
+            .meta
+            .prewake_claimed
+            .store(false, Ordering::SeqCst);
+        let after = measure_latency(&shape, false, op, 40, Some(400), true);
+        assert_eq!((before.1, before.2), (after.1, after.2));
+        assert_eq!(shape.fx.pipe.meta.warm_calls.swap(0, Ordering::SeqCst), 16);
+        println!(
+            "ANONYMOUS_COLD op={op:?} before_ms={:.0} after_ms={:.0} KV={} GET={} pings=16",
+            before.0 * 40.0,
+            after.0 * 40.0,
+            after.1,
+            after.2
+        );
+        let warm = measure(&shape, false, op);
+        assert_eq!(shape.fx.pipe.meta.warm_calls.load(Ordering::SeqCst), 0);
+        shape.fx.pipe.meta.prewake.store(false, Ordering::SeqCst);
+        assert_eq!(warm, measure(&shape, false, op));
+        shape.fx.pipe.meta.prewake.store(true, Ordering::SeqCst);
+        shape
+            .fx
+            .pipe
+            .meta
+            .prewake_claimed
+            .store(false, Ordering::SeqCst);
+        assert_eq!(warm, measure(&shape, false, op));
+        assert_eq!(shape.fx.pipe.meta.warm_calls.swap(0, Ordering::SeqCst), 16);
+    }
+}
+
+#[test]
+fn anonymous_repository_index_prewake_preserves_uniform_absence_and_validation() {
+    let shape = shape(1, 1, false, |_| 1);
+    let fx = &shape.fx;
+    fx.pipe.meta.anonymous_prewake.store(true, Ordering::SeqCst);
+    fx.pipe.meta.prewake.store(true, Ordering::SeqCst);
+    let set = signed(
+        &fx.owner,
+        &fx.identity("room"),
+        Procedure::SetRepoVisibility,
+        fx.number(),
+    );
+    block_on(fx.pipe.set_repo_visibility(
+        &fx.auth(&set),
+        VisibilityRequest::Envelope(crate::pipeline::RepoVisibility::Private),
+    ))
+    .unwrap();
+    let pack = PackKey::new(shape.packs[0]);
+    for name in ["room", "missing"] {
+        let request =
+            Req::unsigned(Procedure::PackExists).header("x-repository", &fx.identity(name));
+        let auth = fx.auth(&request);
+        let on = block_on(fx.pipe.pack_exists(&auth, pack)).unwrap_err();
+        let reader = block_on(fx.pipe.object_reader(fx.repo_id(name), ReaderView::Public)).unwrap();
+        let on_objects = block_on(reader.read_canonical(&[shape.head])).unwrap();
+        assert_eq!(on_objects, vec![None]);
+        fx.pipe.meta.prewake.store(false, Ordering::SeqCst);
+        let off = block_on(fx.pipe.pack_exists(&auth, pack)).unwrap_err();
+        assert_eq!(on.code(), off.code());
+        assert_eq!(on.public_message(), off.public_message());
+        assert_eq!(on.code(), Code::NotFound);
+        assert_eq!(
+            on_objects,
+            block_on(reader.read_canonical(&[shape.head])).unwrap()
+        );
+        fx.pipe.meta.prewake.store(true, Ordering::SeqCst);
+    }
+    let request = Req::unsigned(Procedure::PackExists).header("x-repository", "invalid name");
+    let lookup = |name: &str| {
+        request
+            .headers
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, v)| v.clone())
+    };
+    let meta = RequestMeta {
+        procedure: request.procedure,
+        header: &lookup,
+        header_values: None,
+        unary_body: Some(&request.body),
+        transport_principal: None,
+    };
+    assert!(fx.pipe.authenticate(&meta).is_err());
+    assert_eq!(fx.pipe.meta.warm_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn anonymous_repository_index_prewake_waits_for_the_authorizer() {
+    let az = Arc::new(Scripted::default());
+    let fx = fixture_tweaked(scripted(&az), http_cfg(), |cfg| {
+        cfg.sharding = Sharding::D34;
+    });
+    let d = data();
+    fx.push("room", &d.refs(), d.head(), None);
+    drain(&fx);
+    fx.pipe.meta.prewake.store(true, Ordering::SeqCst);
+    fx.pipe.meta.anonymous_prewake.store(true, Ordering::SeqCst);
+    *az.verdict.lock().unwrap() = Some(Code::NotFound);
+    let reader = block_on(
+        fx.pipe
+            .object_reader(fx.repo_id("room"), ReaderView::Public),
+    )
+    .unwrap();
+    assert_eq!(
+        block_on(reader.read_canonical(&[d.head()])).unwrap(),
+        vec![None]
+    );
+    let request = Req::unsigned(Procedure::PackExists).header("x-repository", &fx.identity("room"));
+    assert!(
+        block_on(
+            fx.pipe
+                .pack_exists(&fx.auth(&request), PackKey::new([1; 32]))
+        )
+        .is_err()
+    );
+    assert_eq!(fx.pipe.meta.warm_calls.load(Ordering::SeqCst), 0);
+}

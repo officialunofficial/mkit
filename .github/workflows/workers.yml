@@ -462,6 +462,15 @@ jobs:
           TMPDIR: ${{ runner.temp }}/wire-logs
           VCS_CONFORMANCE_KEEP: '1'
           VCS_CONFORMANCE_PREWAKE: 'true'
+          VCS_CONFORMANCE_PREWAKE_ANONYMOUS: 'true'
+        run: scripts/vcs-worker-conformance.sh --test-faults --multi
+
+      - name: Wire suite (test-faults, D34, Multi, signed-only index prewake)
+        env:
+          TMPDIR: ${{ runner.temp }}/wire-logs
+          VCS_CONFORMANCE_KEEP: '1'
+          VCS_CONFORMANCE_PREWAKE: 'true'
+          VCS_CONFORMANCE_PREWAKE_ANONYMOUS: 'false'
         run: scripts/vcs-worker-conformance.sh --test-faults --multi
 
       - name: Wire suite (test-faults, single sharding)

@@ -78,10 +78,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 .with_session(&session.io.calls)
                 .flagging(&capped)
                 .with_io(&admission);
-            if !self
-                .install_selected(&meta, &mut session.proofs, &reference)
-                .await?
-            {
+            let (installed, ()) = futures::future::join(
+                self.install_selected(&meta, &mut session.proofs, &reference),
+                self.prepare_anonymous(),
+            )
+            .await;
+            if !installed? {
                 return Ok(None);
             }
             Ok(session

@@ -1628,10 +1628,20 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         self.observe(a, async {
             let op = self.identify(a, OpKind::PackExists { key })?;
             let authorized = self.authorize_read(&op).await?;
-            if !self
-                .pack_is_member(a, &key, authorized.facts.caller_view)
-                .await?
+            let membership = self.pack_is_member(a, &key, authorized.facts.caller_view);
+            let member = if matches!(op.principal, Principal::Anonymous)
+                && matches!(self.cfg.addressing, Addressing::Multi(_))
             {
+                let (member, ()) = futures::future::join(
+                    membership,
+                    Box::pin(self.meta.prepare_anonymous_repo_read(&op.repo)),
+                )
+                .await;
+                member
+            } else {
+                membership.await
+            };
+            if !member? {
                 return Ok(false);
             }
             let head = self.blobs.head(&key.into()).await;
@@ -2335,10 +2345,20 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let opened = async {
             let op = self.identify(a, OpKind::DownloadPack { key })?;
             let authorized = self.authorize_read(&op).await?;
-            if !self
-                .pack_is_member(a, &key, authorized.facts.caller_view)
-                .await?
+            let membership = self.pack_is_member(a, &key, authorized.facts.caller_view);
+            let member = if matches!(op.principal, Principal::Anonymous)
+                && matches!(self.cfg.addressing, Addressing::Multi(_))
             {
+                let (member, ()) = futures::future::join(
+                    membership,
+                    Box::pin(self.meta.prepare_anonymous_repo_read(&op.repo)),
+                )
+                .await;
+                member
+            } else {
+                membership.await
+            };
+            if !member? {
                 return Err(ServerError::not_found("pack not found"));
             }
             let body = self.blobs.get(&key.into(), None).await;

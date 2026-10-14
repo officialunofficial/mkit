@@ -71,6 +71,7 @@ fn store(transport: Transport, budget: u32) -> DoNamespaceStore<Transport> {
 fn hint(recent: Recent) -> Prewake {
     Prewake {
         ttl_ms: 90_000,
+        anonymous: Anonymous::default(),
         recent,
         allowance: SliceBudget::new(CALLS),
     }
@@ -300,4 +301,92 @@ fn configured_store_hook_shares_recent_claims_and_off_is_noop() {
     assert_eq!(first.read_call_allowance(), Some(8984));
     assert_eq!(second.read_call_allowance(), Some(9000));
     assert_eq!(off.read_call_allowance(), Some(9000));
+}
+
+#[test]
+fn anonymous_rolling_cap_is_shared_retained_and_does_not_charge_skips() {
+    let recent = Recent::default();
+    let window = Anonymous::default();
+    let budget = SliceBudget::new(9000);
+    for i in 0..ANONYMOUS_WAVES {
+        let mut p = hint(recent.clone());
+        p.anonymous = window.clone();
+        assert!(p.claim_read(
+            &repo(&format!("public{i}")),
+            100 + i as u64,
+            Some(&budget),
+            true
+        ));
+    }
+    let mut p = hint(recent.clone());
+    p.anonymous = window.clone();
+    assert!(!p.claim_read(&repo("over-cap"), 60_099, Some(&budget), true));
+    assert_eq!(
+        budget.used(),
+        u32::try_from(ANONYMOUS_WAVES).unwrap() * CALLS
+    );
+    assert_eq!(p.allowance.used(), 0);
+    assert!(!recent.lock().unwrap().contains_key(&repo("over-cap")));
+    // Clock rollback cannot refill the window.
+    assert!(!p.claim_read(&repo("rollback"), 0, Some(&budget), true));
+    assert!(p.claim_read(&repo("over-cap"), 60_100, Some(&budget), true));
+    assert_eq!(window.lock().unwrap().len(), ANONYMOUS_WAVES);
+    let mut signed = hint(recent);
+    signed.anonymous = window;
+    assert!(signed.claim(&repo("signed-cap-independent"), 60_100, None));
+}
+
+#[test]
+fn anonymous_switch_and_master_off_skip_dispatch() {
+    assert!(parse_anonymous(&|_| None).unwrap());
+    assert!(!parse_anonymous(&|_| Some("false".into())).unwrap());
+    assert!(parse_anonymous(&|_| Some("invalid".into())).is_err());
+    let transport = Transport::default();
+    let off = store(transport.clone(), 9000).with_index_prewake(None);
+    block_on(off.prepare_anonymous_repo_read(&repo("anonymous-master-off")));
+    let signed_only = store(transport.clone(), 9000)
+        .with_index_prewake(Some(90_000))
+        .with_anonymous_index_prewake(false);
+    block_on(signed_only.prepare_anonymous_repo_read(&repo("anonymous-sub-off")));
+    assert!(transport.targets.lock().unwrap().is_empty());
+    assert_eq!(signed_only.read_call_allowance(), Some(9000));
+    block_on(signed_only.prepare_repo_read(&repo("anonymous-sub-off")));
+    assert_eq!(transport.targets.lock().unwrap().len(), CALLS as usize);
+}
+
+#[test]
+fn anonymous_wave_is_joined_budgeted_and_recent_even_on_failure() {
+    let transport = Transport {
+        fail: true,
+        ..Transport::default()
+    };
+    let store = store(transport.clone(), 9000);
+    let recent = Recent::default();
+    let window = Anonymous::default();
+    for _ in 0..2 {
+        let mut p = hint(recent.clone());
+        p.anonymous = window.clone();
+        block_on(p.run_anonymous(&store, &repo("anonymous-failure")));
+    }
+    assert_eq!(transport.targets.lock().unwrap().len(), CALLS as usize);
+    assert_eq!(transport.peak.load(Ordering::SeqCst), CALLS);
+    assert_eq!(transport.active.load(Ordering::SeqCst), 0);
+    assert_eq!(window.lock().unwrap().len(), 1);
+    assert_eq!(store.read_call_allowance(), Some(8984));
+}
+
+#[test]
+fn configured_anonymous_hook_shares_ttl_with_signed_reads() {
+    let transport = Transport::default();
+    let repository = repo("configured-anonymous-cache");
+    let first = store(transport.clone(), 9000).with_index_prewake(Some(90_000));
+    block_on(first.prepare_anonymous_repo_read(&repository));
+    let second = store(transport.clone(), 9000).with_index_prewake(Some(90_000));
+    block_on(second.prepare_anonymous_repo_read(&repository));
+    let signed = store(transport.clone(), 9000).with_index_prewake(Some(90_000));
+    block_on(signed.prepare_repo_read(&repository));
+    assert_eq!(transport.targets.lock().unwrap().len(), CALLS as usize);
+    assert_eq!(first.read_call_allowance(), Some(8984));
+    assert_eq!(second.read_call_allowance(), Some(9000));
+    assert_eq!(signed.read_call_allowance(), Some(9000));
 }

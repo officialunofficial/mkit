@@ -315,6 +315,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 .map(Some),
         }
     }
+    // Call only after this operation's fresh anonymous authorization succeeds.
+    async fn prepare_anonymous(&self) {
+        if matches!(self.view, ReaderView::Public) && self.pipe.visibility_gates_reads() {
+            self.pipe.meta.prepare_anonymous_repo_read(&self.repo).await;
+        }
+    }
+
     /// Prefetch canonical bytes; inaccessible IDs are uniformly absent.
     /// # Errors
     /// Oversized batches, invalid authority, exhausted budgets or store failures.
@@ -617,46 +624,49 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             .unwrap_or(self.cfg.http_decode_budget)
             .min(self.cfg.http_decode_budget);
         let mut decode = Budget(allowance);
-        let result = if let Some(session) = session.as_mut() {
-            let (io, mut charge, output, proofs) = session.split_with_proofs(allowance);
-            self.batch_with_budget(
-                ids,
-                sizes_only,
-                &calls,
-                writer,
-                &if sizes_only {
-                    ids.iter().copied().collect()
-                } else {
-                    BTreeSet::new()
-                },
-                &mut charge.budget,
-                !writer,
-                max_bytes,
-                Some((io, output)),
-                Some(proofs),
-                &capped,
-            )
-            .await
-        } else {
-            self.batch_with_budget(
-                ids,
-                sizes_only,
-                &calls,
-                writer,
-                &if sizes_only {
-                    ids.iter().copied().collect()
-                } else {
-                    BTreeSet::new()
-                },
-                &mut decode,
-                !writer,
-                max_bytes,
-                None,
-                None,
-                &capped,
-            )
-            .await
+        let work = async {
+            if let Some(session) = session.as_mut() {
+                let (io, mut charge, output, proofs) = session.split_with_proofs(allowance);
+                self.batch_with_budget(
+                    ids,
+                    sizes_only,
+                    &calls,
+                    writer,
+                    &if sizes_only {
+                        ids.iter().copied().collect()
+                    } else {
+                        BTreeSet::new()
+                    },
+                    &mut charge.budget,
+                    !writer,
+                    max_bytes,
+                    Some((io, output)),
+                    Some(proofs),
+                    &capped,
+                )
+                .await
+            } else {
+                self.batch_with_budget(
+                    ids,
+                    sizes_only,
+                    &calls,
+                    writer,
+                    &if sizes_only {
+                        ids.iter().copied().collect()
+                    } else {
+                        BTreeSet::new()
+                    },
+                    &mut decode,
+                    !writer,
+                    max_bytes,
+                    None,
+                    None,
+                    &capped,
+                )
+                .await
+            }
         };
+        let (result, ()) = futures::future::join(work, self.prepare_anonymous()).await;
         settle(result, &capped)
     }
 

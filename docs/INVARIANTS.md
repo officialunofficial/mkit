@@ -2858,8 +2858,12 @@ and exit-code behavior. No authorization, wire, or stored-format boundary moves.
 
 ## Repository activation hints carry no authority
 
-**Always:** Workers repository index warm-up runs only for authenticated,
-validated reads, joins their authorization prologue, and discards every result.
+**Always:** Workers repository index warm-up runs for authenticated, validated
+reads joined with their authorization prologue, or for anonymous reads only after
+repository existence and readability succeed, joined with the next read step.
+Every result is discarded. Private/missing/invalid repositories never start an
+anonymous wave. Anonymous claims share a rolling cap of eight waves per sixty
+seconds per isolate, retained after cancellation and failure.
 All sixteen calls reserve the existing invocation budget and a separate bounded
 activation allowance before dispatch. A volatile repository claim prevents
 another wave during its TTL, including after cancellation or failure.
@@ -2873,7 +2877,10 @@ could exceed the invocation allowance, or hints could substitute for fresh check
 **Enforced by:** the pipeline's signed-read and owner-reader entries, the Workers
 prewake claim and reservation, width/TTL/budget/failure tests, the canonical cold
 model, and enabled/disabled Workers wire conformance. The default storage hook
-performs no work; single sharding and anonymous reads skip activation.
+performs no work; single sharding skips activation. The master switch defaults
+off; the independent anonymous sub-switch defaults on under that master switch.
+Anonymous absence, rolling-cap, TTL and cold-read regressions enforce the new
+boundaries. No authorization state is cached by either volatile bound.
 
 ## Pending advance waits precede fresh guarded attempts
 

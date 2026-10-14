@@ -755,6 +755,8 @@ struct Spy {
     #[cfg(feature = "http-objects")]
     prewake: AtomicBool,
     #[cfg(feature = "http-objects")]
+    anonymous_prewake: AtomicBool,
+    #[cfg(feature = "http-objects")]
     prewake_claimed: AtomicBool,
     #[cfg(feature = "http-objects")]
     warm_calls: AtomicU32,
@@ -785,6 +787,8 @@ impl Spy {
         Self {
             #[cfg(feature = "http-objects")]
             prewake: AtomicBool::new(false),
+            #[cfg(feature = "http-objects")]
+            anonymous_prewake: AtomicBool::new(false),
             #[cfg(feature = "http-objects")]
             prewake_claimed: AtomicBool::new(false),
             #[cfg(feature = "http-objects")]
@@ -891,6 +895,12 @@ impl Spy {
 }
 
 impl NamespaceStore for Spy {
+    #[cfg(feature = "http-objects")]
+    async fn prepare_anonymous_repo_read(&self, repo: &RepoId) {
+        if self.anonymous_prewake.load(Ordering::SeqCst) {
+            self.prepare_repo_read(repo).await;
+        }
+    }
     #[cfg(feature = "http-objects")]
     async fn prepare_repo_read(&self, repo: &RepoId) {
         if !self.prewake.load(Ordering::SeqCst) || self.prewake_claimed.swap(true, Ordering::SeqCst)
