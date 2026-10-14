@@ -71,6 +71,9 @@ pre-dispatch policy. Retry the
 same identity until expiry; unsigned reads and discovery stay identity-free.
 
 `Client::with_request_policy(&policy)` installs host-owned `RequestPolicy`.
+The policy type stays part of the client type: default clients retain their
+conditional `Send` and `Sync` traits, and explicitly configured policies may
+use local state.
 The client consults it for each signed request, including reads, after the write
 observer and before signing. `RequestContext` carries the operation, public key,
 and optional write intent. `WriteIntent::ticketed` identifies ticket credentials

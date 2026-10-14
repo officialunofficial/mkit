@@ -9,13 +9,19 @@ use crate::proto::{
     UploadPackResponse, UploadPartResponse,
 };
 use crate::push::{condition, pack_commitment, pack_messages, part_commitment, part_messages};
-use crate::seams::{Observer, RefMove, RefTarget, WriteIntent, procedures};
+use crate::seams::{Observer, RefMove, RefTarget, RequestPolicy, WriteIntent, procedures};
 use mkit_core::{hash::Hash, refs::RefWriteCondition, upload_parts::PartPlan};
 
 pub(crate) type Called<R> = Result<(R, Option<Identity>), Error>;
 
-pub(crate) async fn begin_upload<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
-    rpc: &Rpc<'_, T, S, C, O>,
+pub(crate) async fn begin_upload<
+    T: HttpTransport,
+    S: Signer,
+    C: Clock,
+    O: Observer,
+    P: RequestPolicy + ?Sized,
+>(
+    rpc: &Rpc<'_, T, S, C, O, P>,
     head_ref: &str,
     pack_id: &Hash,
     bytes: u64,
@@ -40,8 +46,14 @@ pub(crate) async fn begin_upload<T: HttpTransport, S: Signer, C: Clock, O: Obser
     rpc.unary_with("BeginUpload", &request, opts).await
 }
 
-pub(crate) async fn upload_pack<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
-    rpc: &Rpc<'_, T, S, C, O>,
+pub(crate) async fn upload_pack<
+    T: HttpTransport,
+    S: Signer,
+    C: Clock,
+    O: Observer,
+    P: RequestPolicy + ?Sized,
+>(
+    rpc: &Rpc<'_, T, S, C, O, P>,
     pack_id: &Hash,
     pack: &[u8],
     ticket_id: Option<Hash>,
@@ -69,8 +81,14 @@ pub(crate) async fn upload_pack<T: HttpTransport, S: Signer, C: Clock, O: Observ
     .await
 }
 
-pub(crate) async fn upload_part<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
-    rpc: &Rpc<'_, T, S, C, O>,
+pub(crate) async fn upload_part<
+    T: HttpTransport,
+    S: Signer,
+    C: Clock,
+    O: Observer,
+    P: RequestPolicy + ?Sized,
+>(
+    rpc: &Rpc<'_, T, S, C, O, P>,
     ticket_id: Hash,
     ticket_token: Option<Vec<u8>>,
     plan: &PartPlan,
@@ -100,8 +118,14 @@ pub(crate) async fn upload_part<T: HttpTransport, S: Signer, C: Clock, O: Observ
     .await
 }
 
-pub(crate) async fn complete_upload<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
-    rpc: &Rpc<'_, T, S, C, O>,
+pub(crate) async fn complete_upload<
+    T: HttpTransport,
+    S: Signer,
+    C: Clock,
+    O: Observer,
+    P: RequestPolicy + ?Sized,
+>(
+    rpc: &Rpc<'_, T, S, C, O, P>,
     ticket_id: Option<Hash>,
     ticket_token: Option<Vec<u8>>,
     receipts: Vec<Vec<u8>>,
@@ -127,8 +151,14 @@ pub(crate) async fn complete_upload<T: HttpTransport, S: Signer, C: Clock, O: Ob
 }
 
 /// `UpdateRef`: set `new_id`, or delete when it is `None`.
-pub(crate) async fn update_ref<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
-    rpc: &Rpc<'_, T, S, C, O>,
+pub(crate) async fn update_ref<
+    T: HttpTransport,
+    S: Signer,
+    C: Clock,
+    O: Observer,
+    P: RequestPolicy + ?Sized,
+>(
+    rpc: &Rpc<'_, T, S, C, O, P>,
     name: &str,
     expected: RefWriteCondition,
     new_id: Option<Hash>,
@@ -242,8 +272,14 @@ impl Advance {
     }
 }
 
-pub(crate) async fn advance_refs<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
-    rpc: &Rpc<'_, T, S, C, O>,
+pub(crate) async fn advance_refs<
+    T: HttpTransport,
+    S: Signer,
+    C: Clock,
+    O: Observer,
+    P: RequestPolicy + ?Sized,
+>(
+    rpc: &Rpc<'_, T, S, C, O, P>,
     request: &AdvanceRefsRequest,
     identity: Option<&Identity>,
 ) -> Called<crate::proto::AdvanceRefsResponse> {

@@ -38,6 +38,7 @@ set -euo pipefail
 ceiling_for() {
     case "$1" in
         mkit-cli)               echo 23 ;;
+        mkit-client)            echo 0  ;;
         mkit-core)              echo 3  ;;
         mkit-keystore)          echo 0  ;;
         mkit-attest)            echo 0  ;;
@@ -61,7 +62,7 @@ ceiling_for() {
 # unreachable from mkit-cli). mkit-transport-memory is intentionally
 # excluded — see the dev-only-dependency note above.
 EXPECTED_CRATES=(
-    mkit-cli mkit-core mkit-keystore mkit-attest mkit-rpc
+    mkit-cli mkit-client mkit-core mkit-keystore mkit-attest mkit-rpc
     mkit-transport-file mkit-transport-http
     mkit-transport-s3 mkit-transport-ssh
     mkit-transport-enc mkit-transport-connect mkit-git-bridge

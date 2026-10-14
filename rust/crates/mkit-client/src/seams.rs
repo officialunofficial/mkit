@@ -393,6 +393,15 @@ pub struct UnsignedRequestContext<'a> {
     pub intent: Option<WriteIntent<'a>>,
 }
 
+/// The policy type of a client with no configured request policy.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoRequestPolicy;
+impl RequestPolicy for NoRequestPolicy {
+    fn headers(&self, _: &RequestContext<'_>) -> Result<RequestHeaders, Veto> {
+        Ok(RequestHeaders::new())
+    }
+}
+
 /// Host-owned credential selection, consulted for every signed envelope.
 ///
 /// The host selects grants and validated admission headers here. Challenge

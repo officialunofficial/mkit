@@ -150,6 +150,7 @@ miniz_oxide
 mio
 mkit-attest
 mkit-cli
+mkit-client
 mkit-core
 mkit-keystore
 mkit-rpc

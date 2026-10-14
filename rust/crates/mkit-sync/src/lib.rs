@@ -54,7 +54,8 @@ pub mod worktree;
 pub use applied_packs::AppliedPacks;
 #[cfg(feature = "client")]
 pub use client_source::{
-    ClientSession, ClientSource, Executor, FuturesExecutor, UploadEvent, WriteRecovery,
+    ClientSession, ClientSource, Executor, FuturesExecutor, NoWriteRecovery, UploadEvent,
+    WriteRecovery,
 };
 pub use clone::{
     CloneError, CloneInitError, CloneRemote, CloneReport, DEFAULT_REMOTE_NAME, clone,

@@ -24,7 +24,7 @@ pub use push::{Outcome, PackmapMode, Push};
 pub use read::{MemorySink, ObjectSink, UnpackOptions, Unpacked, Verification, unpack};
 pub use receipts::{MemoryPartReceiptStore, PartReceiptStore, StoredPart, TicketMetadata};
 pub use seams::{
-    Attempt, AttemptHeaders, NoObserver, Observer, RefMove, RefTarget, RequestContext,
-    RequestHeaders, RequestPolicy, SignError, SigningRequest, UnsignedRequestContext, Veto,
-    WriteIntent, is_reserved_header, procedures,
+    Attempt, AttemptHeaders, NoObserver, NoRequestPolicy, Observer, RefMove, RefTarget,
+    RequestContext, RequestHeaders, RequestPolicy, SignError, SigningRequest,
+    UnsignedRequestContext, Veto, WriteIntent, is_reserved_header, procedures,
 };

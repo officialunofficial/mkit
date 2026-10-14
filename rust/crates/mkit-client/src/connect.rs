@@ -1,6 +1,6 @@
 use crate::seams::{
-    Attempt, NoObserver, Observer, RequestContext, RequestPolicy, SignError, SigningRequest,
-    UnsignedRequestContext, WriteIntent,
+    Attempt, NoObserver, NoRequestPolicy, Observer, RequestContext, RequestPolicy, SignError,
+    SigningRequest, UnsignedRequestContext, WriteIntent,
 };
 use base64::{
     Engine as _,
@@ -335,13 +335,13 @@ impl Error {
     }
 }
 
-pub(crate) struct Rpc<'a, T, S, C, O = NoObserver> {
+pub(crate) struct Rpc<'a, T, S, C, O = NoObserver, P: ?Sized = NoRequestPolicy> {
     pub(crate) transport: &'a T,
     /// `None` makes every request anonymous.
     pub(crate) auth: Option<(&'a S, &'a C)>,
     pub(crate) unsigned_clock: Option<&'a C>,
     pub(crate) observer: &'a O,
-    pub(crate) request_policy: Option<&'a dyn RequestPolicy>,
+    pub(crate) request_policy: Option<&'a P>,
     pub(crate) destination: &'a Destination,
     pub(crate) deadline_ms: i64,
 }
@@ -401,8 +401,8 @@ impl<'a, T, S, C> Rpc<'a, T, S, C> {
     }
 }
 
-impl<'a, T, S, C, O> Rpc<'a, T, S, C, O> {
-    pub(crate) fn observed<P: Observer>(self, observer: &'a P) -> Rpc<'a, T, S, C, P> {
+impl<'a, T, S, C, O, P: ?Sized> Rpc<'a, T, S, C, O, P> {
+    pub(crate) fn observed<Q: Observer>(self, observer: &'a Q) -> Rpc<'a, T, S, C, Q, P> {
         Rpc {
             transport: self.transport,
             auth: self.auth,
@@ -415,7 +415,9 @@ impl<'a, T, S, C, O> Rpc<'a, T, S, C, O> {
     }
 }
 
-impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Rpc<'_, T, S, C, O> {
+impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Sized>
+    Rpc<'_, T, S, C, O, P>
+{
     pub(crate) async fn unary<Q: Message, R: Message + Default>(
         &self,
         method: &str,

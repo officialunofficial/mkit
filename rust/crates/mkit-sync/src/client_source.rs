@@ -12,10 +12,11 @@ use std::future::Future;
 use std::sync::Arc;
 
 mod write;
-pub use write::{ClientSession, UploadEvent, WriteRecovery};
+pub use write::{ClientSession, NoWriteRecovery, UploadEvent, WriteRecovery};
 
 use mkit_client::{
-    Client, Clock, Error as ClientError, HttpTransport, NoObserver, Observer, Signer,
+    Client, Clock, Error as ClientError, HttpTransport, NoObserver, NoRequestPolicy, Observer,
+    RequestPolicy, Signer,
 };
 use mkit_core::hash::Hash;
 use mkit_core::protocol::PackKey;
@@ -48,15 +49,26 @@ const NODE_LIMIT: u64 = 1024 * 1024;
 
 /// A remote repository reached through a [`Client`]. The
 /// engine calls it one operation at a time.
-pub struct ClientSource<'a, T, S, C, E, O = NoObserver> {
-    client: &'a Client<'a, T, S, C, O>,
+pub struct ClientSource<
+    'a,
+    T,
+    S,
+    C,
+    E,
+    O = NoObserver,
+    P: ?Sized = NoRequestPolicy,
+    R: ?Sized = NoWriteRecovery,
+> {
+    client: &'a Client<'a, T, S, C, O, P>,
     executor: &'a E,
     writes: write::WriteState,
     session: Option<&'a ClientSession>,
-    recovery: Option<&'a dyn WriteRecovery>,
+    recovery: Option<&'a R>,
 }
 
-impl<T, S, C, E, O> std::fmt::Debug for ClientSource<'_, T, S, C, E, O> {
+impl<T, S, C, E, O, P: ?Sized, R: ?Sized> std::fmt::Debug
+    for ClientSource<'_, T, S, C, E, O, P, R>
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClientSource")
             .field("client", &self.client)
@@ -64,11 +76,11 @@ impl<T, S, C, E, O> std::fmt::Debug for ClientSource<'_, T, S, C, E, O> {
     }
 }
 
-impl<'a, T, S, C, E, O> ClientSource<'a, T, S, C, E, O> {
+impl<'a, T, S, C, E, O, P: ?Sized> ClientSource<'a, T, S, C, E, O, P> {
     /// `executor` drives every call. When the transport is built on an async
     /// runtime, pass the transport itself if it is an [`Executor`].
     #[must_use]
-    pub fn new(client: &'a Client<'a, T, S, C, O>, executor: &'a E) -> Self {
+    pub fn new(client: &'a Client<'a, T, S, C, O, P>, executor: &'a E) -> Self {
         Self {
             client,
             executor,
@@ -77,7 +89,9 @@ impl<'a, T, S, C, E, O> ClientSource<'a, T, S, C, E, O> {
             recovery: None,
         }
     }
+}
 
+impl<'a, T, S, C, E, O, P: ?Sized, R: ?Sized> ClientSource<'a, T, S, C, E, O, P, R> {
     fn write_state(&self) -> &write::WriteState {
         self.session.map_or(&self.writes, |session| &session.state)
     }
@@ -91,9 +105,17 @@ impl<'a, T, S, C, E, O> ClientSource<'a, T, S, C, E, O> {
 
     /// Let the host schedule typed failures and supply admission recovery.
     #[must_use]
-    pub fn with_write_recovery(mut self, recovery: &'a dyn WriteRecovery) -> Self {
-        self.recovery = Some(recovery);
-        self
+    pub fn with_write_recovery<R2: WriteRecovery + ?Sized>(
+        self,
+        recovery: &'a R2,
+    ) -> ClientSource<'a, T, S, C, E, O, P, R2> {
+        ClientSource {
+            client: self.client,
+            executor: self.executor,
+            writes: self.writes,
+            session: self.session,
+            recovery: Some(recovery),
+        }
     }
 }
 
@@ -146,8 +168,16 @@ fn source_error(error: ClientError) -> SourceError {
     }
 }
 
-impl<'a, T: HttpTransport, S: Signer, C: Clock, E: Executor, O: Observer>
-    ClientSource<'a, T, S, C, E, O>
+impl<
+    'a,
+    T: HttpTransport,
+    S: Signer,
+    C: Clock,
+    E: Executor,
+    O: Observer,
+    P: RequestPolicy + ?Sized,
+    R: WriteRecovery + ?Sized,
+> ClientSource<'a, T, S, C, E, O, P, R>
 {
     /// Reuse cached upload tickets and capabilities across borrowed clients.
     /// A session binds to this destination and public key on first use.
@@ -198,8 +228,15 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock, E: Executor, O: Observer>
     }
 }
 
-impl<T: HttpTransport, S: Signer, C: Clock, E: Executor, O: Observer> RemoteSource
-    for ClientSource<'_, T, S, C, E, O>
+impl<
+    T: HttpTransport,
+    S: Signer,
+    C: Clock,
+    E: Executor,
+    O: Observer,
+    P: RequestPolicy + ?Sized,
+    R: WriteRecovery + ?Sized,
+> RemoteSource for ClientSource<'_, T, S, C, E, O, P, R>
 {
     fn supports_push(&self) -> bool {
         self.client.supports_writes()
@@ -354,6 +391,61 @@ mod tests {
         ) -> Result<mkit_client::AttemptHeaders, mkit_client::Veto> {
             panic!("reads must not invoke the write observer")
         }
+    }
+
+    #[test]
+    fn default_source_and_session_retain_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>(_: &T) {}
+        struct SyncChannel;
+        impl HttpTransport for SyncChannel {
+            async fn send(
+                &self,
+                _: Request<Vec<u8>>,
+                _: usize,
+            ) -> Result<Response<Vec<u8>>, String> {
+                Err("no network expected".into())
+            }
+        }
+        let transport = SyncChannel;
+        let client = Client::anonymous(
+            &transport,
+            Destination::new("https://vcs.example.org".into(), "default".into()).unwrap(),
+        );
+        let source = ClientSource::new(&client, &FuturesExecutor);
+        assert_send_sync(&source);
+        assert_send_sync(&ClientSession::default());
+    }
+
+    #[test]
+    fn source_accepts_explicit_thread_local_policy_and_recovery() {
+        use std::cell::Cell;
+        struct LocalPolicy(Cell<u32>);
+        impl RequestPolicy for LocalPolicy {
+            fn headers(
+                &self,
+                _: &mkit_client::RequestContext<'_>,
+            ) -> Result<mkit_client::RequestHeaders, mkit_client::Veto> {
+                self.0.set(self.0.get() + 1);
+                Ok(mkit_client::RequestHeaders::new())
+            }
+        }
+        struct LocalRecovery(Cell<u32>);
+        impl WriteRecovery for LocalRecovery {
+            fn recover(&self, _: &str, _: &SourceError, _: u32) -> Result<bool, SourceError> {
+                self.0.set(self.0.get() + 1);
+                Ok(false)
+            }
+        }
+        let (transport, destination) = source_over(Vec::new());
+        let policy = LocalPolicy(Cell::new(0));
+        let recovery = LocalRecovery(Cell::new(0));
+        let policy_ref: &dyn RequestPolicy = &policy;
+        let recovery_ref: &dyn WriteRecovery = &recovery;
+        let client = Client::anonymous(&transport, destination).with_request_policy(policy_ref);
+        let source = ClientSource::new(&client, &FuturesExecutor).with_write_recovery(recovery_ref);
+        assert!(!source.supports_push());
+        assert_eq!(policy.0.get(), 0);
+        assert_eq!(recovery.0.get(), 0);
     }
 
     #[test]

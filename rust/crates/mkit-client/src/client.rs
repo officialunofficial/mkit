@@ -17,7 +17,7 @@ use crate::proto::{
     PackExistsResponse, ReadRefRequest, ReadRefResponse, RefRedaction, UpdateRefResponse,
     UploadPackResponse, UploadPartResponse, UploadTicket,
 };
-use crate::seams::{NoObserver, Observer, RequestPolicy, WriteIntent, procedures};
+use crate::seams::{NoObserver, NoRequestPolicy, Observer, RequestPolicy, WriteIntent, procedures};
 use mkit_core::{
     hash::Hash, refs::RefWriteCondition, upload_parts::PartPlan, write_auth::ContentCommitment,
 };
@@ -89,17 +89,17 @@ pub struct RefPage {
 ///
 /// [`Client::with_observer`] adds host policy for every signed or explicitly clocked
 /// unsigned write (see "Host policy seams" in the crate README).
-pub struct Client<'a, T, S = NoSigner, C = NoClock, O = NoObserver> {
+pub struct Client<'a, T, S = NoSigner, C = NoClock, O = NoObserver, P: ?Sized = NoRequestPolicy> {
     transport: &'a T,
     destination: Destination,
     auth: Option<(&'a S, &'a C)>,
     unsigned_clock: Option<&'a C>,
     observer: &'a O,
-    request_policy: Option<&'a dyn RequestPolicy>,
+    request_policy: Option<&'a P>,
     unsigned_writes: bool,
 }
 
-impl<T, S, C, O> std::fmt::Debug for Client<'_, T, S, C, O> {
+impl<T, S, C, O, P: ?Sized> std::fmt::Debug for Client<'_, T, S, C, O, P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Client")
             .field("destination", &self.destination)
@@ -171,7 +171,7 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Client<'a, T, S, C> {
     }
 }
 
-impl<'a, T, S, C, O> Client<'a, T, S, C, O> {
+impl<'a, T, S, C, O, P: ?Sized> Client<'a, T, S, C, O, P> {
     /// Opt an unsigned client into clock-backed write replay metadata. This
     /// does not enable writes or signing, and does not change a signed client's
     /// configured clock. Use [`Client::anonymous_with_clock`] when selecting a
@@ -202,9 +202,19 @@ impl<'a, T, S, C, O> Client<'a, T, S, C, O> {
     /// Signed policy runs after the write observer and before signing.
     /// Discovery bypasses credential selection.
     #[must_use]
-    pub fn with_request_policy(mut self, policy: &'a dyn RequestPolicy) -> Self {
-        self.request_policy = Some(policy);
-        self
+    pub fn with_request_policy<Q: RequestPolicy + ?Sized>(
+        self,
+        policy: &'a Q,
+    ) -> Client<'a, T, S, C, O, Q> {
+        Client {
+            transport: self.transport,
+            destination: self.destination,
+            auth: self.auth,
+            unsigned_clock: self.unsigned_clock,
+            observer: self.observer,
+            request_policy: Some(policy),
+            unsigned_writes: self.unsigned_writes,
+        }
     }
 
     /// Run `observer` before signed or explicitly clocked unsigned write RPCs.
@@ -212,7 +222,7 @@ impl<'a, T, S, C, O> Client<'a, T, S, C, O> {
     /// signer (when configured), deadline
     /// check, dispatch.
     #[must_use]
-    pub fn with_observer<P: Observer>(self, observer: &'a P) -> Client<'a, T, S, C, P> {
+    pub fn with_observer<Q: Observer>(self, observer: &'a Q) -> Client<'a, T, S, C, Q, P> {
         Client {
             transport: self.transport,
             destination: self.destination,
@@ -225,13 +235,15 @@ impl<'a, T, S, C, O> Client<'a, T, S, C, O> {
     }
 }
 
-impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Client<'_, T, S, C, O> {
+impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Sized>
+    Client<'_, T, S, C, O, P>
+{
     #[must_use]
     pub fn destination(&self) -> &Destination {
         &self.destination
     }
 
-    fn rpc(&self) -> Rpc<'_, T, S, C, O> {
+    fn rpc(&self) -> Rpc<'_, T, S, C, O, P> {
         Rpc {
             transport: self.transport,
             auth: self.auth,

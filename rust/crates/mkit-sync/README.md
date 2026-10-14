@@ -201,8 +201,10 @@ read configuration or run helpers.
 
 `ClientSession` retains negotiated capabilities and upload commitments across
 fresh borrowed clients. Use `ClientSource::with_session` to lend it for one
-operation; reuse with another origin, repository, or signer is refused. A native
-host sharing a session between threads protects it with its own mutex.
+operation; reuse with another origin, repository, or signer is refused. Session
+bookkeeping uses short internal locks. Default sources retain their conditional
+`Send` and `Sync` traits; explicitly configured policy and recovery types may
+use local state.
 
 `ClientSource::with_receipt_store` accepts a caller-owned `PartReceiptStore`.
 Its `put` must finish durably before returning. The source saves each acknowledged

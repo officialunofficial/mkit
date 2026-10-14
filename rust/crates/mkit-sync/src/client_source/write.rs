@@ -1,8 +1,9 @@
 //! Native write orchestration over the client's canonical per-RPC calls.
 
-use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 use mkit_client::proto::{self, GetServerInfoResponse, UploadTicket};
 use mkit_client::{
@@ -15,6 +16,7 @@ use mkit_core::upload_parts::PartPlan;
 
 use super::{ClientSource, Clock, Executor, HttpTransport, Observer, Signer, source_error};
 use crate::SourceError;
+use mkit_client::RequestPolicy;
 
 /// Host-owned scheduling and admission recovery. Returning `true` retries the
 /// same operation; the host must bound retries and finish any wait first.
@@ -40,6 +42,54 @@ pub trait WriteRecovery {
     fn upload_event(&self, event: UploadEvent) -> Result<(), SourceError> {
         let _ = event;
         Ok(())
+    }
+}
+
+/// Recovery policy for a source without host scheduling. Typed failures are
+/// returned to the caller unchanged.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoWriteRecovery;
+impl WriteRecovery for NoWriteRecovery {
+    fn recover(&self, _: &str, _: &SourceError, _: u32) -> Result<bool, SourceError> {
+        Ok(false)
+    }
+}
+
+/// Private short-lived state locks. No host callback or HTTP operation runs
+/// under a guard, so poison can only come from interrupted internal bookkeeping.
+/// Keep the last state in that case; subsequent RPCs still authorize afresh.
+#[derive(Default)]
+pub(super) struct StateCell<T>(Mutex<T>);
+impl<T> StateCell<T> {
+    fn new(value: T) -> Self {
+        Self(Mutex::new(value))
+    }
+    fn borrow(&self) -> MutexGuard<'_, T> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    fn borrow_mut(&self) -> MutexGuard<'_, T> {
+        self.borrow()
+    }
+    pub(super) fn replace(&self, value: T) -> T {
+        std::mem::replace(&mut *self.borrow_mut(), value)
+    }
+}
+
+struct Flag(AtomicBool);
+impl Flag {
+    fn new(value: bool) -> Self {
+        Self(AtomicBool::new(value))
+    }
+    fn get(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+    fn set(&self, value: bool) {
+        self.0.store(value, Ordering::Relaxed);
+    }
+    fn replace(&self, value: bool) -> bool {
+        self.0.swap(value, Ordering::Relaxed)
     }
 }
 
@@ -72,7 +122,7 @@ pub enum UploadEvent {
 #[derive(Default)]
 pub struct ClientSession {
     pub(super) state: WriteState,
-    binding: RefCell<Option<SessionBinding>>,
+    binding: StateCell<Option<SessionBinding>>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -123,21 +173,21 @@ impl ClientSession {
 }
 
 pub(super) struct WriteState {
-    info: RefCell<Option<Result<GetServerInfoResponse, ()>>>,
-    tickets: RefCell<HashMap<(String, PackKey), UploadTicket>>,
-    pub(super) receipts: RefCell<Arc<dyn PartReceiptStore>>,
-    swept: Cell<bool>,
-    ticketless: Cell<bool>,
+    info: StateCell<Option<Result<GetServerInfoResponse, ()>>>,
+    tickets: StateCell<HashMap<(String, PackKey), UploadTicket>>,
+    pub(super) receipts: StateCell<Arc<dyn PartReceiptStore>>,
+    swept: Flag,
+    ticketless: Flag,
 }
 
 impl Default for WriteState {
     fn default() -> Self {
         Self {
-            info: RefCell::new(None),
-            tickets: RefCell::new(HashMap::new()),
-            receipts: RefCell::new(Arc::new(MemoryPartReceiptStore::default())),
-            swept: Cell::new(false),
-            ticketless: Cell::new(false),
+            info: StateCell::new(None),
+            tickets: StateCell::new(HashMap::new()),
+            receipts: StateCell::new(Arc::new(MemoryPartReceiptStore::default())),
+            swept: Flag::new(false),
+            ticketless: Flag::new(false),
         }
     }
 }
@@ -170,8 +220,15 @@ fn condition(condition: RefWriteCondition) -> (proto::RefExpectation, Option<Vec
     }
 }
 
-impl<T: HttpTransport, S: Signer, C: Clock, E: Executor, O: Observer>
-    ClientSource<'_, T, S, C, E, O>
+impl<
+    T: HttpTransport,
+    S: Signer,
+    C: Clock,
+    E: Executor,
+    O: Observer,
+    P: RequestPolicy + ?Sized,
+    R: WriteRecovery + ?Sized,
+> ClientSource<'_, T, S, C, E, O, P, R>
 {
     fn write_info(&self) -> Option<GetServerInfoResponse> {
         if self.write_state().info.borrow().is_none() {
@@ -193,13 +250,13 @@ impl<T: HttpTransport, S: Signer, C: Clock, E: Executor, O: Observer>
             .cloned()
     }
 
-    fn write_call<R>(
+    fn write_call<V>(
         &self,
         procedure: &str,
         ticketed: bool,
         deadline: Option<i64>,
-        mut call: impl FnMut(Option<&Identity>) -> Result<R, Error>,
-    ) -> Result<R, SourceError> {
+        mut call: impl FnMut(Option<&Identity>) -> Result<V, Error>,
+    ) -> Result<V, SourceError> {
         let full_procedure = format!("/mkit.transport.v1.TransportService/{procedure}");
         if let Some(recovery) = self.recovery {
             recovery.before_call(&full_procedure)?;
@@ -355,12 +412,12 @@ impl<T: HttpTransport, S: Signer, C: Clock, E: Executor, O: Observer>
             };
             let ticket = match begun.result {
                 Some(proto::begin_upload_response::Result::AlreadyPresent(_)) => {
-                    if let Some(old) = self
+                    let old = self
                         .write_state()
                         .tickets
                         .borrow_mut()
-                        .remove(&(head.to_owned(), *key))
-                    {
+                        .remove(&(head.to_owned(), *key));
+                    if let Some(old) = old {
                         self.forget_ticket(&old);
                     }
                     return Ok(());
@@ -429,11 +486,12 @@ impl<T: HttpTransport, S: Signer, C: Clock, E: Executor, O: Observer>
         {
             return Err(SourceError::InvalidResponse);
         }
-        if let Some(old) = self
+        let old = self
             .write_state()
             .tickets
             .borrow_mut()
-            .insert((head.to_owned(), *key), ticket.clone())
+            .insert((head.to_owned(), *key), ticket.clone());
+        if let Some(old) = old
             && old.id != ticket.id
         {
             self.forget_ticket(&old);
@@ -751,14 +809,18 @@ impl<T: HttpTransport, S: Signer, C: Clock, E: Executor, O: Observer>
     fn forget_committed_tickets(&self, head: &str, selected: Vec<(PackKey, UploadTicket)>) {
         for (key, ticket) in selected {
             let cache_key = (head.to_owned(), key);
-            if self
-                .write_state()
-                .tickets
-                .borrow()
-                .get(&cache_key)
-                .is_some_and(|current| current.id == ticket.id)
-            {
-                self.write_state().tickets.borrow_mut().remove(&cache_key);
+            let removed = {
+                let mut cached = self.write_state().tickets.borrow_mut();
+                if cached
+                    .get(&cache_key)
+                    .is_some_and(|current| current.id == ticket.id)
+                {
+                    cached.remove(&cache_key)
+                } else {
+                    None
+                }
+            };
+            if removed.is_some() {
                 self.forget_ticket(&ticket);
             }
         }
@@ -795,6 +857,7 @@ mod tests {
     use super::*;
     use http::{Request, Response};
     use mkit_client::{Client, Destination};
+    use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
     use std::time::Duration;
 

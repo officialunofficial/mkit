@@ -1,7 +1,7 @@
 const MAX_CHAIN_PACKS: usize = crate::read::MAX_CHAIN_PACKS;
 use crate::calls;
 use crate::connect::{Built, Opts, RESPONSE_LIMIT, Rpc, membership_lag, pending_delay};
-use crate::seams::{NoObserver, Observer};
+use crate::seams::{NoObserver, Observer, RequestPolicy};
 use crate::{
     Clock, Destination, Error, HttpTransport, Plan, Signer,
     proto::{
@@ -260,8 +260,8 @@ impl Push {
 // The upload steps share one ticket/deadline state across the single-part
 // and multipart paths; splitting them would thread that state through helpers.
 #[allow(clippy::too_many_lines)]
-async fn upload<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
-    rpc: &mut Rpc<'_, T, S, C, O>,
+async fn upload<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Sized>(
+    rpc: &mut Rpc<'_, T, S, C, O, P>,
     head_ref: &str,
     key: &Hash,
     bytes: &[u8],
@@ -460,8 +460,8 @@ pub(crate) fn condition(condition: RefWriteCondition) -> (RefExpectation, Option
     }
 }
 
-async fn read_ref<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
-    rpc: &Rpc<'_, T, S, C, O>,
+async fn read_ref<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Sized>(
+    rpc: &Rpc<'_, T, S, C, O, P>,
     name: &str,
 ) -> Result<Option<Hash>, Error> {
     let response: ReadRefResponse = rpc
@@ -486,8 +486,14 @@ async fn read_ref<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
     }
 }
 
-async fn walk_chain<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
-    rpc: &Rpc<'_, T, S, C, O>,
+async fn walk_chain<
+    T: HttpTransport,
+    S: Signer,
+    C: Clock,
+    O: Observer,
+    P: RequestPolicy + ?Sized,
+>(
+    rpc: &Rpc<'_, T, S, C, O, P>,
     root: Hash,
     head_ref: &str,
 ) -> Result<HashSet<Hash>, Error> {
@@ -507,8 +513,14 @@ async fn walk_chain<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
 /// membership-lag answer on the host clock, keeping the same signed identity
 /// until it expires. Per-RPC calls never wait; this loop is the only place the
 /// crate calls `Clock::wait`.
-pub(crate) async fn advance<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
-    rpc: &Rpc<'_, T, S, C, O>,
+pub(crate) async fn advance<
+    T: HttpTransport,
+    S: Signer,
+    C: Clock,
+    O: Observer,
+    P: RequestPolicy + ?Sized,
+>(
+    rpc: &Rpc<'_, T, S, C, O, P>,
     message: &AdvanceRefsRequest,
 ) -> Result<AdvanceRefsResponse, Error> {
     let (_, clock) = rpc.auth.ok_or(Error::Invalid("signed client required"))?;
@@ -592,8 +604,14 @@ pub(crate) async fn advance<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
     }
 }
 
-async fn commit_head<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
-    rpc: &Rpc<'_, T, S, C, O>,
+async fn commit_head<
+    T: HttpTransport,
+    S: Signer,
+    C: Clock,
+    O: Observer,
+    P: RequestPolicy + ?Sized,
+>(
+    rpc: &Rpc<'_, T, S, C, O, P>,
     name: &str,
     lease: RefWriteCondition,
     tip: Hash,
@@ -606,8 +624,14 @@ async fn commit_head<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
         Err(error) => Err(error),
     }
 }
-async fn head_conflict<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
-    rpc: &Rpc<'_, T, S, C, O>,
+async fn head_conflict<
+    T: HttpTransport,
+    S: Signer,
+    C: Clock,
+    O: Observer,
+    P: RequestPolicy + ?Sized,
+>(
+    rpc: &Rpc<'_, T, S, C, O, P>,
     name: &str,
     tip: Hash,
 ) -> Result<Outcome, Error> {
