@@ -120,6 +120,18 @@ jobs:
         working-directory: rust
         run: cargo semver-checks -p mkit-server --all-features --baseline-version 0.5.0 --release-type major
 
+      # All-features enables the performance wrapper, which already boxes
+      # stages. Exercise the plain path and the wasm-compatible decoder too.
+      - name: Extraction stack and future bounds without performance instrumentation
+        working-directory: rust
+        env:
+          CARGO_BUILD_JOBS: '3'
+          CARGO_PROFILE_DEV_DEBUG: '2'
+        run: |
+          cargo test --locked -p mkit-server --no-default-features --features memory,pack-ruzstd,futures/default --lib fifty_deep_quota_boundary_uses_a_small_stack -- --test-threads 3
+          cargo test --locked -p mkit-server --no-default-features --features memory,pack-ruzstd,futures/default --lib maximum_configured_member_chain_matches_native_on_a_small_stack -- --test-threads 3
+          cargo test --locked -p mkit-server --no-default-features --features memory,pack-ruzstd,futures/default --lib extraction_step_futures_stay_small -- --test-threads 3
+
   # mkit-client is the runtime-independent protocol client. Its wasm32 build is
   # the product requirement, so it is built (not only checked) for the real
   # target, and its dependency graph is held free of async runtimes and C
