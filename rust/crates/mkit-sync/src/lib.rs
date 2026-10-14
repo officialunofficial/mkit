@@ -27,6 +27,7 @@
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
 mod applied_packs;
+mod checkpoint;
 #[cfg(feature = "client")]
 mod client_source;
 mod clone;

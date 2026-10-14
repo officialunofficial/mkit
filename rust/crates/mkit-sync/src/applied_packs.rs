@@ -2,14 +2,10 @@
 //! store, keyed by remote — the fetch-side redownload-avoidance cache for
 //! issue #409.
 //!
-//! [`crate::fetch::resolve_and_download_chain`] always walks a branch's
-//! *whole* packmap chain to discover its shape (chain-node downloads are
-//! small blobs and stay unconditional — see that function's docs), but
-//! without this record it re-downloads and re-unpacks every pack in the
-//! chain on every fetch, even packs the local object store already has
-//! applied. [`AppliedPacks`] lets the download and unpack loops skip any
-//! pack digest already recorded, so a steady-state fetch costs
-//! `O(new packs)` instead of `O(chain length)`.
+//! Fetch walks only the packmap suffix after a verified branch checkpoint,
+//! or the whole chain when no checkpoint is usable. [`AppliedPacks`] skips
+//! previously applied packs within that walk. Checkpoints live separately
+//! under `applied-packs/.heads/`; see the sync README for their format.
 //!
 //! # Format
 //!
@@ -311,7 +307,7 @@ fn write(path: &Path, set: &HashSet<Hash>) -> Result<(), SyncError> {
 /// (kept as a local copy here rather than reaching into mkit-core's
 /// crate-private helper — see that module's docs for why each durable
 /// subsystem owns its own copy of this primitive).
-fn write_atomic(final_path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_atomic(final_path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = final_path
         .parent()
         .expect("applied_packs::write_atomic: path has parent");

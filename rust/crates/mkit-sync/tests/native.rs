@@ -11,11 +11,13 @@ use mkit_core::layout::RepoLayout;
 use mkit_core::refs;
 use mkit_sync::{
     ClientSource, CloneRemote, NativeClock, NativeHttp, NoopObserver, PullOutcome, SyncError,
-    SyncOptions, clone, fetch, pull,
+    SyncOptions, TransportSource, clone, fetch, pull,
 };
 use support::{
     Dalek, Live, READER_SEED, WRITER_SEED, destination, push_commit, self_certifying_namespace,
 };
+
+include!("support/counting.rs");
 
 fn remote(url: &str) -> CloneRemote {
     CloneRemote {
@@ -39,26 +41,35 @@ fn an_anonymous_client_clones_pulls_and_no_ops_over_http() {
         &[("a.txt", b"one\n")],
     );
     let client = Client::anonymous(&http, destination(&live.origin, &repository));
-    let source = ClientSource::new(&client, &http);
+    let client_source = ClientSource::new(&client, &http);
+    let transport = mkit_transport_connect::ConnectTransport::connect_for_test(
+        format!("{}/{repository}", live.origin).parse().unwrap(),
+    );
+    let transport_source = TransportSource::new(&transport);
+    // Neither wrapper supplies an identity: both adapters must forward the
+    // actual destination to make the checkpoint and two-call path work.
+    let sources = [
+        CountingSource::new(&client_source),
+        CountingSource::new(&transport_source),
+    ];
     let dir = tempfile::tempdir().unwrap();
-    let target = dir.path().join("work");
-
-    let cloned = clone(
-        &target,
-        &source,
-        &remote(&format!("mkit+{}/{repository}", live.origin)),
-        &SyncOptions::default(),
-        &NoopObserver,
-    )
-    .unwrap();
-
-    assert_eq!(cloned.pull.fetch.branches_fetched, 1);
-    assert!(matches!(
-        cloned.pull.outcome,
-        PullOutcome::FastForwarded { new, .. } if new == first
-    ));
-    assert_eq!(std::fs::read(target.join("a.txt")).unwrap(), b"one\n");
-
+    let targets = [dir.path().join("client"), dir.path().join("transport")];
+    for (source, target) in sources.iter().zip(&targets) {
+        let cloned = clone(
+            target,
+            source,
+            &remote(&format!("mkit+{}/{repository}", live.origin)),
+            &SyncOptions::default(),
+            &NoopObserver,
+        )
+        .unwrap();
+        assert_eq!(cloned.pull.fetch.branches_fetched, 1);
+        assert!(
+            matches!(cloned.pull.outcome, PullOutcome::FastForwarded { new, .. } if new == first)
+        );
+        assert_eq!(std::fs::read(target.join("a.txt")).unwrap(), b"one\n");
+        assert_eq!(source.take().len(), 4); // ListRefs, ReadRef, node, pack
+    }
     let second = push_commit(
         &http,
         &live.origin,
@@ -67,34 +78,42 @@ fn an_anonymous_client_clones_pulls_and_no_ops_over_http() {
         Some(first),
         &[("a.txt", b"one\n"), ("b.txt", b"two\n")],
     );
-    let pulled = pull(
-        &target,
-        &source,
-        "default",
-        &SyncOptions::default(),
-        &NoopObserver,
-    )
-    .unwrap();
-    assert!(matches!(
-        pulled.outcome,
-        PullOutcome::FastForwarded { old: Some(old), new, .. } if old == first && new == second
-    ));
-    assert_eq!(pulled.fetch.packs_downloaded, 1);
-    assert_eq!(pulled.fetch.packs_already_applied, 1);
-    assert_eq!(std::fs::read(target.join("b.txt")).unwrap(), b"two\n");
-
-    let again = pull(
-        &target,
-        &source,
-        "default",
-        &SyncOptions::default(),
-        &NoopObserver,
-    )
-    .unwrap();
-    assert!(matches!(again.outcome, PullOutcome::UpToDate { .. }));
-    assert_eq!(again.fetch.packs_downloaded, 0);
-    let layout = RepoLayout::single(&target);
-    assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some(second));
+    for (source, target) in sources.iter().zip(&targets) {
+        let pulled = pull(
+            target,
+            source,
+            "default",
+            &SyncOptions::default(),
+            &NoopObserver,
+        )
+        .unwrap();
+        assert!(
+            matches!(pulled.outcome, PullOutcome::FastForwarded { old: Some(old), new, .. } if old == first && new == second)
+        );
+        assert_eq!(source.take().len(), 4); // only the new node and pack
+        assert_eq!(pulled.fetch.packs_downloaded, 1);
+        assert_eq!(pulled.fetch.packs_already_applied, 1);
+        assert_eq!(std::fs::read(target.join("b.txt")).unwrap(), b"two\n");
+        let again = pull(
+            target,
+            source,
+            "default",
+            &SyncOptions::default(),
+            &NoopObserver,
+        )
+        .unwrap();
+        assert!(matches!(again.outcome, PullOutcome::UpToDate { .. }));
+        assert_eq!(again.fetch.packs_downloaded, 0);
+        assert_eq!(again.fetch.objects_unpacked, 0);
+        assert_eq!(
+            source.take(),
+            ["ListRefs", "ReadRef refs/mkit/packmap/main"]
+        );
+        assert_eq!(
+            refs::read_ref(&RepoLayout::single(target), "main").unwrap(),
+            Some(second)
+        );
+    }
 }
 
 #[test]

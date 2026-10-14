@@ -60,6 +60,14 @@ collect the applicable entries between their old and new immutable pins.
   driver-specific limits and errors are unchanged. No wire or stored-format
   change; no wipe.
 
+- Native fetch and pull stop packmap walks at a fully verified per-branch
+  checkpoint bound to the remote repository and origin. An unchanged branch
+  needs only ListRefs and ReadRef; an appended node downloads only its new
+  packs. Rewritten chains retain the full walk, and missing local objects
+  retain full-chain recovery. New **.mkit/applied-packs/.heads/** files are
+  disposable local caches; no wire or authoritative stored-format change,
+  public API break, or store reset is required.
+
 - Workers deployment guidance recommends explicit region placement, matching
   Durable Object and R2 location hints, and caller-versus-object trace checks.
   No runtime, API, wire, or stored-format change; no store reset is required.

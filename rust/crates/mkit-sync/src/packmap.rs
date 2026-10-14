@@ -41,7 +41,7 @@ pub(crate) fn branch_ref_hint(branch: &str) -> String {
 /// bounded so such a remote surfaces as [`SyncError::PackChainInvalid`]
 /// instead of hanging. (A cycle is already caught by the `seen` set; this
 /// bound additionally caps an acyclic but pathologically long chain.)
-const MAX_PACK_CHAIN_DEPTH: usize = 100_000;
+pub(crate) const MAX_PACK_CHAIN_DEPTH: usize = 100_000;
 
 /// Bounds retained chain and stage metadata across all nodes, not only
 /// within one packlist. At most one million pack keys plus one hundred
@@ -83,6 +83,18 @@ pub fn walk_pack_chain(
     branch: &str,
     head_key: Hash,
 ) -> Result<Vec<transfer::PackListNode>, SyncError> {
+    Ok(walk_pack_chain_until(source, observer, branch, head_key, None)?.0)
+}
+
+/// Stop before downloading an immutable, previously verified node. If the
+/// checkpoint is not an ancestor, reaching the root naturally returns the full chain.
+pub(crate) fn walk_pack_chain_until(
+    source: &dyn RemoteSource,
+    observer: &dyn SyncObserver,
+    branch: &str,
+    head_key: Hash,
+    stop: Option<Hash>,
+) -> Result<(Vec<transfer::PackListNode>, bool), SyncError> {
     let invalid = || SyncError::PackChainInvalid {
         branch: branch.to_owned(),
         source: None,
@@ -95,6 +107,9 @@ pub fn walk_pack_chain(
     while let Some(key) = cursor {
         if observer.cancelled() {
             return Err(SyncError::Interrupted);
+        }
+        if Some(key) == stop {
+            return Ok((nodes, true));
         }
         // Cycle / runaway-depth guard.
         if !seen.insert(key) || seen.len() > MAX_PACK_CHAIN_DEPTH {
@@ -124,7 +139,7 @@ pub fn walk_pack_chain(
         cursor = node.prev;
         nodes.push(node);
     }
-    Ok(nodes)
+    Ok((nodes, false))
 }
 
 /// Flatten nodes returned by [`walk_pack_chain`] into the pack keys in
