@@ -9,9 +9,36 @@ const DENIAL_WAVE_WIDTH: usize = crate::takedown::inventory::STAGE_BATCH_ENTRIES
 /// one `require_clear` call per id. Every response of a wave is awaited, then
 /// the first failure in input order is returned and later waves are skipped.
 /// Callers must await this helper serially: the width bound is per call.
-pub(crate) async fn require_clear_many<S: NamespaceStore>(
+#[cfg(any(not(feature = "perf-metrics"), test))]
+pub(crate) fn require_clear_many<'a, S: NamespaceStore>(
+    store: &'a S,
+    ids: impl Iterator<Item = Hash> + crate::MaybeSend + 'a,
+) -> impl std::future::Future<Output = Result<(), ServerError>> + 'a {
+    require_clear_many_inner(
+        store,
+        ids,
+        #[cfg(feature = "perf-metrics")]
+        None,
+    )
+}
+
+#[cfg(feature = "perf-metrics")]
+pub(crate) fn require_clear_many_observed<'a, S: NamespaceStore>(
+    store: &'a S,
+    ids: impl Iterator<Item = Hash> + crate::MaybeSend + 'a,
+    clock: &'a dyn crate::Clock,
+    counts: &'a mut crate::telemetry::performance::Denials,
+) -> impl std::future::Future<Output = Result<(), ServerError>> + 'a {
+    require_clear_many_inner(store, ids, Some((clock, counts)))
+}
+
+async fn require_clear_many_inner<S: NamespaceStore>(
     store: &S,
     mut ids: impl Iterator<Item = Hash> + crate::MaybeSend,
+    #[cfg(feature = "perf-metrics")] mut observations: Option<(
+        &dyn crate::Clock,
+        &mut crate::telemetry::performance::Denials,
+    )>,
 ) -> Result<(), ServerError> {
     loop {
         let wave: Vec<_> = ids.by_ref().take(DENIAL_WAVE_WIDTH).collect();
@@ -32,13 +59,40 @@ pub(crate) async fn require_clear_many<S: NamespaceStore>(
         // Short-circuiting on completion order would change Blocked precedence.
         let replies = crate::store::ReadReservation::scope(
             &[reservation],
-            futures::future::join_all(
-                wave.iter()
-                    .map(|id| crate::takedown::denial::require_clear(store, id)),
-            ),
+            futures::future::join_all(wave.iter().map(|id| {
+                #[cfg(not(feature = "perf-metrics"))]
+                {
+                    crate::takedown::denial::require_clear(store, id)
+                }
+                #[cfg(feature = "perf-metrics")]
+                {
+                    let clock = observations.as_ref().map(|(clock, _)| *clock);
+                    async move {
+                        #[cfg(feature = "perf-metrics")]
+                        let started = clock.map(crate::Clock::now_ms);
+                        let reply = crate::takedown::denial::require_clear(store, id).await;
+                        #[cfg(feature = "perf-metrics")]
+                        let elapsed = clock.zip(started).map(|(clock, started)| {
+                            crate::telemetry::performance::elapsed(clock, started)
+                        });
+                        (reply, elapsed)
+                    }
+                }
+            })),
         )
         .await;
+        #[cfg(feature = "perf-metrics")]
+        if let Some((_, counts)) = observations.as_mut() {
+            for (_, ms) in &replies {
+                if let Some(ms) = ms {
+                    counts.record(*ms);
+                }
+            }
+        }
         for reply in replies {
+            #[cfg(feature = "perf-metrics")]
+            reply.0?;
+            #[cfg(not(feature = "perf-metrics"))]
             reply?;
         }
     }
@@ -129,6 +183,40 @@ mod tests {
         async fn probe(&self) -> Result<(), StoreError> {
             Ok(())
         }
+    }
+
+    #[cfg(feature = "perf-metrics")]
+    #[tokio::test(start_paused = true)]
+    async fn observed_denials_count_every_completed_reply_before_first_error() {
+        #[derive(Default)]
+        struct Counts(std::sync::Mutex<Vec<u64>>);
+        impl crate::Metrics for Counts {
+            fn incr(&self, name: &'static str, labels: &[(&'static str, &str)], by: u64) {
+                assert_eq!(name, "mkit_server_verification_denial_calls_total");
+                assert_eq!(labels, &[("stage", "decode")]);
+                self.0.lock().unwrap().push(by);
+            }
+            fn observe_ms(&self, _: &'static str, _: &[(&'static str, &str)], _: f64) {}
+        }
+        let store = Delayed {
+            blocked: Some([0; 32]),
+            unavailable: Some([1; 32]),
+            ..Delayed::default()
+        };
+        let budget = SliceBudget::new(40);
+        let remote = Budgeted::new(&store, &budget);
+        let clock = crate::ManualClock::new(0);
+        let mut histogram = crate::telemetry::performance::Denials::default();
+        let error =
+            require_clear_many_observed(&remote, (0..33).map(|n| [n; 32]), &clock, &mut histogram)
+                .await
+                .unwrap_err();
+        assert_eq!(error.code(), crate::Code::PermissionDenied);
+        assert_eq!(store.calls.load(Ordering::SeqCst), 16);
+        assert_eq!(store.active.load(Ordering::SeqCst), 0);
+        let metrics = Counts::default();
+        histogram.emit(&metrics, "decode");
+        assert_eq!(*metrics.0.lock().unwrap(), vec![16]);
     }
 
     #[tokio::test(start_paused = true)]

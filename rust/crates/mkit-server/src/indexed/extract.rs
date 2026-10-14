@@ -25,6 +25,10 @@
 //! store), and dedup or storage outcomes map to `pending` or to the generic
 //! storage error, so no outcome reveals what the deployment already holds.
 
+#[cfg(not(feature = "perf-metrics"))]
+use super::resolve::member_object as measured_member_object;
+#[cfg(feature = "perf-metrics")]
+use super::resolve::member_object_observed as measured_member_object;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -430,6 +434,8 @@ pub(super) struct Extractor<'a, B, S> {
     /// Member bytes resolved so far in this advance, bases included.
     pub resolved: AtomicU64,
     pub denial_pack: std::sync::Mutex<Option<(Hash, u64)>>,
+    #[cfg(feature = "perf-metrics")]
+    pub performance_denials: std::sync::Mutex<crate::telemetry::performance::Denials>,
 }
 
 impl<B: MultipartBlobStore, S: NamespaceStore> Extractor<'_, B, S> {
@@ -739,7 +745,19 @@ impl<B: MultipartBlobStore, S: NamespaceStore> Extractor<'_, B, S> {
         id: &Hash,
         located: &BTreeMap<Hash, crate::store::index::ObjectLookup>,
     ) -> Result<Cow<'_, [u8]>, ExtractError> {
+        #[cfg(feature = "perf-metrics")]
+        let mut observations =
+            crate::telemetry::performance::DenialAccumulator::new(&self.performance_denials);
+        #[cfg(not(feature = "perf-metrics"))]
         crate::takedown::denial::require_clear(self.store, id).await?;
+        #[cfg(feature = "perf-metrics")]
+        crate::takedown::denial::require_clear_observed(
+            self.store,
+            id,
+            self.clock,
+            &mut observations.counts,
+        )
+        .await?;
         if let Some((canonical, object, _)) = self.staged.get(id) {
             // Borrowed: a staged chunk is never copied a second time. (Only a
             // Blob is byte-hashed; a merkelized type is malformed here anyway.)
@@ -758,7 +776,7 @@ impl<B: MultipartBlobStore, S: NamespaceStore> Extractor<'_, B, S> {
         // A fresh cache per chunk: the chunk is dropped once written. The
         // cost is charged to the advance-wide counter.
         let mut cache = resolve::MemberCache::default();
-        let resolved = resolve::member_object(
+        let resolved = measured_member_object(
             self.blobs,
             self.store,
             self.shards,
@@ -770,6 +788,10 @@ impl<B: MultipartBlobStore, S: NamespaceStore> Extractor<'_, B, S> {
             &mut cache,
             &mut BTreeSet::new(),
             self.metrics,
+            #[cfg(feature = "perf-metrics")]
+            self.clock,
+            #[cfg(feature = "perf-metrics")]
+            &mut observations.counts,
         )
         .await;
         let pack = *self.denial_pack.lock().map_err(|_| inconsistent())?;
@@ -804,6 +826,15 @@ impl<B: MultipartBlobStore, S: NamespaceStore> Extractor<'_, B, S> {
             Ok(Object::Blob(blob)) if hash(&canonical) == *id => Ok(Cow::Owned(blob.data)),
             Ok(Object::Blob(_)) | Err(_) => Err(inconsistent().into()),
             Ok(_) => Err(malformed_manifest()),
+        }
+    }
+}
+
+#[cfg(feature = "perf-metrics")]
+impl<B, S> Drop for Extractor<'_, B, S> {
+    fn drop(&mut self) {
+        if let Ok(mut counts) = self.performance_denials.lock() {
+            counts.emit(self.metrics, "inline_verifier");
         }
     }
 }

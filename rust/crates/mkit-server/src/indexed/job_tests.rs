@@ -3393,3 +3393,5 @@ fn a_batch_that_outgrows_one_slice_shrinks_instead_of_ending_terminal() {
 }
 
 mod tiny;
+
+mod performance;

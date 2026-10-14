@@ -758,8 +758,9 @@ timestamps, stable ids, redacted errors, backlog and recovered results.
 
 ### Diagnosing slow and cold reads
 
-The adapter adds no custom per-call telemetry. Cloudflare's platform tracing
-already records every Durable Object call, so use it instead of bespoke timers.
+Cloudflare's platform tracing records Durable Object calls without a custom
+build. For bounded caller/object timing, cold flags, SQL counts, and verification
+histograms, enable the optional [performance measurements](performance-metrics.md).
 
 **Enable tracing.** Set `observability.traces.enabled = true` in the Wrangler
 config (optionally with `head_sampling_rate`); no code changes are needed

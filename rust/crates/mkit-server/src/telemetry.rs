@@ -12,6 +12,10 @@
 //! messages. [`Redactor`] extends [`NEVER_LOG`] with deployment-configured
 //! names, such as the headers an admission helper attaches.
 
+/// Optional scalar alarm and verification-slice context for adapters.
+#[cfg(feature = "perf-metrics")]
+pub mod slice_context;
+
 use crate::rt::{MaybeSend, MaybeSync};
 
 /// Counter: requests handled. Labels: `procedure`, `code`.
@@ -187,6 +191,280 @@ pub(crate) fn verification_progress(
         ticket = ticket.map(mkit_core::hash::to_hex).as_deref(),
         pack = pack.map(mkit_core::hash::to_hex).as_deref(),
     );
+}
+
+/// Bounded performance observations, enabled explicitly at build time.
+#[cfg(feature = "perf-metrics")]
+pub(crate) mod performance {
+    use super::Metrics;
+
+    const BOUNDS: [u64; 8] = [0, 1, 10, 50, 100, 250, 500, 1_000];
+
+    /// Disjoint duration buckets. Space is constant regardless of object count.
+    #[derive(Default)]
+    pub(crate) struct Denials {
+        buckets: [u64; 9],
+    }
+
+    impl Denials {
+        pub(crate) fn record(&mut self, ms: u64) {
+            let bucket = BOUNDS.iter().position(|bound| ms <= *bound).unwrap_or(8);
+            self.buckets[bucket] = self.buckets[bucket].saturating_add(1);
+        }
+
+        pub(crate) fn emit(&mut self, metrics: &dyn Metrics, stage: &'static str) {
+            let calls = self.buckets.iter().copied().sum();
+            if calls == 0 {
+                return;
+            }
+            metrics.incr(
+                "mkit_server_verification_denial_calls_total",
+                &[("stage", stage)],
+                calls,
+            );
+            tracing::info!(
+                event = "verification_denial_histogram",
+                stage,
+                calls,
+                ms_0 = self.buckets[0],
+                ms_1 = self.buckets[1],
+                ms_10 = self.buckets[2],
+                ms_50 = self.buckets[3],
+                ms_100 = self.buckets[4],
+                ms_250 = self.buckets[5],
+                ms_500 = self.buckets[6],
+                ms_1000 = self.buckets[7],
+                ms_inf = self.buckets[8]
+            );
+            self.buckets = [0; 9];
+        }
+    }
+
+    pub(crate) struct DenialAccumulator<'a> {
+        pub(crate) counts: Denials,
+        target: &'a std::sync::Mutex<Denials>,
+    }
+    impl<'a> DenialAccumulator<'a> {
+        pub(crate) fn new(target: &'a std::sync::Mutex<Denials>) -> Self {
+            Self {
+                counts: Denials::default(),
+                target,
+            }
+        }
+    }
+    impl Drop for DenialAccumulator<'_> {
+        fn drop(&mut self) {
+            if let Ok(mut total) = self.target.lock() {
+                for (target, count) in total.buckets.iter_mut().zip(self.counts.buckets) {
+                    *target = target.saturating_add(count);
+                }
+            }
+        }
+    }
+
+    /// Clock elapsed time includes waits; it is never a CPU measurement.
+    pub(crate) fn elapsed(clock: &dyn crate::Clock, started: i64) -> u64 {
+        u64::try_from(clock.now_ms().saturating_sub(started)).unwrap_or(0)
+    }
+
+    pub(crate) fn duration(
+        metrics: &dyn Metrics,
+        stage: &'static str,
+        component: &'static str,
+        ms: u64,
+    ) {
+        metrics.observe_ms(
+            "mkit_server_verification_stage_duration_ms",
+            &[("stage", stage), ("component", component)],
+            f64::from(u32::try_from(ms).unwrap_or(u32::MAX)),
+        );
+        if component == "total" {
+            tracing::info!(
+                event = "verification_stage_duration",
+                stage,
+                component,
+                duration_ms = ms
+            );
+        }
+    }
+
+    /// One fixed-size summary for every `EmitIndex` invocation, including errors.
+    pub(crate) struct EmitComponents<'a> {
+        clock: &'a dyn crate::Clock,
+        metrics: &'a dyn Metrics,
+        ms: [u64; 6],
+    }
+    impl<'a> EmitComponents<'a> {
+        pub(crate) fn new(clock: &'a dyn crate::Clock, metrics: &'a dyn Metrics) -> Self {
+            Self {
+                clock,
+                metrics,
+                ms: [0; 6],
+            }
+        }
+        pub(crate) fn timer(&mut self, index: usize) -> ComponentTimer<'_> {
+            ComponentTimer {
+                clock: self.clock,
+                started: self.clock.now_ms(),
+                total: &mut self.ms[index],
+            }
+        }
+    }
+    impl Drop for EmitComponents<'_> {
+        fn drop(&mut self) {
+            tracing::info!(
+                event = "verification_emit_components",
+                scan_ms = self.ms[0],
+                plan_ms = self.ms[1],
+                denial_ms = self.ms[2],
+                direct_apply_ms = self.ms[3],
+                relay_commit_ms = self.ms[4],
+                outbox_read_ms = self.ms[5]
+            );
+            for (component, ms) in [
+                "scan",
+                "plan",
+                "denial",
+                "direct_apply",
+                "relay_commit",
+                "outbox_read",
+            ]
+            .into_iter()
+            .zip(self.ms)
+            {
+                duration(self.metrics, "emit_index", component, ms);
+            }
+        }
+    }
+    pub(crate) struct ComponentTimer<'a> {
+        clock: &'a dyn crate::Clock,
+        started: i64,
+        total: &'a mut u64,
+    }
+    impl Drop for ComponentTimer<'_> {
+        fn drop(&mut self) {
+            *self.total = self.total.saturating_add(elapsed(self.clock, self.started));
+        }
+    }
+
+    pub(crate) struct Timer<'a> {
+        clock: &'a dyn crate::Clock,
+        metrics: &'a dyn Metrics,
+        stage: &'static str,
+        component: &'static str,
+        started: i64,
+    }
+    impl<'a> Timer<'a> {
+        pub(crate) fn new(
+            clock: &'a dyn crate::Clock,
+            metrics: &'a dyn Metrics,
+            stage: &'static str,
+            component: &'static str,
+        ) -> Self {
+            Self {
+                clock,
+                metrics,
+                stage,
+                component,
+                started: clock.now_ms(),
+            }
+        }
+    }
+    impl Drop for Timer<'_> {
+        fn drop(&mut self) {
+            duration(
+                self.metrics,
+                self.stage,
+                self.component,
+                elapsed(self.clock, self.started),
+            );
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::Mutex;
+
+        type CounterRow = (&'static str, Vec<(String, String)>, u64);
+        #[derive(Default)]
+        struct Capture(Mutex<Vec<CounterRow>>);
+        impl Metrics for Capture {
+            fn incr(&self, name: &'static str, labels: &[(&'static str, &str)], by: u64) {
+                self.0.lock().expect("fixture").push((
+                    name,
+                    labels
+                        .iter()
+                        .map(|(k, v)| ((*k).into(), (*v).into()))
+                        .collect(),
+                    by,
+                ));
+            }
+            fn observe_ms(&self, _: &'static str, _: &[(&'static str, &str)], _: f64) {}
+        }
+
+        #[test]
+        fn component_totals_include_failed_stage_and_repeated_calls() {
+            #[derive(Default)]
+            struct Durations(Mutex<Vec<f64>>);
+            impl Metrics for Durations {
+                fn incr(&self, _: &'static str, _: &[(&'static str, &str)], _: u64) {}
+                fn observe_ms(&self, _: &'static str, _: &[(&'static str, &str)], ms: f64) {
+                    self.0.lock().expect("fixture").push(ms);
+                }
+            }
+            fn failed_stage(clock: &crate::ManualClock, metrics: &Durations) -> Result<(), ()> {
+                let mut summary = EmitComponents::new(clock, metrics);
+                {
+                    let _timer = summary.timer(2);
+                    clock.advance(12);
+                }
+                {
+                    let _timer = summary.timer(2);
+                    clock.advance(7);
+                }
+                Err(())
+            }
+            let clock = crate::ManualClock::new(0);
+            let metrics = Durations::default();
+            assert_eq!(failed_stage(&clock, &metrics), Err(()));
+            assert_eq!(
+                *metrics.0.lock().expect("fixture"),
+                vec![0.0, 0.0, 19.0, 0.0, 0.0, 0.0]
+            );
+        }
+
+        #[test]
+        fn duration_buckets_are_disjoint_and_include_overflow() {
+            let mut histogram = Denials::default();
+            for ms in [0, 1, 10, 50, 100, 250, 500, 1_000, u64::MAX] {
+                histogram.record(ms);
+            }
+            assert_eq!(histogram.buckets, [1; 9]);
+        }
+
+        #[test]
+        fn denial_histograms_have_constant_volume_and_identifier_free_fields() {
+            let metrics = Capture::default();
+            let mut counts = Denials::default();
+            for _ in 0..10_000 {
+                counts.record(55);
+            }
+            counts.emit(&metrics, "decode");
+            counts.emit(&metrics, "decode");
+            let rows = metrics.0.lock().expect("fixture");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].2, 10_000);
+            for (_, labels, _) in rows.iter() {
+                assert!(
+                    labels
+                        .iter()
+                        .all(|(key, value)| matches!(key.as_str(), "stage")
+                            && matches!(value.as_str(), "decode"))
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]

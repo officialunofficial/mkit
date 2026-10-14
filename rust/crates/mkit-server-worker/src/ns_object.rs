@@ -265,7 +265,10 @@ impl<C: SqlConn> NamespaceStore for PressureStore<C> {
     }
 }
 
-fn decode_request(body: &str, class: ShardClass) -> Result<(Partition, NsCall), NsReply> {
+pub(crate) fn decode_request(
+    body: &str,
+    class: ShardClass,
+) -> Result<(Partition, NsCall), NsReply> {
     let invalid = |message: &str| NsReply::Err {
         kind: NsErrKind::Invalid,
         message: message.into(),
@@ -304,7 +307,7 @@ pub(crate) fn failure(e: &StoreError) -> NsReply {
 }
 
 #[allow(clippy::too_many_lines)] // One JSON call dispatcher; each arm is independently bounded.
-async fn dispatch<S: NamespaceStore>(
+pub(crate) async fn dispatch<S: NamespaceStore>(
     store: &S,
     p: &Partition,
     call: NsCall,
@@ -548,6 +551,8 @@ pub use object::{DoConn, NsObject};
 mod object {
     use std::cell::{Cell, OnceCell};
     use std::sync::Arc;
+    #[cfg(feature = "perf-metrics")]
+    use std::sync::atomic::AtomicBool;
 
     use crate::sql::{Capacity, SqlKvStore, TimerCursor};
     use mkit_server::Clock;
@@ -579,6 +584,15 @@ mod object {
     pub struct NsObject {
         class: ShardClass,
         conn: DoConn,
+        #[cfg(feature = "perf-metrics")]
+        perf_conn: DoSqlConn,
+        #[cfg(feature = "perf-metrics")]
+        served: Cell<bool>,
+        #[cfg(feature = "perf-metrics")]
+        first_slice: Arc<AtomicBool>,
+        /// Last successful alarm schedule observed by this activation only.
+        #[cfg(feature = "perf-metrics")]
+        alarm_scheduled_ms: Cell<Option<u64>>,
         capacity: Capacity,
         store: OnceCell<PressureStore<DoConn>>,
         storage: Storage,
@@ -614,11 +628,21 @@ mod object {
         #[must_use]
         pub fn new(state: State, class: ShardClass) -> (Self, State) {
             let (conn, state) = DoSqlConn::from_state(state);
+            #[cfg(feature = "perf-metrics")]
+            let perf_conn = conn.clone();
             #[cfg(feature = "__test-faults")]
             let conn = crate::faults::FaultConn::new(conn);
             let object = Self {
                 class,
                 conn,
+                #[cfg(feature = "perf-metrics")]
+                perf_conn,
+                #[cfg(feature = "perf-metrics")]
+                served: Cell::new(false),
+                #[cfg(feature = "perf-metrics")]
+                first_slice: Arc::new(AtomicBool::new(true)),
+                #[cfg(feature = "perf-metrics")]
+                alarm_scheduled_ms: Cell::new(None),
                 capacity: DO_CAPACITY,
                 store: OnceCell::new(),
                 storage: state.storage(),
@@ -689,16 +713,33 @@ mod object {
 
         /// Answer one `POST` from [`crate::ns_client`].
         pub async fn handle(&self, mut req: Request) -> worker::Result<Response> {
+            #[cfg(feature = "perf-metrics")]
+            let (started, cold, measured) = (
+                worker::js_sys::Date::now(),
+                !self.served.replace(true),
+                req.headers()
+                    .get(crate::telemetry::perf_rpc::HEADER)
+                    .ok()
+                    .flatten()
+                    .as_deref()
+                    == Some("1"),
+            );
             if req.method() != Method::Post {
                 return Response::error("method not allowed", 405);
             }
             let body = req.text().await?;
+            #[cfg(feature = "perf-metrics")]
+            let decode_started = worker::js_sys::Date::now();
             let decoded = decode_request(&body, self.class);
+            #[cfg(feature = "perf-metrics")]
+            let decode_ms = (worker::js_sys::Date::now() - decode_started).max(0.0);
             // Activation opens SQLite below, but must not scan application timers.
             // The first ordinary request retains cold-start alarm repair.
             if !matches!(&decoded, Ok((_, NsCall::Ping))) {
                 self.ensure_alarm().await;
             }
+            #[cfg(feature = "perf-metrics")]
+            let mut sql = crate::telemetry::perf_sql::SqlTimings::default();
             let reply = match decoded.and_then(|request| {
                 self.store()
                     .map(|store| (store, request))
@@ -712,9 +753,17 @@ mod object {
                     if req.path() == "/stats" {
                         store.clear_stats_cache();
                     }
+                    // The SQL store's dispatch completes on its first poll. Collect
+                    // only this synchronous section, never alarm I/O or another request.
+                    #[cfg(feature = "perf-metrics")]
+                    self.perf_conn.begin_perf(measured);
                     let (reply, earliest) = dispatch(store, &partition, call)
                         .await
                         .unwrap_or_else(|error| (failure(&error), None));
+                    #[cfg(feature = "perf-metrics")]
+                    {
+                        sql = self.perf_conn.take_perf();
+                    }
                     let seeded = store.take_seeded_due();
                     let earliest = match (earliest, seeded) {
                         (Some(a), Some(b)) => Some(a.min(b)),
@@ -731,14 +780,38 @@ mod object {
                         crate::log_failure(&format!("timer alarm update failed: {error}"));
                         return Err(error);
                     }
-                    encode(&reply)
+                    reply
                 }
-                Err(reply) => encode(&reply),
+                Err(reply) => reply,
             };
-            let mut response = Response::ok(reply)?;
+            #[cfg(feature = "perf-metrics")]
+            let encode_started = worker::js_sys::Date::now();
+            let body = encode(&reply);
+            #[cfg(feature = "perf-metrics")]
+            let encode_ms = (worker::js_sys::Date::now() - encode_started).max(0.0);
+            #[cfg(feature = "perf-metrics")]
+            let rows = crate::telemetry::perf_rpc::reply_rows(&reply);
+            // Release decoded rows before constructing the response body, as
+            // in the uninstrumented branch-local encoding path.
+            drop(reply);
+            let mut response = Response::ok(body)?;
             response
                 .headers_mut()
                 .set("Content-Type", "application/json")?;
+            #[cfg(feature = "perf-metrics")]
+            if measured {
+                let inside_ms = (worker::js_sys::Date::now() - started).max(0.0);
+                let metadata = format!(
+                    "{inside_ms},{},{decode_ms},{encode_ms},{},{},{},{rows},1",
+                    u8::from(cold),
+                    sql.sql_query_ms,
+                    sql.query_statements,
+                    sql.query_rows,
+                );
+                let _ = response
+                    .headers_mut()
+                    .set(crate::telemetry::perf_rpc::HEADER, &metadata);
+            }
             Ok(response)
         }
 
@@ -754,7 +827,14 @@ mod object {
             let date = worker::js_sys::Date::new(&worker::wasm_bindgen::JsValue::from_f64(
                 timestamp as f64,
             ));
-            self.storage.set_alarm(ScheduledTime::new(date)).await
+            let result = self.storage.set_alarm(ScheduledTime::new(date)).await;
+            #[cfg(feature = "perf-metrics")]
+            self.alarm_scheduled_ms.set(if result.is_ok() {
+                u64::try_from(timestamp).ok()
+            } else {
+                None
+            });
+            result
         }
 
         /// Self-healing arm: once per cold start (and again after any failed
@@ -792,7 +872,52 @@ mod object {
         }
 
         /// Fire due timers and multiplex all partition heads onto one alarm.
-        pub async fn alarm(&self) -> worker::Result<Response> {
+        pub fn alarm(&self) -> impl std::future::Future<Output = worker::Result<Response>> {
+            #[cfg(feature = "perf-metrics")]
+            {
+                self.alarm_observed(crate::telemetry::perf_alarm::RuntimeAlarmInfo::default())
+            }
+            #[cfg(not(feature = "perf-metrics"))]
+            {
+                self.alarm_inner()
+            }
+        }
+
+        /// Alarm entry retaining optional runtime retry metadata. Argument-free
+        /// embedders may keep calling `alarm`; absent metadata stays unknown.
+        #[cfg(feature = "perf-metrics")]
+        pub async fn alarm_with_info(
+            &self,
+            info: worker::wasm_bindgen::JsValue,
+        ) -> worker::Result<Response> {
+            let runtime = crate::telemetry::perf_alarm::RuntimeAlarmInfo::from_js(&info);
+            drop(info);
+            self.alarm_observed(runtime).await
+        }
+
+        #[cfg(feature = "perf-metrics")]
+        async fn alarm_observed(
+            &self,
+            runtime: crate::telemetry::perf_alarm::RuntimeAlarmInfo,
+        ) -> worker::Result<Response> {
+            use mkit_server::telemetry::slice_context::{AlarmContext, AlarmMetadata};
+            let fired_ms = self.now_ms();
+            // The upstream bridge may omit retry metadata. A remembered arm
+            // alone cannot establish a runtime retry's physical schedule.
+            let remembered = self.alarm_scheduled_ms.take();
+            let metadata = AlarmMetadata {
+                alarm_last_armed_ms: remembered,
+                alarm_scheduled_ms: runtime.confirmed_schedule(remembered),
+                alarm_fired_ms: Some(fired_ms),
+                runtime_retry_count: runtime.retry_count,
+                runtime_is_retry: runtime.is_retry,
+            };
+            AlarmContext::new(metadata, self.first_slice.clone())
+                .scope(self.alarm_inner())
+                .await
+        }
+
+        async fn alarm_inner(&self) -> worker::Result<Response> {
             crate::alarm::observe_alarm(self.now_ms());
             self.alarm_dirty.set(false);
             self.alarm_armed.set(false);
@@ -827,7 +952,14 @@ mod object {
             );
             let result = match action {
                 AlarmAction::Set(next) => self.set_alarm(next).await,
-                AlarmAction::Delete => self.storage.delete_alarm().await,
+                AlarmAction::Delete => {
+                    let result = self.storage.delete_alarm().await;
+                    #[cfg(feature = "perf-metrics")]
+                    if result.is_ok() {
+                        self.alarm_scheduled_ms.set(None);
+                    }
+                    result
+                }
             };
             if let Err(error) = result {
                 crate::log_failure(&format!("timer alarm update failed: {error}"));

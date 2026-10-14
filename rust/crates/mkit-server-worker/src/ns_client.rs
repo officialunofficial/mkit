@@ -38,6 +38,20 @@ pub trait NsTransport: MaybeSend + MaybeSync {
         op: &'static str,
         body: String,
     ) -> impl Future<Output = Result<String, StoreError>> + MaybeSend;
+
+    /// Performance-only scalar context; the default retains the existing transport.
+    #[cfg(feature = "perf-metrics")]
+    fn call_profiled(
+        &self,
+        target: &DoTarget,
+        op: &'static str,
+        body: String,
+        prefix: &'static str,
+        count: usize,
+    ) -> impl Future<Output = Result<String, StoreError>> + MaybeSend {
+        let _ = (prefix, count);
+        self.call(target, op, body)
+    }
 }
 
 /// Charge before dispatch; clients and spawned work retain the same counter.
@@ -166,13 +180,27 @@ impl<T: NsTransport> DoNamespaceStore<T> {
     async fn call(&self, p: &Partition, call: NsCall) -> Result<NsReply, StoreError> {
         let target = do_target(p)?;
         let op = op(&call);
+        #[cfg(feature = "perf-metrics")]
+        let count = crate::telemetry::perf_rpc::count(&call);
         let body = serde_json::to_string(&NsRequest::new(p, call)?)
             .map_err(|e| backend_error(StorageOp::RequestSerialize, e))?;
         if !matches!(op, "get" | "get_many" | "scan" | "scan_many") || !self.read_credits.paid() {
             charge_request(self.request_budget.as_ref())?;
             charge_alarm(self.alarm_budget.as_ref())?;
         }
+        #[cfg(not(feature = "perf-metrics"))]
         let reply = self.transport.call(&target, op, body).await?;
+        #[cfg(feature = "perf-metrics")]
+        let reply = self
+            .transport
+            .call_profiled(
+                &target,
+                op,
+                body,
+                crate::telemetry::perf_rpc::prefix(p),
+                count,
+            )
+            .await?;
         match serde_json::from_str::<NsReply>(&reply) {
             Ok(NsReply::Err { kind, message }) => Err(kind.into_error(message)),
             Ok(reply) => Ok(reply),
@@ -188,7 +216,19 @@ impl<T: NsTransport> DoNamespaceStore<T> {
         let target = do_target(p)?;
         let body = serde_json::to_string(&NsRequest::new(p, NsCall::Ping)?)
             .map_err(|e| backend_error(StorageOp::RequestSerialize, e))?;
+        #[cfg(not(feature = "perf-metrics"))]
         let reply = self.transport.call(&target, "ping", body).await?;
+        #[cfg(feature = "perf-metrics")]
+        let reply = self
+            .transport
+            .call_profiled(
+                &target,
+                "ping",
+                body,
+                crate::telemetry::perf_rpc::prefix(p),
+                0,
+            )
+            .await?;
         match serde_json::from_str::<NsReply>(&reply) {
             Ok(NsReply::Ok) => Ok(()),
             _ => Err(StoreError::unavailable("index warm-up failed")),
@@ -390,6 +430,8 @@ mod stub {
     pub struct StubTransport {
         env: Env,
         placement: Placement,
+        #[cfg(feature = "perf-metrics")]
+        summary: std::sync::Arc<crate::telemetry::perf_rpc::Summary>,
     }
 
     /// The Workers key-level store.
@@ -400,7 +442,12 @@ mod stub {
         /// none).
         #[must_use]
         pub fn new(env: Env, placement: Placement) -> Self {
-            Self { env, placement }
+            Self {
+                env,
+                placement,
+                #[cfg(feature = "perf-metrics")]
+                summary: std::sync::Arc::default(),
+            }
         }
 
         /// `ns.jurisdiction(name)`, which workers-rs does not wrap.
@@ -424,12 +471,52 @@ mod stub {
     }
 
     impl NsTransport for StubTransport {
-        async fn call(
+        fn call(
             &self,
             target: &DoTarget,
             op: &'static str,
             body: String,
+        ) -> impl core::future::Future<Output = Result<String, StoreError>> + mkit_server::MaybeSend
+        {
+            self.call_inner(
+                target,
+                op,
+                body,
+                #[cfg(feature = "perf-metrics")]
+                crate::telemetry::perf_rpc::Call::new("other", op, 0),
+            )
+        }
+
+        #[cfg(feature = "perf-metrics")]
+        fn call_profiled(
+            &self,
+            target: &DoTarget,
+            op: &'static str,
+            body: String,
+            prefix: &'static str,
+            count: usize,
+        ) -> impl core::future::Future<Output = Result<String, StoreError>> + mkit_server::MaybeSend
+        {
+            self.call_inner(
+                target,
+                op,
+                body,
+                crate::telemetry::perf_rpc::Call::new(prefix, op, count),
+            )
+        }
+    }
+
+    impl StubTransport {
+        async fn call_inner(
+            &self,
+            target: &DoTarget,
+            op: &'static str,
+            body: String,
+            #[cfg(feature = "perf-metrics")] record: crate::telemetry::perf_rpc::Call,
         ) -> Result<String, StoreError> {
+            #[cfg(feature = "perf-metrics")]
+            let mut observation =
+                crate::telemetry::perf_rpc::Observation::new(&self.summary, record);
             let mut ns = self
                 .env
                 .durable_object(target.binding)
@@ -455,6 +542,13 @@ mod stub {
             let mut abort = AbortFetch(Some(controller));
             let inner: web_sys::RequestInit = (&init).into();
             inner.set_signal(Some(&signal));
+            #[cfg(feature = "perf-metrics")]
+            {
+                let headers = worker::Headers::new();
+                // Metadata must never turn an otherwise valid request into a failure.
+                let _ = headers.set(crate::telemetry::perf_rpc::HEADER, "1");
+                inner.set_headers(headers.as_ref());
+            }
             let request =
                 web_sys::Request::new_with_str_and_init(&format!("https://ns/{op}"), &inner)
                     .map_err(|e| backend_error(StorageOp::MetaRequest, format!("{e:?}")))?;
@@ -462,6 +556,10 @@ mod stub {
                 .fetch_with_request(Request::from(request))
                 .await
                 .map_err(|e| backend_error(StorageOp::MetaCall, e))?;
+            #[cfg(feature = "perf-metrics")]
+            if let Ok(Some(header)) = response.headers().get(crate::telemetry::perf_rpc::HEADER) {
+                observation.record.reply_metadata(&header);
+            }
             let status = response.status_code();
             // Error replies also own a connection until their body ends.
             let body = response.text().await.map_err(|e| {
@@ -480,6 +578,10 @@ mod stub {
                     StorageOp::MetaCall,
                     format_args!("durable object answered {status}"),
                 ));
+            }
+            #[cfg(feature = "perf-metrics")]
+            {
+                observation.record.complete = true;
             }
             Ok(body)
         }

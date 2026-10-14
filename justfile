@@ -163,6 +163,7 @@ ci-scripts:
     python3 scripts/check-launch-feature-graph.py
     python3 scripts/test-server-gates.py
     python3 scripts/test-workers-wire-diagnostics.py
+    python3 scripts/test-enable-worker-alarm-info.py
     bash scripts/check-cli-baseline.sh
     bash scripts/check-sync-native-deps.sh
     if ! rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unknown$'; then
@@ -209,6 +210,8 @@ ci-server:
         && cargo check --locked -p mkit-server --no-default-features --features test-support --target wasm32-unknown-unknown \
         && cargo build --locked -p mkit-server-worker --target wasm32-unknown-unknown )
     ( cd rust && cargo clippy --locked -p mkit-server -p mkit-server-worker \
+        --target wasm32-unknown-unknown -- -D warnings )
+    ( cd rust && cargo clippy --locked -p mkit-server-worker --features perf-metrics \
         --target wasm32-unknown-unknown -- -D warnings )
     bash scripts/check-cli-baseline.sh
 

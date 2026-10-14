@@ -14,7 +14,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 mod waves;
+#[cfg(any(not(feature = "perf-metrics"), test))]
 pub(crate) use waves::require_clear_many;
+#[cfg(feature = "perf-metrics")]
+pub(crate) use waves::require_clear_many_observed;
 
 /// Independent action. Chunk IDs are the verified canonical manifest's set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2015,3 +2018,16 @@ mod tests {
 
 #[cfg(all(test, feature = "http-objects"))]
 mod read_tests;
+
+#[cfg(feature = "perf-metrics")]
+pub(crate) async fn require_clear_observed<S: NamespaceStore>(
+    store: &S,
+    id: &Hash,
+    clock: &dyn crate::Clock,
+    counts: &mut crate::telemetry::performance::Denials,
+) -> Result<(), ServerError> {
+    let started = clock.now_ms();
+    let result = require_clear(store, id).await;
+    counts.record(crate::telemetry::performance::elapsed(clock, started));
+    result
+}

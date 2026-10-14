@@ -87,13 +87,12 @@ async fn retry_after<N: NamespaceStore>(
             {
                 let now = u64::try_from(clock.now_ms()).unwrap_or(0);
                 let delay = due_at_ms.saturating_sub(now);
-                return Ok(
-                    if job.tiny() && job.phase == super::checkpoint::Phase::AwaitDelivery {
-                        delay.clamp(100, MAX_PENDING_HINT_SECS * 1_000)
-                    } else {
-                        delay.div_ceil(1_000).clamp(1, MAX_PENDING_HINT_SECS) * 1_000
-                    },
-                );
+                let hint = if job.tiny() && job.phase == super::checkpoint::Phase::AwaitDelivery {
+                    delay.clamp(100, MAX_PENDING_HINT_SECS * 1_000)
+                } else {
+                    delay.div_ceil(1_000).clamp(1, MAX_PENDING_HINT_SECS) * 1_000
+                };
+                return Ok(hint);
             }
         }
         match page.next {
@@ -740,6 +739,8 @@ async fn check_optional<B: BlobStore, N: NamespaceStore>(
     } else {
         ADVANCE_CALLS
     });
+    #[cfg(feature = "perf-metrics")]
+    let mut await_hint = None;
     let result = check_inner(
         &super::budget::Budgeted::new(blobs, &budget),
         &super::budget::Budgeted::new(store, &budget),
@@ -753,10 +754,31 @@ async fn check_optional<B: BlobStore, N: NamespaceStore>(
         clock,
         metrics,
         inspection_limit,
+        #[cfg(feature = "perf-metrics")]
+        &mut await_hint,
     )
     .await;
     if result.is_err() && budget.remaining() == 0 {
         return Err(ServerError::invalid_argument("object index limit exceeded"));
+    }
+    #[cfg(feature = "perf-metrics")]
+    if let Some(hint) = await_hint {
+        metrics.observe_ms(
+            "mkit_server_verification_await_hint_ms",
+            &[],
+            f64::from(u32::try_from(hint).unwrap_or(u32::MAX)),
+        );
+        tracing::info!(
+            event = "verification_await_hint_histogram",
+            hint_ms = hint,
+            ms_100 = u64::from(hint <= 100),
+            ms_250 = u64::from(hint > 100 && hint <= 250),
+            ms_500 = u64::from(hint > 250 && hint <= 500),
+            ms_1000 = u64::from(hint > 500 && hint <= 1_000),
+            ms_2000 = u64::from(hint > 1_000 && hint <= 2_000),
+            ms_3000 = u64::from(hint > 2_000 && hint <= 3_000),
+            ms_inf = u64::from(hint > 3_000)
+        );
     }
     result
 }
@@ -775,6 +797,7 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
     clock: &dyn Clock,
     metrics: &dyn Metrics,
     inspection_limit: Option<usize>,
+    #[cfg(feature = "perf-metrics")] await_hint: &mut Option<u64>,
 ) -> Result<StagedCommits, ServerError> {
     // A same-build restart may lower the advertised cap. Refuse before any
     // job read, claim, extraction group or usable-result reuse.
@@ -810,6 +833,8 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
     let mut inspection_packs = Vec::new();
     let mut ready_packs = BTreeSet::new();
     let mut pending: Option<u64> = None;
+    #[cfg(feature = "perf-metrics")]
+    let mut pending_await = false;
     for (i, (ticket, id)) in tickets.iter().zip(ticket_ids).enumerate() {
         let job = rows[2 * i]
             .as_ref()
@@ -848,6 +873,10 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
             return Err(outcome_error(outcome, now, ticket, bound));
         }
         if !(job.usable() && verified) {
+            #[cfg(feature = "perf-metrics")]
+            {
+                pending_await |= job.phase == super::checkpoint::Phase::AwaitDelivery;
+            }
             pending = Some(
                 pending
                     .unwrap_or(0)
@@ -880,6 +909,10 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
         }
     }
     if let Some(ms) = pending {
+        #[cfg(feature = "perf-metrics")]
+        if pending_await {
+            *await_hint = Some(ms);
+        }
         return Err(super::pending(ms));
     }
     let inspection_count = ready
