@@ -2,11 +2,23 @@
 
 Enable the `perf-metrics` Cargo feature on `mkit-server-worker` to collect
 bounded storage and verification measurements. It forwards the same feature
-to the generic `mkit-server` core. The reference Worker forwards this feature:
+to the generic `mkit-server` core. From the reference Worker's directory,
+build and enable runtime alarm metadata forwarding:
 
 ```sh
+rm -f build/worker/alarm-base.mjs
 worker-build --features launch,perf-metrics
+python3 ../../scripts/enable-worker-alarm-info.py build/worker/shim.mjs
 ```
+
+The explicit post-build step preserves the SDK's default and named exports.
+It replaces only the five classes' `alarm(info)` methods, forwarding to the
+feature's additive `alarmWithInfo` export. Class identity, constructor, fetch,
+WebSocket, connect, and other methods and static exports remain with the SDK. Repeat the step after every
+fresh build. The wire harness does this only for its feature-enabled matrix.
+Default builds retain the original shim. Other embedders can use the same
+helper on their generated shim or explicitly forward metadata to
+`NsObject::alarm_with_info`.
 
 Default builds omit the collectors, timers, header metadata, and new events.
 The feature changes no storage query, page boundary, budget, retry hint,
@@ -140,6 +152,64 @@ The Await histogram records one selected response hint when a pending
 AwaitDelivery job participates. It includes the maximum selected across all
 consumed tickets; candidates suppressed by a terminal error produce no row.
 
+## Extract slice gaps
+
+With the feature enabled, the existing `verification_slice_result` event also
+carries the following fields. This adds fields to one existing row per slice;
+it adds no per-call or per-slice rows. The original event identifiers and field
+values remain unchanged. The row is emitted after the handler finishes its
+flush, before the timer driver's guarded commit. An interrupted flush can leave
+an existing start row without a result row; use retry metadata and adjacent
+platform errors for that case.
+
+| Field | Meaning |
+|---|---|
+| `alarm_last_armed_ms` | Last successfully set timestamp remembered by this live instance; a hint that does not establish the current callback's schedule |
+| `alarm_scheduled_ms` | Remembered physical timestamp confirmed by runtime metadata for an initial callback; absent after reconstruction, on retries, or without forwarding |
+| `alarm_fired_ms` | Wall-clock timestamp at alarm callback entry |
+| `alarm_delay_ms` | Nonnegative difference between known physical schedule and callback entry |
+| `timer_scheduled_ms` | Scheduled timestamp in the current logical timer key, including a retry backoff |
+| `logical_due_ms` | Original logical due time retained across timer retries |
+| `timer_retry_attempt` | Logical timer retry count; includes failed or raced guarded attempts and saturates at eight |
+| `runtime_retry_count` | Runtime-provided alarm retry count; absent if the caller supplies no metadata |
+| `runtime_is_retry` | Runtime-provided alarm retry flag; this indicates a previous alarm callback failed, which does not establish that this slice failed |
+| `slice_started_ms` | Timestamp at this slice's handler entry |
+| `timer_delay_ms` | Nonnegative difference between the current logical timer schedule and slice entry; includes alarm scheduling and earlier work within the callback |
+| `cold_first_slice` | First verification slice served by this object instance after construction; HTTP requests and unrelated timers do not consume it |
+| `previous_alarm_failed` | `true` when the runtime identifies a retry of a failed alarm callback; absent when that failure is not established |
+| `prior_unfinished_job_attempts` | Existing durable job attempt count on entry, before this slice prepares an attempt; applies to guarded lookup phases, rather than an Extract retry counter |
+| `previous_slice_failed` | `unknown`: neither a raced logical timer nor a failed alarm callback establishes that the preceding slice itself failed |
+| `previous_disconnect` | `unknown`: the runtime supplies no preceding failure cause, and generic storage errors or retry counts do not establish a disconnect |
+| `slowest_rpc_prefix` | Partition kind of the slowest storage transport call in this slice, using the same allowlist as RPC summaries |
+| `slowest_rpc_ms` | Caller transport wall time for that call, including dropped futures; includes the final flush, excludes the driver's guarded commit |
+| `slice_stop_reason` | Slice limit or boundary that ended Extract work |
+| `extract_chain_stop_reason` | Exact extraction selection-chain stop reason |
+| `extract_chunk_stop_reason` | Exact last chunk-walk stop reason, when a chunk walk ran |
+
+The normalized slice reasons include `step_cap`, `elapsed_cutoff`,
+`call_allowance`, `operation_allowance`, and `chunk_boundary`; exact chain
+reasons retain the labels listed above.
+
+Absent values mean unavailable evidence, rather than zero or false. Physical
+alarm scheduling is remembered only in memory; telemetry does not read storage
+to reconstruct it. Logical timer lag remains available after a cold start. Consecutive tiny slices
+retain the same durable timer key, so their timer lag includes earlier inline
+slices; it does not mean that another physical alarm was scheduled.
+Runtime retry metadata requires the explicit post-build forwarding step above.
+The unmodified SDK bridge and direct Rust calls to `NsObject::alarm` continue
+to work, with unknown runtime retry fields and physical scheduling delay.
+The last-armed hint alone is never treated as a retry's physical schedule.
+See [Durable Object alarms](https://developers.cloudflare.com/durable-objects/api/alarms/).
+
+For a gap, first compare physical alarm delay with logical timer delay. A large
+physical delay points to alarm scheduling. A small physical delay and large
+timer delay points to earlier work in the same callback. Group by cold flag
+and retry evidence, then inspect the slowest partition call and stop reason.
+For runtime retries, inspect adjacent platform error entries for a failure
+cause; the retry metadata alone cannot establish a disconnect. Unknown
+scheduling or failure fields cannot establish a cause. The Workers
+clock limitation still applies to synchronous work within the slice.
+
 ## Query Workers observability
 
 Enable JSON log collection in the deployment's Wrangler configuration:
@@ -177,6 +247,10 @@ Useful saved queries:
 - Filter `event = verification_extract_chain`; group by `stop_reason` and
   `stage`, then count events and average `steps`. A high `calls` or `ops` share
   indicates a different limit from `steps` or `elapsed`.
+- Filter `event = verification_slice_result` and `old_phase = Extract`; compare
+  `alarm_delay_ms` and `timer_delay_ms`, group by `cold_first_slice`,
+  `runtime_is_retry`, and `slice_stop_reason`, and inspect `slowest_rpc_prefix`
+  and `slowest_rpc_ms` for slices around a gap.
 - Filter `event = verification_await_hint_histogram`; sum the hint bucket counts and
   inspect `hint_ms` to compare client advice with observed delivery waits.
 - Select invocation logs; calculate CPU and wall-time percentiles with
@@ -188,9 +262,12 @@ Useful saved queries:
 RPC accounting uses eight bucket counters and at most four fixed-shape call
 records, flushing one row per 100 calls plus one lifetime tail. SQL accounting
 uses five numeric totals with no statement logs. Denial aggregates use nine
-counters per active stage. Emit aggregates use six duration totals.
-No collector accepts a repository name, namespace, key bytes, object ID,
-credential, SQL text, value, cursor, or error message.
+counters per active stage. Emit aggregates use six duration totals. Slice
+context retains fixed metadata and one slowest call; it restores context at
+every future poll so interleaved tasks cannot share measurements.
+No new performance field accepts a repository name, namespace, key bytes,
+object ID, credential, SQL text, value, cursor, or error message. The deferred
+slice row carries only the identifiers already present in that existing event.
 
 Run the heavy scan harness and the log-bound/privacy tests:
 
@@ -207,44 +284,25 @@ lookahead, while returning 800 rows. Set `MKIT_PERF_COST_MODE` to `baseline`,
 `/usr/bin/time` to compare process CPU without including compilation. Repeat
 runs under comparable load; no noisy latency threshold is an assertion.
 
-### Native verification cost sample
+### Compare verification overhead
 
 The verification harness runs 50 fresh jobs over an 18-entry pack. Profile
 the same test binary configuration with and without `perf-metrics`, using
 `indexed::job_tests::performance::verification_instrumentation_cost_probe`.
-Three alternating runs of each configuration produced:
+It checks final storage snapshots, counts slices and logical store calls,
+and prints total tracing rows and bytes, plus counts for new events.
+Compare total bytes: added fields on existing events do not count as new rows.
+Its metrics sink discards observations, so console metric rows are additional.
 
-| Measurement | Feature off | Feature on |
-|---|---:|---:|
-| Median process CPU (user + system) | 0.38 s | 0.41 s |
-| CPU range | 0.37–0.54 s | 0.39–0.54 s |
-| Slices / logical store calls | 150 / 2650 | 150 / 2650 |
-| Tracing rows | 1250 | 1850 |
-| Tracing bytes | 428200 | 532550 |
-| New tracing rows / bytes per job | 0 / 0 | 12 / 2087 |
+Build first, then run each already-built binary under `/usr/bin/time` at least
+three times in alternating order. Report the median process CPU (user plus
+system), range, row and byte totals, matching call counts, and final snapshot
+digest in the change's validation report. Startup, fixture construction, and
+JSON formatting are included. These native debug-build observations are not
+production estimates or regression thresholds.
 
-Final storage snapshots match. This debug-build sample includes process
-startup, fixture construction, and JSON formatting. It measures tracing rows;
-its metrics sink discards metric observations, so console metric rows are
-additional. Shared-load ranges overlap: the roughly 8% median CPU increase
-is a harness observation, not a production estimate or regression threshold.
-
-### Native scan cost sample
-
-Three alternating runs of each mode, each issuing 64 scans, produced:
-
-| Measurement | Raw SQL baseline | Collector disabled | Collector enabled |
-|---|---:|---:|---:|
-| Median process CPU (user + system) | 0.72 s | 0.73 s | 0.73 s |
-| CPU range | 0.72–0.72 s | 0.72–0.73 s | 0.73–0.73 s |
-| New RPC summary rows | 0 | 0 | 1 |
-| New RPC summary bytes | 0 | 0 | 1135–1152 |
-| New per-statement log rows | 0 | 0 | 0 |
-
-Each reply is byte-identical. The enabled run counts 3584 queries and 54272
-materialized rows. Its roughly 1% median CPU increase has the same native
-debug-build and process-level limits as the verification sample. The disabled
-mode exercises an unmeasured wrapper within the feature-enabled test binary;
-default production builds compile the wrapper and collectors out. These
-numbers establish a repeatable harness and bounded log volume, not Workers
-SQL CPU share.
+Apply the same alternating-run method to the three scan modes above. The
+collector-disabled mode exercises an unmeasured wrapper in a feature-enabled
+binary; default production builds omit both wrapper and collectors. Report
+wire identity, query and materialized-row counts, summary bytes, and CPU.
+Use a Workers profile to establish SQL CPU share or platform overhead.

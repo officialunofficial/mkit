@@ -551,6 +551,8 @@ pub use object::{DoConn, NsObject};
 mod object {
     use std::cell::{Cell, OnceCell};
     use std::sync::Arc;
+    #[cfg(feature = "perf-metrics")]
+    use std::sync::atomic::AtomicBool;
 
     use crate::sql::{Capacity, SqlKvStore, TimerCursor};
     use mkit_server::Clock;
@@ -586,6 +588,11 @@ mod object {
         perf_conn: DoSqlConn,
         #[cfg(feature = "perf-metrics")]
         served: Cell<bool>,
+        #[cfg(feature = "perf-metrics")]
+        first_slice: Arc<AtomicBool>,
+        /// Last successful alarm schedule observed by this activation only.
+        #[cfg(feature = "perf-metrics")]
+        alarm_scheduled_ms: Cell<Option<u64>>,
         capacity: Capacity,
         store: OnceCell<PressureStore<DoConn>>,
         storage: Storage,
@@ -632,6 +639,10 @@ mod object {
                 perf_conn,
                 #[cfg(feature = "perf-metrics")]
                 served: Cell::new(false),
+                #[cfg(feature = "perf-metrics")]
+                first_slice: Arc::new(AtomicBool::new(true)),
+                #[cfg(feature = "perf-metrics")]
+                alarm_scheduled_ms: Cell::new(None),
                 capacity: DO_CAPACITY,
                 store: OnceCell::new(),
                 storage: state.storage(),
@@ -816,7 +827,14 @@ mod object {
             let date = worker::js_sys::Date::new(&worker::wasm_bindgen::JsValue::from_f64(
                 timestamp as f64,
             ));
-            self.storage.set_alarm(ScheduledTime::new(date)).await
+            let result = self.storage.set_alarm(ScheduledTime::new(date)).await;
+            #[cfg(feature = "perf-metrics")]
+            self.alarm_scheduled_ms.set(if result.is_ok() {
+                u64::try_from(timestamp).ok()
+            } else {
+                None
+            });
+            result
         }
 
         /// Self-healing arm: once per cold start (and again after any failed
@@ -854,7 +872,52 @@ mod object {
         }
 
         /// Fire due timers and multiplex all partition heads onto one alarm.
-        pub async fn alarm(&self) -> worker::Result<Response> {
+        pub fn alarm(&self) -> impl std::future::Future<Output = worker::Result<Response>> {
+            #[cfg(feature = "perf-metrics")]
+            {
+                self.alarm_observed(crate::telemetry::perf_alarm::RuntimeAlarmInfo::default())
+            }
+            #[cfg(not(feature = "perf-metrics"))]
+            {
+                self.alarm_inner()
+            }
+        }
+
+        /// Alarm entry retaining optional runtime retry metadata. Argument-free
+        /// embedders may keep calling `alarm`; absent metadata stays unknown.
+        #[cfg(feature = "perf-metrics")]
+        pub async fn alarm_with_info(
+            &self,
+            info: worker::wasm_bindgen::JsValue,
+        ) -> worker::Result<Response> {
+            let runtime = crate::telemetry::perf_alarm::RuntimeAlarmInfo::from_js(&info);
+            drop(info);
+            self.alarm_observed(runtime).await
+        }
+
+        #[cfg(feature = "perf-metrics")]
+        async fn alarm_observed(
+            &self,
+            runtime: crate::telemetry::perf_alarm::RuntimeAlarmInfo,
+        ) -> worker::Result<Response> {
+            use mkit_server::telemetry::slice_context::{AlarmContext, AlarmMetadata};
+            let fired_ms = self.now_ms();
+            // The upstream bridge may omit retry metadata. A remembered arm
+            // alone cannot establish a runtime retry's physical schedule.
+            let remembered = self.alarm_scheduled_ms.take();
+            let metadata = AlarmMetadata {
+                alarm_last_armed_ms: remembered,
+                alarm_scheduled_ms: runtime.confirmed_schedule(remembered),
+                alarm_fired_ms: Some(fired_ms),
+                runtime_retry_count: runtime.retry_count,
+                runtime_is_retry: runtime.is_retry,
+            };
+            AlarmContext::new(metadata, self.first_slice.clone())
+                .scope(self.alarm_inner())
+                .await
+        }
+
+        async fn alarm_inner(&self) -> worker::Result<Response> {
             crate::alarm::observe_alarm(self.now_ms());
             self.alarm_dirty.set(false);
             self.alarm_armed.set(false);
@@ -889,7 +952,14 @@ mod object {
             );
             let result = match action {
                 AlarmAction::Set(next) => self.set_alarm(next).await,
-                AlarmAction::Delete => self.storage.delete_alarm().await,
+                AlarmAction::Delete => {
+                    let result = self.storage.delete_alarm().await;
+                    #[cfg(feature = "perf-metrics")]
+                    if result.is_ok() {
+                        self.alarm_scheduled_ms.set(None);
+                    }
+                    result
+                }
             };
             if let Err(error) = result {
                 crate::log_failure(&format!("timer alarm update failed: {error}"));

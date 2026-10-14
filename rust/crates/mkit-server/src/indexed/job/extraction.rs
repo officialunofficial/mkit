@@ -1116,6 +1116,7 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
             } else {
                 "object_complete"
             });
+            crate::telemetry::slice_context::chunk_stop(reason);
             tracing::info!(
                 event = "verification_extract_chunk_chain",
                 steps,
@@ -1420,6 +1421,7 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
                     )
                 }
             });
+            crate::telemetry::slice_context::chain_stop(reason);
             self.h.metrics.incr(
                 "mkit_server_verification_extract_chain_stops_total",
                 &[("reason", reason)],

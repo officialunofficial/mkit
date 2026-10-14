@@ -5,6 +5,8 @@
 /// Physical Durable Object storage pressure and alert bookkeeping.
 pub mod pressure;
 
+#[cfg(all(feature = "perf-metrics", any(target_arch = "wasm32", test)))]
+pub(crate) mod perf_alarm;
 #[cfg(all(test, feature = "perf-metrics", not(target_arch = "wasm32")))]
 mod perf_cost;
 #[cfg(feature = "perf-metrics")]

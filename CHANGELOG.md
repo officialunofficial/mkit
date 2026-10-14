@@ -53,6 +53,14 @@ collect the applicable entries between their old and new immutable pins.
   wire, or stored-format change; no wipe. See
   [fork wave bounds and latency model](docs/operations/fork-waves.md).
 
+- Add opt-in `perf-metrics` storage RPC summaries, denial duration histograms,
+  verification stage and chain timing, and AwaitDelivery hint measurements.
+  SQL query accounting separates stepping/materialization from wire encoding.
+  Existing verification slice events also attribute Extract scheduling delay,
+  retries, cold activation, the slowest storage call, and slice stop reasons.
+  Default builds retain their existing cost and behavior. No public protocol
+  or stored-format change; no store reset is required.
+
 - Ingest and read paths skip block and denial-action reads when
   `PipelineConfig.takedown_denial` is false. Holder, inventory, membership,
   index, and proof-structure writes continue. Takedown-enabled checks retain
@@ -79,12 +87,6 @@ collect the applicable entries between their old and new immutable pins.
   a timer and absolute request deadline with `with_pending_advance_hold`.
   Readiness repeats all normal guards. Timeout preserves the pending bytes and
   typed hint. No breaking API, wire, or stored-format change; no store reset.
-
-- Add opt-in `perf-metrics` storage RPC summaries, denial duration histograms,
-  verification stage and chain timing, and AwaitDelivery hint measurements.
-  SQL query accounting separates stepping/materialization from wire encoding.
-  Default builds retain their existing cost and behavior. No public protocol
-  or stored-format change; no store reset is required.
 
 - Share pure packmap advance planning between the protocol client and CLI in
   `mkit-core::transfer::packmap`. Node bytes, CAS conditions, retries, and

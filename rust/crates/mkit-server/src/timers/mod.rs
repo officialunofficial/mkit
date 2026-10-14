@@ -475,7 +475,14 @@ async fn process_row<S: NamespaceStore>(
         return;
     }
     observe_verify_entry(handler, ctx, &timer, attempt, clock);
+    #[cfg(not(feature = "perf-metrics"))]
     let outcome = fire_timer(handler, ctx, &timer, key.clone(), clock).await;
+    #[cfg(feature = "perf-metrics")]
+    let outcome = crate::telemetry::slice_context::timer_scope(
+        timer_metadata(&key, original_due, attempt),
+        fire_timer(handler, ctx, &timer, key.clone(), clock),
+    )
+    .await;
     observe_verify_result(handler, ctx, &timer, &key, attempt, &outcome, clock);
     match outcome {
         FireOutcome::Committed(put_due, inline_relay) => {
@@ -514,6 +521,22 @@ async fn process_row<S: NamespaceStore>(
                 FireOutcome::Failed(_) => run.retained_due = true,
             }
         }
+    }
+}
+
+#[cfg(feature = "perf-metrics")]
+fn timer_metadata(
+    key: &Key,
+    logical_due_ms: u64,
+    retry_attempt: u8,
+) -> crate::telemetry::slice_context::TimerMetadata {
+    crate::telemetry::slice_context::TimerMetadata {
+        scheduled_ms: match keys::parse(key) {
+            Some(keys::ParsedKey::Timer { due_at_ms, .. }) => due_at_ms,
+            _ => logical_due_ms,
+        },
+        logical_due_ms,
+        retry_attempt,
     }
 }
 

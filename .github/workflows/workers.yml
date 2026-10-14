@@ -66,6 +66,8 @@ on:
       - 'scripts/vcs-worker-conformance.sh'
       - 'scripts/workers-wire-diagnostics.py'
       - 'scripts/test-workers-wire-diagnostics.py'
+      - 'scripts/enable-worker-alarm-info.py'
+      - 'scripts/test-enable-worker-alarm-info.py'
       - 'scripts/workers-runtime-versions.cjs'
       - 'scripts/workers-wire-runtime.cjs'
       - 'scripts/embedded-worker-conformance.*'
@@ -147,6 +149,8 @@ jobs:
               - 'scripts/vcs-worker-conformance.sh'
               - 'scripts/workers-wire-diagnostics.py'
               - 'scripts/test-workers-wire-diagnostics.py'
+              - 'scripts/enable-worker-alarm-info.py'
+              - 'scripts/test-enable-worker-alarm-info.py'
               - 'scripts/workers-runtime-versions.cjs'
               - 'scripts/workers-wire-runtime.cjs'
               - 'scripts/embedded-worker-conformance.*'
@@ -478,6 +482,7 @@ jobs:
         if: always()
         run: |
           python3 scripts/test-workers-wire-diagnostics.py
+          python3 scripts/test-enable-worker-alarm-info.py
           python3 scripts/workers-wire-diagnostics.py "${RUNNER_TEMP}/wire-logs" \
             --output "${RUNNER_TEMP}/wire-logs/diagnostics.json" \
             --summary "$GITHUB_STEP_SUMMARY" --github-output "$GITHUB_OUTPUT"

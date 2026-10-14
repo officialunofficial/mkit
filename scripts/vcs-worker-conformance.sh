@@ -426,8 +426,15 @@ if [ "${no_build}" -eq 0 ]; then
     cargo build --manifest-path rust/Cargo.toml -p mkit-server-conformance \
         --bin mkit-server-conformance
     echo ">> building apps/vcs-worker (worker-build ${build_args[*]})"
+    if [ "${MKIT_PERF_METRICS:-0}" = 1 ]; then
+        # The next build replaces the wrapper with a fresh upstream shim.
+        rm -f apps/vcs-worker/build/worker/alarm-base.mjs
+    fi
     (cd apps/vcs-worker && CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true \
         CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true worker-build "${build_args[@]}")
+    if [ "${MKIT_PERF_METRICS:-0}" = 1 ]; then
+        python3 scripts/enable-worker-alarm-info.py apps/vcs-worker/build/worker/shim.mjs
+    fi
     printf '%s\n' "${build_args[*]}" >apps/vcs-worker/build/wire-profile.txt
 elif [ "$(cat apps/vcs-worker/build/wire-profile.txt)" != "${build_args[*]}" ]; then
     echo "--no-build requires a Worker built by this harness with the same feature flags" >&2
@@ -717,6 +724,28 @@ if [ "${indexed}" -eq 1 ]; then
         require_pass indexed.small_pack_verification_commits
         cp "${work}/last.tap" "${phase}/small-pack.tap"
         stop_server
+        if [ "${MKIT_PERF_METRICS:-0}" = 1 ]; then
+            python3 - "${phase}/wrangler.log" <<'PYINFO'
+import json
+import sys
+from pathlib import Path
+rows = []
+for line in Path(sys.argv[1]).read_text(errors="replace").splitlines():
+    start = line.find("{")
+    if start < 0:
+        continue
+    try:
+        row, _ = json.JSONDecoder().raw_decode(line[start:])
+    except json.JSONDecodeError:
+        continue
+    if isinstance(row, dict) and row.get("event") == "verification_slice_result":
+        rows.append(row)
+assert any(row.get("runtime_is_retry") is False and row.get("runtime_retry_count") == 0
+           and isinstance(row.get("alarm_fired_ms"), int) for row in rows), \
+    "indexed slice rows did not receive runtime alarm metadata"
+print("Indexed slice runtime alarm metadata: passed")
+PYINFO
+        fi
     done
 fi
 if [ "${hooks}" -eq 1 ]; then bash scripts/vcs-worker-hooks.sh; fi

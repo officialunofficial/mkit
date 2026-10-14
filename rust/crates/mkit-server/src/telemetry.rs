@@ -12,6 +12,10 @@
 //! messages. [`Redactor`] extends [`NEVER_LOG`] with deployment-configured
 //! names, such as the headers an admission helper attaches.
 
+/// Optional scalar alarm and verification-slice context for adapters.
+#[cfg(feature = "perf-metrics")]
+pub mod slice_context;
+
 use crate::rt::{MaybeSend, MaybeSync};
 
 /// Counter: requests handled. Labels: `procedure`, `code`.

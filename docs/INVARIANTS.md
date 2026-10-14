@@ -43,7 +43,10 @@ or alter correctness while measuring it.
 
 **Enforced by:** feature-gated collectors, numeric-only RPC header metadata,
 fixed top-four/100-call windows, fixed denial buckets, telemetry privacy and
-volume tests, and the native scan wire-identity cost harness. Worker timestamps
+volume tests, and the native scan wire-identity cost harness. Slice observations
+are scoped to each future poll and retain only one slowest call. Missing alarm
+or failure evidence stays unknown; telemetry never guesses a disconnect or
+adds storage reads to recover diagnostic state. Worker timestamps
 are wall/I/O measurements; synchronous CPU requires platform/local profiling.
 See [Performance measurements](operations/performance-metrics.md).
 

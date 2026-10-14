@@ -59,6 +59,8 @@ impl tracing::Subscriber for Rows {
             totals[0] += 1;
             totals[1] += line.len() + 1;
         }
+        #[cfg(feature = "perf-metrics")]
+        check_slice_fields(&fields.0);
         if !matches!(
             fields.0.get("event").and_then(JsonValue::as_str),
             Some(
@@ -78,6 +80,45 @@ impl tracing::Subscriber for Rows {
         let mut counts = self.0.lock().unwrap();
         counts[2] += 1;
         counts[3] += line.len() + 1;
+    }
+}
+
+#[cfg(feature = "perf-metrics")]
+fn check_slice_fields(fields: &Map<String, JsonValue>) {
+    if fields.get("event").and_then(JsonValue::as_str) == Some("verification_slice_result") {
+        // These identifiers predate the optional diagnostics. Validate all
+        // added fields without treating existing public event fields as new.
+        let diagnostics: Map<_, _> = fields
+            .iter()
+            .filter(|(key, _)| {
+                !matches!(
+                    key.as_str(),
+                    "event"
+                        | "level"
+                        | "target"
+                        | "now_ms"
+                        | "source"
+                        | "ticket"
+                        | "pack"
+                        | "old_phase"
+                        | "new_phase"
+                        | "attempt"
+                        | "generation"
+                        | "relay_sequence"
+                        | "due_at_ms"
+                )
+            })
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        assert!(
+            public_slice_fields(&diagnostics),
+            "unexpected slice diagnostic: {diagnostics:?}"
+        );
+        assert!(
+            !serde_json::to_string(&diagnostics)
+                .unwrap()
+                .contains("private-fixture")
+        );
     }
 }
 
@@ -154,6 +195,106 @@ fn public_fields(fields: &Map<String, JsonValue>) -> bool {
     })
 }
 
+#[cfg(feature = "perf-metrics")]
+fn public_slice_fields(fields: &Map<String, JsonValue>) -> bool {
+    fields.iter().all(|(key, value)| {
+        if matches!(
+            key.as_str(),
+            "alarm_last_armed_ms"
+                | "alarm_scheduled_ms"
+                | "alarm_fired_ms"
+                | "alarm_delay_ms"
+                | "timer_scheduled_ms"
+                | "logical_due_ms"
+                | "timer_retry_attempt"
+                | "runtime_retry_count"
+                | "runtime_is_retry"
+                | "slice_started_ms"
+                | "timer_delay_ms"
+                | "cold_first_slice"
+                | "slowest_rpc_ms"
+                | "previous_alarm_failed"
+                | "prior_unfinished_job_attempts"
+        ) {
+            return value.is_number() || value.is_boolean() || value.is_null();
+        }
+        if key == "slowest_rpc_prefix" {
+            return value.as_str().is_some_and(|value| {
+                matches!(value, "ri:" | "x:" | "ci:" | "r:" | "c:" | "n:" | "other")
+            });
+        }
+        matches!(
+            key.as_str(),
+            "previous_slice_failed"
+                | "previous_disconnect"
+                | "slice_stop_reason"
+                | "extract_chain_stop_reason"
+                | "extract_chunk_stop_reason"
+        ) && value.as_str().is_some_and(|value| {
+            matches!(
+                value,
+                "unknown"
+                    | "step_cap"
+                    | "elapsed_cutoff"
+                    | "call_allowance"
+                    | "chunk_boundary"
+                    | "operation_allowance"
+                    | "steps"
+                    | "calls"
+                    | "ops"
+                    | "elapsed"
+                    | "effect_stage"
+                    | "error"
+                    | "next_error"
+                    | "no_progress"
+                    | "phase_complete"
+                    | "complete"
+                    | "next_unfused"
+                    | "part_complete"
+                    | "chunk_partial"
+                    | "object_complete"
+                    | "store_error"
+                    | "pending"
+                    | "outcome"
+                    | "rejected"
+                    | "restart"
+                    | "pending_or_error"
+                    | "decode_boundary"
+                    | "phase_incomplete"
+                    | "terminal"
+                    | "durable_boundary"
+            )
+        })
+    })
+}
+
+#[cfg(feature = "perf-metrics")]
+#[test]
+fn slice_diagnostics_reject_private_values_and_unknown_fields() {
+    for secret in [
+        "private-fixture",
+        "secret-credential",
+        "private/key",
+        "0123456789abcdef",
+    ] {
+        for field in [
+            "slowest_rpc_prefix",
+            "slice_stop_reason",
+            "previous_disconnect",
+            "alarm_delay_ms",
+        ] {
+            assert!(!public_slice_fields(&Map::from_iter([(
+                field.into(),
+                secret.into()
+            )])));
+        }
+    }
+    assert!(!public_slice_fields(&Map::from_iter([(
+        "object_id".into(),
+        1.into()
+    )])));
+}
+
 #[test]
 fn verification_instrumentation_cost_probe() {
     let capture = Rows::default();
@@ -189,6 +330,14 @@ fn verification_instrumentation_cost_probe() {
     assert!(
         rows <= 50 * 24,
         "new structured rows exceeded the fixture bound"
+    );
+    assert!(
+        total_rows <= 50 * 50,
+        "total tracing rows exceeded the fixture bound"
+    );
+    assert!(
+        total_bytes <= 50 * 24_000,
+        "total tracing bytes exceeded the fixture bound"
     );
     #[cfg(not(feature = "perf-metrics"))]
     assert_eq!((rows, bytes), (0, 0));

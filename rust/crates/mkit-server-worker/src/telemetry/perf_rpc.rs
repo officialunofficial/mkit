@@ -187,6 +187,7 @@ pub(crate) struct Summary<S: LineSink = ConsoleSink> {
 pub(crate) struct Observation<'a> {
     summary: &'a Summary,
     started: f64,
+    slice: Option<mkit_server::telemetry::slice_context::RpcObservation>,
     pub record: Call,
 }
 
@@ -196,6 +197,7 @@ impl<'a> Observation<'a> {
         Self {
             summary,
             started: worker::js_sys::Date::now(),
+            slice: mkit_server::telemetry::slice_context::RpcObservation::current(),
             record,
         }
     }
@@ -205,6 +207,9 @@ impl<'a> Observation<'a> {
 impl Drop for Observation<'_> {
     fn drop(&mut self) {
         self.record.caller_ms = (worker::js_sys::Date::now() - self.started).max(0.0);
+        if let Some(slice) = &self.slice {
+            slice.record_rpc(self.record.prefix, self.record.caller_ms);
+        }
         self.summary.record(self.record.clone());
     }
 }

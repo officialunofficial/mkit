@@ -400,6 +400,19 @@ impl DeltaBaseSource for CacheBases<'_> {
     }
 }
 
+#[cfg(feature = "perf-metrics")]
+struct SliceResultFields {
+    now_ms: u64,
+    ticket: Hash,
+    old_phase: Phase,
+    new_phase: Phase,
+    attempt: u32,
+    prior_job_attempts: u32,
+    generation: u64,
+    relay_sequence: Option<u64>,
+    due_at_ms: u64,
+}
+
 /// Per-slice memory: nothing in it is authoritative, rows are.
 #[derive(Default)]
 struct SliceState {
@@ -545,7 +558,41 @@ where
 
     async fn slice(&self, timer: &DueTimer, local_closure: &mut bool) -> Result<Fired, StoreError> {
         let calls_before = self.budget.used();
+        #[cfg(not(feature = "perf-metrics"))]
         let fired = self.slice_inner(timer, calls_before, local_closure).await;
+        #[cfg(feature = "perf-metrics")]
+        let fired = {
+            let scope =
+                crate::telemetry::slice_context::SliceScope::new(now_ms(self.h.clock.as_ref()));
+            let mut result_fields = None;
+            let result = scope
+                .scope(self.slice_inner(timer, calls_before, local_closure, &mut result_fields))
+                .await;
+            if let Some(fields) = result_fields {
+                let context = scope.snapshot();
+                tracing::info!(event = "verification_slice_result", now_ms = fields.now_ms,
+                    source = ?self.source, ticket = %mkit_core::hash::to_hex(&fields.ticket),
+                    pack = %mkit_core::hash::to_hex(&self.pack), old_phase = ?fields.old_phase,
+                    new_phase = ?fields.new_phase, attempt = fields.attempt, generation = fields.generation,
+                    relay_sequence = fields.relay_sequence, due_at_ms = fields.due_at_ms,
+                    prior_unfinished_job_attempts = fields.prior_job_attempts,
+                    alarm_last_armed_ms = context.alarm.alarm_last_armed_ms,
+                    alarm_scheduled_ms = context.alarm.alarm_scheduled_ms,
+                    alarm_fired_ms = context.alarm.alarm_fired_ms, alarm_delay_ms = context.alarm_delay_ms,
+                    timer_scheduled_ms = context.timer_scheduled_ms, logical_due_ms = context.logical_due_ms,
+                    timer_retry_attempt = context.timer_retry_attempt,
+                    runtime_retry_count = context.alarm.runtime_retry_count, runtime_is_retry = context.alarm.runtime_is_retry,
+                    previous_alarm_failed = context.alarm.runtime_is_retry.filter(|retry| *retry),
+                    previous_slice_failed = "unknown", previous_disconnect = "unknown",
+                    slice_started_ms = context.slice_started_ms, timer_delay_ms = context.timer_delay_ms,
+                    cold_first_slice = context.cold_first_slice,
+                    slowest_rpc_prefix = context.slowest_rpc_prefix, slowest_rpc_ms = context.slowest_rpc_ms,
+                    slice_stop_reason = context.slice_stop_reason,
+                    extract_chain_stop_reason = context.extract_chain_stop_reason,
+                    extract_chunk_stop_reason = context.extract_chunk_stop_reason);
+            }
+            result
+        };
         if let Err(error) = &fired {
             tracing::warn!(%error, pack = %mkit_core::hash::to_hex(&self.pack), "verification slice failed");
         }
@@ -563,12 +610,15 @@ where
         timer: &DueTimer,
         calls_before: u32,
         local_closure: &mut bool,
+        #[cfg(feature = "perf-metrics")] result_fields: &mut Option<SliceResultFields>,
     ) -> Result<Fired, StoreError> {
         let (job, state) =
             checkpoint::read_job(self.local, self.source, &self.repo.name, &self.pack).await?;
         let Some((mut job, mut raw)) = job else {
             return self.cleanup(timer, None, None).await;
         };
+        #[cfg(feature = "perf-metrics")]
+        let prior_job_attempts = job.attempts;
         tracing::info!(event = "verification_slice_start", now_ms = now_ms(self.h.clock.as_ref()),
             source = ?self.source, ticket = %mkit_core::hash::to_hex(&job.ticket_id),
             pack = %mkit_core::hash::to_hex(&self.pack), old_phase = ?job.phase,
@@ -681,6 +731,7 @@ where
             } else {
                 "complete"
             };
+            crate::telemetry::slice_context::phase_stop(reason);
             tracing::info!(
                 event = "verification_phase_chain",
                 steps = chained + 1,
@@ -751,11 +802,26 @@ where
                 0
             }
         };
+        #[cfg(not(feature = "perf-metrics"))]
         tracing::info!(event = "verification_slice_result", now_ms = now_ms(self.h.clock.as_ref()),
             source = ?self.source, ticket = %mkit_core::hash::to_hex(&job.ticket_id),
             pack = %mkit_core::hash::to_hex(&self.pack), old_phase = ?old_phase,
             new_phase = ?job.phase, attempt = job.attempts, generation = job.generation,
             relay_sequence = job.last_relay_seq, due_at_ms = self.due(timer, delay));
+        #[cfg(feature = "perf-metrics")]
+        {
+            *result_fields = Some(SliceResultFields {
+                now_ms: now_ms(self.h.clock.as_ref()),
+                ticket: job.ticket_id,
+                old_phase,
+                new_phase: job.phase,
+                attempt: job.attempts,
+                prior_job_attempts,
+                generation: job.generation,
+                relay_sequence: job.last_relay_seq,
+                due_at_ms: self.due(timer, delay),
+            });
+        }
         // A slice that ended by itself is not a killed one.
         job.attempts = 0;
         *local_closure = old_phase == Phase::Decode
