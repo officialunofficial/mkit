@@ -2859,14 +2859,16 @@ and exit-code behavior. No authorization, wire, or stored-format boundary moves.
 ## Repository activation hints carry no authority
 
 **Always:** Workers repository index warm-up runs for authenticated, validated
-reads joined with their authorization prologue, or for anonymous reads only after
+reads joined with their authorization prologue (ListRefs joins bucket scans
+following authorization and token validation), or for anonymous reads only after
 repository existence and readability succeed, joined with the next read step.
 The wave drains before final serving guards and capture expiry checks. Delayed
 activation cannot hold already-validated output past revocation or expiry.
 Every result is discarded. Private/missing/invalid repositories never start an
 anonymous wave. Anonymous claims share a rolling cap of eight waves per sixty
 seconds per isolate, retained after cancellation and failure.
-All sixteen calls reserve the existing invocation budget and a separate bounded
+Two sequential groups of sixteen ping RefIndex then RepoIndex; all thirty-two
+calls reserve the existing invocation budget and a separate bounded
 activation allowance before dispatch. A volatile repository claim prevents
 another wave during its TTL, including after cancellation or failure.
 

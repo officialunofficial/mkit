@@ -7,7 +7,8 @@ use mkit_server::{NamespaceStore, Partition, RepoId};
 
 use crate::ns_client::{DoNamespaceStore, NsTransport};
 
-const CALLS: u32 = mkit_server::store::REPO_INDEX_FANOUT as u32;
+const CALLS: u32 =
+    (mkit_server::store::REPO_INDEX_FANOUT + mkit_server::store::REF_INDEX_FANOUT) as u32;
 const MAX_REPOSITORIES: usize = 4096;
 const ANONYMOUS_WAVES: usize = 8;
 const ANONYMOUS_WINDOW_MS: u64 = 60_000;
@@ -123,6 +124,22 @@ impl Prewake {
             return;
         }
         let wave = async {
+            // Keep the measured width of sixteen. Ref scans are on the read
+            // prologue; object-index lookups follow them. One claim covers both
+            // families so a ref-only read cannot suppress later object warming.
+            futures::future::join_all((0..mkit_server::store::REF_INDEX_FANOUT).map(
+                |bucket| async move {
+                    let partition = Partition::RefIndex {
+                        ns: repo.namespace.clone(),
+                        repo: repo.name.clone(),
+                        bucket,
+                    };
+                    if let Err(error) = store.ping(&partition).await {
+                        tracing::warn!(error = %error, "ref index warm-up failed");
+                    }
+                },
+            ))
+            .await;
             futures::future::join_all((0..mkit_server::store::REPO_INDEX_FANOUT).map(
                 |prefix| async move {
                     let partition = Partition::RepoIndex {

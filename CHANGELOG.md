@@ -35,7 +35,11 @@ collect the applicable entries between their old and new immutable pins.
   `REPO_INDEX_PREWAKE_ANONYMOUS` defaults on under the default-off master switch;
   operators can select signed-only activation. Anonymous waves retain repository
   TTL claims and add an isolate-wide cap of eight waves per rolling minute
-  (128 extra Durable Object calls), within the existing invocation budget.
+  (256 extra Durable Object calls), within the existing invocation budget.
+  Both signed and anonymous plans now ping all sixteen RefIndex buckets before
+  the sixteen RepoIndex shards, including Multi ListRefs after authorization
+  and token validation. Two sequential groups retain concurrency sixteen;
+  both families share one TTL claim and a thirty-two-call reservation.
   Private, missing and invalid repositories never start anonymous waves.
   No wire or stored-format change; no wipe.
 

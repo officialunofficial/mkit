@@ -278,6 +278,17 @@ fn measure_latency(
     cold: Option<u64>,
     warm_packs: bool,
 ) -> (f64, u32, usize) {
+    measure_index_latency(shape, owner, op, latency, cold, warm_packs, false)
+}
+fn measure_index_latency(
+    shape: &Shape,
+    owner: bool,
+    op: Op,
+    latency: u32,
+    cold: Option<u64>,
+    warm_packs: bool,
+    cold_refs: bool,
+) -> (f64, u32, usize) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .start_paused(true)
@@ -316,7 +327,11 @@ fn measure_latency(
     };
     let operation = async {
         if let Some(milliseconds) = cold {
-            read_probe::run_cold(milliseconds, &warm_partitions, operation).await
+            if cold_refs {
+                read_probe::run_cold_indexes(milliseconds, &warm_partitions, true, operation).await
+            } else {
+                read_probe::run_cold(milliseconds, &warm_partitions, operation).await
+            }
         } else {
             operation.await
         }
@@ -585,12 +600,13 @@ fn repository_index_prewake_models_cold_reads_and_warm_rounds() {
     let shape = shape(11, 8, true, |_| 1);
     for op in [
         Op::ReadGate,
+        Op::ListRefs,
         Op::GetReadGate,
         Op::Show { sizes: true },
         Op::CanonicalLog(10),
     ] {
         shape.fx.pipe.meta.prewake.store(false, Ordering::SeqCst);
-        let before = measure_latency(&shape, true, op, 40, Some(400), true);
+        let before = measure_index_latency(&shape, true, op, 40, Some(400), true, true);
         shape.fx.pipe.meta.prewake.store(true, Ordering::SeqCst);
         shape
             .fx
@@ -598,17 +614,18 @@ fn repository_index_prewake_models_cold_reads_and_warm_rounds() {
             .meta
             .prewake_claimed
             .store(false, Ordering::SeqCst);
-        let after = measure_latency(&shape, true, op, 40, Some(400), true);
+        let after = measure_index_latency(&shape, true, op, 40, Some(400), true, true);
         assert_eq!((before.1, before.2), (after.1, after.2));
-        assert_eq!(shape.fx.pipe.meta.warm_calls.swap(0, Ordering::SeqCst), 16);
+        assert_eq!(shape.fx.pipe.meta.warm_calls.swap(0, Ordering::SeqCst), 32);
         if matches!(op, Op::GetReadGate) {
-            // This pack gate touches one index shard; overlap preserves its latency.
-            assert!((after.0 - before.0).abs() < f64::EPSILON);
+            // A pack-only gate does not scan refs: the two-phase plan adds a
+            // cold ref wave before its object shard is warm.
+            assert!(after.0 >= before.0);
         } else {
             assert!(after.0 < before.0);
         }
         println!(
-            "PREWAKE_COLD op={op:?} before_ms={:.0} after_ms={:.0} warmup_calls=16 KV={} GET={}",
+            "PREWAKE_COLD op={op:?} before_ms={:.0} after_ms={:.0} warmup_calls=32 KV={} GET={}",
             before.0 * 40.0,
             after.0 * 40.0,
             after.1,
@@ -627,12 +644,15 @@ fn repository_index_prewake_models_cold_reads_and_warm_rounds() {
             .prewake_claimed
             .store(false, Ordering::SeqCst);
         let on = measure(&shape, true, op);
-        assert_eq!(on, off);
+        assert_eq!((on.1, on.2), (off.1, off.2));
+        assert!(on.0 <= off.0 + 1.0);
         println!(
-            "PREWAKE_WARM op={op:?} added_rounds=0 warmup_calls=16 second_read_calls=0 KV={} GET={}",
-            on.1, on.2
+            "PREWAKE_WARM op={op:?} added_rounds={} warmup_calls=32 second_read_calls=0 KV={} GET={}",
+            on.0 - off.0,
+            on.1,
+            on.2
         );
-        assert_eq!(shape.fx.pipe.meta.warm_calls.swap(0, Ordering::SeqCst), 16);
+        assert_eq!(shape.fx.pipe.meta.warm_calls.swap(0, Ordering::SeqCst), 32);
     }
 }
 
@@ -642,8 +662,9 @@ fn repository_index_prewake_requires_valid_owner_envelope() {
     let fx = &shape.fx;
     fx.pipe.meta.prewake.store(true, Ordering::SeqCst);
     measure(&shape, false, Op::Show { sizes: false });
-    measure(&shape, true, Op::ListRefs);
     assert_eq!(fx.pipe.meta.warm_calls.load(Ordering::SeqCst), 0);
+    measure(&shape, true, Op::ListRefs);
+    assert_eq!(fx.pipe.meta.warm_calls.swap(0, Ordering::SeqCst), 32);
     let lookup = |_: &str| None;
     let meta = RequestMeta {
         procedure: Procedure::ListRefs,
@@ -698,7 +719,7 @@ fn repository_index_prewake_rpc_validation_precedes_activation() {
     );
     let auth = fx.auth(&req);
     assert!(block_on(fx.pipe.pack_exists(&auth, pack)).unwrap());
-    assert_eq!(fx.pipe.meta.warm_calls.load(Ordering::SeqCst), 16);
+    assert_eq!(fx.pipe.meta.warm_calls.load(Ordering::SeqCst), 32);
 }
 
 #[test]
@@ -735,6 +756,8 @@ fn anonymous_repository_index_prewake_models_cold_reads_and_warm_rounds() {
         .anonymous_prewake
         .store(true, Ordering::SeqCst);
     for op in [
+        Op::ReadGate,
+        Op::ListRefs,
         Op::GetReadGate,
         Op::Show { sizes: true },
         Op::CanonicalLog(10),
@@ -746,7 +769,7 @@ fn anonymous_repository_index_prewake_models_cold_reads_and_warm_rounds() {
         // Page-1 security installs a durable revision once; compare the same
         // initialized repository state, with partition coldness reset per run.
         measure(&shape, false, op);
-        let before = measure_latency(&shape, false, op, 40, Some(400), true);
+        let before = measure_index_latency(&shape, false, op, 40, Some(400), true, true);
         shape.fx.pipe.meta.prewake.store(true, Ordering::SeqCst);
         shape
             .fx
@@ -754,11 +777,11 @@ fn anonymous_repository_index_prewake_models_cold_reads_and_warm_rounds() {
             .meta
             .prewake_claimed
             .store(false, Ordering::SeqCst);
-        let after = measure_latency(&shape, false, op, 40, Some(400), true);
+        let after = measure_index_latency(&shape, false, op, 40, Some(400), true, true);
         assert_eq!((before.1, before.2), (after.1, after.2));
-        assert_eq!(shape.fx.pipe.meta.warm_calls.swap(0, Ordering::SeqCst), 16);
+        assert_eq!(shape.fx.pipe.meta.warm_calls.swap(0, Ordering::SeqCst), 32);
         println!(
-            "ANONYMOUS_COLD op={op:?} before_ms={:.0} after_ms={:.0} KV={} GET={} pings=16",
+            "ANONYMOUS_COLD op={op:?} before_ms={:.0} after_ms={:.0} KV={} GET={} pings=32",
             before.0 * 40.0,
             after.0 * 40.0,
             after.1,
@@ -775,8 +798,14 @@ fn anonymous_repository_index_prewake_models_cold_reads_and_warm_rounds() {
             .meta
             .prewake_claimed
             .store(false, Ordering::SeqCst);
-        assert_eq!(warm, measure(&shape, false, op));
-        assert_eq!(shape.fx.pipe.meta.warm_calls.swap(0, Ordering::SeqCst), 16);
+        let first = measure(&shape, false, op);
+        assert_eq!((warm.1, warm.2), (first.1, first.2));
+        assert!(first.0 <= warm.0 + 1.0);
+        println!(
+            "ANONYMOUS_WARM op={op:?} added_rounds={} pings=32",
+            first.0 - warm.0
+        );
+        assert_eq!(shape.fx.pipe.meta.warm_calls.swap(0, Ordering::SeqCst), 32);
     }
 }
 
@@ -803,11 +832,18 @@ fn anonymous_repository_index_prewake_preserves_uniform_absence_and_validation()
             Req::unsigned(Procedure::PackExists).header("x-repository", &fx.identity(name));
         let auth = fx.auth(&request);
         let on = block_on(fx.pipe.pack_exists(&auth, pack)).unwrap_err();
+        let listing = Req::unsigned(Procedure::ListRefs).header("x-repository", &fx.identity(name));
+        let on_listing =
+            block_on(fx.pipe.list_refs(&fx.auth(&listing), "refs/heads/")).unwrap_err();
         let reader = block_on(fx.pipe.object_reader(fx.repo_id(name), ReaderView::Public)).unwrap();
         let on_objects = block_on(reader.read_canonical(&[shape.head])).unwrap();
         assert_eq!(on_objects, vec![None]);
         fx.pipe.meta.prewake.store(false, Ordering::SeqCst);
         let off = block_on(fx.pipe.pack_exists(&auth, pack)).unwrap_err();
+        let off_listing =
+            block_on(fx.pipe.list_refs(&fx.auth(&listing), "refs/heads/")).unwrap_err();
+        assert_eq!(on_listing.code(), off_listing.code());
+        assert_eq!(on_listing.public_message(), off_listing.public_message());
         assert_eq!(on.code(), off.code());
         assert_eq!(on.public_message(), off.public_message());
         assert_eq!(on.code(), Code::NotFound);
@@ -903,7 +939,7 @@ fn anonymous_prewake_preserves_final_denial_after_a_delayed_wave() {
         });
         let mut cx = std::task::Context::from_waker(futures::task::noop_waker_ref());
         assert!(std::future::Future::poll(read.as_mut(), &mut cx).is_pending());
-        assert_eq!(fx.pipe.meta.warm_calls.load(Ordering::SeqCst), 16);
+        assert_eq!(fx.pipe.meta.warm_calls.load(Ordering::SeqCst), 32);
         assert_eq!(pause.requested().len(), 1);
         block_on(ContentIndex::new(BorrowedStore(&fx.pipe.meta)).block(
             &crate::takedown::DenialCapability::for_test(),
@@ -972,4 +1008,29 @@ fn anonymous_prewake_preserves_session_expiry_after_a_delayed_wave() {
             Err(error) => assert_eq!(error.code(), Code::ResourceExhausted),
         }
     }
+}
+
+#[test]
+fn anonymous_list_refs_validates_prefix_and_token_before_activation() {
+    let shape = shape(1, 1, false, |_| 1);
+    let fx = &shape.fx;
+    fx.pipe.meta.prewake.store(true, Ordering::SeqCst);
+    fx.pipe.meta.anonymous_prewake.store(true, Ordering::SeqCst);
+    let request = Req::unsigned(Procedure::ListRefs).header("x-repository", &fx.identity("room"));
+    let auth = fx.auth(&request);
+    assert!(block_on(fx.pipe.list_refs(&auth, "/")).is_err());
+    assert!(
+        block_on(
+            fx.pipe
+                .list_refs_page(&auth, "refs/heads/", Some(10), Some(b"invalid"))
+        )
+        .is_err()
+    );
+    assert_eq!(fx.pipe.meta.warm_calls.load(Ordering::SeqCst), 0);
+    assert!(
+        !block_on(fx.pipe.list_refs(&auth, "refs/heads/"))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(fx.pipe.meta.warm_calls.load(Ordering::SeqCst), 32);
 }

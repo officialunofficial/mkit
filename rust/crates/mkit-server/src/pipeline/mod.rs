@@ -1353,40 +1353,54 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 writer: authorized.facts.caller_view == CallerView::Writer,
                 policy: self.publication_policy.as_deref(),
             };
-            let result = if partitions.len() == 1 {
-                let bucket = list::RefBucket {
-                    store: &view,
-                    partition: &partitions[0],
-                };
-                list::page_in_waves(
-                    &view,
-                    &[bucket],
-                    &op.repo,
-                    &scan,
-                    last.as_deref(),
-                    limit,
-                    list::MAX_RESPONSE_BYTES,
-                )
-                .await
-            } else {
-                let buckets = partitions
-                    .iter()
-                    .map(|partition| list::IndexBucket {
-                        store: &view,
-                        partition,
-                    })
-                    .collect::<Vec<_>>();
-                list::page_in_waves(
-                    &view,
-                    &buckets,
-                    &op.repo,
-                    &scan,
-                    last.as_deref(),
-                    limit,
-                    list::MAX_RESPONSE_BYTES,
-                )
-                .await
+            let preparation = async {
+                if matches!(self.cfg.addressing, Addressing::Multi(_)) {
+                    if matches!(a.principal, Principal::Anonymous) {
+                        self.meta.prepare_anonymous_repo_read(&op.repo).await;
+                    } else if op.auth.is_some() {
+                        self.meta.prepare_repo_read(&op.repo).await;
+                    }
+                }
             };
+            let scan_page = async {
+                if partitions.len() == 1 {
+                    let bucket = list::RefBucket {
+                        store: &view,
+                        partition: &partitions[0],
+                    };
+                    list::page_in_waves(
+                        &view,
+                        &[bucket],
+                        &op.repo,
+                        &scan,
+                        last.as_deref(),
+                        limit,
+                        list::MAX_RESPONSE_BYTES,
+                    )
+                    .await
+                } else {
+                    let buckets = partitions
+                        .iter()
+                        .map(|partition| list::IndexBucket {
+                            store: &view,
+                            partition,
+                        })
+                        .collect::<Vec<_>>();
+                    list::page_in_waves(
+                        &view,
+                        &buckets,
+                        &op.repo,
+                        &scan,
+                        last.as_deref(),
+                        limit,
+                        list::MAX_RESPONSE_BYTES,
+                    )
+                    .await
+                }
+            };
+            // Authorization and token validation precede activation. Listing
+            // scans carry snapshot semantics; response assembly follows both.
+            let (result, ()) = futures::future::join(scan_page, preparation).await;
             let mut page = result.map_err(|err| {
                 tracing::warn!(detail = %err, "ref listing scan failed");
                 ServerError::unavailable("ref listing unavailable")

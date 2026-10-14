@@ -89,9 +89,11 @@ fn wave_is_width_sixteen_joined_and_recent_across_requests() {
         second.run(&store, &repo("wave")),
     ));
     assert_eq!(transport.active.load(Ordering::SeqCst), 0);
-    assert_eq!(transport.peak.load(Ordering::SeqCst), CALLS);
+    assert_eq!(transport.peak.load(Ordering::SeqCst), 16);
     let targets = transport.targets.lock().unwrap();
     assert_eq!(targets.len(), CALLS as usize);
+    assert!(targets[..16].iter().all(|name| name.starts_with("x:")));
+    assert!(targets[16..].iter().all(|name| name.starts_with("i:")));
     assert_eq!(
         targets
             .iter()
@@ -100,7 +102,7 @@ fn wave_is_width_sixteen_joined_and_recent_across_requests() {
         CALLS as usize
     );
     assert_eq!(first.allowance.used() + second.allowance.used(), CALLS);
-    assert_eq!(store.read_call_allowance(), Some(8984));
+    assert_eq!(store.read_call_allowance(), Some(8968));
     drop(targets);
     block_on(hint(recent).run(&store, &repo("wave")));
     assert_eq!(transport.targets.lock().unwrap().len(), CALLS as usize);
@@ -109,11 +111,11 @@ fn wave_is_width_sixteen_joined_and_recent_across_requests() {
 #[test]
 fn tight_budget_and_exhausted_allowance_skip_without_charging() {
     let transport = Transport::default();
-    let store = store(transport.clone(), 15);
+    let store = store(transport.clone(), CALLS - 1);
     let prewake = hint(Recent::default());
     block_on(prewake.run(&store, &repo("tight")));
     assert_eq!(prewake.allowance.used(), 0);
-    assert_eq!(store.read_call_allowance(), Some(15));
+    assert_eq!(store.read_call_allowance(), Some(CALLS - 1));
     assert!(prewake.recent.lock().unwrap().is_empty());
     assert!(transport.targets.lock().unwrap().is_empty());
     let p = Partition::Coordinator(NamespaceKey::deployment_default());
@@ -140,7 +142,7 @@ fn failures_are_suppressed_and_retries_are_rate_bounded() {
     block_on(hint(recent).run(&store, &repo("failure")));
     assert_eq!(transport.targets.lock().unwrap().len(), CALLS as usize);
     assert_eq!(transport.active.load(Ordering::SeqCst), 0);
-    assert_eq!(store.read_call_allowance(), Some(8984));
+    assert_eq!(store.read_call_allowance(), Some(8968));
     let p = Partition::Coordinator(NamespaceKey::deployment_default());
     assert!(
         block_on(store.get(&p, &Key::new(b"key".to_vec())))
@@ -192,12 +194,12 @@ fn cancelled_wave_is_not_detached_and_retains_its_claim() {
     let mut wave = Box::pin(prewake.run(&store, &repository));
     let mut cx = std::task::Context::from_waker(futures::task::noop_waker_ref());
     assert!(wave.as_mut().poll(&mut cx).is_pending());
-    assert_eq!(transport.active.load(Ordering::SeqCst), CALLS);
+    assert_eq!(transport.active.load(Ordering::SeqCst), 16);
     drop(wave);
     assert_eq!(transport.active.load(Ordering::SeqCst), 0);
     block_on(hint(recent).run(&store, &repository));
-    assert_eq!(transport.targets.lock().unwrap().len(), CALLS as usize);
-    assert_eq!(store.read_call_allowance(), Some(8984));
+    assert_eq!(transport.targets.lock().unwrap().len(), 16);
+    assert_eq!(store.read_call_allowance(), Some(8968));
 }
 
 struct NoData;
@@ -247,6 +249,20 @@ fn ping_dispatch_uses_no_application_data_and_validates_partition_class() {
     )))
     .unwrap();
     assert_eq!(good, crate::wire::NsReply::Ok);
+    let refs = Partition::RefIndex {
+        ns: NamespaceKey::deployment_default(),
+        repo: RepoName::new("ping").unwrap(),
+        bucket: 15,
+    };
+    let refs_body = serde_json::to_string(&NsRequest::new(&refs, NsCall::Ping).unwrap()).unwrap();
+    let refs_reply: crate::wire::NsReply =
+        serde_json::from_str(&block_on(crate::ns_object::serve(
+            &NoData,
+            &refs_body,
+            crate::classes::ShardClass::RepoIndexShard,
+        )))
+        .unwrap();
+    assert_eq!(refs_reply, crate::wire::NsReply::Ok);
     let bad: crate::wire::NsReply = serde_json::from_str(&block_on(crate::ns_object::serve(
         &NoData,
         &body,
@@ -271,14 +287,14 @@ fn timed_out_wave_is_suppressed_cancels_calls_and_retains_claim() {
     let mut wave = Box::pin(finish_wave(&sleep, prewake.run(&store, &repository)));
     let mut cx = std::task::Context::from_waker(futures::task::noop_waker_ref());
     assert!(wave.as_mut().poll(&mut cx).is_pending());
-    assert_eq!(transport.active.load(Ordering::SeqCst), CALLS);
+    assert_eq!(transport.active.load(Ordering::SeqCst), 16);
     assert_eq!(sleep.requested(), vec![std::time::Duration::from_secs(1)]);
     sleep.fire();
     block_on(wave);
     assert_eq!(transport.active.load(Ordering::SeqCst), 0);
     block_on(hint(recent).run(&store, &repository));
-    assert_eq!(transport.targets.lock().unwrap().len(), CALLS as usize);
-    assert_eq!(store.read_call_allowance(), Some(8984));
+    assert_eq!(transport.targets.lock().unwrap().len(), 16);
+    assert_eq!(store.read_call_allowance(), Some(8968));
     let p = Partition::Coordinator(NamespaceKey::deployment_default());
     assert!(
         block_on(store.get(&p, &Key::new(b"key".to_vec())))
@@ -298,7 +314,7 @@ fn configured_store_hook_shares_recent_claims_and_off_is_noop() {
     let off = store(transport.clone(), 9000).with_index_prewake(None);
     block_on(off.prepare_repo_read(&repo("configured-off")));
     assert_eq!(transport.targets.lock().unwrap().len(), CALLS as usize);
-    assert_eq!(first.read_call_allowance(), Some(8984));
+    assert_eq!(first.read_call_allowance(), Some(8968));
     assert_eq!(second.read_call_allowance(), Some(9000));
     assert_eq!(off.read_call_allowance(), Some(9000));
 }
@@ -369,10 +385,10 @@ fn anonymous_wave_is_joined_budgeted_and_recent_even_on_failure() {
         block_on(p.run_anonymous(&store, &repo("anonymous-failure")));
     }
     assert_eq!(transport.targets.lock().unwrap().len(), CALLS as usize);
-    assert_eq!(transport.peak.load(Ordering::SeqCst), CALLS);
+    assert_eq!(transport.peak.load(Ordering::SeqCst), 16);
     assert_eq!(transport.active.load(Ordering::SeqCst), 0);
     assert_eq!(window.lock().unwrap().len(), 1);
-    assert_eq!(store.read_call_allowance(), Some(8984));
+    assert_eq!(store.read_call_allowance(), Some(8968));
 }
 
 #[test]
@@ -386,7 +402,7 @@ fn configured_anonymous_hook_shares_ttl_with_signed_reads() {
     let signed = store(transport.clone(), 9000).with_index_prewake(Some(90_000));
     block_on(signed.prepare_repo_read(&repository));
     assert_eq!(transport.targets.lock().unwrap().len(), CALLS as usize);
-    assert_eq!(first.read_call_allowance(), Some(8984));
+    assert_eq!(first.read_call_allowance(), Some(8968));
     assert_eq!(second.read_call_allowance(), Some(9000));
     assert_eq!(signed.read_call_allowance(), Some(9000));
 }
