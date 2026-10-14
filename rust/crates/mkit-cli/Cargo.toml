@@ -75,11 +75,10 @@ mkit-transport-file = { version = "0.5", path = "../mkit-transport-file" }
 # `mkit-transport-connect::TOKEN_ENV`, so callers of either transport read
 # the same `MKIT_API_TOKEN` env var).
 mkit-transport-http = { version = "0.5", path = "../mkit-transport-http" }
-# `mkit-transport-connect` is the native ConnectRPC client — the active
-# implementation behind `mkit+https://` / loopback `mkit+http://` dispatch
-# (mkit#701). Required unconditionally (client dispatch, not
-# feature-gated). The CLI hosts no Connect server and has no HTTP
-# server stack.
+# `mkit-transport-connect` supplies native host policy and the compatibility
+# facade for Connect dispatch. `mkit-client` owns the per-RPC protocol and
+# `mkit-sync::ClientSource` drives repository operations. The adapter is
+# unconditional; the CLI hosts no Connect HTTP server.
 mkit-transport-connect = { version = "0.5", path = "../mkit-transport-connect" }
 mkit-transport-s3 = { version = "0.5", path = "../mkit-transport-s3" }
 mkit-transport-ssh = { version = "0.5", path = "../mkit-transport-ssh" }
@@ -281,7 +280,9 @@ connectrpc = { version = "0.9.0", default-features = false, features = ["server"
 # graph, where mkit-server stays at `ssh` + `fs`.
 mkit-server = { version = "0.5", path = "../mkit-server", default-features = false, features = ["ssh", "fs", "connect", "memory"] }
 http = "1"
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "time", "sync"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "time", "sync", "io-util"] }
+# Real TLS proxy for the Connect CLI regression matrix.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 futures = "0.3"
 # tests/cli_transcripts.rs: declarative `.trycmd` transcript tests for
 # simple, deterministic CLI output (error messages, not full help text —

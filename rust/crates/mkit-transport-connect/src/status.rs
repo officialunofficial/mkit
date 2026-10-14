@@ -1,13 +1,18 @@
 //! Preserve the one HTTP status ConnectRPC discards when constructing errors.
+#[cfg(test)]
 use connectrpc::client::{ClientBody, ClientTransport};
+#[cfg(test)]
 use futures::future::BoxFuture;
+#[cfg(test)]
 use http::{Request, Response, StatusCode};
 
 pub(crate) const STATUS_MARKER: &str = "x-mkit-client-status";
 
+#[cfg(test)]
 #[derive(Clone)]
 pub(crate) struct StatusTransport<T>(pub T);
 
+#[cfg(test)]
 impl<T: ClientTransport> ClientTransport for StatusTransport<T> {
     type ResponseBody = T::ResponseBody;
     type Error = T::Error;
@@ -34,6 +39,7 @@ impl<T: ClientTransport> ClientTransport for StatusTransport<T> {
 mod tests {
     use super::*;
     use bytes::Bytes;
+    #[cfg(test)]
     use connectrpc::client::full_body;
     use http_body_util::Full;
     use std::convert::Infallible;

@@ -146,7 +146,15 @@ fn fetch_one(
                     crate::progress::should_report(quiet),
                     quiet,
                 );
-                remote_dispatch::fetch_all_with(cwd, tx.as_ref(), &resolved.name, require_signed)
+                tx.with_source(|source| {
+                    remote_dispatch::fetch_all_with_source(
+                        cwd,
+                        source,
+                        &resolved.name,
+                        require_signed,
+                    )
+                })
+                .and_then(|result| result)
             };
             match fetch_outcome {
                 Ok(_) => {

@@ -9,11 +9,12 @@ mod push;
 mod read;
 mod receipts;
 mod seams;
+mod stream;
 
 pub use client::{Client, NamedRef, NoClock, NoSigner, RefPage, SignedEnvelope, Visibility};
 pub use connect::{
-    ChannelError, Clock, Destination, Detail, Error, HttpTransport, Identity, RemoteError, Reply,
-    Signer,
+    AdvertiseRequestTimeout, ChannelError, Clock, Destination, Detail, Error, HttpTransport,
+    Identity, RemoteError, Reply, RequestTimeout, Signer,
 };
 /// Challenge types carried by [`Error::PaymentRequired`].
 pub use mkit_core::protocol::{AdmissionChallengeEntry, AdmissionRequired};
@@ -28,3 +29,7 @@ pub use seams::{
     RequestContext, RequestHeaders, RequestPolicy, SignError, SigningRequest,
     UnsignedRequestContext, Veto, WriteIntent, is_reserved_header, procedures,
 };
+
+pub use stream::{RequestStream, ResponseStream};
+
+pub use seams::{FailureDiagnostic, FailureKind, FailureObserver, ResponseProfile};

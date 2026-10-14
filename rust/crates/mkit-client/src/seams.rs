@@ -393,6 +393,115 @@ pub struct UnsignedRequestContext<'a> {
     pub intent: Option<WriteIntent<'a>>,
 }
 
+/// Optional response acceptance and framing bounds selected by the host.
+/// Defaults preserve the client's strict response checks and existing limits.
+// Independent acceptance options, rather than mutually exclusive states.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
+pub struct ResponseProfile {
+    /// Omit the `ListRefs` page-size field when the caller selects zero.
+    pub omit_zero_page_size: bool,
+    /// Drop read hints that fail the canonical ref-name grammar.
+    pub ignore_invalid_ref_hints: bool,
+    /// Defer the final downloaded-byte hash check to the caller. Frame order,
+    /// chunk identity, offsets, declared size and resource limits still apply.
+    /// Hosts using this option must verify bytes before storing or trusting them.
+    pub skip_download_hash_verification: bool,
+    /// Accept every successful HTTP status rather than only 200.
+    pub allow_other_success_status: bool,
+    /// Accept an omitted response content type.
+    pub allow_missing_content_type: bool,
+    /// Accept content types beginning with the requested media type.
+    pub allow_content_type_prefix: bool,
+    /// Default absent error fields and normalize unknown codes by HTTP status.
+    pub allow_incomplete_error_fields: bool,
+    /// Accept a zero-byte coded HTTP body without requiring a coding envelope.
+    pub allow_empty_coded_body: bool,
+    /// Interpret omitted ReadRef/PackExists presence fields as false.
+    pub missing_presence_is_false: bool,
+    /// Expose bounded HTTP error bodies instead of refusing redirects locally.
+    /// Redirects are never followed.
+    pub expose_error_responses: bool,
+    /// Optional Connect data-frame cap, clamped to the response budget.
+    pub frame_limit: Option<usize>,
+    /// Optional end-frame and HTTP error-body cap, clamped to the response budget.
+    pub end_frame_limit: Option<usize>,
+}
+
+/// The stage that observed a response or channel failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FailureKind {
+    Http,
+    Headers,
+    Decode,
+    DecodeResourceLimit,
+    Channel,
+    RequestIo,
+    BodyIo,
+    Coding,
+    WireLimit,
+    InflatedLimit,
+}
+
+/// Borrowed, bounded evidence captured before a failure is simplified. Treat
+/// bodies, headers and diagnostic causes as untrusted and potentially sensitive.
+#[derive(Clone, Copy)]
+#[non_exhaustive]
+pub struct FailureDiagnostic<'a> {
+    pub procedure: &'a str,
+    pub kind: FailureKind,
+    pub status: Option<http::StatusCode>,
+    pub headers: Option<&'a HeaderMap>,
+    pub body: Option<&'a [u8]>,
+    /// Client-parsed error envelope, when the response supplied a valid one.
+    pub parsed_error: Option<&'a crate::RemoteError>,
+    pub cause: &'a str,
+    pub limit: Option<usize>,
+}
+
+impl<'a> FailureDiagnostic<'a> {
+    #[must_use]
+    pub fn new(procedure: &'a str, kind: FailureKind, cause: &'a str) -> Self {
+        Self {
+            procedure,
+            kind,
+            status: None,
+            headers: None,
+            body: None,
+            parsed_error: None,
+            cause,
+            limit: None,
+        }
+    }
+}
+
+impl std::fmt::Debug for FailureDiagnostic<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FailureDiagnostic")
+            .field("procedure", &self.procedure)
+            .field("kind", &self.kind)
+            .field("status", &self.status)
+            .field("limit", &self.limit)
+            .field("body_len", &self.body.map(<[u8]>::len))
+            .finish_non_exhaustive()
+    }
+}
+
+/// Host-owned failure classification and response acceptance. Mapping a failure
+/// does not retry the request; scheduling remains with the caller.
+pub trait FailureObserver {
+    /// Return an alternate error, or preserve the client's default failure.
+    fn map_failure(&self, _failure: &FailureDiagnostic<'_>) -> Option<Error> {
+        None
+    }
+    /// Select explicit response compatibility for this exchange.
+    fn response_profile(&self) -> ResponseProfile {
+        ResponseProfile::default()
+    }
+}
+
 /// The policy type of a client with no configured request policy.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoRequestPolicy;
@@ -408,6 +517,29 @@ impl RequestPolicy for NoRequestPolicy {
 /// recovery, helper execution, trust and grant verification remain in the host.
 /// This synchronous callback must not run a blocking admission helper.
 pub trait RequestPolicy {
+    /// Select a bounded response budget for this procedure. The default keeps
+    /// the primitive's caller-supplied limit unchanged.
+    fn response_limit(&self, _procedure: &str, default: usize) -> usize {
+        default
+    }
+    fn response_profile(&self, _procedure: &str) -> ResponseProfile {
+        ResponseProfile::default()
+    }
+    fn map_failure(&self, _failure: &FailureDiagnostic<'_>) -> Option<Error> {
+        None
+    }
+    /// Ask a native channel to advertise its actual, locally clamped I/O budget.
+    fn advertise_request_timeout(&self, _procedure: &str) -> bool {
+        false
+    }
+
+    /// Optionally shorten the channel's per-request I/O budget. This local
+    /// extension changes no headers or authenticated bytes. Hosts can clamp a
+    /// request to the remaining ticket or operation deadline.
+    fn request_timeout(&self, _procedure: &str) -> Option<std::time::Duration> {
+        None
+    }
+
     /// Select headers before the signer runs. A refusal prevents dispatch.
     ///
     /// # Errors

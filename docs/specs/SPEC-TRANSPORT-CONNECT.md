@@ -1046,22 +1046,20 @@ and with them the axum-hosted `TransportServer` of
 
 ### 7.3 Native CLI Connect client
 
-**Implemented** (mkit#701):
-[`mkit-transport-connect`](../../rust/crates/mkit-transport-connect/), a
-non-wasm Rust crate mirroring
-[`mkit-repo-client`](../../rust/crates/mkit-repo-client/Cargo.toml)'s
-"zero-duplication" codegen approach: compiled directly from the
-canonical `proto/mkit/transport/v1/transport.proto` via a
-workspace-relative path in `build.rs`, never a hand-copied proto or a
-hand-rolled URL builder. It differs from `mkit-repo-client` only in
-target: native (Tokio, `connectrpc`'s HTTP/native-TLS client
-transport, TLS trust via Mozilla `webpki-roots`) rather than wasm (Fetch API,
-`wasm-bindgen`), so it drops the wasm-only dependencies
-(`wasm-bindgen`, `web-sys`, `send_wrapper`) and enables `connectrpc`'s
-native client features instead. `ConnectTransport` bridges the
-synchronous `Transport` trait to the async generated client via
-`mkit_core::protocol::async_shim::Executor` (a dedicated tokio runtime
-per instance), mirroring `mkit-transport-enc`'s `TokioExecutor`.
+`mkit-client` owns the runtime-independent protocol implementation: canonical
+messages, signed envelopes, Connect framing, and response decoding.
+`mkit-sync::ClientSource` drives native repository operations over its per-RPC
+calls. The CLI routes `mkit+https` and `mkit+http` push, fetch, pull, and clone
+through that source.
+
+`mkit-transport-connect` retains the synchronous `Transport` API as a native
+host adapter. It supplies TLS, credentials, grants, admission recovery,
+scheduling, and progress callbacks. Its public epoch and visibility helpers
+also delegate to the protocol client. Native HTTP uses a current-thread runtime,
+HTTP/1.1, gzip or identity, and bounded streaming; the
+[adapter guide](../../rust/crates/mkit-transport-connect/README.md#native-behavior-differences)
+records differences from the previous native driver. These are implementation
+choices and do not change the normative wire contract.
 
 The native CLI accepts additional trusted PEM certificates from
 `http.sslCAInfo`; `MKIT_SSL_CA_FILE` takes precedence over that configuration
@@ -1092,7 +1090,7 @@ a deployment can require either, both, or neither:
   <token>` on every call. This is `mkit-transport-http`'s scheme
   (SPEC-TRANSPORT §5.2) and is what bearer-mode `mkit-server` deployments
   (§7.2) expect.
-- **Ed25519 envelope**: `EnvelopeTransport` signs the auth v2 contract
+- **Ed25519 envelope**: `mkit-client` signs the auth v2 contract
   in §7.1 for reads and writes, with an exact request body commitment for
   reads and unary writes, including the framed `DownloadPack` request, and
   the declared pack id and length for streaming `UploadPack` writes.

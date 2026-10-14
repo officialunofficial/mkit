@@ -356,17 +356,58 @@ pub fn open_trusted(
     repo_chosen: bool,
     cfg: &crate::config::LayeredConfig,
     layout: &RepoLayout,
-) -> Result<Arc<dyn Transport>, DispatchError> {
+) -> Result<Remote, DispatchError> {
     crate::config::endpoint_credential_trust(cfg, endpoint, repo_chosen)
         .map_err(DispatchError::UntrustedRemote)?;
     open_with_config_for_remote(endpoint, &cfg.merged, layout, Some(remote_name))
+}
+
+/// A configured native remote. Connect operations use `ClientSource`; other
+/// schemes retain their synchronous transport adapter.
+pub enum Remote {
+    Connect(Arc<ConnectTransport>),
+    Transport(Arc<dyn Transport>),
+}
+
+impl std::fmt::Debug for Remote {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Remote")
+            .field("connect", &matches!(self, Self::Connect(_)))
+            .finish_non_exhaustive()
+    }
+}
+
+impl Remote {
+    /// Lend the configured source for one repository operation.
+    ///
+    /// # Errors
+    /// The host adapter cannot prepare the operation.
+    pub fn with_source<R>(
+        &self,
+        operation: impl FnOnce(&dyn mkit_sync::RemoteSource) -> R,
+    ) -> Result<R, DispatchError> {
+        match self {
+            Self::Connect(transport) => transport.with_source(operation).map_err(Into::into),
+            Self::Transport(transport) => Ok(operation(&cli_source(transport.as_ref()))),
+        }
+    }
+
+    /// Bounds used for interruption guidance, from cached discovery.
+    #[must_use]
+    pub fn upload_limits(&self) -> mkit_core::protocol::UploadLimits {
+        match self {
+            Self::Connect(transport) => transport.upload_limits(),
+            Self::Transport(transport) => transport.upload_limits(),
+        }
+    }
 }
 
 /// A remote opened for `mkit push`: the transport, and (for a signing Connect
 /// client) the check that its stored grants authorize every advance of a split
 /// push.
 pub(crate) struct PushRemote {
-    pub tx: Arc<dyn Transport>,
+    pub tx: Remote,
     pub authority: Option<Arc<dyn StepAuthority>>,
 }
 
@@ -402,7 +443,10 @@ pub(crate) fn open_trusted_for_push(
                 signer_key,
             }) as Arc<dyn StepAuthority>
         });
-    Ok(PushRemote { tx, authority })
+    Ok(PushRemote {
+        tx: Remote::Connect(tx),
+        authority,
+    })
 }
 
 /// The single chokepoint that resolves SSH trust-pinning (issue #389) and
@@ -417,7 +461,7 @@ pub(crate) fn open_with_config(
     url: &str,
     cfg: &crate::config::Config,
     layout: &RepoLayout,
-) -> Result<Arc<dyn Transport>, DispatchError> {
+) -> Result<Remote, DispatchError> {
     open_with_config_for_remote(url, cfg, layout, None)
 }
 
@@ -426,17 +470,17 @@ fn open_with_config_for_remote(
     cfg: &crate::config::Config,
     layout: &RepoLayout,
     remote_name: Option<&str>,
-) -> Result<Arc<dyn Transport>, DispatchError> {
+) -> Result<Remote, DispatchError> {
     if is_connect_url(url) {
-        return Ok(Arc::new(open_connect_with_config(
+        return Ok(Remote::Connect(Arc::new(open_connect_with_config(
             url,
             cfg,
             layout,
             remote_name,
             true,
-        )?));
+        )?)));
     }
-    open_with_ssh_options(url, &ssh_options_from_config(cfg), None)
+    open_with_ssh_options(url, &ssh_options_from_config(cfg), None).map(Remote::Transport)
 }
 
 fn is_connect_url(url: &str) -> bool {
@@ -930,12 +974,22 @@ pub fn push_all_with(
     force: bool,
     authority: Option<&dyn StepAuthority>,
 ) -> Result<Pushed, DispatchError> {
+    push_all_with_source(cwd, &cli_source(tx), remote, force, authority)
+}
+
+pub(crate) fn push_all_with_source(
+    cwd: &Path,
+    source: &dyn mkit_sync::RemoteSource,
+    remote: Option<&str>,
+    force: bool,
+    authority: Option<&dyn StepAuthority>,
+) -> Result<Pushed, DispatchError> {
     let (mut options, warning) = push_options(cwd, authority)?;
     let observer = PushObserver { warning };
     options.control.observer = &observer;
     options.remote_name = remote.unwrap_or(DEFAULT_REMOTE);
     options.target = mkit_sync::PushTarget::All { force };
-    let report = mkit_sync::push(cwd, &cli_source(tx), &options)?;
+    let report = mkit_sync::push(cwd, source, &options)?;
     Ok(Pushed {
         refs: report.refs,
         steps: report.steps,
@@ -1017,6 +1071,27 @@ pub fn push_branch_tracked(
     lease: PushLease,
     authority: Option<&dyn StepAuthority>,
 ) -> Result<(Hash, usize), DispatchError> {
+    push_branch_tracked_source(
+        cwd,
+        &cli_source(tx),
+        remote,
+        branch,
+        remote_branch,
+        lease,
+        authority,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_branch_tracked_source(
+    cwd: &Path,
+    source: &dyn mkit_sync::RemoteSource,
+    remote: &str,
+    branch: &str,
+    remote_branch: &str,
+    lease: PushLease,
+    authority: Option<&dyn StepAuthority>,
+) -> Result<(Hash, usize), DispatchError> {
     let (mut options, warning) = push_options(cwd, authority)?;
     let observer = PushObserver { warning };
     options.control.observer = &observer;
@@ -1026,7 +1101,7 @@ pub fn push_branch_tracked(
         remote: remote_branch.into(),
         lease,
     };
-    let report = mkit_sync::push(cwd, &cli_source(tx), &options)?;
+    let report = mkit_sync::push(cwd, source, &options)?;
     Ok((report.tip.ok_or(DispatchError::NotCommit)?, report.steps))
 }
 
@@ -1205,9 +1280,18 @@ pub fn pull_all_with(
     target_branch: Option<&str>,
     require_signed: bool,
 ) -> Result<usize, DispatchError> {
+    pull_all_with_source(cwd, &cli_source(tx), remote, target_branch, require_signed)
+}
+
+pub(crate) fn pull_all_with_source(
+    cwd: &Path,
+    source: &dyn mkit_sync::RemoteSource,
+    remote: &str,
+    target_branch: Option<&str>,
+    require_signed: bool,
+) -> Result<usize, DispatchError> {
     let options = sync_options(cwd, target_branch, require_signed)?;
-    let source = cli_source(tx);
-    let report = mkit_sync::pull(cwd, &source, remote, &options, &CliObserver)?;
+    let report = mkit_sync::pull(cwd, source, remote, &options, &CliObserver)?;
     Ok(report.fetch.branches_fetched)
 }
 
@@ -1229,9 +1313,17 @@ pub fn fetch_all_with(
     remote: &str,
     require_signed: bool,
 ) -> Result<usize, DispatchError> {
+    fetch_all_with_source(cwd, &cli_source(tx), remote, require_signed)
+}
+
+pub(crate) fn fetch_all_with_source(
+    cwd: &Path,
+    source: &dyn mkit_sync::RemoteSource,
+    remote: &str,
+    require_signed: bool,
+) -> Result<usize, DispatchError> {
     let options = sync_options(cwd, None, require_signed)?;
-    let source = cli_source(tx);
-    let report = mkit_sync::fetch(cwd, &source, remote, &options, &CliObserver)?;
+    let report = mkit_sync::fetch(cwd, source, remote, &options, &CliObserver)?;
     Ok(report.branches_fetched)
 }
 
@@ -1354,6 +1446,12 @@ impl From<mkit_sync::SourceError> for DispatchError {
             S::AdmissionConfiguration(value) => TransportError::AdmissionConfiguration(value),
             S::TlsConfiguration(value) => TransportError::TlsConfiguration(value),
             S::AdmissionHelperFailed(value) => TransportError::AdmissionHelperFailed(value),
+            S::RemoteError(value) if value.starts_with("upload interrupted; ") => {
+                return Self::UploadInterrupted(value);
+            }
+            S::RemoteError(value) if value == PENDING_INTERRUPTED_MESSAGE => {
+                return Self::Interrupted;
+            }
             S::RemoteError(value) => TransportError::RemoteError(value),
             S::RefConflict => TransportError::RefConflict,
             S::InvalidRef(value) => TransportError::InvalidRef(value),
@@ -1651,16 +1749,14 @@ mod tests {
                 ..Config::default()
             };
             let error = super::open_with_config(endpoint, &cfg, &layout)
-                .err()
-                .expect("untrusted signing must fail");
+                .expect_err("untrusted signing must fail");
             assert!(
                 matches!(error, super::DispatchError::UntrustedRemote(_)),
                 "destination rejection must precede key access: {error}"
             );
             cfg.trusted_remote_endpoint = endpoint.into();
             let error = super::open_with_config(endpoint, &cfg, &layout)
-                .err()
-                .expect("trusted endpoint now resolves the absent key");
+                .expect_err("trusted endpoint now resolves the absent key");
             assert!(
                 error.to_string().contains("requires a signing key"),
                 "trusted destination should reach key resolution: {error}"
@@ -1674,8 +1770,7 @@ mod tests {
         let layout = RepoLayout::single(directory.path());
         let url = "mkit+https://host/Uppercase";
         let error = super::open_with_config(url, &Config::default(), &layout)
-            .err()
-            .expect("uppercase repository identity must be rejected");
+            .expect_err("uppercase repository identity must be rejected");
         assert!(
             matches!(error, super::DispatchError::MalformedUrl(_)),
             "expected malformed URL, got {error:?}"

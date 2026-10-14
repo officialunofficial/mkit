@@ -196,16 +196,85 @@ impl<
         Ok(self)
     }
 
+    /// Download a pack without a read-your-writes ref hint.
+    ///
+    /// # Errors
+    /// Transport, remote, size or content-integrity failures.
+    pub fn download_pack_unhinted(&self, key: &PackKey) -> Result<Vec<u8>, SourceError> {
+        self.write_call("DownloadPack", false, None, |identity| {
+            self.executor.block_on(self.client.download_pack(
+                &key.into_hash(),
+                None,
+                mkit_core::protocol::PACK_BODY_LIMIT,
+                identity,
+            ))
+        })
+        .map(|reply| reply.value)
+    }
+
+    /// Test pack membership without a ref hint.
+    ///
+    /// # Errors
+    /// Transport, remote or invalid-response failures.
+    pub fn pack_exists(&self, key: &PackKey) -> Result<bool, SourceError> {
+        self.pack_exists_with_hint(key, None)
+    }
+
+    /// Test pack membership with a read-your-writes ref hint.
+    ///
+    /// # Errors
+    /// Transport, remote or invalid-response failures.
+    pub fn pack_exists_via_ref(&self, key: &PackKey, name: &str) -> Result<bool, SourceError> {
+        self.pack_exists_with_hint(key, Some(name))
+    }
+
+    fn pack_exists_with_hint(
+        &self,
+        key: &PackKey,
+        hint: Option<&str>,
+    ) -> Result<bool, SourceError> {
+        match self.write_call("PackExists", false, None, |identity| {
+            self.executor
+                .block_on(self.client.pack_exists(&key.into_hash(), hint, identity))
+        }) {
+            Ok(reply) => Ok(reply.value),
+            Err(SourceError::Remote(remote)) if remote.code == "not_found" => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
     fn list_branches_with_page_limit(&self, max_pages: u32) -> Result<Vec<Ref>, SourceError> {
+        self.list_refs_with_page_limit("refs/heads/", max_pages)
+    }
+
+    /// List every ref under `prefix`, following bounded, ordered pages.
+    ///
+    /// # Errors
+    /// Remote failures or an invalid, repeated or unordered listing page.
+    pub fn list_refs(&self, prefix: &str) -> Result<Vec<Ref>, SourceError> {
+        self.list_refs_with_page_limit(prefix, mkit_core::ref_listing::MAX_PAGES)
+    }
+
+    /// List refs with an explicit maximum number of pages.
+    ///
+    /// # Errors
+    /// Remote failures, invalid page ordering or an exhausted page bound.
+    pub fn list_refs_with_page_limit(
+        &self,
+        prefix: &str,
+        max_pages: u32,
+    ) -> Result<Vec<Ref>, SourceError> {
         let mut listing = mkit_core::ref_listing::RefListing::new(max_pages);
         while listing.can_request() {
             let reply = self
-                .executor
-                .block_on(
-                    self.client
-                        .list_refs("refs/heads/", 0, listing.cursor(), None),
-                )
-                .map_err(source_error)?
+                .write_call("ListRefs", false, None, |identity| {
+                    self.executor.block_on(self.client.list_refs(
+                        prefix,
+                        0,
+                        listing.cursor(),
+                        identity,
+                    ))
+                })?
                 .value;
             let page = reply
                 .refs
@@ -315,33 +384,37 @@ impl<
     }
 
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError> {
-        match self.executor.block_on(self.client.read_ref(name, None)) {
+        match self.write_call("ReadRef", false, None, |identity| {
+            self.executor.block_on(self.client.read_ref(name, identity))
+        }) {
             Ok(reply) => Ok(reply.value),
-            Err(ClientError::Remote(remote)) if remote.code == "not_found" => Ok(None),
-            Err(error) => Err(source_error(error)),
+            Err(SourceError::Remote(remote)) if remote.code == "not_found" => Ok(None),
+            Err(error) => Err(error),
         }
     }
 
     fn download_blob_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
-        self.executor
-            .block_on(
-                self.client
-                    .download_pack(&key.into_hash(), Some(ref_name), NODE_LIMIT, None),
-            )
-            .map(|reply| reply.value)
-            .map_err(source_error)
+        self.write_call("DownloadPack", false, None, |identity| {
+            self.executor.block_on(self.client.download_pack(
+                &key.into_hash(),
+                Some(ref_name),
+                NODE_LIMIT,
+                identity,
+            ))
+        })
+        .map(|reply| reply.value)
     }
 
     fn download_pack_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
-        self.executor
-            .block_on(self.client.download_pack(
+        self.write_call("DownloadPack", false, None, |identity| {
+            self.executor.block_on(self.client.download_pack(
                 &key.into_hash(),
                 Some(ref_name),
                 mkit_core::protocol::PACK_BODY_LIMIT,
-                None,
+                identity,
             ))
-            .map(|reply| reply.value)
-            .map_err(source_error)
+        })
+        .map(|reply| reply.value)
     }
 
     fn repository_address(&self) -> Option<(String, String)> {

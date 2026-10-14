@@ -1,18 +1,10 @@
-# mkit-transport-connect — the native (non-wasm) ConnectRPC CLIENT of
-# `mkit.transport.v1.TransportService` (SPEC-TRANSPORT-CONNECT), implementing
-# `Transport` itself: the implementation behind the `mkit+https://` /
-# loopback `mkit+http://` remote scheme in `mkit-cli`'s `remote_dispatch`.
-#
-# The server is `mkit-server`'s pipeline (hosted on Workers by
-# `mkit-server-worker`). This crate's former `server` feature (the axum-hosted
-# `TransportServer` behind `mkit serve --http`) was removed with that flag
-# (WP-M0-15, a breaking change: the next release is 0.5).
-#
-# Shared wire types and Connect bindings are owned by mkit-rpc's opt-in
-# transport feature; this crate adds the native/TLS client runtime.
+# Native Transport and host-policy adapter over mkit-client's canonical
+# mkit.transport.v1 per-RPC implementation. The CLI lends ClientSource for
+# repository operations; remaining Transport callers keep this facade.
+# Generated bindings and pooled HTTP utilities remain public compatibility APIs.
 [package]
 name = "mkit-transport-connect"
-description = "Native ConnectRPC client for mkit.transport.v1 (SPEC-TRANSPORT-CONNECT): the mkit+https:// remote transport"
+description = "Native Transport and host-policy adapter over the mkit-client Connect protocol implementation"
 keywords = ["mkit", "vcs", "transport", "connectrpc", "client"]
 categories = ["network-programming", "web-programming::http-client"]
 readme = "README.md"
@@ -30,6 +22,7 @@ authors.workspace = true
 all = { level = "warn", priority = -1 }
 
 [dependencies]
+mkit-sync = { version = "0.5", path = "../mkit-sync", default-features = false, features = ["connect-native"] }
 mkit-client = { version = "0.5", path = "../mkit-client", default-features = false }
 mkit-rpc = { version = "0.5", path = "../mkit-rpc", features = ["transport"] }
 # Inter-workspace deps need explicit version + path so `cargo publish`

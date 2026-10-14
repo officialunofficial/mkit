@@ -200,9 +200,9 @@ fn cleartext_http_to_a_non_loopback_host_is_refused_unless_allowed() {
 #[test]
 fn two_sequential_requests_work_against_a_server_that_closes_after_each_response() {
     // Keep-alive on the wire (no `connection: close`), then the server closes
-    // the socket: the second request must still succeed. (hyper also notices a
-    // closed idle connection at checkout, so this is a behaviour check, not a
-    // guard for the disabled pool, which is a conservative choice.)
+    // the socket: the second request must still succeed when the current-thread
+    // runtime resumes. A closed idle connection is discarded at checkout or
+    // recovered through hyper's untouched-request cancellation retry.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     std::thread::spawn(move || {
@@ -221,6 +221,135 @@ fn two_sequential_requests_work_against_a_server_that_closes_after_each_response
     // Time for the server's close to reach the client.
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(send(&http, &url, 1024).unwrap().body(), b"ok");
+}
+
+#[test]
+fn sequential_reads_and_signed_writes_reuse_a_connection() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let mut connections = 0;
+        let mut requests = Vec::new();
+        while requests.len() < 3 {
+            let (mut socket, _) = listener.accept().unwrap();
+            connections += 1;
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            loop {
+                let request = read_request(&mut socket);
+                if request.is_empty() {
+                    break;
+                }
+                requests.push(request);
+                socket
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+                    .unwrap();
+                if requests.len() == 3 {
+                    return (connections, requests);
+                }
+            }
+        }
+        (connections, requests)
+    });
+    let http = NativeHttp::new().unwrap();
+    for procedure in ["ListRefs", "ReadRef", "UpdateRef"] {
+        let request = Request::post(format!(
+            "http://{address}/mkit.transport.v1.TransportService/{procedure}"
+        ))
+        .header("x-signature", "fixed-signature")
+        .header("idempotency-key", "fixed-nonce")
+        .body(b"same signed bytes".to_vec())
+        .unwrap();
+        assert_eq!(
+            http.block_on(http.send(request, 1024)).unwrap().body(),
+            b"ok"
+        );
+    }
+    drop(http);
+    let (connections, requests) = server.join().unwrap();
+    assert_eq!(connections, 1, "each RPC must not pay another handshake");
+    assert_eq!(requests.len(), 3);
+    for request in requests {
+        assert!(request.ends_with(b"same signed bytes"));
+        assert!(String::from_utf8_lossy(&request).contains("x-signature: fixed-signature"));
+    }
+}
+
+#[test]
+fn a_signed_request_received_before_disconnect_is_not_replayed_by_the_pool() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        read_request(&mut socket);
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+            .unwrap();
+        // The write is deliberately received in full, then loses its reply.
+        // Allow a separate connection on the unfixed transport so this also
+        // tests the parent without hanging.
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut written = read_request(&mut socket);
+        if written.is_empty() {
+            (socket, _) = listener.accept().unwrap();
+            written = read_request(&mut socket);
+        }
+        drop(socket);
+        listener.set_nonblocking(true).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(listener.accept().is_err(), "a written request was replayed");
+        written
+    });
+    let http = NativeHttp::new()
+        .unwrap()
+        .with_timeout(Duration::from_secs(2));
+    assert_eq!(
+        send(&http, &format!("http://{address}/"), 1024)
+            .unwrap()
+            .body(),
+        b"ok"
+    );
+    let request = Request::post(format!(
+        "http://{address}/mkit.transport.v1.TransportService/UpdateRef"
+    ))
+    .header("x-signature", "fixed-signature")
+    .header("idempotency-key", "fixed-nonce")
+    .body(b"signed mutation".to_vec())
+    .unwrap();
+    assert!(http.block_on(http.send(request, 1024)).is_err());
+    let written = server.join().unwrap();
+    assert!(written.ends_with(b"signed mutation"));
+    assert!(String::from_utf8_lossy(&written).contains("idempotency-key: fixed-nonce"));
+}
+
+#[test]
+fn an_idle_connection_expires_while_the_current_thread_runtime_is_paused() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut first, _) = listener.accept().unwrap();
+        read_request(&mut first);
+        first
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+            .unwrap();
+        // Keep the old connection open: only expiration can force checkout
+        // onto the second connection, even with no runtime driving idle tasks.
+        let (mut second, _) = listener.accept().unwrap();
+        read_request(&mut second);
+        second.write_all(&response("200 OK", &[], b"new")).unwrap();
+        drop(first);
+    });
+    let http = NativeHttp::new()
+        .unwrap()
+        .with_timeout(Duration::from_secs(2));
+    let url = format!("http://{address}/");
+    assert_eq!(send(&http, &url, 1024).unwrap().body(), b"ok");
+    std::thread::sleep(Duration::from_millis(10_100));
+    assert_eq!(send(&http, &url, 1024).unwrap().body(), b"new");
+    server.join().unwrap();
 }
 
 #[test]
@@ -438,5 +567,604 @@ fn actual_response_timeout_preserves_terminal_deadline_class() {
     assert!(matches!(
         send_classified(&http, &url, 1024),
         Err(ChannelError::TimedOut(cause)) if cause == "client-side deadline exceeded"
+    ));
+}
+
+struct StreamingBody(std::vec::IntoIter<Vec<u8>>);
+impl mkit_client::RequestStream for StreamingBody {
+    fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, mkit_client::Error> {
+        Ok(self.0.next())
+    }
+}
+
+#[derive(Default)]
+struct StreamingReply {
+    bytes: Vec<u8>,
+    largest_chunk: usize,
+    first_chunk: Option<std::sync::mpsc::Sender<()>>,
+}
+impl mkit_client::ResponseStream for StreamingReply {
+    fn start(&mut self, response: http::Response<()>) -> Result<(), mkit_client::Error> {
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get("content-encoding").is_none());
+        Ok(())
+    }
+    fn chunk(&mut self, bytes: &[u8]) -> Result<(), mkit_client::Error> {
+        if !bytes.is_empty()
+            && let Some(sender) = self.first_chunk.take()
+        {
+            sender.send(()).unwrap();
+        }
+        self.largest_chunk = self.largest_chunk.max(bytes.len());
+        self.bytes.extend_from_slice(bytes);
+        Ok(())
+    }
+    fn finish(&mut self) -> Result<(), mkit_client::Error> {
+        Ok(())
+    }
+}
+
+fn read_chunked_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
+    use std::io::BufRead as _;
+    let mut reader = std::io::BufReader::new(stream);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        if line == "\r\n" {
+            break;
+        }
+        assert!(!line.is_empty());
+    }
+    let mut body = Vec::new();
+    loop {
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        let size = usize::from_str_radix(line.trim(), 16).unwrap();
+        if size == 0 {
+            reader.read_line(&mut String::new()).unwrap();
+            return body;
+        }
+        let offset = body.len();
+        body.resize(offset + size, 0);
+        reader.read_exact(&mut body[offset..]).unwrap();
+        let mut end = [0; 2];
+        reader.read_exact(&mut end).unwrap();
+        assert_eq!(&end, b"\r\n");
+    }
+}
+
+#[test]
+fn streaming_upload_delivers_each_pulled_chunk_without_changing_bytes() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let body = read_chunked_request(&mut socket);
+        socket.write_all(&response("200 OK", &[], b"done")).unwrap();
+        body
+    });
+    let http = NativeHttp::new().unwrap();
+    let mut body = StreamingBody(vec![vec![1; 8192], vec![2; 8192], vec![3; 8192]].into_iter());
+    let request = Request::post(format!("http://{address}/"))
+        .body(())
+        .unwrap();
+    let mut reply = StreamingReply::default();
+    http.block_on(http.send_stream(request, &mut body, 1024, &mut reply))
+        .unwrap();
+    assert_eq!(reply.bytes, b"done");
+    assert_eq!(
+        server.join().unwrap(),
+        [vec![1; 8192], vec![2; 8192], vec![3; 8192]].concat()
+    );
+}
+
+#[test]
+fn a_streamed_signed_write_survives_an_idle_close_without_changing_its_body() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut first, _) = listener.accept().unwrap();
+        read_request(&mut first);
+        first
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+            .unwrap();
+        drop(first);
+        closed_tx.send(()).unwrap();
+        let (mut second, _) = listener.accept().unwrap();
+        let bytes = read_chunked_request(&mut second);
+        second.write_all(&response("200 OK", &[], b"done")).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(listener.accept().is_err(), "streamed request was replayed");
+        bytes
+    });
+    let http = NativeHttp::new()
+        .unwrap()
+        .with_timeout(Duration::from_secs(2));
+    assert_eq!(
+        send(&http, &format!("http://{address}/"), 1024)
+            .unwrap()
+            .body(),
+        b"ok"
+    );
+    // The owned current-thread runtime is paused while the server closes.
+    closed_rx.recv().unwrap();
+    let chunks = vec![vec![1; 8192], vec![2; 8192], vec![3; 8192]];
+    let mut body = StreamingBody(chunks.clone().into_iter());
+    let request = Request::post(format!(
+        "http://{address}/mkit.transport.v1.TransportService/UploadPack"
+    ))
+    .header("x-signature", "fixed-signature")
+    .header("idempotency-key", "fixed-nonce")
+    .body(())
+    .unwrap();
+    let mut reply = StreamingReply::default();
+    http.block_on(http.send_stream(request, &mut body, 1024, &mut reply))
+        .unwrap();
+    assert_eq!(reply.bytes, b"done");
+    assert_eq!(server.join().unwrap(), chunks.concat());
+}
+
+#[test]
+fn a_partial_response_does_not_contaminate_the_next_exchange() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut first, _) = listener.accept().unwrap();
+        read_request(&mut first);
+        first
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 8\r\n\r\nshort")
+            .unwrap();
+        drop(first);
+        let (mut second, _) = listener.accept().unwrap();
+        read_request(&mut second);
+        second
+            .write_all(&response("200 OK", &[], b"clean"))
+            .unwrap();
+    });
+    let http = NativeHttp::new()
+        .unwrap()
+        .with_timeout(Duration::from_secs(2));
+    let url = format!("http://{address}/");
+    assert!(send(&http, &url, 1024).is_err());
+    assert_eq!(send(&http, &url, 1024).unwrap().body(), b"clean");
+    server.join().unwrap();
+}
+
+#[test]
+fn streaming_response_is_delivered_before_the_server_finishes_sending() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        read_chunked_request(&mut socket);
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 8192\r\nconnection: close\r\n\r\n")
+            .unwrap();
+        socket.write_all(&vec![1; 4096]).unwrap();
+        socket.flush().unwrap();
+        let observed = receiver.recv_timeout(Duration::from_secs(10)).is_ok();
+        socket.write_all(&vec![2; 4096]).unwrap();
+        observed
+    });
+    let http = NativeHttp::new().unwrap();
+    let request = Request::post(format!("http://{address}/"))
+        .body(())
+        .unwrap();
+    let mut body = StreamingBody(vec![b"request".to_vec()].into_iter());
+    let mut reply = StreamingReply {
+        first_chunk: Some(sender),
+        ..Default::default()
+    };
+    http.block_on(http.send_stream(request, &mut body, 8192, &mut reply))
+        .unwrap();
+    assert!(
+        server.join().unwrap(),
+        "response was buffered before delivery"
+    );
+    assert_eq!(reply.bytes, [vec![1; 4096], vec![2; 4096]].concat());
+}
+
+#[test]
+fn streaming_gzip_is_incremental_and_enforces_both_bounds_and_checksum() {
+    for kind in ["valid", "inflated limit", "wire limit", "checksum"] {
+        let data = vec![7; 128 * 1024];
+        let mut compressed = gzip(&data);
+        if kind == "checksum" {
+            let last = compressed.len() - 1;
+            compressed[last] ^= 1;
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            read_chunked_request(&mut socket);
+            let _ = socket.write_all(&response(
+                "200 OK",
+                &[("content-encoding", "gzip")],
+                &compressed,
+            ));
+        });
+        let http = NativeHttp::new().unwrap();
+        let request = Request::post(format!("http://{address}/"))
+            .body(())
+            .unwrap();
+        let mut body = StreamingBody(vec![b"request".to_vec()].into_iter());
+        let mut reply = StreamingReply::default();
+        let limit = match kind {
+            "inflated limit" => 4096,
+            "wire limit" => 16,
+            _ => data.len(),
+        };
+        let result = http.block_on(http.send_stream(request, &mut body, limit, &mut reply));
+        if kind == "valid" {
+            result.unwrap();
+            assert_eq!(reply.bytes, data);
+            assert!(reply.largest_chunk < data.len());
+        } else {
+            assert!(matches!(result, Err(mkit_client::Error::Transport(_))));
+        }
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn native_host_header_defaults_reach_requests_and_preserve_explicit_values() {
+    let mut defaults = http::HeaderMap::new();
+    defaults.insert("authorization", "Bearer default".parse().unwrap());
+    let http = NativeHttp::new().unwrap().with_default_headers(defaults);
+    for explicit in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let request = read_request(&mut socket);
+            socket.write_all(&response("200 OK", &[], b"ok")).unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        let mut request = Request::post(format!("http://{address}/"))
+            .body(Vec::new())
+            .unwrap();
+        if explicit {
+            request
+                .headers_mut()
+                .insert("authorization", "Bearer explicit".parse().unwrap());
+        }
+        http.block_on(http.send(request, 1024)).unwrap();
+        let wire = server.join().unwrap();
+        assert!(wire.contains(if explicit {
+            "authorization: Bearer explicit\r\n"
+        } else {
+            "authorization: Bearer default\r\n"
+        }));
+    }
+}
+
+#[test]
+fn request_timeout_extension_shortens_buffered_and_streaming_exchange_budgets() {
+    for streaming in [false, true] {
+        let url = respond_once(
+            b"HTTP/1.1 200 OK\r\ncontent-length: 10\r\n\r\n".to_vec(),
+            true,
+        );
+        let http = NativeHttp::new()
+            .unwrap()
+            .with_timeout(Duration::from_secs(30));
+        let elapsed = std::time::Instant::now();
+        let result = if streaming {
+            let mut request = Request::post(url).body(()).unwrap();
+            request
+                .extensions_mut()
+                .insert(mkit_client::RequestTimeout(Duration::from_millis(100)));
+            let mut body = StreamingBody(vec![b"request".to_vec()].into_iter());
+            let mut reply = StreamingReply::default();
+            http.block_on(http.send_stream(request, &mut body, 1024, &mut reply))
+        } else {
+            let mut request = Request::post(url).body(b"request".to_vec()).unwrap();
+            request
+                .extensions_mut()
+                .insert(mkit_client::RequestTimeout(Duration::from_millis(100)));
+            http.block_on(http.send_classified(request, 1024))
+                .map(|_| ())
+                .map_err(|error| match error {
+                    mkit_client::ChannelError::Transient(cause) => {
+                        mkit_client::Error::Connection(cause)
+                    }
+                    mkit_client::ChannelError::TimedOut(cause) => {
+                        mkit_client::Error::RequestTimeout(cause)
+                    }
+                    other => mkit_client::Error::Transport(other.to_string()),
+                })
+        };
+        assert!(
+            matches!(result, Err(mkit_client::Error::RequestTimeout(cause)) if cause == "client-side deadline exceeded")
+        );
+        assert!(elapsed.elapsed() < Duration::from_secs(3));
+    }
+}
+
+#[test]
+fn an_early_admission_reply_keeps_its_typed_challenge_after_upload_receiver_closes() {
+    use mkit_client::{Client, Destination, Error, RequestStream, ResponseStream};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct InfiniteBody<'a>(&'a AtomicUsize);
+    impl RequestStream for InfiniteBody<'_> {
+        fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, Error> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(Some(vec![0; 1024 * 1024]))
+        }
+    }
+    struct InfiniteChannel<'a> {
+        http: &'a NativeHttp,
+        produced: AtomicUsize,
+    }
+    impl HttpTransport for InfiniteChannel<'_> {
+        async fn send(
+            &self,
+            request: Request<Vec<u8>>,
+            limit: usize,
+        ) -> Result<http::Response<Vec<u8>>, String> {
+            self.http.send(request, limit).await
+        }
+        async fn send_stream<B: RequestStream + ?Sized, S: ResponseStream + ?Sized>(
+            &self,
+            request: Request<()>,
+            _: &mut B,
+            limit: usize,
+            sink: &mut S,
+        ) -> Result<(), Error> {
+            self.http
+                .send_stream(request, &mut InfiniteBody(&self.produced), limit, sink)
+                .await
+        }
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (finished_sender, finished_receiver) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        // Read the request head only; admission happens before body consumption.
+        read_request(&mut socket);
+        let error = br#"{"code":"permission_denied","message":"admission"}"#;
+        socket.write_all(format!(
+            "HTTP/1.1 402 Payment Required\r\ncontent-length: {}\r\nwww-authenticate: test challenge\r\nconnection: close\r\n\r\n",
+            error.len()
+        ).as_bytes()).unwrap();
+        socket.flush().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        socket.write_all(error).unwrap();
+        socket.flush().unwrap();
+        // Keep the socket alive until the client decodes the response, avoiding
+        // a TCP reset caused by closing with unread upload bytes.
+        finished_receiver
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap();
+    });
+    let http = NativeHttp::new()
+        .unwrap()
+        .with_timeout(Duration::from_secs(3));
+    let channel = InfiniteChannel {
+        http: &http,
+        produced: AtomicUsize::new(0),
+    };
+    let destination = Destination::new(format!("http://{address}"), "default".to_owned()).unwrap();
+    let client = Client::anonymous(&channel, destination).with_unsigned_writes();
+    let key = mkit_core::pack::pack_key(b"pack");
+    let result = http.block_on(client.upload_pack(&key, b"pack", None, None));
+    finished_sender.send(()).unwrap();
+    server.join().unwrap();
+    assert!(
+        matches!(result, Err(Error::PaymentRequired(required)) if required.www_authenticate == ["test challenge"])
+    );
+    assert!(
+        channel.produced.load(Ordering::Relaxed) < 64,
+        "producer was not bounded by backpressure"
+    );
+}
+
+type CapturedNativeFailure = (
+    mkit_client::FailureKind,
+    u16,
+    String,
+    Vec<u8>,
+    Option<String>,
+);
+#[derive(Default)]
+struct FailureCapture(std::cell::RefCell<Vec<CapturedNativeFailure>>);
+impl mkit_client::FailureObserver for FailureCapture {
+    fn map_failure(
+        &self,
+        failure: &mkit_client::FailureDiagnostic<'_>,
+    ) -> Option<mkit_client::Error> {
+        self.0.borrow_mut().push((
+            failure.kind,
+            failure.status.map_or(0, |status| status.as_u16()),
+            failure.cause.to_owned(),
+            failure.body.unwrap_or_default().to_vec(),
+            failure
+                .headers
+                .and_then(|headers| headers.get("content-encoding"))
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned),
+        ));
+        Some(mkit_client::Error::Transport(
+            "mapped native failure".to_owned(),
+        ))
+    }
+}
+
+#[test]
+fn diagnosed_coding_failure_preserves_status_headers_and_bounded_wire_body() {
+    let url = respond_once(
+        response("200 OK", &[("content-encoding", "br")], b"wire"),
+        false,
+    );
+    let http = NativeHttp::new().unwrap();
+    let observer = FailureCapture::default();
+    let request = Request::post(url).body(Vec::new()).unwrap();
+    let result = http.block_on(http.send_diagnosed(request, 16, &observer));
+    assert!(
+        matches!(result, Err(mkit_client::Error::Transport(message)) if message == "mapped native failure")
+    );
+    let failures = observer.0.borrow();
+    assert_eq!(
+        failures.as_slice(),
+        &[(
+            mkit_client::FailureKind::Coding,
+            200,
+            "br".to_owned(),
+            b"wire".to_vec(),
+            Some("br".to_owned())
+        )]
+    );
+}
+
+#[test]
+fn diagnosed_body_io_has_a_typed_cause_without_the_native_display_prefix() {
+    let url = respond_once(
+        b"HTTP/1.1 200 OK\r\ncontent-length: 5\r\nconnection: close\r\n\r\nhi".to_vec(),
+        false,
+    );
+    let http = NativeHttp::new().unwrap();
+    let observer = FailureCapture::default();
+    let result = http.block_on(http.send_diagnosed(
+        Request::post(url).body(Vec::new()).unwrap(),
+        16,
+        &observer,
+    ));
+    assert!(matches!(result, Err(mkit_client::Error::Transport(_))));
+    let failures = observer.0.borrow();
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].0, mkit_client::FailureKind::BodyIo);
+    assert_eq!(failures[0].1, 200);
+    assert!(!failures[0].2.starts_with("response body:"));
+    assert!(!failures[0].2.is_empty());
+}
+
+#[test]
+fn timeout_advertisement_is_opt_in_and_uses_the_clamped_budget() {
+    for advertise in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            sender.send(read_request(&mut stream)).unwrap();
+            stream.write_all(&response("200 OK", &[], b"ok")).unwrap();
+        });
+        let http = NativeHttp::new()
+            .unwrap()
+            .with_timeout(Duration::from_secs(10));
+        let mut request = Request::post(format!("http://{address}/"))
+            .body(Vec::new())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(mkit_client::RequestTimeout(Duration::from_micros(
+                1_234_567,
+            )));
+        if advertise {
+            request
+                .extensions_mut()
+                .insert(mkit_client::AdvertiseRequestTimeout);
+        }
+        http.block_on(http.send(request, 16)).unwrap();
+        let request = String::from_utf8(receiver.recv_timeout(Duration::from_secs(2)).unwrap())
+            .unwrap()
+            .to_ascii_lowercase();
+        assert_eq!(request.contains("connect-timeout-ms: 1234\r\n"), advertise);
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn diagnosed_wire_limit_never_exposes_more_than_the_selected_budget() {
+    let url = respond_once(response("200 OK", &[], &[0; 17]), false);
+    let http = NativeHttp::new().unwrap();
+    let observer = FailureCapture::default();
+    let result = http.block_on(http.send_diagnosed(
+        Request::post(url).body(Vec::new()).unwrap(),
+        16,
+        &observer,
+    ));
+    assert!(matches!(result, Err(mkit_client::Error::Transport(_))));
+    let failures = observer.0.borrow();
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].0, mkit_client::FailureKind::WireLimit);
+    assert_eq!(failures[0].1, 200);
+    assert!(failures[0].3.len() <= 16);
+}
+
+#[test]
+fn concrete_native_exchange_futures_retain_conditional_send() {
+    fn assert_send<T: Send>(_: T) {}
+    struct Diagnostics;
+    impl mkit_client::FailureObserver for Diagnostics {}
+    let http = NativeHttp::new().unwrap();
+    let request = || {
+        Request::post("http://127.0.0.1:1/")
+            .body(Vec::new())
+            .unwrap()
+    };
+    assert_send(http.send_typed(request(), 1024));
+    assert_send(http.send(request(), 1024));
+    assert_send(http.send_diagnosed(request(), 1024, &Diagnostics));
+    let mut body = StreamingBody(Vec::new().into_iter());
+    let mut sink = StreamingReply::default();
+    assert_send(http.send_stream(
+        Request::post("http://127.0.0.1:1/").body(()).unwrap(),
+        &mut body,
+        1024,
+        &mut sink,
+    ));
+    assert_send(http.send_stream_diagnosed(
+        Request::post("http://127.0.0.1:1/").body(()).unwrap(),
+        &mut body,
+        1024,
+        &mut sink,
+        &Diagnostics,
+    ));
+}
+
+#[test]
+fn explicitly_erased_local_stream_callbacks_remain_supported() {
+    struct LocalBody(std::rc::Rc<()>);
+    impl mkit_client::RequestStream for LocalBody {
+        fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, mkit_client::Error> {
+            assert_eq!(std::rc::Rc::strong_count(&self.0), 1);
+            Ok(None)
+        }
+    }
+    struct LocalSink(std::rc::Rc<()>);
+    impl mkit_client::ResponseStream for LocalSink {
+        fn start(&mut self, _: http::Response<()>) -> Result<(), mkit_client::Error> {
+            Ok(())
+        }
+        fn chunk(&mut self, _: &[u8]) -> Result<(), mkit_client::Error> {
+            Ok(())
+        }
+        fn finish(&mut self) -> Result<(), mkit_client::Error> {
+            assert_eq!(std::rc::Rc::strong_count(&self.0), 1);
+            Ok(())
+        }
+    }
+    let http = NativeHttp::new().unwrap();
+    let mut body = LocalBody(std::rc::Rc::new(()));
+    let mut sink = LocalSink(std::rc::Rc::new(()));
+    let diagnostics = FailureCapture::default();
+    let body: &mut dyn mkit_client::RequestStream = &mut body;
+    let sink: &mut dyn mkit_client::ResponseStream = &mut sink;
+    let diagnostics: &dyn mkit_client::FailureObserver = &diagnostics;
+    drop(http.send_stream_diagnosed(
+        Request::post("http://127.0.0.1:1/").body(()).unwrap(),
+        body,
+        1024,
+        sink,
+        diagnostics,
     ));
 }

@@ -3,7 +3,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::time::Duration;
 
 use mkit_client::proto::{self, GetServerInfoResponse, UploadTicket};
 use mkit_client::{
@@ -28,6 +29,32 @@ pub trait WriteRecovery {
         Ok(())
     }
 
+    /// Prepare one attempt's deadline before entering the asynchronous
+    /// executor. Hosts can cap their transport timeout to this bound.
+    fn before_attempt(&self, procedure: &str, deadline: Option<i64>) -> Result<(), SourceError> {
+        let _ = (procedure, deadline);
+        Ok(())
+    }
+
+    /// Finish one logical RPC, including errors and early refusals.
+    fn after_call(&self, procedure: &str, succeeded: bool) {
+        let _ = (procedure, succeeded);
+    }
+
+    /// Finish a repository advance after validating its semantic outcome.
+    /// `None` denotes an error or malformed response. Structural refusals are
+    /// successful protocol outcomes and retain their exact commit variant.
+    fn after_advance(&self, outcome: Option<CommitOutcome>) {
+        let _ = outcome;
+    }
+
+    /// Host timeout and retry budget that a refreshed identity must cover.
+    /// The default preserves the upload renewal margin.
+    fn renewal_margin(&self, procedure: &str) -> Duration {
+        let _ = procedure;
+        Duration::from_secs(30)
+    }
+
     /// Decide whether to retry a failed RPC. Admission headers are supplied
     /// through the client's request policy, and policy never runs in this adapter.
     fn recover(
@@ -42,6 +69,50 @@ pub trait WriteRecovery {
     fn upload_event(&self, event: UploadEvent) -> Result<(), SourceError> {
         let _ = event;
         Ok(())
+    }
+}
+
+struct CallCompletion<'a, R: WriteRecovery + ?Sized> {
+    recovery: Option<&'a R>,
+    procedure: &'a str,
+    succeeded: bool,
+}
+
+impl<R: WriteRecovery + ?Sized> Drop for CallCompletion<'_, R> {
+    fn drop(&mut self) {
+        if let Some(recovery) = self.recovery {
+            recovery.after_call(self.procedure, self.succeeded);
+        }
+    }
+}
+
+struct AdvanceCompletion<'a, R: WriteRecovery + ?Sized> {
+    recovery: Option<&'a R>,
+    outcome: Option<CommitOutcome>,
+}
+
+impl<'a, R: WriteRecovery + ?Sized> AdvanceCompletion<'a, R> {
+    fn new(recovery: Option<&'a R>) -> Self {
+        Self {
+            recovery,
+            outcome: None,
+        }
+    }
+
+    fn finish(&mut self, outcome: CommitOutcome) -> CommitOutcome {
+        self.outcome = Some(outcome);
+        if let Some(recovery) = self.recovery.take() {
+            recovery.after_advance(self.outcome);
+        }
+        outcome
+    }
+}
+
+impl<R: WriteRecovery + ?Sized> Drop for AdvanceCompletion<'_, R> {
+    fn drop(&mut self) {
+        if let Some(recovery) = self.recovery {
+            recovery.after_advance(self.outcome);
+        }
     }
 }
 
@@ -173,21 +244,23 @@ impl ClientSession {
 }
 
 pub(super) struct WriteState {
-    info: StateCell<Option<Result<GetServerInfoResponse, ()>>>,
+    info: OnceLock<Result<GetServerInfoResponse, ()>>,
     tickets: StateCell<HashMap<(String, PackKey), UploadTicket>>,
     pub(super) receipts: StateCell<Arc<dyn PartReceiptStore>>,
     swept: Flag,
     ticketless: Flag,
+    discovery_legacy: Flag,
 }
 
 impl Default for WriteState {
     fn default() -> Self {
         Self {
-            info: StateCell::new(None),
+            info: OnceLock::new(),
             tickets: StateCell::new(HashMap::new()),
             receipts: StateCell::new(Arc::new(MemoryPartReceiptStore::default())),
             swept: Flag::new(false),
             ticketless: Flag::new(false),
+            discovery_legacy: Flag::new(false),
         }
     }
 }
@@ -212,6 +285,27 @@ fn valid_info(info: &GetServerInfoResponse) -> bool {
         && info.max_list_refs_page_size.is_some_and(|size| size >= 1)
 }
 
+fn requires_write_identity(procedure: &str) -> bool {
+    matches!(
+        procedure,
+        "BeginUpload"
+            | "UploadPack"
+            | "UploadPart"
+            | "CompleteUpload"
+            | "UpdateRef"
+            | "AdvanceRefs"
+    )
+}
+
+fn advance_outcome(response: &proto::AdvanceRefsResponse) -> Result<AdvanceOutcome, SourceError> {
+    match response.outcome.and_then(|outcome| outcome.as_known()) {
+        Some(proto::AdvanceOutcome::Committed) => Ok(AdvanceOutcome::Committed),
+        Some(proto::AdvanceOutcome::HeadConflict) => Ok(AdvanceOutcome::HeadConflict),
+        Some(proto::AdvanceOutcome::PackmapConflict) => Ok(AdvanceOutcome::PackmapConflict),
+        _ => Err(SourceError::InvalidResponse),
+    }
+}
+
 fn condition(condition: RefWriteCondition) -> (proto::RefExpectation, Option<Vec<u8>>) {
     match condition {
         RefWriteCondition::Any => (proto::RefExpectation::Any, None),
@@ -231,26 +325,27 @@ impl<
 > ClientSource<'_, T, S, C, E, O, P, R>
 {
     fn write_info(&self) -> Option<GetServerInfoResponse> {
-        if self.write_state().info.borrow().is_none() {
-            let info = match self.executor.block_on(self.client.server_info()) {
-                Ok(info) if valid_info(&info) => Ok(info),
-                Err(Error::Remote(remote)) if remote.code == "unimplemented" => {
-                    self.write_state().ticketless.set(true);
-                    Err(())
-                }
-                _ => Err(()),
-            };
-            *self.write_state().info.borrow_mut() = Some(info);
-        }
         self.write_state()
             .info
-            .borrow()
+            .get_or_init(|| {
+                match self.write_call("GetServerInfo", false, None, |_| {
+                    self.executor.block_on(self.client.server_info())
+                }) {
+                    Ok(info) if valid_info(&info) => Ok(info),
+                    Err(SourceError::Remote(remote)) if remote.code == "unimplemented" => {
+                        self.write_state().discovery_legacy.set(true);
+                        self.write_state().ticketless.set(true);
+                        Err(())
+                    }
+                    _ => Err(()),
+                }
+            })
             .as_ref()
-            .and_then(|info| info.as_ref().ok())
+            .ok()
             .cloned()
     }
 
-    fn write_call<V>(
+    pub(super) fn write_call<V>(
         &self,
         procedure: &str,
         ticketed: bool,
@@ -261,17 +356,18 @@ impl<
         if let Some(recovery) = self.recovery {
             recovery.before_call(&full_procedure)?;
         }
-        let write_identity = self.client.has_clock()
-            && matches!(
-                procedure,
-                "BeginUpload"
-                    | "UploadPack"
-                    | "UploadPart"
-                    | "CompleteUpload"
-                    | "UpdateRef"
-                    | "AdvanceRefs"
-            );
-        let mut identity = (self.client.public_key().is_some() || write_identity)
+        let mut completion = CallCompletion {
+            recovery: self.recovery,
+            procedure: &full_procedure,
+            succeeded: false,
+        };
+        let margin = self.recovery.map_or(Duration::from_secs(30), |recovery| {
+            recovery.renewal_margin(&full_procedure)
+        });
+        let margin_ms = i64::try_from(margin.as_millis()).unwrap_or(i64::MAX);
+        let write_identity = self.client.has_clock() && requires_write_identity(procedure);
+        let mut identity = (procedure != "GetServerInfo"
+            && (self.client.public_key().is_some() || write_identity))
             .then(|| self.client.new_identity())
             .transpose()
             .map_err(source_error)?;
@@ -280,6 +376,9 @@ impl<
         let mut saw_pending = false;
         let mut renewed_after_unauthenticated = false;
         loop {
+            if let Some(recovery) = self.recovery {
+                recovery.before_attempt(&full_procedure, deadline)?;
+            }
             let now = self.client.now_ms();
             if deadline
                 .zip(now)
@@ -289,12 +388,22 @@ impl<
             }
             if let (Some(now), Some(current)) = (now, identity)
                 && (now >= current.expires_at_ms
-                    || (definitive && current.expires_at_ms.saturating_sub(now) <= 30_000))
+                    || (attempt > 1
+                        && matches!(
+                            procedure,
+                            "ReadRef" | "ListRefs" | "DownloadPack" | "PackExists"
+                        ))
+                    || ((definitive
+                        || matches!(procedure, "UploadPack" | "UploadPart" | "CompleteUpload"))
+                        && current.expires_at_ms.saturating_sub(now) <= margin_ms))
             {
                 identity = Some(self.client.new_identity().map_err(source_error)?);
             }
             match call(identity.as_ref()) {
-                Ok(value) => return Ok(value),
+                Ok(value) => {
+                    completion.succeeded = true;
+                    return Ok(value);
+                }
                 Err(error) => {
                     let mapped = source_error(error);
                     if matches!(mapped, SourceError::PaymentRequired { .. })
@@ -312,7 +421,9 @@ impl<
                         renewed_after_unauthenticated = true;
                         continue;
                     }
-                    if matches!(mapped, SourceError::PendingVerification { .. }) {
+                    if procedure == "AdvanceRefs"
+                        && matches!(mapped, SourceError::PendingVerification { .. })
+                    {
                         saw_pending = true;
                         renewed_after_unauthenticated = false;
                     } else if procedure == "AdvanceRefs"
@@ -327,12 +438,11 @@ impl<
                     let Some(recovery) = self.recovery else {
                         return Err(mapped);
                     };
-                    definitive = matches!(
-                        mapped,
-                        SourceError::PendingVerification { .. }
-                            | SourceError::MembershipNotVisible
-                            | SourceError::PaymentRequired { .. }
-                    );
+                    definitive = matches!(mapped, SourceError::PaymentRequired { .. })
+                        || (procedure == "AdvanceRefs"
+                            && (matches!(mapped, SourceError::PendingVerification { .. })
+                                || (ticketed
+                                    && matches!(mapped, SourceError::MembershipNotVisible))));
                     if !recovery.recover(&full_procedure, &mapped, attempt)? {
                         return Err(mapped);
                     }
@@ -340,6 +450,85 @@ impl<
                 }
             }
         }
+    }
+
+    /// Cached valid server capabilities, absent for legacy or failed discovery.
+    ///
+    /// Discovery failure keeps uploads conservative and does not become a
+    /// source construction failure.
+    pub fn server_info(&self) -> Option<GetServerInfoResponse> {
+        self.write_info()
+    }
+
+    /// Whether discovery returned the legacy unimplemented response.
+    #[must_use]
+    pub fn discovery_is_legacy(&self) -> bool {
+        let _ = self.write_info();
+        self.write_state().discovery_legacy.get()
+    }
+
+    /// Upload a pack without reserving a ref-bound ticket.
+    ///
+    /// # Errors
+    /// The pack exceeds the transport bound, writes are disabled, or the
+    /// host/server refuses the upload.
+    pub fn upload_pack_unhinted(&self, bytes: &[u8], key: &PackKey) -> Result<(), SourceError> {
+        if bytes.len() as u64 > PACK_BODY_LIMIT {
+            return Err(SourceError::PayloadTooLarge(bytes.len()));
+        }
+        self.write_call("UploadPack", false, None, |identity| {
+            self.executor.block_on(
+                self.client
+                    .upload_pack(&key.into_hash(), bytes, None, identity),
+            )
+        })
+        .map(|_| ())
+    }
+
+    /// Advance two refs without consuming cached upload tickets. Scheduling
+    /// and admission recovery use the same host seam as native push.
+    ///
+    /// # Errors
+    /// Remote refusals, malformed outcomes, or the host deadline expires.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_refs_with_deadline(
+        &self,
+        head: &str,
+        head_condition: RefWriteCondition,
+        tip: &Hash,
+        packmap: &str,
+        packmap_condition: RefWriteCondition,
+        node: &Hash,
+        deadline: Option<i64>,
+    ) -> Result<AdvanceOutcome, SourceError> {
+        let mut completion = AdvanceCompletion::new(self.recovery);
+        let (head_expectation, head_expected_id) = condition(head_condition);
+        let (packmap_expectation, packmap_expected_id) = condition(packmap_condition);
+        let request = proto::AdvanceRefsRequest {
+            head_ref: Some(head.to_owned()),
+            head_expectation: Some(head_expectation.into()),
+            head_expected_id,
+            head_new_id: Some(tip.to_vec()),
+            packmap_ref: Some(packmap.to_owned()),
+            packmap_expectation: Some(packmap_expectation.into()),
+            packmap_expected_id,
+            packmap_new_id: Some(node.to_vec()),
+            ..Default::default()
+        };
+        let deadline = deadline.or_else(|| {
+            self.client
+                .now_ms()
+                .map(|now| now.saturating_add(7 * 24 * 60 * 60 * 1000))
+        });
+        let response = self
+            .write_call("AdvanceRefs", false, deadline, |identity| {
+                self.executor
+                    .block_on(self.client.advance_refs(&request, identity))
+            })?
+            .value;
+        let outcome = advance_outcome(&response)?;
+        completion.finish(CommitOutcome::Advanced(outcome));
+        Ok(outcome)
     }
 
     pub(super) fn write_upload(
@@ -598,9 +787,7 @@ impl<
                     return Ok(());
                 }
                 Err(error)
-                    if matches!(&error, SourceError::Remote(remote) if remote.code == "invalid_argument" && remote.message == "invalid upload part receipt")
-                        && from_disk
-                        && invalid_retry == 0 =>
+                    if remote_is(&error, "invalid_argument") && from_disk && invalid_retry == 0 =>
                 {
                     self.forget_ticket(ticket);
                 }
@@ -708,6 +895,7 @@ impl<
         node: &Hash,
         keys: &[PackKey],
     ) -> Result<CommitOutcome, SourceError> {
+        let mut completion = AdvanceCompletion::new(self.recovery);
         let selected = keys
             .iter()
             .filter_map(|key| {
@@ -743,7 +931,7 @@ impl<
             .filter_map(|(_, ticket)| ticket.expires_unix_ms)
             .min();
         if deadline.is_some_and(|expiry| expiry <= self.client.now_ms().unwrap_or(i64::MAX)) {
-            return Ok(CommitOutcome::TicketRejected);
+            return Ok(completion.finish(CommitOutcome::TicketRejected));
         }
         let (head_expectation, head_expected_id) = condition(head_condition);
         let (packmap_expectation, packmap_expected_id) = condition(packmap_condition);
@@ -777,33 +965,28 @@ impl<
             Err(SourceError::Remote(remote))
                 if !ids.is_empty() && remote.code == "failed_precondition" =>
             {
-                return Ok(
-                    if remote.message == "delta base not available in this repository" {
-                        CommitOutcome::DeltaBaseUnavailable
-                    } else {
-                        CommitOutcome::TicketRejected
-                    },
-                );
+                let outcome = if remote.message == "delta base not available in this repository" {
+                    CommitOutcome::DeltaBaseUnavailable
+                } else {
+                    CommitOutcome::TicketRejected
+                };
+                return Ok(completion.finish(outcome));
             }
             Err(SourceError::Remote(remote))
                 if !ids.is_empty()
                     && remote.code == "invalid_argument"
                     && remote.message == "packlist lists a pack that is not in this repository" =>
             {
-                return Ok(CommitOutcome::PacklistNotInRepository);
+                return Ok(completion.finish(CommitOutcome::PacklistNotInRepository));
             }
             result => result?.value,
         };
-        let outcome = match response.outcome.and_then(|outcome| outcome.as_known()) {
-            Some(proto::AdvanceOutcome::Committed) => AdvanceOutcome::Committed,
-            Some(proto::AdvanceOutcome::HeadConflict) => AdvanceOutcome::HeadConflict,
-            Some(proto::AdvanceOutcome::PackmapConflict) => AdvanceOutcome::PackmapConflict,
-            _ => return Err(SourceError::InvalidResponse),
-        };
+        let outcome = advance_outcome(&response)?;
+        let commit_outcome = completion.finish(CommitOutcome::Advanced(outcome));
         if outcome == AdvanceOutcome::Committed {
             self.forget_committed_tickets(head, selected);
         }
-        Ok(CommitOutcome::Advanced(outcome))
+        Ok(commit_outcome)
     }
 
     fn forget_committed_tickets(&self, head: &str, selected: Vec<(PackKey, UploadTicket)>) {
@@ -1081,6 +1264,97 @@ mod tests {
             }
             assert_eq!(recovery.0.get(), waits);
         }
+    }
+
+    #[test]
+    fn committed_receipt_observation_precedes_ticket_receipt_cleanup() {
+        use buffa::Message as _;
+        use mkit_core::protocol::TransportResult;
+        use std::sync::Mutex;
+        struct TraceStore(Arc<Mutex<Vec<&'static str>>>);
+        impl PartReceiptStore for TraceStore {
+            fn load(&self, _: &TicketMetadata, _: &PartPlan) -> TransportResult<Vec<StoredPart>> {
+                Ok(Vec::new())
+            }
+            fn put(&self, _: &TicketMetadata, _: &StoredPart) -> TransportResult<()> {
+                Ok(())
+            }
+            fn forget(&self, _: &Hash) -> TransportResult<()> {
+                self.0.lock().unwrap().push("forget");
+                Ok(())
+            }
+            fn sweep(&self, _: i64) -> TransportResult<()> {
+                Ok(())
+            }
+        }
+        struct TraceRecovery(Arc<Mutex<Vec<&'static str>>>);
+        impl WriteRecovery for TraceRecovery {
+            fn recover(&self, _: &str, _: &SourceError, _: u32) -> Result<bool, SourceError> {
+                Ok(false)
+            }
+            fn after_advance(&self, outcome: Option<CommitOutcome>) {
+                assert_eq!(
+                    outcome,
+                    Some(CommitOutcome::Advanced(AdvanceOutcome::Committed))
+                );
+                self.0.lock().unwrap().push("receipt");
+            }
+        }
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let recovery = TraceRecovery(events.clone());
+        let channel = Channel {
+            replies: RefCell::new(
+                [Response::builder()
+                    .status(200)
+                    .header("content-type", "application/proto")
+                    .body(
+                        proto::AdvanceRefsResponse {
+                            outcome: Some(proto::AdvanceOutcome::Committed.into()),
+                            ..Default::default()
+                        }
+                        .encode_to_vec(),
+                    )
+                    .unwrap()]
+                .into(),
+            ),
+            nonces: RefCell::new(Vec::new()),
+        };
+        let time = Time::default();
+        let client = Client::signed(
+            &channel,
+            Destination::new("https://vcs.example.org".into(), "default".into()).unwrap(),
+            &Key,
+            &time,
+        );
+        let source = ClientSource::new(&client, &super::super::FuturesExecutor)
+            .with_write_recovery(&recovery)
+            .with_receipt_store(Arc::new(TraceStore(events.clone())));
+        let key = PackKey::from_hash([6; 32]);
+        source.write_state().tickets.borrow_mut().insert(
+            ("refs/heads/main".into(), key),
+            UploadTicket {
+                id: Some(vec![7; 32]),
+                token: Some(vec![8]),
+                part_size: Some(8 << 20),
+                expires_unix_ms: Some(100_000),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            source
+                .write_advance_refs_committing(
+                    "refs/heads/main",
+                    RefWriteCondition::Missing,
+                    &[4; 32],
+                    "refs/mkit/packmap/main",
+                    RefWriteCondition::Missing,
+                    &[5; 32],
+                    &[key]
+                )
+                .unwrap(),
+            CommitOutcome::Advanced(AdvanceOutcome::Committed)
+        );
+        assert_eq!(*events.lock().unwrap(), ["receipt", "forget"]);
     }
 
     struct Refusal;

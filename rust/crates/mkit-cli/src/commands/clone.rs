@@ -144,13 +144,16 @@ pub fn run(args: &[String]) -> u8 {
                 crate::progress::should_report(opts.quiet),
                 opts.quiet,
             );
-            remote_dispatch::pull_all_with(
-                &target,
-                tx.as_ref(),
-                &origin_name,
-                opts.branch.as_deref(),
-                require_signed,
-            )
+            tx.with_source(|source| {
+                remote_dispatch::pull_all_with_source(
+                    &target,
+                    source,
+                    &origin_name,
+                    opts.branch.as_deref(),
+                    require_signed,
+                )
+            })
+            .and_then(|result| result)
         }
         Err(e) => return emit_err(&format!("open remote: {e}"), exit::PROTOCOL_ERROR),
     };

@@ -2,19 +2,13 @@
 #![cfg_attr(not(test), deny(clippy::print_stdout, clippy::print_stderr))]
 #![doc = include_str!("../README.md")]
 //!
-//! `mkit.transport.v1.TransportService` (SPEC-TRANSPORT-CONNECT) client:
-//! [`ConnectTransport`], a non-wasm ConnectRPC client implementing
-//! [`mkit_core::protocol::Transport`] itself, used by `mkit-cli`'s
-//! `remote_dispatch` for `mkit+https://` / loopback `mkit+http://`.
+//! [`ConnectTransport`] preserves synchronous Transport APIs and native host
+//! configuration over `mkit-client`'s canonical Connect RPC implementation.
+//! Repository operations borrow `mkit-sync::ClientSource`; the host supplies
+//! credential selection, admission recovery, scheduling and durable receipts.
 //!
-//! The server is not in this crate: `mkit-server`'s pipeline (on Workers,
-//! `mkit-server-worker`) serves `mkit.transport.v1`. The `server`
-//! feature and its `router`/`serve`/`TransportServer`/`map_transport_error`
-//! API were removed with `mkit serve --http`.
-//!
-//! The client is generated from the canonical
-//! `<repo-root>/proto/mkit/transport/v1/transport.proto` by `mkit-rpc`
-//! (refresh with `scripts/regen-transport-proto.sh`).
+//! Generated messages and Connect bindings remain compatibility reexports
+//! from `mkit-rpc`, owned by the canonical transport schema.
 //!
 //! See [`docs/specs/SPEC-TRANSPORT-CONNECT.md`][spec] for the full wire
 //! contract (verb mapping, CAS semantics, error-code mapping, streaming
@@ -26,8 +20,8 @@ pub mod admission;
 mod client;
 pub mod envelope;
 mod error;
-mod executor;
 pub mod grant;
+mod host;
 mod part_receipts;
 pub mod pooled_http;
 mod receipt;

@@ -33,7 +33,9 @@ use buffa::Message as _;
 use connectrpc::{ConnectError, ErrorCode};
 use mkit_core::protocol::{AdmissionChallengeEntry, AdmissionRequired, TransportError};
 
-use crate::proto::mkit::transport::v1::{AdmissionChallenge, PendingVerification};
+use crate::proto::mkit::transport::v1::AdmissionChallenge;
+#[cfg(test)]
+use crate::proto::mkit::transport::v1::PendingVerification;
 use crate::status::STATUS_MARKER;
 
 // Known gap: use mkit_core::admission bounds once the server admission bundle lands.
@@ -138,6 +140,7 @@ fn admission_required(err: &ConnectError) -> Option<Result<AdmissionRequired, Tr
 
 /// Recognise only a typed `AdvanceRefs` unavailable response. Malformed
 /// details deliberately fall back to the ordinary retry ladder.
+#[cfg(test)]
 pub(crate) fn pending_verification_delay(err: &ConnectError) -> Option<std::time::Duration> {
     if err.code != ErrorCode::Unavailable {
         return None;
@@ -163,6 +166,7 @@ pub(crate) fn pending_verification_delay(err: &ConnectError) -> Option<std::time
 /// Whether `err` is the membership-lag `unavailable`. The typed
 /// `MembershipNotVisible` detail decides; the exact public message is a
 /// fallback for servers that predate the detail.
+#[cfg(test)]
 pub(crate) fn is_membership_lag(err: &ConnectError) -> bool {
     err.code == ErrorCode::Unavailable
         && (err.details.iter().any(|detail| {
@@ -198,6 +202,7 @@ pub(crate) fn parse_retry_after(values: &[String]) -> std::time::Duration {
 /// still taking effect, and the header says when to ask again. An
 /// `unavailable` without one (a transport-level failure such as DNS, connect
 /// or TLS, or a proxy error) stays an error for the ordinary retry ladder.
+#[cfg(test)]
 pub(crate) fn pending_retry_after(err: &ConnectError) -> Option<std::time::Duration> {
     if err.code != ErrorCode::Unavailable {
         return None;

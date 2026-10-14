@@ -152,13 +152,16 @@ fn pull_one(
                     crate::progress::should_report(quiet),
                     quiet,
                 );
-                remote_dispatch::pull_all_with(
-                    cwd,
-                    tx.as_ref(),
-                    &resolved.name,
-                    None,
-                    require_signed,
-                )
+                tx.with_source(|source| {
+                    remote_dispatch::pull_all_with_source(
+                        cwd,
+                        source,
+                        &resolved.name,
+                        None,
+                        require_signed,
+                    )
+                })
+                .and_then(|result| result)
             };
             match pull_outcome {
                 Ok(_) => {

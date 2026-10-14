@@ -68,9 +68,48 @@ replace a concurrent writer's packmap without its lease.
 client push driver, and `packmap_planner`'s former-driver matrix and property
 tests. Sync's native push regressions and the CLI push goldens pin pack ids,
 ref moves, and output. Chain validation, reset authorization, upload, and
-conflict handling remain driver boundaries. `TransportSource` carries native
-writes; `ClientSource` stays read-only until its write policy and resumability
-match that path.
+conflict handling remain driver boundaries. Connect repository operations use
+`ClientSource`; other transports use `TransportSource`.
+
+## Connect retries preserve identity and durable acknowledgements
+
+**Always:** `mkit-client` owns Connect encoding and decoding. The host selects
+credentials, grants, admission helpers, retry scheduling, and receipt storage.
+Ambiguous writes retain their authenticated identity until expiry. A durable
+part receipt is stored before progress or the next part. Fresh clients reuse
+acknowledged parts only when destination, signer, ticket, pack, and geometry
+match. Signing and exchange time consume the same attempt budget.
+
+**Because:** retrying a logical write must not duplicate mutation or charge,
+and a process restart must not discard an acknowledged upload part.
+
+**If violated:** a retry could execute a second write, reuse another upload's
+receipt, resend durable parts, or exceed the operation deadline.
+
+**Enforced by:** `ClientSource` write recovery and caller-owned `ClientSession`,
+host request policy, `NativeHttp` budgets, both-backend push and policy tests,
+the multipart process-kill test, and native streaming and response compatibility
+tests. Session locks release before host callbacks; receipt observation precedes
+successful ticket cleanup.
+
+## Native connection reuse never replays a started request
+
+**Always:** reads and signed writes reuse at most one idle HTTP connection per
+origin for ten seconds on the same current-thread runtime. Automatic connection
+recovery uses only hyper's recovered, untouched request, before writing starts;
+signed headers, nonce, and buffered or streamed body remain identical. Failures
+after writing starts return to caller-owned recovery. Partial responses and
+cancellation do not make an incomplete exchange eligible for reuse.
+
+**Because:** connection reuse removes repeated TLS handshakes, while only an
+untouched request establishes that no mutation could have reached the server.
+
+**If violated:** a pooled retry could duplicate a write, change its identity,
+reuse an expired connection, or expose bytes from an interrupted response.
+
+**Enforced by:** `NativeHttp`'s bounded idle pool, hyper's pre-start cancellation
+retry, native connection reuse/idle expiration/post-write disconnect/streamed
+idle-close/partial-response tests, and the real HTTPS CLI latency comparison.
 
 ## Custom ref admission fences the committed presence delta
 

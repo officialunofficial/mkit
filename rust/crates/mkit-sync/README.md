@@ -221,9 +221,12 @@ Ticketed uploads and advances never invoke admission recovery. The callback also
 reports multipart progress after durable persistence and can cancel before a part.
 The host must bound its retry ladder and waits.
 
-The CLI continues to use `TransportSource` in this change. Its routing switch and
-native streaming parity are separate work. Native extra-CA and configuration
-wiring remain host-owned. The protocol client's own push API is unchanged.
+The CLI uses a configured `ClientSource` for `mkit+https` and `mkit+http` push,
+fetch, pull, and clone. Native extra-CA, bearer credentials, grants, helpers, and
+configuration remain host-owned. Other schemes retain `TransportSource`.
+`NativeHttp` streams upload frames and incrementally decodes downloads; generic
+HTTP transports retain an additive buffered fallback. The protocol client's
+whole-push API is unchanged.
 
 A missing repository, a private one read anonymously and one read by a signer
 the server denies all come back as the same `SyncError::RepositoryNotFound`
@@ -289,6 +292,14 @@ built-in web PKI roots unless the caller passes a `rustls::ClientConfig`.
 `NativeClock` supplies the epoch clock, OS entropy for nonces and the tokio
 timer. Calling `NativeHttp` from inside another tokio runtime panics, as
 `block_on` does.
+
+The owned runtime and HTTP pool survive between operations. The pool keeps at
+most one idle connection per origin for ten seconds, with TCP_NODELAY enabled.
+Reads and signed writes, including streamed transfers, reuse the connection.
+Hyper automatically retries only an untouched request canceled before writing
+starts; it retains the same body and identity. An exchange failure after writing
+starts is returned to the caller. Pool checkout checks elapsed idle time even
+when the current-thread runtime is paused. No scheduler thread is added.
 
 The channel adds no zstd: with `--no-default-features` the tree has none, and pack decode goes through
 mkit-core's `pack-ruzstd`. `scripts/check-sync-native-deps.sh` runs in CI and

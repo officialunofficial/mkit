@@ -7,7 +7,10 @@
 //! build links it for pack decode; build without default features). The
 //! `connect-native` dependency gate in CI enforces that.
 
+use std::io::Write as _;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -17,8 +20,11 @@ use http_body_util::{BodyExt as _, Full};
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client as HyperClient;
 use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::rt::TokioExecutor;
-use mkit_client::{ChannelError, Clock, HttpTransport};
+use hyper_util::rt::{TokioExecutor, TokioTimer};
+use mkit_client::{
+    AdvertiseRequestTimeout, ChannelError, Clock, Error, FailureDiagnostic, FailureKind,
+    FailureObserver, HttpTransport, RequestStream, RequestTimeout, ResponseStream,
+};
 use mkit_core::hash::Hash;
 use rustls::{ClientConfig, RootCertStore};
 
@@ -31,6 +37,44 @@ pub const DEFAULT_TRANSFER_TIMEOUT: Duration = Duration::from_mins(5);
 
 type Connector = hyper_rustls::HttpsConnector<HttpConnector>;
 
+// The receiver is owned and Send; the producer can still borrow the caller's
+// pack. A single queued frame applies backpressure without spawning a task or
+// requiring a 'static request source.
+enum NativeBody {
+    Full(Full<Bytes>),
+    Stream(tokio::sync::mpsc::Receiver<Bytes>),
+}
+impl hyper::body::Body for NativeBody {
+    type Data = Bytes;
+    type Error = std::convert::Infallible;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        match self.get_mut() {
+            Self::Full(body) => Pin::new(body).poll_frame(cx),
+            Self::Stream(receiver) => receiver
+                .poll_recv(cx)
+                .map(|chunk| chunk.map(|bytes| Ok(hyper::body::Frame::data(bytes)))),
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        match self {
+            Self::Full(body) => body.is_end_stream(),
+            Self::Stream(receiver) => receiver.is_closed() && receiver.is_empty(),
+        }
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        match self {
+            Self::Full(body) => body.size_hint(),
+            Self::Stream(_) => hyper::body::SizeHint::default(),
+        }
+    }
+}
+
 /// The native [`HttpTransport`]. It owns a current-thread runtime, so it is
 /// also the [`Executor`] to hand to a
 /// [`ClientSource`](crate::ClientSource): the requests then run inside the
@@ -39,11 +83,12 @@ type Connector = hyper_rustls::HttpsConnector<HttpConnector>;
 pub struct NativeHttp {
     // Declared first so in-flight connection tasks drop before the runtime
     // that drives them.
-    client: HyperClient<Connector, Full<Bytes>>,
+    client: HyperClient<Connector, NativeBody>,
     runtime: tokio::runtime::Runtime,
     metadata_timeout: Duration,
     transfer_timeout: Duration,
     allow_insecure_http: bool,
+    default_headers: HeaderMap,
 }
 
 impl std::fmt::Debug for NativeHttp {
@@ -93,17 +138,24 @@ impl NativeHttp {
             .enable_io()
             .enable_time()
             .build()?;
+        let mut http = HttpConnector::new();
+        http.enforce_http(false);
+        http.set_nodelay(true);
         let connector = HttpsConnectorBuilder::new()
             .with_tls_config(tls.clone())
             .https_or_http()
             .enable_http1()
-            .build();
-        // No idle pool: connection tasks only run while a call is inside
-        // `block_on`, so an idle connection the server closes between calls
-        // would go unnoticed and the next signed POST could be written to a
-        // dead socket. One connection per request costs little next to a pack.
+            .wrap_connector(http);
+        // Keep one idle connection per origin for sequential RPCs. Checkout
+        // checks elapsed idle time even while this runtime is paused. Hyper
+        // retries a canceled request only if it has not started writing it;
+        // this preserves signed bytes and also the streaming body's receiver.
+        // Failures after writing begins return to the existing host recovery.
         let client = HyperClient::builder(TokioExecutor::new())
-            .pool_max_idle_per_host(0)
+            .pool_max_idle_per_host(1)
+            .pool_idle_timeout(Duration::from_secs(10))
+            .pool_timer(TokioTimer::new())
+            .retry_canceled_requests(true)
             .build(connector);
         Ok(Self {
             runtime,
@@ -111,7 +163,28 @@ impl NativeHttp {
             metadata_timeout: DEFAULT_METADATA_TIMEOUT,
             transfer_timeout: DEFAULT_TRANSFER_TIMEOUT,
             allow_insecure_http: false,
+            default_headers: HeaderMap::new(),
         })
+    }
+
+    /// Apply host-supplied defaults to every request, including discovery and
+    /// unsigned owner statements. Explicit request headers take precedence.
+    /// Configuration and credential trust remain the caller's responsibility.
+    #[must_use]
+    pub fn with_default_headers(mut self, headers: HeaderMap) -> Self {
+        self.default_headers = headers;
+        self
+    }
+
+    fn prepare_headers(&self, headers: &mut HeaderMap) -> Result<(), NativeHttpError> {
+        for name in self.default_headers.keys() {
+            if !headers.contains_key(name) {
+                for value in self.default_headers.get_all(name) {
+                    headers.append(name.clone(), value.clone());
+                }
+            }
+        }
+        request_headers(headers)
     }
 
     /// Allow cleartext `http` to hosts other than loopback. Off by default: a
@@ -205,19 +278,125 @@ fn is_loopback_host(host: &str) -> bool {
             .is_ok_and(|ip| ip.is_loopback())
 }
 
+enum ExchangeFailure {
+    Native(NativeHttpError),
+    Mapped(Error),
+}
+impl From<NativeHttpError> for ExchangeFailure {
+    fn from(error: NativeHttpError) -> Self {
+        Self::Native(error)
+    }
+}
+impl ExchangeFailure {
+    fn into_client(self) -> Error {
+        match self {
+            Self::Native(error) => client_error(error),
+            Self::Mapped(error) => error,
+        }
+    }
+}
+struct NoDiagnostics;
+impl FailureObserver for NoDiagnostics {}
+struct Diagnostics<'a, D: FailureObserver + ?Sized> {
+    observer: Option<&'a D>,
+    procedure: &'a str,
+    status: Option<http::StatusCode>,
+    headers: Option<&'a HeaderMap>,
+}
+impl<D: FailureObserver + ?Sized> Copy for Diagnostics<'_, D> {}
+impl<D: FailureObserver + ?Sized> Clone for Diagnostics<'_, D> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<D: FailureObserver + ?Sized> Diagnostics<'_, D> {
+    fn diagnostic<'a>(
+        &'a self,
+        kind: FailureKind,
+        cause: &'a str,
+        body: Option<&'a [u8]>,
+        limit: usize,
+    ) -> FailureDiagnostic<'a> {
+        let mut failure = FailureDiagnostic::new(self.procedure, kind, cause);
+        failure.status = self.status;
+        failure.headers = self.headers;
+        failure.body = body;
+        failure.limit = Some(limit);
+        failure
+    }
+    fn failure(
+        &self,
+        kind: FailureKind,
+        cause: &str,
+        body: Option<&[u8]>,
+        limit: usize,
+        default: NativeHttpError,
+    ) -> ExchangeFailure {
+        let mapped = self
+            .observer
+            .and_then(|observer| observer.map_failure(&self.diagnostic(kind, cause, body, limit)));
+        mapped.map_or_else(|| ExchangeFailure::Native(default), ExchangeFailure::Mapped)
+    }
+    fn client_failure(
+        &self,
+        kind: FailureKind,
+        cause: &str,
+        body: Option<&[u8]>,
+        limit: usize,
+        default: Error,
+    ) -> Error {
+        self.observer
+            .and_then(|observer| observer.map_failure(&self.diagnostic(kind, cause, body, limit)))
+            .unwrap_or(default)
+    }
+}
+
+fn advertise_timeout<B>(
+    request: &mut Request<B>,
+    timeout: Duration,
+) -> Result<(), NativeHttpError> {
+    if request
+        .extensions()
+        .get::<AdvertiseRequestTimeout>()
+        .is_some()
+    {
+        let millis = timeout.as_millis().min(9_999_999_999);
+        request.headers_mut().insert(
+            "connect-timeout-ms",
+            HeaderValue::from_str(&millis.to_string()).map_err(|_| {
+                NativeHttpError::Exchange("invalid request timeout header".to_owned())
+            })?,
+        );
+    }
+    Ok(())
+}
+
 /// Read at most `limit` bytes of `body`, refusing a longer one while it is
 /// received.
-async fn read_bounded(
+async fn read_bounded<D: FailureObserver + ?Sized>(
     mut body: hyper::body::Incoming,
     limit: usize,
-) -> Result<Vec<u8>, NativeHttpError> {
+    diagnostics: Diagnostics<'_, D>,
+) -> Result<Vec<u8>, ExchangeFailure> {
     let mut out = Vec::new();
     while let Some(frame) = body.frame().await {
-        let frame = frame.map_err(|e| exchange_error("response body", &e))?;
+        let frame = frame.map_err(|error| {
+            diagnostics.failure(
+                FailureKind::BodyIo,
+                &error.to_string(),
+                None,
+                limit,
+                exchange_error("response body", &error),
+            )
+        })?;
         if let Some(data) = frame.data_ref() {
             if out.len().saturating_add(data.len()) > limit {
-                return Err(NativeHttpError::Exchange(
-                    "response exceeds the size limit".to_owned(),
+                return Err(diagnostics.failure(
+                    FailureKind::WireLimit,
+                    "response exceeds the size limit",
+                    None,
+                    limit,
+                    NativeHttpError::Exchange("response exceeds the size limit".to_owned()),
                 ));
             }
             out.extend_from_slice(data);
@@ -226,16 +405,55 @@ async fn read_bounded(
     Ok(out)
 }
 
+/// Preserve a host-opted-in HTTP admission response even when its bounded
+/// body cannot be read. The protocol client still validates challenge headers.
+async fn read_response_body<D: FailureObserver + ?Sized>(
+    body: hyper::body::Incoming,
+    limit: usize,
+    diagnostics: Diagnostics<'_, D>,
+    profile: mkit_client::ResponseProfile,
+) -> Result<Vec<u8>, ExchangeFailure> {
+    match read_bounded(body, limit, diagnostics).await {
+        Err(_)
+            if profile.expose_error_responses
+                && diagnostics.status == Some(http::StatusCode::PAYMENT_REQUIRED) =>
+        {
+            Ok(Vec::new())
+        }
+        result => result,
+    }
+}
+
 /// Inflate a gzip body, refusing one that expands past `limit`.
-fn gunzip_bounded(compressed: &[u8], limit: usize) -> Result<Vec<u8>, String> {
+enum GzipFailure {
+    Coding(std::io::Error),
+    Limit,
+}
+impl GzipFailure {
+    fn diagnostic(&self) -> (FailureKind, String, String) {
+        match self {
+            Self::Coding(error) => (
+                FailureKind::Coding,
+                error.to_string(),
+                format!("gzip response: {error}"),
+            ),
+            Self::Limit => (
+                FailureKind::InflatedLimit,
+                "response exceeds the size limit once decompressed".to_owned(),
+                "response exceeds the size limit once decompressed".to_owned(),
+            ),
+        }
+    }
+}
+fn gunzip_bounded(compressed: &[u8], limit: usize) -> Result<Vec<u8>, GzipFailure> {
     use std::io::Read as _;
     let mut out = Vec::new();
     flate2::read::GzDecoder::new(compressed)
         .take(limit as u64 + 1)
         .read_to_end(&mut out)
-        .map_err(|e| format!("gzip response: {e}"))?;
+        .map_err(GzipFailure::Coding)?;
     if out.len() > limit {
-        return Err("response exceeds the size limit once decompressed".to_owned());
+        return Err(GzipFailure::Limit);
     }
     Ok(out)
 }
@@ -250,10 +468,10 @@ pub enum NativeHttpError {
     /// A redirect, cleartext, response-limit or response-coding refusal.
     #[error("{0}")]
     Exchange(String),
-    /// An HTTP/TLS exchange, response-body I/O or timeout failure.
+    /// An HTTP/TLS exchange or response-body I/O failure.
     #[error("{0}")]
     Connection(String),
-    /// The configured request budget elapsed.
+    /// The configured per-request I/O budget ended.
     #[error("{0}")]
     Timeout(String),
 }
@@ -309,6 +527,93 @@ fn request_headers(headers: &mut HeaderMap) -> Result<(), NativeHttpError> {
     Ok(())
 }
 
+fn decode_body<D: FailureObserver + ?Sized>(
+    wire: Vec<u8>,
+    headers: &HeaderMap,
+    limit: usize,
+    profile: mkit_client::ResponseProfile,
+    diagnostics: Diagnostics<'_, D>,
+) -> Result<Vec<u8>, ExchangeFailure> {
+    let bytes = (|| {
+        let mut codings = headers.get_all(CONTENT_ENCODING).iter();
+        let coding = match (codings.next(), codings.next()) {
+            (None, _) => None,
+            (Some(v), None) => Some(
+                v.to_str()
+                    .map_err(|_| {
+                        diagnostics.failure(
+                            FailureKind::Coding,
+                            "unreadable content-encoding",
+                            Some(&wire),
+                            limit,
+                            NativeHttpError::Exchange("unreadable content-encoding".to_owned()),
+                        )
+                    })?
+                    .trim()
+                    .to_ascii_lowercase(),
+            ),
+            (Some(_), Some(_)) => {
+                return Err(diagnostics.failure(
+                    FailureKind::Coding,
+                    "multiple content-encoding values",
+                    Some(&wire),
+                    limit,
+                    NativeHttpError::Exchange(
+                        "unsupported content-encoding (gzip only)".to_owned(),
+                    ),
+                ));
+            }
+        };
+        match coding.as_deref() {
+            None | Some("identity") => Ok(wire),
+            Some("gzip") if wire.is_empty() && profile.allow_empty_coded_body => Ok(wire),
+            Some("gzip") => match gunzip_bounded(&wire, limit) {
+                Ok(bytes) => Ok(bytes),
+                Err(error) => {
+                    let (kind, cause, message) = error.diagnostic();
+                    Err(diagnostics.failure(
+                        kind,
+                        &cause,
+                        Some(&wire),
+                        limit,
+                        NativeHttpError::Exchange(message),
+                    ))
+                }
+            },
+            Some(coding) => Err(diagnostics.failure(
+                FailureKind::Coding,
+                coding,
+                Some(&wire),
+                limit,
+                NativeHttpError::Exchange("unsupported content-encoding (gzip only)".to_owned()),
+            )),
+        }
+    })();
+    match bytes {
+        Ok(bytes) => Ok(bytes),
+        Err(_)
+            if profile.expose_error_responses
+                && diagnostics.status == Some(http::StatusCode::PAYMENT_REQUIRED) =>
+        {
+            // A diagnostic mapper may already have classified a body failure.
+            // Admission takes precedence so the central client emits the typed
+            // challenge and applies its existing validation bounds.
+            Ok(Vec::new())
+        }
+        Err(ExchangeFailure::Native(_))
+            if profile.expose_error_responses
+                && diagnostics
+                    .status
+                    .is_some_and(|status| !status.is_success()) =>
+        {
+            // The central HTTP decoder still observes the status and admission
+            // headers when an error envelope's coding is unusable.
+            Ok(Vec::new())
+        }
+        Err(error) => Err(error),
+    }
+}
+
 impl NativeHttp {
     /// Send one request with typed native errors. The [`HttpTransport`] adapter
     /// uses the same path, converting errors to its required string form.
@@ -321,7 +626,35 @@ impl NativeHttp {
         request: Request<Vec<u8>>,
         response_limit: usize,
     ) -> Result<Response<Vec<u8>>, NativeHttpError> {
-        let timeout = self.request_timeout(request.uri());
+        self.send_inner::<NoDiagnostics>(request, response_limit, None)
+            .await
+            .map_err(|failure| match failure {
+                ExchangeFailure::Native(error) => error,
+                ExchangeFailure::Mapped(error) => NativeHttpError::Exchange(error.to_string()),
+            })
+    }
+
+    async fn send_inner<D: FailureObserver + ?Sized>(
+        &self,
+        mut request: Request<Vec<u8>>,
+        response_limit: usize,
+        observer: Option<&D>,
+    ) -> Result<Response<Vec<u8>>, ExchangeFailure> {
+        let timeout = request.extensions().get::<RequestTimeout>().map_or_else(
+            || self.request_timeout(request.uri()),
+            |bound| self.request_timeout(request.uri()).min(bound.0),
+        );
+        advertise_timeout(&mut request, timeout)?;
+        let procedure = request.uri().path().to_owned();
+        let initial = Diagnostics {
+            observer,
+            procedure: &procedure,
+            status: None,
+            headers: None,
+        };
+        let profile = observer
+            .map(FailureObserver::response_profile)
+            .unwrap_or_default();
         let (mut parts, body) = request.into_parts();
         if parts.uri.scheme_str() == Some("http")
             && !self.allow_insecure_http
@@ -329,62 +662,418 @@ impl NativeHttp {
         {
             return Err(NativeHttpError::Exchange(
                 "cleartext http to a non-loopback host refused".to_owned(),
-            ));
+            )
+            .into());
         }
-        request_headers(&mut parts.headers)?;
-        let request = Request::from_parts(parts, Full::new(Bytes::from(body)));
+        self.prepare_headers(&mut parts.headers)?;
+        let request = Request::from_parts(parts, NativeBody::Full(Full::new(Bytes::from(body))));
         let exchange = async {
-            let response = self
-                .client
-                .request(request)
-                .await
-                .map_err(|e| exchange_error("request failed", &e))?;
+            let response = self.client.request(request).await.map_err(|error| {
+                initial.failure(
+                    FailureKind::RequestIo,
+                    &error.to_string(),
+                    None,
+                    response_limit,
+                    exchange_error("request failed", &error),
+                )
+            })?;
             // Redirects are never followed: a redirect would carry a signed
             // request to an origin the signature was not made for.
-            if response.status().is_redirection() {
-                return Err(NativeHttpError::Exchange("redirect refused".to_owned()));
+            if response.status().is_redirection() && !profile.expose_error_responses {
+                let diagnostics = Diagnostics {
+                    status: Some(response.status()),
+                    headers: Some(response.headers()),
+                    ..initial
+                };
+                return Err(diagnostics.failure(
+                    FailureKind::Http,
+                    "redirect refused",
+                    None,
+                    response_limit,
+                    NativeHttpError::Exchange("redirect refused".to_owned()),
+                ));
             }
             let (mut parts, body) = response.into_parts();
-            let wire = read_bounded(body, response_limit).await?;
-            let mut codings = parts.headers.get_all(CONTENT_ENCODING).iter();
-            let coding = match (codings.next(), codings.next()) {
-                (None, _) => None,
-                (Some(v), None) => Some(
-                    v.to_str()
-                        .map_err(|_| {
-                            NativeHttpError::Exchange("unreadable content-encoding".to_owned())
-                        })?
-                        .trim()
-                        .to_ascii_lowercase(),
-                ),
-                (Some(_), Some(_)) => {
-                    return Err(NativeHttpError::Exchange(
-                        "unsupported content-encoding (gzip only)".to_owned(),
-                    ));
-                }
+            let diagnostics = Diagnostics {
+                status: Some(parts.status),
+                headers: Some(&parts.headers),
+                ..initial
             };
-            let bytes = match coding.as_deref() {
-                None | Some("identity") => wire,
-                Some("gzip") => {
-                    gunzip_bounded(&wire, response_limit).map_err(NativeHttpError::Exchange)?
-                }
-                Some(_) => {
-                    return Err(NativeHttpError::Exchange(
-                        "unsupported content-encoding (gzip only)".to_owned(),
-                    ));
-                }
-            };
+            let wire = read_response_body(body, response_limit, diagnostics, profile).await?;
+            let bytes = decode_body(wire, &parts.headers, response_limit, profile, diagnostics)?;
             parts.headers.remove(CONTENT_ENCODING);
             parts.headers.remove(CONTENT_LENGTH);
             Ok(Response::from_parts(parts, bytes))
         };
-        tokio::time::timeout(timeout, exchange)
+        tokio::time::timeout(timeout, exchange).await.map_err(|_| {
+            ExchangeFailure::Native(NativeHttpError::Timeout("request timed out".to_owned()))
+        })?
+    }
+}
+
+fn client_error(error: NativeHttpError) -> Error {
+    match error {
+        NativeHttpError::Connection(cause) => Error::Connection(cause),
+        NativeHttpError::Timeout(_) => {
+            Error::RequestTimeout("client-side deadline exceeded".to_owned())
+        }
+        refusal => Error::Transport(refusal.to_string()),
+    }
+}
+
+struct ChunkWriter<'a, S: ResponseStream + ?Sized, D: FailureObserver + ?Sized> {
+    sink: &'a mut S,
+    received: usize,
+    limit: usize,
+    error: Option<Error>,
+    diagnostics: Diagnostics<'a, D>,
+}
+impl<S: ResponseStream + ?Sized, D: FailureObserver + ?Sized> std::io::Write
+    for ChunkWriter<'_, S, D>
+{
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.received = self.received.saturating_add(bytes.len());
+        let result = if self.received > self.limit {
+            Err(self.diagnostics.client_failure(
+                FailureKind::InflatedLimit,
+                "response exceeds the size limit once decompressed",
+                None,
+                self.limit,
+                Error::Transport("response exceeds the size limit once decompressed".to_owned()),
+            ))
+        } else {
+            self.sink.chunk(bytes)
+        };
+        match result {
+            Ok(()) => Ok(bytes.len()),
+            Err(error) => {
+                self.error = Some(error);
+                Err(std::io::Error::other("response chunk refused"))
+            }
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn gzip_error<S: ResponseStream + ?Sized, D: FailureObserver + ?Sized>(
+    decoder: &mut flate2::write::GzDecoder<ChunkWriter<'_, S, D>>,
+    error: &std::io::Error,
+) -> Error {
+    decoder.get_mut().error.take().unwrap_or_else(|| {
+        let writer = decoder.get_mut();
+        writer.diagnostics.client_failure(
+            FailureKind::Coding,
+            &error.to_string(),
+            None,
+            writer.limit,
+            Error::Transport(format!("gzip response: {error}")),
+        )
+    })
+}
+
+fn response_gzip<D: FailureObserver + ?Sized>(
+    headers: &HeaderMap,
+    diagnostics: Diagnostics<'_, D>,
+    limit: usize,
+) -> Result<bool, Error> {
+    let mut codings = headers.get_all(CONTENT_ENCODING).iter();
+    match (codings.next(), codings.next()) {
+        (None, _) => Ok(false),
+        (Some(value), None) => match value.to_str().map(str::trim) {
+            Ok(value) if value.eq_ignore_ascii_case("identity") => Ok(false),
+            Ok(value) if value.eq_ignore_ascii_case("gzip") => Ok(true),
+            Err(_) => Err(diagnostics.client_failure(
+                FailureKind::Coding,
+                "unreadable content-encoding",
+                None,
+                limit,
+                Error::Transport("unreadable content-encoding".to_owned()),
+            )),
+            _ => Err(diagnostics.client_failure(
+                FailureKind::Coding,
+                value.to_str().unwrap_or(""),
+                None,
+                limit,
+                Error::Transport("unsupported content-encoding (gzip only)".to_owned()),
+            )),
+        },
+        _ => Err(diagnostics.client_failure(
+            FailureKind::Coding,
+            "multiple content-encoding values",
+            None,
+            limit,
+            Error::Transport("unsupported content-encoding (gzip only)".to_owned()),
+        )),
+    }
+}
+
+async fn stream_error_response<S: ResponseStream + ?Sized, D: FailureObserver + ?Sized>(
+    response: Response<hyper::body::Incoming>,
+    limit: usize,
+    sink: &mut S,
+    initial: Diagnostics<'_, D>,
+    profile: mkit_client::ResponseProfile,
+) -> Result<(), Error> {
+    let (mut parts, body) = response.into_parts();
+    let diagnostics = Diagnostics {
+        status: Some(parts.status),
+        headers: Some(&parts.headers),
+        ..initial
+    };
+    let limit = profile.end_frame_limit.unwrap_or(limit).min(limit);
+    let wire = read_response_body(body, limit, diagnostics, profile)
+        .await
+        .map_err(ExchangeFailure::into_client)?;
+    let bytes = decode_body(wire, &parts.headers, limit, profile, diagnostics)
+        .map_err(ExchangeFailure::into_client)?;
+    parts.headers.remove(CONTENT_ENCODING);
+    parts.headers.remove(CONTENT_LENGTH);
+    sink.start(Response::from_parts(parts, ()))?;
+    sink.chunk(&bytes)?;
+    sink.finish()
+}
+
+async fn stream_response<S: ResponseStream + ?Sized, D: FailureObserver + ?Sized>(
+    response: Response<hyper::body::Incoming>,
+    limit: usize,
+    sink: &mut S,
+    initial: Diagnostics<'_, D>,
+) -> Result<(), Error> {
+    let profile = initial
+        .observer
+        .map(FailureObserver::response_profile)
+        .unwrap_or_default();
+    if !response.status().is_success() && profile.expose_error_responses {
+        return stream_error_response(response, limit, sink, initial, profile).await;
+    }
+    if response.status().is_redirection() && !profile.expose_error_responses {
+        return Err(Error::Transport("redirect refused".to_owned()));
+    }
+    let (mut parts, mut body) = response.into_parts();
+    let original_headers = parts.headers.clone();
+    let diagnostics = Diagnostics {
+        status: Some(parts.status),
+        headers: Some(&original_headers),
+        ..initial
+    };
+    let gzip = response_gzip(&parts.headers, diagnostics, limit)?;
+    parts.headers.remove(CONTENT_ENCODING);
+    parts.headers.remove(CONTENT_LENGTH);
+    sink.start(Response::from_parts(parts, ()))?;
+    let mut wire_received = 0_usize;
+    if gzip {
+        let writer = ChunkWriter {
+            sink,
+            received: 0,
+            limit,
+            error: None,
+            diagnostics,
+        };
+        let mut decoder = flate2::write::GzDecoder::new(writer);
+        while let Some(frame) = body.frame().await {
+            let frame = frame.map_err(|error| {
+                diagnostics.client_failure(
+                    FailureKind::BodyIo,
+                    &error.to_string(),
+                    None,
+                    limit,
+                    client_error(exchange_error("response body", &error)),
+                )
+            })?;
+            if let Some(bytes) = frame.data_ref() {
+                wire_received = wire_received.saturating_add(bytes.len());
+                if wire_received > limit {
+                    return Err(diagnostics.client_failure(
+                        FailureKind::WireLimit,
+                        "response exceeds the size limit",
+                        None,
+                        limit,
+                        Error::Transport("response exceeds the size limit".to_owned()),
+                    ));
+                }
+                if let Err(error) = decoder.write_all(bytes) {
+                    return Err(gzip_error(&mut decoder, &error));
+                }
+            }
+        }
+        if (wire_received > 0 || !profile.allow_empty_coded_body)
+            && let Err(error) = decoder.try_finish()
+        {
+            return Err(gzip_error(&mut decoder, &error));
+        }
+        decoder.get_mut().sink.finish()
+    } else {
+        while let Some(frame) = body.frame().await {
+            let frame = frame.map_err(|error| {
+                diagnostics.client_failure(
+                    FailureKind::BodyIo,
+                    &error.to_string(),
+                    None,
+                    limit,
+                    client_error(exchange_error("response body", &error)),
+                )
+            })?;
+            if let Some(bytes) = frame.data_ref() {
+                wire_received = wire_received.saturating_add(bytes.len());
+                if wire_received > limit {
+                    return Err(diagnostics.client_failure(
+                        FailureKind::WireLimit,
+                        "response exceeds the size limit",
+                        None,
+                        limit,
+                        Error::Transport("response exceeds the size limit".to_owned()),
+                    ));
+                }
+                sink.chunk(bytes)?;
+            }
+        }
+        sink.finish()
+    }
+}
+
+impl NativeHttp {
+    async fn stream_inner<
+        B: RequestStream + ?Sized,
+        S: ResponseStream + ?Sized,
+        D: FailureObserver + ?Sized,
+    >(
+        &self,
+        mut request: Request<()>,
+        body: &mut B,
+        response_limit: usize,
+        sink: &mut S,
+        observer: Option<&D>,
+    ) -> Result<(), Error> {
+        let timeout = request.extensions().get::<RequestTimeout>().map_or_else(
+            || self.request_timeout(request.uri()),
+            |bound| self.request_timeout(request.uri()).min(bound.0),
+        );
+        advertise_timeout(&mut request, timeout).map_err(client_error)?;
+        let procedure = request.uri().path().to_owned();
+        let diagnostics = Diagnostics {
+            observer,
+            procedure: &procedure,
+            status: None,
+            headers: None,
+        };
+        let (mut parts, ()) = request.into_parts();
+        if parts.uri.scheme_str() == Some("http")
+            && !self.allow_insecure_http
+            && !parts.uri.host().is_some_and(is_loopback_host)
+        {
+            return Err(Error::Transport(
+                "cleartext http to a non-loopback host refused".to_owned(),
+            ));
+        }
+        self.prepare_headers(&mut parts.headers)
+            .map_err(client_error)?;
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        let request = Request::from_parts(parts, NativeBody::Stream(receiver));
+        let produce = async move {
+            while let Some(chunk) = body.next_chunk()? {
+                if sender.send(Bytes::from(chunk)).await.is_err() {
+                    // A response head may close the upload receiver before its
+                    // error body arrives. Let that response finish before
+                    // deciding whether incomplete request production failed.
+                    return Ok::<_, Error>(false);
+                }
+            }
+            Ok::<_, Error>(true)
+        };
+        let exchange = async {
+            let response = self.client.request(request).await.map_err(|error| {
+                diagnostics.client_failure(
+                    FailureKind::RequestIo,
+                    &error.to_string(),
+                    None,
+                    response_limit,
+                    client_error(exchange_error("request failed", &error)),
+                )
+            })?;
+            stream_response(response, response_limit, sink, diagnostics).await
+        };
+        // Drive both borrowing futures locally. An early rejection cancels the
+        // producer; successful exchanges require complete request production.
+        let together = async {
+            use std::future::Future as _;
+            let mut produce = std::pin::pin!(produce);
+            let mut exchange = std::pin::pin!(exchange);
+            let mut produced = None;
+            let mut exchanged = false;
+            std::future::poll_fn(|cx| {
+                if !exchanged {
+                    match exchange.as_mut().poll(cx) {
+                        Poll::Ready(Ok(())) => exchanged = true,
+                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                        Poll::Pending => {}
+                    }
+                }
+                if produced.is_none() {
+                    match produce.as_mut().poll(cx) {
+                        Poll::Ready(Ok(complete)) => produced = Some(complete),
+                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                        Poll::Pending => {}
+                    }
+                }
+                if exchanged {
+                    match produced {
+                        Some(true) => Poll::Ready(Ok(())),
+                        Some(false) => Poll::Ready(Err(Error::Transport(
+                            "request body stopped before completion".to_owned(),
+                        ))),
+                        None => Poll::Pending,
+                    }
+                } else {
+                    Poll::Pending
+                }
+            })
             .await
-            .map_err(|_| NativeHttpError::Timeout("request timed out".to_owned()))?
+        };
+        tokio::time::timeout(timeout, together)
+            .await
+            .map_err(|_| Error::RequestTimeout("client-side deadline exceeded".to_owned()))?
     }
 }
 
 impl HttpTransport for NativeHttp {
+    async fn send_stream<B: RequestStream + ?Sized, S: ResponseStream + ?Sized>(
+        &self,
+        request: Request<()>,
+        body: &mut B,
+        response_limit: usize,
+        sink: &mut S,
+    ) -> Result<(), Error> {
+        self.stream_inner::<B, S, NoDiagnostics>(request, body, response_limit, sink, None)
+            .await
+    }
+    async fn send_diagnosed<D: FailureObserver + ?Sized>(
+        &self,
+        request: Request<Vec<u8>>,
+        response_limit: usize,
+        observer: &D,
+    ) -> Result<Response<Vec<u8>>, Error> {
+        self.send_inner(request, response_limit, Some(observer))
+            .await
+            .map_err(ExchangeFailure::into_client)
+    }
+    async fn send_stream_diagnosed<
+        B: RequestStream + ?Sized,
+        S: ResponseStream + ?Sized,
+        D: FailureObserver + ?Sized,
+    >(
+        &self,
+        request: Request<()>,
+        body: &mut B,
+        response_limit: usize,
+        sink: &mut S,
+        observer: &D,
+    ) -> Result<(), Error> {
+        self.stream_inner(request, body, response_limit, sink, Some(observer))
+            .await
+    }
+
     async fn send_classified(
         &self,
         request: Request<Vec<u8>>,

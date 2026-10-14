@@ -156,6 +156,22 @@ fn id32(bytes: Option<&[u8]>, what: &'static str) -> Result<Hash, Error> {
 }
 
 impl<'a, T: HttpTransport, S: Signer, C: Clock> Client<'a, T, S, C> {
+    /// An unsigned client with host-selected signer and clock types. This
+    /// supports hosts whose configuration selects signed or unsigned operation
+    /// while keeping one concrete client type. Writes require explicit opt-in.
+    #[must_use]
+    pub fn unsigned(transport: &'a T, destination: Destination) -> Self {
+        Self {
+            transport,
+            destination,
+            auth: None,
+            unsigned_clock: None,
+            observer: &NoObserver,
+            request_policy: None,
+            unsigned_writes: false,
+        }
+    }
+
     /// A client that signs every RPC except `GetServerInfo`.
     #[must_use]
     pub fn signed(transport: &'a T, destination: Destination, signer: &'a S, clock: &'a C) -> Self {
@@ -313,9 +329,14 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
     /// # Errors
     /// Transport, remote or decoding failures.
     pub async fn server_info(&self) -> Result<GetServerInfoResponse, Error> {
-        self.destination
-            .server_info(self.transport)
+        self.rpc()
+            .unary_with(
+                "GetServerInfo",
+                &crate::proto::GetServerInfoRequest::default(),
+                Opts::default(),
+            )
             .await
+            .map(|(value, _)| value)
             .map_err(Error::typed)
     }
 
@@ -332,7 +353,13 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
     ) -> Result<Reply<RefPage>, Error> {
         let request = ListRefsRequest {
             prefix: Some(prefix.to_owned()),
-            page_size: Some(page_size),
+            page_size: if page_size == 0
+                && self.rpc().response_profile("ListRefs").omit_zero_page_size
+            {
+                None
+            } else {
+                Some(page_size)
+            },
             page_token: Some(page_token.to_owned()),
             ..Default::default()
         };
@@ -403,6 +430,75 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         Err(Error::Invalid("ref listing pages"))
     }
 
+    /// Read a namespace's grant epoch. This owner-protocol call always sends
+    /// an unsigned request without a repository header, including on a signed
+    /// client. A missing stored epoch is returned as zero by the server.
+    ///
+    /// # Errors
+    /// Transport, remote or decoding failures, or a missing epoch field.
+    pub async fn get_grant_epoch(&self, namespace: &str) -> Result<Reply<u64>, Error> {
+        let request = crate::proto::GetGrantEpochRequest {
+            namespace: Some(namespace.to_owned()),
+            ..Default::default()
+        };
+        let (response, identity): (crate::proto::GetGrantEpochResponse, _) = self
+            .rpc()
+            .unsigned_unary("GetGrantEpoch", &request, false)
+            .await
+            .map_err(Error::typed)?;
+        Ok(Reply {
+            value: response.epoch.ok_or(Error::Invalid("grant epoch"))?,
+            identity,
+        })
+    }
+
+    /// Set a grant epoch through an owner-signed statement. The request carries
+    /// the statement without an auth envelope or repository header. Pending
+    /// revocation is a typed retry hint for the host to schedule.
+    ///
+    /// # Errors
+    /// Transport, statement rejection or decoding failures.
+    pub async fn set_grant_epoch(&self, statement: &str) -> Result<Reply<u64>, Error> {
+        let request = crate::proto::SetGrantEpochRequest {
+            signed_statement: Some(statement.to_owned()),
+            ..Default::default()
+        };
+        let (response, identity): (crate::proto::SetGrantEpochResponse, _) = self
+            .rpc()
+            .unsigned_unary("SetGrantEpoch", &request, false)
+            .await
+            .map_err(Error::typed)?;
+        Ok(Reply {
+            value: response.epoch.ok_or(Error::Invalid("grant epoch"))?,
+            identity,
+        })
+    }
+
+    /// Set repository visibility through an owner-signed statement. The
+    /// repository header is retained and no auth envelope is created.
+    ///
+    /// # Errors
+    /// Transport, statement rejection or decoding failures.
+    pub async fn visibility_statement(&self, statement: &str) -> Result<Reply<()>, Error> {
+        let request = crate::proto::SetRepoVisibilityRequest {
+            mode: Some(
+                crate::proto::set_repo_visibility_request::Mode::SignedStatement(
+                    statement.to_owned(),
+                ),
+            ),
+            ..Default::default()
+        };
+        let (_, identity): (crate::proto::SetRepoVisibilityResponse, _) = self
+            .rpc()
+            .unsigned_unary("SetRepoVisibility", &request, true)
+            .await
+            .map_err(Error::typed)?;
+        Ok(Reply {
+            value: (),
+            identity,
+        })
+    }
+
     /// `ReadRef`: the ref's object id, or `None` if it does not exist.
     ///
     /// # Errors
@@ -428,6 +524,13 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         let value = match response.exists {
             Some(false) => None,
             Some(true) => Some(id32(response.object_id.as_deref(), "ref value")?),
+            None if self
+                .rpc()
+                .response_profile("ReadRef")
+                .missing_presence_is_false =>
+            {
+                None
+            }
             None => return Err(Error::Invalid("ref presence")),
         };
         Ok(Reply { value, identity })
@@ -458,7 +561,17 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
             .unary_with("PackExists", &request, opts)
             .await
             .map_err(Error::typed)?;
-        let value = response.exists.ok_or(Error::Invalid("pack presence"))?;
+        let value = match response.exists {
+            Some(value) => value,
+            None if self
+                .rpc()
+                .response_profile("PackExists")
+                .missing_presence_is_false =>
+            {
+                false
+            }
+            None => return Err(Error::Invalid("pack presence")),
+        };
         Ok(Reply { value, identity })
     }
 
@@ -466,9 +579,10 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
     /// longer response is [`Error::Limit`]. The response cap is `max_bytes` plus
     /// 1/512 plus 8 KiB for framing, which assumes the server's chunks are at
     /// least about 30 KiB (the reference server sends 800 KiB). The pack must hash to `pack_id`.
-    /// The transport buffers the response (at most `max_bytes` plus
-    /// framing) and the returned pack is a second copy, so peak memory is about
-    /// twice `max_bytes`.
+    /// A transport with incremental responses retains the final pack and one
+    /// response frame. The buffered fallback retains the response plus the
+    /// returned pack, so its peak memory is about twice `max_bytes` plus framing.
+    /// An individual frame is bounded by the same response cap.
     ///
     /// # Errors
     /// Transport, remote, limit or commitment failures.
@@ -775,6 +889,7 @@ pub struct SignedEnvelope {
 mod unsigned_write_tests {
     use super::*;
     use buffa::Message as _;
+    use http::{Request, Response};
     use std::cell::Cell;
     use std::future::Future;
     use std::task::{Context, Poll, Waker};
@@ -797,6 +912,106 @@ mod unsigned_write_tests {
                 .body(UpdateRefResponse::default().encode_to_vec())
                 .unwrap())
         }
+    }
+
+    struct OwnerStatementChannel(Cell<u32>);
+    impl HttpTransport for OwnerStatementChannel {
+        async fn send(
+            &self,
+            request: http::Request<Vec<u8>>,
+            _: usize,
+        ) -> Result<http::Response<Vec<u8>>, String> {
+            let method = request.uri().path().rsplit('/').next().unwrap();
+            assert!(request.headers().get("x-signature").is_none());
+            assert!(request.headers().get("idempotency-key").is_none());
+            assert_eq!(
+                request.headers().contains_key("x-repository"),
+                method == "SetRepoVisibility"
+            );
+            let bytes = match method {
+                "GetGrantEpoch" => {
+                    let request =
+                        crate::proto::GetGrantEpochRequest::decode_from_slice(request.body())
+                            .unwrap();
+                    assert_eq!(request.namespace.as_deref(), Some("namespace"));
+                    crate::proto::GetGrantEpochResponse {
+                        epoch: Some(7),
+                        ..Default::default()
+                    }
+                    .encode_to_vec()
+                }
+                "SetGrantEpoch" => {
+                    let request =
+                        crate::proto::SetGrantEpochRequest::decode_from_slice(request.body())
+                            .unwrap();
+                    assert_eq!(request.signed_statement.as_deref(), Some("epoch-statement"));
+                    crate::proto::SetGrantEpochResponse {
+                        epoch: Some(8),
+                        ..Default::default()
+                    }
+                    .encode_to_vec()
+                }
+                "SetRepoVisibility" => {
+                    let request =
+                        crate::proto::SetRepoVisibilityRequest::decode_from_slice(request.body())
+                            .unwrap();
+                    assert!(
+                        matches!(request.mode, Some(crate::proto::set_repo_visibility_request::Mode::SignedStatement(statement)) if statement == "visibility-statement")
+                    );
+                    crate::proto::SetRepoVisibilityResponse::default().encode_to_vec()
+                }
+                _ => panic!("unexpected owner-protocol call"),
+            };
+            self.0.set(self.0.get() + 1);
+            Ok(http::Response::builder()
+                .status(200)
+                .header("content-type", "application/proto")
+                .body(bytes)
+                .unwrap())
+        }
+    }
+
+    struct OwnerSigner;
+    impl Signer for OwnerSigner {
+        fn public_key(&self) -> Hash {
+            [1; 32]
+        }
+        async fn sign(&self, _: &Hash) -> Result<[u8; 64], String> {
+            panic!("owner statements must not invoke the envelope signer")
+        }
+    }
+    struct OwnerClock;
+    impl Clock for OwnerClock {
+        fn now_ms(&self) -> i64 {
+            1
+        }
+        fn nonce(&self) -> Result<Hash, String> {
+            panic!("owner statements must not generate an envelope identity")
+        }
+        async fn wait(&self, _: std::time::Duration) {
+            panic!("owner statements must not schedule a retry")
+        }
+    }
+
+    #[test]
+    fn owner_statement_calls_remain_unsigned_on_a_signed_client() {
+        let channel = OwnerStatementChannel(Cell::new(0));
+        let destination =
+            Destination::new("https://vcs.example.org".into(), "default".into()).unwrap();
+        let client = Client::signed(&channel, destination, &OwnerSigner, &OwnerClock);
+        let epoch = ready(client.get_grant_epoch("namespace")).unwrap();
+        assert_eq!(epoch.value, 7);
+        assert!(epoch.identity.is_none());
+        let epoch = ready(client.set_grant_epoch("epoch-statement")).unwrap();
+        assert_eq!(epoch.value, 8);
+        assert!(epoch.identity.is_none());
+        assert!(
+            ready(client.visibility_statement("visibility-statement"))
+                .unwrap()
+                .identity
+                .is_none()
+        );
+        assert_eq!(channel.0.get(), 3);
     }
 
     fn ready<F: Future>(future: F) -> F::Output {
@@ -969,5 +1184,267 @@ mod unsigned_write_tests {
         ready(client.server_info()).unwrap();
         assert_eq!(clock.nonces.get(), 1);
         assert_eq!(channel.0.borrow().len(), 2);
+    }
+    struct ProfileChannel {
+        status: http::StatusCode,
+        content_type: Option<&'static str>,
+        body: Vec<u8>,
+        limit: Cell<usize>,
+    }
+    impl HttpTransport for ProfileChannel {
+        async fn send(
+            &self,
+            _: http::Request<Vec<u8>>,
+            limit: usize,
+        ) -> Result<http::Response<Vec<u8>>, String> {
+            self.limit.set(limit);
+            let mut response = http::Response::builder().status(self.status);
+            if let Some(content_type) = self.content_type {
+                response = response.header("content-type", content_type);
+            }
+            Ok(response.body(self.body.clone()).unwrap())
+        }
+    }
+    type CapturedFailure = (
+        crate::FailureKind,
+        String,
+        Option<u16>,
+        Vec<u8>,
+        Option<(String, String)>,
+    );
+    struct ResponsePolicy(std::cell::RefCell<Vec<CapturedFailure>>);
+    impl RequestPolicy for ResponsePolicy {
+        fn headers(
+            &self,
+            _: &crate::RequestContext<'_>,
+        ) -> Result<crate::RequestHeaders, crate::Veto> {
+            Ok(crate::RequestHeaders::new())
+        }
+        fn response_limit(&self, _: &str, _: usize) -> usize {
+            4 * 1024 * 1024
+        }
+        fn response_profile(&self, _: &str) -> crate::ResponseProfile {
+            crate::ResponseProfile {
+                omit_zero_page_size: true,
+                ignore_invalid_ref_hints: true,
+                allow_other_success_status: true,
+                allow_missing_content_type: true,
+                allow_content_type_prefix: true,
+                missing_presence_is_false: true,
+                allow_incomplete_error_fields: true,
+                ..crate::ResponseProfile::default()
+            }
+        }
+        fn map_failure(&self, failure: &crate::FailureDiagnostic<'_>) -> Option<Error> {
+            assert!(
+                failure
+                    .procedure
+                    .starts_with("/mkit.transport.v1.TransportService/")
+            );
+            self.0.borrow_mut().push((
+                failure.kind,
+                failure.cause.to_owned(),
+                failure.status.map(|status| status.as_u16()),
+                failure.body.unwrap_or_default().to_vec(),
+                failure
+                    .parsed_error
+                    .map(|error| (error.code.clone(), error.message.clone())),
+            ));
+            Some(Error::Transport("host-mapped failure".to_owned()))
+        }
+    }
+    fn profile_destination() -> Destination {
+        Destination::new("https://vcs.example.org".into(), "default".into()).unwrap()
+    }
+
+    #[derive(Default)]
+    struct ReadRequestCapture(std::cell::RefCell<Vec<Request<Vec<u8>>>>);
+    impl HttpTransport for ReadRequestCapture {
+        async fn send(
+            &self,
+            request: Request<Vec<u8>>,
+            _: usize,
+        ) -> Result<Response<Vec<u8>>, String> {
+            let bytes = if request.uri().path().ends_with("/ListRefs") {
+                ListRefsResponse::default().encode_to_vec()
+            } else {
+                PackExistsResponse {
+                    exists: Some(false),
+                    ..Default::default()
+                }
+                .encode_to_vec()
+            };
+            self.0.borrow_mut().push(request);
+            Ok(Response::builder()
+                .header("content-type", "application/proto")
+                .body(bytes)
+                .unwrap())
+        }
+    }
+    #[test]
+    fn zero_page_size_and_invalid_hints_require_explicit_host_compatibility() {
+        let channel = ReadRequestCapture::default();
+        let client = Client::anonymous(&channel, profile_destination());
+        ready(client.list_refs("", 0, "", None)).unwrap();
+        let request = channel.0.borrow();
+        let list = ListRefsRequest::decode_from_slice(request[0].body()).unwrap();
+        assert_eq!(list.page_size, Some(0));
+        drop(request);
+        assert!(matches!(
+            ready(client.pack_exists(&[1; 32], Some("refs/heads/bad\nheader"), None)),
+            Err(Error::Invalid("ref hint"))
+        ));
+        assert_eq!(channel.0.borrow().len(), 1);
+
+        let policy = ResponsePolicy(std::cell::RefCell::new(Vec::new()));
+        let client =
+            Client::anonymous(&channel, profile_destination()).with_request_policy(&policy);
+        ready(client.list_refs("", 0, "", None)).unwrap();
+        ready(client.list_refs("", 7, "", None)).unwrap();
+        for hint in ["../bad", "refs/heads/bad\nheader", "refs/heads/main"] {
+            ready(client.pack_exists(&[1; 32], Some(hint), None)).unwrap();
+        }
+        let requests = channel.0.borrow();
+        assert_eq!(
+            ListRefsRequest::decode_from_slice(requests[1].body())
+                .unwrap()
+                .page_size,
+            None
+        );
+        assert_eq!(
+            ListRefsRequest::decode_from_slice(requests[2].body())
+                .unwrap()
+                .page_size,
+            Some(7)
+        );
+        assert!(requests[3].headers().get("x-mkit-ref").is_none());
+        assert!(requests[4].headers().get("x-mkit-ref").is_none());
+        assert_eq!(requests[5].headers()["x-mkit-ref"], "refs/heads/main");
+    }
+
+    #[test]
+    fn default_response_validation_and_budgets_stay_strict() {
+        for (status, content_type) in [
+            (http::StatusCode::NO_CONTENT, None),
+            (http::StatusCode::OK, None),
+            (http::StatusCode::OK, Some("application/proto; mode=test")),
+        ] {
+            let channel = ProfileChannel {
+                status,
+                content_type,
+                body: Vec::new(),
+                limit: Cell::new(0),
+            };
+            let client = Client::anonymous(&channel, profile_destination());
+            assert!(matches!(
+                ready(client.read_ref("refs/heads/main", None)),
+                Err(Error::Invalid("Connect response status/encoding"))
+            ));
+            assert_eq!(channel.limit.get(), 1024 * 1024);
+        }
+    }
+
+    #[test]
+    fn host_response_profile_explicitly_selects_acceptance_presence_and_budget() {
+        let policy = ResponsePolicy(std::cell::RefCell::new(Vec::new()));
+        for (status, content_type) in [
+            (http::StatusCode::NO_CONTENT, None),
+            (http::StatusCode::OK, None),
+            (http::StatusCode::OK, Some("application/proto-any-prefix")),
+        ] {
+            let channel = ProfileChannel {
+                status,
+                content_type,
+                body: Vec::new(),
+                limit: Cell::new(0),
+            };
+            let client =
+                Client::anonymous(&channel, profile_destination()).with_request_policy(&policy);
+            assert!(
+                ready(client.read_ref("refs/heads/main", None))
+                    .unwrap()
+                    .value
+                    .is_none()
+            );
+            assert!(
+                !ready(client.pack_exists(&[1; 32], None, None))
+                    .unwrap()
+                    .value
+            );
+            assert_eq!(channel.limit.get(), 4 * 1024 * 1024);
+        }
+        assert!(policy.0.borrow().is_empty());
+    }
+
+    #[test]
+    fn host_failure_mapping_receives_original_protobuf_and_http_evidence() {
+        let policy = ResponsePolicy(std::cell::RefCell::new(Vec::new()));
+        let invalid = vec![0xff];
+        let cause = ReadRefResponse::decode_from_slice(&invalid)
+            .unwrap_err()
+            .to_string();
+        let channel = ProfileChannel {
+            status: http::StatusCode::CREATED,
+            content_type: Some("application/proto"),
+            body: invalid.clone(),
+            limit: Cell::new(0),
+        };
+        let client =
+            Client::anonymous(&channel, profile_destination()).with_request_policy(&policy);
+        assert!(matches!(
+            ready(client.read_ref("refs/heads/main", None)),
+            Err(Error::Transport(_))
+        ));
+        {
+            let observations = policy.0.borrow();
+            let captured = &observations[0];
+            assert_eq!(captured.0, crate::FailureKind::Decode);
+            assert_eq!(captured.1, cause);
+            assert_eq!(captured.2, Some(201));
+            assert_eq!(captured.3, invalid);
+        }
+        for body in [b"backend unavailable".as_slice(), b"{}"] {
+            let channel = ProfileChannel {
+                status: http::StatusCode::SERVICE_UNAVAILABLE,
+                content_type: Some("text/plain"),
+                body: body.to_vec(),
+                limit: Cell::new(0),
+            };
+            let client =
+                Client::anonymous(&channel, profile_destination()).with_request_policy(&policy);
+            assert!(matches!(
+                ready(client.read_ref("refs/heads/main", None)),
+                Err(Error::Transport(_))
+            ));
+        }
+        let captures = policy.0.borrow();
+        assert_eq!(captures[1].0, crate::FailureKind::Http);
+        assert_eq!(captures[1].2, Some(503));
+        assert_eq!(captures[1].3, b"backend unavailable");
+        assert!(captures[1].4.is_none());
+        assert_eq!(
+            captures[2].4,
+            Some(("unavailable".to_owned(), String::new()))
+        );
+    }
+
+    #[test]
+    fn admission_uses_actual_status_before_optional_failure_mapping() {
+        let policy = ResponsePolicy(std::cell::RefCell::new(Vec::new()));
+        for body in [b"{}".as_slice(), b"unusable error body"] {
+            let channel = ProfileChannel {
+                status: http::StatusCode::PAYMENT_REQUIRED,
+                content_type: None,
+                body: body.to_vec(),
+                limit: Cell::new(0),
+            };
+            let client =
+                Client::anonymous(&channel, profile_destination()).with_request_policy(&policy);
+            assert!(matches!(
+                ready(client.read_ref("refs/heads/main", None)),
+                Err(Error::PaymentRequired(_))
+            ));
+        }
+        assert!(policy.0.borrow().is_empty());
     }
 }

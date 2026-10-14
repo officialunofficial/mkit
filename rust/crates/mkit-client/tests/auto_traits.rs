@@ -67,3 +67,56 @@ fn explicitly_configured_local_and_erased_policies_remain_supported() {
         Client::anonymous(&host, destination()).with_request_policy(&mkit_client::NoRequestPolicy),
     );
 }
+
+fn assert_send_future<F: std::future::Future + Send>(future: F) {
+    drop(future);
+}
+#[test]
+fn default_client_rpc_futures_remain_send() {
+    let host = Host;
+    let destination = || {
+        Destination::new("https://example.test".into(), "repo".into()).expect("test destination")
+    };
+    let key = [2; 32];
+    let anonymous = Client::anonymous(&host, destination()).with_unsigned_writes();
+    assert_send_future(anonymous.read_ref("refs/heads/main", None));
+    assert_send_future(anonymous.server_info());
+    assert_send_future(anonymous.upload_pack(&key, b"pack", None, None));
+    assert_send_future(anonymous.download_pack(&key, None, 1024, None));
+    let signed = Client::signed(&host, destination(), &host, &host);
+    assert_send_future(signed.read_ref("refs/heads/main", None));
+    assert_send_future(signed.server_info());
+    assert_send_future(signed.upload_pack(&key, b"pack", None, None));
+    assert_send_future(signed.download_pack(&key, None, 1024, None));
+}
+
+struct LocalHost(std::rc::Rc<()>);
+impl HttpTransport for LocalHost {
+    async fn send(&self, _: Request<Vec<u8>>, _: usize) -> Result<Response<Vec<u8>>, String> {
+        let _ = &self.0;
+        Ok(Response::new(Vec::new()))
+    }
+}
+fn accept_local_future<F: std::future::Future>(future: F) {
+    drop(future);
+}
+#[test]
+fn local_hosts_and_policies_can_construct_rpc_futures() {
+    let host = LocalHost(std::rc::Rc::new(()));
+    let policy = LocalPolicy(std::cell::Cell::new(0));
+    let client = Client::anonymous(
+        &host,
+        Destination::new("https://example.test".into(), "repo".into()).expect("test destination"),
+    )
+    .with_unsigned_writes()
+    .with_request_policy(&policy);
+    let key = [2; 32];
+    accept_local_future(client.read_ref("refs/heads/main", None));
+    accept_local_future(client.server_info());
+    accept_local_future(client.upload_pack(&key, b"pack", None, None));
+    accept_local_future(client.download_pack(&key, None, 1024, None));
+    let erased: &dyn mkit_client::RequestPolicy = &policy;
+    let client = client.with_request_policy(erased);
+    accept_local_future(client.read_ref("refs/heads/main", None));
+    accept_local_future(client.upload_pack(&key, b"pack", None, None));
+}
