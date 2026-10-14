@@ -35,6 +35,36 @@ const DEPENDENCIES: u8 = 11;
 const MEMBERS: u8 = 12;
 const HEAD: u8 = 13;
 
+/// Sixteen maximum ingest chunks, including canonical and pack framing.
+const SHARED_WINDOW_BYTES: u64 = (4 << 20) + 16 * (super::super::geometry::BLOB_FRAMING_BYTES + 5);
+const _: () = assert!(
+    SHARED_WINDOW_BYTES
+        + PART
+        + super::super::geometry::FRAME_BYTES
+        + super::super::geometry::ENTRY_CACHE_BYTES
+        + 8 * super::super::geometry::CANONICAL_BYTES
+        < super::super::geometry::RESIDENT_BYTES
+);
+
+/// A slice-local transport buffer; each member still decodes and verifies.
+pub(super) struct SharedWindow {
+    pack: Hash,
+    offset: u64,
+    length: u64,
+    loaded: Option<Box<[u8]>>,
+}
+
+impl SharedWindow {
+    fn range(&self, pack: Hash, offset: u64, length: u64) -> Option<std::ops::Range<usize>> {
+        if pack != self.pack {
+            return None;
+        }
+        let start = offset.checked_sub(self.offset)?;
+        let end = start.checked_add(length)?;
+        (end <= self.length).then_some(usize::try_from(start).ok()?..usize::try_from(end).ok()?)
+    }
+}
+
 fn unfrozen(x: &ExtractionV1) -> bool {
     matches!(
         x.stage,
@@ -826,6 +856,73 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
             .nth((x.chunk % 128) as usize)
             .ok_or_else(corrupt)
     }
+    /// Plan only the next bounded group of staged non-delta frames. A gap
+    /// exceeding the cap or a different pack leaves later chunks to the normal
+    /// per-frame read. Loading stays at the first member's reader boundary.
+    async fn shared_window(
+        &self,
+        x: &ExtractionV1,
+        id: Hash,
+        pack: &Hash,
+        p: &Projection,
+        count: u32,
+    ) -> Option<SharedWindow> {
+        let cap = SHARED_WINDOW_BYTES.min(self.h.limits.window_bytes);
+        let mut window: Option<SharedWindow> = None;
+        let mut next = x.clone();
+        let mut remaining = PART - x.written % PART;
+        let steps = self.h.limits.extract_chain_steps.min(CHAIN_MAX_STEPS);
+        for chunk in x.chunk..count.min(x.chunk.saturating_add(steps)) {
+            next.chunk = chunk;
+            let Ok(chunk_id) = self.chunk_id(&next, id, pack, p).await else {
+                break;
+            };
+            let Ok(Some(frame)) = self.staged_frame(x, chunk_id).await else {
+                break;
+            };
+            if frame.value.delta_base.is_some() || self.member_limits(frame.value).is_err() {
+                break;
+            }
+            let Some(end) = frame
+                .value
+                .frame_offset
+                .checked_add(frame.value.frame_length)
+            else {
+                break;
+            };
+            if let Some(w) = &mut window {
+                let start = w.offset.min(frame.value.frame_offset);
+                let end = end.max(w.offset + w.length);
+                if frame.pack != w.pack || end - start > cap {
+                    break;
+                }
+                w.offset = start;
+                w.length = end - start;
+            } else {
+                if frame.value.frame_length > cap {
+                    break;
+                }
+                window = Some(SharedWindow {
+                    pack: frame.pack,
+                    offset: frame.value.frame_offset,
+                    length: frame.value.frame_length,
+                    loaded: None,
+                });
+            }
+            // Staged sizes only bound prefetch; walk_chunk still verifies the
+            // decoded Blob and its actual payload before using these bytes.
+            let payload = frame
+                .value
+                .decoded_size
+                .saturating_sub(super::super::geometry::BLOB_FRAMING_BYTES);
+            let offset = if chunk == x.chunk { x.chunk_offset } else { 0 };
+            remaining = remaining.saturating_sub(payload.saturating_sub(offset));
+            if x.length > PART && remaining == 0 {
+                break;
+            }
+        }
+        window
+    }
     /// One walked chunk: resolve its member, spool its bytes and finish the
     /// part it completes. Returns whether its part was finished.
     async fn walk_chunk(
@@ -948,6 +1045,7 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
             };
             return self.flush_denials(st).await;
         }
+        st.extract_window = Box::pin(self.shared_window(x, id, &pack, &p, count)).await;
         let mut finished_part = self.walk_chunk(st, x, id, &pack, &p).await?;
         let mut steps = 1_u32;
         // Chunks after the first fuse only while every bound holds; a chunk

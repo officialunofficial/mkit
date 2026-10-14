@@ -1788,7 +1788,14 @@ fn a_corrupt_blob_chunk_cursor_fails_without_overflow_or_publication() {
 /// them, a 16 MiB pack window. Returns the rig, the pack, the manifest id
 /// and the reconstructed payload.
 fn staged_chunk_rig(chunks_n: usize) -> (Rig, Hash, Hash, Vec<u8>) {
-    let chunk_bytes: usize = (256 << 10) - 10;
+    staged_chunk_rig_sized(chunks_n, (256 << 10) - 10, false)
+}
+
+fn staged_chunk_rig_sized(
+    chunks_n: usize,
+    chunk_bytes: usize,
+    unique: bool,
+) -> (Rig, Hash, Hash, Vec<u8>) {
     let mut rig = Rig::new();
     rig.limits.window_bytes = 16 << 20;
     let data = (0..chunks_n)
@@ -1797,9 +1804,20 @@ fn staged_chunk_rig(chunks_n: usize) -> (Rig, Hash, Hash, Vec<u8>) {
             for (j, b) in d.iter_mut().enumerate() {
                 *b = u8::try_from((i * 31 + j * 7) % 256).unwrap();
             }
+            if unique {
+                d[..8].copy_from_slice(&u64::try_from(i).unwrap().to_le_bytes());
+            }
             d
         })
         .collect::<Vec<_>>();
+    staged_chunk_data(rig, &data)
+}
+
+fn staged_chunk_data(rig: Rig, data: &[Vec<u8>]) -> (Rig, Hash, Hash, Vec<u8>) {
+    staged_chunk_pack(rig, data, false)
+}
+
+fn staged_chunk_pack(rig: Rig, data: &[Vec<u8>], deduplicate: bool) -> (Rig, Hash, Hash, Vec<u8>) {
     let chunks = data
         .iter()
         .map(|d| Object::Blob(Blob { data: d.clone() }))
@@ -1812,8 +1830,10 @@ fn staged_chunk_rig(chunks_n: usize) -> (Rig, Hash, Hash, Vec<u8>) {
     });
     let id = manifest.id().unwrap();
     let (tree, commit, head) = tree_head(&[id]);
+    let mut seen = BTreeSet::new();
     let objects = chunks
         .into_iter()
+        .filter(|object| !deduplicate || seen.insert(object.id().unwrap()))
         .chain([manifest, tree, commit])
         .collect::<Vec<_>>();
     let (ticket, ticket_id) = rig.add(&pack(&objects));
@@ -1826,13 +1846,20 @@ type CallTable = BTreeMap<(String, u8), (u32, u32, u32, u32)>;
 /// Drive the whole extraction counting remote, blob and window calls per
 /// (phase, stage) slice. Returns the table plus the fixture facts.
 fn extract_call_table(chunks_n: usize) -> (Rig, Hash, Hash, Vec<u8>, CallTable) {
-    let (rig, pack_id, id, expected) = staged_chunk_rig(chunks_n);
+    extract_call_table_on(staged_chunk_rig(chunks_n), true)
+}
+
+fn extract_call_table_on(
+    fixture: (Rig, Hash, Hash, Vec<u8>),
+    denial: bool,
+) -> (Rig, Hash, Hash, Vec<u8>, CallTable) {
+    let (rig, pack_id, id, expected) = fixture;
     let remote = Arc::new(AtomicU32::new(0));
     let blob_calls = Arc::new(AtomicU32::new(0));
     let window_calls = Arc::new(AtomicU32::new(0));
     let h = extraction_handler(&rig, TestExtraction::new(&rig));
     let handler: CountedExtraction = VerifyTimer {
-        takedown_denial: true,
+        takedown_denial: denial,
         remote: Shared(Arc::new(CountReads {
             inner: rig.store.clone(),
             job: keys::verify_job(&rig.repo.name, &pack_id),
@@ -1886,7 +1913,7 @@ fn extract_call_table(chunks_n: usize) -> (Rig, Hash, Hash, Vec<u8>, CallTable) 
 
 fn print_call_table(chunks_n: usize, table: &CallTable) {
     let (mut s, mut r, mut b, mut w) = (0, 0, 0, 0);
-    println!("XC1 chunks={chunks_n}");
+    println!("Extract chunks={chunks_n}");
     println!("phase stage | slices remote blob window");
     for ((phase, stage), (sl, re, bl, wi)) in table {
         println!("{phase} {stage} | {sl} {re} {bl} {wi}");
@@ -1932,8 +1959,57 @@ fn fused_walk(chunks_n: usize, length: u64, cap: u64) -> (u64, u64) {
     (decodes, walks)
 }
 
+/// The original fixture repeats its content every 256 chunks. Its staged
+/// rows select the first occurrence, so slices crossing that discontinuity
+/// fall back after the bounded prefix. Model those reads independently.
+fn modeled_windows(chunks_n: usize, cap: u64) -> u64 {
+    let bytes = (256 << 10) - 10;
+    let frame = bytes + 15;
+    let mut chunk = 0;
+    let mut written = 0;
+    let mut offset = 0;
+    let mut reads = 0;
+    while chunk < chunks_n {
+        let physical = |i: usize| i % 256;
+        let (mut lo, mut hi) = (physical(chunk), physical(chunk));
+        let mut covered = 1;
+        for i in chunk + 1..chunks_n.min(chunk + usize::try_from(cap).unwrap()) {
+            let next_lo = lo.min(physical(i));
+            let next_hi = hi.max(physical(i));
+            if (next_hi - next_lo + 1) * frame > (4 << 20) + 240 {
+                break;
+            }
+            lo = next_lo;
+            hi = next_hi;
+            covered += 1;
+        }
+        reads += 1;
+        let start = chunk;
+        for step in 0..cap {
+            if chunk - start >= covered {
+                reads += 1;
+            }
+            let take = ((8 << 20) - written % (8 << 20)).min(bytes - offset);
+            written += take;
+            offset += take;
+            if offset == bytes {
+                chunk += 1;
+                offset = 0;
+            }
+            if (chunks_n * bytes > 8 << 20 && written % (8 << 20) == 0)
+                || offset != 0
+                || chunk == chunks_n
+                || step + 1 == cap
+            {
+                break;
+            }
+        }
+    }
+    reads
+}
+
 /// Exact call counts of the fused walk. Every decode costs one chunk-id
-/// denial read and one pack window read; every walk slice costs one
+/// denial read; bounded adjacent frames share a window. Every walk slice costs one
 /// deferred pack denial read plus its protect round: `add_hold`'s three
 /// calls and the pending-holder probe, three calls on the extraction's
 /// first protect and two afterwards.
@@ -1949,7 +2025,12 @@ fn assert_fused_calls(rig: &Rig, chunks_n: usize, table: &CallTable) {
             .get(&(extract.clone(), stage))
             .expect("the walk stage ran");
         assert_eq!(u64::from(seen_slices), slices, "stage {stage} slices");
-        assert_eq!(u64::from(windows), decodes, "stage {stage} window reads");
+        let expected_windows = modeled_windows(chunks_n, cap);
+        assert_eq!(
+            u64::from(windows),
+            expected_windows,
+            "stage {stage} window reads"
+        );
         let protect = 5 * slices + u64::from(first_protect);
         assert_eq!(
             u64::from(remote),
@@ -1997,7 +2078,8 @@ fn staged_chunks_fuse_their_reads_at_150_mib() {
 /// The same walk arithmetic applied to the 1 GiB geometry (4,096 chunks of
 /// 256 KiB - 10 bytes, 128 parts) that the measured driven table confirmed:
 /// 384 slices and 6,527/6,526 remote calls in PREFLIGHT/UPLOAD with 4,223
-/// window reads.
+/// frame decodes. Shared reads replace these per-frame reads; discontinuities
+/// in the repeating fixture retain bounded fallback reads.
 #[test]
 fn the_fused_walk_model_at_1_gib_matches_the_driven_table() {
     let chunks_n = 4_096_usize;
@@ -2007,7 +2089,15 @@ fn the_fused_walk_model_at_1_gib_matches_the_driven_table() {
     let slices = walks + 1;
     for (stage, first_protect, remote) in [(3_u8, true, 6_527), (5, false, 6_526)] {
         assert_eq!(slices, 384, "stage {stage} slices");
-        assert_eq!(decodes, 4_223, "stage {stage} window reads");
+        assert_eq!(decodes, 4_223, "stage {stage} frame decodes");
+        let windows = modeled_windows(chunks_n, cap);
+        assert!(windows < decodes);
+        let before = remote + decodes;
+        let after = remote + windows;
+        let denial_off = 5 * slices + u64::from(first_protect) + windows;
+        println!(
+            "1 GiB stage={stage}: slices={slices} before={before} after={after} denial_off={denial_off} windows={windows}"
+        );
         assert_eq!(
             decodes + walks + 5 * slices + u64::from(first_protect),
             remote,
@@ -2570,4 +2660,281 @@ fn a_pack_block_at_a_fused_part_boundary_blocks_before_the_upload() {
         "a part receipt committed under a blocked pack"
     );
     assert!(read_blob(&rig.blobs, &BlobKey::object(id)).is_none());
+}
+
+#[test]
+fn shared_windows_cover_unique_frames_with_denial_on_and_off() {
+    for denial in [false, true] {
+        let fixture = staged_chunk_rig_sized(64, (256 << 10) - 10, true);
+        let (rig, pack, id, expected, table) = extract_call_table_on(fixture, denial);
+        print_call_table(64, &table);
+        assert_eq!(rig.job(&pack).unwrap().outcome, None);
+        assert_eq!(read_blob(&rig.blobs, &BlobKey::object(id)), Some(expected));
+        let (decodes, walks) = fused_walk(
+            64,
+            64 * ((256 << 10) - 10),
+            u64::from(rig.limits.extract_chain_steps.min(16)),
+        );
+        for (stage, first) in [(3, 1), (5, 0)] {
+            let (slices, remote, _, windows) = table[&("Extract".into(), stage)];
+            assert_eq!(u64::from(windows), walks);
+            assert_eq!(
+                u64::from(remote),
+                5 * u64::from(slices) + first + if denial { decodes + walks } else { 0 }
+            );
+        }
+    }
+}
+
+fn production_shaped_150_mib_call_table(denial: bool) {
+    let mut rig = Rig::new();
+    rig.limits.window_bytes = 16 << 20;
+    let mut data = (0..1800)
+        .map(|i| vec![u8::try_from(i % 14).unwrap(); 87381])
+        .collect::<Vec<_>>();
+    data.last_mut().unwrap().extend([13; 600]);
+    let fixture = staged_chunk_pack(rig, &data, true);
+    let (rig, pack, id, expected, table) = extract_call_table_on(fixture, denial);
+    print_call_table(1800, &table);
+    assert_eq!(rig.job(&pack).unwrap().outcome, None);
+    assert_eq!(read_blob(&rig.blobs, &BlobKey::object(id)), Some(expected));
+    for (stage, first) in [(3, 1), (5, 0)] {
+        let (slices, remote, _, windows) = table[&("Extract".into(), stage)];
+        assert_eq!(windows, slices - 1, "one window per walk slice");
+        assert_eq!(
+            remote,
+            5 * slices + first + if denial { 1818 + slices - 1 } else { 0 }
+        );
+    }
+}
+
+#[test]
+fn production_shaped_150_mib_shared_window_call_table_denial_on() {
+    production_shaped_150_mib_call_table(true);
+}
+
+#[test]
+fn production_shaped_150_mib_shared_window_call_table_denial_off() {
+    production_shaped_150_mib_call_table(false);
+}
+
+fn shared_slice_handler(
+    rig: &Rig,
+    extension: &TestExtraction,
+    pack_id: Hash,
+) -> (CountedExtraction, Arc<Mutex<u64>>, Arc<AtomicU32>) {
+    let h = extraction_handler(rig, extension.clone());
+    let maximum: Arc<Mutex<u64>> = Arc::default();
+    let calls = Arc::new(AtomicU32::new(0));
+    let pack = keys::verify_job(&rig.repo.name, &pack_id);
+    let handler = VerifyTimer {
+        takedown_denial: true,
+        remote: Shared(Arc::new(CountReads {
+            inner: rig.store.clone(),
+            job: pack,
+            maximum: Mutex::default(),
+            calls: Arc::default(),
+        })),
+        blobs: CountBlobCalls {
+            inner: rig.blobs.clone(),
+            calls: Arc::default(),
+        },
+        windows: CountWindows {
+            inner: h.windows,
+            maximum: maximum.clone(),
+            calls: Some(calls.clone()),
+        },
+        shards: h.shards,
+        cfg: h.cfg,
+        limits: h.limits,
+        lease: h.lease,
+        clock: h.clock,
+        metrics: h.metrics,
+        extension: h.extension,
+    };
+    (handler, maximum, calls)
+}
+
+#[test]
+fn a_chunk_outside_the_shared_window_falls_back_with_a_fixed_bound() {
+    let (rig, pack, _, _) = staged_chunk_rig_sized(16, (640 << 10) - 10, true);
+    let extension = TestExtraction::new(&rig);
+    drive_until(&rig, &extension, pack, |x| x.stage == 3 && x.chunk == 0);
+    let (handler, maximum, calls) = shared_slice_handler(&rig, &extension, pack);
+    commit_batch(&rig, fire_with(&rig, &handler, pack).unwrap());
+    let x = rig.job(&pack).unwrap().extraction.unwrap();
+    assert!(*maximum.lock().unwrap() <= (4 << 20) + 240);
+    let steps = rig.limits.extract_chain_steps.min(13);
+    assert_eq!(calls.load(Ordering::SeqCst), 1 + steps.saturating_sub(6));
+    assert_eq!(x.chunk, steps.min(12));
+}
+
+#[test]
+fn a_shared_window_spans_the_part_boundary() {
+    let (rig, pack, _, _) = staged_chunk_rig_sized(40, (256 << 10) - 10, true);
+    let extension = TestExtraction::new(&rig);
+    let start = if rig.limits.extract_chain_steps == 1 {
+        31
+    } else {
+        16
+    };
+    drive_until(&rig, &extension, pack, |x| x.stage == 5 && x.chunk == start);
+    let (handler, maximum, calls) = shared_slice_handler(&rig, &extension, pack);
+    commit_batch(&rig, fire_with(&rig, &handler, pack).unwrap());
+    let x = rig.job(&pack).unwrap().extraction.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(x.written, (8 << 20) - 320);
+    assert_eq!(x.chunk, 32);
+    // A twelve-byte pack header and raw frames of 256 KiB plus five bytes:
+    // this single read spans the pack's eight-MiB storage-part boundary.
+    let offset = 12 + u64::from(start) * ((256 << 10) + 5);
+    assert!(offset < 8 << 20);
+    assert!(offset + *maximum.lock().unwrap() > 8 << 20);
+    calls.store(0, Ordering::SeqCst);
+    *maximum.lock().unwrap() = 0;
+    // The output part ends inside the next chunk. Only that frame is fetched,
+    // including bytes beyond the output boundary so its hash is checked.
+    commit_batch(&rig, fire_with(&rig, &handler, pack).unwrap());
+    let x = rig.job(&pack).unwrap().extraction.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(*maximum.lock().unwrap(), (256 << 10) + 5);
+    assert_eq!(x.written, 8 << 20);
+    assert_eq!(x.chunk, 32);
+    assert_eq!(x.chunk_offset, 320);
+}
+
+#[test]
+fn corrupt_bytes_in_a_shared_window_fail_at_exactly_the_corrupt_chunk() {
+    let (rig, pack, _, _) = staged_chunk_rig_sized(16, (256 << 10) - 10, true);
+    let extension = TestExtraction::new(&rig);
+    drive_until(&rig, &extension, pack, |x| x.stage == 3 && x.chunk == 0);
+    // Damage the third frame's payload, while all frames arrive in one read.
+    *rig.windows.corrupt.lock().unwrap() = Some((8 + 2 * ((256 << 10) + 5) + 20, 0, false));
+    let (handler, _, calls) = shared_slice_handler(&rig, &extension, pack);
+    if rig.limits.extract_chain_steps > 1 {
+        commit_batch(&rig, fire_with(&rig, &handler, pack).unwrap());
+        assert_eq!(rig.job(&pack).unwrap().extraction.unwrap().chunk, 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    } else {
+        for _ in 0..2 {
+            commit_batch(&rig, fire_with(&rig, &handler, pack).unwrap());
+        }
+    }
+    let before = rig.job(&pack).unwrap().extraction;
+    assert!(fire_with(&rig, &handler, pack).is_err());
+    assert_eq!(rig.job(&pack).unwrap().extraction, before);
+}
+
+#[test]
+fn shared_windows_preserve_output_holder_and_index_bytes() {
+    let (shared, pack, id, expected) = staged_chunk_rig_sized(40, (256 << 10) - 10, true);
+    let (mut single, single_pack, single_id, _) =
+        staged_chunk_rig_sized(40, (256 << 10) - 10, true);
+    assert_eq!((pack, id), (single_pack, single_id));
+    // Only the transport cap changes: fusion, clocks and effect stages stay.
+    single.limits.window_bytes = 256 << 10;
+    drive(&shared, &TestExtraction::new(&shared), &[pack]);
+    drive(&single, &TestExtraction::new(&single), &[pack]);
+    assert_eq!(shared.job(&pack).unwrap().outcome, None);
+    assert_eq!(single.job(&pack).unwrap().outcome, None);
+    for key in [BlobKey::object(id), BlobKey::object_offsets(id)] {
+        assert_eq!(
+            read_blob(&shared.blobs, &key),
+            read_blob(&single.blobs, &key)
+        );
+    }
+    assert_eq!(
+        read_blob(&shared.blobs, &BlobKey::object(id)),
+        Some(expected)
+    );
+    let frames = shared.rows(&pack, keys::VC_FRAME);
+    assert_eq!(frames, single.rows(&pack, keys::VC_FRAME));
+    for (key, _) in frames {
+        let Some(keys::ParsedKey::VerifyCursor {
+            id: Some(object), ..
+        }) = keys::parse(&key)
+        else {
+            panic!("frame id")
+        };
+        let holder_key = keys::holder(&object, &shared.repo.namespace, &shared.repo.name).unwrap();
+        let holder = block_on(shared.store.get(&content_shard(&object), &holder_key)).unwrap();
+        assert_eq!(
+            holder,
+            block_on(single.store.get(&content_shard(&object), &holder_key)).unwrap()
+        );
+        if object == id {
+            assert!(holder.is_some(), "extracted manifest has a holder");
+        }
+        let partition = shared.shards.object_index(&shared.repo, &object);
+        let index_key = keys::object_index(&shared.repo.name, &object, &pack);
+        let index = block_on(shared.store.get(&partition, &index_key)).unwrap();
+        assert!(index.is_some());
+        assert_eq!(
+            index,
+            block_on(single.store.get(&partition, &index_key)).unwrap()
+        );
+    }
+}
+
+#[test]
+fn a_changed_etag_on_a_fallback_read_restarts_without_advancing_that_chunk() {
+    let (rig, pack, _, _) = staged_chunk_rig_sized(16, (640 << 10) - 10, true);
+    let extension = TestExtraction::new(&rig);
+    drive_until(&rig, &extension, pack, |x| x.stage == 3 && x.chunk == 0);
+    *rig.windows.flip_after.lock().unwrap() = Some(rig.windows.reads.load(Ordering::SeqCst) + 1);
+    let (handler, _, _) = shared_slice_handler(&rig, &extension, pack);
+    commit_batch(&rig, fire_with(&rig, &handler, pack).unwrap());
+    let job = rig.job(&pack).unwrap();
+    assert_eq!(
+        job.extraction.unwrap().chunk,
+        rig.limits.extract_chain_steps.min(6)
+    );
+    commit_batch(&rig, fire_with(&rig, &handler, pack).unwrap());
+    let job = rig.job(&pack).unwrap();
+    assert_eq!(job.restarts, 1);
+    assert_ne!(job.phase, Phase::Extract);
+}
+
+#[test]
+fn sixteen_maximum_ingest_chunks_fit_the_shared_window_bound() {
+    let (rig, pack, _, _) = staged_chunk_rig_sized(16, 256 << 10, true);
+    let extension = TestExtraction::new(&rig);
+    drive_until(&rig, &extension, pack, |x| x.stage == 3 && x.chunk == 0);
+    let (handler, maximum, calls) = shared_slice_handler(&rig, &extension, pack);
+    commit_batch(&rig, fire_with(&rig, &handler, pack).unwrap());
+    let steps = u64::from(rig.limits.extract_chain_steps.min(16));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(*maximum.lock().unwrap(), steps * ((256 << 10) + 15));
+    assert!(*maximum.lock().unwrap() <= (4 << 20) + 240);
+}
+
+#[test]
+fn a_bad_future_frame_offset_does_not_fail_an_earlier_chunk() {
+    let (rig, pack, _, _) = staged_chunk_rig_sized(4, (256 << 10) - 10, true);
+    let extension = TestExtraction::new(&rig);
+    drive_until(&rig, &extension, pack, |x| x.stage == 3 && x.chunk == 0);
+    for (key, raw) in rig.rows(&pack, keys::VC_FRAME) {
+        let Some(keys::ParsedKey::VerifyCursor { id: Some(id), .. }) = keys::parse(&key) else {
+            panic!("frame id")
+        };
+        let mut frame = checkpoint::decode_frame(&id, &raw).unwrap();
+        if frame.value.frame_offset == 12 + 2 * ((256 << 10) + 5) {
+            frame.value.frame_offset = rig.job(&pack).unwrap().pack_len + 16;
+            block_on(rig.store.apply(
+                &rig.source(),
+                Batch::new().put(key, checkpoint::encode_frame(&id, &frame).unwrap()),
+            ))
+            .unwrap();
+            break;
+        }
+    }
+    let (handler, _, _) = shared_slice_handler(&rig, &extension, pack);
+    commit_batch(&rig, fire_with(&rig, &handler, pack).unwrap());
+    if rig.limits.extract_chain_steps == 1 {
+        commit_batch(&rig, fire_with(&rig, &handler, pack).unwrap());
+    }
+    assert_eq!(rig.job(&pack).unwrap().extraction.unwrap().chunk, 2);
+    let before = rig.job(&pack).unwrap().extraction;
+    assert!(fire_with(&rig, &handler, pack).is_err());
+    assert_eq!(rig.job(&pack).unwrap().extraction, before);
 }

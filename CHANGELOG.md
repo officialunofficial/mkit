@@ -15,6 +15,14 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Changed
 
+- Extract shares one etag-bound pack window across each slice's staged
+  non-delta chunks, capped at 4 MiB plus 240 bytes of frame headers and the
+  configured window limit. Frames outside the buffer use bounded per-frame
+  reads. Each chunk retains its hash, size, and identity verification;
+  protection, denial, lease, and replay boundaries are unchanged. No API,
+  wire, or stored-format change; no wipe. See the
+  [Extract call report](docs/operations/extract-calls.md).
+
 - Ingest and read paths skip block and denial-action reads when
   `PipelineConfig.takedown_denial` is false. Holder, inventory, membership,
   index, and proof-structure writes continue. Takedown-enabled checks retain

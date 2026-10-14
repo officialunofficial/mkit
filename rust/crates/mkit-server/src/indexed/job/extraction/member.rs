@@ -44,7 +44,7 @@ fn decode<T: serde::de::DeserializeOwned>(raw: &Value) -> Result<T, Stop> {
 impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: SliceExtension>
     Run<'_, S, R, B, W, X>
 {
-    fn member_limits(&self, index: index::IndexValue) -> Result<(u64, u64), Stop> {
+    pub(super) fn member_limits(&self, index: index::IndexValue) -> Result<(u64, u64), Stop> {
         let budget = self.decode_limits().max_decoded_bytes;
         let wire = crate::indexed::geometry::FRAME_BYTES;
         if index.frame_length > wire
@@ -243,11 +243,36 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
                 pack: frame.pack,
                 ..*self
             };
-            let wire = run
-                .read(&mut job, index.frame_offset, index.frame_length)
-                .await?
-                .bytes;
-            (job.version, wire)
+            let range = st
+                .extract_window
+                .as_ref()
+                .filter(|w| {
+                    w.offset
+                        .checked_add(w.length)
+                        .is_some_and(|end| end <= job.pack_len)
+                })
+                .and_then(|w| w.range(frame.pack, index.frame_offset, index.frame_length));
+            if let Some(range) = range {
+                let window = st.extract_window.as_mut().ok_or_else(corrupt)?;
+                if window.loaded.is_none() {
+                    let bytes = run
+                        .read(&mut job, window.offset, window.length)
+                        .await?
+                        .bytes;
+                    check(bytes.len() as u64 == window.length)?;
+                    window.loaded = Some(bytes.into_boxed_slice());
+                }
+                let bytes = window.loaded.as_ref().ok_or_else(corrupt)?;
+                (job.version, bytes.get(range).ok_or_else(corrupt)?.to_vec())
+            } else {
+                // Release the shared allocation before a fallback read.
+                st.extract_window = None;
+                let wire = run
+                    .read(&mut job, index.frame_offset, index.frame_length)
+                    .await?
+                    .bytes;
+                (job.version, wire)
+            }
         } else {
             let prefix = resolve::frame_bytes(self.blobs, frame.pack, 0, 8, wire_budget)
                 .await
@@ -364,9 +389,8 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
             // A staged, non-delta level-0 frame decodes in this call: its
             // member-frame row is never written and no ascent slice runs.
             if cursor.level == 0 && local && location.value.delta_base.is_none() {
-                let (bytes, _) = self
-                    .decode_member_frame(st, x, &cursor, &frame, defer_pack)
-                    .await?;
+                let (bytes, _) =
+                    Box::pin(self.decode_member_frame(st, x, &cursor, &frame, defer_pack)).await?;
                 check(frame.id == cursor.target)?;
                 let object = mkit_core::serialize::deserialize(&bytes).map_err(|_| corrupt())?;
                 x.reconstruction = None;
@@ -388,9 +412,8 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
             return Ok(None);
         }
         let frame: Frame = decode(&self.require(&frame_key).await?)?;
-        let (bytes, depth) = self
-            .decode_member_frame(st, x, &cursor, &frame, false)
-            .await?;
+        let (bytes, depth) =
+            Box::pin(self.decode_member_frame(st, x, &cursor, &frame, false)).await?;
         let length = bytes.len() as u64;
         cursor.bytes = cursor.bytes.checked_add(length).ok_or_else(corrupt)?;
         st.settled.push(Write::Delete(frame_key));
