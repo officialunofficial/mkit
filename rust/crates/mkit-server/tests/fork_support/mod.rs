@@ -62,7 +62,21 @@ pub struct Counting {
     pub trigger: Arc<Mutex<Option<(&'static str, Hook)>>>,
     /// Fail every read with a transient error while set.
     pub fail_reads: Arc<std::sync::atomic::AtomicBool>,
+    /// Real (tokio, so virtual when paused) milliseconds each call sleeps:
+    /// calls of one wave overlap, so elapsed time counts serial rounds.
+    pub sleep_ms: Arc<AtomicU64>,
+    /// Report a known read allowance, as the Workers store does, so waves run.
+    pub waves: Arc<std::sync::atomic::AtomicBool>,
+    /// Reads of these keys fail at once, without the modeled sleep.
+    pub fail_keys: Arc<Mutex<Vec<Key>>>,
+    /// Job key whose committed rows are recorded in `marks`.
+    pub mark_key: Arc<Mutex<Option<Key>>>,
+    /// (calls so far, job row bytes, instant) per committed row of `mark_key`.
+    pub marks: Arc<Mutex<Vec<Mark>>>,
 }
+
+/// A committed row of the marked job: calls so far, the row, and when.
+pub type Mark = (u64, Vec<u8>, tokio::time::Instant);
 
 pub type Hook = Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>;
 impl Counting {
@@ -79,11 +93,29 @@ impl Counting {
             latency_ms: Arc::default(),
             trigger: Arc::default(),
             fail_reads: Arc::default(),
+            sleep_ms: Arc::default(),
+            waves: Arc::default(),
+            fail_keys: Arc::default(),
+            mark_key: Arc::default(),
+            marks: Arc::default(),
         }
+    }
+    fn injected(&self, keys: &[Key]) -> Result<(), StoreError> {
+        let failing = self.fail_keys.lock().unwrap();
+        if keys.iter().any(|key| failing.contains(key)) {
+            return Err(StoreError::Unavailable("injected key failure".into()));
+        }
+        Ok(())
     }
     fn tick(&self) {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.clock.advance(self.latency_ms.load(Ordering::SeqCst));
+    }
+    async fn pause(&self) {
+        let ms = self.sleep_ms.load(Ordering::SeqCst);
+        if ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+        }
     }
     fn record_denial_reads(&self, p: &Partition, keys: &[Key]) {
         if matches!(p, Partition::ContentShard(_)) {
@@ -114,8 +146,13 @@ impl NamespaceStore for Counting {
     fn capabilities(&self) -> StoreCapabilities {
         self.inner.capabilities()
     }
+    fn read_call_allowance(&self) -> Option<u32> {
+        self.waves.load(Ordering::SeqCst).then_some(u32::MAX)
+    }
     async fn get(&self, p: &Partition, k: &Key) -> Result<Option<Value>, StoreError> {
         self.tick();
+        self.injected(std::slice::from_ref(k))?;
+        self.pause().await;
         self.record_denial_reads(p, std::slice::from_ref(k));
         if self.fail_reads.load(Ordering::SeqCst) {
             return Err(StoreError::Unavailable("injected read failure".into()));
@@ -124,6 +161,8 @@ impl NamespaceStore for Counting {
     }
     async fn get_many(&self, p: &Partition, k: &[Key]) -> Result<Vec<Option<Value>>, StoreError> {
         self.tick();
+        self.injected(k)?;
+        self.pause().await;
         self.record_denial_reads(p, k);
         if self.fail_reads.load(Ordering::SeqCst) {
             return Err(StoreError::Unavailable("injected read failure".into()));
@@ -132,6 +171,7 @@ impl NamespaceStore for Counting {
     }
     async fn scan_many(&self, p: &Partition, r: &[RangeScan]) -> Result<Vec<ScanPage>, StoreError> {
         self.tick();
+        self.pause().await;
         if matches!(p, Partition::RepoIndex { .. }) {
             self.scans.fetch_add(r.len() as u64, Ordering::SeqCst);
         }
@@ -146,6 +186,7 @@ impl NamespaceStore for Counting {
         l: u32,
     ) -> Result<ScanPage, StoreError> {
         self.tick();
+        self.pause().await;
         if matches!(p, Partition::RepoIndex { .. }) {
             self.scans.fetch_add(1, Ordering::SeqCst);
         }
@@ -153,6 +194,20 @@ impl NamespaceStore for Counting {
     }
     async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
         self.tick();
+        self.pause().await;
+        if let Some(mark) = self.mark_key.lock().unwrap().clone() {
+            for write in &batch.writes {
+                if let mkit_server::Write::Put(k, v) = write
+                    && *k == mark
+                {
+                    self.marks.lock().unwrap().push((
+                        self.calls(),
+                        v.as_bytes().to_vec(),
+                        tokio::time::Instant::now(),
+                    ));
+                }
+            }
+        }
         if self.record.load(Ordering::SeqCst) {
             self.log.lock().unwrap().push((p.clone(), batch.clone()));
         }
@@ -186,6 +241,7 @@ impl NamespaceStore for Counting {
     }
     async fn stats(&self, p: &Partition) -> Result<PartitionStats, StoreError> {
         self.tick();
+        self.pause().await;
         self.inner.stats(p).await
     }
     async fn probe(&self) -> Result<(), StoreError> {
