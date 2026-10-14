@@ -47,6 +47,14 @@ Relative signing-key paths in config (`.mkit/keys/…`) resolve their
 `.mkit/` prefix against the **common dir**, so every tree signs with
 the one shared repo key store.
 
+The disposable **applied-packs/.heads/** subdirectory stores native fetch
+checkpoints shared with the object store and remote-tracking refs. Each cache
+key binds the remote, branch, repository identity, and origin. A checkpoint
+follows verified object application and durable tracking publication under the
+existing worktree lock. It is never a GC root. Its advisory format and recovery
+rules are documented in the [sync README](../../rust/crates/mkit-sync/README.md#incremental-fetch-checkpoints).
+No wire, ref, or authoritative repository format changes.
+
 ## 2. On-disk model
 
 ```

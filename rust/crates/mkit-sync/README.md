@@ -61,6 +61,63 @@ let pulled = pull(&dir, &source, "default", &SyncOptions::default(), &NoopObserv
 `SyncOptions` is `#[non_exhaustive]`: start from `SyncOptions::default()` and
 use the `with_*` setters.
 
+### Incremental fetch checkpoints
+
+With signature verification enabled, fetch records the last fully applied
+packmap head per remote branch. Both `ClientSource` and `TransportSource`
+use `RemoteSource::repository_address` to bind it to the repository and
+origin. Sources without that identity retain the full walk. Changing the
+origin or repository prevents reuse, even with the same remote and branch names.
+
+The disposable common-dir cache lives in **.mkit/applied-packs/.heads/**.
+The leading dot keeps the directory outside the valid remote-record namespace.
+Its filename is lowercase BLAKE3 over the remote name, branch name, repository,
+and origin, in that order. Each UTF-8 value has an eight-byte little-endian
+byte-length prefix. File contents are six LF-separated fields, without a final
+LF: `mkit-fetch-head-v1`, lowercase head hash, lowercase tracking-tip hash,
+decimal pack count, decimal node count, and lowercase BLAKE3 of the preceding
+five fields including their four separators. The checksum detects accidental
+corruption. Readers cap input at 512 bytes and validate counts against the
+existing chain limits. Missing, unreadable, or invalid records cause a full walk.
+You can delete these files; they never pin objects for GC. Remote rename starts
+a new checkpoint, and removing a remote may leave a harmless disposable file.
+
+Fetch reads the atomic checkpoint, walks from the new head, and stops before
+downloading the recorded immutable node. Prefix validity does not depend on
+the current tracking tip: the locked closure check remains authoritative even
+after a tracking change or GC. Fetch still verifies and publishes the listed
+tip when it changes under an unchanged packmap head. If the recorded head is
+absent from the chain, the walk continues to the root. When both the
+listed tip and packmap head match, no nodes or packs download. Cancellation
+checks and the local closure check still run. A missing local object triggers
+the existing applied-pack recovery, resolving and downloading the full chain
+with no skips. Stale-listing reads and the concurrent re-baseline retry retain
+their existing behavior.
+
+New packs still pass digest and signature verification. Only after successful
+application and closure verification does fetch durably publish the tracking
+ref, then atomically write and fsync the checkpoint, under the same worktree
+lock. Tracking directories now sync per branch before checkpoint publication.
+A crash before the checkpoint write leaves the old record; the next fetch
+walks more nodes. Cache write failure does not fail an otherwise successful fetch.
+
+For a single branch, one listing page, one pack per node, and no retries,
+let `N` be the total chain length after the operation. Count each ListRefs,
+ReadRef, node download, and pack download as one RPC:
+
+| Operation | Before | After |
+|---|---:|---:|
+| Clone | `2 + 2N` | `2 + 2N` |
+| Pull after one appended commit | `3 + N` | `4` |
+| No-op pull | `2 + N` | `2` |
+
+For `k` appended nodes containing `p` missing packs, incremental fetch costs
+`2 + k + p`. A rewritten chain costs `2 + N + p`. Additional listing pages,
+branches, and recovery reads add their own calls. The report continues to count
+packs in the verified prefix as already applied; CLI output and exit codes stay
+the same. These formulas concern network calls; the local closure check still
+scales with reachable objects.
+
 ### Pushing a repository
 
 Start with `PushOptions::default()`. Use `with_target(PushTarget::Branch { .. })` for

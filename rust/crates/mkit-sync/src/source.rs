@@ -91,7 +91,9 @@ pub trait RemoteSource {
     fn supports_atomic_advance(&self) -> bool {
         false
     }
-    /// Identity and origin of the repository, for error context.
+    /// Identity and origin of the repository, for error context and fetch
+    /// checkpoints. Both must identify this source's destination: changing
+    /// either invalidates checkpoint reuse. `None` disables checkpoints.
     fn repository_address(&self) -> Option<(String, String)> {
         None
     }

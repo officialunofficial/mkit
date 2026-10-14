@@ -886,3 +886,474 @@ fn a_zstd_compressed_pack_is_cloned() {
     let text = std::fs::read_to_string(target.join("big.txt")).unwrap();
     assert_eq!(text, "mkit compresses repetitive text well. ".repeat(256));
 }
+
+include!("support/counting.rs");
+
+fn identified(source: &dyn RemoteSource) -> CountingSource<'_> {
+    let mut counted = CountingSource::new(source);
+    counted.address = Some(("repository".into(), "https://example.invalid".into()));
+    counted
+}
+
+fn checkpoint_file(target: &Path) -> std::path::PathBuf {
+    std::fs::read_dir(
+        RepoLayout::single(target)
+            .applied_packs_dir()
+            .join(".heads"),
+    )
+    .unwrap()
+    .next()
+    .unwrap()
+    .unwrap()
+    .path()
+}
+
+#[test]
+fn incremental_pull_counts_and_rebaseline_fallback() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a", b"1")], true);
+    let second = remote.publish(Some(first), &[("a", b"2")], true);
+    let source = remote.source();
+    let counted = identified(&source);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone(
+        &target,
+        &counted,
+        &default_remote("mkit+memory://x"),
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    let calls = counted.take();
+    assert_eq!(calls.len(), 6); // listing, packmap, two nodes, two packs
+    let report = pull(
+        &target,
+        &counted,
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(
+        counted.take(),
+        ["ListRefs", "ReadRef refs/mkit/packmap/main"]
+    );
+    assert_eq!(report.fetch.objects_unpacked, 0);
+    assert_eq!(report.fetch.packs_already_applied, 2);
+    // A checkpoint established with verification also remains safe for an
+    // explicit verification opt-out; the option does not discard prior trust.
+    pull(
+        &target,
+        &counted,
+        "default",
+        &SyncOptions::default().with_verify_signatures(false),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(
+        counted.take(),
+        ["ListRefs", "ReadRef refs/mkit/packmap/main"]
+    );
+
+    let third = remote.publish(Some(second), &[("a", b"3")], true);
+    let new_head = remote.packmap_head.borrow().unwrap();
+    let report = pull(
+        &target,
+        &counted,
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    let calls = counted.take();
+    assert_eq!(calls.len(), 4);
+    assert_eq!(calls[2], format!("Node {}", hash::to_hex(&new_head)));
+    assert!(calls[3].starts_with("Pack "));
+    assert_eq!(report.fetch.packs_downloaded, 1);
+    assert_eq!(report.fetch.packs_already_applied, 2);
+    assert!(matches!(report.outcome, PullOutcome::FastForwarded { new, .. } if new == third));
+
+    let reset = remote.publish_reset(&[("reset", b"new root")]);
+    let reset_tip = remote.publish(Some(reset), &[("reset", b"new tip")], true);
+    let report = fetch(
+        &target,
+        &counted,
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(counted.take().len(), 6); // unrelated two-node chain, walked to root
+    assert_eq!(report.packs_downloaded, 2);
+    assert_eq!(
+        refs::read_remote_ref(&RepoLayout::single(&target), "default", "main").unwrap(),
+        Some(reset_tip)
+    );
+}
+
+#[test]
+fn checkpoint_corruption_absence_and_identity_changes_walk_the_full_chain() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a", b"1")], true);
+    remote.publish(Some(first), &[("a", b"2")], true);
+    let source = remote.source();
+    let mut counted = identified(&source);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone(
+        &target,
+        &counted,
+        &default_remote("mkit+memory://x"),
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    counted.take();
+    let path = checkpoint_file(&target);
+    for bytes in [Some(b"corrupt".as_slice()), None] {
+        if let Some(bytes) = bytes {
+            std::fs::write(&path, bytes).unwrap();
+        } else {
+            std::fs::remove_file(&path).unwrap();
+        }
+        fetch(
+            &target,
+            &counted,
+            "default",
+            &SyncOptions::default(),
+            &NoopObserver,
+        )
+        .unwrap();
+        assert_eq!(counted.take().len(), 4);
+    }
+    for address in [
+        ("repository", "https://other.invalid"),
+        ("other-repository", "https://example.invalid"),
+    ] {
+        counted.address = Some((address.0.into(), address.1.into()));
+        fetch(
+            &target,
+            &counted,
+            "default",
+            &SyncOptions::default(),
+            &NoopObserver,
+        )
+        .unwrap();
+        assert_eq!(counted.take().len(), 4);
+    }
+}
+
+#[test]
+fn checkpoint_self_heals_a_missing_prefix_and_verifies_new_signatures() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a", b"1")], true);
+    let source = remote.source();
+    let counted = identified(&source);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone(
+        &target,
+        &counted,
+        &default_remote("mkit+memory://x"),
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    let path = checkpoint_file(&target);
+    let before = std::fs::read(&path).unwrap();
+    let layout = RepoLayout::single(&target);
+    std::fs::remove_dir_all(layout.objects_dir()).unwrap();
+    std::fs::create_dir_all(layout.objects_dir()).unwrap();
+    let observer = Recorder::default();
+    fetch(
+        &target,
+        &counted,
+        "default",
+        &SyncOptions::default(),
+        &observer,
+    )
+    .unwrap();
+    assert!(
+        observer
+            .events
+            .borrow()
+            .iter()
+            .any(|e| matches!(e, SyncEvent::AppliedPacksStale { .. }))
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    // Recovery also resolves an omitted prefix after a new suffix was applied.
+    let second = remote.publish(Some(first), &[("a", b"2")], true);
+    std::fs::remove_dir_all(layout.objects_dir()).unwrap();
+    std::fs::create_dir_all(layout.objects_dir()).unwrap();
+    let recovered = fetch(
+        &target,
+        &counted,
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(recovered.packs_downloaded, 2);
+    let before = std::fs::read(&path).unwrap();
+    remote.publish(Some(second), &[("a", b"unsigned")], false);
+    let error = fetch(
+        &target,
+        &counted,
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap_err();
+    assert!(matches!(error, SyncError::UnsignedOrInvalidObject { .. }));
+    assert_eq!(std::fs::read(path).unwrap(), before);
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(second)
+    );
+}
+
+#[test]
+fn crash_between_tracking_publication_and_checkpoint_rewalks_safely() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a", b"1")], true);
+    let source = remote.source();
+    let counted = identified(&source);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone(
+        &target,
+        &counted,
+        &default_remote("mkit+memory://x"),
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    let path = checkpoint_file(&target);
+    let old_record = std::fs::read(&path).unwrap();
+    let applied_path = RepoLayout::single(&target)
+        .applied_packs_dir()
+        .join("default");
+    let old_applied = std::fs::read(&applied_path).unwrap();
+    remote.publish(Some(first), &[("a", b"2")], true);
+    fetch(
+        &target,
+        &counted,
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    // Reconstruct exactly the durable crash boundary: objects and tracking ref
+    // published, but neither the checkpoint rename nor the final applied-pack
+    // persist has occurred.
+    std::fs::write(&path, old_record).unwrap();
+    std::fs::write(&applied_path, old_applied).unwrap();
+    counted.take();
+    let report = fetch(
+        &target,
+        &counted,
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(counted.take().len(), 4); // missed suffix plus the not-yet-recorded new pack
+    assert_eq!(report.packs_downloaded, 1);
+    fetch(
+        &target,
+        &counted,
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(counted.take().len(), 2);
+}
+
+#[test]
+fn concurrent_pulls_publish_consistent_checkpoints_under_the_lock() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a", b"1")], true);
+    let source = remote.source();
+    let counted = identified(&source);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone(
+        &target,
+        &counted,
+        &default_remote("mkit+memory://x"),
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    let second = remote.publish(Some(first), &[("a", b"2")], true);
+    let barrier = std::sync::Barrier::new(2);
+    let tx = &remote.tx;
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let target = &target;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    let source = TransportSource::new(tx);
+                    let mut counted = identified(&source);
+                    // Both transfers rendezvous before either can publish.
+                    counted.before_pack = Some(barrier);
+                    barrier.wait();
+                    pull(
+                        target,
+                        &counted,
+                        "default",
+                        &SyncOptions::default(),
+                        &NoopObserver,
+                    )
+                    .unwrap()
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+    });
+    assert_eq!(
+        refs::read_ref(&RepoLayout::single(&target), "main").unwrap(),
+        Some(second)
+    );
+    counted.take();
+    pull(
+        &target,
+        &counted,
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(counted.take().len(), 2);
+}
+
+#[test]
+fn checkpoints_are_per_branch_and_unchanged_heads_still_publish_listed_tips() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a", b"1")], true);
+    let source = remote.source();
+    let counted = identified(&source);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone(
+        &target,
+        &counted,
+        &default_remote("mkit+memory://x"),
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    let second = remote.publish(Some(first), &[("a", b"2")], true);
+    fetch(
+        &target,
+        &counted,
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    // The listed tip and tracking tip can agree while the checkpoint records
+    // a different historical tip under the same immutable packmap head.
+    refs::write_remote_ref(&RepoLayout::single(&target), "default", "main", &first).unwrap();
+    let stale = StaleListing {
+        inner: remote.source(),
+        listing: vec![refs::Ref {
+            name: "main".into(),
+            hash: Some(first),
+        }],
+    };
+    let stale_counted = identified(&stale);
+    pull(
+        &target,
+        &stale_counted,
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(stale_counted.take().len(), 2); // no-op conditions hold despite the different recorded tip
+
+    remote
+        .tx
+        .update_ref("refs/heads/topic", RefWriteCondition::Missing, &second)
+        .unwrap();
+    remote
+        .tx
+        .update_ref(
+            "refs/mkit/packmap/topic",
+            RefWriteCondition::Missing,
+            &remote.packmap_head.borrow().unwrap(),
+        )
+        .unwrap();
+    fetch(
+        &target,
+        &counted,
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(
+        refs::read_remote_ref(&RepoLayout::single(&target), "default", "main").unwrap(),
+        Some(second)
+    );
+    counted.take();
+    let report = fetch(
+        &target,
+        &counted,
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(counted.take().len(), 3); // one listing, two packmap reads
+    assert_eq!(report.branches_fetched, 2);
+    assert_eq!(report.objects_unpacked, 0);
+}
+
+#[test]
+fn checkpoint_directory_does_not_collide_with_a_remote_named_heads() {
+    let remote = Remote::new();
+    remote.publish(None, &[("a", b"1")], true);
+    let source = remote.source();
+    let counted = identified(&source);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    let mut named = default_remote("mkit+memory://x");
+    named.name = "heads".into();
+    clone(
+        &target,
+        &counted,
+        &named,
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    let records = RepoLayout::single(&target).applied_packs_dir();
+    assert!(records.join("heads").is_file());
+    assert!(records.join(".heads").is_dir());
+    assert!(!refs::validate_ref_name(".heads"));
+    counted.take();
+    let observer = Recorder::default();
+    pull(
+        &target,
+        &counted,
+        "heads",
+        &SyncOptions::default(),
+        &observer,
+    )
+    .unwrap();
+    assert_eq!(counted.take().len(), 2);
+    assert!(
+        !observer
+            .events
+            .borrow()
+            .iter()
+            .any(|event| matches!(event, SyncEvent::AppliedPacksPersistFailed { .. }))
+    );
+}

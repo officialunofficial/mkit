@@ -2769,6 +2769,26 @@ or inconsistent refs to a caller.
 **Enforced by:** the shared accumulator, `Client::list_refs` page validation,
 core budget/page-cap tests, and `shared_listing_adversaries` in each driver.
 
+## Fetch checkpoints follow verified tracking publication
+
+**Always:** a native fetch checkpoint binds its remote branch to a repository
+identity and origin, and records only a fully applied, verified packmap chain.
+Fetch publishes the tracking ref durably before the checkpoint under the same
+worktree lock. An unchanged remote tip and head download nothing. Every listed
+tip still passes locked closure verification; new nodes retain digest and
+signature checks.
+Missing local objects trigger full-chain recovery before publication.
+
+**Because:** immutable packmap nodes permit skipping verified ancestors, but
+an unpublished or differently addressed checkpoint cannot establish local safety.
+
+**If violated:** fetch could skip new content, fail to restore missing objects,
+or publish an unverified branch after a crash or concurrent operation.
+
+**Enforced by:** `mkit-sync::fetch`, checksummed `checkpoint` records, bounded
+`walk_pack_chain_until`, counting-source regressions on both backends, and crash,
+concurrent-pull, identity-change, and signature-failure regressions.
+
 ## Sync source outcomes retain host scheduling evidence
 
 **Always:** `RemoteSource` returns backend-neutral `SourceError`. Verification

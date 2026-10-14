@@ -15,13 +15,17 @@ use mkit_core::refs;
 use mkit_core::store::{ObjectStore, StoreError};
 
 use crate::applied_packs::AppliedPacks;
+use crate::checkpoint::{self, Checkpoint};
 use std::path::Path;
 
 use crate::SyncOptions;
 use crate::error::SyncError;
 use crate::lock::acquire_worktree_lock;
 use crate::observer::{SyncEvent, SyncObserver};
-use crate::packmap::{packmap_ref, resolve_pack_chain};
+use crate::packmap::{
+    MAX_FETCH_PACKS, MAX_PACK_CHAIN_DEPTH, flatten_oldest_first, packmap_ref, resolve_pack_chain,
+    walk_pack_chain_until,
+};
 use crate::source::RemoteSource;
 use crate::stage::{StagedPacks, download_pack_chain, unpack_downloaded_packs};
 
@@ -48,12 +52,17 @@ pub struct FetchReport {
 /// caller must run under the repo lock.
 pub(crate) struct FetchedChain {
     /// Oldest-first flattened chain. Retained (not just `downloaded`) so a
-    /// self-heal retry inside [`apply_fetched_chain`] can re-download without
-    /// re-walking the packlist chain.
+    /// self-heal retry inside [`apply_fetched_chain`] can re-download it.
+    /// An omitted prefix is resolved in full only on self-heal.
     chain: Vec<Hash>,
     /// Private, verified files for missing packs in apply order. Payload
     /// bytes are never retained across download iterations.
     downloaded: StagedPacks,
+    head: Hash,
+    /// Counts for the complete chain, including its verified prefix.
+    packs: usize,
+    nodes: usize,
+    prefix_packs: usize,
 }
 
 /// Phase 1 of a branch fetch: walk `branch`'s packmap chain from `head_key`
@@ -61,10 +70,8 @@ pub(crate) struct FetchedChain {
 /// network I/O (the local object store is never touched), so the caller does
 /// not need the repo lock.
 ///
-/// Packs already recorded in `applied` are skipped, so a steady-state fetch
-/// only pays for packs new since the last fetch. The chain itself is still
-/// resolved in full every time: node downloads are small blobs and remain the
-/// source of truth for chain shape.
+/// A matching checkpoint skips the immutable prefix. Missing or unrelated
+/// checkpoints leave the full walk unchanged.
 pub(crate) fn resolve_and_download_chain(
     source: &dyn RemoteSource,
     observer: &dyn SyncObserver,
@@ -72,10 +79,35 @@ pub(crate) fn resolve_and_download_chain(
     head_key: Hash,
     applied: &AppliedPacks,
     stage_parent: Option<&Path>,
+    checkpoint: Option<Checkpoint>,
 ) -> Result<FetchedChain, SyncError> {
-    let chain = resolve_pack_chain(source, observer, branch, head_key)?;
+    let (nodes, reached) = walk_pack_chain_until(
+        source,
+        observer,
+        branch,
+        head_key,
+        checkpoint.map(|c| c.head),
+    )?;
+    let prefix = checkpoint.filter(|_| reached);
+    let node_count = nodes.len() + prefix.map_or(0, |c| c.nodes);
+    let chain = flatten_oldest_first(nodes);
+    let prefix_packs = prefix.map_or(0, |c| c.packs);
+    let packs = chain.len() + prefix_packs;
+    if node_count > MAX_PACK_CHAIN_DEPTH || packs > MAX_FETCH_PACKS {
+        return Err(SyncError::PackChainInvalid {
+            branch: branch.to_owned(),
+            source: None,
+        });
+    }
     let downloaded = download_pack_chain(source, observer, branch, &chain, applied, stage_parent)?;
-    Ok(FetchedChain { chain, downloaded })
+    Ok(FetchedChain {
+        chain,
+        downloaded,
+        head: head_key,
+        packs,
+        nodes: node_count,
+        prefix_packs,
+    })
 }
 
 /// What [`apply_fetched_chain`] did, for the report.
@@ -102,8 +134,9 @@ pub(crate) struct Applied {
 /// one recorded pack. The record claimed packs were applied but their objects
 /// are not in the store (for example `.mkit/objects` was wiped while
 /// `applied-packs/` survived), so `applied` is cleared in memory and the
-/// whole chain is retried once with no skips. Every other failure propagates
-/// without triggering self-heal, because none is evidence the local store is
+/// whole chain is resolved if necessary and retried once with no skips.
+/// Every other failure propagates without triggering self-heal, because none
+/// is evidence the local store is
 /// stale: a corrupt pack, a remote missing a pack, a transport error, a
 /// closure too large to verify, an interruption, or a failed signature.
 ///
@@ -125,10 +158,16 @@ pub(crate) fn apply_fetched_chain(
     require_signed: bool,
     stage_parent: Option<&Path>,
 ) -> Result<Applied, SyncError> {
-    let FetchedChain { chain, downloaded } = fetched;
+    let FetchedChain {
+        mut chain,
+        downloaded,
+        head,
+        prefix_packs,
+        ..
+    } = fetched;
     let mut stats = Applied {
         packs_downloaded: downloaded.packs.len(),
-        packs_skipped: chain.len() - downloaded.packs.len(),
+        packs_skipped: chain.len() + prefix_packs - downloaded.packs.len(),
         objects_unpacked: 0,
     };
     stats.objects_unpacked +=
@@ -151,6 +190,11 @@ pub(crate) fn apply_fetched_chain(
             // store wipe that trips self-heal makes those entries just as
             // stale.
             applied.clear();
+            if prefix_packs > 0 {
+                // Release suffix metadata before allocating the complete walk.
+                drop(chain);
+                chain = resolve_pack_chain(source, observer, branch, head)?;
+            }
             let downloaded =
                 download_pack_chain(source, observer, branch, &chain, applied, stage_parent)?;
             stats.packs_downloaded = downloaded.packs.len();
@@ -281,10 +325,8 @@ fn fetch_objects_inner(
             None => return Err(SyncError::RemoteBranchMissing(branch.to_owned())),
         }
     }
-    // Batch every fetched branch's remote-tracking-ref write: `tracking.write`
-    // still runs inside this branch's lock scope below, so ref visibility
-    // timing is unchanged from per-branch publish-then-unlock; only the
-    // parent-directory fsync is deferred to one pass after the loop.
+    // Unidentified sources retain batched tracking writes. Checkpoints need
+    // each tracking rename durable before the checkpoint is published.
     let mut tracking = refs::RemoteRefBatch::new(layout, remote)?;
     let result: Result<(), SyncError> = (|| {
         for r in remote_refs {
@@ -317,6 +359,12 @@ fn fetch_objects_inner(
                 return Err(SyncError::PackmapMissing(r.name.clone()));
             };
 
+            let checkpoint_path = checkpoint::path(layout, source, remote, &r.name);
+            // The immutable prefix remains verified even if tracking moved.
+            // Always check the listed tip's closure under the apply lock below,
+            // including when the head matches but that tip changed.
+            let checkpoint = checkpoint_path.as_deref().and_then(Checkpoint::load);
+
             // Phase 1: resolve this branch's chain and download its packs.
             // No repo lock is held.
             let fetched = resolve_and_download_chain(
@@ -326,7 +374,14 @@ fn fetch_objects_inner(
                 chain_head,
                 applied,
                 stage_parent,
+                checkpoint,
             )?;
+            let completed = Checkpoint {
+                head: chain_head,
+                tip: h,
+                packs: fetched.packs,
+                nodes: fetched.nodes,
+            };
 
             // Phase 2: unpack, verify and publish this branch's ref under a
             // repo lock acquired fresh for this branch and released once this
@@ -337,8 +392,8 @@ fn fetch_objects_inner(
             // fails because a concurrent re-baseline moved the branch under
             // us, the freshly re-read tip. The match also carries the lock
             // guard out, so whichever branch runs, the correct (possibly
-            // re-acquired) guard is held at `tracking.write` below.
-            let (published_tip, _lock, applied_stats) = match apply_fetched_chain(
+            // re-acquired) guard is held at the tracking write below.
+            let (completed, _lock, applied_stats) = match apply_fetched_chain(
                 store,
                 source,
                 observer,
@@ -350,7 +405,7 @@ fn fetch_objects_inner(
                 require_signed,
                 stage_parent,
             ) {
-                Ok(stats) => (h, lock, stats),
+                Ok(stats) => (completed, lock, stats),
                 Err(e @ SyncError::RemoteMissingObject(_)) => {
                     // Re-read the branch's CURRENT tip and packmap. If either
                     // is gone (branch deleted mid-fetch) the original error
@@ -374,7 +429,14 @@ fn fetch_objects_inner(
                         fresh_head,
                         applied,
                         stage_parent,
+                        None,
                     )?;
+                    let completed = Checkpoint {
+                        head: fresh_head,
+                        tip: fresh_h,
+                        packs: fresh_fetched.packs,
+                        nodes: fresh_fetched.nodes,
+                    };
                     let lock = acquire_worktree_lock(layout, observer)?;
                     let stats = apply_fetched_chain(
                         store,
@@ -388,12 +450,20 @@ fn fetch_objects_inner(
                         require_signed,
                         stage_parent,
                     )?;
-                    (fresh_h, lock, stats)
+                    (completed, lock, stats)
                 }
                 Err(e) => return Err(e),
             };
-            // Still inside the lock's scope.
-            tracking.write(&r.name, &published_tip)?;
+            // Still inside the lock's scope. Make the tracking rename durable
+            // before its checkpoint; a crash between them leaves the old record.
+            tracking.write(&r.name, &completed.tip)?;
+            if require_signed && let Some(path) = &checkpoint_path {
+                let batch =
+                    std::mem::replace(&mut tracking, refs::RemoteRefBatch::new(layout, remote)?);
+                batch.commit()?;
+                // Like applied-packs, this is a disposable performance cache.
+                let _ = completed.persist(path);
+            }
             report.branches_fetched += 1;
             report.packs_downloaded += applied_stats.packs_downloaded;
             report.packs_already_applied += applied_stats.packs_skipped;
@@ -401,9 +471,7 @@ fn fetch_objects_inner(
         }
         Ok(())
     })();
-    // Commit whatever tracking-ref writes succeeded regardless of how the
-    // loop above ended: a mid-loop failure still durably publishes the prefix
-    // that already verified successfully.
+    // Persist the successful batched prefix even if a later branch failed.
     tracking.commit()?;
     result
 }
