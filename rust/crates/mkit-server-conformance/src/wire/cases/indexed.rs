@@ -410,9 +410,11 @@ async fn advance_with_concurrent_read(
             let response = want_ok(reply?, "same-shard concurrent read")?;
             // The commit may linearize before its HTTP reply arrives. Either
             // snapshot is valid; an unrelated head is never valid.
+            let id = response.object_id.as_deref().unwrap_or_default();
             ensure!(
-                response.object_id.is_none() || response.object_id.as_deref() == Some(expected_head.as_slice()),
-                "same-shard concurrent read returned an unexpected head"
+                (response.exists != Some(true) && id.is_empty())
+                    || (response.exists == Some(true) && id == expected_head.as_slice()),
+                "same-shard concurrent read returned an unexpected head: {response:?}"
             );
         }
     }
