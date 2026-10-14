@@ -474,6 +474,9 @@ async fn claim_extraction_group<N: NamespaceStore>(
             continue;
         }
         let (changed, before_effects) = marks[i];
+        if (changed && before_effects) || (new[i] && job.usable()) {
+            debug_assert!(needs[i], "member check without member rows");
+        }
         if changed
             && before_effects
             && let Some(witness) = failed_group(repo, job, &members[i])?
@@ -577,6 +580,7 @@ async fn claim_extraction_group<N: NamespaceStore>(
             && prior.usable()
             && prior.extraction_group != group
         {
+            debug_assert!(needs[i], "member check without member rows");
             for guard in finished_peers(repo, prior, &members[i])? {
                 if !batch.preconditions.contains(&guard) {
                     batch.preconditions.push(guard);
