@@ -347,12 +347,12 @@ pub fn is_reserved_header(name: &str) -> bool {
             .any(|prefix| name.starts_with(prefix))
 }
 
-/// Host policy run before a write is signed or sent. The default does nothing.
+/// Host policy for identity-bearing writes. The default does nothing.
 #[allow(async_fn_in_trait)]
 pub trait Observer {
-    /// Called once per attempt, before the attempt is signed, for every write
-    /// RPC. `Err` vetoes the write: nothing is signed or sent. `Ok` may add
-    /// headers for this attempt.
+    /// Called once per signed or explicitly clocked unsigned write attempt,
+    /// before signing or dispatch. `Err` vetoes the write: nothing is signed or
+    /// sent. `Ok` may add headers for this attempt.
     ///
     /// # Errors
     /// A [`Veto`] stops the call with [`Error::Vetoed`].

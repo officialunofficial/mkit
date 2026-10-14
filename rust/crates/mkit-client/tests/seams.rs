@@ -1645,7 +1645,10 @@ fn request_policy_selects_fresh_credentials_for_signed_reads_and_observes_receip
             format!("grant-{}", index + 1)
         );
         assert_eq!(request.headers()["authorization"], "admission-token");
-        let mut response = unary(&proto::ReadRefResponse::default())?;
+        let mut response = unary(&proto::ReadRefResponse {
+            exists: Some(false),
+            ..Default::default()
+        })?;
         response
             .headers_mut()
             .insert("payment-receipt", "opaque".parse().unwrap());

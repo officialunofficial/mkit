@@ -121,6 +121,7 @@ fn source_error(error: ClientError) -> SourceError {
         // HttpTransport does not classify its string errors. Refused redirects
         // and malformed/oversized responses must not become transient failures.
         ClientError::Connection(_) => SourceError::ServerError { status: 503 },
+        ClientError::RequestTimeout(cause) => SourceError::RemoteError(cause),
         ClientError::Transport(cause) => SourceError::RemoteError(format!("transport: {cause}")),
         ClientError::PaymentRequired(challenges) => SourceError::PaymentRequired { challenges },
         ClientError::PendingVerification { retry_after } => {
@@ -145,8 +146,8 @@ fn source_error(error: ClientError) -> SourceError {
     }
 }
 
-impl<T: HttpTransport, S: Signer, C: Clock, E: Executor, O: Observer>
-    ClientSource<'_, T, S, C, E, O>
+impl<'a, T: HttpTransport, S: Signer, C: Clock, E: Executor, O: Observer>
+    ClientSource<'a, T, S, C, E, O>
 {
     /// Reuse cached upload tickets and capabilities across borrowed clients.
     /// A session binds to this destination and public key on first use.
@@ -210,6 +211,9 @@ impl<T: HttpTransport, S: Signer, C: Clock, E: Executor, O: Observer> RemoteSour
         key: &PackKey,
         name: &str,
     ) -> Result<(), SourceError> {
+        if !self.client.supports_writes() {
+            return Err(SourceError::ProtocolError);
+        }
         self.write_upload(bytes, key, name)
     }
 
@@ -219,6 +223,9 @@ impl<T: HttpTransport, S: Signer, C: Clock, E: Executor, O: Observer> RemoteSour
         key: &PackKey,
         name: &str,
     ) -> Result<(), SourceError> {
+        if !self.client.supports_writes() {
+            return Err(SourceError::ProtocolError);
+        }
         self.write_upload(bytes, key, name)
     }
 
@@ -228,6 +235,9 @@ impl<T: HttpTransport, S: Signer, C: Clock, E: Executor, O: Observer> RemoteSour
         condition: mkit_core::refs::RefWriteCondition,
         tip: &Hash,
     ) -> Result<(), SourceError> {
+        if !self.client.supports_writes() {
+            return Err(SourceError::ProtocolError);
+        }
         self.write_update_ref(name, condition, tip)
     }
 
@@ -241,6 +251,9 @@ impl<T: HttpTransport, S: Signer, C: Clock, E: Executor, O: Observer> RemoteSour
         node: &Hash,
         keys: &[PackKey],
     ) -> Result<mkit_core::protocol::CommitOutcome, SourceError> {
+        if !self.client.supports_writes() {
+            return Err(SourceError::ProtocolError);
+        }
         self.write_advance_refs_committing(
             head,
             head_condition,
@@ -265,10 +278,11 @@ impl<T: HttpTransport, S: Signer, C: Clock, E: Executor, O: Observer> RemoteSour
     }
 
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError> {
-        self.executor
-            .block_on(self.client.read_ref(name, None))
-            .map(|reply| reply.value)
-            .map_err(source_error)
+        match self.executor.block_on(self.client.read_ref(name, None)) {
+            Ok(reply) => Ok(reply.value),
+            Err(ClientError::Remote(remote)) if remote.code == "not_found" => Ok(None),
+            Err(error) => Err(source_error(error)),
+        }
     }
 
     fn download_blob_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
@@ -339,6 +353,37 @@ mod tests {
             _: &mkit_client::Attempt,
         ) -> Result<mkit_client::AttemptHeaders, mkit_client::Veto> {
             panic!("reads must not invoke the write observer")
+        }
+    }
+
+    #[test]
+    fn anonymous_source_writes_refuse_before_any_network_call() {
+        let (transport, dest) = source_over(Vec::new());
+        let client = Client::anonymous(&transport, dest);
+        let source = ClientSource::new(&client, &FuturesExecutor);
+        let key = PackKey::from_hash([4; 32]);
+        assert!(!source.supports_push());
+        for result in [
+            source.upload_pack_via_ref(&[0], &key, "refs/heads/main"),
+            source.upload_blob_via_ref(&[0], &key, "refs/heads/main"),
+            source.update_ref(
+                "refs/heads/main",
+                mkit_core::refs::RefWriteCondition::Missing,
+                &[4; 32],
+            ),
+            source
+                .advance_refs_committing(
+                    "refs/heads/main",
+                    mkit_core::refs::RefWriteCondition::Missing,
+                    &[4; 32],
+                    "refs/mkit/packmap/main",
+                    mkit_core::refs::RefWriteCondition::Missing,
+                    &[4; 32],
+                    &[],
+                )
+                .map(|_| ()),
+        ] {
+            assert!(matches!(result, Err(SourceError::ProtocolError)));
         }
     }
 

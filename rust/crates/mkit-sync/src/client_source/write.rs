@@ -204,10 +204,18 @@ impl<T: HttpTransport, S: Signer, C: Clock, E: Executor, O: Observer>
         if let Some(recovery) = self.recovery {
             recovery.before_call(&full_procedure)?;
         }
-        let mut identity = self
-            .client
-            .public_key()
-            .map(|_| self.client.new_identity())
+        let write_identity = self.client.has_clock()
+            && matches!(
+                procedure,
+                "BeginUpload"
+                    | "UploadPack"
+                    | "UploadPart"
+                    | "CompleteUpload"
+                    | "UpdateRef"
+                    | "AdvanceRefs"
+            );
+        let mut identity = (self.client.public_key().is_some() || write_identity)
+            .then(|| self.client.new_identity())
             .transpose()
             .map_err(source_error)?;
         let mut attempt = 1;
@@ -250,6 +258,14 @@ impl<T: HttpTransport, S: Signer, C: Clock, E: Executor, O: Observer>
                     if matches!(mapped, SourceError::PendingVerification { .. }) {
                         saw_pending = true;
                         renewed_after_unauthenticated = false;
+                    } else if procedure == "AdvanceRefs"
+                        && ticketed
+                        && matches!(mapped, SourceError::MembershipNotVisible)
+                    {
+                        // A membership wait grants the pending ladder's one
+                        // identity renewal without resetting an allowance
+                        // already used by this logical advance.
+                        saw_pending = true;
                     }
                     let Some(recovery) = self.recovery else {
                         return Err(mapped);
@@ -298,7 +314,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, E: Executor, O: Observer>
         }
         if self.client.public_key().is_none() {
             return Err(SourceError::RemoteError(
-                "server requires signed uploads; set `transport_auth = envelope`".to_owned(),
+                "server requires signed uploads".to_owned(),
             ));
         }
         for restart in 0..2 {
@@ -352,42 +368,8 @@ impl<T: HttpTransport, S: Signer, C: Clock, E: Executor, O: Observer>
                 Some(proto::begin_upload_response::Result::Ticket(ticket)) => *ticket,
                 _ => return Err(SourceError::InvalidResponse),
             };
-            let id: Hash = ticket
-                .id
-                .as_deref()
-                .and_then(|id| id.try_into().ok())
-                .ok_or(SourceError::InvalidResponse)?;
-            let part_size = ticket.part_size.ok_or(SourceError::InvalidResponse)?;
-            let expiry = ticket.expires_unix_ms.ok_or(SourceError::InvalidResponse)?;
-            if ticket.token.as_ref().is_none_or(Vec::is_empty)
-                || part_size < 8 * 1024 * 1024
-                || !part_size.is_power_of_two()
-                || expiry <= self.client.now_ms().unwrap_or(i64::MAX)
-            {
-                return Err(SourceError::InvalidResponse);
-            }
-            if let Some(old) = self
-                .write_state()
-                .tickets
-                .borrow_mut()
-                .insert((head.to_owned(), *key), ticket.clone())
-                && old.id != ticket.id
-            {
-                self.forget_ticket(&old);
-            }
-            let result = if bytes.len() as u64 <= part_size {
-                self.write_call("UploadPack", true, None, |identity| {
-                    self.executor.block_on(self.client.upload_pack(
-                        &key.into_hash(),
-                        bytes,
-                        ticket.token.as_deref(),
-                        identity,
-                    ))
-                })
-                .map(|_| ())
-            } else {
-                self.write_parts(bytes, key, head, &ticket, info.as_ref(), id)
-            };
+            let id = self.cache_ticket(head, key, &ticket)?;
+            let result = self.upload_ticket_bytes(bytes, key, head, &ticket, info.as_ref(), id);
             match result {
                 Ok(()) => return Ok(()),
                 Err(error) if remote_is(&error, "failed_precondition") => {
@@ -401,6 +383,62 @@ impl<T: HttpTransport, S: Signer, C: Clock, E: Executor, O: Observer>
             }
         }
         Err(SourceError::ProtocolError)
+    }
+
+    fn upload_ticket_bytes(
+        &self,
+        bytes: &[u8],
+        key: &PackKey,
+        head: &str,
+        ticket: &UploadTicket,
+        info: Option<&GetServerInfoResponse>,
+        id: Hash,
+    ) -> Result<(), SourceError> {
+        if bytes.len() as u64 <= ticket.part_size.ok_or(SourceError::InvalidResponse)? {
+            self.write_call("UploadPack", true, None, |identity| {
+                self.executor.block_on(self.client.upload_pack(
+                    &key.into_hash(),
+                    bytes,
+                    ticket.token.as_deref(),
+                    identity,
+                ))
+            })
+            .map(|_| ())
+        } else {
+            self.write_parts(bytes, key, head, ticket, info, id)
+        }
+    }
+
+    fn cache_ticket(
+        &self,
+        head: &str,
+        key: &PackKey,
+        ticket: &UploadTicket,
+    ) -> Result<Hash, SourceError> {
+        let id: Hash = ticket
+            .id
+            .as_deref()
+            .and_then(|id| id.try_into().ok())
+            .ok_or(SourceError::InvalidResponse)?;
+        let part_size = ticket.part_size.ok_or(SourceError::InvalidResponse)?;
+        let expiry = ticket.expires_unix_ms.ok_or(SourceError::InvalidResponse)?;
+        if ticket.token.as_ref().is_none_or(Vec::is_empty)
+            || part_size < 8 * 1024 * 1024
+            || !part_size.is_power_of_two()
+            || expiry <= self.client.now_ms().unwrap_or(i64::MAX)
+        {
+            return Err(SourceError::InvalidResponse);
+        }
+        if let Some(old) = self
+            .write_state()
+            .tickets
+            .borrow_mut()
+            .insert((head.to_owned(), *key), ticket.clone())
+            && old.id != ticket.id
+        {
+            self.forget_ticket(&old);
+        }
+        Ok(id)
     }
 
     fn forget_ticket(&self, ticket: &UploadTicket) {
@@ -482,63 +520,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, E: Executor, O: Observer>
                     }
                 }
             }
-            let resumed = parts.iter().flatten().count() as u32;
-            let mut saved_bytes = parts.iter().flatten().map(|part| part.len).sum::<u64>();
-            self.write_upload_event(UploadEvent::PartsPlanned {
-                parts: plan.count(),
-                resumed,
-                saved_bytes,
-                bytes: bytes.len() as u64,
-            })?;
-            for index in 0..plan.count() {
-                if parts[index as usize].is_some() {
-                    continue;
-                }
-                self.write_upload_event(UploadEvent::BeforePart)?;
-                let offset = usize::try_from(
-                    plan.offset(index)
-                        .map_err(|_| SourceError::InvalidResponse)?,
-                )
-                .map_err(|_| SourceError::InvalidResponse)?;
-                let len = usize::try_from(
-                    plan.expected_len(index)
-                        .map_err(|_| SourceError::InvalidResponse)?,
-                )
-                .map_err(|_| SourceError::InvalidResponse)?;
-                let slice = bytes
-                    .get(offset..offset + len)
-                    .ok_or(SourceError::InvalidResponse)?;
-                let response = self.write_call("UploadPart", true, None, |identity| {
-                    self.executor.block_on(
-                        self.client
-                            .upload_part(ticket, &plan, index, slice, identity),
-                    )
-                })?;
-                let receipt = response
-                    .value
-                    .receipt
-                    .filter(|receipt| !receipt.is_empty() && receipt.len() <= 512)
-                    .ok_or(SourceError::InvalidResponse)?;
-                let part = StoredPart {
-                    index,
-                    len: len as u64,
-                    receipt,
-                    from_disk: false,
-                };
-                self.write_state()
-                    .receipt_store()
-                    .put(&metadata, &part)
-                    .map_err(SourceError::from)?;
-                saved_bytes += part.len;
-                parts[index as usize] = Some(part);
-                self.write_upload_event(UploadEvent::PartSent {
-                    index,
-                    parts: plan.count(),
-                    saved_bytes,
-                    bytes: bytes.len() as u64,
-                    resumed,
-                })?;
-            }
+            self.send_missing_parts(bytes, ticket, &plan, &metadata, &mut parts)?;
             let from_disk = parts.iter().flatten().any(|part| part.from_disk);
             let receipts = parts
                 .into_iter()
@@ -562,12 +544,81 @@ impl<T: HttpTransport, S: Signer, C: Clock, E: Executor, O: Observer>
                         && from_disk
                         && invalid_retry == 0 =>
                 {
-                    self.forget_ticket(ticket)
+                    self.forget_ticket(ticket);
                 }
                 Err(error) => return Err(error),
             }
         }
         Err(SourceError::InvalidResponse)
+    }
+
+    fn send_missing_parts(
+        &self,
+        bytes: &[u8],
+        ticket: &UploadTicket,
+        plan: &PartPlan,
+        metadata: &TicketMetadata,
+        parts: &mut [Option<StoredPart>],
+    ) -> Result<(), SourceError> {
+        let resumed = u32::try_from(parts.iter().flatten().count())
+            .map_err(|_| SourceError::ProtocolError)?;
+        let mut saved_bytes = parts.iter().flatten().map(|part| part.len).sum::<u64>();
+        self.write_upload_event(UploadEvent::PartsPlanned {
+            parts: plan.count(),
+            resumed,
+            saved_bytes,
+            bytes: bytes.len() as u64,
+        })?;
+        for index in 0..plan.count() {
+            if parts[index as usize].is_some() {
+                continue;
+            }
+            self.write_upload_event(UploadEvent::BeforePart)?;
+            let offset = usize::try_from(
+                plan.offset(index)
+                    .map_err(|_| SourceError::InvalidResponse)?,
+            )
+            .map_err(|_| SourceError::InvalidResponse)?;
+            let len = usize::try_from(
+                plan.expected_len(index)
+                    .map_err(|_| SourceError::InvalidResponse)?,
+            )
+            .map_err(|_| SourceError::InvalidResponse)?;
+            let slice = bytes
+                .get(offset..offset + len)
+                .ok_or(SourceError::InvalidResponse)?;
+            let response = self.write_call("UploadPart", true, None, |identity| {
+                self.executor.block_on(
+                    self.client
+                        .upload_part(ticket, plan, index, slice, identity),
+                )
+            })?;
+            let receipt = response
+                .value
+                .receipt
+                .filter(|receipt| !receipt.is_empty() && receipt.len() <= 512)
+                .ok_or(SourceError::InvalidResponse)?;
+            let part = StoredPart {
+                index,
+                len: len as u64,
+                receipt,
+                from_disk: false,
+            };
+            self.write_state()
+                .receipt_store()
+                .put(metadata, &part)
+                .map_err(SourceError::from)?;
+            saved_bytes += part.len;
+            parts[index as usize] = Some(part);
+            self.write_upload_event(UploadEvent::PartSent {
+                index,
+                parts: plan.count(),
+                saved_bytes,
+                bytes: bytes.len() as u64,
+                resumed,
+            })?;
+        }
+        Ok(())
     }
 
     pub(super) fn write_update_ref(
@@ -692,21 +743,25 @@ impl<T: HttpTransport, S: Signer, C: Clock, E: Executor, O: Observer>
             _ => return Err(SourceError::InvalidResponse),
         };
         if outcome == AdvanceOutcome::Committed {
-            for (key, ticket) in selected {
-                let cache_key = (head.to_owned(), key);
-                if self
-                    .write_state()
-                    .tickets
-                    .borrow()
-                    .get(&cache_key)
-                    .is_some_and(|current| current.id == ticket.id)
-                {
-                    self.write_state().tickets.borrow_mut().remove(&cache_key);
-                    self.forget_ticket(&ticket);
-                }
-            }
+            self.forget_committed_tickets(head, selected);
         }
         Ok(CommitOutcome::Advanced(outcome))
+    }
+
+    fn forget_committed_tickets(&self, head: &str, selected: Vec<(PackKey, UploadTicket)>) {
+        for (key, ticket) in selected {
+            let cache_key = (head.to_owned(), key);
+            if self
+                .write_state()
+                .tickets
+                .borrow()
+                .get(&cache_key)
+                .is_some_and(|current| current.id == ticket.id)
+            {
+                self.write_state().tickets.borrow_mut().remove(&cache_key);
+                self.forget_ticket(&ticket);
+            }
+        }
     }
 
     pub(super) fn write_upload_limits(&self) -> UploadLimits {
@@ -855,6 +910,116 @@ mod tests {
             assert_eq!(recovery.calls.get(), 1);
         }
     }
+    struct MembershipRecovery(Cell<u32>);
+    impl WriteRecovery for MembershipRecovery {
+        fn recover(&self, _: &str, error: &SourceError, _: u32) -> Result<bool, SourceError> {
+            if matches!(error, SourceError::MembershipNotVisible) {
+                self.0.set(self.0.get() + 1);
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+    }
+    fn membership() -> Response<Vec<u8>> {
+        Response::builder()
+            .status(503)
+            .body(
+                br#"{"code":"unavailable","message":"repository membership not yet visible"}"#
+                    .to_vec(),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn membership_wait_allows_one_fresh_identity_after_unauthenticated() {
+        use buffa::Message as _;
+        let committed = || {
+            Response::builder()
+                .status(200)
+                .header("content-type", "application/proto")
+                .body(
+                    proto::AdvanceRefsResponse {
+                        outcome: Some(proto::AdvanceOutcome::Committed.into()),
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
+                )
+                .unwrap()
+        };
+        let request = proto::AdvanceRefsRequest {
+            head_ref: Some("refs/heads/main".into()),
+            head_expectation: Some(proto::RefExpectation::Missing.into()),
+            head_new_id: Some(vec![4; 32]),
+            packmap_ref: Some("refs/mkit/packmap/main".into()),
+            packmap_expectation: Some(proto::RefExpectation::Missing.into()),
+            packmap_new_id: Some(vec![5; 32]),
+            ticket_ids: vec![vec![7; 32]],
+            ..Default::default()
+        };
+        for (replies, succeeds, waits) in [
+            (
+                vec![membership(), error("unauthenticated"), committed()],
+                true,
+                1,
+            ),
+            (
+                vec![
+                    membership(),
+                    error("unauthenticated"),
+                    error("unauthenticated"),
+                ],
+                false,
+                1,
+            ),
+            (
+                vec![
+                    membership(),
+                    error("unauthenticated"),
+                    membership(),
+                    error("unauthenticated"),
+                ],
+                false,
+                2,
+            ),
+        ] {
+            let time = Time::default();
+            let channel = Channel {
+                replies: RefCell::new(replies.into()),
+                nonces: RefCell::new(Vec::new()),
+            };
+            let client = Client::signed(
+                &channel,
+                Destination::new("https://vcs.example.org".into(), "default".into()).unwrap(),
+                &Key,
+                &time,
+            );
+            let recovery = MembershipRecovery(Cell::new(0));
+            let source = ClientSource::new(&client, &super::super::FuturesExecutor)
+                .with_write_recovery(&recovery);
+            let result = source.write_call("AdvanceRefs", true, None, |identity| {
+                source
+                    .executor
+                    .block_on(client.advance_refs(&request, identity))
+            });
+            if succeeds {
+                assert!(result.is_ok());
+            } else {
+                assert!(
+                    matches!(result, Err(SourceError::Remote(remote)) if remote.code == "unauthenticated")
+                );
+            }
+            assert!(channel.replies.borrow().is_empty());
+            let nonces = channel.nonces.borrow();
+            assert_eq!(nonces[0], nonces[1]);
+            assert_ne!(nonces[1], nonces[2]);
+            if nonces.len() == 4 {
+                assert_eq!(nonces[2], nonces[3]);
+            }
+            assert_eq!(recovery.0.get(), waits);
+        }
+    }
+
     struct Refusal;
     impl WriteRecovery for Refusal {
         fn recover(&self, _: &str, _: &SourceError, _: u32) -> Result<bool, SourceError> {

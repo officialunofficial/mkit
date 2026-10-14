@@ -61,10 +61,13 @@ pub trait HttpTransport {
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ChannelError {
-    /// A connection, response-body I/O or timeout failure. Its request may have
+    /// A connection or response-body I/O failure. Its request may have
     /// reached the server; a retry must retain the authenticated identity.
     #[error("{0}")]
     Transient(String),
+    /// The channel's request budget elapsed. Scheduling remains host-owned.
+    #[error("{0}")]
+    TimedOut(String),
     /// A security, negotiation, framing or resource-bound refusal. Repeating
     /// the request unchanged cannot be assumed safe or useful.
     #[error("{0}")]
@@ -234,7 +237,7 @@ impl Identity {
 }
 
 /// A successful per-RPC result with the identity the request used. The identity
-/// is `None` for anonymous and discovery calls.
+/// is `None` for unclocked unsigned calls, reads without signing and discovery.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Reply<R> {
@@ -257,6 +260,9 @@ pub enum Error {
     /// An explicitly transient channel failure. Scheduling remains host-owned.
     #[error("transport: {0}")]
     Connection(String),
+    /// A channel request budget elapsed without a complete response.
+    #[error("transport: {0}")]
+    RequestTimeout(String),
     #[error("signing: {0}")]
     Signing(String),
     #[error("Connect {0:?}")]
@@ -333,6 +339,7 @@ pub(crate) struct Rpc<'a, T, S, C, O = NoObserver> {
     pub(crate) transport: &'a T,
     /// `None` makes every request anonymous.
     pub(crate) auth: Option<(&'a S, &'a C)>,
+    pub(crate) unsigned_clock: Option<&'a C>,
     pub(crate) observer: &'a O,
     pub(crate) request_policy: Option<&'a dyn RequestPolicy>,
     pub(crate) destination: &'a Destination,
@@ -385,6 +392,7 @@ impl<'a, T, S, C> Rpc<'a, T, S, C> {
         Self {
             transport,
             auth: Some((signer, clock)),
+            unsigned_clock: None,
             observer: &NoObserver,
             request_policy: None,
             destination,
@@ -398,6 +406,7 @@ impl<'a, T, S, C, O> Rpc<'a, T, S, C, O> {
         Rpc {
             transport: self.transport,
             auth: self.auth,
+            unsigned_clock: self.unsigned_clock,
             observer,
             request_policy: self.request_policy,
             destination: self.destination,
@@ -609,14 +618,17 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Rpc<'_, T, S, C, O> {
         attempt: u32,
     ) -> Result<Built, Error> {
         if self.auth.is_none() || method == "GetServerInfo" {
-            if opts.identity.is_some() && self.auth.is_none() {
-                return Err(Error::Invalid("identity requires a signer"));
-            }
+            let (metadata, identity) = if self.auth.is_none() {
+                self.unsigned_metadata(method, opts, attempt).await?
+            } else {
+                (HeaderMap::new(), None)
+            };
             let mut request = if method == "GetServerInfo" {
                 self.destination.info_request()?
             } else {
                 self.destination.plain_request(method, body, streaming)?
             };
+            request.headers_mut().extend(metadata);
             if method != "GetServerInfo"
                 && let Some(policy) = self.request_policy
             {
@@ -639,10 +651,12 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Rpc<'_, T, S, C, O> {
             {
                 return Err(Error::Deadline);
             }
-            return Ok(Built {
-                request,
-                identity: None,
-            });
+            if let (Some(clock), Some(identity)) = (self.unsigned_clock, identity)
+                && clock.now_ms() >= identity.expires_at_ms
+            {
+                return Err(self.expired(&identity));
+            }
+            return Ok(Built { request, identity });
         }
         let procedure = format!("{SERVICE}{method}");
         let signed = self.sign(&procedure, commitment, opts, attempt).await?;
@@ -654,6 +668,75 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Rpc<'_, T, S, C, O> {
         })
     }
 
+    async fn unsigned_metadata(
+        &self,
+        method: &str,
+        opts: Opts<'_>,
+        attempt: u32,
+    ) -> Result<(HeaderMap, Option<Identity>), Error> {
+        let eligible = opts.intent.is_some()
+            && matches!(
+                method,
+                "UpdateRef"
+                    | "AdvanceRefs"
+                    | "BeginUpload"
+                    | "UploadPack"
+                    | "UploadPart"
+                    | "CompleteUpload"
+            );
+        let Some(clock) = self.unsigned_clock.filter(|_| eligible) else {
+            if opts.identity.is_some() {
+                return Err(Error::Invalid("identity requires a signer"));
+            }
+            return Ok((HeaderMap::new(), None));
+        };
+        let identity = if let Some(identity) = opts.identity {
+            identity.validate()?;
+            *identity
+        } else {
+            let created = clock.now_ms();
+            if created >= self.deadline_ms {
+                return Err(Error::Deadline);
+            }
+            Identity::new(
+                clock.nonce().map_err(Error::Signing)?,
+                created,
+                created
+                    .saturating_add(MAX_VALIDITY_MS)
+                    .min(self.deadline_ms),
+            )
+        };
+        if clock.now_ms() >= identity.expires_at_ms {
+            return Err(self.expired(&identity));
+        }
+        let mut headers = self
+            .observer
+            .before_dispatch(
+                opts.intent.ok_or(Error::Invalid("unsigned write intent"))?,
+                &Attempt::new(
+                    attempt,
+                    identity.nonce,
+                    identity.created_at_ms,
+                    identity.expires_at_ms,
+                ),
+            )
+            .await
+            .map_err(|veto| Error::Vetoed(veto.reason().to_owned()))?
+            .validate()?;
+        for (name, value) in [
+            ("idempotency-key", identity.idempotency_key()),
+            ("x-created-at", identity.created_at_ms.to_string()),
+            ("x-expires-at", identity.expires_at_ms.to_string()),
+        ] {
+            headers.insert(
+                name,
+                HeaderValue::from_str(&value)
+                    .map_err(|_| Error::Invalid("write identity header"))?,
+            );
+        }
+        Ok((headers, Some(identity)))
+    }
+
     /// A window clamped to the push deadline ended because the push did.
     fn expired(&self, id: &Identity) -> Error {
         if id.expires_at_ms == self.deadline_ms {
@@ -661,6 +744,32 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Rpc<'_, T, S, C, O> {
         } else {
             Error::EnvelopeExpired
         }
+    }
+
+    fn apply_policy(
+        &self,
+        signing: SigningRequest<'_>,
+        intent: Option<WriteIntent<'_>>,
+        extra: &mut HeaderMap,
+        public_key: Hash,
+    ) -> Result<(), Error> {
+        if let Some(policy) = self.request_policy {
+            let context = RequestContext {
+                signing,
+                intent,
+                public_key,
+            };
+            let headers = policy
+                .headers(&context)
+                .map_err(|veto| Error::Vetoed(veto.reason().to_owned()))?
+                .validate()?;
+            for (name, value) in &headers {
+                if extra.insert(name.clone(), value.clone()).is_some() {
+                    return Err(Error::Invalid("duplicate request policy header"));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The seam pipeline for one envelope: identity, observer, signer, deadline
@@ -735,22 +844,12 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Rpc<'_, T, S, C, O> {
             commitment: parsed,
             attempt,
         };
-        if let Some(policy) = self.request_policy {
-            let context = RequestContext {
-                signing: request,
-                intent: opts.intent.copied(),
-                public_key: signer.public_key(),
-            };
-            let headers = policy
-                .headers(&context)
-                .map_err(|veto| Error::Vetoed(veto.reason().to_owned()))?
-                .validate()?;
-            for (name, value) in &headers {
-                if extra.insert(name.clone(), value.clone()).is_some() {
-                    return Err(Error::Invalid("duplicate request policy header"));
-                }
-            }
-        }
+        self.apply_policy(
+            request,
+            opts.intent.copied(),
+            &mut extra,
+            signer.public_key(),
+        )?;
         let signature = signer
             .sign_operation(&request, &digest)
             .await
@@ -813,6 +912,7 @@ pub(crate) async fn send_checked<T: HttpTransport>(
             .await
             .map_err(|error| match error {
                 ChannelError::Transient(cause) => Error::Connection(cause),
+                ChannelError::TimedOut(cause) => Error::RequestTimeout(cause),
                 ChannelError::Refused(cause) => Error::Transport(cause),
             })?;
     if response.body().len() > limit {
@@ -1092,7 +1192,6 @@ mod tests;
 #[cfg(test)]
 mod channel_tests {
     use super::*;
-    use std::future::Future as _;
 
     struct ExistingChannel;
     impl HttpTransport for ExistingChannel {

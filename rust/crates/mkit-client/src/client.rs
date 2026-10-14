@@ -87,12 +87,13 @@ pub struct RefPage {
 /// (SPEC-TRANSPORT-CONNECT §7.1). Unsigned writes require explicit
 /// [`Client::with_unsigned_writes`] opt-in and server authorization.
 ///
-/// [`Client::with_observer`] adds host policy that runs before every write is
-/// signed or sent (see "Host policy seams" in the crate README).
+/// [`Client::with_observer`] adds host policy for every signed or explicitly clocked
+/// unsigned write (see "Host policy seams" in the crate README).
 pub struct Client<'a, T, S = NoSigner, C = NoClock, O = NoObserver> {
     transport: &'a T,
     destination: Destination,
     auth: Option<(&'a S, &'a C)>,
+    unsigned_clock: Option<&'a C>,
     observer: &'a O,
     request_policy: Option<&'a dyn RequestPolicy>,
     unsigned_writes: bool,
@@ -115,6 +116,25 @@ impl<'a, T: HttpTransport> Client<'a, T> {
             transport,
             destination,
             auth: None,
+            unsigned_clock: None,
+            observer: &NoObserver,
+            request_policy: None,
+            unsigned_writes: false,
+        }
+    }
+}
+
+impl<'a, T: HttpTransport, C: Clock> Client<'a, T, NoSigner, C> {
+    /// An unsigned client with a host clock for replayable write metadata.
+    /// Reads and discovery remain identity-free; writes still require
+    /// [`with_unsigned_writes`](Self::with_unsigned_writes) opt-in.
+    #[must_use]
+    pub fn anonymous_with_clock(transport: &'a T, destination: Destination, clock: &'a C) -> Self {
+        Self {
+            transport,
+            destination,
+            auth: None,
+            unsigned_clock: Some(clock),
             observer: &NoObserver,
             request_policy: None,
             unsigned_writes: false,
@@ -143,6 +163,7 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Client<'a, T, S, C> {
             transport,
             destination,
             auth: Some((signer, clock)),
+            unsigned_clock: None,
             observer: &NoObserver,
             request_policy: None,
             unsigned_writes: false,
@@ -151,6 +172,16 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Client<'a, T, S, C> {
 }
 
 impl<'a, T, S, C, O> Client<'a, T, S, C, O> {
+    /// Opt an unsigned client into clock-backed write replay metadata. This
+    /// does not enable writes or signing, and does not change a signed client's
+    /// configured clock. Use [`Client::anonymous_with_clock`] when selecting a
+    /// clock type for an anonymous client.
+    #[must_use]
+    pub fn with_unsigned_clock(mut self, clock: &'a C) -> Self {
+        self.unsigned_clock = Some(clock);
+        self
+    }
+
     /// Permit unsigned transport write calls. The server still authorizes
     /// every request, using credentials supplied by the host transport. The
     /// default anonymous client remains read-only; visibility changes and
@@ -167,17 +198,18 @@ impl<'a, T, S, C, O> Client<'a, T, S, C, O> {
         self.auth.is_some() || self.unsigned_writes
     }
 
-    /// Select host-owned credentials for every signed request, including reads.
-    /// The policy runs after the write observer and before signing. Discovery
-    /// and anonymous requests do not consult it.
+    /// Select host-owned credentials through signed or unsigned callbacks.
+    /// Signed policy runs after the write observer and before signing.
+    /// Discovery bypasses credential selection.
     #[must_use]
     pub fn with_request_policy(mut self, policy: &'a dyn RequestPolicy) -> Self {
         self.request_policy = Some(policy);
         self
     }
 
-    /// Run `observer` before every write RPC this client sends: it can veto the
-    /// write and add per-attempt headers. Order: observer, signer, deadline
+    /// Run `observer` before signed or explicitly clocked unsigned write RPCs.
+    /// It can veto the write and add per-attempt headers. Order: observer,
+    /// signer (when configured), deadline
     /// check, dispatch.
     #[must_use]
     pub fn with_observer<P: Observer>(self, observer: &'a P) -> Client<'a, T, S, C, P> {
@@ -185,6 +217,7 @@ impl<'a, T, S, C, O> Client<'a, T, S, C, O> {
             transport: self.transport,
             destination: self.destination,
             auth: self.auth,
+            unsigned_clock: self.unsigned_clock,
             observer,
             request_policy: self.request_policy,
             unsigned_writes: self.unsigned_writes,
@@ -202,6 +235,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Client<'_, T, S, C, O> 
         Rpc {
             transport: self.transport,
             auth: self.auth,
+            unsigned_clock: self.unsigned_clock,
             observer: self.observer,
             request_policy: self.request_policy,
             destination: &self.destination,
@@ -216,10 +250,20 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Client<'_, T, S, C, O> 
         self.auth.map(|(signer, _)| signer.public_key())
     }
 
-    /// Current host clock time, absent for anonymous clients.
+    /// Whether the client has a signing clock or an explicit unsigned clock.
+    #[must_use]
+    pub fn has_clock(&self) -> bool {
+        self.clock().is_some()
+    }
+
+    fn clock(&self) -> Option<&C> {
+        self.auth.map(|(_, clock)| clock).or(self.unsigned_clock)
+    }
+
+    /// Current host time, absent for unsigned clients without an explicit clock.
     #[must_use]
     pub fn now_ms(&self) -> Option<i64> {
-        self.auth.map(|(_, clock)| clock.now_ms())
+        self.clock().map(Clock::now_ms)
     }
 
     fn require_write_auth(&self) -> Result<(), Error> {
@@ -239,9 +283,11 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Client<'_, T, S, C, O> 
     /// A fresh identity from the clock, to persist before a call and pass to it.
     ///
     /// # Errors
-    /// An anonymous client, or a clock that cannot supply entropy.
+    /// An unsigned client without an explicit clock, or unavailable entropy.
     pub fn new_identity(&self) -> Result<Identity, Error> {
-        let (_, clock) = self.auth.ok_or(Error::Invalid("signed client required"))?;
+        let clock = self
+            .clock()
+            .ok_or(Error::Invalid("signed client required"))?;
         let created_at_ms = clock.now_ms();
         Ok(Identity {
             nonce: clock.nonce().map_err(Error::Signing)?,
@@ -758,6 +804,9 @@ mod unsigned_write_tests {
         let destination =
             Destination::new("https://vcs.example.org".into(), "default".into()).unwrap();
         let client = Client::anonymous(&channel, destination);
+        assert!(!client.has_clock());
+        assert_eq!(client.now_ms(), None);
+        assert!(client.new_identity().is_err());
         assert!(!client.supports_writes());
         assert!(matches!(
             ready(client.update_ref("refs/heads/main", RefWriteCondition::Missing, [1; 32], None)),
@@ -773,5 +822,140 @@ mod unsigned_write_tests {
         assert_eq!(channel.0.get(), 1);
         assert!(ready(client.set_repo_visibility(Visibility::Public, None)).is_err());
         assert_eq!(channel.0.get(), 1);
+    }
+    struct UnsignedClock {
+        now: Cell<i64>,
+        nonces: Cell<u8>,
+    }
+    impl Clock for UnsignedClock {
+        fn now_ms(&self) -> i64 {
+            self.now.get()
+        }
+        fn nonce(&self) -> Result<Hash, String> {
+            let value = self.nonces.get() + 1;
+            self.nonces.set(value);
+            Ok([value; 32])
+        }
+        async fn wait(&self, _: std::time::Duration) {}
+    }
+    struct ClockedChannel(std::cell::RefCell<Vec<http::HeaderMap>>);
+    impl HttpTransport for ClockedChannel {
+        async fn send(
+            &self,
+            request: http::Request<Vec<u8>>,
+            _: usize,
+        ) -> Result<http::Response<Vec<u8>>, String> {
+            for header in [
+                "x-signature",
+                "x-public-key",
+                "x-audience",
+                "x-envelope-version",
+                "x-digest",
+            ] {
+                assert!(!request.headers().contains_key(header));
+            }
+            let method = request.uri().path().rsplit('/').next().unwrap();
+            if method != "UpdateRef" {
+                for header in ["idempotency-key", "x-created-at", "x-expires-at"] {
+                    assert!(!request.headers().contains_key(header));
+                }
+            }
+            self.0.borrow_mut().push(request.headers().clone());
+            let bytes = match method {
+                "UpdateRef" => UpdateRefResponse::default().encode_to_vec(),
+                "ReadRef" => crate::proto::ReadRefResponse {
+                    exists: Some(false),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+                "GetServerInfo" => crate::proto::GetServerInfoResponse::default().encode_to_vec(),
+                _ => panic!("unexpected clocked call"),
+            };
+            Ok(http::Response::builder()
+                .header("content-type", "application/proto")
+                .body(bytes)
+                .unwrap())
+        }
+    }
+
+    #[test]
+    fn explicit_unsigned_clock_preserves_write_nonce_replay_and_expiry() {
+        let channel = ClockedChannel(std::cell::RefCell::new(Vec::new()));
+        let clock = UnsignedClock {
+            now: Cell::new(1_000),
+            nonces: Cell::new(0),
+        };
+        let destination =
+            Destination::new("https://vcs.example.org".into(), "default".into()).unwrap();
+        let client = Client::anonymous_with_clock(&channel, destination, &clock);
+        assert!(client.has_clock());
+        assert_eq!(client.now_ms(), Some(1_000));
+        assert!(!client.supports_writes());
+        let client = client.with_unsigned_writes().with_observer(&NoObserver);
+        let first =
+            ready(client.update_ref("refs/heads/main", RefWriteCondition::Missing, [1; 32], None))
+                .unwrap();
+        let identity = first.identity.unwrap();
+        let replay = ready(client.update_ref(
+            "refs/heads/main",
+            RefWriteCondition::Missing,
+            [1; 32],
+            Some(&identity),
+        ))
+        .unwrap();
+        assert_eq!(replay.identity, Some(identity));
+        assert_eq!(clock.nonces.get(), 1);
+        let sent = channel.0.borrow();
+        for header in ["idempotency-key", "x-created-at", "x-expires-at"] {
+            assert_eq!(sent[0][header], sent[1][header]);
+        }
+        assert_eq!(sent[0]["idempotency-key"], identity.idempotency_key());
+        drop(sent);
+        clock.now.set(identity.expires_at_ms);
+        assert!(matches!(
+            ready(client.update_ref(
+                "refs/heads/main",
+                RefWriteCondition::Missing,
+                [1; 32],
+                Some(&identity)
+            )),
+            Err(Error::EnvelopeExpired)
+        ));
+        assert_eq!(channel.0.borrow().len(), 2);
+        let fresh =
+            ready(client.update_ref("refs/heads/main", RefWriteCondition::Missing, [1; 32], None))
+                .unwrap()
+                .identity
+                .unwrap();
+        assert_ne!(fresh.nonce, identity.nonce);
+        assert_eq!(clock.nonces.get(), 2);
+    }
+
+    #[test]
+    fn explicit_unsigned_clock_does_not_add_read_or_discovery_identity() {
+        let channel = ClockedChannel(std::cell::RefCell::new(Vec::new()));
+        let clock = UnsignedClock {
+            now: Cell::new(1_000),
+            nonces: Cell::new(0),
+        };
+        let destination =
+            Destination::new("https://vcs.example.org".into(), "default".into()).unwrap();
+        let client =
+            Client::anonymous_with_clock(&channel, destination, &clock).with_unsigned_writes();
+        let identity = client.new_identity().unwrap();
+        assert!(matches!(
+            ready(client.read_ref("refs/heads/main", Some(&identity))),
+            Err(Error::Invalid("identity requires a signer"))
+        ));
+        assert_eq!(channel.0.borrow().len(), 0);
+        assert!(
+            ready(client.read_ref("refs/heads/main", None))
+                .unwrap()
+                .identity
+                .is_none()
+        );
+        ready(client.server_info()).unwrap();
+        assert_eq!(clock.nonces.get(), 1);
+        assert_eq!(channel.0.borrow().len(), 2);
     }
 }

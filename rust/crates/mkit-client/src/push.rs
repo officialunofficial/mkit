@@ -386,6 +386,7 @@ pub(crate) fn pack_messages(
     };
     let chunks = bytes
         .chunks(CHUNK_SIZE)
+        .chain(bytes.is_empty().then_some(bytes))
         .enumerate()
         .map(move |(index, bytes_chunk)| UploadPackRequest {
             body: Some(
@@ -615,4 +616,22 @@ async fn head_conflict<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
     } else {
         Outcome::HeadConflict
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_upload_has_an_explicit_last_chunk() {
+        let key = mkit_core::pack::pack_key(b"");
+        let messages: Vec<_> = pack_messages(&key, b"", None).collect();
+        assert_eq!(messages.len(), 2, "header plus empty final chunk");
+        let Some(crate::proto::upload_pack_request::Body::Chunk(chunk)) = &messages[1].body else {
+            panic!("missing final chunk");
+        };
+        assert_eq!(chunk.offset, Some(0));
+        assert_eq!(chunk.data.as_deref(), Some(b"".as_slice()));
+        assert_eq!(chunk.last, Some(true));
+    }
 }

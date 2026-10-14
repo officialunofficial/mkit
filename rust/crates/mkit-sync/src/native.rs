@@ -253,6 +253,9 @@ pub enum NativeHttpError {
     /// An HTTP/TLS exchange, response-body I/O or timeout failure.
     #[error("{0}")]
     Connection(String),
+    /// The configured request budget elapsed.
+    #[error("{0}")]
+    Timeout(String),
 }
 
 /// Preserve every supplied value. Refuse negotiation we cannot decode,
@@ -377,7 +380,7 @@ impl NativeHttp {
         };
         tokio::time::timeout(timeout, exchange)
             .await
-            .map_err(|_| NativeHttpError::Connection("request timed out".to_owned()))?
+            .map_err(|_| NativeHttpError::Timeout("request timed out".to_owned()))?
     }
 }
 
@@ -391,6 +394,9 @@ impl HttpTransport for NativeHttp {
             .await
             .map_err(|error| match error {
                 NativeHttpError::Connection(cause) => ChannelError::Transient(cause),
+                NativeHttpError::Timeout(_) => {
+                    ChannelError::TimedOut("client-side deadline exceeded".to_owned())
+                }
                 refusal => ChannelError::Refused(refusal.to_string()),
             })
     }

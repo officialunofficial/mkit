@@ -425,7 +425,7 @@ fn actual_connection_and_response_body_io_failures_are_transient() {
 }
 
 #[test]
-fn actual_response_timeout_is_transient() {
+fn actual_response_timeout_preserves_terminal_deadline_class() {
     use mkit_client::ChannelError;
 
     let url = respond_once(
@@ -437,6 +437,6 @@ fn actual_response_timeout_is_transient() {
         .with_timeout(Duration::from_millis(100));
     assert!(matches!(
         send_classified(&http, &url, 1024),
-        Err(ChannelError::Transient(_))
+        Err(ChannelError::TimedOut(cause)) if cause == "client-side deadline exceeded"
     ));
 }

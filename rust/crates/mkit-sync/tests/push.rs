@@ -655,8 +655,12 @@ fn caller_owned_session_keeps_upload_commitments_across_fresh_clients() {
     let store = ObjectStore::open(&RepoLayout::single(dir.path())).unwrap();
     let plan = transfer::plan_pack(&store, tip, None).unwrap();
     let mut writer = PackWriter::new();
-    for id in plan.raw { writer.push_raw(id, &store.read(&id).unwrap()).unwrap(); }
-    for delta in plan.deltas { writer.push_delta(&delta.base, &delta.stream).unwrap(); }
+    for id in plan.raw {
+        writer.push_raw(id, &store.read(&id).unwrap()).unwrap();
+    }
+    for delta in plan.deltas {
+        writer.push_delta(&delta.base, &delta.stream).unwrap();
+    }
     let pack = writer.finish().unwrap();
     let key = PackKey::from_hash(pack_key(&pack));
     let node = transfer::encode_packlist(None, &[key.into_hash()]).unwrap();
@@ -665,20 +669,52 @@ fn caller_owned_session_keeps_upload_commitments_across_fresh_clients() {
     {
         let http = NativeHttp::new().unwrap();
         let signer = Dalek::new(WRITER_SEED);
-        let client = mkit_client::Client::signed(&http, destination(&live.origin, &name), &signer, &NativeClock);
-        let source = ClientSource::new(&client, &http).with_session(&session).unwrap();
-        source.upload_pack_via_ref(&pack, &key, "refs/heads/main").unwrap();
-        source.upload_blob_via_ref(&node, &node_key, "refs/heads/main").unwrap();
+        let client = mkit_client::Client::signed(
+            &http,
+            destination(&live.origin, &name),
+            &signer,
+            &NativeClock,
+        );
+        let source = ClientSource::new(&client, &http)
+            .with_session(&session)
+            .unwrap();
+        source
+            .upload_pack_via_ref(&pack, &key, "refs/heads/main")
+            .unwrap();
+        source
+            .upload_blob_via_ref(&node, &node_key, "refs/heads/main")
+            .unwrap();
     }
     let http = NativeHttp::new().unwrap();
     let signer = Dalek::new(WRITER_SEED);
-    let client = mkit_client::Client::signed(&http, destination(&live.origin, &name), &signer, &NativeClock);
-    let source = ClientSource::new(&client, &http).with_session(&session).unwrap();
-    assert_eq!(source.advance_refs_committing(
-        "refs/heads/main", refs::RefWriteCondition::Missing, &tip,
-        "refs/mkit/packmap/main", refs::RefWriteCondition::Missing, node_key.as_bytes(),
-        &[key, node_key],
-    ).unwrap(), mkit_core::protocol::CommitOutcome::Advanced(mkit_core::protocol::AdvanceOutcome::Committed));
+    let client = mkit_client::Client::signed(
+        &http,
+        destination(&live.origin, &name),
+        &signer,
+        &NativeClock,
+    );
+    let source = ClientSource::new(&client, &http)
+        .with_session(&session)
+        .unwrap();
+    assert_eq!(
+        source
+            .advance_refs_committing(
+                "refs/heads/main",
+                refs::RefWriteCondition::Missing,
+                &tip,
+                "refs/mkit/packmap/main",
+                refs::RefWriteCondition::Missing,
+                node_key.as_bytes(),
+                &[key, node_key],
+            )
+            .unwrap(),
+        mkit_core::protocol::CommitOutcome::Advanced(
+            mkit_core::protocol::AdvanceOutcome::Committed
+        )
+    );
     assert_eq!(source.read_ref("refs/heads/main").unwrap(), Some(tip));
-    assert_eq!(source.read_ref("refs/mkit/packmap/main").unwrap(), Some(node_key.into_hash()));
+    assert_eq!(
+        source.read_ref("refs/mkit/packmap/main").unwrap(),
+        Some(node_key.into_hash())
+    );
 }

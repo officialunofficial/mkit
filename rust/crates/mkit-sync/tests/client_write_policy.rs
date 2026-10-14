@@ -149,7 +149,7 @@ fn grant(origin: &str, repository: &str) -> Arc<StoredGrant> {
 fn grant_authorized_push_and_fresh_requests_match_both_backends() {
     let mut published = Vec::new();
     for client_backend in [false, true] {
-        let live = Live::self_certifying();
+        let live = Live::self_certifying_with_grants();
         let repository = format!("{}/grantee", self_certifying_namespace());
         let grants = grant(&live.origin, &repository);
         let dir = tempfile::tempdir().unwrap();
@@ -299,18 +299,48 @@ impl FaultServer {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let saved = requests.clone();
         let thread = std::thread::spawn(move || {
+            // A connection-pool race may establish a socket that never carries
+            // a request. Keep accepting while those sockets are idle; request
+            // order follows readable HTTP messages, not TCP acceptance order.
+            let mut connections = Vec::<TcpStream>::new();
             for index in 0..count {
                 let deadline = Instant::now() + Duration::from_secs(30);
-                let (mut stream, _) = loop {
-                    match listener.accept() {
-                        Ok(connection) => break connection,
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                            assert!(Instant::now() < deadline, "expected request {index}");
-                            std::thread::sleep(Duration::from_millis(5));
+                let mut stream = loop {
+                    loop {
+                        match listener.accept() {
+                            Ok((connection, _)) => {
+                                connection.set_nonblocking(true).unwrap();
+                                connections.push(connection);
+                                assert!(connections.len() <= 64, "too many idle connections");
+                            }
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                            Err(error) => panic!("accept failed: {error}"),
                         }
-                        Err(error) => panic!("accept failed: {error}"),
                     }
+                    let mut ready = None;
+                    let mut connection = 0;
+                    while connection < connections.len() {
+                        match connections[connection].peek(&mut [0; 1]) {
+                            Ok(0) => {
+                                connections.swap_remove(connection);
+                            }
+                            Ok(_) => {
+                                ready = Some(connection);
+                                break;
+                            }
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                connection += 1;
+                            }
+                            Err(error) => panic!("request readiness failed: {error}"),
+                        }
+                    }
+                    if let Some(ready) = ready {
+                        break connections.swap_remove(ready);
+                    }
+                    assert!(Instant::now() < deadline, "expected request {index}");
+                    std::thread::sleep(Duration::from_millis(5));
                 };
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(30)))
                     .unwrap();
@@ -335,6 +365,27 @@ impl Drop for FaultServer {
             result.unwrap();
         }
     }
+}
+
+#[test]
+fn fault_server_reads_requests_while_an_earlier_connection_is_idle() {
+    let server = FaultServer::new(1, |_, request| {
+        assert_eq!(request.path, "/probe");
+        ok(&proto::UpdateRefResponse::default())
+    });
+    let address = server.origin.strip_prefix("http://").unwrap();
+    let _idle = TcpStream::connect(address).unwrap();
+    let mut active = TcpStream::connect(address).unwrap();
+    active
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    active
+        .write_all(b"POST /probe HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n")
+        .unwrap();
+    let mut response = Vec::new();
+    active.read_to_end(&mut response).unwrap();
+    assert!(response.starts_with(b"HTTP/1.1 200"));
+    assert_eq!(server.requests.lock().unwrap().len(), 1);
 }
 
 struct HostAdmission {
@@ -428,8 +479,8 @@ impl WriteRecovery for HostAdmission {
             .unwrap();
         let filtered = mkit_transport_connect::admission::filter_headers(
             response,
-            &Default::default(),
-            &Default::default(),
+            &std::collections::HashSet::default(),
+            &http::HeaderMap::default(),
             false,
         )
         .unwrap();
@@ -558,13 +609,40 @@ fn ticketed_upload_402_never_runs_admission_helper_on_either_backend() {
 }
 
 #[test]
-fn unsigned_admission_recovery_matches_both_backends_without_fake_identity() {
+fn unsigned_admission_recovery_matches_both_backends_without_synthetic_signer() {
+    struct UnsignedPolicy<'a> {
+        host: &'a HostAdmission,
+        calls: AtomicUsize,
+    }
+    impl RequestPolicy for UnsignedPolicy<'_> {
+        fn headers(&self, _: &RequestContext<'_>) -> Result<RequestHeaders, Veto> {
+            panic!("an unsigned write must not invoke signed policy");
+        }
+        fn unsigned_headers(
+            &self,
+            request: &mkit_client::UnsignedRequestContext<'_>,
+        ) -> Result<RequestHeaders, Veto> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.host.unsigned_headers(request)
+        }
+    }
     let mut bodies = Vec::new();
     for client_backend in [false, true] {
         let server = FaultServer::new(2, |index, request| {
             assert!(request.path.ends_with("/UpdateRef"));
-            assert!(!request.headers.contains_key("idempotency-key"));
+            let nonce = &request.headers["idempotency-key"];
+            assert_eq!(nonce.len(), 64);
+            assert!(
+                nonce
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            );
+            let created = request.headers["x-created-at"].parse::<i64>().unwrap();
+            let expires = request.headers["x-expires-at"].parse::<i64>().unwrap();
+            assert!(expires > created);
+            assert!(expires - created <= mkit_core::write_auth::MAX_VALIDITY_MS);
             assert!(!request.headers.contains_key("x-public-key"));
+            assert!(!request.headers.contains_key("x-signature"));
             if index == 0 {
                 challenge()
             } else {
@@ -575,14 +653,23 @@ fn unsigned_admission_recovery_matches_both_backends_without_fake_identity() {
         let host = Arc::new(HostAdmission::new(&server.origin));
         if client_backend {
             let http = NativeHttp::new().unwrap();
-            let client =
-                mkit_client::Client::anonymous(&http, destination(&server.origin, "default"))
-                    .with_unsigned_writes()
-                    .with_request_policy(host.as_ref());
+            let policy = UnsignedPolicy {
+                host: host.as_ref(),
+                calls: AtomicUsize::new(0),
+            };
+            let client = mkit_client::Client::anonymous_with_clock(
+                &http,
+                destination(&server.origin, "default"),
+                &NativeClock,
+            )
+            .with_unsigned_writes()
+            .with_request_policy(&policy);
+            assert!(client.public_key().is_none());
             ClientSource::new(&client, &http)
                 .with_write_recovery(host.as_ref())
                 .update_ref("refs/heads/main", RefWriteCondition::Missing, &[8; 32])
                 .unwrap();
+            assert_eq!(policy.calls.load(Ordering::SeqCst), 2);
         } else {
             let tx = ConnectTransport::connect(&format!("mkit+{}/default", server.origin))
                 .unwrap()
@@ -595,6 +682,9 @@ fn unsigned_admission_recovery_matches_both_backends_without_fake_identity() {
         let requests = server.requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].body, requests[1].body);
+        for name in ["idempotency-key", "x-created-at", "x-expires-at"] {
+            assert_eq!(requests[0].headers[name], requests[1].headers[name]);
+        }
         bodies.push(requests[0].body.clone());
     }
     assert_eq!(bodies[0], bodies[1]);

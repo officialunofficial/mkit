@@ -191,7 +191,8 @@ clone(&dir, &source, &remote, &SyncOptions::default(), &NoopObserver)?;
 
 A signed `ClientSource` supports push through the client's per-RPC calls.
 A host using bearer or unsigned authentication can explicitly enable ticketless
-writes with `Client::with_unsigned_writes()`; anonymous clients remain read-only
+writes with `Client::with_unsigned_writes()` and retain retry identity through
+`Client::anonymous_with_clock`; anonymous clients remain read-only
 without that opt-in.
 Use `Client::with_request_policy` to select stored grants and validated admission
 headers for each signed request, including reads. The host verifies grants,
@@ -244,7 +245,8 @@ separate typed variants. Unclassified `HttpTransport` string failures are
 terminal: that seam also reports refused redirects and malformed responses.
 A channel can override `HttpTransport::send_classified` to distinguish actual
 connection failures. `NativeHttp` does so; those failures retain the existing
-Connect adapter's retryable HTTP 503 class. Redirect, parsing, negotiation,
+Connect adapter's retryable HTTP 503 class. Request budgets retain the terminal
+`client-side deadline exceeded` diagnostic. Redirect, parsing, negotiation,
 and response-bound refusals remain terminal.
 
 Raw Connect failures keep code, message, opaque details, actual HTTP status,

@@ -39,9 +39,11 @@ collect the applicable entries between their old and new immutable pins.
   `ClientSession` retains upload commitments across borrowed clients and refuses
   reuse at another destination or signer. Channels can distinguish transient I/O
   from terminal refusals through additive `send_classified`/`ChannelError` APIs.
+  Empty uploads include the explicit final chunk used by the existing transport.
   Shared `PartReceiptStore` types preserve durable part acknowledgements and resume
-  across fresh client or transport instances. Client additions are additive;
-  the CLI routing stays unchanged. No wire or stored-format change; wipe: no.
+  across fresh client or transport instances. Unsigned clients with an explicit
+  clock retain write nonce and expiry metadata without a signer. Client additions
+  are additive; the CLI routing stays unchanged. No wire or stored-format change; wipe: no.
 
 - Ingest and read paths skip block and denial-action reads when
   `PipelineConfig.takedown_denial` is false. Holder, inventory, membership,
@@ -56,10 +58,7 @@ collect the applicable entries between their old and new immutable pins.
   `SyncObserver`. The CLI delegates closure and delta planning, pack upload,
   split advances, and packmap CAS retries while retaining configuration, trust,
   grants, admission policy, output, and exit codes. Pack and packmap ids, ref
-  moves, limits, and resumability are unchanged. All existing schemes use
-  `TransportSource`; `ClientSource` remains read-only pending grants and
-  admission/402 helpers, durable receipt persistence, and resumable-part parity.
-  No wire or stored-format change; no wipe.
+  moves, limits, and resumability are unchanged. No wire or stored-format change; no wipe.
 
 - Refill ListRefs scans as each bucket finishes instead of waiting for fixed
   groups of six. At most six scans remain in flight; each dispatch reserves its
