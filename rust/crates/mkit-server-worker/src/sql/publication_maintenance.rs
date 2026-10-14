@@ -139,6 +139,21 @@ mod tests {
         }
     }
     #[test]
+    fn persisted_pause_generation_matches_version_one_golden() {
+        let conn = RusqliteConn::open_in_memory().unwrap();
+        let store = SqlKvStore::open(conn.clone()).unwrap();
+        let part = Partition::Namespace(NamespaceKey::deployment_default());
+        store.pause_publication(&part, None, generation(1)).unwrap();
+        let golden =
+            include_str!("../../../../tests/golden/publication-fence/pause-generation-v1.json");
+        let mut expected = vec![1];
+        expected.extend_from_slice(golden.trim_end().as_bytes());
+        let rows = conn
+            .query(GET, &[SqlValue::Blob(part.encode().unwrap().to_vec())])
+            .unwrap();
+        assert_eq!(rows, vec![vec![SqlValue::Blob(expected)]]);
+    }
+    #[test]
     fn pause_metadata_preserves_capacity_reserve_and_exact_retries() {
         use super::super::Capacity;
         block_on(async {
