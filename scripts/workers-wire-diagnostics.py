@@ -54,7 +54,7 @@ def markdown(report):
     for row in report["phases"]:
         for case, count in sorted(row["cases"].items()):
             lines.append(f'- `{row["phase"]}` / `{case}`: {count} retries')
-    lines += ["", "Download `workers-wire-logs` for phase logs, request/replay hashes, "
+    lines += ["", "Download the matching `workers-wire-logs-perf-*` artifact for phase logs, request/replay hashes, "
               "runtime versions and server/alarm output when losses or retries occur."]
     return "\n".join(lines) + "\n"
 
@@ -74,7 +74,7 @@ def main():
             summary.write(markdown(report))
     if args.github_output and report["totals"]["retries"]:
         print(f'::warning title=Workers wire retries::{report["totals"]["retries"]} retries occurred; '
-              'inspect the connection diagnostics in the job summary and workers-wire-logs.')
+              'inspect the connection diagnostics in the job summary and workers-wire-logs-perf-* artifact.')
     if args.github_output:
         with args.github_output.open("a") as output:
             output.write(f'keep={str(report["keep"]).lower()}\n')
