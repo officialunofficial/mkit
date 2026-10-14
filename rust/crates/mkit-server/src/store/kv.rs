@@ -430,6 +430,16 @@ pub trait NamespaceStore: MaybeSend + MaybeSync {
         async {}
     }
 
+    /// Activation only after anonymous existence and readability checks succeed.
+    /// Results carry no authority; implementations must bound work and suppress failures.
+    #[doc(hidden)]
+    fn prepare_anonymous_repo_read(
+        &self,
+        _repo: &crate::RepoId,
+    ) -> impl Future<Output = ()> + MaybeSend {
+        async {}
+    }
+
     /// What this store supports.
     fn capabilities(&self) -> StoreCapabilities;
 
@@ -558,6 +568,9 @@ pub trait NamespaceStore: MaybeSend + MaybeSync {
 
 // Share a store handle across response streams and retained finalizers.
 impl<S: NamespaceStore + ?Sized> NamespaceStore for std::sync::Arc<S> {
+    async fn prepare_anonymous_repo_read(&self, repo: &crate::RepoId) {
+        self.as_ref().prepare_anonymous_repo_read(repo).await;
+    }
     async fn prepare_repo_read(&self, repo: &crate::RepoId) {
         self.as_ref().prepare_repo_read(repo).await;
     }

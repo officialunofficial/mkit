@@ -755,6 +755,10 @@ struct Spy {
     #[cfg(feature = "http-objects")]
     prewake: AtomicBool,
     #[cfg(feature = "http-objects")]
+    anonymous_prewake: AtomicBool,
+    #[cfg(feature = "http-objects")]
+    prewake_pause: Mutex<Option<Arc<crate::ManualSleep>>>,
+    #[cfg(feature = "http-objects")]
     prewake_claimed: AtomicBool,
     #[cfg(feature = "http-objects")]
     warm_calls: AtomicU32,
@@ -785,6 +789,10 @@ impl Spy {
         Self {
             #[cfg(feature = "http-objects")]
             prewake: AtomicBool::new(false),
+            #[cfg(feature = "http-objects")]
+            anonymous_prewake: AtomicBool::new(false),
+            #[cfg(feature = "http-objects")]
+            prewake_pause: Mutex::new(None),
             #[cfg(feature = "http-objects")]
             prewake_claimed: AtomicBool::new(false),
             #[cfg(feature = "http-objects")]
@@ -892,27 +900,47 @@ impl Spy {
 
 impl NamespaceStore for Spy {
     #[cfg(feature = "http-objects")]
+    async fn prepare_anonymous_repo_read(&self, repo: &RepoId) {
+        if self.anonymous_prewake.load(Ordering::SeqCst) {
+            self.prepare_repo_read(repo).await;
+        }
+    }
+    #[cfg(feature = "http-objects")]
     async fn prepare_repo_read(&self, repo: &RepoId) {
         if !self.prewake.load(Ordering::SeqCst) || self.prewake_claimed.swap(true, Ordering::SeqCst)
         {
             return;
         }
-        futures::future::join_all(
-            (0..crate::store::REPO_INDEX_FANOUT).map(|prefix| async move {
-                self.warm_calls.fetch_add(1, Ordering::SeqCst);
-                let p = Partition::RepoIndex {
-                    ns: repo.namespace.clone(),
-                    repo: repo.name.clone(),
-                    prefix,
-                };
-                let latency = crate::store::read_probe::partition_latency_ms(
-                    &p,
-                    self.latency_ms.load(Ordering::SeqCst),
-                );
-                crate::store::read_probe::delay(latency, "index_prewake").await;
-            }),
-        )
-        .await;
+        for refs in [true, false] {
+            futures::future::join_all((0..crate::store::REPO_INDEX_FANOUT).map(
+                |prefix| async move {
+                    self.warm_calls.fetch_add(1, Ordering::SeqCst);
+                    let p = if refs {
+                        Partition::RefIndex {
+                            ns: repo.namespace.clone(),
+                            repo: repo.name.clone(),
+                            bucket: prefix,
+                        }
+                    } else {
+                        Partition::RepoIndex {
+                            ns: repo.namespace.clone(),
+                            repo: repo.name.clone(),
+                            prefix,
+                        }
+                    };
+                    let latency = crate::store::read_probe::partition_latency_ms(
+                        &p,
+                        self.latency_ms.load(Ordering::SeqCst),
+                    );
+                    crate::store::read_probe::delay(latency, "index_prewake").await;
+                },
+            ))
+            .await;
+        }
+        let pause = self.prewake_pause.lock().unwrap().clone();
+        if let Some(pause) = pause {
+            crate::Sleep::sleep(pause.as_ref(), std::time::Duration::from_secs(1)).await;
+        }
     }
     fn read_call_allowance(&self) -> Option<u32> {
         Some(

@@ -93,6 +93,7 @@ pub struct DoNamespaceStore<T> {
     request_budget: Option<SliceBudget>,
     alarm_budget: Option<mkit_server::purge::SliceBudget>,
     prewake: Option<crate::prewake::Prewake>,
+    anonymous_prewake: bool,
     read_credits: std::sync::Arc<mkit_server::store::ReadCredits>,
 }
 
@@ -132,6 +133,7 @@ impl<T: NsTransport> DoNamespaceStore<T> {
         Self {
             transport,
             prewake: None,
+            anonymous_prewake: true,
             probe_partition,
             reserved_batch_ops: 0,
             request_budget: None,
@@ -145,6 +147,14 @@ impl<T: NsTransport> DoNamespaceStore<T> {
     #[doc(hidden)]
     pub fn with_index_prewake(mut self, ttl_ms: Option<u64>) -> Self {
         self.prewake = ttl_ms.map(crate::prewake::Prewake::new);
+        self
+    }
+
+    /// Select anonymous activation independently of signed activation.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn with_anonymous_index_prewake(mut self, enabled: bool) -> Self {
+        self.anonymous_prewake = enabled;
         self
     }
 
@@ -263,6 +273,13 @@ impl<T: NsTransport> DoNamespaceStore<T> {
 }
 
 impl<T: NsTransport> NamespaceStore for DoNamespaceStore<T> {
+    async fn prepare_anonymous_repo_read(&self, repo: &mkit_server::RepoId) {
+        if self.anonymous_prewake
+            && let Some(prewake) = &self.prewake
+        {
+            prewake.run_anonymous(self, repo).await;
+        }
+    }
     async fn prepare_repo_read(&self, repo: &mkit_server::RepoId) {
         if let Some(prewake) = &self.prewake {
             prewake.run(self, repo).await;

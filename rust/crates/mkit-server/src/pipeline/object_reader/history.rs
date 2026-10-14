@@ -388,9 +388,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             policy: self.pipe.publication_policy.as_deref(),
         };
         let shard = self.pipe.shards.ref_shard(&self.repo, reference);
-        let result = crate::store::read::read_ref(&view, &shard, &self.repo.name, reference)
-            .await
-            .map_err(failure);
+        let (result, ()) = futures::future::join(
+            crate::store::read::read_ref(&view, &shard, &self.repo.name, reference),
+            self.prepare_anonymous(),
+        )
+        .await;
+        let result = result.map_err(failure);
         let tip = settle(result, &capped)?;
         session.proofs.capture_selected(tip);
         Ok(tip)

@@ -310,7 +310,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 let anchor = anchor?;
                 (anchor, settle(security, &security_capped)?)
             } else {
-                let anchor = self.continuation_anchor(&meta, reference).await?;
+                let (anchor, ()) = futures::future::join(
+                    self.continuation_anchor(&meta, reference),
+                    self.prepare_anonymous(),
+                )
+                .await;
+                let anchor = anchor?;
                 let security = self.history_security(&meta, claims.is_none()).await?;
                 (anchor, security)
             };

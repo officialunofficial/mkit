@@ -1353,40 +1353,54 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 writer: authorized.facts.caller_view == CallerView::Writer,
                 policy: self.publication_policy.as_deref(),
             };
-            let result = if partitions.len() == 1 {
-                let bucket = list::RefBucket {
-                    store: &view,
-                    partition: &partitions[0],
-                };
-                list::page_in_waves(
-                    &view,
-                    &[bucket],
-                    &op.repo,
-                    &scan,
-                    last.as_deref(),
-                    limit,
-                    list::MAX_RESPONSE_BYTES,
-                )
-                .await
-            } else {
-                let buckets = partitions
-                    .iter()
-                    .map(|partition| list::IndexBucket {
-                        store: &view,
-                        partition,
-                    })
-                    .collect::<Vec<_>>();
-                list::page_in_waves(
-                    &view,
-                    &buckets,
-                    &op.repo,
-                    &scan,
-                    last.as_deref(),
-                    limit,
-                    list::MAX_RESPONSE_BYTES,
-                )
-                .await
+            let preparation = async {
+                if matches!(self.cfg.addressing, Addressing::Multi(_)) {
+                    if matches!(a.principal, Principal::Anonymous) {
+                        self.meta.prepare_anonymous_repo_read(&op.repo).await;
+                    } else if op.auth.is_some() {
+                        self.meta.prepare_repo_read(&op.repo).await;
+                    }
+                }
             };
+            let scan_page = async {
+                if partitions.len() == 1 {
+                    let bucket = list::RefBucket {
+                        store: &view,
+                        partition: &partitions[0],
+                    };
+                    list::page_in_waves(
+                        &view,
+                        &[bucket],
+                        &op.repo,
+                        &scan,
+                        last.as_deref(),
+                        limit,
+                        list::MAX_RESPONSE_BYTES,
+                    )
+                    .await
+                } else {
+                    let buckets = partitions
+                        .iter()
+                        .map(|partition| list::IndexBucket {
+                            store: &view,
+                            partition,
+                        })
+                        .collect::<Vec<_>>();
+                    list::page_in_waves(
+                        &view,
+                        &buckets,
+                        &op.repo,
+                        &scan,
+                        last.as_deref(),
+                        limit,
+                        list::MAX_RESPONSE_BYTES,
+                    )
+                    .await
+                }
+            };
+            // Authorization and token validation precede activation. Listing
+            // scans carry snapshot semantics; response assembly follows both.
+            let (result, ()) = futures::future::join(scan_page, preparation).await;
             let mut page = result.map_err(|err| {
                 tracing::warn!(detail = %err, "ref listing scan failed");
                 ServerError::unavailable("ref listing unavailable")
@@ -1628,10 +1642,20 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         self.observe(a, async {
             let op = self.identify(a, OpKind::PackExists { key })?;
             let authorized = self.authorize_read(&op).await?;
-            if !self
-                .pack_is_member(a, &key, authorized.facts.caller_view)
-                .await?
+            let membership = self.pack_is_member(a, &key, authorized.facts.caller_view);
+            let member = if matches!(op.principal, Principal::Anonymous)
+                && matches!(self.cfg.addressing, Addressing::Multi(_))
             {
+                let (member, ()) = futures::future::join(
+                    membership,
+                    Box::pin(self.meta.prepare_anonymous_repo_read(&op.repo)),
+                )
+                .await;
+                member
+            } else {
+                membership.await
+            };
+            if !member? {
                 return Ok(false);
             }
             let head = self.blobs.head(&key.into()).await;
@@ -2335,10 +2359,20 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let opened = async {
             let op = self.identify(a, OpKind::DownloadPack { key })?;
             let authorized = self.authorize_read(&op).await?;
-            if !self
-                .pack_is_member(a, &key, authorized.facts.caller_view)
-                .await?
+            let membership = self.pack_is_member(a, &key, authorized.facts.caller_view);
+            let member = if matches!(op.principal, Principal::Anonymous)
+                && matches!(self.cfg.addressing, Addressing::Multi(_))
             {
+                let (member, ()) = futures::future::join(
+                    membership,
+                    Box::pin(self.meta.prepare_anonymous_repo_read(&op.repo)),
+                )
+                .await;
+                member
+            } else {
+                membership.await
+            };
+            if !member? {
                 return Err(ServerError::not_found("pack not found"));
             }
             let body = self.blobs.get(&key.into(), None).await;

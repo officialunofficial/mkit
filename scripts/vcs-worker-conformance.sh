@@ -71,6 +71,7 @@
 #
 # Environment:
 #   VCS_CONFORMANCE_PREWAKE  true enables repository index warm-up (default false)
+#   VCS_CONFORMANCE_PREWAKE_ANONYMOUS  anonymous sub-switch (default true)
 #   VCS_CONFORMANCE_PORT   local port (default 8791)
 #   VCS_CONFORMANCE_KEEP   keep the state and log directory (default: removed
 #                          on success)
@@ -199,6 +200,7 @@ start_server() {
             "${root}/apps/vcs-worker/wrangler.dev.jsonc" \
             "${root}/apps/vcs-worker/build" "${phase}/state" "${PORT}" \
             --var "REPO_INDEX_PREWAKE:${VCS_CONFORMANCE_PREWAKE:-false}" \
+            --var "REPO_INDEX_PREWAKE_ANONYMOUS:${VCS_CONFORMANCE_PREWAKE_ANONYMOUS:-true}" \
             "$@" ${VCS_CONFORMANCE_WRANGLER_ARGS:-}
     ) >"${log}" 2>&1 &
     server_pid=$!

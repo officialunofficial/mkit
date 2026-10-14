@@ -19,7 +19,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         memo: &mut ReadProofs,
         reference: &str,
     ) -> Result<bool, ServerError> {
-        let anchor = match self.continuation_anchor(meta, reference).await {
+        let (anchor, ()) = futures::future::join(
+            self.continuation_anchor(meta, reference),
+            self.prepare_anonymous(),
+        )
+        .await;
+        let anchor = match anchor {
             Ok(anchor) => anchor,
             Err(error) if error.code() == Code::NotFound => return Ok(false),
             Err(error) => return Err(error),

@@ -1063,37 +1063,68 @@ Set `REPO_INDEX_PREWAKE=true` to overlap cold repository index activation with
 signed-read authorization. The default is `false`, preserving existing read
 calls and results. `REPO_INDEX_PREWAKE_TTL_SECONDS` defaults to 90 and accepts
 1 through 120 seconds, below the observed idle window of more than 140 seconds.
-Programmatic deployments use `WorkerConfig::repo_index_prewake_ttl_ms`.
+`REPO_INDEX_PREWAKE_ANONYMOUS` defaults to `true`: enabling the master switch
+also covers the public cold workload. Set it to `false` for signed-only activation.
+The master switch still defaults off. Programmatic deployments use
+`WorkerConfig::repo_index_prewake_ttl_ms` and `repo_index_prewake_anonymous`.
 Single sharding skips activation.
 
 An incoming request activates a non-running object and invokes its constructor
 ([Durable Object lifecycle](https://developers.cloudflare.com/durable-objects/concepts/durable-object-lifecycle/)).
-An authenticated, validated read starts sixteen internal `ping` requests in one
-concurrent wave, joined with the authorization prologue. Owner object readers
-validate their signed envelope and repository binding before starting that wave;
-canonical and history reads reuse the same entry. Signed Multi pack reads use
-their existing authenticated operation. Pack reads with Single addressing and
-standalone ref reads do not touch RepoIndex and skip the wave. Anonymous and
-public object readers do not start waves. `ListRefs` scans RefIndex rather than RepoIndex and does not warm
-RepoIndex. Repository statistics reads also skip the wave.
+An authenticated, validated read starts an internal activation plan joined with
+its authorization prologue. Owner object readers validate their signed envelope
+and repository binding first; canonical and history reads reuse that entry.
+Signed Multi pack reads use their existing authenticated operation. Anonymous
+Multi pack reads start only after complete read authorization, joined with pack
+membership. Public object readers in visibility-gated deployments start only
+after existence, visibility and the authorizer pass, joined with opening
+root/anchor reads or an index lookup when roots are cached. Multi `ListRefs`
+starts after authorization and page-token validation, joined with bucket scans.
+Private, missing, invalid and rejected repositories never start anonymous plans.
+Single-addressing pack reads, standalone ref reads, statistics and token-authorized
+HTTP serving skip activation.
 
-The wave adds sixteen calls and zero rounds to the warm-latency probe when
-joined with authorization. A cold activation can outlast that prologue; the
-read waits for the wave, with a fixed one-second timeout. No task is detached.
+Each plan pings all sixteen `RefIndex` buckets (`x:` object names), then all
+sixteen `RepoIndex` shards (`i:` names), using the same Durable Object class.
+The two groups run sequentially, with at most sixteen calls active at once.
+The [concurrency canary](https://github.com/officialunofficial/mkit/pull/1424)
+measured sixteen against six: median first-call ratios were 1.04 from the Worker
+and 1.07 from an alarm; warm ratios were 1.00 and 1.01. It measured local
+workerd/Miniflare concurrency, not distributed cold activation, and did not test
+thirty-two. Keeping width sixteen avoids relying on an unmeasured increase.
+Ref buckets come first because gate/ref discovery precedes object-index lookup.
+One repository claim covers both families: even a ref-only listing warms object
+indexes, so its TTL claim cannot suppress preparation for a following object read.
+
+The plan adds thirty-two calls and two activation rounds. A first admitted plan
+can add one warm round when its next independent step takes only one round;
+longer ref scans can hide both groups. A read inside the TTL adds no calls or
+rounds. Anonymous authorization's coordinator call
+remains serial (one round, which can itself be cold); activation starts afterwards.
+No existence or visibility read is moved earlier or cached. Uniform absence keeps
+its result mapping and private/missing paths receive no extra work. Readable
+repositories can have different timing: their joined wave can outlast the next
+step by up to the one-second timeout. This does not make private and missing
+repositories distinguishable through activation. The read joins the wave under
+a fixed one-second timeout. The wave drains before final serving guards and
+capture expiry checks. Delayed-wave regressions block a target or expire the
+session while activation is pending, then verify that no bytes, metadata or
+expired checkpoint escape. No task is detached.
 Each response is consumed before the wave ends; timeout or cancellation aborts
-remaining fetches and retains the TTL claim. The `ping` operation is distinct from ordinary reads for
-transport instrumentation. SQLite opens and initializes its schema in the object
+remaining fetches and retains the TTL claim. The `ping` operation is distinct
+from ordinary reads for transport instrumentation. SQLite opens and initializes its schema in the object
 handler before `ping` answers, without reading application rows or scanning
 application timers. Ordinary requests retain cold-start alarm repair. An empty
 `get_many` cannot substitute: the client returns locally without sending it.
 
-Each request client has a separate sixteen-call activation allowance, shared by
-its clones. The wave reserves all sixteen calls from the existing 9,000-call
+Each request client has a separate thirty-two-call activation allowance, shared by
+its clones. The wave reserves all thirty-two calls from the existing 9,000-call
 backend request allowance before dispatch, in addition to that small allowance.
 It does not consume object-reader proof, row, byte, decode, or session credits.
-A refused reservation skips the entire wave without changing the read. Successful
-reservation leaves 8,984 backend calls; the existing 1,000-call hook and settlement
-headroom remains unchanged. These calls never bypass the physical invocation
+A refused reservation skips the entire wave without changing the read. A successful
+reservation subtracts thirty-two from the remaining backend allowance, leaving 8,968
+from a fresh allowance, or less after anonymous authorization's ordinary calls.
+The existing 1,000-call hook and settlement headroom remains unchanged. These calls never bypass the physical invocation
 budget. Enable the option only when that additional cost fits your read workload.
 
 The isolate retains at most 4,096 repository claims. A live claim suppresses
@@ -1101,8 +1132,15 @@ another wave even across concurrent request clients. Claims start before dispatc
 and survive failures or cancellation for the TTL, bounding retries to one wave
 per repository per TTL per isolate. A full cache skips new repositories without
 evicting live claims. Expired claims are reclaimed; isolate restart loses all
-claims and permits another wave. Cache contents are scheduling hints only, never
-membership, permission, denial, or proof. Warm-up errors are logged and discarded;
+claims and permits another wave. Anonymous waves also share an isolate-wide
+rolling 60-second window with at most eight claims: at most 256 extra DO requests
+in any minute per live isolate. The window holds at most eight timestamps,
+charges only admitted waves, and retains failed/cancelled claims. Clock rollback
+does not refill it. Exhaustion skips activation without changing correctness or
+consuming budget; signed waves remain independently bounded by the repository TTL.
+Restarts reset both volatile bounds; this is not a deployment-wide rate limit.
+Cache contents are scheduling hints only, never membership, permission, denial,
+or proof. Warm-up errors are logged and discarded;
 all existing authorization and final security checks still run on fresh state.
 There is no public wire or stored-format change, and no reset is needed.
 
@@ -1110,7 +1148,34 @@ The `repository_index_prewake_models_cold_reads_and_warm_rounds` probe uses the
 same canonical reader fixtures with 400 ms first touches and 40 ms warm calls.
 Its read-gate shape performs head metadata preflight; Show reads canonical tree
 levels and sizes; Log(10) walks ten canonical first parents. It compares KV and
-blob GET counts exactly, reports the separate sixteen pings, and asserts that a
-second warm read and a joined warm wave retain the feature-off round counts.
+blob GET counts exactly, reports the separate thirty-two pings. The second warm read retains feature-off
+round counts; the first admitted warm plan adds at most one round.
+The expanded model applies 400 ms first-touch latency to RefIndex as well as
+RepoIndex, with 40 ms warm calls and source packs warm. Previously, RefIndex
+was always warm in the model. Signed head-metadata preflight changes from
+2,120 ms to 1,080 ms; signed ListRefs changes from 1,240 ms to 840 ms.
+The anonymous cold model uses the same fixture and latency assumptions:
+
+| Anonymous read | Before | After | KV | Blob GET | Extra pings |
+|---|---:|---:|---:|---:|---:|
+| Head-metadata gate (`ReadGate`, scans sixteen ref buckets) | 2,080 ms | 960 ms | 20 | 0 | 32 |
+| ListRefs (sixteen ref buckets) | 1,240 ms | 840 ms | 17 | 0 | 32 |
+| GetReadGate (pack-serving gate) | 480 ms | 880 ms | 2 | 0 | 32 |
+| Show (canonical levels and sizes) | 4,040 ms | 1,480 ms | 37 | 6 | 32 |
+| Log(10), canonical first parents | 7,120 ms | 2,400 ms | 46 | 20 | 32 |
+| Native first-parent history, 10 commits | 6,960 ms | 3,400 ms | 64 | 20 | 32 |
+| Tokenized page 1, 10 commits | 7,080 ms | 3,520 ms | 68 | 20 | 32 |
+| Selected-ref canonical Log(10) | 6,040 ms | 2,480 ms | 33 | 20 | 32 |
+
+The head-metadata gate scans all sixteen RefIndex buckets; its model covers
+that discovery cost as well as object lookup. The pack-serving gate touches
+one RepoIndex shard without scanning refs, so the ref-first plan can increase
+its latency. These measurements exercise the actual loader graph, but
+are not deployment predictions or a model of an external gate's full composition.
+The history fixtures initialize their durable security revision before the
+comparison; each measurement resets partition coldness. Other cold object
+classes retain their costs. The next read inside the TTL issues no pings; the first warm plan can add one
+round.
+
 The Workers wire workflow runs release-feature conformance with activation off
-and Multi test-fault conformance with activation on.
+and Multi test-fault conformance with the anonymous sub-switch both on and off.

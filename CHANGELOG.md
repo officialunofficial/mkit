@@ -38,6 +38,19 @@ collect the applicable entries between their old and new immutable pins.
   closed. Replay, reservation and settlement checks are unchanged; the namespace
   record must also be present and well formed. Grant-epoch forks still fail
   closed. No wire or stored-format change; no wipe.
+- Optional repository index activation now covers anonymous readable repositories
+  after existence and authorization checks, joined with the next read step.
+  `REPO_INDEX_PREWAKE_ANONYMOUS` defaults on under the default-off master switch;
+  operators can select signed-only activation. Anonymous waves retain repository
+  TTL claims and add an isolate-wide cap of eight waves per rolling minute
+  (256 extra Durable Object calls), within the existing invocation budget.
+  Both signed and anonymous plans now ping all sixteen RefIndex buckets before
+  the sixteen RepoIndex shards, including Multi ListRefs after authorization
+  and token validation. Two sequential groups retain concurrency sixteen;
+  both families share one TTL claim and a thirty-two-call reservation.
+  Private, missing and invalid repositories never start anonymous waves.
+  No wire or stored-format change; no wipe.
+
 - Extract shares one etag-bound pack window across each slice's staged
   non-delta chunks, capped at 4 MiB plus 240 bytes of frame headers and the
   configured window limit. Frames outside the buffer use bounded per-frame

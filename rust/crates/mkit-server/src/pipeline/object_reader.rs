@@ -315,6 +315,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 .map(Some),
         }
     }
+    // Call only after this operation's fresh anonymous authorization succeeds.
+    async fn prepare_anonymous(&self) {
+        if matches!(self.view, ReaderView::Public) && self.pipe.visibility_gates_reads() {
+            self.pipe.meta.prepare_anonymous_repo_read(&self.repo).await;
+        }
+    }
+
     /// Prefetch canonical bytes; inaccessible IDs are uniformly absent.
     /// # Errors
     /// Oversized batches, invalid authority, exhausted budgets or store failures.
@@ -746,6 +753,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         } else {
             located.iter().map(|(id, _)| *id).collect::<BTreeSet<_>>()
         };
+        let mut prepared = false;
         let mut reached = BTreeSet::new();
         let mut fresh = BTreeSet::new();
         if proofs.is_none() && !writer && !pipe.cfg.takedown_denial {
@@ -778,7 +786,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     };
                 }
                 match self.install_selected(&meta, memo, reference).await {
-                    Ok(true) => {}
+                    Ok(true) => prepared = true,
                     Ok(false) => return Ok((BTreeMap::new(), BTreeMap::new())),
                     Err(error)
                         if capped_as_absent
@@ -821,8 +829,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             } else if let Some(tips) = proofs.as_ref().and_then(|memo| memo.tips.as_ref()) {
                 Ok((tips.clone(), false))
             } else {
-                pipe.reader_tips(&meta, &self.repo, cfg.max_walk_objects, writer)
-                    .await
+                // Drain activation with the opening root reads, before walking
+                // proofs, loading bytes or checking final denial/expiry guards.
+                let (tips, ()) = futures::future::join(
+                    pipe.reader_tips(&meta, &self.repo, cfg.max_walk_objects, writer),
+                    self.prepare_anonymous(),
+                )
+                .await;
+                prepared = true;
+                tips
             };
             // A spent call budget is an unprovable proof, not a store fault.
             let (tips, truncated) = match tips {
@@ -895,9 +910,18 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     accessible.push(*id);
                 }
             }
-            let (members, skipped) = resolve::locate_ids(&env, &accessible, resolve::OnCap::Skip)
-                .await
-                .map_err(resolution_failure)?;
+            let (locations, ()) = futures::future::join(
+                resolve::locate_ids(&env, &accessible, resolve::OnCap::Skip),
+                async {
+                    // A cached root set may skip opening reads. In that case
+                    // overlap the first index lookup, still before final guards.
+                    if !prepared && !accessible.is_empty() {
+                        self.prepare_anonymous().await;
+                    }
+                },
+            )
+            .await;
+            let (members, skipped) = locations.map_err(resolution_failure)?;
             if skipped && !capped_as_absent {
                 return Err(exhausted());
             }

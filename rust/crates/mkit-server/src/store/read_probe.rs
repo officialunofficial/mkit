@@ -23,6 +23,7 @@ tokio::task_local! { static ACTIVE: Config; }
 #[cfg(feature = "http-objects")]
 struct ColdTouches {
     milliseconds: u64,
+    refs: bool,
     seen: Mutex<std::collections::BTreeSet<super::Partition>>,
 }
 #[cfg(feature = "http-objects")]
@@ -33,9 +34,19 @@ pub(crate) async fn run_cold<T>(
     warm: &[super::Partition],
     future: impl Future<Output = T>,
 ) -> T {
+    run_cold_indexes(milliseconds, warm, false, future).await
+}
+#[cfg(feature = "http-objects")]
+pub(crate) async fn run_cold_indexes<T>(
+    milliseconds: u64,
+    warm: &[super::Partition],
+    refs: bool,
+    future: impl Future<Output = T>,
+) -> T {
     COLD.scope(
         ColdTouches {
             milliseconds,
+            refs,
             seen: Mutex::new(warm.iter().cloned().collect()),
         },
         future,
@@ -45,11 +56,11 @@ pub(crate) async fn run_cold<T>(
 #[cfg(feature = "http-objects")]
 pub(crate) fn partition_latency_ms(partition: &super::Partition, warm: u64) -> u64 {
     COLD.try_with(|cold| {
-        if matches!(
+        let indexed = matches!(
             partition,
             super::Partition::RepoIndex { .. } | super::Partition::ContentShard(_)
-        ) && cold.seen.lock().unwrap().insert(partition.clone())
-        {
+        ) || (cold.refs && matches!(partition, super::Partition::RefIndex { .. }));
+        if indexed && cold.seen.lock().unwrap().insert(partition.clone()) {
             cold.milliseconds
         } else {
             warm
