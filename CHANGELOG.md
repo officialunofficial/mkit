@@ -33,6 +33,12 @@ collect the applicable entries between their old and new immutable pins.
   admission/402 helpers, durable receipt persistence, and resumable-part parity.
   No wire or stored-format change; no wipe.
 
+- Refill ListRefs scans as each bucket finishes instead of waiting for fixed
+  groups of six. At most six scans remain in flight; each dispatch reserves its
+  inherited call ledgers, and failures drain dispatched reads before returning
+  the earliest source error. Complete ref coverage, pagination, response bounds,
+  and wire/stored formats are unchanged; no store reset is required.
+
 - Share pure packmap advance planning between the protocol client and CLI in
   `mkit-core::transfer::packmap`. Node bytes, CAS conditions, retries, and
   driver-specific limits and errors are unchanged. No wire or stored-format

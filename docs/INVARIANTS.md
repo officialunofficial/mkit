@@ -54,7 +54,10 @@ shared pending-reservation outbox planner, and `pipeline::tests::ref_admission`.
 **Always:** independent reads consume results in their original semantic order.
 Every dispatched wave reserves its backend calls first and shares the existing
 six-call admission envelope. Unknown or insufficient allowance keeps the serial
-path. Delta members stay serial between contiguous raw runs. Continuation
+path. Ref listings refill a freed slot without waiting for a slower peer;
+each dispatched scan owns its reservation. A failure stops refill, drains all
+dispatched scans, and returns the earliest source error in source order.
+Delta members stay serial between contiguous raw runs. Continuation
 activation stays after authorization and anchor validation; closing reads stay
 after the guarded apply. Final denial and membership checks stay after all
 seam callbacks, with fresh per-phase state.
