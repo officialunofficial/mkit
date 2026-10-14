@@ -67,6 +67,7 @@
 # curl, and the Rust toolchain of rust/rust-toolchain.toml.
 #
 # Environment:
+#   VCS_CONFORMANCE_PREWAKE  true enables repository index warm-up (default false)
 #   VCS_CONFORMANCE_PORT   local port (default 8791)
 #   VCS_CONFORMANCE_KEEP   keep the state and log directory (default: removed
 #                          on success)
@@ -194,6 +195,7 @@ start_server() {
             npx --yes --package "wrangler@${WRANGLER_VERSION}" -- node scripts/workers-wire-runtime.cjs \
             "${root}/apps/vcs-worker/wrangler.dev.jsonc" \
             "${root}/apps/vcs-worker/build" "${phase}/state" "${PORT}" \
+            --var "REPO_INDEX_PREWAKE:${VCS_CONFORMANCE_PREWAKE:-false}" \
             "$@" ${VCS_CONFORMANCE_WRANGLER_ARGS:-}
     ) >"${log}" 2>&1 &
     server_pid=$!

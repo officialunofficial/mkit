@@ -2811,3 +2811,23 @@ configured clients cannot be used through the sync adapter.
 metadata/overload tests, and `observed_signed_client_composes_as_source`.
 CLI transport display parity and the existing CLI golden suites retain output
 and exit-code behavior. No authorization, wire, or stored-format boundary moves.
+
+
+## Repository activation hints carry no authority
+
+**Always:** Workers repository index warm-up runs only for authenticated,
+validated reads, joins their authorization prologue, and discards every result.
+All sixteen calls reserve the existing invocation budget and a separate bounded
+activation allowance before dispatch. A volatile repository claim prevents
+another wave during its TTL, including after cancellation or failure.
+
+**Because:** cold activation can overlap without changing membership, denial,
+proof, or final guards. Optional work must not bypass resource or admission bounds.
+
+**If violated:** anonymous traffic could amplify object wakes, backend calls
+could exceed the invocation allowance, or hints could substitute for fresh checks.
+
+**Enforced by:** the pipeline's signed-read and owner-reader entries, the Workers
+prewake claim and reservation, width/TTL/budget/failure tests, the canonical cold
+model, and enabled/disabled Workers wire conformance. The default storage hook
+performs no work; single sharding and anonymous reads skip activation.

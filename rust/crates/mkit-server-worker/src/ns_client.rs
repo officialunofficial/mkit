@@ -78,11 +78,13 @@ pub struct DoNamespaceStore<T> {
     reserved_batch_ops: usize,
     request_budget: Option<SliceBudget>,
     alarm_budget: Option<mkit_server::purge::SliceBudget>,
+    prewake: Option<crate::prewake::Prewake>,
     read_credits: std::sync::Arc<mkit_server::store::ReadCredits>,
 }
 
 fn op(call: &NsCall) -> &'static str {
     match call {
+        NsCall::Ping => "ping",
         NsCall::Get { .. } => "get",
         NsCall::GetMany { .. } => "get_many",
         NsCall::Scan { .. } => "scan",
@@ -115,12 +117,21 @@ impl<T: NsTransport> DoNamespaceStore<T> {
     pub fn new(transport: T, probe_partition: Partition) -> Self {
         Self {
             transport,
+            prewake: None,
             probe_partition,
             reserved_batch_ops: 0,
             request_budget: None,
             alarm_budget: None,
             read_credits: std::sync::Arc::default(),
         }
+    }
+
+    /// Enable bounded repository activation hints for this request.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn with_index_prewake(mut self, ttl_ms: Option<u64>) -> Self {
+        self.prewake = ttl_ms.map(crate::prewake::Prewake::new);
+        self
     }
 
     /// Share an invocation's backend allowance with its other clients.
@@ -169,6 +180,21 @@ impl<T: NsTransport> DoNamespaceStore<T> {
         }
     }
 
+    pub(crate) fn request_budget(&self) -> Option<&SliceBudget> {
+        self.request_budget.as_ref()
+    }
+
+    pub(crate) async fn ping(&self, p: &Partition) -> Result<(), StoreError> {
+        let target = do_target(p)?;
+        let body = serde_json::to_string(&NsRequest::new(p, NsCall::Ping)?)
+            .map_err(|e| backend_error(StorageOp::RequestSerialize, e))?;
+        let reply = self.transport.call(&target, "ping", body).await?;
+        match serde_json::from_str::<NsReply>(&reply) {
+            Ok(NsReply::Ok) => Ok(()),
+            _ => Err(StoreError::unavailable("index warm-up failed")),
+        }
+    }
+
     /// One page of the portable export of `p` (M0-02b), read in the
     /// partition's Durable Object: for app-level dumps (WP-1.29).
     ///
@@ -197,6 +223,11 @@ impl<T: NsTransport> DoNamespaceStore<T> {
 }
 
 impl<T: NsTransport> NamespaceStore for DoNamespaceStore<T> {
+    async fn prepare_repo_read(&self, repo: &mkit_server::RepoId) {
+        if let Some(prewake) = &self.prewake {
+            prewake.run(self, repo).await;
+        }
+    }
     fn read_call_allowance(&self) -> Option<u32> {
         Some(
             self.request_budget

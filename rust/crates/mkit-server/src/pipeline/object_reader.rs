@@ -308,7 +308,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     })?;
                 Ok(None)
             }
-            ReaderView::Owner(meta) => self.pipe.authorize_owner(&self.repo, meta).await.map(Some),
+            ReaderView::Owner(meta) => self
+                .pipe
+                .authorize_owner_prepared(&self.repo, meta, true)
+                .await
+                .map(Some),
         }
     }
     /// Prefetch canonical bytes; inaccessible IDs are uniformly absent.

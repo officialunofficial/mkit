@@ -113,6 +113,8 @@ impl NsRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum NsCall {
+    /// Activate the object and initialize its SQL store, without row reads.
+    Ping,
     /// `get`.
     Get { key: Blob },
     /// `get_many`.

@@ -2898,7 +2898,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// caller's view; `epoch` is the stored grant epoch, for
     /// `IssueObjectUrl`'s reuse.
     async fn authorize_read(&self, op: &Operation) -> Result<ReadAuth, ServerError> {
-        self.authorize_read_with_meta(op, &self.meta, None).await
+        let authorization = self.authorize_read_with_meta(op, &self.meta, None);
+        if op.auth.is_some() && !matches!(op.kind, OpKind::ListRefs { .. }) {
+            let (result, ()) =
+                futures::future::join(authorization, self.meta.prepare_repo_read(&op.repo)).await;
+            result
+        } else {
+            authorization.await
+        }
     }
 
     async fn authorize_read_with_meta<S: NamespaceStore>(
