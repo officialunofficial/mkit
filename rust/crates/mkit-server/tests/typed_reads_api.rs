@@ -2,7 +2,7 @@
 use mkit_server::fork::{ForkRequest, ForkResult, ForkSpec, Phase};
 use mkit_server::pipeline::{Authenticated, HookSet, Pipeline, RepoVisibility, ShardMap};
 use mkit_server::reads::{
-    ForkJobStatus, ForkReplayIdentity, MemberReadLimits, PublishedBranch, ReadAccess,
+    ForkJobStatus, ForkReplayIdentity, MemberReadLimits, PackRef, PublishedBranch, ReadAccess,
 };
 use mkit_server::{BlobStore, MultipartBlobStore, NamespaceStore, RepoId, ServerError};
 
@@ -94,7 +94,42 @@ pub async fn embedding_queries<N: NamespaceStore, B: BlobStore>(
         }
     }
     if let Some(status) = reads.fork_job_status(spec).await? {
-        let _ = landing_matches(&status, retained, replay);
+        let confirmed = landing_matches(&status, retained, replay);
+        if confirmed {
+            let packs = status
+                .packs
+                .iter()
+                .map(|pack| PackRef {
+                    id: pack.id,
+                    len: pack.bytes,
+                })
+                .collect::<Vec<_>>();
+            let locations = reads
+                .object_index_in_packs(repo, &spec.expected_tip, &packs)
+                .await?;
+            for (pack, location) in locations {
+                let witness = reads.pack_witness(repo, &pack).await?;
+                let _ = (
+                    location.frame_offset,
+                    location.frame_length,
+                    location.wire_type,
+                    location.decoded_size,
+                    location.in_pack_delta_depth,
+                    location.delta_base,
+                    witness.visible(false, retained.result.membership_generation),
+                );
+                if let Some(member) = witness.member {
+                    let _ = (
+                        member.generation,
+                        member.sequence,
+                        member.published,
+                        member.held,
+                        member.boundary,
+                    );
+                }
+                let _ = witness.published;
+            }
+        }
         let _ = (
             status.phase,
             status.failure,

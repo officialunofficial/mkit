@@ -7,6 +7,26 @@ profile; storage-only groundwork is labeled explicitly. The
 [SPEC-SERVER profile map](specs/SPEC-SERVER.md#1-scope-and-relation-to-spec-transport-connect)
 distinguishes current enforcement from future integration.
 
+## Typed pack evidence retains exact keys and live witness semantics
+
+**Always:** exact pack index reads use only supplied packs, preserve present input
+order and duplicates, and validate every frame against its supplied pack length.
+At most 1,024 packs use eight 128-key reads through the caller's budgeted store.
+Pack visibility reads decode both live witnesses; both must be unheld, match the
+chosen membership generation, and be cleared unless the caller uses a writer view.
+Corrupt rows, malformed replies, and exhausted budgets refuse the whole result.
+
+**Because:** a generic member lookup may choose a different duplicate pack,
+and one witness alone cannot prove confirmed lineage visibility.
+
+**If violated:** callers could misattribute an object, accept a partial visibility
+proof, or consume unbounded metadata work.
+
+**Enforced by:** `ReadAccess::{object_index_in_packs, pack_witness}` and
+`reads::tests` routing, frame-bound, batch, budget, and witness parity regressions.
+These are trusted evidence APIs; authorization and final serving guards remain
+at their existing boundaries. No wire or stored-format change.
+
 ## Packmap advances preserve node bytes and live-ref leases
 
 **Always:** native CLI and protocol-client pushes use the same pure planner.
