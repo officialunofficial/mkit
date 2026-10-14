@@ -1145,7 +1145,7 @@ The anonymous cold model uses the same fixture and latency assumptions:
 | GetReadGate (pack-serving gate) | 480 ms | 480 ms | 2 | 0 | 16 |
 | Show (canonical levels and sizes) | 2,960 ms | 1,080 ms | 37 | 6 | 16 |
 | Log(10), canonical first parents | 6,040 ms | 2,000 ms | 46 | 20 | 16 |
-| Native first-parent history, 10 commits | 6,1,080 ms | 3,000 ms | 64 | 20 | 16 |
+| Native first-parent history, 10 commits | 6,960 ms | 3,000 ms | 64 | 20 | 16 |
 | Tokenized page 1, 10 commits | 7,080 ms | 3,120 ms | 68 | 20 | 16 |
 | Selected-ref canonical Log(10) | 6,040 ms | 2,080 ms | 33 | 20 | 16 |
 
