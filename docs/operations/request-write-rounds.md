@@ -53,8 +53,9 @@ create` commits under denial because tag refs carry no packmap to prove.
 | Ref delete | any | any | committed | 2 | 0 | 60 | 60 | 2 |
 
 `PlanSnapshot` holds every fused read plus the mid-request checks the
-classifier cannot separate; `GuardedApply` is every guarded batch, including
-mid-request CAS writes, not only the final commit.
+classifier cannot separate; `GuardedApply` is every remaining guarded batch
+(coordinator applies classify `Lease`, outcome-only applies `OutcomeSink`),
+including mid-request CAS writes, not only the final commit.
 
 Denial off, a signed ref write is 4–7 KV calls and one batch: the fused
 read-ahead, the object-index lookup and membership read, then the apply. The
@@ -221,9 +222,10 @@ warm-model upper bounds for the serialized work, not predicted wall-clock.
 
 - The 30 ms unit is a modeling constant, not a store benchmark; real savings
   scale with the deployment's per-call latency. Cold-modeled cells charge
-  300 ms only for the first touch of each index or content partition and once
-  for the blob store (`read_probe::partition_latency_ms`) — an upper bound
-  when partitions stay warm across requests.
+  300 ms only for the first touch of each index or content partition
+  (`read_probe::partition_latency_ms`) and once for the blob store (the
+  probe's own first-touch flag) — an upper bound when partitions stay warm
+  across requests.
 - The settle step is a fixed pump: twelve `run_due` ticks at 1 ms apart, so
   its call counts are for this two-pack flow, not a general settlement price.
 - `PlanSnapshot` over-attributes: the probe tags by key class, so denial proof

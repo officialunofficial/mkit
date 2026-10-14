@@ -155,8 +155,6 @@ fn tag(key: &Key) -> &'static str {
         b"ae" => "ae",
         b"ai" => "ai",
         b"ps" => "ps",
-        b"d" => "d",
-        b"work" => "work",
         _ => "?",
     }
 }
