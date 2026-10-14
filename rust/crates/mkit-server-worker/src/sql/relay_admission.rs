@@ -18,6 +18,8 @@ use mkit_server::{
     Batch, BatchOutcome, Key, NamespaceStore, Partition, Precondition, StoreError, Value, Write,
 };
 
+mod progress;
+
 const PRESENT: &str =
     "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'mkit_relay_admission'";
 const CREATE: &str = "CREATE TABLE IF NOT EXISTS mkit_relay_admission (part BLOB PRIMARY KEY NOT NULL, generation BLOB NOT NULL) WITHOUT ROWID";
@@ -100,7 +102,7 @@ pub(super) fn validate<C: SqlConn>(
     Ok(())
 }
 
-/// One generation and actual source watermark observed in a single SQL cut.
+/// Admission, private applied progress and compatibility rh in one SQL cut.
 /// Private fields prevent constructing an arbitrary admitted watermark.
 #[derive(Debug, Clone)]
 pub struct RelayAdmissionSnapshot {
@@ -109,9 +111,45 @@ pub struct RelayAdmissionSnapshot {
     generation: Generation,
     observed: Option<Value>,
     watermark: u64,
+    compatibility_watermark: u64,
+    progress: Option<Vec<u8>>,
+}
+/// Fresh target-local delivery evidence. Private fields prevent substituting a
+/// caller watermark or raw compatibility rh. This proves local applied progress,
+/// not current external authority; recovery still needs enforced pause-before-
+/// rotation ordering before using a receipt for source cleanup.
+#[derive(Debug, Clone)]
+pub struct TargetProgressReceipt {
+    target: Partition,
+    source: Partition,
+    generation: Generation,
+    through: u64,
+}
+impl TargetProgressReceipt {
+    /// Complete logical target partition.
+    #[must_use]
+    pub fn target(&self) -> &Partition {
+        &self.target
+    }
+    /// Complete logical source partition.
+    #[must_use]
+    pub fn source(&self) -> &Partition {
+        &self.source
+    }
+    /// Local admission generation in which these effects committed.
+    #[must_use]
+    pub fn generation(&self) -> Generation {
+        self.generation
+    }
+    /// Applied source sequence; not inherited from compatibility rh.
+    #[must_use]
+    pub fn through(&self) -> u64 {
+        self.through
+    }
 }
 impl RelayAdmissionSnapshot {
-    /// Actual target-local source watermark, not a source completion receipt.
+    /// Proven applied progress in this local admission generation only.
+    /// This is not external identity or a coordinator completion receipt.
     #[must_use]
     pub fn watermark(&self) -> u64 {
         self.watermark
@@ -120,7 +158,7 @@ impl RelayAdmissionSnapshot {
 fn admitted_batch(
     snapshot: &RelayAdmissionSnapshot,
     proofs: &[VerifiedRelay],
-) -> Result<Batch, StoreError> {
+) -> Result<(Batch, u64), StoreError> {
     if proofs.is_empty() || proofs.len() > mkit_server::store::MAX_BATCH_OPS {
         return Err(StoreError::Invalid("invalid admitted relay count".into()));
     }
@@ -190,10 +228,11 @@ fn admitted_batch(
             "admitted relay message batch bound".into(),
         ));
     }
-    batch
-        .writes
-        .push(Write::Put(rh, codec::encode_u64(sequence)));
-    Ok(batch)
+    batch.writes.push(Write::Put(
+        rh,
+        codec::encode_u64(snapshot.compatibility_watermark.max(sequence)),
+    ));
+    Ok((batch, sequence))
 }
 
 impl<C: SqlConn> SqlKvStore<C> {
@@ -233,9 +272,9 @@ impl<C: SqlConn> SqlKvStore<C> {
         }))?;
         Ok(())
     }
-    /// Observe generation and rh atomically; admission alone proves no external identity.
-    /// Raw rh is not generation-specific provenance. Consistent bootstrap and
-    /// restored-counter ordering are mandatory integration prerequisites.
+    /// Observe admission, generation-bound progress and raw rh atomically.
+    /// Raw rh never supplies applied progress. Admission still proves no external
+    /// identity, legacy reconciliation or complete source-prefix ordering.
     pub fn relay_admission_snapshot(
         &self,
         target: &Partition,
@@ -244,31 +283,59 @@ impl<C: SqlConn> SqlKvStore<C> {
     ) -> Result<RelayAdmissionSnapshot, StoreError> {
         let part = target_part(target)?;
         let rh = keys::relay_high_water(source)?;
-        let (observed, watermark) = self.conn().transaction(Box::new(move |conn| {
-            require_generation(&conn, &part, generation)?;
-            let observed = kv::read(&conn, &part, &rh)?;
-            let watermark = observed
-                .as_ref()
-                .map(codec::decode_u64)
-                .transpose()
-                .map_err(|_| SqlError::Corrupt("relay admission watermark"))?
-                .unwrap_or(0);
-            Ok((observed, watermark))
-        }))?;
+        let source_encoded = SqlValue::Blob(source.encode()?.to_vec());
+        let (observed, compatibility_watermark, progress, watermark) =
+            self.conn().transaction(Box::new(move |conn| {
+                require_generation(&conn, &part, generation)?;
+                let observed = kv::read(&conn, &part, &rh)?;
+                let watermark = observed
+                    .as_ref()
+                    .map(codec::decode_u64)
+                    .transpose()
+                    .map_err(|_| SqlError::Corrupt("relay admission watermark"))?
+                    .unwrap_or(0);
+                let (progress, applied) =
+                    progress::read(&conn, &part, &source_encoded, generation)?;
+                Ok((observed, watermark, progress, applied))
+            }))?;
         Ok(RelayAdmissionSnapshot {
             target: target.clone(),
             source: source.clone(),
             generation,
             observed,
             watermark,
+            compatibility_watermark,
+            progress,
         })
     }
-    /// Confirm a duplicate using fresh admission and rh, even after source cleanup.
+    /// Observe admission and private applied progress in one fresh SQL cut.
+    /// Returns no receipt for absent or older-generation progress. A receipt
+    /// proves actual local delivery, never current external authority.
+    pub fn target_progress_receipt(
+        &self,
+        target: &Partition,
+        source: &Partition,
+        generation: Generation,
+    ) -> Result<Option<TargetProgressReceipt>, StoreError> {
+        let part = target_part(target)?;
+        let encoded_source = SqlValue::Blob(source.encode()?.to_vec());
+        let through = self.conn().transaction(Box::new(move |conn| {
+            require_generation(&conn, &part, generation)?;
+            Ok(progress::read(&conn, &part, &encoded_source, generation)?.1)
+        }))?;
+        Ok((through != 0).then(|| TargetProgressReceipt {
+            target: target.clone(),
+            source: source.clone(),
+            generation,
+            through,
+        }))
+    }
+    /// Confirm a duplicate using fresh admission and private applied progress,
+    /// even after source cleanup. Raw rh never supplies a duplicate proof.
     /// Only an integration-owned requested sequence may be supplied; this is not
     /// an exact source-row proof or publication coordinator completion receipt.
-    /// This result is usable only after bootstrap established counter provenance;
-    /// changing admission generation does not prove that an inherited rh belongs
-    /// to a new source history.
+    /// Older-generation progress is ignored, even when compatibility rh is high.
+    /// This does not establish current external identity or bootstrap readiness.
     pub fn admitted_relay_duplicate(
         &self,
         snapshot: &RelayAdmissionSnapshot,
@@ -277,20 +344,9 @@ impl<C: SqlConn> SqlKvStore<C> {
         if sequence == 0 {
             return Err(StoreError::Invalid("zero relay duplicate sequence".into()));
         }
-        let part = target_part(&snapshot.target)?;
-        let rh = keys::relay_high_water(&snapshot.source)?;
-        let generation = snapshot.generation;
-        Ok(self.conn().transaction(Box::new(move |conn| {
-            require_generation(&conn, &part, generation)?;
-            let value = kv::read(&conn, &part, &rh)?;
-            let watermark = value
-                .as_ref()
-                .map(codec::decode_u64)
-                .transpose()
-                .map_err(|_| SqlError::Corrupt("relay admission watermark"))?
-                .unwrap_or(0);
-            Ok(watermark >= sequence)
-        }))?)
+        Ok(self
+            .target_progress_receipt(&snapshot.target, &snapshot.source, snapshot.generation)?
+            .is_some_and(|receipt| receipt.through() >= sequence))
     }
     /// Reconstruct complete bound messages and rh CAS from one verified intent.
     /// Every bound message through the new watermark must be supplied. The caller
@@ -313,21 +369,42 @@ impl<C: SqlConn> SqlKvStore<C> {
             ) -> Result<(), SqlError>
             + 'static,
     {
-        let batch = admitted_batch(snapshot, proofs)?;
-        batch.validate(&self.capabilities())?;
+        let (batch, through) = admitted_batch(snapshot, proofs)?;
+        let part = target_part(&snapshot.target)?;
+        let source = SqlValue::Blob(snapshot.source.encode()?.to_vec());
+        let expected_progress = snapshot.progress.clone();
+        let next = progress::encode(snapshot.generation, through)?;
+        let caps = self.capabilities();
+        progress::validate_batch(
+            &batch,
+            caps,
+            &part,
+            &source,
+            expected_progress.as_deref(),
+            &next,
+        )?;
         let original_writes = batch.writes.clone();
         let original_guards = batch.preconditions.clone();
-        let part = target_part(&snapshot.target)?;
         let generation = snapshot.generation;
         let limit = self.metadata_soft_limit();
         Ok(self.conn().transaction(Box::new(move |conn| {
-            kv::check_and_write_extended_admitted(
+            let progress_part = part.clone();
+            let progress_source = source.clone();
+            let next_for_validation = next.clone();
+            let progress_conn = conn.clone();
+            let outcome = kv::check_and_write_extended_admitted(
                 &conn,
                 &part,
                 batch,
                 limit,
                 Some(generation),
                 move |get, batch, now| {
+                    if progress::read(&progress_conn, &progress_part, &progress_source, generation)?
+                        .0
+                        != expected_progress
+                    {
+                        return Err(SqlError::Constraint);
+                    }
                     extend(get, batch, now)?;
                     if !batch.writes.starts_with(&original_writes)
                         || !batch.preconditions.starts_with(&original_guards)
@@ -342,9 +419,22 @@ impl<C: SqlConn> SqlKvStore<C> {
                             "extension altered admitted relay effects",
                         ));
                     }
+                    progress::validate_batch(
+                        batch,
+                        caps,
+                        &progress_part,
+                        &progress_source,
+                        expected_progress.as_deref(),
+                        &next_for_validation,
+                    )
+                    .map_err(|_| SqlError::Corrupt("extended relay progress batch allowance"))?;
                     Ok(())
                 },
-            )
+            )?;
+            if outcome == BatchOutcome::Committed {
+                progress::write(&conn, &part, &source, next)?;
+            }
+            Ok(outcome)
         }))?)
     }
 }

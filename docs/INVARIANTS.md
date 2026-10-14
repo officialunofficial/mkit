@@ -2777,6 +2777,15 @@ it establishes neither current external generation nor target admission.
 Always enforce enrolled target admission after transaction extensions, including portable imports.
 Because old executors can deliver delayed projection effects after a temporary pause ends.
 If violated, a restored or delayed relay can change a projection under a stale generation.
+Always derive target duplicate/delivery evidence from current-generation private progress.
+Because a restored source counter can be lower than an inherited compatibility watermark.
+If violated, a new source row can be discarded before its effects commit.
+Always commit admitted target effects and private progress in one SQL transaction,
+with independent progress CAS and private operation/byte capacity reservations.
+Always reject ordinary nonempty writes to an enrolled source, including imports,
+and bind admitted source markers and immutable outbox allocation to that generation.
+Because delayed executors and unproven cleanup can invalidate a certified source prefix.
+If violated, newer publication tokens can describe missing or replaced relay effects.
 Permanent local admission and a raw watermark do not prove the complete auxiliary-only
 source prefix or restored source/target counter provenance. Activation remains disabled
 until integration enforces those conditions; generation rebinding cannot manufacture proof.

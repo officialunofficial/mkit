@@ -4935,6 +4935,37 @@ unenrolled stores require no reset. Experimental enabled data predating the
 required bindings must be rebuilt before activation. No public protocol or
 launch-profile conformance changes are implied.
 
+**Unshipped permanent SQL admission.** Private source and target enrollment
+rows bind a full logical partition to its external publication generation.
+Enrollment MUST require the matching maintenance pause and exact prior-generation
+CAS; activation clears that pause atomically. These tables are outside portable
+KV export/import and are included in physical SQL backups. Default factories
+remain unenrolled. Physical recovery still requires a fresh external generation.
+
+Once a source is enrolled, the final extended SQL boundary MUST reject ordinary
+nonempty writes, including portable imports. Explicit admitted source writes
+MUST recheck local generation and pause, bind source markers to that generation,
+preserve original guards and effects, and allocate new immutable relay rows above
+an exactly guarded prior outbox counter. Outcomes may create sequence gaps.
+Existing relay rows MUST NOT be rewritten or deleted through this path. Typed
+generation-bound cleanup, complete source-prefix certification, foreground/alarm
+integration and bootstrap reconciliation remain required before activation.
+
+Private target progress has one row per full `(target, source)` pair, without a
+generation history. Its canonical version-one JSON contains `version`,
+`generation`, and positive `through`, bounded to 512 bytes. An absent row or a
+valid row from an older generation establishes zero current-generation progress.
+Raw compatibility `rh` MUST NOT establish a duplicate or delivery receipt. An
+admitted target transaction MUST CAS exact private progress independently of raw
+`rh`, commit complete proven effects and new progress atomically, and preserve
+raw `rh` as `max(old_rh, applied_sequence)`. It reserves two private batch
+operations and their bytes before and after extensions; capacity or metadata
+failure rolls back both effects and progress. Fresh local progress observations
+establish local delivery, not current external identity or complete source history.
+A source restored at counter 5 with inherited target `rh=100` MUST NOT acknowledge
+new row 6 without actually committing its effects. Factories remain disabled
+until the external authority, complete prefix and recovery barriers are enforced.
+
 **Optional Worker maintenance barrier.** The SQL adapter can explicitly pause
 a logical partition under a trusted external publication generation. Its private
 `mkit_publication_pause` table binds the canonical encoded partition to a version-1

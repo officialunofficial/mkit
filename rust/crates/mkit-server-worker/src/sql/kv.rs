@@ -329,9 +329,54 @@ where
 pub(super) fn check_and_write_extended_admitted<C: SqlConn, F>(
     conn: &C,
     part: &SqlValue,
+    batch: Batch,
+    soft_limit: Option<u64>,
+    admitted: Option<mkit_server::store::adapter_spi::publication_fence::Generation>,
+    extend: F,
+) -> Result<BatchOutcome, SqlError>
+where
+    F: FnOnce(
+        &dyn Fn(&Key) -> Result<Option<Value>, SqlError>,
+        &mut Batch,
+        u64,
+    ) -> Result<(), SqlError>,
+{
+    check_and_write_extended_authorized(conn, part, batch, soft_limit, admitted, None, extend)
+}
+
+pub(super) fn check_and_write_extended_source<C: SqlConn, F>(
+    conn: &C,
+    part: &SqlValue,
+    batch: Batch,
+    soft_limit: Option<u64>,
+    generation: mkit_server::store::adapter_spi::publication_fence::Generation,
+    extend: F,
+) -> Result<BatchOutcome, SqlError>
+where
+    F: FnOnce(
+        &dyn Fn(&Key) -> Result<Option<Value>, SqlError>,
+        &mut Batch,
+        u64,
+    ) -> Result<(), SqlError>,
+{
+    check_and_write_extended_authorized(
+        conn,
+        part,
+        batch,
+        soft_limit,
+        None,
+        Some(generation),
+        extend,
+    )
+}
+
+fn check_and_write_extended_authorized<C: SqlConn, F>(
+    conn: &C,
+    part: &SqlValue,
     mut batch: Batch,
     soft_limit: Option<u64>,
     admitted: Option<mkit_server::store::adapter_spi::publication_fence::Generation>,
+    source_generation: Option<mkit_server::store::adapter_spi::publication_fence::Generation>,
     extend: F,
 ) -> Result<BatchOutcome, SqlError>
 where
@@ -365,6 +410,7 @@ where
         .map_err(|_| SqlError::Corrupt("extended batch exceeds limits"))?;
     super::publication_maintenance::reject_paused_writes(conn, part, &batch)?;
     super::relay_admission::validate(conn, part, &batch, admitted)?;
+    super::source_admission::validate(conn, part, &batch, source_generation)?;
     let SqlValue::Blob(encoded_partition) = part else {
         return Err(SqlError::Corrupt("invalid publication fence partition"));
     };

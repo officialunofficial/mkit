@@ -1113,6 +1113,49 @@ impl PublicationFence {
         .await
     }
 }
+/// Bind the final effective source marker to the admitted recovery identity.
+/// A batch marker put takes precedence over stored state; marker deletion is
+/// refused. Marker-free auxiliary work remains valid when no marker exists.
+/// This check does not authorize a transition: `validate_source_transaction`
+/// must still validate the original guarded publication and disposition.
+///
+/// # Errors
+/// Refuses malformed markers, foreign sources/generations or marker deletion.
+pub fn validate_source_generation(
+    source: &Partition,
+    batch: &Batch,
+    generation: Generation,
+    get: impl Fn(&Key) -> Result<Option<Value>, StoreError>,
+) -> Result<(), StoreError> {
+    if !matches!(source, Partition::Ref { .. }) {
+        return Err(invalid("source generation requires Ref"));
+    }
+    let key = source_key();
+    let mut effective = None;
+    for write in &batch.writes {
+        match write {
+            super::Write::Put(written, raw) if *written == key => effective = Some(raw.clone()),
+            super::Write::Delete(deleted) if *deleted == key => {
+                return Err(invalid("source generation marker cannot be deleted"));
+            }
+            _ => {}
+        }
+    }
+    let effective = match effective {
+        Some(raw) => Some(raw),
+        None => get(&key)?,
+    };
+    let Some(raw) = effective else {
+        return Ok(());
+    };
+    let marker: SourceMarker = decode(&raw)?;
+    marker.intent.validate()?;
+    if marker.intent.source()? != *source || marker.intent.generation != generation {
+        return Err(invalid("source marker admission identity mismatch"));
+    }
+    Ok(())
+}
+
 /// Validate publication bookkeeping against the final guarded source transaction.
 ///
 /// Storage adapters call this after original preconditions hold, before writing

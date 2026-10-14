@@ -15,6 +15,14 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Changed
 
+- [embedder: stored-format change] Add private generation-bound target progress
+  and permanent source admission. Restored compatibility watermarks cannot
+  acknowledge new-generation delivery. Effects and bounded private progress
+  commit atomically with independent CAS and operation/byte reservations;
+  enrolled sources reject ordinary/import writes, enforce immutable relay
+  allocation and refuse unproven cleanup. These optional SQL tables require no
+  reset for existing unenrolled stores. Factories remain disabled pending full
+  source-prefix, cleanup, bootstrap and external-authority integration.
 - Add opt-in permanent SQL relay admission outside portable KV exports.
   Admitted RefIndex partitions reject legacy projection and watermark writes,
   including imports. Proven effects commit with generation and watermark CAS
