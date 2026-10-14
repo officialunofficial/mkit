@@ -749,6 +749,63 @@ mod tests {
                         .await
                         .is_err()
                 );
+                // A non-empty rid with no rows is accepted and reported, so the
+                // caller must compare `reservation.id` with its retained evidence;
+                // a present, mismatching reservation under that rid still fails.
+                let store = MemoryKv::default();
+                let mut renamed = job(&spec);
+                renamed.settle.as_mut().unwrap().rid = "other".into();
+                write_job(&store, shards, &spec, &renamed).await;
+                let reads = ReadAccess::new(&store, shards, RepoVisibility::Public, true);
+                let recovered = reads
+                    .recover_completed_fork(&spec, &original)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(recovered.reservation.id, "other");
+                store
+                    .apply(
+                        &coordinator,
+                        Batch::new().put(
+                            keys::reservation("other").unwrap(),
+                            codec::encode_reservation(&codec::ReservationV1::committed(
+                                dest.clone(),
+                                1,
+                                11,
+                                11,
+                                0,
+                                Vec::new(),
+                                codec::StoredProcedure::Fork,
+                            )),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+                assert!(
+                    reads
+                        .recover_completed_fork(&spec, &original)
+                        .await
+                        .is_err()
+                );
+                // Namespace-creating fork: both rows absent recovers; the namespace
+                // record is still required.
+                let store = MemoryKv::default();
+                write_job(&store, shards, &spec, &creating(&spec)).await;
+                let reads = ReadAccess::new(&store, shards, RepoVisibility::Public, true);
+                assert!(
+                    reads
+                        .recover_completed_fork(&spec, &original)
+                        .await
+                        .is_err()
+                );
+                put_namespace(&store, shards, &spec).await;
+                assert!(
+                    reads
+                        .recover_completed_fork(&spec, &original)
+                        .await
+                        .unwrap()
+                        .is_some()
+                );
                 // A non-Done job still reports nothing.
                 let mut pending = job(&spec);
                 pending.phase = Phase::Copy;
