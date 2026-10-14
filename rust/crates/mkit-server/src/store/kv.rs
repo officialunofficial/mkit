@@ -422,6 +422,14 @@ pub struct PartitionStats {
 ///    during synchronous execution, so the backend's reading can lag real
 ///    time by that span.
 pub trait NamespaceStore: MaybeSend + MaybeSync {
+    /// Optional backend activation hint for an authenticated, validated read.
+    /// Results carry no data or authority; implementations must bound work and
+    /// suppress failures. The default performs no work.
+    #[doc(hidden)]
+    fn prepare_repo_read(&self, _repo: &crate::RepoId) -> impl Future<Output = ()> + MaybeSend {
+        async {}
+    }
+
     /// What this store supports.
     fn capabilities(&self) -> StoreCapabilities;
 
@@ -550,6 +558,9 @@ pub trait NamespaceStore: MaybeSend + MaybeSync {
 
 // Share a store handle across response streams and retained finalizers.
 impl<S: NamespaceStore + ?Sized> NamespaceStore for std::sync::Arc<S> {
+    async fn prepare_repo_read(&self, repo: &crate::RepoId) {
+        self.as_ref().prepare_repo_read(repo).await;
+    }
     fn read_call_allowance(&self) -> Option<u32> {
         self.as_ref().read_call_allowance()
     }

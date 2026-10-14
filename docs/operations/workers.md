@@ -392,6 +392,8 @@ The base launch vars are:
 | `DEFAULT_REPO_VISIBILITY` | `public` (default) or `private`; set at creation. Explicit repository visibility wins; changing this default changes every repository without an explicit setting |
 | `MAX_PACK_BYTES` | Default `1073741824`; allowed 1–5363340410. Select from measured workload, not the ceiling |
 | `NAMESPACE_LOCATION_HINT` | Optional placement hint |
+| `REPO_INDEX_PREWAKE` | `false` (default) or `true`; concurrent activation for signed repository reads |
+| `REPO_INDEX_PREWAKE_TTL_SECONDS` | Default `90`; 1 through 120 seconds |
 | `NAMESPACE_JURISDICTION` | Optional `eu`, `us` or `fedramp`; fixed for the deployment lifetime and consistent with R2 residency |
 | `BACKUP_PREFIX` | Distinct deployment prefix, e.g. `mkit-vcs-worker-staging` |
 | `BACKUP_INTERVAL_MS` | Default `86400000`; zero disables portable export |
@@ -1005,3 +1007,62 @@ with overlapping uploads/reads and mixed due alarms at concurrency 1/2/3/4/6.
 Capture synchronized per-isolate Wasm/V8/backing/transport high-water, retention,
 cancellation and memory-limit errors. Keep gaps visible; process RSS and sums
 across different isolates cannot certify headroom.
+
+
+## Repository index activation
+
+Set `REPO_INDEX_PREWAKE=true` to overlap cold repository index activation with
+signed-read authorization. The default is `false`, preserving existing read
+calls and results. `REPO_INDEX_PREWAKE_TTL_SECONDS` defaults to 90 and accepts
+1 through 120 seconds, below the observed idle window of more than 140 seconds.
+Programmatic deployments use `WorkerConfig::repo_index_prewake_ttl_ms`.
+Single sharding skips activation.
+
+An incoming request activates a non-running object and invokes its constructor
+([Durable Object lifecycle](https://developers.cloudflare.com/durable-objects/concepts/durable-object-lifecycle/)).
+An authenticated, validated read starts sixteen internal `ping` requests in one
+concurrent wave, joined with the authorization prologue. Owner object readers
+validate their signed envelope and repository binding before starting that wave;
+canonical and history reads reuse the same entry. Signed Multi pack reads use
+their existing authenticated operation. Pack reads with Single addressing and
+standalone ref reads do not touch RepoIndex and skip the wave. Anonymous and
+public object readers do not start waves. `ListRefs` scans RefIndex rather than RepoIndex and does not warm
+RepoIndex. Repository statistics reads also skip the wave.
+
+The wave adds sixteen calls and zero rounds to the warm-latency probe when
+joined with authorization. A cold activation can outlast that prologue; the
+read waits for the wave, with a fixed one-second timeout. No task is detached.
+Each response is consumed before the wave ends; timeout or cancellation aborts
+remaining fetches and retains the TTL claim. The `ping` operation is distinct from ordinary reads for
+transport instrumentation. SQLite opens and initializes its schema in the object
+handler before `ping` answers, without reading application rows or scanning
+application timers. Ordinary requests retain cold-start alarm repair. An empty
+`get_many` cannot substitute: the client returns locally without sending it.
+
+Each request client has a separate sixteen-call activation allowance, shared by
+its clones. The wave reserves all sixteen calls from the existing 9,000-call
+backend request allowance before dispatch, in addition to that small allowance.
+It does not consume object-reader proof, row, byte, decode, or session credits.
+A refused reservation skips the entire wave without changing the read. Successful
+reservation leaves 8,984 backend calls; the existing 1,000-call hook and settlement
+headroom remains unchanged. These calls never bypass the physical invocation
+budget. Enable the option only when that additional cost fits your read workload.
+
+The isolate retains at most 4,096 repository claims. A live claim suppresses
+another wave even across concurrent request clients. Claims start before dispatch
+and survive failures or cancellation for the TTL, bounding retries to one wave
+per repository per TTL per isolate. A full cache skips new repositories without
+evicting live claims. Expired claims are reclaimed; isolate restart loses all
+claims and permits another wave. Cache contents are scheduling hints only, never
+membership, permission, denial, or proof. Warm-up errors are logged and discarded;
+all existing authorization and final security checks still run on fresh state.
+There is no public wire or stored-format change, and no reset is needed.
+
+The `repository_index_prewake_models_cold_reads_and_warm_rounds` probe uses the
+same canonical reader fixtures with 400 ms first touches and 40 ms warm calls.
+Its read-gate shape performs head metadata preflight; Show reads canonical tree
+levels and sizes; Log(10) walks ten canonical first parents. It compares KV and
+blob GET counts exactly, reports the separate sixteen pings, and asserts that a
+second warm read and a joined warm wave retain the feature-off round counts.
+The Workers wire workflow runs release-feature conformance with activation off
+and Multi test-fault conformance with activation on.

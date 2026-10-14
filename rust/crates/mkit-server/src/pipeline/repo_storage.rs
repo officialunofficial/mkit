@@ -84,6 +84,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         repo: &RepoId,
         meta: &RequestMeta<'_>,
     ) -> Result<super::Authenticated, ServerError> {
+        self.authorize_owner_prepared(repo, meta, false).await
+    }
+
+    pub(super) async fn authorize_owner_prepared(
+        &self,
+        repo: &RepoId,
+        meta: &RequestMeta<'_>,
+        prepare: bool,
+    ) -> Result<super::Authenticated, ServerError> {
         if !matches!(self.cfg.auth, AuthMode::AuthV2(_)) {
             return Err(ServerError::unauthenticated("auth v2 required"));
         }
@@ -97,7 +106,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 prefix: "refs/".into(),
             },
         )?;
-        self.authorize_owner_operation(&a, &op, &self.meta).await?;
+        let authorization = self.authorize_owner_operation(&a, &op, &self.meta);
+        if prepare {
+            let (result, ()) =
+                futures::future::join(authorization, self.meta.prepare_repo_read(repo)).await;
+            result?;
+        } else {
+            authorization.await?;
+        }
         Ok(a)
     }
 

@@ -448,10 +448,11 @@ jobs:
           VCS_CONFORMANCE_KEEP: '1'
         run: scripts/vcs-worker-conformance.sh
 
-      - name: Wire suite (test-faults, D34, Multi)
+      - name: Wire suite (test-faults, D34, Multi, index prewake enabled)
         env:
           TMPDIR: ${{ runner.temp }}/wire-logs
           VCS_CONFORMANCE_KEEP: '1'
+          VCS_CONFORMANCE_PREWAKE: 'true'
         run: scripts/vcs-worker-conformance.sh --test-faults --multi
 
       - name: Wire suite (test-faults, single sharding)

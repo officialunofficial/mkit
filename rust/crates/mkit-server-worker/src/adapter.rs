@@ -229,6 +229,8 @@ pub struct WorkerConfig {
     /// Deployment-wide placement. Jurisdiction must remain fixed for its lifetime:
     /// changing it maps every name to new, empty objects.
     pub placement: Placement,
+    /// Default-off repository index activation; TTL in milliseconds (1..=120000).
+    pub repo_index_prewake_ttl_ms: Option<u64>,
     /// The request body cap, [`DEFAULT_MAX_BODY_BYTES`].
     pub max_body_bytes: usize,
     /// The R2 bucket binding ([`crate::r2::STORAGE_BINDING`]). Durable
@@ -330,6 +332,14 @@ impl WorkerConfig {
         use mkit_server::pipeline::{AuthMode, PipelineConfig};
         use mkit_server::upload::UploadLimits;
 
+        if self
+            .repo_index_prewake_ttl_ms
+            .is_some_and(|ttl| !(1..=120_000).contains(&ttl))
+        {
+            return Err(ConfigError(
+                "repository index prewake TTL must be 1..120000 ms".into(),
+            ));
+        }
         crate::launch::validate_programmatic(self)?;
         let bad = |e: &dyn core::fmt::Display| ConfigError(e.to_string());
         // Under multi addressing the signed repository is the request's,
@@ -759,6 +769,7 @@ impl WorkerConfig {
             indexed,
             sharding,
             placement,
+            repo_index_prewake_ttl_ms: crate::prewake::parse(&var)?,
             audience,
             repository,
             addressing,
@@ -2352,7 +2363,7 @@ mod glue {
     use std::sync::Once;
 
     use crate::telemetry::{ConsoleMetrics, install};
-    use mkit_server::pipeline::{DeliveryError, HookSet, OutcomeSink, Pipeline};
+    use mkit_server::pipeline::{DeliveryError, HookSet, OutcomeSink, Pipeline, Sharding};
     use mkit_worker_common::adapter::{copy_headers_filtered, respond_streamed, to_http_method};
     use mkit_worker_common::body_cap::content_length_exceeds;
     use mkit_worker_common::cors::{cors_preflight_response, is_options_preflight};
@@ -2477,7 +2488,12 @@ mod glue {
             StubTransport::new(env.clone(), cfg.placement.clone()),
             cfg.probe_partition(),
         )
-        .with_budget(request_budget.clone());
+        .with_budget(request_budget.clone())
+        .with_index_prewake(if cfg.sharding == Sharding::D34 {
+            cfg.repo_index_prewake_ttl_ms
+        } else {
+            None
+        });
         config.purge = crate::admin::purge_config(cfg, meta.clone(), Some(request_budget))?;
         #[cfg(feature = "__test-faults")]
         let faulted = blobs.clone();
@@ -3940,6 +3956,33 @@ mod tests {
         let mut pairs = base.to_vec();
         pairs.push(("SHARDING", "other"));
         assert!(WorkerConfig::from_vars(vars(&pairs)).is_err());
+    }
+
+    #[test]
+    fn repository_index_prewake_config_is_opt_in_and_validated() {
+        let base = [
+            (AUDIENCE_VAR, "https://vcs.example"),
+            (REPOSITORY_VAR, "default"),
+        ];
+        assert_eq!(
+            WorkerConfig::from_vars(vars(&base))
+                .unwrap()
+                .repo_index_prewake_ttl_ms,
+            None
+        );
+        let mut pairs = base.to_vec();
+        pairs.push(("REPO_INDEX_PREWAKE", "true"));
+        let mut config = WorkerConfig::from_vars(vars(&pairs)).unwrap();
+        assert_eq!(config.repo_index_prewake_ttl_ms, Some(90_000));
+        config.repo_index_prewake_ttl_ms = Some(0);
+        assert!(config.validate().is_err());
+        pairs.push(("REPO_INDEX_PREWAKE_TTL_SECONDS", "120"));
+        assert_eq!(
+            WorkerConfig::from_vars(vars(&pairs))
+                .unwrap()
+                .repo_index_prewake_ttl_ms,
+            Some(120_000)
+        );
     }
 
     #[test]

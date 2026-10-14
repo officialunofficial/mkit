@@ -311,6 +311,7 @@ async fn dispatch<S: NamespaceStore>(
 ) -> Result<(NsReply, Option<u64>), StoreError> {
     let key = |b: Blob| Key::new(b.0);
     let reply = match call {
+        NsCall::Ping => NsReply::Ok,
         NsCall::Get { key: k } => NsReply::Value {
             value: store
                 .get(p, &key(k))
@@ -553,7 +554,7 @@ mod object {
     use mkit_server::timers::{TickBudget, TimerRegistry};
     use worker::{Method, Request, Response, ScheduledTime, State, Storage};
 
-    use super::{PressureStore, decode_request, dispatch, encode, failure};
+    use super::{NsCall, PressureStore, decode_request, dispatch, encode, failure};
     use crate::alarm::{
         AlarmAction, alarm_after_put, alarm_after_tick_with_dirty, alarm_to_arm, head_due_ms,
         run_physical_alarm,
@@ -692,8 +693,12 @@ mod object {
                 return Response::error("method not allowed", 405);
             }
             let body = req.text().await?;
-            self.ensure_alarm().await;
             let decoded = decode_request(&body, self.class);
+            // Activation opens SQLite below, but must not scan application timers.
+            // The first ordinary request retains cold-start alarm repair.
+            if !matches!(&decoded, Ok((_, NsCall::Ping))) {
+                self.ensure_alarm().await;
+            }
             let reply = match decoded.and_then(|request| {
                 self.store()
                     .map(|store| (store, request))

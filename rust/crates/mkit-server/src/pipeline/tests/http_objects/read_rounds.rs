@@ -18,6 +18,7 @@ const LATENCY: u32 = 30;
 
 #[derive(Clone, Copy, Debug)]
 enum Op {
+    ReadGate,
     Show { sizes: bool },
     Cat,
     ListRefs,
@@ -176,6 +177,10 @@ async fn run(
         )
         .await?;
     match op {
+        Op::ReadGate => {
+            let answers = reader.object_metadata_in(session, &[shape.head]).await?;
+            assert!(answers[0].is_some());
+        }
         Op::Show { sizes } => {
             let mut levels = vec![vec![shape.head], vec![shape.root]];
             levels.extend(shape.dir.map(|dir| vec![dir]));
@@ -571,4 +576,150 @@ async fn before_get_read_gate(
     }
     crate::takedown::denial::require_clear(&fx.pipe.meta, &key.0).await?;
     Ok(fx.pipe.blobs.head(&key.into()).await.unwrap().is_some())
+}
+
+/// Same canonical fixtures and loader graph; only repository activation differs.
+#[test]
+fn repository_index_prewake_models_cold_reads_and_warm_rounds() {
+    let shape = shape(11, 8, true, |_| 1);
+    for op in [
+        Op::ReadGate,
+        Op::GetReadGate,
+        Op::Show { sizes: true },
+        Op::CanonicalLog(10),
+    ] {
+        shape.fx.pipe.meta.prewake.store(false, Ordering::SeqCst);
+        let before = measure_latency(&shape, true, op, 40, Some(400), true);
+        shape.fx.pipe.meta.prewake.store(true, Ordering::SeqCst);
+        shape
+            .fx
+            .pipe
+            .meta
+            .prewake_claimed
+            .store(false, Ordering::SeqCst);
+        let after = measure_latency(&shape, true, op, 40, Some(400), true);
+        assert_eq!((before.1, before.2), (after.1, after.2));
+        assert_eq!(shape.fx.pipe.meta.warm_calls.swap(0, Ordering::SeqCst), 16);
+        if matches!(op, Op::GetReadGate) {
+            // This pack gate touches one index shard; overlap preserves its latency.
+            assert!((after.0 - before.0).abs() < f64::EPSILON);
+        } else {
+            assert!(after.0 < before.0);
+        }
+        println!(
+            "PREWAKE_COLD op={op:?} before_ms={:.0} after_ms={:.0} warmup_calls=16 KV={} GET={}",
+            before.0 * 40.0,
+            after.0 * 40.0,
+            after.1,
+            after.2
+        );
+        let warm = measure(&shape, true, op);
+        assert_eq!(shape.fx.pipe.meta.warm_calls.load(Ordering::SeqCst), 0);
+        shape.fx.pipe.meta.prewake.store(false, Ordering::SeqCst);
+        let off = measure(&shape, true, op);
+        assert_eq!(warm, off);
+        shape.fx.pipe.meta.prewake.store(true, Ordering::SeqCst);
+        shape
+            .fx
+            .pipe
+            .meta
+            .prewake_claimed
+            .store(false, Ordering::SeqCst);
+        let on = measure(&shape, true, op);
+        assert_eq!(on, off);
+        println!(
+            "PREWAKE_WARM op={op:?} added_rounds=0 warmup_calls=16 second_read_calls=0 KV={} GET={}",
+            on.1, on.2
+        );
+        assert_eq!(shape.fx.pipe.meta.warm_calls.swap(0, Ordering::SeqCst), 16);
+    }
+}
+
+#[test]
+fn repository_index_prewake_requires_valid_owner_envelope() {
+    let shape = shape(1, 1, false, |_| 1);
+    let fx = &shape.fx;
+    fx.pipe.meta.prewake.store(true, Ordering::SeqCst);
+    measure(&shape, false, Op::Show { sizes: false });
+    measure(&shape, true, Op::ListRefs);
+    assert_eq!(fx.pipe.meta.warm_calls.load(Ordering::SeqCst), 0);
+    let lookup = |_: &str| None;
+    let meta = RequestMeta {
+        procedure: Procedure::ListRefs,
+        header: &lookup,
+        header_values: None,
+        unary_body: Some(&[]),
+        transport_principal: None,
+    };
+    assert!(
+        block_on(
+            fx.pipe
+                .object_reader(fx.repo_id("room"), ReaderView::Owner(&meta))
+        )
+        .is_err()
+    );
+    assert_eq!(fx.pipe.meta.warm_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn repository_index_prewake_rpc_validation_precedes_activation() {
+    let shape = shape(1, 1, false, |_| 1);
+    let fx = &shape.fx;
+    fx.pipe.meta.prewake.store(true, Ordering::SeqCst);
+    let unsigned = Req::unsigned(Procedure::ReadRef).header("x-repository", &fx.identity("room"));
+    let auth = fx.auth(&unsigned);
+    assert!(block_on(fx.pipe.read_ref(&auth, HEAD)).unwrap().is_some());
+    assert_eq!(fx.pipe.meta.warm_calls.load(Ordering::SeqCst), 0);
+    let req = signed(
+        &fx.owner,
+        &fx.identity("room"),
+        Procedure::ReadRef,
+        fx.number(),
+    );
+    let auth = fx.auth(&req);
+    assert!(block_on(fx.pipe.read_ref(&auth, "invalid")).is_err());
+    assert_eq!(fx.pipe.meta.warm_calls.load(Ordering::SeqCst), 0);
+    assert!(block_on(fx.pipe.read_ref(&auth, HEAD)).unwrap().is_some());
+    assert_eq!(fx.pipe.meta.warm_calls.load(Ordering::SeqCst), 0);
+    let pack = mkit_core::protocol::PackKey::new(shape.packs[0]);
+    let unsigned =
+        Req::unsigned(Procedure::PackExists).header("x-repository", &fx.identity("room"));
+    assert!(block_on(fx.pipe.pack_exists(&fx.auth(&unsigned), pack)).unwrap());
+    assert_eq!(fx.pipe.meta.warm_calls.load(Ordering::SeqCst), 0);
+    // A different authenticated procedure cannot prepare the pack read.
+    assert!(block_on(fx.pipe.pack_exists(&auth, pack)).is_err());
+    assert_eq!(fx.pipe.meta.warm_calls.load(Ordering::SeqCst), 0);
+    let req = signed(
+        &fx.owner,
+        &fx.identity("room"),
+        Procedure::PackExists,
+        fx.number(),
+    );
+    let auth = fx.auth(&req);
+    assert!(block_on(fx.pipe.pack_exists(&auth, pack)).unwrap());
+    assert_eq!(fx.pipe.meta.warm_calls.load(Ordering::SeqCst), 16);
+}
+
+#[test]
+fn repository_index_prewake_skips_single_addressing_pack_reads() {
+    let clock = super::super::clock();
+    let mut config = super::super::cfg(super::super::authv2());
+    config.sharding = Sharding::D34;
+    let env = super::super::build(
+        config,
+        Spy::new(super::super::store(&clock)),
+        Hooks::new(),
+        clock,
+    );
+    env.pipe.meta.prewake.store(true, Ordering::SeqCst);
+    let request = Req::signed(&key(7), Procedure::PackExists, b"{}", &nonce(42), T0);
+    let auth = env.auth(&request).unwrap();
+    assert!(
+        !block_on(
+            env.pipe
+                .pack_exists(&auth, mkit_core::protocol::PackKey::new([1; 32]))
+        )
+        .unwrap()
+    );
+    assert_eq!(env.pipe.meta.warm_calls.load(Ordering::SeqCst), 0);
 }

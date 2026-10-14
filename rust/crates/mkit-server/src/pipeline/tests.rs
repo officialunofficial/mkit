@@ -752,6 +752,12 @@ type ReadManyHook = Box<dyn Fn(&MemoryKv, &Partition, &[Key]) + Send + Sync>;
 /// run a hook before each apply, can yield at every call and can fail
 /// every read.
 struct Spy {
+    #[cfg(feature = "http-objects")]
+    prewake: AtomicBool,
+    #[cfg(feature = "http-objects")]
+    prewake_claimed: AtomicBool,
+    #[cfg(feature = "http-objects")]
+    warm_calls: AtomicU32,
     latency_ms: std::sync::atomic::AtomicU64,
     count_partition_scans: AtomicBool,
     request_budget: Mutex<Option<crate::indexed::budget::SliceBudget>>,
@@ -777,6 +783,12 @@ struct Spy {
 impl Spy {
     fn new(inner: MemoryKv) -> Self {
         Self {
+            #[cfg(feature = "http-objects")]
+            prewake: AtomicBool::new(false),
+            #[cfg(feature = "http-objects")]
+            prewake_claimed: AtomicBool::new(false),
+            #[cfg(feature = "http-objects")]
+            warm_calls: AtomicU32::new(0),
             latency_ms: std::sync::atomic::AtomicU64::new(0),
             count_partition_scans: AtomicBool::new(false),
             inner: Arc::new(inner),
@@ -879,6 +891,29 @@ impl Spy {
 }
 
 impl NamespaceStore for Spy {
+    #[cfg(feature = "http-objects")]
+    async fn prepare_repo_read(&self, repo: &RepoId) {
+        if !self.prewake.load(Ordering::SeqCst) || self.prewake_claimed.swap(true, Ordering::SeqCst)
+        {
+            return;
+        }
+        futures::future::join_all(
+            (0..crate::store::REPO_INDEX_FANOUT).map(|prefix| async move {
+                self.warm_calls.fetch_add(1, Ordering::SeqCst);
+                let p = Partition::RepoIndex {
+                    ns: repo.namespace.clone(),
+                    repo: repo.name.clone(),
+                    prefix,
+                };
+                let latency = crate::store::read_probe::partition_latency_ms(
+                    &p,
+                    self.latency_ms.load(Ordering::SeqCst),
+                );
+                crate::store::read_probe::delay(latency, "index_prewake").await;
+            }),
+        )
+        .await;
+    }
     fn read_call_allowance(&self) -> Option<u32> {
         Some(
             self.request_budget

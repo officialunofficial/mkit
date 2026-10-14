@@ -741,6 +741,14 @@ collect the applicable entries between their old and new immutable pins.
   authorization, membership and denial remain live.
   No persisted cache or writer proofs in the shared published cache.
 
+- Workers deployments can enable `REPO_INDEX_PREWAKE=true` to activate all
+  sixteen repository index objects concurrently with signed-read authorization.
+  `REPO_INDEX_PREWAKE_TTL_SECONDS` defaults to 90 and accepts 1 through 120.
+  The option defaults off, uses a bounded volatile cache and a separate
+  sixteen-call warm-up allowance inside the existing request budget, and
+  suppresses failures. Anonymous reads and single sharding skip the wave.
+  No public wire, stored-format, or store-reset change.
+
 ### Changed
 
 - Inventory staging reuses the entry lookup for entries without history
