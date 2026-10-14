@@ -2923,8 +2923,10 @@ Paid Workers launch profile and complete valid scanner retrieval settings MUST b
 present at startup before the route is mounted; partial settings MUST be
 refused. Without enablement, the route MUST NOT be mounted. It grants no
 public-serving, write, admin, or preservation-read permission. Global denial
-under §14 MUST remain authoritative, including for staged packs and trusted
-scanners.
+under §14 MUST remain authoritative when `takedown_denial` is enabled,
+including for staged packs and trusted scanners. When it is disabled, retrieval
+MUST skip block/action rows and denial-specific descriptor proofs under §14.2;
+credential, ticket, lifetime and range checks still apply.
 
 An enabled PRE_RECEIVE call MUST include `scanner_retrieval`, an
 `InspectRetrieval` message with the following fields:
@@ -3008,10 +3010,10 @@ ticket close.
 Every retrieval failure MUST return the same HTTP 404 `not_found` answer,
 including missing or incorrect capability, unknown or disallowed scanner
 key, invalid signature, expiry, unknown or foreign pack, closed/consumed
-or expired ticket, and an active global block. Storage or proof failure
+or expired ticket, and, with denial enabled, an active global block. Storage or proof failure
 MUST fail closed with the same answer. No error may disclose whether
-the pack or ticket exists. Authorization and global-denial checks MUST
-precede reading pack bytes.
+the pack or ticket exists. Authorization and, when enabled, global-denial
+checks MUST precede reading pack bytes.
 
 ## 12. Storage leases and lifecycle events
 

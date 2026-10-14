@@ -64,6 +64,12 @@ impl<S: NamespaceStore> NamespaceStore for DenialReads<S> {
     fn reserve_read_calls(&self, calls: u32) -> Result<Option<ReadReservation>, StoreError> {
         self.store.reserve_read_calls(calls)
     }
+    async fn has(&self, partition: &Partition, key: &Key) -> Result<bool, StoreError> {
+        if self.omitted(partition, key) {
+            return Ok(false);
+        }
+        self.store.has(partition, key).await
+    }
     async fn get(&self, partition: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
         if self.omitted(partition, key) {
             return Ok(None);
@@ -207,6 +213,9 @@ mod tests {
         inner: MemoryKv,
         reads: Mutex<Vec<Vec<Key>>>,
         batches: Mutex<Vec<Batch>>,
+        has_reads: Mutex<Vec<(Partition, Key)>>,
+        has_reply: Option<bool>,
+        refuse_get: bool,
     }
     impl NamespaceStore for Observed {
         fn capabilities(&self) -> StoreCapabilities {
@@ -214,7 +223,20 @@ mod tests {
         }
         async fn get(&self, p: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
             self.reads.lock().unwrap().push(vec![key.clone()]);
+            if self.refuse_get {
+                return Err(StoreError::unavailable("get is unavailable"));
+            }
             self.inner.get(p, key).await
+        }
+        async fn has(&self, p: &Partition, key: &Key) -> Result<bool, StoreError> {
+            self.has_reads
+                .lock()
+                .unwrap()
+                .push((p.clone(), key.clone()));
+            match self.has_reply {
+                Some(reply) => Ok(reply),
+                None => self.inner.has(p, key).await,
+            }
         }
         async fn get_many(
             &self,
@@ -437,5 +459,49 @@ mod tests {
             StoreError::Invalid(_)
         ));
         assert_eq!(store.batches.lock().unwrap().len(), calls);
+    }
+    #[tokio::test]
+    async fn has_forwards_backend_semantics_and_omits_only_disabled_denial_rows() {
+        let store = Observed {
+            has_reply: Some(true),
+            refuse_get: true,
+            ..Observed::default()
+        };
+        let id = [3; 32];
+        let partition = super::super::content_shard(&id);
+        let block = keys::block(&id);
+        let action = crate::takedown::denial::action_key(&id);
+        let ordinary = Key::new(b"ordinary".to_vec());
+        assert!(store.get(&partition, &ordinary).await.is_err());
+        store.reads.lock().unwrap().clear();
+        for enabled in [true, false] {
+            let gate = DenialReads::new(&store, enabled);
+            assert_eq!(gate.has(&partition, &block).await.unwrap(), enabled);
+            assert_eq!(gate.has(&partition, &action).await.unwrap(), enabled);
+            assert!(gate.has(&partition, &ordinary).await.unwrap());
+        }
+        // An exact block-shaped key in another partition is ordinary data.
+        let other = Partition::ContentShard(0);
+        assert_ne!(partition, other);
+        assert!(
+            DenialReads::new(&store, false)
+                .has(&other, &block)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            *store.has_reads.lock().unwrap(),
+            [
+                (partition.clone(), block.clone()),
+                (partition.clone(), action),
+                (partition.clone(), ordinary.clone()),
+                (partition, ordinary),
+                (other, block),
+            ]
+        );
+        assert!(
+            store.reads.lock().unwrap().is_empty(),
+            "has must never fall back to get"
+        );
     }
 }

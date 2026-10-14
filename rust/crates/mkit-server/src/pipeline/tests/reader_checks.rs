@@ -281,3 +281,94 @@ fn inherited_wave_budget_refuses_before_any_dispatch_and_charges_once() {
         }
     });
 }
+
+fn locations(count: u16) -> Vec<(Hash, crate::store::index::LocatedObject)> {
+    let all_ids = ids(count * 2);
+    all_ids[..usize::from(count)]
+        .iter()
+        .zip(&all_ids[usize::from(count)..])
+        .map(|(&id, &pack)| {
+            (
+                id,
+                crate::store::index::LocatedObject {
+                    pack,
+                    value: crate::store::index::IndexValue {
+                        frame_offset: 12,
+                        frame_length: 15,
+                        wire_type: 0,
+                        decoded_size: 10,
+                        chain_depth: 0,
+                        delta_base: None,
+                    },
+                },
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn disabled_denial_never_plans_uncached_guards_after_cache_exhaustion() {
+    runtime().block_on(async {
+        let locations = locations(300);
+        let backend = Backend::default();
+        let budget = SliceBudget::new(0);
+        let io = ReadIo::new();
+        let store = Budgeted::new(&backend, &budget).with_io(&io);
+        let checks = Checks::new(&store, false);
+        for (id, location) in &locations {
+            for guard in [id, &location.pack] {
+                assert!(
+                    !crate::takedown::denial::denied(&checks, guard)
+                        .await
+                        .unwrap()
+                );
+            }
+        }
+        assert_eq!(checks.cache.lock().unwrap().slots.len(), MAX_CHECKS);
+        assert!(checks.uncached_locations(&locations).is_empty());
+        checks.prefetch_locations(&locations).await.unwrap();
+        assert_eq!(budget.used(), 0);
+        assert!(backend.batches.lock().unwrap().is_empty());
+        assert_eq!(backend.peak.load(Ordering::SeqCst), 0);
+    });
+}
+
+#[test]
+fn enabled_denial_keeps_overflow_location_guards_live() {
+    runtime().block_on(async {
+        let locations = locations(300);
+        let backend = Backend::default();
+        let budget = SliceBudget::new(602);
+        let io = ReadIo::new();
+        let store = Budgeted::new(&backend, &budget).with_io(&io);
+        let checks = Checks::new(&store, true);
+        for (id, location) in &locations {
+            for guard in [id, &location.pack] {
+                assert!(
+                    !crate::takedown::denial::denied(&checks, guard)
+                        .await
+                        .unwrap()
+                );
+            }
+        }
+        assert_eq!(checks.cache.lock().unwrap().slots.len(), MAX_CHECKS);
+        let remaining = checks.uncached_locations(&locations);
+        let expected: std::collections::BTreeSet<_> = locations[MAX_CHECKS / 2..]
+            .iter()
+            .flat_map(|(id, location)| [*id, location.pack])
+            .collect();
+        assert_eq!(remaining, expected);
+        assert_eq!(remaining.len(), 600 - MAX_CHECKS);
+        let (id, location) = locations.last().unwrap();
+        block(&backend, id);
+        block(&backend, &location.pack);
+        assert!(crate::takedown::denial::denied(&checks, id).await.unwrap());
+        assert!(
+            crate::takedown::denial::denied(&checks, &location.pack)
+                .await
+                .unwrap()
+        );
+        assert_eq!(budget.used(), 602);
+        assert_eq!(backend.batches.lock().unwrap().len(), 602);
+    });
+}

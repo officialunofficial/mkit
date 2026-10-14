@@ -138,7 +138,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             return Err(missing());
         }
         let budget = SliceBudget::new(MAX_CALLS);
-        let meta = Budgeted::new(&self.meta, &budget);
+        let meta = crate::store::DenialReads::new(
+            Budgeted::new(&self.meta, &budget),
+            self.cfg.takedown_denial,
+        );
         let blobs = Budgeted::new(&self.blobs, &budget);
         let partition = self.shards.ref_shard(&repo, &claims.assignment.ref_name);
         check_tickets(
@@ -150,13 +153,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             self.clock.as_ref(),
         )
         .await?;
-        crate::takedown::denial::require_pack_clear_for_scanner(
-            &meta,
-            self.shards.as_ref(),
-            &repo,
-            &pack.id,
-        )
-        .await?;
+        for id in meta.enabled_ids(std::iter::once(&pack.id)) {
+            crate::takedown::denial::require_pack_clear_for_scanner(
+                &meta,
+                self.shards.as_ref(),
+                &repo,
+                id,
+            )
+            .await?;
+        }
         let now = u64::try_from(self.clock.now_ms()).map_err(|_| missing())?;
         if now >= claims.expires_at_ms {
             return Err(missing());

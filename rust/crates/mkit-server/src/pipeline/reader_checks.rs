@@ -38,9 +38,8 @@ impl<'a, S> Checks<'a, S> {
             .cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        locations
-            .iter()
-            .flat_map(|(id, loc)| [*id, loc.pack])
+        self.store
+            .enabled_ids(locations.iter().flat_map(|(id, loc)| [*id, loc.pack]))
             .filter(|id| {
                 cache
                     .slots

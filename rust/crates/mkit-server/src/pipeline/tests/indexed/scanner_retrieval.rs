@@ -364,98 +364,160 @@ fn consumed_closed_and_expired_tickets_end_retrieval() {
     }
 }
 
-#[test]
-fn global_block_denial_is_enforced_even_when_public_denial_flag_is_off() {
-    let (mut env, owner, identity) = environment();
-    assert!(!env.pipe.cfg.takedown_denial);
-    env.pipe.cfg.scanner_retrieval = Some(scanner_config());
-    let (bytes, _) = pack();
-    let ticket = begin_and_upload(&env, &owner, &identity, &bytes, 193_030);
-    let token = mint(
-        &env,
-        &assignment(&env, &owner, &identity, &[(&bytes, vec![ticket])]),
-        Duration::from_secs(10),
-    );
-    assert!(fetch(&env, &identity, &token, &hash(&bytes), None).is_ok());
-    block_on(
-        ContentIndex::new(BorrowedStore(&env.pipe.meta)).install_block_action(
-            &crate::takedown::DenialCapability::for_test(),
-            &hash(&bytes),
-            &crate::takedown::denial::BlockAction {
-                id: [50; 32],
-                takedown_id: [51; 32],
-                reason: "manual".into(),
-                blocked_at_ms: T0 as u64,
-                chunk_ids: vec![],
-            },
-            T0 as u64,
-        ),
-    )
-    .unwrap();
-    not_found(fetch(&env, &identity, &token, &hash(&bytes), None));
-    not_found(fetch(&env, &identity, &token, &hash(&bytes), Some((0, 3))));
+fn denial_probe_reads(env: &Env) -> (usize, usize) {
+    let seen = env.pipe.meta.seen.lock().unwrap();
+    let blocks = seen
+        .iter()
+        .filter(|key| {
+            key.as_bytes()
+                .strip_prefix(b"b\0")
+                .is_some_and(|raw| raw.len() == 32 || raw.len() == 40 && &raw[32..] == b"\0actions")
+        })
+        .count();
+    let descriptors = seen
+        .iter()
+        .filter(|key| {
+            key.as_bytes()
+                .starts_with(b"b\0\xffdenial-action-descriptors-v2-index\0")
+        })
+        .count();
+    (blocks, descriptors)
+}
+
+fn fetch_with_denial_mode(env: &Env, identity: &str, token: &str, bytes: &[u8], denied: bool) {
+    for range in [None, Some((0, 3))] {
+        env.pipe.meta.seen.lock().unwrap().clear();
+        let result = fetch(env, identity, token, &hash(bytes), range);
+        if denied && env.pipe.cfg.takedown_denial {
+            not_found(result);
+        } else {
+            let response = result.unwrap();
+            let expected = range.map_or(bytes, |(start, end)| {
+                &bytes[usize::try_from(start).unwrap()..=usize::try_from(end).unwrap()]
+            });
+            assert_eq!(response.bytes.as_ref(), expected);
+            assert_eq!(response.partial, range.is_some());
+        }
+        let (blocks, descriptors) = denial_probe_reads(env);
+        if env.pipe.cfg.takedown_denial {
+            assert!(blocks > 0, "enabled retrieval must strongly check denial");
+        } else {
+            assert_eq!(
+                (blocks, descriptors),
+                (0, 0),
+                "disabled retrieval must skip block and descriptor I/O"
+            );
+        }
+    }
 }
 
 #[test]
-fn a_blocked_manifest_suppresses_its_chunk_in_an_otherwise_unblocked_raw_pack() {
+fn global_pack_denial_follows_mode_for_whole_and_ranged_scanner_reads() {
     for sharding in [Sharding::Single, Sharding::D34] {
-        let (mut env, owner, identity) = environment_with_sharding(sharding);
-        env.pipe.cfg.scanner_retrieval = Some(scanner_config());
-        assert!(!env.pipe.cfg.takedown_denial);
-        let chunk = Object::Blob(Blob {
-            data: b"shared chunk bytes".to_vec(),
-        });
-        let held_manifest = Object::ChunkedBlob(ChunkedBlob {
-            total_size: 18,
-            chunk_size: 0,
-            chunks: vec![chunk.id().unwrap()],
-        });
-        let mut writer = PackWriter::new_raw_only();
-        writer
-            .push_raw(chunk.id().unwrap(), &serialize(&chunk).unwrap())
-            .unwrap();
-        let chunk_pack = writer.finish().unwrap();
-        let (other, _) = pack();
-        let chunk_ticket = begin_and_upload(&env, &owner, &identity, &chunk_pack, 193_070);
-        let other_ticket = begin_and_upload(&env, &owner, &identity, &other, 193_071);
-        let assignment = assignment(
-            &env,
-            &owner,
-            &identity,
-            &[
-                (&chunk_pack, vec![chunk_ticket]),
-                (&other, vec![other_ticket]),
-            ],
-        );
-        let token = mint(&env, &assignment, Duration::from_secs(10));
-        hold_manifest(&env, &owner, &identity, &held_manifest);
-        assert!(fetch(&env, &identity, &token, &hash(&chunk_pack), None).is_ok());
-        block_on(
-            ContentIndex::new(BorrowedStore(&env.pipe.meta)).install_block_action(
-                &crate::takedown::DenialCapability::for_test(),
-                &held_manifest.id().unwrap(),
-                &crate::takedown::denial::BlockAction {
-                    id: [53; 32],
-                    takedown_id: [54; 32],
-                    reason: "manual".into(),
-                    blocked_at_ms: T0 as u64,
-                    chunk_ids: vec![chunk.id().unwrap()],
-                },
-                T0 as u64,
-            ),
-        )
-        .unwrap();
-        // The denied manifest is not an added pack/object in this capability;
-        // its strong global chunk stop still applies to the scanner's bytes.
-        not_found(fetch(&env, &identity, &token, &hash(&chunk_pack), None));
-        not_found(fetch(
-            &env,
-            &identity,
-            &token,
-            &hash(&chunk_pack),
-            Some((0, 3)),
-        ));
-        assert!(fetch(&env, &identity, &token, &hash(&other), None).is_ok());
+        for enabled in [false, true] {
+            for action in [false, true] {
+                let (mut env, owner, identity) = environment_with_sharding(sharding);
+                env.pipe.cfg.takedown_denial = enabled;
+                env.pipe.cfg.scanner_retrieval = Some(scanner_config());
+                let (bytes, _) = pack();
+                let ticket = begin_and_upload(&env, &owner, &identity, &bytes, 193_030);
+                let token = mint(
+                    &env,
+                    &assignment(&env, &owner, &identity, &[(&bytes, vec![ticket])]),
+                    Duration::from_secs(10),
+                );
+                fetch_with_denial_mode(&env, &identity, &token, &bytes, false);
+                let index = ContentIndex::new(BorrowedStore(&env.pipe.meta));
+                if action {
+                    block_on(index.install_block_action(
+                        &crate::takedown::DenialCapability::for_test(),
+                        &hash(&bytes),
+                        &crate::takedown::denial::BlockAction {
+                            id: [50; 32],
+                            takedown_id: [51; 32],
+                            reason: "manual".into(),
+                            blocked_at_ms: T0 as u64,
+                            chunk_ids: vec![],
+                        },
+                        T0 as u64,
+                    ))
+                    .unwrap();
+                } else {
+                    block_on(index.block(
+                        &crate::takedown::DenialCapability::for_test(),
+                        &hash(&bytes),
+                        &crate::store::BlockEntry::new("manual", T0 as u64),
+                        T0 as u64,
+                    ))
+                    .unwrap();
+                }
+                // Seeded rows model an existing store; production off-mode cannot create them.
+                fetch_with_denial_mode(&env, &identity, &token, &bytes, true);
+            }
+        }
+    }
+}
+
+#[test]
+fn manifest_and_chunk_denial_follow_mode_for_whole_and_ranged_scanner_reads() {
+    for sharding in [Sharding::Single, Sharding::D34] {
+        for enabled in [false, true] {
+            for deny_manifest in [false, true] {
+                let (mut env, owner, identity) = environment_with_sharding(sharding);
+                env.pipe.cfg.takedown_denial = enabled;
+                env.pipe.cfg.scanner_retrieval = Some(scanner_config());
+                let chunk = Object::Blob(Blob {
+                    data: b"shared chunk bytes".to_vec(),
+                });
+                let held_manifest = Object::ChunkedBlob(ChunkedBlob {
+                    total_size: 18,
+                    chunk_size: 0,
+                    chunks: vec![chunk.id().unwrap()],
+                });
+                let mut writer = PackWriter::new_raw_only();
+                writer
+                    .push_raw(chunk.id().unwrap(), &serialize(&chunk).unwrap())
+                    .unwrap();
+                let chunk_pack = writer.finish().unwrap();
+                let (other, _) = pack();
+                let chunk_ticket = begin_and_upload(&env, &owner, &identity, &chunk_pack, 193_070);
+                let other_ticket = begin_and_upload(&env, &owner, &identity, &other, 193_071);
+                let assignment = assignment(
+                    &env,
+                    &owner,
+                    &identity,
+                    &[
+                        (&chunk_pack, vec![chunk_ticket]),
+                        (&other, vec![other_ticket]),
+                    ],
+                );
+                let token = mint(&env, &assignment, Duration::from_secs(10));
+                hold_manifest(&env, &owner, &identity, &held_manifest);
+                fetch_with_denial_mode(&env, &identity, &token, &chunk_pack, false);
+                let (target, chunk_ids) = if deny_manifest {
+                    (held_manifest.id().unwrap(), vec![chunk.id().unwrap()])
+                } else {
+                    (chunk.id().unwrap(), vec![])
+                };
+                block_on(
+                    ContentIndex::new(BorrowedStore(&env.pipe.meta)).install_block_action(
+                        &crate::takedown::DenialCapability::for_test(),
+                        &target,
+                        &crate::takedown::denial::BlockAction {
+                            id: [53; 32],
+                            takedown_id: [54; 32],
+                            reason: "manual".into(),
+                            blocked_at_ms: T0 as u64,
+                            chunk_ids,
+                        },
+                        T0 as u64,
+                    ),
+                )
+                .unwrap();
+                fetch_with_denial_mode(&env, &identity, &token, &chunk_pack, true);
+                fetch_with_denial_mode(&env, &identity, &token, &other, false);
+            }
+        }
     }
 }
 

@@ -247,7 +247,10 @@ fresh and expired request envelopes, and grant expiry.
 **Always:** scanner byte reads require both a dedicated short-lived capability
 and an allowlisted scanner auth-v2 signature over the exact private request.
 Every ticket bound to the requested raw pack must still be open and unexpired
-at request time, and global denial must permit the bytes. Apply consumption,
+at request time. With `takedown_denial=true`, global denial must permit the
+bytes; with it false, block/action reads and denial-specific descriptor proofs
+are skipped. Credential, ticket, lifetime and range checks remain in both modes.
+Apply consumption,
 terminal close, ticket expiry or capability expiry yields the same `not_found`
 as a missing pack. Fail-closed inspection leaves tickets open, so retrieval
 intentionally survives that attempt only until capability expiry. Retries keep
