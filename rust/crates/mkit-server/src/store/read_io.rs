@@ -62,6 +62,17 @@ pub struct ReadReservation {
     inherited: Option<Box<ReadReservation>>,
 }
 impl ReadReservation {
+    /// Accounting layers in this reservation, without consuming its credit.
+    pub(crate) fn accounting_layers(&self) -> u32 {
+        let mut layers = 0_u32;
+        let mut current = Some(self);
+        while let Some(reservation) = current {
+            layers = layers.saturating_add(1);
+            current = reservation.inherited.as_deref();
+        }
+        layers
+    }
+
     /// Activate only these waves and their inherited ledgers while polling
     /// `future`. Unrelated tasks and cancelled waves cannot borrow their credit.
     #[doc(hidden)]

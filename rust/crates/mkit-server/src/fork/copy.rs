@@ -162,15 +162,49 @@ pub(crate) async fn require_scannable<S: NamespaceStore>(
     job: &ForkJobV1,
     budget: &SliceBudget,
 ) -> Result<(), ForkError> {
-    let store = Budgeted::new(env.store, budget);
+    let partitions: Vec<_> = env
+        .shards
+        .object_index_partitions(&job.source()?)
+        .into_iter()
+        .filter(|p| matches!(p, Partition::RepoIndex { .. }))
+        .collect();
     let mut total = 0_u64;
-    for partition in env.shards.object_index_partitions(&job.source()?) {
-        // A partition shared with other repositories says nothing about this one.
-        if !matches!(partition, Partition::RepoIndex { .. }) {
-            continue;
-        }
-        if let Some(keys) = store.stats(&partition).await?.keys {
-            total = total.saturating_add(keys);
+    let mut pending = partitions.as_slice();
+    while !pending.is_empty() {
+        // Stats cannot use read credits, but a zero-call reservation exposes
+        // inherited accounting layers without spending or dispatching calls.
+        // Include the local debit and an opaque leaf: shared ancestors must
+        // cover the whole wave before a later call can mask an earlier error.
+        let cap = match (
+            env.store.read_call_allowance(),
+            env.store.reserve_read_calls(0),
+        ) {
+            (Some(allowance), Ok(reservation)) => {
+                let layers = reservation
+                    .as_ref()
+                    .map_or(0, crate::store::ReadReservation::accounting_layers);
+                let debits = layers.saturating_mul(2).saturating_add(2);
+                usize::try_from(allowance.min(budget.remaining()) / debits)
+                    .unwrap_or(6)
+                    .clamp(1, 6)
+            }
+            _ => 1,
+        };
+        let width = pending.len().min(cap);
+        let (wave, rest) = pending.split_at(width);
+        pending = rest;
+        // Stats do not consume read credits. Charge the slice once before
+        // dispatch, then use the underlying store (including its own ledger).
+        budget.charge_many(u32::try_from(wave.len()).unwrap_or(u32::MAX))?;
+        let replies = crate::store::ReadReservation::scope(
+            &[],
+            futures::future::join_all(wave.iter().map(|p| env.store.stats(p))),
+        )
+        .await;
+        for reply in replies {
+            if let Some(keys) = reply?.keys {
+                total = total.saturating_add(keys);
+            }
         }
     }
     if total > MAX_SCANNED_ROWS {
@@ -190,6 +224,7 @@ struct Page<'a> {
     per_batch: usize,
     range: (crate::store::Key, crate::store::Key),
     partitions: &'a [Partition],
+    budget: &'a SliceBudget,
 }
 
 /// Scan the source's index rows and copy those of the pack set. One scan page
@@ -231,6 +266,7 @@ pub(crate) async fn copy<S: NamespaceStore>(
         holders,
         manifests,
         partitions: &partitions,
+        budget,
         source,
         dest,
     };
@@ -340,7 +376,16 @@ async fn copy_page<S: NamespaceStore>(
         }
     }
     if !candidates.is_empty() {
-        copy_holders(env, store, job, &page.source, &page.dest, &candidates).await?;
+        copy_holders(
+            env,
+            store,
+            page.budget,
+            job,
+            &page.source,
+            &page.dest,
+            &candidates,
+        )
+        .await?;
     }
     if let Some(next) = scanned.next {
         job.after = Some(next.as_bytes().to_vec());
@@ -352,9 +397,10 @@ async fn copy_page<S: NamespaceStore>(
 }
 
 /// The destination becomes a holder of each extracted object the source holds.
-async fn copy_holders<S: NamespaceStore>(
+pub(super) async fn copy_holders<S: NamespaceStore>(
     env: &ForkEnv<'_, S>,
     store: &Budgeted<'_, S>,
+    budget: &SliceBudget,
     job: &ForkJobV1,
     source: &crate::repo::RepoId,
     dest: &crate::repo::RepoId,
@@ -364,15 +410,65 @@ async fn copy_holders<S: NamespaceStore>(
     let index = ContentIndex::new(BorrowedStore(&denial_reads));
     let from = Holder::new(source.namespace.clone(), source.name.clone());
     let to = Holder::new(dest.namespace.clone(), dest.name.clone());
-    for object in objects {
-        if index.holder_record(object, &from).await?.is_none() {
-            continue;
+    // Four mutations retain fewer rows than the existing 500-row copy scan.
+    // The page reserve still covers the same calls; retries charge on dispatch.
+    let mut pending = objects;
+    while !pending.is_empty() {
+        // An object may occur in several packs. Keep its repeated writes
+        // serial, preserving call counts without introducing CAS races.
+        // One holder read plus up to eight three-call mutation attempts.
+        // With less headroom, retain serial error precedence.
+        // Reserve the first existing read before inspecting its accounting
+        // layers. Each layer can charge two ledgers, whose ancestors may alias;
+        // leave one more debit for an opaque leaf. Unknown caps stay serial.
+        let first_reservation = store.reserve_read_calls(1)?;
+        let layers = first_reservation
+            .as_ref()
+            .map_or(0, crate::store::ReadReservation::accounting_layers);
+        let debits = layers.saturating_mul(2).saturating_add(1);
+        let allowance = store
+            .read_call_allowance()
+            .unwrap_or(0)
+            .min(budget.remaining());
+        let cap = usize::try_from(allowance / 25_u32.saturating_mul(debits))
+            .unwrap_or(4)
+            .clamp(1, 4);
+        let mut width = 0;
+        while width < pending.len().min(cap) && !pending[..width].contains(&pending[width]) {
+            width += 1;
         }
-        let outcome = index
-            .add_holder_unless_blocked(object, &to, &job.binding, None, env.now())
-            .await?;
-        if outcome.blocked.is_some() {
-            return Err(ForkError::NotFound);
+        let (wave, rest) = pending.split_at(width);
+        pending = rest;
+        let mut first_reservation = Some(first_reservation);
+        let replies = futures::future::join_all(wave.iter().map(|object| {
+            let reservation = if let Some(first) = first_reservation.take() {
+                Ok(first)
+            } else {
+                store.reserve_read_calls(1)
+            };
+            let (index, from, to) = (&index, &from, &to);
+            async move {
+                let reservation = reservation?;
+                let held = crate::store::ReadReservation::scope(
+                    &[reservation],
+                    index.holder_record(object, from),
+                )
+                .await?;
+                if held.is_none() {
+                    return Ok(());
+                }
+                let outcome = index
+                    .add_holder_unless_blocked(object, to, &job.binding, None, env.now())
+                    .await?;
+                if outcome.blocked.is_some() {
+                    return Err(ForkError::NotFound);
+                }
+                Ok(())
+            }
+        }))
+        .await;
+        for reply in replies {
+            reply?;
         }
     }
     Ok(())

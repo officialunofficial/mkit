@@ -2885,3 +2885,25 @@ resend an acknowledged part or advance refs without its upload commitment.
 
 **Enforced by:** request-policy seam tests and both-backend native push tests,
 including multipart interruption and receipt reuse across fresh instances.
+
+## Fork waves retain checkpoint and failure order
+
+**Always:** fork emptiness and statistics waves contain at most six operations;
+holder waves contain at most four IDs. Repeated holder IDs run in
+separate waves. Replies are drained and consumed in input order. Successful
+units retain their storage call counts and existing slice limits. Reads reserve
+credit before dispatch; variable holder retries charge each actual call.
+Wave widths account conservatively for repeated debits across inherited
+reservation layers, including shared ledger ancestors. Write proofs overlap
+directory reads only when known headroom covers all sixteen first pages;
+otherwise they remain serial. Later sibling refusals must not reclassify an
+earlier I/O error as a spent fork slice.
+
+**Because:** completion order must not select a different refusal, and parallel
+writes to the same object state would introduce avoidable CAS retries.
+
+**If violated:** fork error precedence changes, slice accounting grows, or a
+failed unit publishes partial progress.
+
+**Enforced by:** the fork wave regressions and existing crash, resume, lifecycle,
+and denial-gate tests. See [bounds and latency model](operations/fork-waves.md).

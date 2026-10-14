@@ -319,7 +319,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let present = if present && self.cfg.indexed.is_some() {
             let denial_reads = crate::store::DenialReads::new(&self.meta, self.cfg.takedown_denial);
             let clear = if self.cfg.takedown_denial {
-                crate::takedown::denial::require_pack_clear(
+                crate::takedown::denial::require_pack_clear_for_write(
                     &self.meta,
                     self.shards.as_ref(),
                     &op.repo,

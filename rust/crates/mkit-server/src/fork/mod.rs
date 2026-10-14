@@ -22,6 +22,9 @@ mod request;
 mod sets;
 mod settle;
 
+#[cfg(test)]
+mod wave_tests;
+
 pub(crate) use plan::read_published;
 
 pub(crate) use crate::store::CONTENT_APPLY_WINDOW_MS as CONTENT_WINDOW;
