@@ -10,6 +10,20 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SyncEvent {
+    /// Local lease checks completed; a branch is about to be transferred.
+    PushBranchStarted { branch: String },
+    /// One outgoing object was staged into a pack.
+    ObjectsPacked { count: usize },
+    /// A sealed outgoing pack was uploaded successfully.
+    PackUploaded { bytes: u64 },
+    /// A split push is starting an advance.
+    PushStep { index: usize, total: usize },
+    /// An advance and its local tracking write completed.
+    PushStepCommitted {
+        index: usize,
+        total: usize,
+        tip: mkit_core::hash::Hash,
+    },
     /// A pack was unpacked into the object store.
     ObjectsUnpacked { count: usize },
     /// A listed branch was deleted on the remote since the listing (the

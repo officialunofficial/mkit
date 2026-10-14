@@ -1,6 +1,6 @@
 [package]
 name = "mkit-sync"
-description = "Native clone, fetch and pull for .mkit repositories, as a library that returns typed reports and prints nothing"
+description = "Native clone, fetch, pull and push for .mkit repositories, as a library that returns typed reports and prints nothing"
 readme = "README.md"
 keywords = ["mkit", "vcs", "clone", "fetch", "sync"]
 categories = ["development-tools", "filesystem"]
@@ -71,6 +71,8 @@ connect-native = [
 ]
 
 [dev-dependencies]
+proptest = "1"
+mkit-transport-connect = { path = "../mkit-transport-connect" }
 mkit-test-util = { path = "../mkit-test-util" }
 http = "1"
 mkit-transport-memory = { path = "../mkit-transport-memory" }

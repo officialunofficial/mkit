@@ -9,7 +9,8 @@ distinguishes current enforcement from future integration.
 
 ## Packmap advances preserve node bytes and live-ref leases
 
-**Always:** native CLI and protocol-client pushes use the same pure planner.
+**Always:** native repository pushes in `mkit-sync` and protocol-client pushes
+use the same pure planner. The CLI delegates repository push mechanics to sync.
 New pack ids retain apply order. Full overlap permits a head-only advance;
 partial overlap appends the full requested set. Resets clear the predecessor
 but CAS against the live prior ref, even on a retry.
@@ -20,9 +21,13 @@ still win its ref race before advertising the new closure.
 **If violated:** retries could append redundant nodes, change content ids, or
 replace a concurrent writer's packmap without its lease.
 
-**Enforced by:** `transfer::packmap::plan_advance`, both push adapters, and
-`packmap_planner`'s former-driver matrix and property tests. Chain validation,
-reset authorization, upload, and conflict handling remain adapter boundaries.
+**Enforced by:** `transfer::packmap::plan_advance`, `mkit-sync::push`, the protocol
+client push driver, and `packmap_planner`'s former-driver matrix and property
+tests. Sync's native push regressions and the CLI push goldens pin pack ids,
+ref moves, and output. Chain validation, reset authorization, upload, and
+conflict handling remain driver boundaries. `TransportSource` carries native
+writes; `ClientSource` stays read-only until its write policy and resumability
+match that path.
 
 ## Custom ref admission fences the committed presence delta
 

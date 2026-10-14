@@ -23,6 +23,16 @@ collect the applicable entries between their old and new immutable pins.
   ingested objects are checked on read after activation. No wire or
   stored-format change; wipe: no.
 
+- Native repository push now lives in `mkit-sync`: `push` returns a typed
+  `PushReport` or `PushError`, uses `RemoteSource`, and reports progress through
+  `SyncObserver`. The CLI delegates closure and delta planning, pack upload,
+  split advances, and packmap CAS retries while retaining configuration, trust,
+  grants, admission policy, output, and exit codes. Pack and packmap ids, ref
+  moves, limits, and resumability are unchanged. All existing schemes use
+  `TransportSource`; `ClientSource` remains read-only pending grants and
+  admission/402 helpers, durable receipt persistence, and resumable-part parity.
+  No wire or stored-format change; no wipe.
+
 - Share pure packmap advance planning between the protocol client and CLI in
   `mkit-core::transfer::packmap`. Node bytes, CAS conditions, retries, and
   driver-specific limits and errors are unchanged. No wire or stored-format
@@ -846,6 +856,20 @@ collect the applicable entries between their old and new immutable pins.
   timer reads use the deployment's denial policy. The rooted production alarm
   registry separately receives the pipeline's denial-write capability.
   No wire or stored-format change; wipe: no.
+
+- The unstable `mkit_cli::remote_dispatch::push_branch_steps` callback now
+  returns `mkit_sync::PushError`. Migration: return typed sync/push failures
+  from the callback; the wrapper still returns `DispatchError` to its caller.
+
+- The unstable `mkit-cli` library's `PushControl` gains an `observer` field.
+  `PushControl`, `StepAuthority`, and push planning now belong to `mkit-sync`;
+  the CLI retains its re-exports and maps typed library errors to its existing
+  errors. Migration: construct controls with `PushControl::default()`, or add
+  `observer: &NoopObserver` to struct literals. Set the observer for native sync
+  calls; CLI compatibility wrappers retain CLI progress and cancellation.
+  Repository callers can use `mkit_sync::push` with `PushOptions` and match
+  `PushError::Sync(SyncError::Source(_))` for backend failures. CLI output and
+  exit codes are unchanged. No wire or stored-format change; wipe: no.
 
 - [embedder: breaking API] `mkit-sync::RemoteSource` read methods now return
   backend-neutral `SourceError`; `SyncError::Transport` is replaced by

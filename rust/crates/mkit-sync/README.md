@@ -1,13 +1,17 @@
 # mkit-sync
 
-Native clone, fetch and pull for `.mkit` repositories, as a library.
+Native clone, fetch, pull, and push for `.mkit` repositories, as a library.
 
 `mkit-sync` is the filesystem layer behind the `mkit` command line's `clone`,
-`fetch` and `pull`: it walks a branch's packmap chain, downloads the packs it
+`fetch`, `pull`, and `push`. The read path walks a branch's packmap chain, downloads the packs it
 does not already have, unpacks them under the per-branch repository lock,
 verifies the signature of every commit, remix and tag it introduced, checks
 the tip's closure is complete, publishes the remote-tracking ref, and (for
 `pull`) fast-forwards the branch, HEAD and worktree with rollback on failure.
+
+The push path plans the repository closure and deltas, builds and uploads
+packs, advances the packmap and branch refs with CAS, and records each published
+remote-tracking ref. It preserves split-push bounds and resumable uploads.
 
 Every call returns a typed report or a typed error. **Nothing is printed**
 (`#![deny(clippy::print_stdout, clippy::print_stderr)]`), and the library
@@ -42,6 +46,7 @@ let pulled = pull(&dir, &source, "default", &SyncOptions::default(), &NoopObserv
 | `fetch(dir, source, remote, &SyncOptions, observer) -> FetchReport` | Reconstruct every remote branch and publish `refs/remotes/<remote>/*`. HEAD, local branches and the worktree are untouched. |
 | `pull(...) -> PullReport` | `fetch`, then fast-forward the current (or `target_branch`) branch, HEAD and worktree. Anything that is not a fast-forward is `SyncError::NonFastForwardPull`. A worktree whose local changes the fast-forward would overwrite is `SyncError::RestoreSafety`. |
 | `clone(...) -> CloneReport` | `init_clone_dir` followed by `pull`. |
+| `push(dir, source, &PushOptions) -> PushReport` | Publish selected branches through a write-capable source and durably record their remote-tracking refs. |
 
 `SyncOptions`:
 
@@ -56,6 +61,36 @@ let pulled = pull(&dir, &source, "default", &SyncOptions::default(), &NoopObserv
 `SyncOptions` is `#[non_exhaustive]`: start from `SyncOptions::default()` and
 use the `with_*` setters.
 
+### Pushing a repository
+
+Start with `PushOptions::default()`. Use `with_target(PushTarget::Branch { .. })` for
+one local-to-remote branch mapping, with `PushLease::FastForward`, `WithLease`,
+or `Force`; the default pushes all branches without force. `remote_name` selects
+the local tracking refs. `sync_policy`, `rebaseline_threshold`, and
+`pack_payload_cap` carry caller policy. `control` sets split bounds, an optional
+`StepAuthority` check before split uploads, and `observer` for progress and
+cancellation. The library loads the repository's shallow boundaries.
+
+```rust,ignore
+use mkit_sync::{PushLease, PushOptions, PushTarget, push};
+
+let mut options = PushOptions::default().with_target(PushTarget::Branch {
+    local: "main".into(),
+    remote: "main".into(),
+    lease: PushLease::FastForward,
+});
+options.remote_name = "origin";
+options.control.observer = &my_observer;
+let report = push(&dir, &source, &options)?;
+```
+
+`PushReport` contains the completed ref count, advance count, and optional
+single-branch tip. `PushError` preserves push-specific refusals and carries
+filesystem and backend failures through `PushError::Sync`; backend failures
+remain `SyncError::Source(SourceError)`. The CLI maps these errors to its
+existing output and exit codes. Configuration, trust gates, grant checks,
+admission helpers, signing, and extra certificate trust stay caller-owned.
+
 ### Observing a sync
 
 Warnings and progress that a command line would print arrive as
@@ -67,12 +102,15 @@ cancellation (`cancelled()`), which makes the call fail with
 ### Remote sources
 
 The engine reads through the `RemoteSource` trait: list branches, read a ref,
-download a packmap node, download a pack. Two backends ship:
+download a packmap node, and download a pack. Write-capable sources also
+advertise limits, upload packs, and advance refs. `supports_push()` is `false`
+by default, so custom read-only sources need no write implementation. Two
+backends ship:
 
 * `TransportSource` (always): mkit-core's synchronous `Transport`, so every
   transport scheme (file, ssh, s3, http, connect) works. Credentials live in
   the transport the caller built; `with_error_classifier` lets a caller map
-  transport-specific failures to typed errors.
+  transport-specific failures to typed errors. This backend supports push.
 * `ClientSource` (feature `client`): `mkit_client::Client` for `mkit+https` and
   `mkit+http` remotes, anonymous or **signed by an injected
   `mkit_client::Signer` and `Clock`**. Private reads are authenticated by the
@@ -91,6 +129,12 @@ let client = Client::signed(&http, destination, &my_signer, &NativeClock)
 let source = ClientSource::new(&client, &http);
 clone(&dir, &source, &remote, &SyncOptions::default(), &NoopObserver)?;
 ```
+
+`ClientSource` remains read-only (`supports_push() == false`). The CLI's
+`mkit+https` push uses `TransportSource` until the client adapter has parity for
+grants, admission and 402 helpers, durable receipt persistence, and resumable
+parts. Native extra-CA and configuration wiring remain host-owned. The protocol
+client's own push API is unchanged.
 
 A missing repository, a private one read anonymously and one read by a signer
 the server denies all come back as the same `SyncError::RepositoryNotFound`
