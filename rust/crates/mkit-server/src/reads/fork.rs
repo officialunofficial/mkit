@@ -130,7 +130,8 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
     /// grant, or namespace cap. A fork that created its destination namespace is
     /// accepted too: namespace creation changes neither the reservation nor the
     /// replay record, so the same settlement proves it, and the namespace record
-    /// must still be present and well formed (read in the same batch). A grant
+    /// must still be present and well formed (read in the same batch), so a later
+    /// removal of that record, for example by a takedown, makes it fail closed. A grant
     /// epoch is never accepted: the pipeline records none, and the grant a
     /// later epoch may have revoked cannot be proven from retained evidence.
     /// Other jobs remain readable through `fork_job_status`; authenticated
@@ -928,6 +929,30 @@ mod tests {
                             &shards.coordinator(&spec.dest.namespace),
                             Batch::new()
                                 .put(keys::reservation("reservation").unwrap(), reservation),
+                        )
+                        .await
+                        .unwrap();
+                    let reads = ReadAccess::new(&store, shards, RepoVisibility::Public, true);
+                    assert!(
+                        reads
+                            .recover_completed_fork(&spec, &original())
+                            .await
+                            .is_err()
+                    );
+                }
+                // A missing replay or reservation row, with the namespace present.
+                for missing in [
+                    keys::replay(&original().scope),
+                    keys::reservation("reservation").unwrap(),
+                ] {
+                    let store = MemoryKv::default();
+                    write_job(&store, shards, &spec, &creating(&spec)).await;
+                    settle(&store, shards, &spec).await;
+                    put_namespace(&store, shards, &spec).await;
+                    store
+                        .apply(
+                            &shards.coordinator(&spec.dest.namespace),
+                            Batch::new().delete(missing),
                         )
                         .await
                         .unwrap();
