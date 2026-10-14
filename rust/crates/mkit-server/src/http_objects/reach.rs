@@ -173,11 +173,11 @@ const FIRST_FILE_BATCH: usize = 8;
 /// just to be skipped, and a locate costs one index scan per id. Draining the
 /// files of a wide tip tree before following a parent edge made an older
 /// commit cost O(entries). While history waits, the file batch therefore
-/// starts small and doubles (up to `BATCH`) with every history batch: an
-/// older commit `d` hops back costs about `FIRST_FILE_BATCH * 2^d` locates
-/// instead of every entry, and a chunk target behind a tip manifest, `p`
-/// files in, waits for only about `log2(p)` history batches. Once history is
-/// exhausted, files drain at the full batch size.
+/// starts small and doubles with every file batch: an older commit `d` hops
+/// back costs about `FIRST_FILE_BATCH * 2^d` locates instead of every entry,
+/// and a chunk target behind a tip manifest, `p` files in, waits for only
+/// about `log2(p / FIRST_FILE_BATCH)` history batches, however wide the tree.
+/// Once history is exhausted, files drain at the full batch size.
 struct Frontier {
     cap: usize,
     seen: BTreeSet<Hash>,
@@ -244,7 +244,7 @@ impl Frontier {
         self.files_turn = !files_turn;
         if files_turn && !self.files.is_empty() {
             let most = self.file_quota;
-            self.file_quota = (most * 2).min(BATCH);
+            self.file_quota = most.saturating_mul(2);
             take(&mut self.files, Kind::File, most)
         } else {
             take(&mut self.nodes, Kind::Node, BATCH)
@@ -464,6 +464,26 @@ mod tests {
         let mut h = [0; 32];
         h[..8].copy_from_slice(&(n as u64).to_be_bytes());
         h
+    }
+
+    #[test]
+    fn history_hops_before_a_file_grow_logarithmically_in_its_position() {
+        let mut frontier = Frontier::new(1_000_000);
+        for n in 0..100_000 {
+            frontier.push(hash_of(n), Kind::File);
+        }
+        let (mut hops, mut located) = (0, 0);
+        while located < 100_000 {
+            frontier.push(hash_of(1_000_000 + hops), Kind::Node);
+            let batch = frontier.batch();
+            if batch[0].1 == Kind::Node {
+                hops += 1;
+            } else {
+                located += batch.len();
+            }
+        }
+        // 8 * (2^k - 1) >= 100_000 needs k = 14 file batches, so 14 hops.
+        assert!(hops <= 15, "{hops} history batches");
     }
 
     #[test]

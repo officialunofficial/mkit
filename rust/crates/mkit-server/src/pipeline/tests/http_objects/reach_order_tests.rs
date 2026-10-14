@@ -28,6 +28,7 @@ struct Repo {
 
 fn repo(files: usize, denial: bool) -> Repo {
     let mut repo = build(files);
+    // Pushed with denial off (no packmap upload to verify), then switched on.
     repo.fx.pipe.cfg.takedown_denial = denial;
     repo
 }
@@ -178,7 +179,7 @@ fn a_mixed_batch_of_older_and_tip_targets_is_all_served() {
             .object_reader(wide.fx.repo_id("room"), ReaderView::Public),
     )
     .unwrap();
-    let mut ids = vec![
+    let ids = [
         wide.commits[0],
         wide.roots[1],
         wide.old_file,
@@ -188,7 +189,6 @@ fn a_mixed_batch_of_older_and_tip_targets_is_all_served() {
         [0xEE; 32],
     ];
     let served = block_on(reader.read_canonical_in(&mut ReaderSession::default(), &ids)).unwrap();
-    let last = ids.pop().unwrap();
     assert!(served[..6].iter().all(Option::is_some));
-    assert!(served[6].is_none(), "{last:?} is unreachable");
+    assert!(served[6].is_none(), "the unreachable id is not served");
 }
