@@ -289,8 +289,9 @@ EmitIndex and inline index writes recheck their ObjectIndex puts in the existing
 put order before each direct apply. Their per-batch planning deadlines are
 created at the same boundary as before. The earlier inline denial precheck uses
 the same waves before signature and closure validation. Extract retains a fresh
-denial before each chunk's frame read and each member frame's subjects;
-prefetching would move later checks ahead of earlier I/O and effects. Rows already staged are
+denial before each chunk's decode and each member frame's subjects. A bounded
+slice-local window shares the staged pack transport read; it does not prefetch
+denial checks or cache decoded chunks. See the [Extract call report](extract-calls.md). Rows already staged are
 skipped, so a replay after a lost reply or a crash writes nothing twice. The
 head guard keeps stagers of one pack serial. Entries with reference pages retain
 an early replay lookup, refresh their plan after page staging, and stage alone.

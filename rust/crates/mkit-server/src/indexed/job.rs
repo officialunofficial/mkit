@@ -422,6 +422,7 @@ struct SliceState {
     /// Source packs whose denial reads fused chunk decodes defer to the end
     /// of the slice: they still run before the part upload and the commit.
     deferred_denials: BTreeSet<Hash>,
+    extract_window: Option<extraction::SharedWindow>,
     visiting: BTreeSet<(Hash, Hash, u64)>,
     frames: BTreeMap<Hash, FrameRow>,
     /// Bounded resource prediction only; Closure still reads its rows fresh.
