@@ -2470,7 +2470,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         kind: OpKind,
         implicit: Option<&'a [PendingPack]>,
     ) -> crate::rt::BoxFuture<'a, Result<(StoredResult, ResponseMeta), ServerError>> {
-        Box::pin(self.write_with_pending_hold(a, kind, implicit))
+        if self.pending_hold.is_none() {
+            Box::pin(self.write_inner(a, kind, implicit, None))
+        } else {
+            Box::pin(self.write_with_pending_hold(a, kind, implicit))
+        }
     }
 
     #[allow(clippy::too_many_lines)] // Stage order and multipart session cleanup share this entry point.

@@ -27,7 +27,7 @@ fn assert_same_pending(actual: &ServerError, expected: &ServerError) {
     assert_eq!(actual.details(), expected.details());
 }
 
-fn settle(env: &Env, source: &Partition) {
+fn settle<H: HookSet>(env: &Env<H>, source: &Partition) {
     let handler = VerifyTimer {
         remote: Ref(&env.pipe.meta),
         blobs: Ref(&env.pipe.blobs),
@@ -246,13 +246,42 @@ fn small_pack_with_client_poll(sharding: Sharding) -> u64 {
     elapsed
 }
 
+struct MutablePreReceive(Arc<AtomicBool>);
+
+impl PreReceive for MutablePreReceive {
+    async fn check(&self, op: &Operation, _: Option<&BlobKey>) -> Result<(), ServerError> {
+        if op.procedure() == Procedure::AdvanceRefs && self.0.load(Ordering::SeqCst) {
+            return Err(ServerError::permission_denied("pre-receive denied"));
+        }
+        Ok(())
+    }
+}
+
 #[test]
-fn denial_installed_during_hold_is_rechecked_before_commit() {
-    let (mut env, owner, identity) = environment_with(Sharding::Single, scheduled());
-    env.pipe.cfg.takedown_denial = true;
+fn pre_receive_denial_after_hold_prevents_commit() {
+    let denied = Arc::new(AtomicBool::new(false));
+    let hooks = Hooks {
+        authorizer: OpenAuthorizer,
+        admission: DefaultAdmission,
+        pre_receive: MutablePreReceive(denied.clone()),
+        receipts: NoReceipts,
+        outcomes: NoOutcomes,
+    };
+    let (mut env, owner, identity) =
+        super::super::indexed::environment_with_hooks(Sharding::Single, scheduled(), None, hooks);
     let (bytes, head) = pack();
     let pack_id = hash(&bytes);
-    let ticket = begin_and_upload(&env, &owner, &identity, &bytes, 1_010);
+    let upload_request = signed(&owner, &identity, Procedure::BeginUpload, 1_010);
+    let BeginUploadResult::Ticket { id: ticket, .. } = block_on(env.pipe.begin_upload(
+        &env.auth(&upload_request).unwrap(),
+        HEAD,
+        &pack_id,
+        bytes.len() as u64,
+    ))
+    .unwrap() else {
+        panic!("expected upload ticket");
+    };
+    super::super::indexed::upload(&env, &bytes, ticket);
     let request = signed(&owner, &identity, Procedure::AdvanceRefs, 1_011);
     let auth = env.auth(&request).unwrap();
     let repo = auth.repo().repo.clone();
@@ -272,35 +301,122 @@ fn denial_installed_during_hold_is_rechecked_before_commit() {
     let mut cx = Context::from_waker(futures::task::noop_waker_ref());
     assert!(waiting.as_mut().poll(&mut cx).is_pending());
     settle(&env, &source);
-    block_on(
-        crate::store::ContentIndex::new(crate::store::BorrowedStore(&env.pipe.meta))
-            .install_block_action(
-                &head,
-                &crate::takedown::denial::BlockAction {
-                    id: [31; 32],
-                    takedown_id: [32; 32],
-                    reason: "manual".into(),
-                    blocked_at_ms: ms(env.clock.now_ms()),
-                    chunk_ids: vec![],
-                },
-                ms(env.clock.now_ms()),
-            ),
-    )
-    .unwrap();
+    denied.store(true, Ordering::SeqCst);
     env.clock.advance(88);
     sleeper.fire();
     let error = block_on(waiting).unwrap_err();
     assert_eq!(error.code(), Code::PermissionDenied);
-    assert_eq!(error.public_message(), "object blocked");
-    assert_advance_unmoved(&env, &repo, &[pack_id]);
+    assert_eq!(error.public_message(), "pre-receive denied");
+    for name in [HEAD, PACKMAP] {
+        assert!(
+            block_on(env.pipe.meta.get(&source, &keys::ref_key(&repo.name, name)))
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+struct ExpiringAuthorizer {
+    observed: Arc<Mutex<Vec<i64>>>,
+    expires_at_ms: i64,
+}
+
+impl Authorizer for ExpiringAuthorizer {
+    async fn authorize(&self, op: &Operation) -> Result<AuthzFacts, ServerError> {
+        if op.procedure() == Procedure::AdvanceRefs {
+            let now = op.business_now_ms.unwrap();
+            self.observed.lock().unwrap().push(now);
+            if now >= self.expires_at_ms {
+                return Err(ServerError::permission_denied("authorization expired"));
+            }
+        }
+        Ok(AuthzFacts::default())
+    }
+}
+
+#[test]
+fn authorization_during_hold_uses_fresh_business_time() {
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let hooks = Hooks {
+        authorizer: ExpiringAuthorizer {
+            observed: observed.clone(),
+            expires_at_ms: T0 + 100,
+        },
+        admission: DefaultAdmission,
+        pre_receive: NoPreReceive,
+        receipts: NoReceipts,
+        outcomes: NoOutcomes,
+    };
+    let (mut env, owner, identity) =
+        super::super::indexed::environment_with_hooks(Sharding::Single, scheduled(), None, hooks);
+    let (bytes, head) = pack();
+    let pack_id = hash(&bytes);
+    let upload_request = signed(&owner, &identity, Procedure::BeginUpload, 1_020);
+    let BeginUploadResult::Ticket { id: ticket, .. } = block_on(env.pipe.begin_upload(
+        &env.auth(&upload_request).unwrap(),
+        HEAD,
+        &pack_id,
+        bytes.len() as u64,
+    ))
+    .unwrap() else {
+        panic!("expected upload ticket");
+    };
+    super::super::indexed::upload(&env, &bytes, ticket);
+    let request = signed(&owner, &identity, Procedure::AdvanceRefs, 1_021);
+    let auth = env.auth(&request).unwrap();
+    let repo = auth.repo().repo.clone();
+    let source = env.pipe.shards.ref_shard(&repo, HEAD);
+    let sleeper = Arc::new(ManualSleep::new());
+    env.pipe = env.pipe.with_pending_advance_hold(
+        Duration::from_secs(2),
+        sleeper.clone(),
+        ms(env.clock.now_ms()) + 15_000,
+    );
+    let mut waiting = Box::pin(env.pipe.advance_refs_with_tickets(
+        &auth,
+        upd(HEAD, Missing, head),
+        upd(PACKMAP, Missing, pack_id),
+        vec![ticket],
+    ));
+    let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+    assert!(waiting.as_mut().poll(&mut cx).is_pending());
+    assert_eq!(*observed.lock().unwrap(), vec![T0]);
+    settle(&env, &source);
+    env.clock.advance(88);
+    sleeper.fire();
+    let error = block_on(waiting).unwrap_err();
+    assert_eq!(error.code(), Code::PermissionDenied);
+    assert_eq!(error.public_message(), "authorization expired");
+    assert_eq!(*observed.lock().unwrap(), vec![T0, T0 + 100]);
+    for name in [HEAD, PACKMAP] {
+        assert!(
+            block_on(env.pipe.meta.get(&source, &keys::ref_key(&repo.name, name)))
+                .unwrap()
+                .is_none()
+        );
+    }
 }
 
 #[test]
 fn cancellation_during_hold_preserves_nonce_and_competing_ref_cas() {
     let (mut env, owner, identity) = environment_with(Sharding::Single, scheduled());
+    env.pipe = env.pipe.with_write_gate();
     let (bytes, head) = pack();
     let pack_id = hash(&bytes);
     let ticket = begin_and_upload(&env, &owner, &identity, &bytes, 1_000);
+    let competing_bytes = super::super::indexed::pack_with_blob(7);
+    let competing_pack = hash(&competing_bytes);
+    let competing_ticket = begin_and_upload(&env, &owner, &identity, &competing_bytes, 1_003);
+    advance(
+        &env,
+        &owner,
+        &identity,
+        1_002,
+        head,
+        competing_pack,
+        vec![competing_ticket],
+    )
+    .unwrap_err();
     let request = signed(&owner, &identity, Procedure::AdvanceRefs, 1_001);
     let auth = env.auth(&request).unwrap();
     let repo = auth.repo().repo.clone();
@@ -331,16 +447,28 @@ fn cancellation_during_hold_preserves_nonce_and_competing_ref_cas() {
     settle(&env, &source);
     // A second request can advance while the first request is asleep.
     assert_eq!(
-        advance(&env, &owner, &identity, 1_002, head, pack_id, vec![ticket]).unwrap(),
+        advance(
+            &env,
+            &owner,
+            &identity,
+            1_002,
+            head,
+            competing_pack,
+            vec![competing_ticket]
+        )
+        .unwrap(),
         AdvanceOutcome::Committed
     );
     sleeper.fire();
     let Poll::Ready(result) = waiting.as_mut().poll(&mut cx) else {
         panic!("the completed job must wake the advance");
     };
+    assert_eq!(result.unwrap(), AdvanceOutcome::PackmapConflict);
     assert!(
-        result.is_err(),
-        "fresh retry must respect the competing ref CAS"
+        block_on(env.pipe.meta.get(&source, &keys::ticket(&ticket)))
+            .unwrap()
+            .is_some(),
+        "the losing CAS must not consume its independent ticket"
     );
     let current = block_on(env.pipe.meta.get(&source, &keys::ref_key(&repo.name, HEAD)))
         .unwrap()

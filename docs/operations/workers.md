@@ -78,7 +78,8 @@ pipeline's default allowance starts when it is constructed.
 No process-local completion signal exists. Polling durable job rows also works
 after a verifier restart. Every 100 ms poll makes one batched KV request, with
 at most seven job rows. A full timeout adds at most twenty KV calls: one ticket
-resolution and nineteen polls. Readiness adds the full normal advance attempt.
+resolution and nineteen polls, reading at most 140 rows in total. Readiness
+adds the full normal advance attempt.
 Hold-off paths issue no extra calls. No lease, reservation, write gate, or
 snapshot survives into the wait.
 

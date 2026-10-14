@@ -44,9 +44,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         kind: OpKind,
         implicit: Option<&[PendingPack]>,
     ) -> Result<(StoredResult, ResponseMeta), ServerError> {
-        if self.pending_hold.is_none() {
-            return self.write_inner(a, kind, implicit, None).await;
-        }
         // The entire attempt returns before waiting: no snapshot, admission
         // reservation, lease grant, or write gate survives this boundary.
         let result = self.write_inner(a, kind.clone(), implicit, None).await;
@@ -94,6 +91,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     Some(keys::verify_job(&repo.name, &ticket.pack_id))
                 })
                 .collect::<Option<Vec<_>>>()?;
+            drop(rows);
             // One batched KV read per poll, regardless of ticket count. Never
             // trust these observations for admission or commit: only wake up.
             for _ in 0..19 {
@@ -114,9 +112,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 if jobs
                     .iter()
                     .all(crate::indexed::checkpoint::VerifyJobV1::usable)
-                    || jobs.iter().any(|job| job.outcome.is_some() || job.gone)
                 {
                     return Some(());
+                }
+                if jobs.iter().any(|job| job.outcome.is_some() || job.gone) {
+                    return None;
                 }
             }
             hold.sleep.sleep(Duration::from_millis(POLL_MS)).await;
@@ -126,7 +126,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         if matches!(ready, Ok(Some(()))) && ms(self.clock.now_ms()) < allowance {
             // Fresh authorization, tickets, admission, denial, CAS and final
             // guards, including the durable replay lookup for a lost reply.
-            self.write_inner(a, kind, implicit, None).await
+            let mut fresh = a.clone();
+            fresh.business_now_ms = self.clock.now_ms().saturating_add(a.business_skew_ms);
+            self.write_inner(&fresh, kind, implicit, None).await
         } else {
             // Preserve the original pending bytes and typed millisecond hint.
             result
