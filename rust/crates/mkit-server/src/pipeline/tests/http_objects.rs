@@ -2541,6 +2541,7 @@ mod selected_ref_tests;
 
 mod reader_batch_cost;
 
+mod reach_order_tests;
 mod read_rounds;
 mod reader_batch_limit_tests;
 mod reader_guard_tests;
