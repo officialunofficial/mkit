@@ -2893,8 +2893,11 @@ holder waves contain at most four IDs. Repeated holder IDs run in
 separate waves. Replies are drained and consumed in input order. Successful
 units retain their storage call counts and existing slice limits. Reads reserve
 credit before dispatch; variable holder retries charge each actual call.
-Statistics and holder widths account conservatively for repeated debits across
-inherited reservation layers, including shared ledger ancestors.
+Wave widths account conservatively for repeated debits across inherited
+reservation layers, including shared ledger ancestors. Write proofs overlap
+directory reads only when known headroom covers all sixteen first pages;
+otherwise they remain serial. Later sibling refusals must not reclassify an
+earlier I/O error as a spent fork slice.
 
 **Because:** completion order must not select a different refusal, and parallel
 writes to the same object state would introduce avoidable CAS retries.

@@ -343,14 +343,37 @@ pub(super) async fn require_empty<S: NamespaceStore>(
     if partitions.is_empty() {
         return Err(ForkError::Unavailable("fork shard map"));
     }
-    for wave in partitions.chunks(6) {
-        let replies = futures::future::join_all(wave.iter().map(|(p, start, end)| async {
-            let reservation = env.store.reserve_read_calls(1)?;
-            crate::store::ReadReservation::scope(
-                &[reservation],
-                env.store.scan(p, start, end, None, 1),
-            )
-            .await
+    let mut pending = partitions.as_slice();
+    while !pending.is_empty() {
+        // Reserve the first existing read before selecting a wave. Inherited
+        // layers can debit shared ancestors twice; an opaque leaf needs one
+        // more debit. Narrow tight or unknown allowances so a later refusal
+        // cannot reclassify an earlier I/O error as a spent fork slice.
+        let first_reservation = env.store.reserve_read_calls(1)?;
+        let layers = first_reservation
+            .as_ref()
+            .map_or(0, crate::store::ReadReservation::accounting_layers);
+        let debits = layers.saturating_mul(2).saturating_add(1);
+        let cap = usize::try_from(env.store.read_call_allowance().unwrap_or(0) / debits)
+            .unwrap_or(6)
+            .clamp(1, 6);
+        let (wave, rest) = pending.split_at(pending.len().min(cap));
+        pending = rest;
+        let mut first_reservation = Some(first_reservation);
+        let replies = futures::future::join_all(wave.iter().map(|(p, start, end)| {
+            let reservation = if let Some(first) = first_reservation.take() {
+                Ok(first)
+            } else {
+                env.store.reserve_read_calls(1)
+            };
+            async move {
+                let reservation = reservation?;
+                crate::store::ReadReservation::scope(
+                    &[reservation],
+                    env.store.scan(p, start, end, None, 1),
+                )
+                .await
+            }
         }))
         .await;
         for reply in replies {

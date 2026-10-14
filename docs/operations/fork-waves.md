@@ -5,7 +5,11 @@ It does not overlap fork phases, pack publication boundaries, or cursor commits.
 
 ## Calls and ordering
 
-Destination emptiness checks use waves of six scans with a limit of one row.
+Destination emptiness checks use at most six scans with a limit of one row.
+The first existing read exposes accounting depth before wave selection;
+known remaining calls must cover `2 * layers + 1` debits per scan.
+Unknown allowances keep scans serial, so later refusals cannot mask an earlier
+I/O error in the fork driver.
 Source index statistics use at most six concurrent calls, narrowing when the
 remaining allowance cannot cover shared accounting ancestors. A zero-call
 reservation exposes the inherited depth without spending calls or dispatching
@@ -55,7 +59,10 @@ sets and hold scans, below the existing 500-row copy scan and 1,000-row reader
 envelope. Nested mutation retries do not accumulate responses.
 
 The two per-pack write proofs use the existing `WRITE_PROOF_CONCURRENCY` of
-four. Four maximum values total 2 MiB, within the existing 4 MiB proof bound.
+four when known headroom covers all sixteen first-page calls, including
+`2 * layers + 1` possible shared-ancestor debits per call. A zero-call reservation
+provides that metadata; tight or unknown headroom retains serial reads.
+Four maximum values total 2 MiB, within the existing 4 MiB proof bound.
 Valid directory waves hold at most `4 * 64 * 33` pointer-value bytes.
 The sixteen bounded pointer pages remain retained as before;
 pointed-to descriptor reads and nested proofs remain serial.

@@ -19,6 +19,7 @@ struct Probe {
     active: AtomicUsize,
     peak: AtomicUsize,
     scan_nonempty: Option<u16>,
+    scan_repo_failures: Vec<u16>,
     partition_failures: Vec<u16>,
     partition_exhausted: Option<u16>,
     key_failure: Option<Key>,
@@ -38,6 +39,7 @@ impl Default for Probe {
             active: AtomicUsize::new(0),
             peak: AtomicUsize::new(0),
             scan_nonempty: None,
+            scan_repo_failures: Vec::new(),
             partition_failures: Vec::new(),
             partition_exhausted: None,
             key_failure: None,
@@ -136,6 +138,10 @@ impl NamespaceStore for Probe {
     ) -> Result<ScanPage, StoreError> {
         self.delay().await;
         self.partition_error(p)?;
+        if matches!(p, Partition::RepoIndex { prefix, .. } if self.scan_repo_failures.contains(prefix))
+        {
+            return Err(StoreError::unavailable("injected repo scan"));
+        }
         if matches!(p, Partition::RefIndex { bucket, .. } if Some(*bucket) == self.scan_nonempty) {
             return Ok(ScanPage {
                 entries: vec![(start.clone(), Value::default())],
@@ -488,8 +494,8 @@ async fn empty_waves_preserve_budgeted_error_order_and_charges() {
         job::require_empty(&env, &repo("destination"), true).await,
         Err(ForkError::NotEmpty)
     ));
-    assert_eq!(budget.used(), 3);
-    assert_eq!(store.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(budget.used(), 2);
+    assert_eq!(store.calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test(start_paused = true)]
@@ -643,6 +649,47 @@ async fn register_stats_keep_first_error_with_shared_parent_budget() {
     assert_eq!(store.calls.load(Ordering::SeqCst), 35);
     assert_eq!(parent.used(), 37);
     assert_eq!(local.used(), 2);
+    assert!(!parent.refused());
+    assert!(!local.refused());
+}
+
+#[tokio::test(start_paused = true)]
+async fn register_scans_keep_first_error_with_aliased_parent_budget() {
+    let store = Probe {
+        scan_repo_failures: vec![2, 3],
+        ..Probe::default()
+    };
+    let mut job = job();
+    job.phase = Phase::Register;
+    let dest = job.dest().unwrap();
+    store
+        .inner
+        .apply(
+            &D34Shards.coordinator(&dest.namespace),
+            Batch::new().put(keys::fork_job(&dest.name), super::encode_job(&job).unwrap()),
+        )
+        .await
+        .unwrap();
+    let parent = crate::budget::SliceBudget::new(41);
+    let local = parent.child(41);
+    let first = Budgeted::new(&store, &parent);
+    let wrapped = Budgeted::new(&first, &parent);
+    let clock = ManualClock::new(0);
+    let env = ForkEnv {
+        store: &wrapped,
+        shards: &D34Shards,
+        clock: &clock,
+        takedown_denial: true,
+        extract_min_bytes: Some(1),
+        limits: ForkLimits::default(),
+    };
+    // Two inherited layers debit the same parent. A later sibling refusal
+    // must not hide the earlier scan error at global partition position 18.
+    let error = step(&env, &dest, &local).await.unwrap_err();
+    assert!(matches!(error, ForkError::Unavailable(_)), "{error:?}");
+    assert_eq!(store.calls.load(Ordering::SeqCst), 20);
+    assert_eq!(parent.used(), 41);
+    assert_eq!(local.used(), 1);
     assert!(!parent.refused());
     assert!(!local.refused());
 }
