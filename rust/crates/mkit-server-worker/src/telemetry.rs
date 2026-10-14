@@ -5,6 +5,13 @@
 /// Physical Durable Object storage pressure and alert bookkeeping.
 pub mod pressure;
 
+#[cfg(all(test, feature = "perf-metrics", not(target_arch = "wasm32")))]
+mod perf_cost;
+#[cfg(feature = "perf-metrics")]
+pub(crate) mod perf_rpc;
+#[cfg(feature = "perf-metrics")]
+pub mod perf_sql;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use mkit_server::Metrics;

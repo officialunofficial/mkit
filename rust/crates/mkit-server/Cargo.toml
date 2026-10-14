@@ -82,6 +82,8 @@ mkit-rpc = { version = "0.5", path = "../mkit-rpc", optional = true }
 getrandom = { version = "0.4", optional = true }
 
 [features]
+# Bounded, opt-in performance observations; never changes verification decisions.
+perf-metrics = []
 default = ["connect"]
 # The `mkit.transport.v1` Connect binding (`connect`): vendored codegen,
 # `TransportService` and `grpc.health.v1.Health` over the pipeline, and the

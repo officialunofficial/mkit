@@ -210,6 +210,8 @@ ci-server:
         && cargo build --locked -p mkit-server-worker --target wasm32-unknown-unknown )
     ( cd rust && cargo clippy --locked -p mkit-server -p mkit-server-worker \
         --target wasm32-unknown-unknown -- -D warnings )
+    ( cd rust && cargo clippy --locked -p mkit-server-worker --features perf-metrics \
+        --target wasm32-unknown-unknown -- -D warnings )
     bash scripts/check-cli-baseline.sh
 
 # Mirrors cloudbuild/docs.yaml (rustdoc -D warnings).

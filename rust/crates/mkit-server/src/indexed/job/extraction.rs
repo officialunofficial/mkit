@@ -1013,6 +1013,7 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
         st.deferred_denials.clear();
         Ok(())
     }
+    #[allow(clippy::too_many_lines)] // Keep the existing chunk walk and its opt-in summary together.
     async fn walk_source(
         &self,
         st: &mut SliceState,
@@ -1048,6 +1049,8 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
         st.extract_window = Box::pin(self.shared_window(x, id, &pack, &p, count)).await;
         let mut finished_part = self.walk_chunk(st, x, id, &pack, &p).await?;
         let mut steps = 1_u32;
+        #[cfg(feature = "perf-metrics")]
+        let mut chunk_stop = None;
         // Chunks after the first fuse only while every bound holds; a chunk
         // that fails or cannot fuse leaves the slice at its own first step.
         while !finished_part && x.chunk_offset == 0 && x.chunk < count {
@@ -1058,6 +1061,20 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
                 st.guards.len() + st.settled.len(),
                 now_ms(self.h.clock.as_ref()).saturating_sub(started),
             ) {
+                #[cfg(feature = "perf-metrics")]
+                {
+                    chunk_stop = Some(
+                        if steps >= self.h.limits.extract_chain_steps.min(CHAIN_MAX_STEPS) {
+                            "steps"
+                        } else if self.budget.remaining() < CHAIN_MIN_CALLS {
+                            "calls"
+                        } else if st.guards.len() + st.settled.len() + 4 > CHAIN_MAX_OPS {
+                            "ops"
+                        } else {
+                            "elapsed"
+                        },
+                    );
+                }
                 break;
             }
             let (before, guards, settled, denials) = (
@@ -1070,15 +1087,40 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
             steps += 1;
             match next {
                 Ok(Some(done)) => finished_part = done,
-                Ok(None) => break,
+                Ok(None) => {
+                    #[cfg(feature = "perf-metrics")]
+                    {
+                        chunk_stop = Some("next_unfused");
+                    }
+                    break;
+                }
                 Err(_) => {
                     *x = before;
                     st.guards.truncate(guards);
                     st.settled.truncate(settled);
                     st.deferred_denials = denials;
+                    #[cfg(feature = "perf-metrics")]
+                    {
+                        chunk_stop = Some("next_error");
+                    }
                     break;
                 }
             }
+        }
+        #[cfg(feature = "perf-metrics")]
+        {
+            let reason = chunk_stop.unwrap_or(if finished_part {
+                "part_complete"
+            } else if x.chunk_offset != 0 {
+                "chunk_partial"
+            } else {
+                "object_complete"
+            });
+            tracing::info!(
+                event = "verification_extract_chunk_chain",
+                steps,
+                stop_reason = reason
+            );
         }
         self.flush_denials(st).await
     }
@@ -1308,8 +1350,13 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
         // The first step is the unchained step: its result, error included,
         // is returned exactly as before.
         let started = now_ms(self.h.clock.as_ref());
+        #[cfg(not(feature = "perf-metrics"))]
         let mut result = self.stage(st, job, &mut x).await;
+        #[cfg(feature = "perf-metrics")]
+        let mut result = self.observed_stage(st, job, &mut x).await;
         let mut steps = 1;
+        #[cfg(feature = "perf-metrics")]
+        let mut observed_stop = None;
         // Selection steps only read, write deterministic rows guarded by this
         // job, or queue guarded settled writes: they run back to back inside
         // the slice's one guarded commit. Effect stages never chain.
@@ -1326,7 +1373,10 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
         {
             let before = (x.clone(), job.phase, job.outcome);
             let (guards, settled) = (st.guards.len(), st.settled.len());
+            #[cfg(not(feature = "perf-metrics"))]
             let next = self.stage(st, job, &mut x).await;
+            #[cfg(feature = "perf-metrics")]
+            let next = self.observed_stage(st, job, &mut x).await;
             steps += 1;
             if next.is_err() {
                 // Keep the steps already taken. The failed step reruns first
@@ -1334,6 +1384,10 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
                 (x, job.phase, job.outcome) = before;
                 st.guards.truncate(guards);
                 st.settled.truncate(settled);
+                #[cfg(feature = "perf-metrics")]
+                {
+                    observed_stop = Some("next_error");
+                }
                 break;
             }
             // A step that left its cursor in place has progress that is
@@ -1341,13 +1395,63 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
             let stalled = x == before.0;
             result = next;
             if stalled {
+                #[cfg(feature = "perf-metrics")]
+                {
+                    observed_stop = Some("no_progress");
+                }
                 break;
             }
+        }
+        #[cfg(feature = "perf-metrics")]
+        {
+            let reason = observed_stop.unwrap_or_else(|| {
+                if result.is_err() {
+                    "error"
+                } else if job.phase != Phase::Extract {
+                    "phase_complete"
+                } else {
+                    chain_stop_reason(
+                        self.h.limits.extract_chain_steps,
+                        steps,
+                        x.stage,
+                        self.budget.remaining(),
+                        st.guards.len() + st.settled.len(),
+                        now_ms(self.h.clock.as_ref()).saturating_sub(started),
+                    )
+                }
+            });
+            self.h.metrics.incr(
+                "mkit_server_verification_extract_chain_stops_total",
+                &[("reason", reason)],
+                1,
+            );
+            tracing::info!(
+                event = "verification_extract_chain",
+                steps,
+                stop_reason = reason,
+                stage = stage_name(x.stage)
+            );
         }
         job.extraction = Some(x);
         result?;
         self.flush_denials(st).await?;
         Ok(0)
+    }
+
+    #[cfg(feature = "perf-metrics")]
+    async fn observed_stage(
+        &self,
+        st: &mut SliceState,
+        job: &mut VerifyJobV1,
+        x: &mut ExtractionV1,
+    ) -> Result<(), Stop> {
+        let _timer = crate::telemetry::performance::Timer::new(
+            self.h.clock.as_ref(),
+            self.h.metrics.as_ref(),
+            "extract",
+            stage_name(x.stage),
+        );
+        Box::pin(self.stage(st, job, x)).await
     }
 
     async fn stage(
@@ -1371,6 +1475,51 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
             DELIVERY => self.delivery(st, job, x).await,
             _ => Err(corrupt()),
         }
+    }
+}
+
+#[cfg(feature = "perf-metrics")]
+fn stage_name(stage: u8) -> &'static str {
+    match stage {
+        SCAN => "scan",
+        CLOSURE => "closure",
+        DEPENDENCIES => "dependencies",
+        MEMBERS => "members",
+        HEAD => "head",
+        SELECT => "select",
+        CHOOSE => "choose",
+        PREFLIGHT => "preflight",
+        UPLOAD => "upload",
+        START => "start",
+        COMPLETE => "complete",
+        OFFSETS => "offsets",
+        ENQUEUE => "enqueue",
+        DELIVERY => "delivery",
+        _ => "invalid",
+    }
+}
+
+#[cfg(feature = "perf-metrics")]
+fn chain_stop_reason(
+    step_cap: u32,
+    steps: u32,
+    stage: u8,
+    remaining_calls: u32,
+    ops: usize,
+    elapsed_ms: u64,
+) -> &'static str {
+    if steps >= step_cap.min(CHAIN_MAX_STEPS) {
+        "steps"
+    } else if !chains(stage) {
+        "effect_stage"
+    } else if remaining_calls < CHAIN_MIN_CALLS {
+        "calls"
+    } else if ops + step_ops(stage) > CHAIN_MAX_OPS {
+        "ops"
+    } else if elapsed_ms >= CHAIN_MAX_MS {
+        "elapsed"
+    } else {
+        "complete"
     }
 }
 

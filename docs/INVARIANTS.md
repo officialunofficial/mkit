@@ -27,6 +27,26 @@ proof, or consume unbounded metadata work.
 These are trusted evidence APIs; authorization and final serving guards remain
 at their existing boundaries. No wire or stored-format change.
 
+## Optional performance measurements retain behavior and privacy
+
+**Always:** `perf-metrics` collectors retain fixed-size numeric aggregates and
+constant partition-kind, stage, operation, and stop-reason labels. They never
+retain keys, credentials, names, object ids, SQL text, values, or error details.
+Default builds omit new timers, metadata, and log events. Enabled builds execute
+the same checks, SQL, budgets, checkpoint writes, and reply bodies.
+
+**Because:** measuring latency must not disclose private data or change a
+security boundary, page boundary, scheduling decision, or resource allowance.
+
+**If violated:** diagnostics could leak private repository data, distort timing,
+or alter correctness while measuring it.
+
+**Enforced by:** feature-gated collectors, numeric-only RPC header metadata,
+fixed top-four/100-call windows, fixed denial buckets, telemetry privacy and
+volume tests, and the native scan wire-identity cost harness. Worker timestamps
+are wall/I/O measurements; synchronous CPU requires platform/local profiling.
+See [Performance measurements](operations/performance-metrics.md).
+
 ## Packmap advances preserve node bytes and live-ref leases
 
 **Always:** native repository pushes in `mkit-sync` and protocol-client pushes

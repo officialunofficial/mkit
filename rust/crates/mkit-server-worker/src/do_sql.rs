@@ -199,6 +199,8 @@ mod conn {
         /// `ctx.storage`, for `transactionSync`, which workers-rs does not
         /// wrap.
         storage: JsValue,
+        #[cfg(feature = "perf-metrics")]
+        perf: crate::telemetry::perf_sql::SqlCollector,
     }
 
     fn js_message(e: &JsValue) -> String {
@@ -242,7 +244,30 @@ mod conn {
             let storage = raw.storage().map_or(JsValue::UNDEFINED, JsValue::from);
             let state = State::from(raw);
             let sql = state.storage().sql();
-            (Self { sql, storage }, state)
+            (
+                Self {
+                    sql,
+                    storage,
+                    #[cfg(feature = "perf-metrics")]
+                    perf: crate::telemetry::perf_sql::SqlCollector::default(),
+                },
+                state,
+            )
+        }
+
+        /// Start numeric SQL accounting for one sampled synchronous dispatch.
+        /// No await may occur before `take_perf`, because clones share the scope.
+        #[cfg(feature = "perf-metrics")]
+        pub fn begin_perf(&self, sampled: bool) {
+            self.perf.begin(sampled);
+        }
+
+        /// End the dispatch scope. Workers' clock can remain frozen during SQL;
+        /// these wall-time fields are not CPU measurements.
+        #[cfg(feature = "perf-metrics")]
+        #[must_use]
+        pub fn take_perf(&self) -> crate::telemetry::perf_sql::SqlTimings {
+            self.perf.take()
         }
 
         fn run(&self, sql: &str, params: &[SqlValue]) -> Result<worker::SqlCursor, SqlError> {
@@ -259,27 +284,42 @@ mod conn {
 
     impl SqlConn for DoSqlConn {
         fn exec(&self, sql: &str, params: &[SqlValue]) -> Result<u64, SqlError> {
-            let cursor = self.run(sql, params)?;
-            for row in cursor.raw() {
-                row.map_err(|e| classify_error(&e.to_string()))?;
-            }
-            // `rows_written` is also `f64 as usize` (saturating at 2^32 − 1
-            // on wasm32), harmless here: one `SqlKvStore` statement writes
-            // at most one row, and callers ignore the count.
-            Ok(cursor.rows_written() as u64)
+            #[cfg(feature = "perf-metrics")]
+            let timer = self.perf.timer();
+            let result = (|| {
+                let cursor = self.run(sql, params)?;
+                for row in cursor.raw() {
+                    row.map_err(|e| classify_error(&e.to_string()))?;
+                }
+                // `rows_written` is also `f64 as usize` (saturating at 2^32 − 1
+                // on wasm32), harmless here: one `SqlKvStore` statement writes
+                // at most one row, and callers ignore the count.
+                Ok(cursor.rows_written() as u64)
+            })();
+            #[cfg(feature = "perf-metrics")]
+            self.perf.record(timer, false, 0);
+            result
         }
 
         fn query(&self, sql: &str, params: &[SqlValue]) -> Result<Vec<Row>, SqlError> {
-            let cursor = self.run(sql, params)?;
-            cursor
-                .raw()
-                .map(|row| {
-                    row.map_err(|e| classify_error(&e.to_string()))?
-                        .into_iter()
-                        .map(|v| from_do(from_storage(v)))
-                        .collect()
-                })
-                .collect()
+            #[cfg(feature = "perf-metrics")]
+            let timer = self.perf.timer();
+            let result: Result<Vec<Row>, SqlError> = (|| {
+                let cursor = self.run(sql, params)?;
+                cursor
+                    .raw()
+                    .map(|row| {
+                        row.map_err(|e| classify_error(&e.to_string()))?
+                            .into_iter()
+                            .map(|v| from_do(from_storage(v)))
+                            .collect()
+                    })
+                    .collect()
+            })();
+            #[cfg(feature = "perf-metrics")]
+            self.perf
+                .record(timer, true, result.as_ref().map_or(0, Vec::len));
+            result
         }
 
         fn transaction<T: 'static>(&self, f: TxFn<Self, T>) -> Result<T, SqlError> {

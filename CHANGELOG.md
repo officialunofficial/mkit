@@ -80,6 +80,12 @@ collect the applicable entries between their old and new immutable pins.
   Readiness repeats all normal guards. Timeout preserves the pending bytes and
   typed hint. No breaking API, wire, or stored-format change; no store reset.
 
+- Add opt-in `perf-metrics` storage RPC summaries, denial duration histograms,
+  verification stage and chain timing, and AwaitDelivery hint measurements.
+  SQL query accounting separates stepping/materialization from wire encoding.
+  Default builds retain their existing cost and behavior. No public protocol
+  or stored-format change; no store reset is required.
+
 - Share pure packmap advance planning between the protocol client and CLI in
   `mkit-core::transfer::packmap`. Node bytes, CAS conditions, retries, and
   driver-specific limits and errors are unchanged. No wire or stored-format

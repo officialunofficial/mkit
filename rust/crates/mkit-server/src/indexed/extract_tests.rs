@@ -843,6 +843,10 @@ fn extractor<'a, B: MultipartBlobStore, S: NamespaceStore>(
     staged: &'a Staged,
 ) -> Extractor<'a, B, S> {
     Extractor {
+        #[cfg(feature = "perf-metrics")]
+        performance_denials: std::sync::Mutex::new(
+            crate::telemetry::performance::Denials::default(),
+        ),
         blobs,
         store,
         shards: &SinglePartition,

@@ -265,7 +265,10 @@ impl<C: SqlConn> NamespaceStore for PressureStore<C> {
     }
 }
 
-fn decode_request(body: &str, class: ShardClass) -> Result<(Partition, NsCall), NsReply> {
+pub(crate) fn decode_request(
+    body: &str,
+    class: ShardClass,
+) -> Result<(Partition, NsCall), NsReply> {
     let invalid = |message: &str| NsReply::Err {
         kind: NsErrKind::Invalid,
         message: message.into(),
@@ -304,7 +307,7 @@ pub(crate) fn failure(e: &StoreError) -> NsReply {
 }
 
 #[allow(clippy::too_many_lines)] // One JSON call dispatcher; each arm is independently bounded.
-async fn dispatch<S: NamespaceStore>(
+pub(crate) async fn dispatch<S: NamespaceStore>(
     store: &S,
     p: &Partition,
     call: NsCall,
@@ -579,6 +582,10 @@ mod object {
     pub struct NsObject {
         class: ShardClass,
         conn: DoConn,
+        #[cfg(feature = "perf-metrics")]
+        perf_conn: DoSqlConn,
+        #[cfg(feature = "perf-metrics")]
+        served: Cell<bool>,
         capacity: Capacity,
         store: OnceCell<PressureStore<DoConn>>,
         storage: Storage,
@@ -614,11 +621,17 @@ mod object {
         #[must_use]
         pub fn new(state: State, class: ShardClass) -> (Self, State) {
             let (conn, state) = DoSqlConn::from_state(state);
+            #[cfg(feature = "perf-metrics")]
+            let perf_conn = conn.clone();
             #[cfg(feature = "__test-faults")]
             let conn = crate::faults::FaultConn::new(conn);
             let object = Self {
                 class,
                 conn,
+                #[cfg(feature = "perf-metrics")]
+                perf_conn,
+                #[cfg(feature = "perf-metrics")]
+                served: Cell::new(false),
                 capacity: DO_CAPACITY,
                 store: OnceCell::new(),
                 storage: state.storage(),
@@ -689,16 +702,33 @@ mod object {
 
         /// Answer one `POST` from [`crate::ns_client`].
         pub async fn handle(&self, mut req: Request) -> worker::Result<Response> {
+            #[cfg(feature = "perf-metrics")]
+            let (started, cold, measured) = (
+                worker::js_sys::Date::now(),
+                !self.served.replace(true),
+                req.headers()
+                    .get(crate::telemetry::perf_rpc::HEADER)
+                    .ok()
+                    .flatten()
+                    .as_deref()
+                    == Some("1"),
+            );
             if req.method() != Method::Post {
                 return Response::error("method not allowed", 405);
             }
             let body = req.text().await?;
+            #[cfg(feature = "perf-metrics")]
+            let decode_started = worker::js_sys::Date::now();
             let decoded = decode_request(&body, self.class);
+            #[cfg(feature = "perf-metrics")]
+            let decode_ms = (worker::js_sys::Date::now() - decode_started).max(0.0);
             // Activation opens SQLite below, but must not scan application timers.
             // The first ordinary request retains cold-start alarm repair.
             if !matches!(&decoded, Ok((_, NsCall::Ping))) {
                 self.ensure_alarm().await;
             }
+            #[cfg(feature = "perf-metrics")]
+            let mut sql = crate::telemetry::perf_sql::SqlTimings::default();
             let reply = match decoded.and_then(|request| {
                 self.store()
                     .map(|store| (store, request))
@@ -712,9 +742,17 @@ mod object {
                     if req.path() == "/stats" {
                         store.clear_stats_cache();
                     }
+                    // The SQL store's dispatch completes on its first poll. Collect
+                    // only this synchronous section, never alarm I/O or another request.
+                    #[cfg(feature = "perf-metrics")]
+                    self.perf_conn.begin_perf(measured);
                     let (reply, earliest) = dispatch(store, &partition, call)
                         .await
                         .unwrap_or_else(|error| (failure(&error), None));
+                    #[cfg(feature = "perf-metrics")]
+                    {
+                        sql = self.perf_conn.take_perf();
+                    }
                     let seeded = store.take_seeded_due();
                     let earliest = match (earliest, seeded) {
                         (Some(a), Some(b)) => Some(a.min(b)),
@@ -731,14 +769,38 @@ mod object {
                         crate::log_failure(&format!("timer alarm update failed: {error}"));
                         return Err(error);
                     }
-                    encode(&reply)
+                    reply
                 }
-                Err(reply) => encode(&reply),
+                Err(reply) => reply,
             };
-            let mut response = Response::ok(reply)?;
+            #[cfg(feature = "perf-metrics")]
+            let encode_started = worker::js_sys::Date::now();
+            let body = encode(&reply);
+            #[cfg(feature = "perf-metrics")]
+            let encode_ms = (worker::js_sys::Date::now() - encode_started).max(0.0);
+            #[cfg(feature = "perf-metrics")]
+            let rows = crate::telemetry::perf_rpc::reply_rows(&reply);
+            // Release decoded rows before constructing the response body, as
+            // in the uninstrumented branch-local encoding path.
+            drop(reply);
+            let mut response = Response::ok(body)?;
             response
                 .headers_mut()
                 .set("Content-Type", "application/json")?;
+            #[cfg(feature = "perf-metrics")]
+            if measured {
+                let inside_ms = (worker::js_sys::Date::now() - started).max(0.0);
+                let metadata = format!(
+                    "{inside_ms},{},{decode_ms},{encode_ms},{},{},{},{rows},1",
+                    u8::from(cold),
+                    sql.sql_query_ms,
+                    sql.query_statements,
+                    sql.query_rows,
+                );
+                let _ = response
+                    .headers_mut()
+                    .set(crate::telemetry::perf_rpc::HEADER, &metadata);
+            }
             Ok(response)
         }
 

@@ -380,7 +380,11 @@ jobs:
   # the release feature set and the `test-faults` one (clock skew, stats,
   # quota and growth cases, and the adapter's body-buffer bound).
   vcs-worker-conformance:
-    name: vcs-worker wire conformance (direct workerd)
+    name: vcs-worker wire conformance (direct workerd, perf=${{ matrix.perf_metrics }})
+    strategy:
+      fail-fast: false
+      matrix:
+        perf_metrics: ['0', '1']
     needs: changes
     if: >-
       always() &&
@@ -388,6 +392,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       WRANGLER_SEND_METRICS: 'false'
+      MKIT_PERF_METRICS: ${{ matrix.perf_metrics }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 

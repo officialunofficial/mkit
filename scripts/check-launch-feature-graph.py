@@ -38,4 +38,5 @@ def check(manifest, features=()):
 
 if __name__ == "__main__":
     check("apps/vcs-worker/Cargo.toml", ("launch",))
+    check("apps/vcs-worker/Cargo.toml", ("launch", "perf-metrics"))
     check("apps/embedded-worker/tests/embedding-conformance/Cargo.toml")

@@ -39,6 +39,7 @@ opt-level = "s"
 lto = true
 
 [features]
+perf-metrics = ["mkit-server-worker/perf-metrics"]
 # Local-only fault injection and test hooks (the pipeline's
 # `x-mkit-test-fault`/clock-skew directives, the store faults,
 # `GET /__mkit_test/stats`, `TEST_QUOTA_*`); omitted from production builds.

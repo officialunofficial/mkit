@@ -1,4 +1,8 @@
 //! Inline verification before a ticketed advance commits.
+#[cfg(not(feature = "perf-metrics"))]
+use super::resolve::member_object as measured_member_object;
+#[cfg(feature = "perf-metrics")]
+use super::resolve::member_object_observed as measured_member_object;
 use crate::store::keys;
 
 use super::{
@@ -110,9 +114,14 @@ async fn check_member_head_type<B: BlobStore, S: NamespaceStore>(
     budget: u64,
     (cfg, clock, metrics): (IndexedConfig, &dyn Clock, &dyn Metrics),
 ) -> Result<(), ServerError> {
+    #[cfg(feature = "perf-metrics")]
+    let mut denial_counts = InlineDenials {
+        counts: crate::telemetry::performance::Denials::default(),
+        metrics,
+    };
     let mut memo = resolve::MemberCache::default();
     let mut visiting = BTreeSet::new();
-    let (bytes, _) = resolve::member_object(
+    let (bytes, _) = measured_member_object(
         blobs,
         store,
         shards,
@@ -124,6 +133,10 @@ async fn check_member_head_type<B: BlobStore, S: NamespaceStore>(
         &mut memo,
         &mut visiting,
         metrics,
+        #[cfg(feature = "perf-metrics")]
+        clock,
+        #[cfg(feature = "perf-metrics")]
+        &mut denial_counts.counts,
     )
     .await
     .map_err(|failure| failure.public_error(now_ms(clock), created, cfg.relay_lag_bound_ms))?;
@@ -448,6 +461,9 @@ async fn verify_ticketed_optional<B: MultipartBlobStore, S: NamespaceStore>(
     metrics: &dyn Metrics,
     inspection_limit: Option<usize>,
 ) -> Result<StagedCommits, ServerError> {
+    #[cfg(feature = "perf-metrics")]
+    let _timer =
+        crate::telemetry::performance::Timer::new(clock, metrics, "inline_verifier", "total");
     // Check before inspection preflight or verification-state handling, so a
     // cached Verified pack returns the same cap error as a fresh pack.
     for ticket in tickets {
@@ -548,6 +564,11 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
     let mut external_bases = BTreeSet::new();
     let mut staged_owner = BTreeMap::new();
     let mut denial_ids = BTreeSet::new();
+    #[cfg(feature = "perf-metrics")]
+    let mut denial_counts = InlineDenials {
+        counts: crate::telemetry::performance::Denials::default(),
+        metrics,
+    };
     let mut work = Vec::with_capacity(tickets.len());
     let mut raw_packs = BTreeSet::new();
     let mut packlists = Vec::new();
@@ -802,7 +823,7 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
                             ServerError::invalid_argument(resolve::DECODE_BUDGET_MESSAGE)
                         })?;
                         let budget = cfg.decode_budget.saturating_sub(staged_bytes);
-                        let (canonical, depth) = resolve::member_object(
+                        let (canonical, depth) = measured_member_object(
                             blobs,
                             store,
                             shards,
@@ -814,6 +835,10 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
                             &mut memo,
                             &mut visiting,
                             metrics,
+                            #[cfg(feature = "perf-metrics")]
+                            clock,
+                            #[cfg(feature = "perf-metrics")]
+                            &mut denial_counts.counts,
                         )
                         .await
                         .map_err(|failure| {
@@ -988,8 +1013,17 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
             }
         }
     }
+    #[cfg(not(feature = "perf-metrics"))]
     crate::takedown::denial::require_clear_many(store, store.enabled_ids(staged.keys().copied()))
         .await?;
+    #[cfg(feature = "perf-metrics")]
+    crate::takedown::denial::require_clear_many_observed(
+        store,
+        store.enabled_ids(staged.keys().copied()),
+        clock,
+        &mut denial_counts.counts,
+    )
+    .await?;
     for (id, (_, object, _)) in &staged {
         if verify_object_signature(object).is_err() {
             let owner = staged_owner[id];
@@ -1124,6 +1158,10 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
     // One extractor per advance: its resolution counter is shared by every
     // manifest and chunk (R-163).
     let extractor = Extractor {
+        #[cfg(feature = "perf-metrics")]
+        performance_denials: std::sync::Mutex::new(
+            crate::telemetry::performance::Denials::default(),
+        ),
         blobs,
         store,
         shards,
@@ -1166,14 +1204,21 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
         for direct in plan.direct {
             renew_all_pending(store, source, repo, acquired, clock).await?;
             let mut batch = Batch::new().require(Precondition::NotAfter(deadline(clock)));
-            crate::takedown::denial::require_clear_many(
-                store,
+            let ids =
                 store.enabled_ids(direct.puts.iter().filter_map(|(key, _)| {
                     match keys::parse(key) {
                         Some(keys::ParsedKey::ObjectIndex { object, .. }) => Some(object),
                         _ => None,
                     }
-                })),
+                }));
+            #[cfg(not(feature = "perf-metrics"))]
+            crate::takedown::denial::require_clear_many(store, ids).await?;
+            #[cfg(feature = "perf-metrics")]
+            crate::takedown::denial::require_clear_many_observed(
+                store,
+                ids,
+                clock,
+                &mut denial_counts.counts,
             )
             .await?;
             for (key, value) in direct.puts {
@@ -1262,6 +1307,8 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
         }
         acquired.remove(&pack.ticket.pack_id);
     }
+    #[cfg(feature = "perf-metrics")]
+    drop(extractor);
     let parents = staged
         .iter()
         .filter_map(|(id, (_, object, _))| Some((*id, history_parents(object)?)))
@@ -1299,4 +1346,16 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
         external_bases,
         inspection,
     })
+}
+
+#[cfg(feature = "perf-metrics")]
+struct InlineDenials<'a> {
+    counts: crate::telemetry::performance::Denials,
+    metrics: &'a dyn Metrics,
+}
+#[cfg(feature = "perf-metrics")]
+impl Drop for InlineDenials<'_> {
+    fn drop(&mut self) {
+        self.counts.emit(self.metrics, "inline_verifier");
+    }
 }

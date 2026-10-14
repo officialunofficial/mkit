@@ -410,6 +410,11 @@ if [ "${hooks}" -eq 1 ]; then
     build_args=(--release --features __test-faults,signed-http-hooks)
 fi
 
+# Run the same wire assertions with performance metadata enabled on demand.
+if [ "${MKIT_PERF_METRICS:-0}" = 1 ]; then
+    build_args+=(--features perf-metrics)
+fi
+
 git rev-parse HEAD >"${work}/head.txt"
 npx --yes --package "wrangler@${WRANGLER_VERSION}" -c 'node scripts/workers-runtime-versions.cjs' >"${work}/runtime-versions.json"
 

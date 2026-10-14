@@ -16,6 +16,10 @@
 //! repository membership or the platform is a terminal [`Outcome`], never a
 //! persisted `Rejected` (R-148).
 
+#[cfg(not(feature = "perf-metrics"))]
+use super::resolve::member_object as measured_member_object;
+#[cfg(feature = "perf-metrics")]
+use super::resolve::member_object_observed as measured_member_object;
 use super::{
     IndexedConfig,
     budget::{Budgeted, PackWindows, SliceBudget, Window, WindowError, is_exhausted},
@@ -399,6 +403,8 @@ impl DeltaBaseSource for CacheBases<'_> {
 /// Per-slice memory: nothing in it is authoritative, rows are.
 #[derive(Default)]
 struct SliceState {
+    #[cfg(feature = "perf-metrics")]
+    performance_denials: crate::telemetry::performance::Denials,
     guards: Vec<Precondition>,
     job_guard: Option<Value>,
     decode_checkpoint: Option<VerifyJobV1>,
@@ -617,8 +623,13 @@ where
         let start = job.clone();
         let old_phase = job.phase;
         let mut ran = job.phase;
+        #[cfg(not(feature = "perf-metrics"))]
         let mut result = self
             .step(&mut st, &mut job, state.as_ref(), &mut held)
+            .await;
+        #[cfg(feature = "perf-metrics")]
+        let mut result = self
+            .observed_step(&mut st, &mut job, state.as_ref(), &mut held)
             .await;
         // The phases after the decode are cheap: run them back to back while
         // each one finishes at once and the slice still has calls to spend.
@@ -635,9 +646,46 @@ where
             chained += 1;
             ran = job.phase;
             st.await_entered = old_phase != Phase::AwaitDelivery;
-            result = self
-                .step(&mut st, &mut job, state.as_ref(), &mut held)
-                .await;
+            #[cfg(not(feature = "perf-metrics"))]
+            {
+                result = self
+                    .step(&mut st, &mut job, state.as_ref(), &mut held)
+                    .await;
+            }
+            #[cfg(feature = "perf-metrics")]
+            {
+                result = self
+                    .observed_step(&mut st, &mut job, state.as_ref(), &mut held)
+                    .await;
+            }
+        }
+        #[cfg(feature = "perf-metrics")]
+        {
+            let reason = if !matches!(result, Ok(0)) {
+                "pending_or_error"
+            } else if ran == Phase::Decode {
+                "decode_boundary"
+            } else if job.phase == ran {
+                "phase_incomplete"
+            } else if job.phase == Phase::Watch {
+                "terminal"
+            } else if matches!(
+                job.phase,
+                Phase::ClosureResolve | Phase::Recheck | Phase::Extract
+            ) {
+                "durable_boundary"
+            } else if chained >= 6 {
+                "steps"
+            } else if self.budget.remaining() < ENTRY_RESERVE {
+                "calls"
+            } else {
+                "complete"
+            };
+            tracing::info!(
+                event = "verification_phase_chain",
+                steps = chained + 1,
+                stop_reason = reason
+            );
         }
         let inventory_result = match &result {
             Err(Stop::Store(StoreError::Unavailable(source))) => source
@@ -1040,6 +1088,55 @@ where
     W: PackWindows,
     X: SliceExtension,
 {
+    #[cfg(feature = "perf-metrics")]
+    async fn observed_step(
+        &self,
+        st: &mut SliceState,
+        job: &mut VerifyJobV1,
+        state: Option<&(VerificationV1, Value)>,
+        held: &mut Option<Value>,
+    ) -> Result<u64, Stop> {
+        let (started, phase) = (self.h.clock.now_ms(), job.phase);
+        // Keep the optional observer's enclosing future off the small-stack path.
+        let result = Box::pin(self.step(st, job, state, held)).await;
+        {
+            let phase_label = match phase {
+                Phase::Decode => "decode",
+                Phase::ClosureResolve => "closure_resolve",
+                Phase::EmitIndex => "emit_index",
+                Phase::AwaitDelivery => "await_delivery",
+                Phase::Extract => "extract",
+                Phase::Verify => "verify",
+                Phase::Recheck => "recheck",
+                Phase::Watch => "watch",
+            };
+            let ms = crate::telemetry::performance::elapsed(self.h.clock.as_ref(), started);
+            let stop_reason = match &result {
+                Ok(0) => "complete",
+                Ok(_) | Err(Stop::Yield(_) | Stop::Wait(_)) => "pending",
+                Err(Stop::Store(_)) => "store_error",
+                Err(Stop::Outcome(_)) => "outcome",
+                Err(Stop::Reject(_)) => "rejected",
+                Err(Stop::Restart) => "restart",
+            };
+            self.h.metrics.observe_ms(
+                "mkit_server_verification_stage_duration_ms",
+                &[("stage", phase_label), ("component", "total")],
+                f64::from(u32::try_from(ms).unwrap_or(u32::MAX)),
+            );
+            tracing::info!(
+                event = "verification_stage_duration",
+                stage = phase_label,
+                component = "total",
+                duration_ms = ms,
+                stop_reason
+            );
+            st.performance_denials
+                .emit(self.h.metrics.as_ref(), phase_label);
+        }
+        result
+    }
+
     async fn step(
         &self,
         st: &mut SliceState,
@@ -1056,7 +1153,7 @@ where
                 }
                 Ok(0)
             }
-            Phase::EmitIndex => self.emit(job).await,
+            Phase::EmitIndex => self.emit(st, job).await,
             Phase::AwaitDelivery => self.await_delivery(job, st.await_entered).await,
             Phase::Extract => {
                 if self.h.extension.extraction_enabled() {
@@ -1584,9 +1681,18 @@ where
         st.entries_staged += batch.len() as u64;
         let started = now_ms(self.h.clock.as_ref());
         let calls = self.budget.used();
+        #[cfg(not(feature = "perf-metrics"))]
         let clear = crate::takedown::denial::require_clear_many(
             self.remote,
             self.remote.enabled_ids(batch.iter().map(|item| item.id)),
+        )
+        .await;
+        #[cfg(feature = "perf-metrics")]
+        let clear = crate::takedown::denial::require_clear_many_observed(
+            self.remote,
+            self.remote.enabled_ids(batch.iter().map(|item| item.id)),
+            self.h.clock.as_ref(),
+            &mut st.performance_denials,
         )
         .await;
         // Wall time of the bounded waves, including failed reads, rather than
@@ -1824,7 +1930,7 @@ where
         // is charged per distinct base by `charge_bases`, from persisted rows,
         // so it does not depend on what earlier slices retained.
         let memo_budget = self.decode_limits().max_decoded_bytes;
-        let (canonical, _) = resolve::member_object(
+        let (canonical, _) = measured_member_object(
             self.blobs,
             self.remote,
             self.h.shards.as_ref(),
@@ -1836,6 +1942,10 @@ where
             &mut st.memo,
             &mut st.visiting,
             self.h.metrics.as_ref(),
+            #[cfg(feature = "perf-metrics")]
+            self.h.clock.as_ref(),
+            #[cfg(feature = "perf-metrics")]
+            &mut st.performance_denials,
         )
         .await
         .map_err(|failure| match failure {
@@ -2062,13 +2172,27 @@ where
 
     /// Relay this pack's index rows, one page of frames per slice, after the
     /// decode reached `Done` (SPEC-PACKFILE §11).
-    async fn emit(&self, job: &mut VerifyJobV1) -> Result<u64, Stop> {
+    #[allow(clippy::too_many_lines)] // Preserve the existing emit ordering while attributing its bounded components.
+    async fn emit(&self, st: &mut SliceState, job: &mut VerifyJobV1) -> Result<u64, Stop> {
+        #[cfg(not(feature = "perf-metrics"))]
+        let _ = st;
+        #[cfg(feature = "perf-metrics")]
+        let mut components = crate::telemetry::performance::EmitComponents::new(
+            self.h.clock.as_ref(),
+            self.h.metrics.as_ref(),
+        );
         let (start, end) = keys::verify_range(&self.repo.name, &self.pack, Some(keys::VC_FRAME));
         let cursor = (!job.scan.is_empty()).then(|| Cursor::new(job.scan.clone()));
+        #[cfg(feature = "perf-metrics")]
+        let scan_timer = components.timer(0);
         let page = self
             .local
             .scan(self.source, &start, &end, cursor.as_ref(), EMIT_PAGE)
             .await?;
+        #[cfg(feature = "perf-metrics")]
+        drop(scan_timer);
+        #[cfg(feature = "perf-metrics")]
+        let plan_timer = components.timer(1);
         let mut entries: Vec<IndexEntry> = Vec::with_capacity(page.entries.len());
         for (key, value) in &page.entries {
             let Some(keys::ParsedKey::VerifyCursor { id: Some(id), .. }) = keys::parse(key) else {
@@ -2085,25 +2209,37 @@ where
             &entries,
             now_ms(clock),
         )?;
+        #[cfg(feature = "perf-metrics")]
+        drop(plan_timer);
         for direct in plan.direct {
             let mut batch = Batch::new().require(Precondition::NotAfter(self.deadline()));
-            crate::takedown::denial::require_clear_many(
+            #[cfg(feature = "perf-metrics")]
+            let denial_timer = components.timer(2);
+            let ids = self.remote.enabled_ids(direct.puts.iter().filter_map(|(key, _)| match keys::parse(key) {
+                Some(keys::ParsedKey::ObjectIndex { object, .. }) => Some(object),
+                _ => None,
+            }));
+            #[cfg(not(feature = "perf-metrics"))]
+            let clear = crate::takedown::denial::require_clear_many(self.remote, ids).await;
+            #[cfg(feature = "perf-metrics")]
+            let clear = crate::takedown::denial::require_clear_many_observed(
                 self.remote,
-                self.remote.enabled_ids(direct.puts.iter().filter_map(
-                    |(key, _)| match keys::parse(key) {
-                        Some(keys::ParsedKey::ObjectIndex { object, .. }) => Some(object),
-                        _ => None,
-                    },
-                )),
+                ids,
+                self.h.clock.as_ref(),
+                &mut st.performance_denials,
             )
-            .await
-            .map_err(|error| {
+            .await;
+            clear.map_err(|error| {
                 if error.code() == crate::Code::PermissionDenied {
                     Stop::Outcome(Outcome::Blocked)
                 } else {
                     unavailable("index object unavailable")
                 }
             })?;
+            #[cfg(feature = "perf-metrics")]
+            drop(denial_timer);
+            #[cfg(feature = "perf-metrics")]
+            let _apply_timer = components.timer(3);
             for (key, value) in direct.puts {
                 batch = batch.put(key, value);
             }
@@ -2133,6 +2269,8 @@ where
             } else {
                 None
             };
+            #[cfg(feature = "perf-metrics")]
+            let relay_timer = components.timer(4);
             commit_relay_rows(
                 self.local,
                 self.source,
@@ -2142,6 +2280,10 @@ where
                 lease.as_ref(),
             )
             .await?;
+            #[cfg(feature = "perf-metrics")]
+            drop(relay_timer);
+            #[cfg(feature = "perf-metrics")]
+            let _outbox_timer = components.timer(5);
             job.last_relay_seq = self
                 .local
                 .get(self.source, &keys::outbox_sequence())

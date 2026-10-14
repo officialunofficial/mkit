@@ -2516,6 +2516,9 @@ mod glue {
             None,
             false,
         );
+
+        #[cfg(feature = "perf-metrics")]
+        install();
         cfg.validate_runtime(env)?;
         let bad = |e: &dyn core::fmt::Display| ConfigError(e.to_string());
         let mut config = cfg.pipeline_config()?;

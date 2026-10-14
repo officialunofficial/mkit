@@ -31,6 +31,8 @@ authors.workspace = true
 workspace = true
 
 [features]
+# Opt-in bounded performance summaries; omitted from default builds.
+perf-metrics = ["mkit-server/perf-metrics"]
 # Store-level fault injection (a failed final R2 chunk, a Durable Object
 # batch that fails once after its writes), plus the pipeline seam of
 # `mkit-server/__test-faults`. Never enabled by a release build.

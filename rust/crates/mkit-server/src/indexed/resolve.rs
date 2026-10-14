@@ -367,7 +367,56 @@ pub fn member_object<'a, B: BlobStore, S: NamespaceStore>(
     metrics: &'a dyn Metrics,
 ) -> BoxFuture<'a, Result<ResolvedMember, ResolveFailure>> {
     member_object_inner(
-        blobs, store, shards, repo, id, located, cap, budget, memo, visiting, metrics, true, None,
+        blobs,
+        store,
+        shards,
+        repo,
+        id,
+        located,
+        cap,
+        budget,
+        memo,
+        visiting,
+        metrics,
+        true,
+        None,
+        #[cfg(feature = "perf-metrics")]
+        None,
+    )
+}
+
+#[cfg(feature = "perf-metrics")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn member_object_observed<'a, B: BlobStore, S: NamespaceStore>(
+    blobs: &'a B,
+    store: &'a S,
+    shards: &'a dyn ShardMap,
+    repo: &'a RepoId,
+    id: Hash,
+    located: LocatedObject,
+    cap: u32,
+    budget: u64,
+    memo: &'a mut MemberCache,
+    visiting: &'a mut BTreeSet<Location>,
+    metrics: &'a dyn Metrics,
+    clock: &'a dyn crate::Clock,
+    counts: &'a mut crate::telemetry::performance::Denials,
+) -> BoxFuture<'a, Result<ResolvedMember, ResolveFailure>> {
+    member_object_inner(
+        blobs,
+        store,
+        shards,
+        repo,
+        id,
+        located,
+        cap,
+        budget,
+        memo,
+        visiting,
+        metrics,
+        true,
+        None,
+        Some((clock, counts)),
     )
 }
 
@@ -387,7 +436,21 @@ pub fn member_object_for_preservation<'a, B: BlobStore, S: NamespaceStore>(
     metrics: &'a dyn Metrics,
 ) -> BoxFuture<'a, Result<ResolvedMember, ResolveFailure>> {
     member_object_inner(
-        blobs, store, shards, repo, id, located, cap, budget, memo, visiting, metrics, false, None,
+        blobs,
+        store,
+        shards,
+        repo,
+        id,
+        located,
+        cap,
+        budget,
+        memo,
+        visiting,
+        metrics,
+        false,
+        None,
+        #[cfg(feature = "perf-metrics")]
+        None,
     )
 }
 
@@ -440,6 +503,8 @@ pub fn member_object_for_preservation_bounded<'a, B: BlobStore, S: NamespaceStor
         metrics,
         false,
         Some(limits),
+        #[cfg(feature = "perf-metrics")]
+        None,
     )
 }
 
@@ -596,6 +661,10 @@ fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
     metrics: &'a dyn Metrics,
     enforce_denial: bool,
     source_limits: Option<MemberSourceLimits>,
+    #[cfg(feature = "perf-metrics")] mut observations: Option<(
+        &'a dyn crate::Clock,
+        &'a mut crate::telemetry::performance::Denials,
+    )>,
 ) -> BoxFuture<'a, Result<ResolvedMember, ResolveFailure>> {
     Box::pin(async move {
         let (mut id, mut located) = (id, located);
@@ -608,8 +677,26 @@ fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
                     return Err(budget_exceeded().into());
                 }
                 if enforce_denial {
-                    crate::takedown::denial::require_clear(store, &id).await?;
-                    crate::takedown::denial::require_clear(store, &located.pack).await?;
+                    #[cfg(feature = "perf-metrics")]
+                    if let Some((clock, counts)) = observations.as_mut() {
+                        crate::takedown::denial::require_clear_observed(store, &id, *clock, counts)
+                            .await?;
+                        crate::takedown::denial::require_clear_observed(
+                            store,
+                            &located.pack,
+                            *clock,
+                            counts,
+                        )
+                        .await?;
+                    } else {
+                        crate::takedown::denial::require_clear(store, &id).await?;
+                        crate::takedown::denial::require_clear(store, &located.pack).await?;
+                    }
+                    #[cfg(not(feature = "perf-metrics"))]
+                    {
+                        crate::takedown::denial::require_clear(store, &id).await?;
+                        crate::takedown::denial::require_clear(store, &located.pack).await?;
+                    }
                 }
                 source_limits = Some(source_limits.unwrap_or(MemberSourceLimits::new(
                     super::geometry::FRAME_BYTES,
