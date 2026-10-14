@@ -338,3 +338,75 @@ fn publication_fence_plan_binds_all_new_publication_rows_not_only_last_effect() 
     );
     assert!(publication_batch(&source, &too_many).is_err());
 }
+
+#[test]
+fn publication_fence_plan_binds_auxiliary_prefix_without_other_destinations_or_tail() {
+    let (repo, source, _) = fixture();
+    let name = "refs/heads/main";
+    let target = D34Shards.ref_index(&repo, name);
+    let other = Partition::Coordinator(repo.namespace.clone());
+    let value = codec::encode_ref_id(&[3; 32]);
+    let mut batch = Batch::new()
+        .require(Precondition::Absent(keys::outbox_sequence()))
+        .put(keys::outbox_sequence(), codec::encode_u64(4))
+        .put(keys::published_ref(&repo.name, name), value.clone());
+    for (sequence, destination, key, row_value) in [
+        (
+            1,
+            target.clone(),
+            Key::new(b"auxiliary".to_vec()),
+            Value::new(vec![1]),
+        ),
+        (
+            2,
+            other,
+            Key::new(b"unrelated".to_vec()),
+            Value::new(vec![2]),
+        ),
+        (
+            3,
+            target.clone(),
+            keys::published_index(&repo.name, name),
+            value,
+        ),
+        (
+            4,
+            target.clone(),
+            Key::new(b"later".to_vec()),
+            Value::new(vec![4]),
+        ),
+    ] {
+        batch = batch.put(
+            keys::relay(sequence),
+            codec::encode_relay(&codec::RelayV1 {
+                at_ms: 1000,
+                target: destination,
+                puts: vec![(key, row_value)],
+                deletes: vec![],
+            })
+            .unwrap(),
+        );
+    }
+    let plan = publication_batch(&source, &batch).unwrap().unwrap();
+    assert_eq!(plan.targets, vec![(target.clone(), 3)]);
+    assert_eq!(
+        plan.relays
+            .iter()
+            .map(|row| row.binding.sequence())
+            .collect::<Vec<_>>(),
+        vec![1, 3]
+    );
+    let raw = batch
+        .writes
+        .iter()
+        .find_map(|write| match write {
+            Write::Put(key, raw) if *key == keys::relay(1) => Some(raw),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        plan.fence_targets().unwrap()[0]
+            .verify_relay(1, raw)
+            .is_ok()
+    );
+}

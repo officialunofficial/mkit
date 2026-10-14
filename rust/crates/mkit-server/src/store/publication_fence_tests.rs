@@ -1323,3 +1323,104 @@ fn exact_relay_bindings_reject_duplicates_order_bounds_and_recovery_rebinding() 
         assert!(RelayBinding::new(1, &huge).is_err());
     });
 }
+
+#[test]
+fn committed_publication_verifies_auxiliary_prefix_and_rejects_final_rebinding() {
+    block_on(async {
+        let store = MemoryKv::default();
+        let fence = setup(&store).await;
+        let source = source("main");
+        let repo = repo();
+        let name = "refs/heads/main";
+        let target = D34Shards.ref_index(&repo, name);
+        let value = codec::encode_ref_id(&[3; 32]);
+        let mut batch = Batch::new()
+            .require(Precondition::Absent(keys::outbox_sequence()))
+            .put(keys::outbox_sequence(), codec::encode_u64(3))
+            .put(keys::published_ref(&repo.name, name), value.clone());
+        for (sequence, destination, key, row_value) in [
+            (
+                1,
+                target.clone(),
+                Key::new(b"auxiliary".to_vec()),
+                Value::new(vec![1]),
+            ),
+            (
+                2,
+                Partition::Coordinator(repo.namespace.clone()),
+                Key::new(b"unrelated".to_vec()),
+                Value::new(vec![2]),
+            ),
+            (
+                3,
+                target.clone(),
+                keys::published_index(&repo.name, name),
+                value,
+            ),
+        ] {
+            batch = batch.put(
+                keys::relay(sequence),
+                codec::encode_relay(&codec::RelayV1 {
+                    at_ms: 1000,
+                    target: destination,
+                    puts: vec![(key, row_value)],
+                    deletes: vec![],
+                })
+                .unwrap(),
+            );
+        }
+        let plan = super::super::publication_fence_plan::publication_batch(&source, &batch)
+            .unwrap()
+            .unwrap();
+        let intent = fence
+            .begin(
+                &store,
+                &source,
+                1,
+                plan.digest,
+                plan.fence_targets().unwrap(),
+            )
+            .await
+            .unwrap();
+        fence.arm(&store, &intent).await.unwrap();
+        let armed = store.get(&source, &source_key()).await.unwrap();
+        PublicationFence::source_commit_fragment(&intent, &mut batch).unwrap();
+        let mut changed = batch.clone();
+        let raw = changed
+            .writes
+            .iter_mut()
+            .find_map(|write| match write {
+                super::super::Write::Put(key, raw) if *key == keys::relay(1) => Some(raw),
+                _ => None,
+            })
+            .unwrap();
+        let mut relay = codec::decode_relay(raw).unwrap();
+        relay.puts[0].1 = Value::new(vec![9]);
+        *raw = codec::encode_relay(&relay).unwrap();
+        assert!(
+            validate_source_transaction(&source, &changed, |key| {
+                assert_eq!(*key, source_key());
+                Ok(armed.clone())
+            })
+            .is_err(),
+            "final source validation must recompute the auxiliary row binding"
+        );
+        assert!(validate_source_transaction(&source, &batch, |_| Ok(armed.clone())).is_ok());
+        assert_eq!(
+            store.apply(&source, batch).await.unwrap(),
+            BatchOutcome::Committed
+        );
+        let proof = VerifiedRelay::verify(&store, &intent, &target, 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            codec::decode_relay(proof.row()).unwrap().puts[0].1,
+            Value::new(vec![1])
+        );
+        assert!(
+            VerifiedRelay::verify(&store, &intent, &target, 2)
+                .await
+                .is_err()
+        );
+    });
+}

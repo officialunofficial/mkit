@@ -2765,8 +2765,9 @@ and exit-code behavior. No authorization, wire, or stored-format boundary moves.
 Each source keeps one bounded intent row. No row retains an attempt history.
 A stable token requires a sealed bootstrap cut and zero pending intents.
 The source transaction binds its exact guarded batch and projection allocations to the intent.
-Every newly retained relay with publication effects binds its exact encoded bytes
-and source sequence, including earlier messages to the same destination and auxiliary effects.
+Every new relay to a required publication target through its publication watermark
+binds exact encoded bytes and source sequence, including auxiliary-only earlier messages.
+Interleaved other destinations and later auxiliary rows do not extend that obligation.
 Sequences are globally unique within an intent and ordered within each target.
 The message bound follows the 100-operation source batch, separately from 16 targets.
 The final source transaction recomputes these bindings. A watermark alone cannot

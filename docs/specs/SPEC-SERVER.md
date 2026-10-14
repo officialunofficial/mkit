@@ -4921,8 +4921,10 @@ sequence, and sequences MUST be globally unique across the intent. The source
 batch operation limit bounds relay bindings to 100; distinct targets remain
 limited to 16 and the full encoded record to 32 KiB. Target ordering follows
 canonical partition bytes. Source planning and final SQL validation derive
-these bindings from every newly retained relay containing publication effects,
-not merely the last message for each destination.
+these bindings from every new relay to required publication targets through
+their publication watermark, including earlier auxiliary-only messages. Rows
+for other destinations and later auxiliary rows do not extend the obligation.
+This same-batch binding does not certify older retained backlog.
 
 An actual retained-row observation MUST match an exact committed source marker
 and its bound row bytes, sequence and destination. That observation establishes

@@ -20,7 +20,7 @@ pub struct PublicationBatch {
     pub digest: Hash,
     /// Target partition and source outbox sequence, in canonical order.
     pub targets: Vec<(Partition, u64)>,
-    /// Every newly allocated row carrying published ref-index effects.
+    /// New rows for required targets through their publication watermark.
     pub relays: Vec<PublicationRelay>,
 }
 /// Exact source row selected from the actual guarded publication batch.
@@ -216,6 +216,7 @@ pub fn publication_batch(
         }
     }
     let mut publication_relays = Vec::new();
+    let mut targets: BTreeMap<Vec<u8>, (Partition, u64)> = BTreeMap::new();
     for (sequence, raw) in relays {
         if sequence <= previous || allocated.is_none_or(|last| last <= previous || sequence > last)
         {
@@ -245,29 +246,30 @@ pub fn publication_batch(
             }
         }
         if has_projection {
-            if publication_relays.len() == MAX_RELAY_BINDINGS {
-                return Err(invalid());
-            }
-            publication_relays.push(PublicationRelay {
-                target: relay.target,
-                binding: RelayBinding::new(sequence, &raw)?,
-            });
+            let entry = targets
+                .entry(relay.target.encode()?.to_vec())
+                .or_insert((relay.target.clone(), sequence));
+            entry.1 = entry.1.max(sequence);
         }
+        if publication_relays.len() == MAX_RELAY_BINDINGS {
+            return Err(invalid());
+        }
+        publication_relays.push(PublicationRelay {
+            target: relay.target,
+            binding: RelayBinding::new(sequence, &raw)?,
+        });
     }
-    let mut targets: BTreeMap<Vec<u8>, (Partition, u64)> = BTreeMap::new();
     for (name, expected) in published {
         let (actual, _, _) = projected.remove(&name).ok_or_else(invalid)?;
         if actual != expected {
             return Err(invalid());
         }
     }
-    for relay in &publication_relays {
-        let sequence = relay.binding.sequence();
-        let entry = targets
-            .entry(relay.target.encode()?.to_vec())
-            .or_insert((relay.target.clone(), sequence));
-        entry.1 = entry.1.max(sequence);
-    }
+    publication_relays.retain(|relay| {
+        targets.values().any(|(target, watermark)| {
+            *target == relay.target && relay.binding.sequence() <= *watermark
+        })
+    });
     Ok(Some(PublicationBatch {
         digest: batch_digest(source, batch)?,
         targets: targets.into_values().collect(),
