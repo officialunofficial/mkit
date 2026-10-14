@@ -36,8 +36,20 @@ pub(crate) fn order(job: &ForkJobV1) -> Vec<Hash> {
     ids
 }
 
+/// `job.part` while the members other than the head are written in waves.
+const WRITES: u16 = 2;
+/// `job.part` while those members are proved again in waves.
+const CHECKS: u16 = 3;
+
 /// Prove and write each pack, then prove it again, from the cursor. `true`
 /// once all are published.
+///
+/// Without pack-level denial the members other than the head are written
+/// together, then proved again together, and the head is written and proved
+/// last, alone: its flag then still says every other inherited pack is a
+/// member. A job in either wave state resumes the same way however wide the
+/// next driver can run. With denial a proof can cost most of a slice, and
+/// each pack is written and proved in turn.
 pub(crate) async fn slice<S: NamespaceStore>(
     env: &ForkEnv<'_, S>,
     job: &mut ForkJobV1,
@@ -49,9 +61,33 @@ pub(crate) async fn slice<S: NamespaceStore>(
     let order = order(job);
     let fresh = super::fresh(budget);
     let mut progressed = false;
+    if job.cursor == 0
+        && job.part == 0
+        && order.len() > 2
+        && !env.takedown_denial
+        && super::wave_width(env.store, budget, super::WAVE_UNIT_CALLS) > 1
+    {
+        job.part = WRITES;
+    }
     while (job.cursor as usize) < order.len() {
         if budget.remaining() < UNIT_RESERVE {
             return Ok(false);
+        }
+        if job.part >= WRITES {
+            let (done, failure) = wave(env, &store, budget, job, &source, &dest, &order).await;
+            progressed |= done > 0;
+            match failure {
+                None => {}
+                Some(error) if super::spent(&error, budget) => {
+                    return if progressed || !fresh {
+                        Ok(false)
+                    } else {
+                        Err(ForkError::TooLarge)
+                    };
+                }
+                Some(error) => return Err(error),
+            }
+            continue;
         }
         let id = order[job.cursor as usize];
         // Two units per pack, each costing one proof: the write (proof, then
@@ -83,6 +119,60 @@ pub(crate) async fn slice<S: NamespaceStore>(
         }
     }
     Ok(true)
+}
+
+/// One wave of the write or check stage, from the cursor: as many members
+/// other than the head as the slice can pay a unit's reserve for. Returns the
+/// units that finished, counted from the first, and the failure of the first
+/// that did not: replies are read in input order, so a later unit's failure
+/// never replaces an earlier one's. The units after a failure may have
+/// written their rows; those are repeated by a replay, which finds them.
+async fn wave<S: NamespaceStore>(
+    env: &ForkEnv<'_, S>,
+    store: &Budgeted<'_, S>,
+    budget: &SliceBudget,
+    job: &mut ForkJobV1,
+    source: &RepoId,
+    dest: &RepoId,
+    order: &[Hash],
+) -> (usize, Option<ForkError>) {
+    let last = order.len() - 1;
+    let start = job.cursor as usize;
+    let width = super::wave_width(env.store, budget, super::WAVE_UNIT_CALLS);
+    let units = &order[start..last.min(start + width)];
+    let stage = job.part;
+    let replies = {
+        let job = &*job;
+        futures::future::join_all(units.iter().map(|id| async move {
+            if stage == WRITES {
+                write_one(env, store, job, source, dest, id).await
+            } else {
+                prove(env, store, source, id, job.source_generation).await
+            }
+        }))
+        .await
+    };
+    let mut done = 0;
+    let mut failure = None;
+    for reply in replies {
+        match reply {
+            Ok(()) => done += 1,
+            Err(error) => {
+                failure = Some(error);
+                break;
+            }
+        }
+    }
+    job.cursor += u32::try_from(done).unwrap_or(0);
+    if job.cursor as usize >= last {
+        // Every member but the head has been through this stage.
+        if stage == WRITES {
+            (job.part, job.cursor) = (CHECKS, 0);
+        } else {
+            (job.part, job.cursor) = (0, u32::try_from(last).unwrap_or(0));
+        }
+    }
+    (done, failure)
 }
 
 async fn write_one<S: NamespaceStore>(

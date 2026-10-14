@@ -25,6 +25,13 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Fixed
 
+- `ReadAccess::recover_completed_fork` now recovers a Done fork whose reservation
+  was deleted by outcome acknowledgement or whose replay row was pruned after
+  envelope expiry. The Done job is committed atomically with both rows and stays
+  authoritative: its result and settle identity are still matched exactly against
+  the caller's identity, the authority and namespace checks are unchanged, and a
+  row that is still present must agree with the job or recovery fails closed. No
+  wire or stored-format change; no wipe.
 - Scheduled indexed extraction boxes each stage future so nested backend reads
   leave room for frame decoding on a small stack. The 50-hop quota-boundary
   regression retains its 512 KiB stack, and a native future-size guard covers the
@@ -51,6 +58,37 @@ collect the applicable entries between their old and new immutable pins.
   change; no wipe. See the
   [request write rounds](docs/operations/request-write-rounds.md) probe.
 
+- A fork copies the source's index partitions in waves of up to six instead of
+  one at a time, and reads larger pages (500 rows, or 256 where holders are
+  copied; they were 64 with extraction). The Copy phase of a 500-file fork takes
+  about 9 serial rounds instead of 35, a 3,000-file fork about 15 instead of 112,
+  and a 10,000-file fork now finishes in one slice (35 rounds) instead of three
+  (340). A page with more holder candidates than one wave may copy resumes inside
+  the page. Index rows, holders, checks, failure order and budgets are unchanged:
+  a wave reports the first failing partition in order, and one that spends the
+  slice keeps no progress. [embedder: stored-format change] [embedder: breaking
+  API] The fork job row gains one copy cursor per partition (`lanes`, of the new
+  `CopyLane`), and `part` and `after` no longer carry the copy cursor. A job
+  started by an earlier build cannot be decoded: finish it before upgrading or
+  discard it; no store reset otherwise. Code that builds a `ForkJobV1` literal
+  adds `lanes: Vec::new()`; reading jobs through `decode_job` needs no change.
+  No wire change.
+
+- A fork takes fewer serial storage rounds. Without pack-level takedown denial it
+  skips the closure walk and writes no cleared set (nothing read it; enabling
+  denial later makes the first advance of such a destination a full walk, slower
+  but equally strict, and bound by the usual per-advance item capacity). A plan that fits one slice is computed once, before
+  admission, and carried into the job, which refuses it unless the source
+  still publishes the same tip, packmap head and membership generation; the
+  first proof of each pack after admission now precedes its membership write, so
+  a takedown landing in that gap fails the fork after registration like any
+  later refusal. Without denial, and where the store reports a known read
+  allowance, planning reads up to six packs at once and publication writes and
+  proves the members other than the head in waves, then writes the head last.
+  A 500-file fork of a two-commit source takes 101 rounds instead of 142 and
+  a 3,000-file one 178 instead of 219. New additive API: `fork::plan_fork`,
+  `fork::ForkPlan` and `fork::start_planned` (`start_with` and `plan_bytes`
+  are unchanged). No wire or stored-format change; no wipe.
 - The reachability walk behind object reads now expands trees first and then
   alternates history with a small, doubling file batch, instead of locating every
   file entry of a tree before following any commit parent. Reading an older

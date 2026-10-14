@@ -1938,7 +1938,7 @@ nothing the authorized reader does not see. `resource_exhausted`
 implementation (1,024 packs, 16,384 index rows, 8,000 ids in a working set,
 2,048 unresolved external-base ids and 1,800 per pack, 262,144 source index
 rows scanned) was exceeded. A refusal found before the destination is
-registered (planning, the cleared-set walk, the emptiness and scan-size checks
+registered (planning, the cleared-set walk where it runs, the emptiness and scan-size checks
 that precede registration, a proof too large for one slice) deletes the job, leaves nothing
 else behind (a timer already scheduled ends on its next fire) and lets the
 same request be retried; one found later (a takedown after planning, a moved
@@ -1960,7 +1960,17 @@ and a visibility the owner declared for the name before it existed stands
 
 **Job.** The fork is a durable job in the destination's coordinator, advanced
 in slices of at most 600 storage calls by the request that started it and
-then by the fork timer (timer kind 16). Every effect is repeatable (a put of
+then by the fork timer (timer kind 16). The pack set is planned once before
+admission, which charges its exact bytes; when that plan fits one slice it is
+carried into the job, which then begins after its planning phase. The carry is
+used only if the source still publishes the pair it was computed from: the
+tip, the packmap head and the membership generation are read again at the start
+and any difference is `failed_precondition` `source tip changed`. A plan that
+does not fit one slice is made again by the job. The plan proved every pack before admission; the first proof after admission
+is then the one that precedes each pack's membership write, so a takedown that
+lands in between fails the fork after registration, by the abandoned-destination
+rule above. Without pack-level denial the plan reads the next packs of the set
+together (at most six at once), merging them in order. Every effect is repeatable (a put of
 the same value, or a holder write that only raises a sequence), so a crash or
 a lost reply at any write resumes by repeating the state's slice. Order of effects: the destination is registered first (a
 takedown sweep enumerates the registry, so every destination that holds
@@ -1971,7 +1981,14 @@ extracted objects the source holds are held by the destination; and published
 membership is written last, packmap head last of all. Membership of a forked
 pack is published, generation 0, sequence 0. No ref is written. Each pack is two units, the write
 (proof, rows) and the check after it, so a unit costs one proof; a pack whose
-proof cannot fit a slice is refused during planning. The write's deadline is
+proof cannot fit a slice is refused during planning. On a deployment without
+pack-level denial whose store reports a known read allowance, the units
+overlap: the members other than the head are written together in waves of at
+most six, then proved again in waves, and the packmap head is written and
+proved last, alone, after every other member write; a failure is the first one
+in pack order, and a wave's slice budget is reserved before it starts. A
+deployment with denial, or a store with an unknown allowance, writes and proves
+each pack in turn. The write's deadline is
 stamped when it is made: the check after it, not the age of the proof, is what
 closes the window between proof and write. Before each
 membership write the server re-reads the source's published value and
@@ -1995,9 +2012,12 @@ cost of the proof does not depend on the pack's size; with descriptors it
 grows with the pack's tree and manifest rows per descriptor, as in the full
 proof.
 
-**Cleared set and publication boundary.** The fork records, in the
+**Cleared set and publication boundary.** On a deployment with pack-level
+takedown denial (§14.2), the fork records, in the
 destination's coordinator, the commits and trees of the closure of `T`
-(cleared set) and the inherited external-base packs, and flags the
+(cleared set) and the inherited external-base packs; a deployment without it
+builds neither, since nothing reads them, and skips the walk that would. The
+fork always flags the
 destination's membership witness for `M` (a twentieth byte equal to 1 after
 the nineteen-byte witness; every other witness is unchanged). A publication
 walk (§10.2) that reads the flag while walking the packmap chain, on a
@@ -2022,7 +2042,15 @@ copied, and:
 - a takedown that supersedes or blocks a pack of the chain stops every pair
   that lists it, so the cleared set cannot outlive the packs it describes; a
   rewritten chain that no longer contains the flagged head gets the full walk;
-- a repository that was never forked carries no flag and reads nothing extra.
+- a repository that was never forked carries no flag and reads nothing extra;
+- a destination flagged by a fork that built no cleared set has none to load:
+  if denial is enabled later, a publication walk that reads the flag finds no
+  cleared objects and no recorded base packs, so it visits every object and
+  discovers every external base itself. That first advance is slower and
+  exactly as strict, since the denial proof covers every pack the walk reaches.
+  It is also bound by the walk's usual per-advance item capacity, so a
+  deployment that may enable denial later and forks repositories whose closure
+  exceeds that capacity should fork with denial on.
 
 **Request.** `ForkRequest` names the source repository, the branch
 `refs/heads/<x>`, the `expected_tip` (required) and the destination
@@ -5030,6 +5058,7 @@ client-visible error contract.
 | Version | Status | Change |
 |---|---|---|
 | 1 | draft | The membership-lag `unavailable` (§9.4, §9.7) carries an empty `MembershipNotVisible` detail; code, message and status are unchanged. Additive; no stored-format change. |
+| 1 | draft | Fork job rounds (§9.9): a deployment without pack-level denial builds no cleared set (a later switch to denial takes a full first walk); the pre-admission plan is carried into the job when it fits one slice, after an equality check of the source pair; and independent pack units of planning and publication overlap in waves, the packmap head last. No wire, stored-row or response change. |
 | 1 | draft | Embedded dispatch for a fork (§9.9): a typed in-process entry that authenticates, runs the deployment guard, recognises a completed replay with fail-closed evidence and runs the embedder's pre-dispatch policy before `fork_repo`. Additive API; no wire change, no stored-row change. |
 | 1 | draft | Document scoped heavy extraction regression scheduling in §20; no runtime, wire, or conformance requirement change. |
 | 1 | draft | Server-side fork (§9.9): a durable, resumable job that gives an empty destination the published membership of one source branch (packmap chain, listed packs and external-base packs), the cleared set and the flagged packmap head that bound later publication walks, and admission bound to the job. Additive: witness boundary flag (`m`/`pm` value of 20 bytes), `fj` and `fo` rows, timer kind 16, `Procedure::Fork`; the embedder-facing `ForkRequest` with its canonical signed body, `Pipeline::fork_repo`, the source-read and destination-write authorization, a hard-bound admission charge, and additive hook fields (`Operation.fork`, `AdmitRequest.fork`). No Connect wire change; no stored-row version change. |
@@ -5204,6 +5233,7 @@ These queries route through the configured shard map and never return encoded ro
 Callers retain repository authorization, their own policy journal, and final disclosure checks.
 Existing authorized pipeline readers keep uniform absence and their final guards.
 A visibility revision compares stored observations; it is not a monotonic policy journal.
-Fork recovery checks original replay and reservation evidence without authenticating an expired envelope.
+Fork recovery trusts the Done job, which is committed atomically with its replay and reservation rows, and checks the caller's identity against it without authenticating an expired envelope.
+A replay or reservation row that is still present must match the job; a row removed by outcome acknowledgement or replay expiry is accepted as absent.
 The caller verifies current destination authority and its trusted retained landing evidence.
 This additive surface changes no wire or stored format and requires no reset.

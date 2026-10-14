@@ -126,6 +126,10 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
     /// This does not authenticate an expired envelope, admit work, read the source,
     /// publish refs, or run effects. Missing, pending, and failed jobs return `None`.
     /// All evidence is read afresh, with replay and reservation in one batch.
+    /// The Done job, committed atomically with both rows, is authoritative:
+    /// outcome acknowledgement deletes the reservation and the replay row is
+    /// pruned after envelope expiry, so either or both may be absent. A row
+    /// that is present must still match the job and the supplied identity.
     /// This query accepts authority-fenced owner admissions with no quota charges,
     /// grant, or namespace cap. A fork that created its destination namespace is
     /// accepted too: namespace creation changes neither the reservation nor the
@@ -138,7 +142,7 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
     /// retries use `Pipeline::fork_repo`.
     ///
     /// # Errors
-    /// Conflicting, corrupt, incomplete, or pruned completion evidence fails closed.
+    /// Conflicting, corrupt, or incomplete completion evidence fails closed.
     pub async fn recover_completed_fork(
         &self,
         spec: &ForkSpec,
@@ -170,35 +174,43 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
             .get_many(&self.shards.coordinator(&spec.dest.namespace), &wanted)
             .await
             .map_err(|_| failure())?;
+        // The Done job was committed atomically with both rows, so it is
+        // authoritative. Outcome acknowledgement deletes the reservation and
+        // the replay row is pruned after envelope expiry, so either may be
+        // absent. A row that is present must still agree exactly.
         let (replay_row, reservation_row) = match rows.as_slice() {
-            [Some(replay), Some(reservation)] if !creates_namespace => (replay, reservation),
-            [Some(replay), Some(reservation), Some(namespace)] if creates_namespace => {
+            [replay, reservation] if !creates_namespace => (replay, reservation),
+            [replay, reservation, Some(namespace)] if creates_namespace => {
                 codec::decode_namespace_record(namespace).map_err(|_| failure())?;
                 (replay, reservation)
             }
             _ => return Err(failure()),
         };
-        let replay = codec::decode_replay_record(replay_row).map_err(|_| failure())?;
-        if replay.fingerprint != original.fingerprint
-            || replay.expires_at_ms != original.expires_at_ms
-            || replay.state != ReplayState::Committed(StoredResult::Fork)
-        {
-            return Err(failure());
+        if let Some(replay_row) = replay_row {
+            let replay = codec::decode_replay_record(replay_row).map_err(|_| failure())?;
+            if replay.fingerprint != original.fingerprint
+                || replay.expires_at_ms != original.expires_at_ms
+                || replay.state != ReplayState::Committed(StoredResult::Fork)
+            {
+                return Err(failure());
+            }
         }
-        match codec::decode_reservation(reservation_row).map_err(|_| failure())? {
-            codec::ReservationV1::Committed {
-                repository: committed_repo,
-                bytes_stored,
-                new_to_repo,
-                new_to_store: 0,
-                refs,
-                procedure: codec::StoredProcedure::Fork,
-                ..
-            } if committed_repo == repository
-                && bytes_stored == result.pack_bytes
-                && new_to_repo == result.pack_bytes
-                && refs.is_empty() => {}
-            _ => return Err(failure()),
+        if let Some(reservation_row) = reservation_row {
+            match codec::decode_reservation(reservation_row).map_err(|_| failure())? {
+                codec::ReservationV1::Committed {
+                    repository: committed_repo,
+                    bytes_stored,
+                    new_to_repo,
+                    new_to_store: 0,
+                    refs,
+                    procedure: codec::StoredProcedure::Fork,
+                    ..
+                } if committed_repo == repository
+                    && bytes_stored == result.pack_bytes
+                    && new_to_repo == result.pack_bytes
+                    && refs.is_empty() => {}
+                _ => return Err(failure()),
+            }
         }
         let status = status(&job);
         Ok(Some(RecoveredFork {
@@ -436,6 +448,7 @@ mod tests {
             cursor: 0,
             deps: Vec::new(),
             part: 0,
+            lanes: Vec::new(),
             after: None,
             scanned: 1,
             copied: 1,
@@ -563,11 +576,13 @@ mod tests {
                 );
                 let mut job = job(&spec);
                 write_job(&store, shards, &spec, &job).await;
+                // Both rows absent (acknowledged and pruned): the Done job suffices.
                 assert!(
                     reads
                         .recover_completed_fork(&spec, &original)
                         .await
-                        .is_err()
+                        .unwrap()
+                        .is_some()
                 );
                 settle(&store, shards, &spec).await;
                 let recovered = reads
@@ -623,6 +638,179 @@ mod tests {
                 job.phase = Phase::Copy;
                 job.result = None;
                 write_job(&store, shards, &spec, &job).await;
+                assert!(
+                    reads
+                        .recover_completed_fork(&spec, &original)
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn recovery_survives_acknowledged_and_expired_rows_but_not_contradictions() {
+        futures_executor::block_on(async {
+            for shards in [&SinglePartition as &dyn ShardMap, &D34Shards] {
+                let spec = spec();
+                let original = original();
+                let coordinator = shards.coordinator(&spec.dest.namespace);
+                let rows = [
+                    (keys::replay(&original.scope), "replay"),
+                    (keys::reservation("reservation").unwrap(), "reservation"),
+                ];
+                // Each subset of deleted rows still recovers the same result.
+                for mask in 0..4_u8 {
+                    let store = MemoryKv::default();
+                    let job = job(&spec);
+                    write_job(&store, shards, &spec, &job).await;
+                    settle(&store, shards, &spec).await;
+                    let mut batch = Batch::new();
+                    for (bit, (key, _)) in rows.iter().enumerate() {
+                        if mask & (1 << bit) != 0 {
+                            batch = batch.delete(key.clone());
+                        }
+                    }
+                    store.apply(&coordinator, batch).await.unwrap();
+                    let reads = ReadAccess::new(&store, shards, RepoVisibility::Public, true);
+                    let recovered = reads
+                        .recover_completed_fork(&spec, &original)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(Some(recovered.result), job.result);
+                    assert_eq!(recovered.reservation.id, "reservation");
+                    // Another caller's identity is refused the same way with or
+                    // without the rows.
+                    let other = ForkReplayIdentity {
+                        scope: [8; 32],
+                        ..original.clone()
+                    };
+                    assert!(reads.recover_completed_fork(&spec, &other).await.is_err());
+                    let wrong = ForkReplayIdentity {
+                        fingerprint: [9; 32],
+                        ..original.clone()
+                    };
+                    assert!(reads.recover_completed_fork(&spec, &wrong).await.is_err());
+                }
+                // A present reservation that is not the committed settlement, or
+                // that names another rid's outcome, fails closed.
+                let dest = identity(&spec.dest);
+                for contradicting in [
+                    codec::ReservationV1::pending(
+                        dest.clone(),
+                        0,
+                        1,
+                        codec::PendingOp::Write,
+                        codec::StoredProcedure::Fork,
+                    ),
+                    codec::ReservationV1::committed(
+                        dest.clone(),
+                        1,
+                        11,
+                        11,
+                        0,
+                        Vec::new(),
+                        codec::StoredProcedure::Fork,
+                    ),
+                ] {
+                    let store = MemoryKv::default();
+                    write_job(&store, shards, &spec, &job(&spec)).await;
+                    store
+                        .apply(
+                            &coordinator,
+                            Batch::new().put(
+                                keys::reservation("reservation").unwrap(),
+                                codec::encode_reservation(&contradicting),
+                            ),
+                        )
+                        .await
+                        .unwrap();
+                    let reads = ReadAccess::new(&store, shards, RepoVisibility::Public, true);
+                    assert!(
+                        reads
+                            .recover_completed_fork(&spec, &original)
+                            .await
+                            .is_err()
+                    );
+                }
+                // A job whose settle identity differs from the caller's fails even
+                // when both rows are absent.
+                let store = MemoryKv::default();
+                let mut other = job(&spec);
+                other.settle.as_mut().unwrap().rid = String::new();
+                write_job(&store, shards, &spec, &other).await;
+                let reads = ReadAccess::new(&store, shards, RepoVisibility::Public, true);
+                assert!(
+                    reads
+                        .recover_completed_fork(&spec, &original)
+                        .await
+                        .is_err()
+                );
+                // A non-empty rid with no rows is accepted and reported, so the
+                // caller must compare `reservation.id` with its retained evidence;
+                // a present, mismatching reservation under that rid still fails.
+                let store = MemoryKv::default();
+                let mut renamed = job(&spec);
+                renamed.settle.as_mut().unwrap().rid = "other".into();
+                write_job(&store, shards, &spec, &renamed).await;
+                let reads = ReadAccess::new(&store, shards, RepoVisibility::Public, true);
+                let recovered = reads
+                    .recover_completed_fork(&spec, &original)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(recovered.reservation.id, "other");
+                store
+                    .apply(
+                        &coordinator,
+                        Batch::new().put(
+                            keys::reservation("other").unwrap(),
+                            codec::encode_reservation(&codec::ReservationV1::committed(
+                                dest.clone(),
+                                1,
+                                11,
+                                11,
+                                0,
+                                Vec::new(),
+                                codec::StoredProcedure::Fork,
+                            )),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+                assert!(
+                    reads
+                        .recover_completed_fork(&spec, &original)
+                        .await
+                        .is_err()
+                );
+                // Namespace-creating fork: both rows absent recovers; the namespace
+                // record is still required.
+                let store = MemoryKv::default();
+                write_job(&store, shards, &spec, &creating(&spec)).await;
+                let reads = ReadAccess::new(&store, shards, RepoVisibility::Public, true);
+                assert!(
+                    reads
+                        .recover_completed_fork(&spec, &original)
+                        .await
+                        .is_err()
+                );
+                put_namespace(&store, shards, &spec).await;
+                assert!(
+                    reads
+                        .recover_completed_fork(&spec, &original)
+                        .await
+                        .unwrap()
+                        .is_some()
+                );
+                // A non-Done job still reports nothing.
+                let mut pending = job(&spec);
+                pending.phase = Phase::Copy;
+                pending.result = None;
+                write_job(&store, shards, &spec, &pending).await;
                 assert!(
                     reads
                         .recover_completed_fork(&spec, &original)
@@ -849,14 +1037,13 @@ mod tests {
         fn replay(job: &mut ForkJobV1) -> &mut ReplayV1 {
             job.settle.as_mut().unwrap().replay.as_mut().unwrap()
         }
-        let job_mutations: [Mutation; 10] = [
+        let job_mutations: [Mutation; 9] = [
             |job| job.fence.as_mut().unwrap().grant_epoch = Some(1),
             |job| job.fence.as_mut().unwrap().authority_generation = None,
             |job| replay(job).scope = [9; 32],
             |job| replay(job).fingerprint = [9; 32],
             |job| replay(job).expires_at_ms += 1,
             |job| job.settle.as_mut().unwrap().replay = None,
-            |job| job.settle.as_mut().unwrap().rid = "other".into(),
             |job| job.settle.as_mut().unwrap().repository.push('x'),
             |job| job.settle.as_mut().unwrap().declared_bytes = 9,
             |job| {
@@ -940,7 +1127,8 @@ mod tests {
                             .is_err()
                     );
                 }
-                // A missing replay or reservation row, with the namespace present.
+                // A missing replay or reservation row (acknowledged or expired) is accepted,
+                // with the namespace present.
                 for missing in [
                     keys::replay(&original().scope),
                     keys::reservation("reservation").unwrap(),
@@ -961,7 +1149,8 @@ mod tests {
                         reads
                             .recover_completed_fork(&spec, &original())
                             .await
-                            .is_err()
+                            .unwrap()
+                            .is_some()
                     );
                 }
                 // Replay records that are not the committed original.

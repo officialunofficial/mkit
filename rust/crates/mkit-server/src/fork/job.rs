@@ -66,6 +66,27 @@ pub async fn start_with<S: NamespaceStore>(
     settle: Option<SettleV1>,
     fence: Option<FenceV1>,
 ) -> Result<StartOutcome, ForkError> {
+    start_planned(env, spec, settle, fence, None).await
+}
+
+/// [`start_with`] carrying the plan [`plan_fork`] computed for the same request.
+///
+/// A job created with a plan begins after its Plan phase. The plan is used
+/// only if the source still publishes the pair it was computed from: the
+/// tip, the packmap head and the membership generation are read again here
+/// and any difference refuses the fork like a moved tip. Every other check
+/// of [`start_with`] runs as before, and the pack proofs the Plan phase would
+/// repeat next run at Publish.
+///
+/// # Errors
+/// [`ForkError`].
+pub async fn start_planned<S: NamespaceStore>(
+    env: &ForkEnv<'_, S>,
+    spec: &ForkSpec,
+    settle: Option<SettleV1>,
+    fence: Option<FenceV1>,
+    planned: Option<ForkPlan>,
+) -> Result<StartOutcome, ForkError> {
     // A map that cannot list its index shards cannot be forked from or into.
     if env.shards.object_index_partitions(&spec.source).is_empty()
         || env.shards.object_index_partitions(&spec.dest).is_empty()
@@ -95,7 +116,7 @@ pub async fn start_with<S: NamespaceStore>(
     require_unregistered(env, &spec.dest).await?;
     let now = env.now();
     check_request(env, &p, now, settle.as_ref(), fence.as_ref()).await?;
-    let job = new_job(
+    let mut job = new_job(
         spec,
         &view,
         now,
@@ -107,6 +128,9 @@ pub async fn start_with<S: NamespaceStore>(
         }),
         fence,
     );
+    if let Some(planned) = planned {
+        planned.carry(&view, &mut job)?;
+    }
     launch(env, &p, job, settle.as_ref()).await
 }
 
@@ -143,6 +167,7 @@ fn new_job(
         cursor: 0,
         deps: Vec::new(),
         part: 0,
+        lanes: Vec::new(),
         after: None,
         scanned: 0,
         copied: 0,
@@ -153,18 +178,62 @@ fn new_job(
     }
 }
 
-/// The bytes a fork of `spec` would inherit, summed from the pack set of the
-/// source's published value: what admission is charged for. The pack set
-/// is fixed by the tip the request pins (sealed inventories are immutable), so
-/// this is the number the job's own plan reaches. `None` when the plan does
-/// not fit one slice, in which case the caller falls back to an upper bound.
+/// The pack set a fork of one request inherits, computed before admission
+/// and the pair of the source's published value it was computed from.
+///
+/// It is carried into the job by [`start_planned`], so the job does not plan
+/// the same set again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForkPlan {
+    pub(super) packmap: mkit_core::hash::Hash,
+    pub(super) generation: u64,
+    pub(super) packs: Vec<PackRow>,
+}
+
+impl ForkPlan {
+    /// The bytes the fork inherits: what admission is charged for.
+    #[must_use]
+    pub fn bytes(&self) -> u64 {
+        self.packs.iter().map(|p| p.len).sum()
+    }
+
+    /// Begin `job` after its Plan phase, if the source still publishes the
+    /// pair this plan was computed from.
+    pub(super) fn carry(
+        self,
+        view: &plan::SourceView,
+        job: &mut ForkJobV1,
+    ) -> Result<(), ForkError> {
+        if view.packmap != self.packmap || view.generation != self.generation {
+            return Err(ForkError::TipChanged);
+        }
+        job.packs = self.packs;
+        // The Plan phase's own bound: admission charged exactly these bytes.
+        if job
+            .settle
+            .as_ref()
+            .is_some_and(|s| job.pack_bytes() > s.declared_bytes)
+        {
+            return Err(ForkError::Quota(super::OVER_ADMITTED));
+        }
+        job.phase = Phase::Trees;
+        job.cursor = 0;
+        job.deps.clear();
+        Ok(())
+    }
+}
+
+/// The pack set a fork of `spec` would inherit, from the pack set of the
+/// source's published value. The set is fixed by the tip the request pins
+/// (sealed inventories are immutable). `None` when the plan does not fit one
+/// slice, in which case the job plans it itself.
 ///
 /// # Errors
 /// The refusals of [`start`] that concern the source.
-pub async fn plan_bytes<S: NamespaceStore>(
+pub async fn plan_fork<S: NamespaceStore>(
     env: &ForkEnv<'_, S>,
     spec: &ForkSpec,
-) -> Result<Option<u64>, ForkError> {
+) -> Result<Option<ForkPlan>, ForkError> {
     let view = plan::read_source(
         env.store,
         env.shards,
@@ -175,9 +244,25 @@ pub async fn plan_bytes<S: NamespaceStore>(
     .await?;
     let mut scratch = new_job(spec, &view, env.now(), None, None);
     let budget = SliceBudget::new(SLICE_CALLS);
-    Ok(plan::slice(env, &mut scratch, &budget)
-        .await?
-        .then(|| scratch.pack_bytes()))
+    let complete = plan::slice(env, &mut scratch, &budget).await?;
+    Ok(complete.then_some(ForkPlan {
+        packmap: view.packmap,
+        generation: view.generation,
+        packs: scratch.packs,
+    }))
+}
+
+/// The bytes a fork of `spec` would inherit: what admission is charged for,
+/// the number the job's own plan reaches. `None` when the plan does not fit
+/// one slice, in which case the caller falls back to an upper bound.
+///
+/// # Errors
+/// The refusals of [`start`] that concern the source.
+pub async fn plan_bytes<S: NamespaceStore>(
+    env: &ForkEnv<'_, S>,
+    spec: &ForkSpec,
+) -> Result<Option<u64>, ForkError> {
+    Ok(plan_fork(env, spec).await?.as_ref().map(ForkPlan::bytes))
 }
 
 /// Creation attempts: the charge is planned against the quota rows as they
@@ -356,7 +441,7 @@ pub(super) async fn require_empty<S: NamespaceStore>(
         let debits = layers.saturating_mul(2).saturating_add(1);
         let cap = usize::try_from(env.store.read_call_allowance().unwrap_or(0) / debits)
             .unwrap_or(6)
-            .clamp(1, 6);
+            .clamp(1, super::WAVE_WIDTH);
         let (wave, rest) = pending.split_at(pending.len().min(cap));
         pending = rest;
         let mut first_reservation = Some(first_reservation);
@@ -579,7 +664,15 @@ async fn advance<S: NamespaceStore>(
         Phase::Trees => {
             let (batch, done) = closure::trees(env, job, budget).await?;
             if done {
-                job.phase = Phase::Walk;
+                // The walk builds the cleared set, which only a deployment
+                // with pack-level denial honors: without denial nothing reads
+                // it, so no set is built (and a later switch to denial pays a
+                // full first walk instead).
+                job.phase = if env.takedown_denial {
+                    Phase::Walk
+                } else {
+                    Phase::Register
+                };
                 job.cursor = 0;
             }
             Ok(batch)
