@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 mod waves;
-#[cfg(not(feature = "perf-metrics"))]
+#[cfg(any(not(feature = "perf-metrics"), test))]
 pub(crate) use waves::require_clear_many;
 #[cfg(feature = "perf-metrics")]
 pub(crate) use waves::require_clear_many_observed;

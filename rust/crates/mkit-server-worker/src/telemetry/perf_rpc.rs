@@ -72,8 +72,8 @@ impl Call {
             _ => "other",
         };
         let op = match op {
-            "get" | "get_many" | "scan" | "scan_many" | "apply" | "stats" | "probe" | "export"
-            | "test_snapshot" | "test_import" => op,
+            "ping" | "get" | "get_many" | "scan" | "scan_many" | "apply" | "stats" | "probe"
+            | "export" | "test_snapshot" | "test_import" => op,
             _ => "other",
         };
         Self {
@@ -282,6 +282,49 @@ mod tests {
         let direct = Call::new("secret-namespace", "credential-value", 0);
         assert_eq!(direct.prefix, "other");
         assert_eq!(direct.op, "other");
+    }
+
+    #[test]
+    fn activation_ping_uses_profiled_transport_without_changing_its_wire_body() {
+        use crate::naming::DoTarget;
+        use crate::ns_client::{DoNamespaceStore, NsTransport};
+        use crate::wire::NsRequest;
+        use mkit_server::{NamespaceKey, StoreError};
+
+        struct Transport;
+        impl NsTransport for Transport {
+            async fn call(
+                &self,
+                _: &DoTarget,
+                _: &'static str,
+                _: String,
+            ) -> Result<String, StoreError> {
+                panic!("activation ping must use the profiled path");
+            }
+            async fn call_profiled(
+                &self,
+                _: &DoTarget,
+                op: &'static str,
+                body: String,
+                prefix: &'static str,
+                count: usize,
+            ) -> Result<String, StoreError> {
+                let request: NsRequest = serde_json::from_str(&body).unwrap();
+                assert!(matches!(request.call, NsCall::Ping));
+                assert_eq!(serde_json::to_string(&request).unwrap(), body);
+                let record = Call::new(prefix, op, count);
+                assert_eq!((record.prefix, record.op, record.count), ("ri:", "ping", 0));
+                Ok(serde_json::to_string(&NsReply::Ok).unwrap())
+            }
+        }
+        let partition = Partition::RepoIndex {
+            ns: NamespaceKey::deployment_default(),
+            repo: mkit_server::RepoName::new("warmup-fixture").unwrap(),
+            prefix: 0,
+        };
+        let store = DoNamespaceStore::new(Transport, partition.clone())
+            .with_budget(mkit_server::indexed::budget::SliceBudget::new(0));
+        futures::executor::block_on(store.ping(&partition)).unwrap();
     }
 
     #[derive(Debug, Clone, Default)]

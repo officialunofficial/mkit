@@ -91,6 +91,11 @@ This top-four selection is biased toward slow calls and is not a random sample.
 `ri:` names the repository-index kind; its existing routing name starts with
 `i:`. Only the kind is logged, never that routing name. Missing reply metadata
 is `null`, including transport failures and a build without the feature.
+Repository-index activation hints use `op = ping`, their partition prefix, and
+`count = 0`. Filter these calls separately from ordinary storage operations.
+They share the same summary windows and top-four retention; no extra row is
+emitted for a warm-up. A warm-up can consume the first-HTTP-request cold flag.
+
 
 The internal request header `x-mkit-perf: 1` asks the object for numeric reply
 metadata. The response header carries, in order, inside milliseconds, cold

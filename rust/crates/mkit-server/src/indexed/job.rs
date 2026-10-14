@@ -2281,10 +2281,13 @@ where
             let mut batch = Batch::new().require(Precondition::NotAfter(self.deadline()));
             #[cfg(feature = "perf-metrics")]
             let denial_timer = components.timer(2);
-            let ids = self.remote.enabled_ids(direct.puts.iter().filter_map(|(key, _)| match keys::parse(key) {
-                Some(keys::ParsedKey::ObjectIndex { object, .. }) => Some(object),
-                _ => None,
-            }));
+            let ids =
+                self.remote.enabled_ids(direct.puts.iter().filter_map(
+                    |(key, _)| match keys::parse(key) {
+                        Some(keys::ParsedKey::ObjectIndex { object, .. }) => Some(object),
+                        _ => None,
+                    },
+                ));
             #[cfg(not(feature = "perf-metrics"))]
             let clear = crate::takedown::denial::require_clear_many(self.remote, ids).await;
             #[cfg(feature = "perf-metrics")]

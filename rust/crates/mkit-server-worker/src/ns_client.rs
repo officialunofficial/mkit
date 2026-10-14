@@ -216,7 +216,19 @@ impl<T: NsTransport> DoNamespaceStore<T> {
         let target = do_target(p)?;
         let body = serde_json::to_string(&NsRequest::new(p, NsCall::Ping)?)
             .map_err(|e| backend_error(StorageOp::RequestSerialize, e))?;
+        #[cfg(not(feature = "perf-metrics"))]
         let reply = self.transport.call(&target, "ping", body).await?;
+        #[cfg(feature = "perf-metrics")]
+        let reply = self
+            .transport
+            .call_profiled(
+                &target,
+                "ping",
+                body,
+                crate::telemetry::perf_rpc::prefix(p),
+                0,
+            )
+            .await?;
         match serde_json::from_str::<NsReply>(&reply) {
             Ok(NsReply::Ok) => Ok(()),
             _ => Err(StoreError::unavailable("index warm-up failed")),
