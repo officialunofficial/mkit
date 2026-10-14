@@ -582,7 +582,12 @@ async fn before_get_read_gate(
 #[test]
 fn repository_index_prewake_models_cold_reads_and_warm_rounds() {
     let shape = shape(11, 8, true, |_| 1);
-    for op in [Op::ReadGate, Op::Show { sizes: true }, Op::CanonicalLog(10)] {
+    for op in [
+        Op::ReadGate,
+        Op::GetReadGate,
+        Op::Show { sizes: true },
+        Op::CanonicalLog(10),
+    ] {
         shape.fx.pipe.meta.prewake.store(false, Ordering::SeqCst);
         let before = measure_latency(&shape, true, op, 40, Some(400), true);
         shape.fx.pipe.meta.prewake.store(true, Ordering::SeqCst);
@@ -595,7 +600,12 @@ fn repository_index_prewake_models_cold_reads_and_warm_rounds() {
         let after = measure_latency(&shape, true, op, 40, Some(400), true);
         assert_eq!((before.1, before.2), (after.1, after.2));
         assert_eq!(shape.fx.pipe.meta.warm_calls.swap(0, Ordering::SeqCst), 16);
-        assert!(after.0 < before.0);
+        if matches!(op, Op::GetReadGate) {
+            // This pack gate touches one index shard; overlap preserves its latency.
+            assert_eq!(after.0, before.0);
+        } else {
+            assert!(after.0 < before.0);
+        }
         println!(
             "PREWAKE_COLD op={op:?} before_ms={:.0} after_ms={:.0} warmup_calls=16 KV={} GET={}",
             before.0 * 40.0,
