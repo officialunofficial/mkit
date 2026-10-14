@@ -255,7 +255,11 @@ fn key_param(key: &Key) -> SqlValue {
     SqlValue::Blob(key.as_bytes().to_vec())
 }
 
-fn read<C: SqlConn>(conn: &C, part: &SqlValue, key: &Key) -> Result<Option<Value>, SqlError> {
+pub(super) fn read<C: SqlConn>(
+    conn: &C,
+    part: &SqlValue,
+    key: &Key,
+) -> Result<Option<Value>, SqlError> {
     let mut rows = conn.query(GET, &[part.clone(), key_param(key)])?;
     rows.first_mut()
         .map(|row| blob(row, 0).map(Value::new))
@@ -308,8 +312,26 @@ fn check_preconditions<C: SqlConn>(
 fn check_and_write_extended<C: SqlConn, F>(
     conn: &C,
     part: &SqlValue,
+    batch: Batch,
+    soft_limit: Option<u64>,
+    extend: F,
+) -> Result<BatchOutcome, SqlError>
+where
+    F: FnOnce(
+        &dyn Fn(&Key) -> Result<Option<Value>, SqlError>,
+        &mut Batch,
+        u64,
+    ) -> Result<(), SqlError>,
+{
+    check_and_write_extended_admitted(conn, part, batch, soft_limit, None, extend)
+}
+
+pub(super) fn check_and_write_extended_admitted<C: SqlConn, F>(
+    conn: &C,
+    part: &SqlValue,
     mut batch: Batch,
     soft_limit: Option<u64>,
+    admitted: Option<mkit_server::store::adapter_spi::publication_fence::Generation>,
     extend: F,
 ) -> Result<BatchOutcome, SqlError>
 where
@@ -342,6 +364,7 @@ where
         .validate(&StoreCapabilities::full())
         .map_err(|_| SqlError::Corrupt("extended batch exceeds limits"))?;
     super::publication_maintenance::reject_paused_writes(conn, part, &batch)?;
+    super::relay_admission::validate(conn, part, &batch, admitted)?;
     let SqlValue::Blob(encoded_partition) = part else {
         return Err(SqlError::Corrupt("invalid publication fence partition"));
     };

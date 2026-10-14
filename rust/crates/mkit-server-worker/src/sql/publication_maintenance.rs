@@ -1,6 +1,6 @@
 //! Local durable publication-maintenance barriers, outside portable KV export.
 //! These receipts prove a local pause only, never inventory completeness or
-//! permission to seal a publication root. No resume path is installed yet.
+//! permission to seal a publication root. Target admission provides guarded resume.
 use super::{SqlConn, SqlError, SqlKvStore, SqlValue};
 use mkit_server::store::adapter_spi::publication_fence::Generation;
 use mkit_server::{Partition, StoreError};
@@ -13,7 +13,7 @@ const PUT: &str = "INSERT INTO mkit_publication_pause (part, generation) VALUES 
 const MAX_GENERATION_BYTES: usize = 512;
 const MAX_PARTITION_BYTES: usize = 4 * 1024;
 
-fn encoded_generation(generation: &Generation) -> Result<Vec<u8>, SqlError> {
+pub(super) fn encoded_generation(generation: &Generation) -> Result<Vec<u8>, SqlError> {
     let mut value = vec![1];
     value.extend(
         serde_json::to_vec(generation)
@@ -24,7 +24,7 @@ fn encoded_generation(generation: &Generation) -> Result<Vec<u8>, SqlError> {
     }
     Ok(value)
 }
-fn read<C: SqlConn>(conn: &C, part: &SqlValue) -> Result<Option<Generation>, SqlError> {
+pub(super) fn read<C: SqlConn>(conn: &C, part: &SqlValue) -> Result<Option<Generation>, SqlError> {
     if conn.query(TABLE_PRESENT, &[])?.is_empty() {
         return Ok(None);
     }

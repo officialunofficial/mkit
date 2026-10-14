@@ -15,6 +15,11 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Changed
 
+- Add opt-in permanent SQL relay admission outside portable KV exports.
+  Admitted RefIndex partitions reject legacy projection and watermark writes,
+  including imports. Proven effects commit with generation and watermark CAS
+  checks after extensions. Activation remains unwired pending complete source
+  prefix verification, legacy reconciliation and restored counter provenance.
 - [embedder: breaking API] [embedder: stored-format change] The unshipped
   publication-fence target binds exact retained relay sequences and encoded-row
   digests. Replace watermark-only `Target::new` calls with

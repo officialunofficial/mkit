@@ -19,6 +19,7 @@ mod kv;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod publication_fence_tests;
 pub mod publication_maintenance;
+pub mod relay_admission;
 pub mod schema;
 #[cfg(test)]
 mod tests;

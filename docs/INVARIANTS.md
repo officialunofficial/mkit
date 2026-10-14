@@ -2773,6 +2773,12 @@ The final source transaction recomputes these bindings. A watermark alone cannot
 associate an older retained message with a newer source intent.
 `VerifiedRelay` observes an actual committed source marker and retained row;
 it establishes neither current external generation nor target admission.
+Always enforce enrolled target admission after transaction extensions, including portable imports.
+Because old executors can deliver delayed projection effects after a temporary pause ends.
+If violated, a restored or delayed relay can change a projection under a stale generation.
+Permanent local admission and a raw watermark do not prove the complete auxiliary-only
+source prefix or restored source/target counter provenance. Activation remains disabled
+until integration enforces those conditions; generation rebinding cannot manufacture proof.
 An irreversible abort changes the armed marker before completing the coordinator intent.
 Completion requires a terminal source marker and every required projection watermark.
 Durable source relay cleanup can prove those watermarks without another target fanout.
