@@ -9,9 +9,14 @@
 //! read from the environment or from user config.
 
 use std::future::Future;
+use std::sync::Arc;
+
+mod write;
+pub use write::{ClientSession, NoWriteRecovery, UploadEvent, WriteRecovery};
 
 use mkit_client::{
-    Client, Clock, Error as ClientError, HttpTransport, NoObserver, Observer, Signer,
+    Client, Clock, Error as ClientError, HttpTransport, NoObserver, NoRequestPolicy, Observer,
+    RequestPolicy, Signer,
 };
 use mkit_core::hash::Hash;
 use mkit_core::protocol::PackKey;
@@ -42,14 +47,28 @@ impl Executor for FuturesExecutor {
 /// A packmap node is small; this is the response cap `mkit-client` uses.
 const NODE_LIMIT: u64 = 1024 * 1024;
 
-/// The read side of a remote repository reached through a [`Client`]. The
+/// A remote repository reached through a [`Client`]. The
 /// engine calls it one operation at a time.
-pub struct ClientSource<'a, T, S, C, E, O = NoObserver> {
-    client: &'a Client<'a, T, S, C, O>,
+pub struct ClientSource<
+    'a,
+    T,
+    S,
+    C,
+    E,
+    O = NoObserver,
+    P: ?Sized = NoRequestPolicy,
+    R: ?Sized = NoWriteRecovery,
+> {
+    client: &'a Client<'a, T, S, C, O, P>,
     executor: &'a E,
+    writes: write::WriteState,
+    session: Option<&'a ClientSession>,
+    recovery: Option<&'a R>,
 }
 
-impl<T, S, C, E, O> std::fmt::Debug for ClientSource<'_, T, S, C, E, O> {
+impl<T, S, C, E, O, P: ?Sized, R: ?Sized> std::fmt::Debug
+    for ClientSource<'_, T, S, C, E, O, P, R>
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClientSource")
             .field("client", &self.client)
@@ -57,12 +76,46 @@ impl<T, S, C, E, O> std::fmt::Debug for ClientSource<'_, T, S, C, E, O> {
     }
 }
 
-impl<'a, T, S, C, E, O> ClientSource<'a, T, S, C, E, O> {
+impl<'a, T, S, C, E, O, P: ?Sized> ClientSource<'a, T, S, C, E, O, P> {
     /// `executor` drives every call. When the transport is built on an async
     /// runtime, pass the transport itself if it is an [`Executor`].
     #[must_use]
-    pub fn new(client: &'a Client<'a, T, S, C, O>, executor: &'a E) -> Self {
-        Self { client, executor }
+    pub fn new(client: &'a Client<'a, T, S, C, O, P>, executor: &'a E) -> Self {
+        Self {
+            client,
+            executor,
+            writes: write::WriteState::default(),
+            session: None,
+            recovery: None,
+        }
+    }
+}
+
+impl<'a, T, S, C, E, O, P: ?Sized, R: ?Sized> ClientSource<'a, T, S, C, E, O, P, R> {
+    fn write_state(&self) -> &write::WriteState {
+        self.session.map_or(&self.writes, |session| &session.state)
+    }
+
+    /// Persist acknowledged parts through a caller-owned durable store.
+    #[must_use]
+    pub fn with_receipt_store(self, store: Arc<dyn mkit_client::PartReceiptStore>) -> Self {
+        self.write_state().receipts.replace(store);
+        self
+    }
+
+    /// Let the host schedule typed failures and supply admission recovery.
+    #[must_use]
+    pub fn with_write_recovery<R2: WriteRecovery + ?Sized>(
+        self,
+        recovery: &'a R2,
+    ) -> ClientSource<'a, T, S, C, E, O, P, R2> {
+        ClientSource {
+            client: self.client,
+            executor: self.executor,
+            writes: self.writes,
+            session: self.session,
+            recovery: Some(recovery),
+        }
     }
 }
 
@@ -89,6 +142,8 @@ fn source_error(error: ClientError) -> SourceError {
         })),
         // HttpTransport does not classify its string errors. Refused redirects
         // and malformed/oversized responses must not become transient failures.
+        ClientError::Connection(_) => SourceError::ServerError { status: 503 },
+        ClientError::RequestTimeout(cause) => SourceError::RemoteError(cause),
         ClientError::Transport(cause) => SourceError::RemoteError(format!("transport: {cause}")),
         ClientError::PaymentRequired(challenges) => SourceError::PaymentRequired { challenges },
         ClientError::PendingVerification { retry_after } => {
@@ -113,9 +168,34 @@ fn source_error(error: ClientError) -> SourceError {
     }
 }
 
-impl<T: HttpTransport, S: Signer, C: Clock, E: Executor, O: Observer>
-    ClientSource<'_, T, S, C, E, O>
+impl<
+    'a,
+    T: HttpTransport,
+    S: Signer,
+    C: Clock,
+    E: Executor,
+    O: Observer,
+    P: RequestPolicy + ?Sized,
+    R: WriteRecovery + ?Sized,
+> ClientSource<'a, T, S, C, E, O, P, R>
 {
+    /// Reuse cached upload tickets and capabilities across borrowed clients.
+    /// A session binds to this destination and public key on first use.
+    /// Configure its receipt store on the session or after selecting it.
+    ///
+    /// # Errors
+    /// A session already bound to another destination or signer is refused.
+    pub fn with_session(mut self, session: &'a ClientSession) -> Result<Self, SourceError> {
+        let destination = self.client.destination();
+        session.bind(
+            destination.origin(),
+            destination.repository(),
+            self.client.public_key(),
+        )?;
+        self.session = Some(session);
+        Ok(self)
+    }
+
     fn list_branches_with_page_limit(&self, max_pages: u32) -> Result<Vec<Ref>, SourceError> {
         let mut listing = mkit_core::ref_listing::RefListing::new(max_pages);
         while listing.can_request() {
@@ -148,18 +228,98 @@ impl<T: HttpTransport, S: Signer, C: Clock, E: Executor, O: Observer>
     }
 }
 
-impl<T: HttpTransport, S: Signer, C: Clock, E: Executor, O: Observer> RemoteSource
-    for ClientSource<'_, T, S, C, E, O>
+impl<
+    T: HttpTransport,
+    S: Signer,
+    C: Clock,
+    E: Executor,
+    O: Observer,
+    P: RequestPolicy + ?Sized,
+    R: WriteRecovery + ?Sized,
+> RemoteSource for ClientSource<'_, T, S, C, E, O, P, R>
 {
+    fn supports_push(&self) -> bool {
+        self.client.supports_writes()
+    }
+
+    fn upload_pack_via_ref(
+        &self,
+        bytes: &[u8],
+        key: &PackKey,
+        name: &str,
+    ) -> Result<(), SourceError> {
+        if !self.client.supports_writes() {
+            return Err(SourceError::ProtocolError);
+        }
+        self.write_upload(bytes, key, name)
+    }
+
+    fn upload_blob_via_ref(
+        &self,
+        bytes: &[u8],
+        key: &PackKey,
+        name: &str,
+    ) -> Result<(), SourceError> {
+        if !self.client.supports_writes() {
+            return Err(SourceError::ProtocolError);
+        }
+        self.write_upload(bytes, key, name)
+    }
+
+    fn update_ref(
+        &self,
+        name: &str,
+        condition: mkit_core::refs::RefWriteCondition,
+        tip: &Hash,
+    ) -> Result<(), SourceError> {
+        if !self.client.supports_writes() {
+            return Err(SourceError::ProtocolError);
+        }
+        self.write_update_ref(name, condition, tip)
+    }
+
+    fn advance_refs_committing(
+        &self,
+        head: &str,
+        head_condition: mkit_core::refs::RefWriteCondition,
+        tip: &Hash,
+        packmap: &str,
+        packmap_condition: mkit_core::refs::RefWriteCondition,
+        node: &Hash,
+        keys: &[PackKey],
+    ) -> Result<mkit_core::protocol::CommitOutcome, SourceError> {
+        if !self.client.supports_writes() {
+            return Err(SourceError::ProtocolError);
+        }
+        self.write_advance_refs_committing(
+            head,
+            head_condition,
+            tip,
+            packmap,
+            packmap_condition,
+            node,
+            keys,
+        )
+    }
+
+    fn upload_limits(&self) -> mkit_core::protocol::UploadLimits {
+        self.write_upload_limits()
+    }
+
+    fn supports_atomic_advance(&self) -> bool {
+        self.write_supports_atomic_advance()
+    }
+
     fn list_branches(&self) -> Result<Vec<Ref>, SourceError> {
         self.list_branches_with_page_limit(mkit_core::ref_listing::MAX_PAGES)
     }
 
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError> {
-        self.executor
-            .block_on(self.client.read_ref(name, None))
-            .map(|reply| reply.value)
-            .map_err(source_error)
+        match self.executor.block_on(self.client.read_ref(name, None)) {
+            Ok(reply) => Ok(reply.value),
+            Err(ClientError::Remote(remote)) if remote.code == "not_found" => Ok(None),
+            Err(error) => Err(source_error(error)),
+        }
     }
 
     fn download_blob_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
@@ -230,6 +390,92 @@ mod tests {
             _: &mkit_client::Attempt,
         ) -> Result<mkit_client::AttemptHeaders, mkit_client::Veto> {
             panic!("reads must not invoke the write observer")
+        }
+    }
+
+    #[test]
+    fn default_source_and_session_retain_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>(_: &T) {}
+        struct SyncChannel;
+        impl HttpTransport for SyncChannel {
+            async fn send(
+                &self,
+                _: Request<Vec<u8>>,
+                _: usize,
+            ) -> Result<Response<Vec<u8>>, String> {
+                Err("no network expected".into())
+            }
+        }
+        let transport = SyncChannel;
+        let client = Client::anonymous(
+            &transport,
+            Destination::new("https://vcs.example.org".into(), "default".into()).unwrap(),
+        );
+        let source = ClientSource::new(&client, &FuturesExecutor);
+        assert_send_sync(&source);
+        assert_send_sync(&ClientSession::default());
+    }
+
+    #[test]
+    fn source_accepts_explicit_thread_local_policy_and_recovery() {
+        use std::cell::Cell;
+        struct LocalPolicy(Cell<u32>);
+        impl RequestPolicy for LocalPolicy {
+            fn headers(
+                &self,
+                _: &mkit_client::RequestContext<'_>,
+            ) -> Result<mkit_client::RequestHeaders, mkit_client::Veto> {
+                self.0.set(self.0.get() + 1);
+                Ok(mkit_client::RequestHeaders::new())
+            }
+        }
+        struct LocalRecovery(Cell<u32>);
+        impl WriteRecovery for LocalRecovery {
+            fn recover(&self, _: &str, _: &SourceError, _: u32) -> Result<bool, SourceError> {
+                self.0.set(self.0.get() + 1);
+                Ok(false)
+            }
+        }
+        let (transport, destination) = source_over(Vec::new());
+        let policy = LocalPolicy(Cell::new(0));
+        let recovery = LocalRecovery(Cell::new(0));
+        let policy_ref: &dyn RequestPolicy = &policy;
+        let recovery_ref: &dyn WriteRecovery = &recovery;
+        let client = Client::anonymous(&transport, destination).with_request_policy(policy_ref);
+        let source = ClientSource::new(&client, &FuturesExecutor).with_write_recovery(recovery_ref);
+        assert!(!source.supports_push());
+        assert_eq!(policy.0.get(), 0);
+        assert_eq!(recovery.0.get(), 0);
+    }
+
+    #[test]
+    fn anonymous_source_writes_refuse_before_any_network_call() {
+        let (transport, dest) = source_over(Vec::new());
+        let client = Client::anonymous(&transport, dest);
+        let source = ClientSource::new(&client, &FuturesExecutor);
+        let key = PackKey::from_hash([4; 32]);
+        assert!(!source.supports_push());
+        for result in [
+            source.upload_pack_via_ref(&[0], &key, "refs/heads/main"),
+            source.upload_blob_via_ref(&[0], &key, "refs/heads/main"),
+            source.update_ref(
+                "refs/heads/main",
+                mkit_core::refs::RefWriteCondition::Missing,
+                &[4; 32],
+            ),
+            source
+                .advance_refs_committing(
+                    "refs/heads/main",
+                    mkit_core::refs::RefWriteCondition::Missing,
+                    &[4; 32],
+                    "refs/mkit/packmap/main",
+                    mkit_core::refs::RefWriteCondition::Missing,
+                    &[4; 32],
+                    &[],
+                )
+                .map(|_| ()),
+        ] {
+            assert!(matches!(result, Err(SourceError::ProtocolError)));
         }
     }
 
@@ -472,6 +718,39 @@ mod tests {
             Pages(RefCell::new(pages.into())),
             Destination::new("https://vcs.example.org".into(), "default".into()).unwrap(),
         )
+    }
+
+    #[test]
+    fn shared_session_refuses_destination_or_signer_changes() {
+        let (transport, destination) = source_over(Vec::new());
+        let session = ClientSession::default();
+        let first = Client::anonymous(&transport, destination.clone());
+        ClientSource::new(&first, &FuturesExecutor)
+            .with_session(&session)
+            .unwrap();
+        let fresh = Client::anonymous(&transport, destination.clone());
+        ClientSource::new(&fresh, &FuturesExecutor)
+            .with_session(&session)
+            .unwrap();
+        for (origin, repository) in [
+            ("https://other.example.org", "default"),
+            ("https://vcs.example.org", "another"),
+        ] {
+            let changed = Client::anonymous(
+                &transport,
+                Destination::new(origin.into(), repository.into()).unwrap(),
+            );
+            assert!(matches!(
+                ClientSource::new(&changed, &FuturesExecutor).with_session(&session),
+                Err(SourceError::InvalidResponse)
+            ));
+        }
+        let signed = Client::signed(&transport, destination, &TestSigner, &TestClock);
+        assert!(matches!(
+            ClientSource::new(&signed, &FuturesExecutor).with_session(&session),
+            Err(SourceError::InvalidResponse)
+        ));
+        assert!(transport.0.borrow().is_empty());
     }
 
     #[test]

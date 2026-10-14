@@ -316,6 +316,15 @@ impl Live {
     /// The default (self-certifying) deployment: `ed25519-…` namespaces owned
     /// by their key, here the writer's.
     pub fn self_certifying() -> Self {
+        Self::self_certifying_configured(false)
+    }
+
+    /// Self-certifying deployment with owner-signed grant verification enabled.
+    pub fn self_certifying_with_grants() -> Self {
+        Self::self_certifying_configured(true)
+    }
+
+    fn self_certifying_configured(grants: bool) -> Self {
         let owner = mkit_attest::grant::Namespace::parse(&self_certifying_namespace()).unwrap();
         let (origin_tx, origin_rx) = mpsc::channel();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -336,6 +345,18 @@ impl Live {
                     AuthMode::AuthV2(AuthV2Config::new(&origin, "").unwrap()),
                     UploadLimits::new(4 << 20, 64),
                 );
+                if grants {
+                    cfg.grants = Some(
+                        mkit_server::GrantConfig::new_allowing_loopback(
+                            &origin,
+                            mkit_attest::grant::AcceptedSchemes::of(&[
+                                mkit_attest::grant::OwnerScheme::Ed25519,
+                            ]),
+                            Vec::new(),
+                        )
+                        .unwrap(),
+                    );
+                }
                 cfg.ticket_keys = Some(
                     TicketKeys::parse(
                         "dev 1111111111111111111111111111111111111111111111111111111111111111",

@@ -2868,3 +2868,20 @@ stall, or an expired envelope could remain held.
 
 **Enforced by:** `pipeline::pending_hold` and scheduled hold regressions for
 expiry, elapsed budget, completion, cancellation, replay, and concurrent CAS.
+
+## Client source writes keep policy and receipt durability in the host
+
+**Always:** signed source writes use `mkit-client` per-RPC calls. The host
+selects grants on each signed envelope and schedules typed failures through
+`WriteRecovery`. Ticket-consuming writes never run admission recovery. Each
+part receipt finishes caller-owned durable `put` before progress or the next
+part. Fresh instances recover the open ticket and reuse only matching receipts.
+
+**Because:** wire ownership belongs to the protocol client, while credential
+trust, helpers, scheduling, and filesystem durability depend on the caller.
+
+**If violated:** policy could authorize the wrong request, or a restart could
+resend an acknowledged part or advance refs without its upload commitment.
+
+**Enforced by:** request-policy seam tests and both-backend native push tests,
+including multipart interruption and receipt reuse across fresh instances.

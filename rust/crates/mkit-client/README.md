@@ -12,7 +12,8 @@ compression dependency. It is the former `mkit-push`, renamed and extended.
   `delete_ref`, `begin_upload`, `upload_pack`, `upload_part`, `complete_upload`
   and `advance_refs`. `Client::anonymous` sends unsigned reads;
   `Client::signed` signs every RPC except discovery, as the protocol requires
-  of a client that has a signer. Writes need a signed client. There is no fork
+  of a client that has a signer. Writes need a signed client or explicit
+  unsigned-write opt-in (below). There is no fork
   RPC in `mkit.transport.v1`, so none is exposed (a branch copy from a published
   source is `advance_refs` with `source_ref`).
 - **`Push`: the bounded whole-push** built on the same calls (below).
@@ -48,6 +49,46 @@ For a write, a server that saved the first reply returns it instead of applying 
 idempotent and keep no reply). An identity past its expiry is rejected by the
 server. Without one, each call draws a fresh
 identity from the clock and returns it. The window is at most 300 s.
+
+## Request credentials and receipts
+
+`HttpTransport::send_classified` can distinguish transient I/O from a channel
+refusal through `ChannelError`. Its default preserves string-only transports as
+terminal `Error::Transport`; explicit transience becomes `Error::Connection`.
+`ChannelError::TimedOut` becomes `Error::RequestTimeout`. The client still
+performs one exchange per RPC and leaves recovery to its caller.
+
+Anonymous clients remain read-only by default. A host that uses bearer or
+unsigned write authentication explicitly enables per-RPC writes with
+`Client::with_unsigned_writes()`. The server still enforces its authentication
+mode; ticketed upload reservations require a signer. Signed visibility and
+external-envelope methods remain signer-only. Unsigned RPC policy uses
+`UnsignedRequestContext`, without a synthetic signer or public key.
+`Client::anonymous_with_clock` (or `with_unsigned_clock` on a typed client)
+opts unsigned writes into caller-owned nonce and validity metadata and observer
+callbacks. Clockless unsigned writes use `RequestPolicy::unsigned_headers` for
+pre-dispatch policy. Retry the
+same identity until expiry; unsigned reads and discovery stay identity-free.
+
+`Client::with_request_policy(&policy)` installs host-owned `RequestPolicy`.
+The policy type stays part of the client type: default clients retain their
+conditional `Send` and `Sync` traits, and explicitly configured policies may
+use local state.
+The client consults it for each signed request, including reads, after the write
+observer and before signing. `RequestContext` carries the operation, public key,
+and optional write intent. `WriteIntent::ticketed` identifies ticket credentials
+even when the caller knows only their opaque token. Dedicated `RequestHeaders` setters carry a write grant
+or authorization credential; ordinary extra headers retain reserved-name checks.
+The host verifies grant authority and scope, filters helper headers, and prevents
+replacement of a transport credential. Policy callbacks do not run helpers or
+schedule retries. `after_response` observes successful response headers so the
+host can record bounded payment receipts.
+
+`PartReceiptStore`, `TicketMetadata`, and `StoredPart` describe caller-owned
+multipart acknowledgement persistence. `put` must finish durably before returning;
+`load` rejects mismatched ticket bindings and part geometry. `MemoryPartReceiptStore`
+is a process-local fallback. Native upload orchestration in `mkit-sync` consumes
+this seam; per-RPC client calls remain independent of filesystem storage.
 
 ## Host policy seams: signer and observer
 

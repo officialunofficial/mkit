@@ -3645,6 +3645,7 @@ dependencies = [
  "hyper-rustls",
  "hyper-util",
  "log",
+ "mkit-client",
  "mkit-core",
  "mkit-rpc",
  "mkit-test-util",

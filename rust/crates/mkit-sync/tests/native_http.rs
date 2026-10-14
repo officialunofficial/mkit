@@ -354,3 +354,89 @@ fn request_kind_selects_independent_timeout_budgets() {
         server.join().unwrap();
     }
 }
+
+fn send_classified(
+    http: &NativeHttp,
+    url: &str,
+    limit: usize,
+) -> Result<http::Response<Vec<u8>>, mkit_client::ChannelError> {
+    let request = Request::post(url).body(b"ping".to_vec()).unwrap();
+    http.block_on(http.send_classified(request, limit))
+}
+
+#[test]
+fn channel_security_and_response_refusals_are_terminal() {
+    use mkit_client::ChannelError;
+
+    let http = NativeHttp::new().unwrap();
+    assert!(matches!(
+        send_classified(&http, "http://203.0.113.9/", 1024),
+        Err(ChannelError::Refused(_))
+    ));
+    let request = Request::post("http://127.0.0.1:9/")
+        .header("accept-encoding", "br")
+        .body(Vec::new())
+        .unwrap();
+    assert!(matches!(
+        http.block_on(http.send_classified(request, 1024)),
+        Err(ChannelError::Refused(_))
+    ));
+    for wire in [
+        response("307 Temporary Redirect", &[("location", "/elsewhere")], b""),
+        response("200 OK", &[], &vec![0; 2048]),
+        b"HTTP/1.1 invalid status\r\n\r\n".to_vec(),
+        response("200 OK", &[("content-encoding", "br")], b"x"),
+        response("200 OK", &[("content-encoding", "gzip")], b"invalid gzip"),
+        response(
+            "200 OK",
+            &[("content-encoding", "gzip")],
+            &gzip(&vec![0; 8192]),
+        ),
+    ] {
+        let url = respond_once(wire, false);
+        assert!(matches!(
+            send_classified(&http, &url, 1024),
+            Err(ChannelError::Refused(_))
+        ));
+    }
+}
+
+#[test]
+fn actual_connection_and_response_body_io_failures_are_transient() {
+    use mkit_client::ChannelError;
+
+    let http = NativeHttp::new().unwrap();
+    let closed = {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap()
+    };
+    assert!(matches!(
+        send_classified(&http, &format!("http://{closed}/"), 1024),
+        Err(ChannelError::Transient(_))
+    ));
+    let url = respond_once(
+        b"HTTP/1.1 200 OK\r\ncontent-length: 10\r\nconnection: close\r\n\r\nshort".to_vec(),
+        false,
+    );
+    assert!(matches!(
+        send_classified(&http, &url, 1024),
+        Err(ChannelError::Transient(_))
+    ));
+}
+
+#[test]
+fn actual_response_timeout_preserves_terminal_deadline_class() {
+    use mkit_client::ChannelError;
+
+    let url = respond_once(
+        b"HTTP/1.1 200 OK\r\ncontent-length: 10\r\n\r\n".to_vec(),
+        true,
+    );
+    let http = NativeHttp::new()
+        .unwrap()
+        .with_timeout(Duration::from_millis(100));
+    assert!(matches!(
+        send_classified(&http, &url, 1024),
+        Err(ChannelError::TimedOut(cause)) if cause == "client-side deadline exceeded"
+    ));
+}

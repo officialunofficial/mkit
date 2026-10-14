@@ -189,11 +189,41 @@ let source = ClientSource::new(&client, &http);
 clone(&dir, &source, &remote, &SyncOptions::default(), &NoopObserver)?;
 ```
 
-`ClientSource` remains read-only (`supports_push() == false`). The CLI's
-`mkit+https` push uses `TransportSource` until the client adapter has parity for
-grants, admission and 402 helpers, durable receipt persistence, and resumable
-parts. Native extra-CA and configuration wiring remain host-owned. The protocol
-client's own push API is unchanged.
+A signed `ClientSource` supports push through the client's per-RPC calls.
+A host using bearer or unsigned authentication can explicitly enable ticketless
+writes with `Client::with_unsigned_writes()` and retain retry identity through
+`Client::anonymous_with_clock`; anonymous clients remain read-only
+without that opt-in.
+Use `Client::with_request_policy` to select stored grants and validated admission
+headers for each signed request, including reads. The host verifies grants,
+selects credentials, and observes bounded payment receipts; the source does not
+read configuration or run helpers.
+
+`ClientSession` retains negotiated capabilities and upload commitments across
+fresh borrowed clients. Use `ClientSource::with_session` to lend it for one
+operation; reuse with another origin, repository, or signer is refused. Session
+bookkeeping uses short internal locks. Default sources retain their conditional
+`Send` and `Sync` traits; explicitly configured policy and recovery types may
+use local state.
+
+`ClientSource::with_receipt_store` accepts a caller-owned `PartReceiptStore`.
+Its `put` must finish durably before returning. The source saves each acknowledged
+part before reporting progress or sending another part. A fresh instance calls
+`BeginUpload` to recover the open ticket, validates saved receipt bindings, and
+uploads only missing parts. Receipt types are shared with the synchronous Connect
+adapter, so existing stores keep their record format.
+
+Without `with_write_recovery`, typed scheduling and payment outcomes return to the
+caller. Install a `WriteRecovery` to schedule retries or run an admission helper;
+its `recover` runs outside the asynchronous executor. The source retains the
+operation identity across ambiguous failures and renews expired envelopes.
+Ticketed uploads and advances never invoke admission recovery. The callback also
+reports multipart progress after durable persistence and can cancel before a part.
+The host must bound its retry ladder and waits.
+
+The CLI continues to use `TransportSource` in this change. Its routing switch and
+native streaming parity are separate work. Native extra-CA and configuration
+wiring remain host-owned. The protocol client's own push API is unchanged.
 
 A missing repository, a private one read anonymously and one read by a signer
 the server denies all come back as the same `SyncError::RepositoryNotFound`
@@ -201,12 +231,12 @@ the server denies all come back as the same `SyncError::RepositoryNotFound`
 
 ### Source failures and host scheduling
 
-Every source read returns `SourceError`, carried by `SyncError::Source`.
+Every source operation returns `SourceError`, carried by `SyncError::Source`.
 `PendingVerification { retry_after }`, `MembershipNotVisible`,
 `RetryAfter { ms }`, and `PaymentRequired { challenges }` preserve the host's
 next action. Payment challenges retain the full `AdmissionRequired` record,
 including helper headers and terminal admission reasons. The library returns
-these outcomes immediately and never sleeps or retries them.
+these outcomes immediately unless a host write-recovery callback schedules a retry.
 
 `SourceError::class()` returns `FailureClass::Resumable` for these outcomes
 (except a terminal admission reason), `Transient` for classified connection
@@ -215,6 +245,11 @@ failures, HTTP 429/5xx transport failures, and Connect `resource_exhausted`,
 policy, not an automatic retry instruction. Signing and signer refusals remain
 separate typed variants. Unclassified `HttpTransport` string failures are
 terminal: that seam also reports refused redirects and malformed responses.
+A channel can override `HttpTransport::send_classified` to distinguish actual
+connection failures. `NativeHttp` does so; those failures retain the existing
+Connect adapter's retryable HTTP 503 class. Request budgets retain the terminal
+`client-side deadline exceeded` diagnostic. Redirect, parsing, negotiation,
+and response-bound refusals remain terminal.
 
 Raw Connect failures keep code, message, opaque details, actual HTTP status,
 and every response header value as bytes in `RemoteFailure`. Treat these fields

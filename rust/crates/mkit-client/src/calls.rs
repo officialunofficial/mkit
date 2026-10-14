@@ -9,13 +9,19 @@ use crate::proto::{
     UploadPackResponse, UploadPartResponse,
 };
 use crate::push::{condition, pack_commitment, pack_messages, part_commitment, part_messages};
-use crate::seams::{Observer, RefMove, RefTarget, WriteIntent, procedures};
+use crate::seams::{Observer, RefMove, RefTarget, RequestPolicy, WriteIntent, procedures};
 use mkit_core::{hash::Hash, refs::RefWriteCondition, upload_parts::PartPlan};
 
 pub(crate) type Called<R> = Result<(R, Option<Identity>), Error>;
 
-pub(crate) async fn begin_upload<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
-    rpc: &Rpc<'_, T, S, C, O>,
+pub(crate) async fn begin_upload<
+    T: HttpTransport,
+    S: Signer,
+    C: Clock,
+    O: Observer,
+    P: RequestPolicy + ?Sized,
+>(
+    rpc: &Rpc<'_, T, S, C, O, P>,
     head_ref: &str,
     pack_id: &Hash,
     bytes: u64,
@@ -40,8 +46,14 @@ pub(crate) async fn begin_upload<T: HttpTransport, S: Signer, C: Clock, O: Obser
     rpc.unary_with("BeginUpload", &request, opts).await
 }
 
-pub(crate) async fn upload_pack<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
-    rpc: &Rpc<'_, T, S, C, O>,
+pub(crate) async fn upload_pack<
+    T: HttpTransport,
+    S: Signer,
+    C: Clock,
+    O: Observer,
+    P: RequestPolicy + ?Sized,
+>(
+    rpc: &Rpc<'_, T, S, C, O, P>,
     pack_id: &Hash,
     pack: &[u8],
     ticket_id: Option<Hash>,
@@ -51,6 +63,7 @@ pub(crate) async fn upload_pack<T: HttpTransport, S: Signer, C: Clock, O: Observ
 ) -> Called<UploadPackResponse> {
     let tickets: Vec<Hash> = ticket_id.into_iter().collect();
     let intent = WriteIntent::new(procedures::UPLOAD_PACK)
+        .with_ticketed(ticket_token.is_some())
         .with_tickets(&tickets)
         .with_pack(*pack_id, pack.len() as u64)
         .with_new_objects(new_objects);
@@ -68,8 +81,14 @@ pub(crate) async fn upload_pack<T: HttpTransport, S: Signer, C: Clock, O: Observ
     .await
 }
 
-pub(crate) async fn upload_part<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
-    rpc: &Rpc<'_, T, S, C, O>,
+pub(crate) async fn upload_part<
+    T: HttpTransport,
+    S: Signer,
+    C: Clock,
+    O: Observer,
+    P: RequestPolicy + ?Sized,
+>(
+    rpc: &Rpc<'_, T, S, C, O, P>,
     ticket_id: Hash,
     ticket_token: Option<Vec<u8>>,
     plan: &PartPlan,
@@ -81,6 +100,7 @@ pub(crate) async fn upload_part<T: HttpTransport, S: Signer, C: Clock, O: Observ
     let commitment = part_commitment(ticket_id, plan, index, part)?;
     let tickets = [ticket_id];
     let intent = WriteIntent::new(procedures::UPLOAD_PART)
+        .with_ticketed(true)
         .with_tickets(&tickets)
         .with_part(index, part.len() as u64)
         .with_new_objects(new_objects);
@@ -98,8 +118,14 @@ pub(crate) async fn upload_part<T: HttpTransport, S: Signer, C: Clock, O: Observ
     .await
 }
 
-pub(crate) async fn complete_upload<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
-    rpc: &Rpc<'_, T, S, C, O>,
+pub(crate) async fn complete_upload<
+    T: HttpTransport,
+    S: Signer,
+    C: Clock,
+    O: Observer,
+    P: RequestPolicy + ?Sized,
+>(
+    rpc: &Rpc<'_, T, S, C, O, P>,
     ticket_id: Option<Hash>,
     ticket_token: Option<Vec<u8>>,
     receipts: Vec<Vec<u8>>,
@@ -113,6 +139,7 @@ pub(crate) async fn complete_upload<T: HttpTransport, S: Signer, C: Clock, O: Ob
     };
     let tickets: Vec<Hash> = ticket_id.into_iter().collect();
     let intent = WriteIntent::new(procedures::COMPLETE_UPLOAD)
+        .with_ticketed(true)
         .with_tickets(&tickets)
         .with_new_objects(new_objects);
     let opts = Opts {
@@ -124,8 +151,14 @@ pub(crate) async fn complete_upload<T: HttpTransport, S: Signer, C: Clock, O: Ob
 }
 
 /// `UpdateRef`: set `new_id`, or delete when it is `None`.
-pub(crate) async fn update_ref<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
-    rpc: &Rpc<'_, T, S, C, O>,
+pub(crate) async fn update_ref<
+    T: HttpTransport,
+    S: Signer,
+    C: Clock,
+    O: Observer,
+    P: RequestPolicy + ?Sized,
+>(
+    rpc: &Rpc<'_, T, S, C, O, P>,
     name: &str,
     expected: RefWriteCondition,
     new_id: Option<Hash>,
@@ -233,13 +266,20 @@ impl Advance {
 
     pub(crate) fn intent(&self) -> WriteIntent<'_> {
         WriteIntent::new(procedures::ADVANCE_REFS)
+            .with_ticketed(!self.tickets.is_empty())
             .with_ref_moves(&self.moves)
             .with_tickets(&self.tickets)
     }
 }
 
-pub(crate) async fn advance_refs<T: HttpTransport, S: Signer, C: Clock, O: Observer>(
-    rpc: &Rpc<'_, T, S, C, O>,
+pub(crate) async fn advance_refs<
+    T: HttpTransport,
+    S: Signer,
+    C: Clock,
+    O: Observer,
+    P: RequestPolicy + ?Sized,
+>(
+    rpc: &Rpc<'_, T, S, C, O, P>,
     request: &AdvanceRefsRequest,
     identity: Option<&Identity>,
 ) -> Called<crate::proto::AdvanceRefsResponse> {
