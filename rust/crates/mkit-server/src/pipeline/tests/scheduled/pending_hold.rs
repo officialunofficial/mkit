@@ -3,6 +3,7 @@ use super::*;
 use crate::rt::{BoxFuture, ManualSleep, Sleep};
 use core::future::Future;
 use core::task::{Context, Poll};
+use futures::FutureExt;
 
 /// Poll sleeps advance logical time; the outer timeout remains pending.
 struct ClockSleep(Arc<ManualClock>);
@@ -474,4 +475,115 @@ fn cancellation_during_hold_preserves_nonce_and_competing_ref_cas() {
         .unwrap()
         .unwrap();
     assert_eq!(codec::decode_ref_id(&current).unwrap(), head);
+}
+
+/// Make the final job read and its deadline timer ready in the same poll.
+struct LateReadySleep {
+    clock: Arc<ManualClock>,
+    expired: ManualSleep,
+}
+
+impl Sleep for LateReadySleep {
+    fn sleep(&self, duration: Duration) -> BoxFuture<'static, ()> {
+        if duration == Duration::from_millis(100) {
+            let clock = self.clock.clone();
+            Box::pin(async move { clock.advance(100) })
+        } else {
+            self.expired.sleep(duration)
+        }
+    }
+}
+
+#[test]
+fn usable_read_racing_expired_timer_preserves_pending_and_skips_retry() {
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let hooks = Hooks {
+        authorizer: ExpiringAuthorizer {
+            observed: observed.clone(),
+            expires_at_ms: T0 + 150,
+        },
+        admission: DefaultAdmission,
+        pre_receive: NoPreReceive,
+        receipts: NoReceipts,
+        outcomes: NoOutcomes,
+    };
+    let (mut env, owner, identity) =
+        super::super::indexed::environment_with_hooks(Sharding::Single, scheduled(), None, hooks);
+    let (bytes, head) = pack();
+    let pack_id = hash(&bytes);
+    let upload_request = signed(&owner, &identity, Procedure::BeginUpload, 1_030);
+    let BeginUploadResult::Ticket { id: ticket, .. } = block_on(env.pipe.begin_upload(
+        &env.auth(&upload_request).unwrap(),
+        HEAD,
+        &pack_id,
+        bytes.len() as u64,
+    ))
+    .unwrap() else {
+        panic!("expected upload ticket");
+    };
+    super::super::indexed::upload(&env, &bytes, ticket);
+    let request = signed(&owner, &identity, Procedure::AdvanceRefs, 1_031);
+    let auth = env.auth(&request).unwrap();
+    let repo = auth.repo().repo.clone();
+    let source = env.pipe.shards.ref_shard(&repo, HEAD);
+    let job_key = keys::verify_job(&repo.name, &pack_id);
+    let sleeper = Arc::new(LateReadySleep {
+        clock: env.clock.clone(),
+        expired: ManualSleep::new(),
+    });
+    let expired = sleeper.expired.clone();
+    let clock = env.clock.clone();
+    env.pipe.meta.read_many_hook = Some(Box::new(move |store, partition, wanted| {
+        if wanted == std::slice::from_ref(&job_key) {
+            // Readiness is only a wake hint. Make it usable without changing
+            // verification state: an expired hint must never start a retry.
+            let raw = store
+                .get(partition, &job_key)
+                .now_or_never()
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let mut job = crate::indexed::checkpoint::decode_job(&raw).unwrap();
+            job.phase = crate::indexed::checkpoint::Phase::Watch;
+            store
+                .apply(
+                    partition,
+                    Batch::new().put(
+                        job_key.clone(),
+                        crate::indexed::checkpoint::encode_job(&job),
+                    ),
+                )
+                .now_or_never()
+                .unwrap()
+                .unwrap();
+            clock.advance(60);
+            expired.fire();
+        }
+    }));
+    env.pipe = env.pipe.with_pending_advance_hold(
+        Duration::from_millis(150),
+        sleeper,
+        ms(env.clock.now_ms()) + 15_000,
+    );
+    let error = block_on(env.pipe.advance_refs_with_tickets(
+        &auth,
+        upd(HEAD, Missing, head),
+        upd(PACKMAP, Missing, pack_id),
+        vec![ticket],
+    ))
+    .unwrap_err();
+    assert_same_pending(&error, &crate::indexed::pending(1_000));
+    assert_eq!(ms(env.clock.now_ms()), ms(T0) + 160);
+    assert_eq!(
+        *observed.lock().unwrap(),
+        vec![T0],
+        "no second guarded attempt"
+    );
+    for name in [HEAD, PACKMAP] {
+        assert!(
+            block_on(env.pipe.meta.get(&source, &keys::ref_key(&repo.name, name)))
+                .unwrap()
+                .is_none()
+        );
+    }
 }

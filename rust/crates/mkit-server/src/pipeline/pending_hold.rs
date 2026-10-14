@@ -76,6 +76,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         if duration < Duration::from_millis(POLL_MS) {
             return result;
         }
+        let hold_deadline_ms = now
+            .saturating_add(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+            .min(allowance);
         let repo = &a.repo().repo;
         let partition = self.shards.ref_shard(repo, &head.name);
         let ready = with_timeout(hold.sleep.as_ref(), duration, async {
@@ -96,9 +99,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             // trust these observations for admission or commit: only wake up.
             for _ in 0..19 {
                 hold.sleep.sleep(Duration::from_millis(POLL_MS)).await;
-                if ms(self.clock.now_ms())
-                    >= now.saturating_add(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
-                {
+                if ms(self.clock.now_ms()) >= hold_deadline_ms {
                     return None;
                 }
                 let rows = self.meta.get_many(&partition, &jobs).await.ok()?;
@@ -123,7 +124,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             None
         })
         .await;
-        if matches!(ready, Ok(Some(()))) && ms(self.clock.now_ms()) < allowance {
+        if matches!(ready, Ok(Some(()))) && ms(self.clock.now_ms()) < hold_deadline_ms {
             // Fresh authorization, tickets, admission, denial, CAS and final
             // guards, including the durable replay lookup for a lost reply.
             let mut fresh = a.clone();
