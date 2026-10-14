@@ -46,8 +46,8 @@ use serde::{Deserialize, Serialize};
 /// copies. The job row lists them, so the bound keeps the row far under the
 /// value limit.
 pub const MAX_FORK_PACKS: usize = 1_024;
-/// Most index rows one fork copies. Measured: 10,000 rows copy in 400 storage
-/// calls (about 20 s at 50 ms per call, one slice), so the copy is not the
+/// Most index rows one fork copies. Measured: 10,000 rows copy in under 200
+/// storage calls (six partitions at a time, one slice), so the copy is not the
 /// limit. The limit is the next advance: its denial proof visits every
 /// dependency pack's inventory at 8 rows per two calls, and 16,384 rows keep
 /// that near 4,100 calls, inside one request's 9,000.
@@ -447,10 +447,13 @@ pub struct ForkJobV1 {
     pub cursor: u32,
     /// External-base object ids not yet mapped to a pack.
     pub deps: Vec<Hash>,
-    /// Index partition cursor of the copy.
+    /// Publish unit: which half of a pack's write-and-check pair is next.
     pub part: u16,
-    /// Resume key within the partition.
+    /// Resume key of the Trees phase.
     pub after: Option<Vec<u8>>,
+    /// The copy's cursor in each source index partition. Empty until the copy
+    /// starts, then one per partition.
+    pub lanes: Vec<CopyLane>,
     /// Source index rows scanned.
     pub scanned: u64,
     /// Index rows copied.
@@ -463,6 +466,20 @@ pub struct ForkJobV1 {
     pub fence: Option<FenceV1>,
     /// The lineage anchor once done.
     pub result: Option<ForkResult>,
+}
+
+/// Where the copy stands in one source index partition.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CopyLane {
+    /// Every row of the partition has been copied.
+    pub done: bool,
+    /// Resume cursor of the next page; `None` is the partition's start.
+    pub after: Option<Vec<u8>>,
+    /// Source key of the last holder candidate of the current page whose
+    /// holder was copied. The page's rows are already written; a page with
+    /// more candidates than one wave may copy resumes after this key.
+    pub held: Option<Vec<u8>>,
 }
 
 impl ForkJobV1 {
