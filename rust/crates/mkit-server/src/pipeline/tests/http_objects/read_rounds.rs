@@ -12,6 +12,7 @@ use crate::pipeline::{
     HistoryMode, HistoryOptions, ObjectReader, PathOptions, ReaderSession, ReaderView,
 };
 use crate::store::read_probe::{self, Config};
+use crate::store::{BorrowedStore, ContentIndex};
 use std::collections::BTreeSet;
 
 const LATENCY: u32 = 30;
@@ -865,4 +866,110 @@ fn anonymous_repository_index_prewake_waits_for_the_authorizer() {
         .is_err()
     );
     assert_eq!(fx.pipe.meta.warm_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn anonymous_prewake_preserves_final_denial_after_a_delayed_wave() {
+    for metadata in [false, true] {
+        let fx = fixture_tweaked(Hooks::new(), http_cfg(), |cfg| {
+            cfg.sharding = Sharding::D34;
+            cfg.takedown_denial = true;
+        });
+        let d = data();
+        fx.push("room", &d.refs(), d.head(), None);
+        drain(&fx);
+        fx.pipe.meta.prewake.store(true, Ordering::SeqCst);
+        fx.pipe.meta.anonymous_prewake.store(true, Ordering::SeqCst);
+        let pause = Arc::new(crate::ManualSleep::new());
+        *fx.pipe.meta.prewake_pause.lock().unwrap() = Some(pause.clone());
+        let reader = block_on(
+            fx.pipe
+                .object_reader(fx.repo_id("room"), ReaderView::Public),
+        )
+        .unwrap();
+        let ids = [id(&d.small)];
+        let mut read = Box::pin(async {
+            if metadata {
+                reader
+                    .object_metadata(&ids)
+                    .await
+                    .map(|rows| rows[0].is_some())
+            } else {
+                reader
+                    .read_canonical(&ids)
+                    .await
+                    .map(|rows| rows[0].is_some())
+            }
+        });
+        let mut cx = std::task::Context::from_waker(futures::task::noop_waker_ref());
+        assert!(std::future::Future::poll(read.as_mut(), &mut cx).is_pending());
+        assert_eq!(fx.pipe.meta.warm_calls.load(Ordering::SeqCst), 16);
+        assert_eq!(pause.requested().len(), 1);
+        block_on(ContentIndex::new(BorrowedStore(&fx.pipe.meta)).block(
+            &crate::takedown::DenialCapability::for_test(),
+            &ids[0],
+            &crate::store::BlockEntry::new("manual", T0 as u64),
+            T0 as u64,
+        ))
+        .unwrap();
+        pause.fire();
+        assert!(
+            !block_on(read).unwrap(),
+            "metadata={metadata}: a blocked target must stay absent"
+        );
+    }
+}
+
+#[test]
+fn anonymous_prewake_preserves_session_expiry_after_a_delayed_wave() {
+    for mode in ["capture", "canonical", "metadata"] {
+        let fx = fixture_tweaked(Hooks::new(), http_cfg(), |cfg| {
+            cfg.sharding = Sharding::D34;
+        });
+        let d = data();
+        fx.push("room", &d.refs(), d.head(), None);
+        drain(&fx);
+        fx.pipe.meta.prewake.store(true, Ordering::SeqCst);
+        fx.pipe.meta.anonymous_prewake.store(true, Ordering::SeqCst);
+        let pause = Arc::new(crate::ManualSleep::new());
+        *fx.pipe.meta.prewake_pause.lock().unwrap() = Some(pause.clone());
+        let reader = block_on(
+            fx.pipe
+                .object_reader(fx.repo_id("room"), ReaderView::Public),
+        )
+        .unwrap();
+        let reader = if mode == "capture" {
+            reader.with_selected_ref(HEAD).unwrap()
+        } else {
+            reader
+        };
+        let ids = [id(&d.small)];
+        let mut session =
+            ReaderSession::with_deadline(crate::pipeline::ReadLimits::default(), T0 as u64 + 100);
+        let mut read = Box::pin(async {
+            match mode {
+                "capture" => reader
+                    .selected_capture_in(&mut session)
+                    .await
+                    .map(|row| row.is_some()),
+                "metadata" => reader
+                    .object_metadata_in(&mut session, &ids)
+                    .await
+                    .map(|rows| rows[0].is_some()),
+                _ => reader
+                    .read_canonical_in(&mut session, &ids)
+                    .await
+                    .map(|rows| rows[0].is_some()),
+            }
+        });
+        let mut cx = std::task::Context::from_waker(futures::task::noop_waker_ref());
+        assert!(std::future::Future::poll(read.as_mut(), &mut cx).is_pending());
+        assert_eq!(pause.requested().len(), 1);
+        fx.clock.advance(101);
+        pause.fire();
+        match block_on(read) {
+            Ok(present) => assert!(!present, "{mode}: expired session must emit nothing"),
+            Err(error) => assert_eq!(error.code(), Code::ResourceExhausted),
+        }
+    }
 }

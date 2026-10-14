@@ -757,6 +757,8 @@ struct Spy {
     #[cfg(feature = "http-objects")]
     anonymous_prewake: AtomicBool,
     #[cfg(feature = "http-objects")]
+    prewake_pause: Mutex<Option<Arc<crate::ManualSleep>>>,
+    #[cfg(feature = "http-objects")]
     prewake_claimed: AtomicBool,
     #[cfg(feature = "http-objects")]
     warm_calls: AtomicU32,
@@ -789,6 +791,8 @@ impl Spy {
             prewake: AtomicBool::new(false),
             #[cfg(feature = "http-objects")]
             anonymous_prewake: AtomicBool::new(false),
+            #[cfg(feature = "http-objects")]
+            prewake_pause: Mutex::new(None),
             #[cfg(feature = "http-objects")]
             prewake_claimed: AtomicBool::new(false),
             #[cfg(feature = "http-objects")]
@@ -923,6 +927,10 @@ impl NamespaceStore for Spy {
             }),
         )
         .await;
+        let pause = self.prewake_pause.lock().unwrap().clone();
+        if let Some(pause) = pause {
+            crate::Sleep::sleep(pause.as_ref(), std::time::Duration::from_secs(1)).await;
+        }
     }
     fn read_call_allowance(&self) -> Option<u32> {
         Some(

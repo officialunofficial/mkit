@@ -2861,6 +2861,8 @@ and exit-code behavior. No authorization, wire, or stored-format boundary moves.
 **Always:** Workers repository index warm-up runs for authenticated, validated
 reads joined with their authorization prologue, or for anonymous reads only after
 repository existence and readability succeed, joined with the next read step.
+The wave drains before final serving guards and capture expiry checks. Delayed
+activation cannot hold already-validated output past revocation or expiry.
 Every result is discarded. Private/missing/invalid repositories never start an
 anonymous wave. Anonymous claims share a rolling cap of eight waves per sixty
 seconds per isolate, retained after cancellation and failure.

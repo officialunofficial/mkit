@@ -19,7 +19,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         memo: &mut ReadProofs,
         reference: &str,
     ) -> Result<bool, ServerError> {
-        let anchor = match self.continuation_anchor(meta, reference).await {
+        let (anchor, ()) = futures::future::join(
+            self.continuation_anchor(meta, reference),
+            self.prepare_anonymous(),
+        )
+        .await;
+        let anchor = match anchor {
             Ok(anchor) => anchor,
             Err(error) if error.code() == Code::NotFound => return Ok(false),
             Err(error) => return Err(error),
@@ -78,12 +83,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 .with_session(&session.io.calls)
                 .flagging(&capped)
                 .with_io(&admission);
-            let (installed, ()) = futures::future::join(
-                self.install_selected(&meta, &mut session.proofs, &reference),
-                self.prepare_anonymous(),
-            )
-            .await;
-            if !installed? {
+            if !self
+                .install_selected(&meta, &mut session.proofs, &reference)
+                .await?
+            {
                 return Ok(None);
             }
             Ok(session

@@ -1080,7 +1080,7 @@ standalone ref reads do not touch RepoIndex and skip the wave. Anonymous Multi
 pack reads start their wave only after the complete read authorization succeeds,
 joined with pack membership. Public object readers in visibility-gated deployments
 start only after repository existence, visibility and the authorizer have passed,
-joined with the canonical/metadata batch or page-1 ref capture. Private, missing,
+joined with opening root/anchor reads or an index lookup when roots are cached. Private, missing,
 invalid and rejected repositories never start anonymous waves. Token-authorized
 HTTP serving is outside this activation path. `ListRefs` scans RefIndex rather
 than RepoIndex and does not warm RepoIndex. Repository statistics reads also skip
@@ -1094,7 +1094,10 @@ its result mapping and private/missing paths receive no extra work. Readable
 repositories can have different timing: their joined wave can outlast the next
 step by up to the one-second timeout. This does not make private and missing
 repositories distinguishable through activation. The read joins the wave under
-a fixed one-second timeout. No task is detached.
+a fixed one-second timeout. The wave drains before final serving guards and
+capture expiry checks. Delayed-wave regressions block a target or expire the
+session while activation is pending, then verify that no bytes, metadata or
+expired checkpoint escape. No task is detached.
 Each response is consumed before the wave ends; timeout or cancellation aborts
 remaining fetches and retains the TTL claim. The `ping` operation is distinct
 from ordinary reads for transport instrumentation. SQLite opens and initializes its schema in the object
@@ -1140,11 +1143,11 @@ The anonymous cold model uses the same fixture and latency assumptions:
 | Anonymous read | Before | After | KV | Blob GET | Extra pings |
 |---|---:|---:|---:|---:|---:|
 | GetReadGate (pack-serving gate) | 480 ms | 480 ms | 2 | 0 | 16 |
-| Show (canonical levels and sizes) | 2,960 ms | 960 ms | 37 | 6 | 16 |
-| Log(10), canonical first parents | 6,040 ms | 1,880 ms | 46 | 20 | 16 |
-| Native first-parent history, 10 commits | 6,960 ms | 3,000 ms | 64 | 20 | 16 |
+| Show (canonical levels and sizes) | 2,960 ms | 1,080 ms | 37 | 6 | 16 |
+| Log(10), canonical first parents | 6,040 ms | 2,000 ms | 46 | 20 | 16 |
+| Native first-parent history, 10 commits | 6,1,080 ms | 3,000 ms | 64 | 20 | 16 |
 | Tokenized page 1, 10 commits | 7,080 ms | 3,120 ms | 68 | 20 | 16 |
-| Selected-ref canonical Log(10) | 6,040 ms | 2,040 ms | 33 | 20 | 16 |
+| Selected-ref canonical Log(10) | 6,040 ms | 2,080 ms | 33 | 20 | 16 |
 
 The pack-serving gate fixture touches one RepoIndex shard, so activation preserves
 its modeled latency. These measurements exercise the actual loader graph, but

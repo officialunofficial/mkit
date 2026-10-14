@@ -624,49 +624,46 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             .unwrap_or(self.cfg.http_decode_budget)
             .min(self.cfg.http_decode_budget);
         let mut decode = Budget(allowance);
-        let work = async {
-            if let Some(session) = session.as_mut() {
-                let (io, mut charge, output, proofs) = session.split_with_proofs(allowance);
-                self.batch_with_budget(
-                    ids,
-                    sizes_only,
-                    &calls,
-                    writer,
-                    &if sizes_only {
-                        ids.iter().copied().collect()
-                    } else {
-                        BTreeSet::new()
-                    },
-                    &mut charge.budget,
-                    !writer,
-                    max_bytes,
-                    Some((io, output)),
-                    Some(proofs),
-                    &capped,
-                )
-                .await
-            } else {
-                self.batch_with_budget(
-                    ids,
-                    sizes_only,
-                    &calls,
-                    writer,
-                    &if sizes_only {
-                        ids.iter().copied().collect()
-                    } else {
-                        BTreeSet::new()
-                    },
-                    &mut decode,
-                    !writer,
-                    max_bytes,
-                    None,
-                    None,
-                    &capped,
-                )
-                .await
-            }
+        let result = if let Some(session) = session.as_mut() {
+            let (io, mut charge, output, proofs) = session.split_with_proofs(allowance);
+            self.batch_with_budget(
+                ids,
+                sizes_only,
+                &calls,
+                writer,
+                &if sizes_only {
+                    ids.iter().copied().collect()
+                } else {
+                    BTreeSet::new()
+                },
+                &mut charge.budget,
+                !writer,
+                max_bytes,
+                Some((io, output)),
+                Some(proofs),
+                &capped,
+            )
+            .await
+        } else {
+            self.batch_with_budget(
+                ids,
+                sizes_only,
+                &calls,
+                writer,
+                &if sizes_only {
+                    ids.iter().copied().collect()
+                } else {
+                    BTreeSet::new()
+                },
+                &mut decode,
+                !writer,
+                max_bytes,
+                None,
+                None,
+                &capped,
+            )
+            .await
         };
-        let (result, ()) = futures::future::join(work, self.prepare_anonymous()).await;
         settle(result, &capped)
     }
 
@@ -756,6 +753,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         } else {
             located.iter().map(|(id, _)| *id).collect::<BTreeSet<_>>()
         };
+        let mut prepared = false;
         let mut reached = BTreeSet::new();
         let mut fresh = BTreeSet::new();
         if proofs.is_none() && !writer && !pipe.cfg.takedown_denial {
@@ -788,7 +786,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     };
                 }
                 match self.install_selected(&meta, memo, reference).await {
-                    Ok(true) => {}
+                    Ok(true) => prepared = true,
                     Ok(false) => return Ok((BTreeMap::new(), BTreeMap::new())),
                     Err(error)
                         if capped_as_absent
@@ -831,8 +829,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             } else if let Some(tips) = proofs.as_ref().and_then(|memo| memo.tips.as_ref()) {
                 Ok((tips.clone(), false))
             } else {
-                pipe.reader_tips(&meta, &self.repo, cfg.max_walk_objects, writer)
-                    .await
+                // Drain activation with the opening root reads, before walking
+                // proofs, loading bytes or checking final denial/expiry guards.
+                let (tips, ()) = futures::future::join(
+                    pipe.reader_tips(&meta, &self.repo, cfg.max_walk_objects, writer),
+                    self.prepare_anonymous(),
+                )
+                .await;
+                prepared = true;
+                tips
             };
             // A spent call budget is an unprovable proof, not a store fault.
             let (tips, truncated) = match tips {
@@ -905,9 +910,18 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     accessible.push(*id);
                 }
             }
-            let (members, skipped) = resolve::locate_ids(&env, &accessible, resolve::OnCap::Skip)
-                .await
-                .map_err(resolution_failure)?;
+            let (locations, ()) = futures::future::join(
+                resolve::locate_ids(&env, &accessible, resolve::OnCap::Skip),
+                async {
+                    // A cached root set may skip opening reads. In that case
+                    // overlap the first index lookup, still before final guards.
+                    if !prepared && !accessible.is_empty() {
+                        self.prepare_anonymous().await;
+                    }
+                },
+            )
+            .await;
+            let (members, skipped) = locations.map_err(resolution_failure)?;
             if skipped && !capped_as_absent {
                 return Err(exhausted());
             }
