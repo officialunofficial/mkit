@@ -171,14 +171,26 @@ pub(crate) async fn require_scannable<S: NamespaceStore>(
     let mut total = 0_u64;
     let mut pending = partitions.as_slice();
     while !pending.is_empty() {
-        // A tight budget keeps serial precedence instead of refusing a whole
-        // wave before an earlier stats error can be observed.
-        let width = if budget.remaining() >= u32::try_from(pending.len().min(6)).unwrap_or(u32::MAX)
-        {
-            pending.len().min(6)
-        } else {
-            1
+        // Stats cannot use read credits, but a zero-call reservation exposes
+        // inherited accounting layers without spending or dispatching calls.
+        // Include the local debit and an opaque leaf: shared ancestors must
+        // cover the whole wave before a later call can mask an earlier error.
+        let cap = match (
+            env.store.read_call_allowance(),
+            env.store.reserve_read_calls(0),
+        ) {
+            (Some(allowance), Ok(reservation)) => {
+                let layers = reservation
+                    .as_ref()
+                    .map_or(0, crate::store::ReadReservation::accounting_layers);
+                let debits = layers.saturating_mul(2).saturating_add(2);
+                usize::try_from(allowance.min(budget.remaining()) / debits)
+                    .unwrap_or(6)
+                    .clamp(1, 6)
+            }
+            _ => 1,
         };
+        let width = pending.len().min(cap);
         let (wave, rest) = pending.split_at(width);
         pending = rest;
         // Stats do not consume read credits. Charge the slice once before

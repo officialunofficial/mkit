@@ -6,7 +6,11 @@ It does not overlap fork phases, pack publication boundaries, or cursor commits.
 ## Calls and ordering
 
 Destination emptiness checks use waves of six scans with a limit of one row.
-Source index statistics use six concurrent calls. Holder copies use four
+Source index statistics use at most six concurrent calls, narrowing when the
+remaining allowance cannot cover shared accounting ancestors. A zero-call
+reservation exposes the inherited depth without spending calls or dispatching
+I/O. Stats need one local debit, up to two per inherited layer, and one for an
+opaque leaf; unknown allowances keep stats serial. Holder copies use four
 distinct object IDs at a time
 within a page, reducing the width when the remaining allowance cannot cover
 all eight possible mutation attempts per ID (25 calls including the holder

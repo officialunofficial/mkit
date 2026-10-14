@@ -24,6 +24,7 @@ struct Probe {
     key_failure: Option<Key>,
     lost_reply: AtomicBool,
     stats_keys: Option<u64>,
+    stats_failures: Vec<u16>,
     opaque_allowance: bool,
     retry_object: Option<Hash>,
     retry_attempts: AtomicUsize,
@@ -42,6 +43,7 @@ impl Default for Probe {
             key_failure: None,
             lost_reply: AtomicBool::new(false),
             stats_keys: None,
+            stats_failures: Vec::new(),
             opaque_allowance: false,
             retry_object: None,
             retry_attempts: AtomicUsize::new(0),
@@ -177,6 +179,10 @@ impl NamespaceStore for Probe {
     async fn stats(&self, p: &Partition) -> Result<PartitionStats, StoreError> {
         self.delay().await;
         self.partition_error(p)?;
+        if matches!(p, Partition::RepoIndex { prefix, .. } if self.stats_failures.contains(prefix))
+        {
+            return Err(StoreError::unavailable("injected stats"));
+        }
         if let Some(keys) = self.stats_keys {
             return Ok(PartitionStats {
                 keys: Some(keys),
@@ -599,4 +605,44 @@ async fn holder_waves_keep_a_retrying_block_before_an_aliased_cap() {
     assert_eq!(shared_calls.used(), 50);
     assert!(!shared_calls.refused());
     assert_eq!(store.peak.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn register_stats_keep_first_error_with_shared_parent_budget() {
+    let store = Probe {
+        stats_failures: vec![0, 1],
+        ..Probe::default()
+    };
+    let mut job = job();
+    job.phase = Phase::Register;
+    let dest = job.dest().unwrap();
+    store
+        .inner
+        .apply(
+            &D34Shards.coordinator(&dest.namespace),
+            Batch::new().put(keys::fork_job(&dest.name), super::encode_job(&job).unwrap()),
+        )
+        .await
+        .unwrap();
+    let parent = crate::budget::SliceBudget::new(41);
+    let local = parent.child(41);
+    let wrapped = Budgeted::new(&store, &parent);
+    let clock = ManualClock::new(0);
+    let env = ForkEnv {
+        store: &wrapped,
+        shards: &D34Shards,
+        clock: &clock,
+        takedown_denial: true,
+        extract_min_bytes: Some(1),
+        limits: ForkLimits::default(),
+    };
+    // Registration leaves six shared calls. Eagerly debiting six local stats
+    // would refuse the first backend call and hide its earlier I/O error.
+    let error = step(&env, &dest, &local).await.unwrap_err();
+    assert!(matches!(error, ForkError::Unavailable(_)), "{error:?}");
+    assert_eq!(store.calls.load(Ordering::SeqCst), 35);
+    assert_eq!(parent.used(), 37);
+    assert_eq!(local.used(), 2);
+    assert!(!parent.refused());
+    assert!(!local.refused());
 }
