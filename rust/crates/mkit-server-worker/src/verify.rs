@@ -195,6 +195,40 @@ impl<W: PackWindows> PackWindows for MidPackCrash<W> {
     }
 }
 
+// A test-only external wait keeps the job pending without active extraction
+// work, so the runtime probe isolates the hold and the DO's input/output gates.
+// Small windows bypass it without consuming the pause, keeping small-pack
+// latency measurements free of the artificial delay.
+#[cfg(all(feature = "__test-faults", any(test, target_arch = "wasm32")))]
+struct PausedFirstWindow<W> {
+    inner: W,
+    sleep: Arc<dyn mkit_server::Sleep>,
+    pause: std::time::Duration,
+    started: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(all(feature = "__test-faults", any(test, target_arch = "wasm32")))]
+impl<W: PackWindows> PackWindows for PausedFirstWindow<W> {
+    fn read<'a>(
+        &'a self,
+        pack: &'a Hash,
+        offset: u64,
+        len: u64,
+        etag: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Window, WindowError>> {
+        if self.pause.is_zero()
+            || len < 1 << 20
+            || self.started.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return self.inner.read(pack, offset, len, etag);
+        }
+        Box::pin(async move {
+            self.sleep.sleep(self.pause).await;
+            self.inner.read(pack, offset, len, etag).await
+        })
+    }
+}
+
 /// Register the kind-7 handler on a Paid deployment's ref shards when
 /// `indexed` asks for scheduled verification; on every other class or plan,
 /// and when `indexed` is `None` (every release build), `registry` comes back
@@ -330,7 +364,18 @@ pub(crate) fn register_configured_budgeted<S: NamespaceStore>(
     let bucket = || EnvBucket::new(env.clone(), cfg.blob_binding);
     let probe = cfg.probe_partition();
     #[cfg(feature = "__test-faults")]
-    let windows = MidPackCrash(R2Windows(bucket()));
+    let windows = PausedFirstWindow {
+        inner: MidPackCrash(R2Windows(bucket())),
+        sleep: Arc::new(crate::sleep::WorkerSleep),
+        pause: std::time::Duration::from_millis(
+            env.var("TEST_VERIFY_FIRST_WINDOW_PAUSE_MS")
+                .ok()
+                .and_then(|value| value.to_string().parse::<u64>().ok())
+                .unwrap_or(0)
+                .min(3_000),
+        ),
+        started: std::sync::atomic::AtomicBool::new(false),
+    };
     #[cfg(not(feature = "__test-faults"))]
     let windows = R2Windows(bucket());
     let Some(indexed) = cfg
@@ -380,6 +425,57 @@ mod tests {
     use std::sync::Mutex;
 
     type Read = (Range<u64>, Option<String>);
+
+    #[cfg(feature = "__test-faults")]
+    #[test]
+    fn first_window_pause_yields_and_other_reads_keep_progressing() {
+        use mkit_server::ManualSleep;
+        use std::sync::atomic::AtomicBool;
+        use std::time::Duration;
+
+        let bucket = Bucket::default();
+        bucket.replace(vec![1; 1 << 20]);
+        let sleep = Arc::new(ManualSleep::new());
+        let windows = PausedFirstWindow {
+            inner: R2Windows(bucket.clone()),
+            sleep: sleep.clone(),
+            pause: Duration::from_secs(3),
+            started: AtomicBool::new(false),
+        };
+        let pack = [0; 32];
+        assert_eq!(
+            block_on(windows.read(&pack, 0, 1, None)).unwrap().bytes,
+            vec![1]
+        );
+        assert!(sleep.requested().is_empty());
+        assert!(!windows.started.load(std::sync::atomic::Ordering::SeqCst));
+        bucket.reads.lock().unwrap().clear();
+        let mut first = windows.read(&pack, 0, 1 << 20, None);
+        let mut context = std::task::Context::from_waker(futures::task::noop_waker_ref());
+        assert!(std::future::Future::poll(first.as_mut(), &mut context).is_pending());
+        assert!(bucket.reads.lock().unwrap().is_empty());
+        assert_eq!(sleep.requested(), vec![Duration::from_secs(3)]);
+        assert_eq!(
+            block_on(windows.read(&pack, 1, 1, None)).unwrap().bytes,
+            vec![1]
+        );
+        sleep.fire();
+        assert_eq!(block_on(first).unwrap().bytes, vec![1; 1 << 20]);
+        assert_eq!(bucket.reads.lock().unwrap().len(), 2);
+        let direct = PausedFirstWindow {
+            inner: R2Windows(bucket),
+            sleep: sleep.clone(),
+            pause: Duration::ZERO,
+            started: AtomicBool::new(false),
+        };
+        assert_eq!(
+            block_on(direct.read(&pack, 0, 1 << 20, None))
+                .unwrap()
+                .bytes,
+            vec![1; 1 << 20]
+        );
+        assert_eq!(sleep.requested(), vec![Duration::from_secs(3)]);
+    }
 
     /// One object with an etag that changes when `replace` is called.
     #[derive(Clone, Default)]

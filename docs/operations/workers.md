@@ -91,6 +91,16 @@ allow interleaving during non-storage awaits. [Input and output gates](https://d
 protect outstanding storage operations and writes, respectively; neither stays
 closed during this timer-only wait once the preceding operations finish.
 
+The indexed wire fixture uses a test-only 3,000 ms pause before its first
+large pack-window read (at least 1 MiB) when the hold is enabled. Small windows
+bypass the pause, so small-pack latency measurements keep their real timing.
+This ordinary asynchronous wait keeps verification pending while isolating the
+held advance and same-shard read
+from extraction work. The read must finish before the advance reply, which
+retains its two-second cap. The original fourth-window failure and checkpoint
+resume then continue. Release builds omit this pause; zero disables it in test
+builds.
+
 ### Latency model and harness
 
 The small-pack latency harness advances its injected clock by 50 ms per storage
@@ -147,6 +157,7 @@ repeated upload completion must reuse the same job. Expiry and lost upload or
 job-creation replies must recover without orphan work. Upload-marker durability
 across blob and namespace stores also needs a recoverable handoff. These concerns
 make eager creation a separate change.
+
 
 ## Verification latency traces
 

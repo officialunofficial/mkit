@@ -661,7 +661,8 @@ if [ "${indexed}" -eq 1 ]; then
         start_server "${indexed_phase}" "${vars[@]}" \
             --var "ADDRESSING:multi" --var "NAMESPACE_ALLOWLIST:${indexed_allowlist}" \
             --var "INDEXED_MODE:true" --var "WORKERS_PLAN:paid" \
-            --var "ADVANCE_REFS_HOLD_MS:${advance_hold_ms}"
+            --var "ADVANCE_REFS_HOLD_MS:${advance_hold_ms}" \
+            --var "TEST_VERIFY_FIRST_WINDOW_PAUSE_MS:$((advance_hold_ms > 0 ? 3000 : 0))"
         echo ">> running the indexed wire case (features: ${held_features}; hold ${advance_hold_ms} ms)"
         status=0
         capture "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
