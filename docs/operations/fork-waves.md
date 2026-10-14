@@ -1,7 +1,10 @@
 # Fork wave bounds and latency model
 
 Fork work overlaps independent storage operations within existing units.
-It does not overlap fork phases, pack publication boundaries, or cursor commits.
+It does not overlap fork phases or cursor commits. Without pack-level denial it
+also overlaps independent pack units of planning and publication, as described
+under [plan and publish waves](#plan-and-publish-waves). The index copy overlaps
+source partitions; see "Index copy waves".
 
 ## Calls and ordering
 
@@ -39,8 +42,10 @@ Read calls reserve credit before dispatch and do not charge that credit again.
 Statistics reserve their exact slice calls before dispatch because stats do not
 consume read credit. Holder mutations retain their existing per-call charges
 before each backend dispatch: the number of retries and whether the source
-holds the object are not known in advance. The copy page's existing reserve of
-`64 * 6 + 40` stays unchanged. CAS retries still draw from the slice budget.
+holds the object are not known in advance. CAS retries still draw from the slice
+budget. A copy wave takes only as many holders as the slice can still pay for
+(six calls each, at most 64), so no holder reserve is held back for pages
+without candidates.
 
 A holder write completed before a failed page checkpoint is safe to
 repeat: the destination holder already exists, so its count does not grow.
@@ -49,6 +54,83 @@ have independent holder and object-state rows.
 
 The fork loops have no separate elapsed slice cutoff. Their existing storage
 call allowance, job expiry, and freshly stamped apply windows remain in force.
+
+## Index copy waves
+
+The copy phase reads up to six of the source's sixteen index partitions at a
+time. The job row keeps one cursor per partition (`lanes`), so a wave takes the
+next page of each of the first open partitions. The width follows the same
+rule as the emptiness scans: the first read is reserved before the width is
+chosen, the known remaining calls must cover `2 * layers + 1` debits per scan,
+and an unknown allowance keeps the copy to one partition at a time. A wave also
+narrows to the calls left in the slice, and once its pages are read it keeps only
+the leading partitions whose writes the slice can still pay for (the first
+always stays); the others, and a failure that belonged to one of them, wait for
+the next wave.
+
+A wave runs in three stages, each finishing for the whole wave before the next:
+the scans, the index writes (at most six at once), then the holders. Replies are
+consumed in partition order and the wave answers as the same partitions taken
+one after another would: the first failing partition's error is the one
+reported, and no partition after it is counted. The `copied == expected`,
+`MAX_SCANNED_ROWS` and object-limit checks run over a running total in that
+order. A wave that spends the slice keeps none of its progress: the cursors and
+counts return to where the wave began, and the next slice repeats it. Every
+write is a put of the same row or a holder write that only raises a sequence, so
+the repeat is safe.
+
+Pages hold 500 rows, or 256 where holders are copied. Holder candidates do not
+bound the page: a wave copies at most 64 holders in all, in partition and key
+order, and the lane records the source key of the last candidate it finished
+(`held`; an empty mark means the rows are written and no candidate is done, for
+a partition the wave had no holder room for). The page's rows are already written, so the next wave scans the same
+page, skips the written rows, and continues after that key; the page is counted
+and its cursor advances only when its last candidate is done. A repeat of a
+holder write is safe for the reason above.
+
+| Files | Copy rounds before / after | Copy calls | Slices for the whole fork |
+| ---: | ---: | ---: | ---: |
+| 500 | 35 / 9 | 35 / 35 | 1 / 1 |
+| 3,000 | 112 / 15 | 112 / 58 | 1 / 1 |
+| 10,000 | 340 / 35 | 340 / 177 | 3 / 1 |
+
+Rounds are measured on a store that sleeps 30 ms per call and reports a known
+read allowance (`tests/fork_copy_rounds.rs`); extraction is deployed at 64 KiB
+and the files are small, so no holder is copied.
+
+## Plan and publish waves
+
+Without pack-level denial a pack's unit is a few fixed calls: planning reads the
+pack's member row, its proof and its sealed head (at most eight calls); a
+publication write reads the source pair, proves the pack, reads the
+destination's two rows and applies the guarded write (at most eight calls).
+Both overlap up to six packs. The width is chosen before dispatch from the
+store's known read allowance and the slice's remaining calls at
+`2 * layers + 1` debits per call, the same conservative rule as the loops
+above; an unknown allowance, or denial, keeps one pack at a time. A wave starts
+only with at least a whole unit reserve (300 calls for planning, 60 for a
+publication unit) in the slice. Replies are consumed in input order, so the
+first failure in pack order is the reported one; packs before it are kept and
+the discarded reads of later packs are repeated by the next wave or slice.
+
+Planning merges each pack's facts in order (the packs it names, its external
+bases) and a wave never plans a pack that an earlier pack of the same wave
+adds: those are read by the next wave. A pack with external bases scans its
+dependency rows serially while it is merged, as before.
+
+Publication keeps the member and head order of the serial path with three
+stages recorded in `job.part`: the members other than the head are written
+together (`2`), proved again together (`3`), and then the head is written and
+proved alone (`0`, `1`). The head's rows, whose flag says every other inherited
+pack is a member, are therefore written last of all. A job in stage `2` or `3`
+resumes under any driver: one that cannot run waves does the same stage one
+pack at a time. A write that failed may leave later packs' rows of the same wave
+written; a replay finds them identical and an unrelated row is never
+overwritten.
+
+When the plan fits one slice the request carries it into the job, which then
+starts after its planning phase. The carry is refused as a moved tip unless the
+source still publishes the same packmap head and membership generation.
 
 ## Memory and security bounds
 

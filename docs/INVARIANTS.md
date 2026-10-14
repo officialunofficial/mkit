@@ -2964,6 +2964,31 @@ resend an acknowledged part or advance refs without its upload commitment.
 **Enforced by:** request-policy seam tests and both-backend native push tests,
 including multipart interruption and receipt reuse across fresh instances.
 
+## A fork without denial builds no cleared set and carries its plan
+
+**Always:** a fork on a deployment without pack-level takedown denial skips the
+closure walk and builds no cleared set and no base-pack set, and still collects
+the manifest set the holder copy needs. A destination flagged by such a fork has
+no sets to load: if denial is enabled later, the first publication walk visits
+every object and its advance-time proof covers every pack it reaches. A plan
+computed before admission is carried into the job only when it fits one slice
+and the source still publishes the same packmap head and membership generation;
+otherwise the job plans for itself. Per-pack proofs run before and after every
+membership write, the authority fence and reservation are re-checked at every
+advance, and the packmap head's membership rows are written after every other
+member's.
+
+**Because:** nothing reads a cleared set without denial, and the set's walk cost
+repeats inside a request; the plan's result is a function of the pair it read,
+and the pair is read again before it is used.
+
+**If violated:** a later switch to denial could skip an object the source never
+proved, an admitted charge could differ from the pack set forked, or a reader
+could see the head's flag without the packs it promises.
+
+**Enforced by:** the fork engine tests for the denial-on full walk, the carried
+pair check, the plan fallback, the publication stage order and the round probe.
+
 ## Fork waves retain checkpoint and failure order
 
 **Always:** fork emptiness and statistics waves contain at most six operations;
@@ -2972,7 +2997,10 @@ separate waves. Replies are drained and consumed in input order. Successful
 units retain their storage call counts and existing slice limits. Reads reserve
 credit before dispatch; variable holder retries charge each actual call.
 Wave widths account conservatively for repeated debits across inherited
-reservation layers, including shared ledger ancestors. Write proofs overlap
+reservation layers, including shared ledger ancestors. Without denial, plan and
+publication units of up to six distinct packs also overlap, with the same
+widths, drains and input-order failure; the packmap head is written alone and
+last. Write proofs overlap
 directory reads only when known headroom covers all sixteen first pages;
 otherwise they remain serial. Later sibling refusals must not reclassify an
 earlier I/O error as a spent fork slice.

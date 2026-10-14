@@ -319,11 +319,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         // (exact, and the source is refused here before anything is admitted
         // or reserved), or, when the plan does not fit one slice, the source's
         // counted bytes, an upper bound that can trail by the relay lag.
-        let inherited = match fork::plan_bytes(&env, &spec).await {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => source.stored_bytes,
+        let planned = match fork::plan_fork(&env, &spec).await {
+            Ok(planned) => planned,
             Err(error) => return Err(error.error()),
         };
+        let inherited = planned
+            .as_ref()
+            .map_or(source.stored_bytes, fork::ForkPlan::bytes);
 
         // Admission, then the reservation that lives as long as the job.
         if !self.hooks.admission().is_default() {
@@ -384,14 +386,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .await;
             return Err(error);
         }
-        let started = match fork::start_with(&env, &spec, Some(settle), Some(fence)).await {
-            Ok(started) => started,
-            Err(error) => {
-                self.abort_fork_reservation(&p, pending.as_ref(), &error.error())
-                    .await;
-                return Err(error.error());
-            }
-        };
+        let started =
+            match fork::start_planned(&env, &spec, Some(settle), Some(fence), planned).await {
+                Ok(started) => started,
+                Err(error) => {
+                    self.abort_fork_reservation(&p, pending.as_ref(), &error.error())
+                        .await;
+                    return Err(error.error());
+                }
+            };
         let ours = matches!(started, StartOutcome::Started(_));
         if !ours && let Some(pending) = &pending {
             // The job exists already: this request's reservation and charges
