@@ -143,7 +143,7 @@ async fn bootstrap_empty_fixture(
 #[test]
 fn publication_fence_waits_for_real_relay_transactions_and_cleanup() {
     use crate::relay::{NoHook, RelayBudget, RelayHandler};
-    use crate::store::adapter_spi::publication_fence::{PublicationFence, Target};
+    use crate::store::adapter_spi::publication_fence::PublicationFence;
     use crate::timers::{TickBudget, TimerRegistry, registry, run_due};
     use crate::{BatchOutcome, ManualClock, MemoryKv, NamespaceStore};
     use futures_executor::block_on;
@@ -166,10 +166,8 @@ fn publication_fence_waits_for_real_relay_transactions_and_cleanup() {
                 &source,
                 1,
                 plan.digest,
-                plan.targets
-                    .iter()
-                    .map(|(target, sequence)| Target::new(target, *sequence).unwrap())
-                    .collect(),
+                plan.fence_targets()
+                    .expect("actual publication plan provides exact relay bindings"),
             )
             .await
             .unwrap();
@@ -228,4 +226,115 @@ fn publication_fence_waits_for_real_relay_transactions_and_cleanup() {
         assert_eq!(after.generation, before.generation);
         assert!(after.revision > before.revision);
     });
+}
+
+#[test]
+fn publication_fence_plan_binds_exact_encoded_messages_including_auxiliary_effects() {
+    let (_, source, batch) = fixture();
+    let original = publication_batch(&source, &batch).unwrap().unwrap();
+    assert_eq!(original.relays.len(), 2);
+    let mut changed = batch.clone();
+    let raw = changed
+        .writes
+        .iter_mut()
+        .find_map(|write| match write {
+            Write::Put(key, value) if *key == keys::relay(1) => Some(value),
+            _ => None,
+        })
+        .unwrap();
+    let before = raw.clone();
+    let mut message = codec::decode_relay(raw).unwrap();
+    message
+        .puts
+        .push((Key::new(b"auxiliary".to_vec()), Value::new(vec![7])));
+    *raw = codec::encode_relay(&message).unwrap();
+    let after = raw.clone();
+    let updated = publication_batch(&source, &changed).unwrap().unwrap();
+    assert_eq!(updated.targets, original.targets);
+    assert_ne!(
+        updated.relays[0].binding.digest(),
+        original.relays[0].binding.digest()
+    );
+    let old_target = original
+        .fence_targets()
+        .unwrap()
+        .into_iter()
+        .find(|target| target.partition().unwrap() == message.target)
+        .unwrap();
+    let new_target = updated
+        .fence_targets()
+        .unwrap()
+        .into_iter()
+        .find(|target| target.partition().unwrap() == message.target)
+        .unwrap();
+    assert!(old_target.verify_relay(1, &before).is_ok());
+    assert!(old_target.verify_relay(1, &after).is_err());
+    assert!(new_target.verify_relay(1, &after).is_ok());
+}
+
+#[test]
+fn publication_fence_plan_binds_all_new_publication_rows_not_only_last_effect() {
+    let (_, source, mut batch) = fixture();
+    let old = batch
+        .writes
+        .iter()
+        .find_map(|write| match write {
+            Write::Put(key, value) if *key == keys::relay(1) => Some(value.clone()),
+            _ => None,
+        })
+        .unwrap();
+    // The later same-target message has the same final authoritative value;
+    // both actual retained rows must remain part of the intent's obligations.
+    batch = batch
+        .put(keys::relay(3), old)
+        .put(keys::outbox_sequence(), codec::encode_u64(3));
+    let plan = publication_batch(&source, &batch).unwrap().unwrap();
+    assert_eq!(
+        plan.relays
+            .iter()
+            .map(|row| row.binding.sequence())
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    let targets = plan.fence_targets().unwrap();
+    assert!(targets.iter().any(|target| {
+        target.watermark() == 3
+            && target
+                .relays()
+                .iter()
+                .map(super::super::publication_fence::RelayBinding::sequence)
+                .collect::<Vec<_>>()
+                == vec![1, 3]
+    }));
+    let raw = batch
+        .writes
+        .iter()
+        .find_map(|write| match write {
+            Write::Put(key, value) if *key == keys::relay(1) => Some(value.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let mut many = batch.clone();
+    for sequence in 4..=32 {
+        many = many.put(keys::relay(sequence), raw.clone());
+    }
+    many = many.put(keys::outbox_sequence(), codec::encode_u64(32));
+    let supported = publication_batch(&source, &many).unwrap().unwrap();
+    assert_eq!(supported.relays.len(), 32);
+    let targets = supported.fence_targets().unwrap();
+    assert!(
+        targets
+            .iter()
+            .any(|target| target.relays().len() == 31 && target.watermark() == 32)
+    );
+    assert_eq!(targets.len(), 2);
+    let mut too_many = batch;
+    for sequence in 4..=u64::try_from(super::super::MAX_BATCH_OPS + 1).unwrap() {
+        too_many = too_many.put(keys::relay(sequence), raw.clone());
+    }
+    too_many = too_many.put(
+        keys::outbox_sequence(),
+        codec::encode_u64(u64::try_from(super::super::MAX_BATCH_OPS + 1).unwrap()),
+    );
+    assert!(publication_batch(&source, &too_many).is_err());
 }

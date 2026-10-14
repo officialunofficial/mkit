@@ -335,10 +335,8 @@ fn recovery_cancels_a_crash_before_arm_and_fences_the_delayed_writer() {
                 &source(),
                 1,
                 plan.digest,
-                plan.targets
-                    .iter()
-                    .map(|(p, n)| Target::new(p, *n).unwrap())
-                    .collect(),
+                plan.fence_targets()
+                    .expect("actual publication plan provides exact relay bindings"),
             )
             .await
             .unwrap();
@@ -638,10 +636,8 @@ fn physical_coordinator_alarm_recovers_crash_before_local_arm() {
                 &source(),
                 1,
                 plan.digest,
-                plan.targets
-                    .iter()
-                    .map(|(p, n)| Target::new(p, *n).unwrap())
-                    .collect(),
+                plan.fence_targets()
+                    .expect("actual publication plan provides exact relay bindings"),
                 2_000,
             )
             .await
@@ -725,10 +721,8 @@ fn stale_physical_recovery_wake_cannot_abort_a_newer_armed_attempt() {
             .unwrap()
             .unwrap();
         let targets = plan
-            .targets
-            .iter()
-            .map(|(p, n)| Target::new(p, *n).unwrap())
-            .collect::<Vec<_>>();
+            .fence_targets()
+            .expect("actual publication plan provides exact relay bindings");
         let old = fence
             .begin_with_recovery(&routed, &source(), 1, plan.digest, targets.clone(), 2_000)
             .await

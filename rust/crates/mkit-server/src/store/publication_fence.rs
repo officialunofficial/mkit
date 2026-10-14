@@ -15,6 +15,9 @@ use crate::repo::RepoId;
 
 /// Maximum distinct projection destinations in one intent.
 pub const MAX_TARGETS: usize = 16;
+/// Every bound message consumes a write in the existing bounded source batch.
+/// Destination fanout is separately limited by `MAX_TARGETS`.
+pub const MAX_RELAY_BINDINGS: usize = super::MAX_BATCH_OPS;
 const MAX_ROW_BYTES: usize = 32 * 1024;
 const MAX_PARTITION_BYTES: usize = 1024;
 
@@ -46,36 +49,119 @@ struct Root {
     sealed: bool,
 }
 
-/// A projection watermark allocated in the guarded source transaction.
+/// One exact encoded publication relay row, separate from its destination.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelayBinding {
+    sequence: u64,
+    digest: Hash,
+}
+impl RelayBinding {
+    /// Bind a nonzero source sequence to the exact encoded retained row.
+    ///
+    /// # Errors
+    /// Refuses zero sequences and malformed or oversized relay rows.
+    pub fn new(sequence: u64, row: &Value) -> Result<Self, StoreError> {
+        if sequence == 0 {
+            return Err(invalid("zero publication relay sequence"));
+        }
+        codec::decode_relay(row)?;
+        Ok(Self {
+            sequence,
+            digest: hash(row.as_bytes()),
+        })
+    }
+    /// Source sequence allocated by the guarded publication transaction.
+    #[must_use]
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+    /// Digest of exact stored bytes, including destination and every effect.
+    #[must_use]
+    pub fn digest(&self) -> Hash {
+        self.digest
+    }
+}
+/// Projection destination, required watermark and exact publication relay rows.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Target {
     partition: Vec<u8>,
     watermark: u64,
+    relays: Vec<RelayBinding>,
 }
 impl Target {
     /// Projection destination bound into the source publication plan.
     pub fn partition(&self) -> Result<Partition, StoreError> {
         Partition::decode(&self.partition)
     }
-    /// Source relay sequence whose target transaction must commit.
+    /// Last required publication source sequence for this destination.
     #[must_use]
     pub fn watermark(&self) -> u64 {
         self.watermark
     }
-    /// Bind an exact target partition and its required source relay watermark.
-    pub fn new(partition: &Partition, watermark: u64) -> Result<Self, StoreError> {
-        if watermark == 0 {
-            return Err(invalid("zero publication target watermark"));
-        }
-        let partition = partition.encode()?.to_vec();
-        if partition.len() > MAX_PARTITION_BYTES {
-            return Err(invalid("publication target too long"));
-        }
-        Ok(Self {
-            partition,
+    /// Exact publication rows, in strictly increasing source sequence order.
+    #[must_use]
+    pub fn relays(&self) -> &[RelayBinding] {
+        &self.relays
+    }
+    /// Bind a destination and its complete bounded publication-row obligations.
+    ///
+    /// # Errors
+    /// Refuses empty/duplicate/unordered bindings or an inconsistent watermark.
+    pub fn new(
+        partition: &Partition,
+        watermark: u64,
+        relays: Vec<RelayBinding>,
+    ) -> Result<Self, StoreError> {
+        let target = Self {
+            partition: partition.encode()?.to_vec(),
             watermark,
-        })
+            relays,
+        };
+        target.validate()?;
+        Ok(target)
+    }
+    fn validate(&self) -> Result<(), StoreError> {
+        if self.partition.len() > MAX_PARTITION_BYTES
+            || self.relays.is_empty()
+            || self.relays.len() > MAX_RELAY_BINDINGS
+            || self.relays.first().is_some_and(|row| row.sequence == 0)
+            || self
+                .relays
+                .windows(2)
+                .any(|rows| rows[0].sequence >= rows[1].sequence)
+            || self
+                .relays
+                .last()
+                .is_none_or(|row| row.sequence != self.watermark)
+        {
+            return Err(invalid("invalid publication relay bindings"));
+        }
+        if Partition::decode(&self.partition)?.encode()?.as_ref() != self.partition.as_slice() {
+            return Err(invalid("publication target not canonical"));
+        }
+        Ok(())
+    }
+    /// Check exact bytes and destination; this does not prove actual retention,
+    /// source disposition, external generation or target admission.
+    ///
+    /// # Errors
+    /// Refuses any row not exactly bound into this target's publication intent.
+    pub fn verify_relay(&self, sequence: u64, row: &Value) -> Result<(), StoreError> {
+        self.validate()?;
+        if row.as_bytes().len() > super::MAX_VALUE_BYTES {
+            return Err(invalid("publication relay row too large"));
+        }
+        if !self
+            .relays
+            .iter()
+            .any(|binding| binding.sequence == sequence && binding.digest == hash(row.as_bytes()))
+            || codec::decode_relay(row)?.target != self.partition()?
+        {
+            return Err(invalid("publication relay outside exact intent binding"));
+        }
+        Ok(())
     }
 }
 
@@ -122,16 +208,26 @@ impl Intent {
             return Err(invalid("unbounded publication intent"));
         }
         Partition::decode(&self.source)?;
+        let mut count = 0usize;
+        let mut sequences = std::collections::BTreeSet::new();
         for (index, target) in self.targets.iter().enumerate() {
-            if target.watermark == 0
-                || target.partition.len() > MAX_PARTITION_BYTES
-                || self.targets[..index]
-                    .iter()
-                    .any(|old| old.partition == target.partition)
-            {
-                return Err(invalid("invalid publication targets"));
+            target.validate()?;
+            if index != 0 && self.targets[index - 1].partition >= target.partition {
+                return Err(invalid("publication targets not in canonical order"));
             }
-            Partition::decode(&target.partition)?;
+            count = count
+                .checked_add(target.relays.len())
+                .ok_or_else(|| invalid("publication relay binding overflow"))?;
+            if count > MAX_RELAY_BINDINGS
+                || target
+                    .relays
+                    .iter()
+                    .any(|row| !sequences.insert(row.sequence))
+            {
+                return Err(invalid(
+                    "duplicate or unbounded publication relay sequences",
+                ));
+            }
         }
         Ok(())
     }
@@ -296,6 +392,83 @@ impl TargetReceipt {
         })
     }
 }
+/// Exact retained source-row observation. This is not target admission and
+/// does not prove the receiver's current external generation or target CAS.
+#[derive(Debug, Clone)]
+pub struct VerifiedRelay {
+    intent: Intent,
+    target: Partition,
+    sequence: u64,
+    row: Value,
+}
+impl VerifiedRelay {
+    /// Verify the committed source and actual retained outbox message.
+    ///
+    /// # Errors
+    /// Refuses uncommitted sources, missing rows and unbound destinations.
+    pub async fn verify<S: NamespaceStore>(
+        store: &S,
+        intent: &Intent,
+        target: &Partition,
+        sequence: u64,
+    ) -> Result<Self, StoreError> {
+        intent.validate()?;
+        let source = intent.source()?;
+        let values = store
+            .get_many(&source, &[source_key(), keys::relay(sequence)])
+            .await?;
+        if values.len() != 2 {
+            return Err(StoreError::Corrupt(
+                "short publication relay observation".into(),
+            ));
+        }
+        let marker: SourceMarker = decode(
+            values[0]
+                .as_ref()
+                .ok_or_else(|| invalid("missing publication source marker"))?,
+        )?;
+        marker.intent.validate()?;
+        if marker.intent != *intent || marker.disposition != Disposition::Committed {
+            return Err(invalid("publication relay source not committed"));
+        }
+        let row = values[1]
+            .clone()
+            .ok_or_else(|| invalid("publication relay not retained"))?;
+        let bound = intent
+            .targets
+            .iter()
+            .find(|bound| bound.partition().is_ok_and(|p| p == *target))
+            .ok_or_else(|| invalid("publication relay destination not bound"))?;
+        bound.verify_relay(sequence, &row)?;
+        Ok(Self {
+            intent: intent.clone(),
+            target: target.clone(),
+            sequence,
+            row,
+        })
+    }
+    /// Exact source intent observed with the retained row.
+    #[must_use]
+    pub fn intent(&self) -> &Intent {
+        &self.intent
+    }
+    /// Retained message destination.
+    #[must_use]
+    pub fn target(&self) -> &Partition {
+        &self.target
+    }
+    /// Retained source sequence.
+    #[must_use]
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+    /// Exact encoded retained row; not reconstructed JSON.
+    #[must_use]
+    pub fn row(&self) -> &Value {
+        &self.row
+    }
+}
+
 /// Explicit integration-owned bootstrap evidence, read from durable storage.
 /// Writing readiness is not proof that reconciliation actually ran.
 #[derive(Debug, Clone)]
@@ -800,11 +973,7 @@ impl PublicationFence {
         let source = intent.source()?;
         let plan = super::publication_fence_plan::publication_batch(&source, batch)?
             .ok_or_else(|| invalid("source commit lacks publication effects"))?;
-        let targets = plan
-            .targets
-            .iter()
-            .map(|(partition, watermark)| Target::new(partition, *watermark))
-            .collect::<Result<Vec<_>, _>>()?;
+        let targets = plan.fence_targets()?;
         if plan.digest != intent.digest || targets != intent.targets {
             return Err(invalid(
                 "publication transaction rebound after invalidation",
@@ -1038,7 +1207,7 @@ pub fn validate_source_transaction(
         Disposition::Committed => {
             let plan = super::publication_fence_plan::publication_batch(source, &original)?
                 .ok_or_else(|| invalid("terminal receipt lacks publication effects"))?;
-            let targets = plan.targets.iter().map(|(p, n)| Target::new(p, *n)).collect::<Result<Vec<_>, _>>()?;
+            let targets = plan.fence_targets()?;
             if plan.digest != next.intent.digest || targets != next.intent.targets { return Err(invalid("final publication transaction rebound")); }
         }
         Disposition::Aborted => {

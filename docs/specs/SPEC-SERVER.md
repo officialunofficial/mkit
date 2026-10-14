@@ -4912,6 +4912,27 @@ names, platform requirements and deployment procedure belong to the
 deployment's operator documentation; the Cloudflare Workers adapter's are in
 [the Workers operator guide](../operations/workers.md).
 
+**Unshipped adapter publication intents.** Version-one intent target records
+contain canonical encoded `partition`, `watermark`, and a required nonempty
+`relays` array of `{sequence, digest}` entries. The digest is BLAKE3 over the
+exact stored relay value, including its destination and all effects. Each
+target's sequences MUST strictly increase, its watermark MUST equal the last
+sequence, and sequences MUST be globally unique across the intent. The source
+batch operation limit bounds relay bindings to 100; distinct targets remain
+limited to 16 and the full encoded record to 32 KiB. Target ordering follows
+canonical partition bytes. Source planning and final SQL validation derive
+these bindings from every newly retained relay containing publication effects,
+not merely the last message for each destination.
+
+An actual retained-row observation MUST match an exact committed source marker
+and its bound row bytes, sequence and destination. That observation establishes
+neither current external generation nor target admission. A watermark alone
+MUST NOT associate an older retained message with a newer intent. These records
+remain adapter groundwork; default factories are disabled and existing
+unenrolled stores require no reset. Experimental enabled data predating the
+required bindings must be rebuilt before activation. No public protocol or
+launch-profile conformance changes are implied.
+
 **Optional Worker maintenance barrier.** The SQL adapter can explicitly pause
 a logical partition under a trusted external publication generation. Its private
 `mkit_publication_pause` table binds the canonical encoded partition to a version-1

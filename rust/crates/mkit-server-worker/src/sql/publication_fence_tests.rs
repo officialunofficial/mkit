@@ -2,7 +2,7 @@ use super::SqlKvStore;
 use crate::test_sqlite::RusqliteConn;
 use futures::executor::block_on;
 use mkit_server::pipeline::{D34Shards, ShardMap};
-use mkit_server::store::adapter_spi::publication_fence::{Generation, PublicationFence, Target};
+use mkit_server::store::adapter_spi::publication_fence::{Generation, PublicationFence};
 use mkit_server::store::adapter_spi::publication_fence_plan::publication_batch;
 use mkit_server::store::adapter_spi::{codec, keys};
 use mkit_server::{
@@ -64,10 +64,8 @@ async fn prepared(store: &SqlKvStore<RusqliteConn>) -> (Partition, Batch) {
             &source,
             1,
             plan.digest,
-            plan.targets
-                .iter()
-                .map(|(target, seq)| Target::new(target, *seq).expect("valid projection target"))
-                .collect(),
+            plan.fence_targets()
+                .expect("fixture plan binds exact relay rows"),
         )
         .await
         .expect("begin fixture publication");

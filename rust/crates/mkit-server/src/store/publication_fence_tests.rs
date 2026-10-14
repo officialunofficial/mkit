@@ -65,10 +65,15 @@ fn plan(name: &str, attempt: u64) -> super::super::publication_fence_plan::Publi
 }
 fn targets(name: &str, attempt: u64) -> Vec<Target> {
     plan(name, attempt)
-        .targets
-        .iter()
-        .map(|(p, n)| Target::new(p, *n).expect("fixture target has a nonzero watermark"))
-        .collect()
+        .fence_targets()
+        .expect("actual fixture publication binds exact relay rows")
+}
+#[test]
+fn target_relay_bindings_match_version_one_golden() {
+    let actual = serde_json::to_string(&targets("main", 1)).unwrap();
+    let expected =
+        include_str!("../../../../tests/golden/publication-fence/target-relay-bindings-v1.json");
+    assert_eq!(actual, expected.trim_end());
 }
 async fn begin(store: &MemoryKv, fence: &PublicationFence, name: &str, attempt: u64) -> Intent {
     fence
@@ -539,7 +544,7 @@ fn bounds_corruption_overflow_and_stale_readiness_fail_closed() {
                 .await
                 .is_err()
         );
-        assert!(Target::new(&source("main"), 0).is_err());
+        assert!(Target::new(&source("main"), 0, vec![]).is_err());
         assert!(decode::<Root>(&Value::new(vec![1; MAX_ROW_BYTES + 1])).is_err());
         let mut malformed = Intent {
             generation: generation(1),
@@ -1184,5 +1189,137 @@ fn stale_recovery_payload_retains_its_exact_attempt_and_generation() {
         let mut unknown = payload.as_bytes().to_vec();
         unknown[0] = 2;
         assert!(fence.recovery_intent(&Value::new(unknown)).is_err());
+    });
+}
+
+#[test]
+fn exact_publication_relay_binding_rejects_real_retained_legacy_row() {
+    block_on(async {
+        let store = MemoryKv::default();
+        let fence = setup(&store).await;
+        let prior = begin(&store, &fence, "main", 1).await;
+        fence.arm(&store, &prior).await.unwrap();
+        commit(&store, &prior, "main").await;
+        fence
+            .source_receipt(
+                &store,
+                &SourceReceipt::verify(&store, &prior).await.unwrap(),
+            )
+            .await
+            .unwrap();
+        for index in 0..prior.targets.len() {
+            fence
+                .target_receipt(&store, &deliver(&store, &prior, index).await)
+                .await
+                .unwrap();
+        }
+        // A crash after target commit may leave real older rows in the outbox.
+        let legacy = store
+            .get(&source("main"), &keys::relay(1))
+            .await
+            .unwrap()
+            .unwrap();
+        let target = codec::decode_relay(&legacy).unwrap().target;
+        let current = begin(&store, &fence, "main", 2).await;
+        fence.arm(&store, &current).await.unwrap();
+        commit(&store, &current, "main").await;
+        assert!(
+            current
+                .targets()
+                .iter()
+                .any(|t| t.partition().unwrap() == target && t.watermark() >= 1)
+        );
+        assert!(
+            VerifiedRelay::verify(&store, &current, &target, 1)
+                .await
+                .is_err(),
+            "an actual retained legacy row must not borrow a newer intent's maximum watermark"
+        );
+        let actual = store
+            .get(&source("main"), &keys::relay(3))
+            .await
+            .unwrap()
+            .unwrap();
+        let target = codec::decode_relay(&actual).unwrap().target;
+        let proof = VerifiedRelay::verify(&store, &current, &target, 3)
+            .await
+            .unwrap();
+        assert_eq!(proof.row(), &actual);
+        assert_eq!(proof.intent(), &current);
+        // Same sequence/destination is insufficient when retained bytes differ.
+        store
+            .apply(&source("main"), Batch::new().put(keys::relay(3), legacy))
+            .await
+            .unwrap();
+        assert!(
+            VerifiedRelay::verify(&store, &current, &target, 3)
+                .await
+                .is_err()
+        );
+        store
+            .apply(&source("main"), Batch::new().put(keys::relay(3), actual))
+            .await
+            .unwrap();
+        assert!(
+            VerifiedRelay::verify(&store, &current, &target, 3)
+                .await
+                .is_ok()
+        );
+    });
+}
+
+#[test]
+fn exact_relay_bindings_reject_duplicates_order_bounds_and_recovery_rebinding() {
+    block_on(async {
+        let store = MemoryKv::default();
+        let fence = setup(&store).await;
+        let intent = begin(&store, &fence, "main", 1).await;
+        let row = publication("main", 1)
+            .writes
+            .into_iter()
+            .find_map(|write| match write {
+                super::super::Write::Put(key, value) if key == keys::relay(1) => Some(value),
+                _ => None,
+            })
+            .unwrap();
+        let target = codec::decode_relay(&row).unwrap().target;
+        let one = RelayBinding::new(1, &row).unwrap();
+        assert!(RelayBinding::new(0, &row).is_err());
+        assert!(Target::new(&target, 1, vec![]).is_err());
+        assert!(Target::new(&target, 1, vec![one.clone(), one.clone()]).is_err());
+        assert!(Target::new(&target, 2, vec![one.clone()]).is_err());
+        let two = RelayBinding::new(2, &row).unwrap();
+        assert!(Target::new(&target, 1, vec![two, one]).is_err());
+        let oversized = (1..=u64::try_from(MAX_RELAY_BINDINGS + 1).unwrap())
+            .map(|n| RelayBinding::new(n, &row).unwrap())
+            .collect();
+        assert!(
+            Target::new(
+                &target,
+                u64::try_from(MAX_RELAY_BINDINGS + 1).unwrap(),
+                oversized
+            )
+            .is_err()
+        );
+        let mut reordered = intent.clone();
+        reordered.targets.reverse();
+        assert!(reordered.validate().is_err());
+        let mut duplicated = intent.clone();
+        duplicated.targets[1].relays[0].sequence = duplicated.targets[0].relays[0].sequence;
+        duplicated.targets[1].watermark = duplicated.targets[0].watermark;
+        assert!(duplicated.validate().is_err());
+        assert!(
+            fence
+                .recovery_intent(&encode(&duplicated).unwrap())
+                .is_err()
+        );
+        let mut stale = intent.clone();
+        stale.targets[0].relays[0].digest = [0; 32];
+        let mut batch = publication("main", 1);
+        assert!(PublicationFence::source_commit_fragment(&stale, &mut batch).is_err());
+        let target = &intent.targets[0];
+        let huge = Value::new(vec![7; super::super::MAX_VALUE_BYTES + 1]);
+        assert!(target.verify_relay(target.watermark(), &huge).is_err());
+        assert!(RelayBinding::new(1, &huge).is_err());
     });
 }

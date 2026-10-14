@@ -15,6 +15,16 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Changed
 
+- [embedder: breaking API] [embedder: stored-format change] The unshipped
+  publication-fence target binds exact retained relay sequences and encoded-row
+  digests. Replace watermark-only `Target::new` calls with
+  `PublicationBatch::fence_targets()`. Version-one intent targets now require
+  ordered `relays` entries; the global message bound follows the existing
+  100-operation source batch limit, independently of 16 destinations and the
+  unchanged 32 KiB encoded ceiling. Default factories remain disabled and
+  existing unenrolled stores require no reset. Experimental fence data must be
+  rebuilt against this unshipped format before activation. Actual retained-row
+  observations do not establish target admission or current external generation.
 - Add an explicit local SQL maintenance pause outside portable KV exports.
   Paused partitions reject all writes after transaction extensions; reads and
   exact pause retries remain available. Metadata growth respects the storage

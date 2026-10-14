@@ -7,6 +7,8 @@ use mkit_core::hash::Hash;
 use crate::pipeline::{D34Shards, ShardMap};
 use crate::repo::RepoId;
 
+use super::publication_fence::{MAX_RELAY_BINDINGS, RelayBinding, Target};
+
 use super::{
     Batch, Partition, Precondition, StoreCapabilities, StoreError, Value, Write, codec, keys,
 };
@@ -18,6 +20,38 @@ pub struct PublicationBatch {
     pub digest: Hash,
     /// Target partition and source outbox sequence, in canonical order.
     pub targets: Vec<(Partition, u64)>,
+    /// Every newly allocated row carrying published ref-index effects.
+    pub relays: Vec<PublicationRelay>,
+}
+/// Exact source row selected from the actual guarded publication batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicationRelay {
+    /// Destination included in the encoded row and matched against D34 routing.
+    pub target: Partition,
+    /// Exact source sequence and encoded-row digest.
+    pub binding: RelayBinding,
+}
+impl PublicationBatch {
+    /// Derive complete canonical fence targets from this inspected batch.
+    ///
+    /// # Errors
+    /// Refuses inconsistent, empty or unbounded target message bindings.
+    pub fn fence_targets(&self) -> Result<Vec<Target>, StoreError> {
+        self.targets
+            .iter()
+            .map(|(target, sequence)| {
+                Target::new(
+                    target,
+                    *sequence,
+                    self.relays
+                        .iter()
+                        .filter(|row| row.target == *target)
+                        .map(|row| row.binding.clone())
+                        .collect(),
+                )
+            })
+            .collect()
+    }
 }
 
 fn invalid() -> StoreError {
@@ -181,12 +215,14 @@ pub fn publication_batch(
             }
         }
     }
+    let mut publication_relays = Vec::new();
     for (sequence, raw) in relays {
         if sequence <= previous || allocated.is_none_or(|last| last <= previous || sequence > last)
         {
             return Err(invalid());
         }
         let relay = codec::decode_relay(&raw)?;
+        let mut has_projection = false;
         for (key, value) in relay
             .puts
             .iter()
@@ -204,24 +240,38 @@ pub fn publication_batch(
                 {
                     return Err(invalid());
                 }
+                has_projection = true;
                 projected.insert(name, (value.cloned(), relay.target.clone(), sequence));
             }
+        }
+        if has_projection {
+            if publication_relays.len() == MAX_RELAY_BINDINGS {
+                return Err(invalid());
+            }
+            publication_relays.push(PublicationRelay {
+                target: relay.target,
+                binding: RelayBinding::new(sequence, &raw)?,
+            });
         }
     }
     let mut targets: BTreeMap<Vec<u8>, (Partition, u64)> = BTreeMap::new();
     for (name, expected) in published {
-        let (actual, target, sequence) = projected.remove(&name).ok_or_else(invalid)?;
+        let (actual, _, _) = projected.remove(&name).ok_or_else(invalid)?;
         if actual != expected {
             return Err(invalid());
         }
+    }
+    for relay in &publication_relays {
+        let sequence = relay.binding.sequence();
         let entry = targets
-            .entry(target.encode()?.to_vec())
-            .or_insert((target, sequence));
+            .entry(relay.target.encode()?.to_vec())
+            .or_insert((relay.target.clone(), sequence));
         entry.1 = entry.1.max(sequence);
     }
     Ok(Some(PublicationBatch {
         digest: batch_digest(source, batch)?,
         targets: targets.into_values().collect(),
+        relays: publication_relays,
     }))
 }
 

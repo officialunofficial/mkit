@@ -2765,6 +2765,14 @@ and exit-code behavior. No authorization, wire, or stored-format boundary moves.
 Each source keeps one bounded intent row. No row retains an attempt history.
 A stable token requires a sealed bootstrap cut and zero pending intents.
 The source transaction binds its exact guarded batch and projection allocations to the intent.
+Every newly retained relay with publication effects binds its exact encoded bytes
+and source sequence, including earlier messages to the same destination and auxiliary effects.
+Sequences are globally unique within an intent and ordered within each target.
+The message bound follows the 100-operation source batch, separately from 16 targets.
+The final source transaction recomputes these bindings. A watermark alone cannot
+associate an older retained message with a newer source intent.
+`VerifiedRelay` observes an actual committed source marker and retained row;
+it establishes neither current external generation nor target admission.
 An irreversible abort changes the armed marker before completing the coordinator intent.
 Completion requires a terminal source marker and every required projection watermark.
 Durable source relay cleanup can prove those watermarks without another target fanout.

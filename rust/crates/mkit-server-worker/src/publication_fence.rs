@@ -3,7 +3,7 @@
 //! route source operations to the raw local store, avoiding wrapper recursion.
 use crate::sql::{SqlConn, SqlError, SqlKvStore};
 use mkit_server::store::adapter_spi::publication_fence::{
-    Generation, Intent, PublicationFence, SourceReceipt, SourceStatus, Target,
+    Generation, Intent, PublicationFence, SourceReceipt, SourceStatus,
 };
 use mkit_server::store::adapter_spi::publication_fence_plan::publication_batch;
 use mkit_server::{Batch, BatchOutcome, NamespaceStore, Partition, RepoId, StoreError};
@@ -218,11 +218,7 @@ impl PublicationWriter {
             .as_ref()
             .map_or(Some(1), |row| row.intent().attempt().checked_add(1))
             .ok_or_else(|| StoreError::Invalid("publication attempt overflow".into()))?;
-        let targets = plan
-            .targets
-            .iter()
-            .map(|(p, sequence)| Target::new(p, *sequence))
-            .collect::<Result<Vec<_>, _>>()?;
+        let targets = plan.fence_targets()?;
         let intent = self
             .fence
             .begin_with_recovery(
