@@ -231,15 +231,18 @@ fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpt
             crate::progress::should_report(opts.quiet),
             opts.quiet,
         );
-        remote_dispatch::push_branch_tracked(
-            layout.worktree_root(),
-            tx.as_ref(),
-            &resolved.name,
-            &branch,
-            &remote_branch,
-            lease,
-            remote.authority.as_deref(),
-        )
+        tx.with_source(|source| {
+            remote_dispatch::push_branch_tracked_source(
+                layout.worktree_root(),
+                source,
+                &resolved.name,
+                &branch,
+                &remote_branch,
+                lease,
+                remote.authority.as_deref(),
+            )
+        })
+        .and_then(|result| result)
     };
     match push_outcome.map_err(remote_dispatch::DispatchError::into_published_prefix) {
         Ok((new_tip, steps)) => {
@@ -390,13 +393,16 @@ fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -
             crate::progress::should_report(opts.quiet),
             opts.quiet,
         );
-        remote_dispatch::push_all_with(
-            layout.worktree_root(),
-            tx.as_ref(),
-            Some(&resolved.name),
-            opts.force,
-            remote.authority.as_deref(),
-        )
+        tx.with_source(|source| {
+            remote_dispatch::push_all_with_source(
+                layout.worktree_root(),
+                source,
+                Some(&resolved.name),
+                opts.force,
+                remote.authority.as_deref(),
+            )
+        })
+        .and_then(|result| result)
     };
     match push_outcome.map_err(remote_dispatch::DispatchError::into_published_prefix) {
         Ok(pushed) => {

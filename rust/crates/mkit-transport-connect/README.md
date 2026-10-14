@@ -1,13 +1,15 @@
 # mkit-transport-connect
 
-The native [ConnectRPC] client of `mkit.transport.v1.TransportService`
-(SPEC-TRANSPORT-CONNECT) &mdash; the implementation behind the `mkit+https://`
-(and loopback-only `mkit+http://`) remote scheme.
+The native host adapter for `mkit.transport.v1.TransportService`
+([SPEC-TRANSPORT-CONNECT](../../../docs/specs/SPEC-TRANSPORT-CONNECT.md)).
+`mkit-client` owns request construction, signatures, framing, and decoding.
+`ClientSource` in `mkit-sync` owns bounded native uploads and ref advances.
 
-[`ConnectTransport`] implements the `Transport` trait
-(`docs/specs/SPEC-TRANSPORT.md`) itself over the `mkit.transport.v1` service.
-`mkit-cli`'s `remote_dispatch` constructs it for `mkit+https://` / loopback
-`mkit+http://`, replacing `mkit-transport-http`'s bespoke JSON dialect there.
+`ConnectTransport` retains the synchronous `Transport` API and native host
+configuration: TLS trust, bearer credentials, grants, admission helpers,
+scheduling, and progress callbacks. The CLI lends its configured `ClientSource`
+through `ConnectTransport::with_source` for `mkit+https` and `mkit+http`
+push, fetch, pull, and clone. Other schemes use `TransportSource`.
 
 The server side is not in this crate. `mkit-server`'s pipeline serves
 `mkit.transport.v1` (on Workers, via `mkit-server-worker`). The `server` cargo
@@ -35,15 +37,12 @@ use the canonical `<repo-root>/proto/mkit/transport/v1/transport.proto`.
   `MKIT_TRANSPORT_CODEGEN=1` for the owning crate and refreshes the single
   shared tree. Commit that output after editing the canonical proto.
 
-## Native vs. wasm
+## Native and wasm
 
-The client differs from `mkit-repo-client` (its wasm sibling) only in
-target: native (Tokio, `connectrpc`'s hyper-rustls client transport) rather
-than wasm (Fetch API, `wasm-bindgen`). It drops the wasm-only dependencies
-(`wasm-bindgen`, `web-sys`, `send_wrapper`) and enables `connectrpc`'s native
-client-TLS feature instead. TLS trust uses `webpki-roots` (the Mozilla root
-program, a pure-Rust dependency) rather than the OS trust store, so this
-crate has no system dependency beyond a working TLS/TCP stack.
+The protocol client is runtime-independent and builds for native and wasm.
+This adapter uses `mkit-sync::NativeHttp`, a current-thread Tokio runtime and
+Hyper over rustls. TLS verifies chain and hostname against the compiled Mozilla
+roots. Browser clients retain browser-managed trust.
 
 The native CLI can add trusted certificates with `http.sslCAInfo`, or with
 `MKIT_SSL_CA_FILE`, which takes precedence. The selected PEM file augments
@@ -55,43 +54,63 @@ Connect remotes only: the self-updater is excluded by design, S3 remotes are
 not yet covered, and wasm/browser Fetch trust is unaffected. See the
 [CLI certificate trust reference](../../../docs/CLI.md#https-certificate-trust).
 
-## Sync `Transport`, async client
+## Synchronous operations and recovery
 
-`Transport` is a synchronous, object-safe trait (`&self` methods, no
-`async`). `ConnectTransport` bridges it to `connectrpc`'s async API via
-`mkit_core::protocol::async_shim::Executor` &mdash; a dedicated tokio runtime,
-mirroring `mkit-transport-enc`'s `tcp::TokioExecutor`.
+`Transport` remains synchronous and object-safe. The adapter lends a borrowed
+client and caller-owned `ClientSession` for each operation. Short internal locks
+protect shared session state and release before host callbacks, which may reenter
+the adapter. A CLI repository operation keeps the same source
+from upload through the consuming advance. Stored part receipts keep their
+existing format and durability boundary.
 
-## No built-in retry ladder
+The host uses the core backoff ladder for classified transient failures.
+Ambiguous writes retain their authenticated operation, body, and identity until
+expiry. Grants are selected per signed request. Only `BeginUpload`, `UpdateRef`,
+and ticketless `AdvanceRefs` run a one-shot admission helper, followed by a new
+retry ladder. Ticket-consuming calls return payment challenges without a helper.
+Pending verification and membership waits retain their deadlines and cancellation
+checkpoints. HTTP request budgets are clipped to the remaining advance deadline.
 
-Unlike `mkit-transport-http`, the client does **not** implement its own
-retry/backoff loop. SPEC-TRANSPORT-CONNECT §7.3 defers that to a shared
-Connect interceptor wrapping the generated client (tracked separately) &mdash;
-every call here is a single attempt. Callers that need SPEC-TRANSPORT §7
-retry semantics apply `mkit_core::protocol::is_retryable` /
-`BackoffIterator` to this transport's returned `TransportError` themselves.
-`mkit-transport-http` is NOT removed: its `sparse-checkout`/`pack-shards`
-extensions have no `mkit.transport.v1` equivalent yet.
+## Native behavior differences
+
+| Behavior | Previous driver | Protocol client adapter |
+| --- | --- | --- |
+| Uploads | Generated streaming calls and a part producer thread | Pull frames through a bounded channel; no producer thread |
+| Downloads | Generated streaming decoder | Incremental bounded Connect and protobuf decoding into the final pack buffer |
+| Runtime | Dedicated runtime with multiple worker threads | Current-thread runtime, driven by the synchronous caller |
+| Connections | Pooled unary connections with one stale-socket retry | Fresh connection for each exchange; the host applies the ordinary retry ladder |
+| HTTP and content coding | HTTP/1.1 or HTTP/2, gzip or zstd | HTTP/1.1, gzip or identity |
+| Request budgets | 30 seconds for metadata, 300 seconds for transfers; signing consumes the local budget | Same budgets, including signing, bounded by remaining advance time; the timeout header advertises the locally clamped remaining budget |
+| Channel failures | Connect status mapping and ordinary retry ladder | Host-owned mappings retain HTTP diagnostics, status classes, and retry counts; body-read failures and deadlines remain terminal; metadata-bound failures retain 429 retries |
+| Gzip validation | Buffered decoder could stop after the first member | Streaming decoder rejects trailing bytes and concatenated members |
+| Shared adapter operations | Independent operation state with shared ticket maps | Caller-owned session with short internal state locks; callbacks may reenter the adapter |
+
+Neither upload framing nor download decoding retains a complete framed transfer
+next to the final pack. Generic `HttpTransport` implementations can use the
+buffered streaming fallback; the native adapter implements bounded streaming.
+Pack bytes and ids, ref conditions and moves, receipt records, CLI output, and
+exit codes remain unchanged. No server, wire, stored-format change, or wipe occurs.
+
+The host response profile retains the previous metadata limit of 4 MiB and its
+acceptance of successful 2xx responses, missing content types, protobuf content
+type prefixes, and omitted false presence fields. It omits a zero listing page
+size, ignores malformed optional read hints, and leaves final download digest
+verification to sync's staging boundary, as the previous driver did. Chunk
+identity, offsets, lengths, and resource bounds remain enforced. The protocol
+client's default validation and response limits remain unchanged.
+
+## Remaining adapter users
+
+The CLI's epoch and visibility commands retain this concrete adapter for their
+native configuration and legacy `Completion` result. In-process transport tests
+and conformance consumers retain `Transport`. `EnvelopeTransport`, pooled HTTP
+utilities, generated type aliases, and admission/TLS/progress types remain public
+utilities. They do not constitute a second per-RPC protocol driver.
 
 ## Testing
 
-`tests/roundtrip.rs` proves the client against a real (in-process)
-`TransportService` server &mdash; a `connectrpc` hyper server on an ephemeral
-loopback port, implementing the generated `TransportService` trait over an
-in-memory `mkit-transport-memory::MemoryTransport` backend &mdash; driving a full
-upload/download/ref/advance round trip through the generated codebase. This
-is the regression gate SPEC-TRANSPORT-CONNECT's testing decisions call for:
-a real server, not a mock standing in for one. `tests/retry.rs` and
-`tests/rpc_timeout.rs` build their own servers the same way.
-
-End to end, `mkit-server-conformance`'s in-process host drives
-`ConnectTransport` against `mkit-server`'s pipeline.
-
-Unary reads and auth-v2 writes retry once on a fresh HTTP/1 connection when a
-previously used pooled socket closes or resets before receiving any response
-bytes. Socket accounting includes partial headers. Writes replay the same
-signed envelope and nonce, allowing the server's stored result to answer a
-lost response. Streaming RPCs start their sole attempt on a fresh connection, so a stale
-pooled socket cannot interrupt an unreplayable body. Unsigned writes, HTTP
-error responses and body read failures are not replayed. Both attempts share the caller's RPC deadline;
-TLS trust and client credentials remain the same on the fresh connection.
+Existing roundtrip, retry, timeout, TLS, grant, admission, multipart, and
+conformance tests exercise the retained adapter APIs. Native streaming tests
+check incremental delivery, bounded frames and gzip, end markers, checksums,
+and request deadlines. Both-backend sync push tests pin pack bytes and ids,
+CAS behavior, grants, admission recovery, and receipt reuse after interruption.

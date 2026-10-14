@@ -10,9 +10,13 @@ use connectrpc::client::{ClientBody, ClientTransport, full_body};
 use futures::future::BoxFuture;
 use http::{HeaderMap, HeaderName, HeaderValue, Request, Response};
 use http_body_util::BodyExt;
-use mkit_core::hash::{hash, to_hex, to_hex_bytes};
+#[cfg(test)]
+use mkit_core::hash::to_hex_bytes;
+use mkit_core::hash::{hash, to_hex};
 
-use mkit_core::write_auth::{Context, MAX_VALIDITY_MS, Operation};
+#[cfg(test)]
+use mkit_core::write_auth::MAX_VALIDITY_MS;
+use mkit_core::write_auth::{Context, Operation};
 
 mod header {
     pub const PUBLIC_KEY: &str = "x-public-key";
@@ -24,13 +28,14 @@ mod header {
 
 /// One request identity. Write callers retain it across retries; read callers
 /// allocate it inside each attempt.
+#[cfg(test)]
 #[derive(Clone)]
 pub(crate) struct RetryIdentity {
     nonce: String,
     created_at: String,
     expires_at: String,
-    pub(crate) expires_at_ms: i64,
 }
+#[cfg(test)]
 impl RetryIdentity {
     pub(crate) fn new() -> Result<Self, String> {
         Self::new_at(now_ms())
@@ -42,7 +47,6 @@ impl RetryIdentity {
             nonce: random_idempotency_key()?,
             created_at: now.to_string(),
             expires_at: expires_at_ms.to_string(),
-            expires_at_ms,
         })
     }
     pub(crate) fn apply(
@@ -53,15 +57,6 @@ impl RetryIdentity {
             .with_header(header::CREATED_AT, self.created_at.as_str())
             .with_header("x-expires-at", self.expires_at.as_str())
             .with_header(header::IDEMPOTENCY_KEY, self.nonce.as_str())
-    }
-
-    /// Start a fresh signed operation before an attempt whose remaining
-    /// validity is too short. Callers pass their retry safety margin.
-    pub(crate) fn renew_if_lapsing(&mut self, now: i64, margin_ms: i64) -> Result<(), String> {
-        if self.expires_at_ms.saturating_sub(now) < margin_ms {
-            *self = Self::new_at(now)?;
-        }
-        Ok(())
     }
 }
 
@@ -148,6 +143,7 @@ pub(crate) fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+#[cfg(test)]
 fn random_idempotency_key() -> Result<String, String> {
     let mut bytes = [0; 32];
     getrandom::fill(&mut bytes).map_err(|e| format!("request nonce entropy unavailable: {e}"))?;

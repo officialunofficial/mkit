@@ -1,6 +1,7 @@
 use crate::seams::{
-    Attempt, NoObserver, NoRequestPolicy, Observer, RequestContext, RequestPolicy, SignError,
-    SigningRequest, UnsignedRequestContext, WriteIntent,
+    Attempt, FailureDiagnostic, FailureKind, FailureObserver, NoObserver, NoRequestPolicy,
+    Observer, RequestContext, RequestPolicy, ResponseProfile, SignError, SigningRequest,
+    UnsignedRequestContext, WriteIntent,
 };
 use base64::{
     Engine as _,
@@ -40,6 +41,75 @@ pub trait HttpTransport {
         response_limit: usize,
     ) -> Result<Response<Vec<u8>>, String>;
 
+    /// Exchange a buffered request with optional host failure diagnostics.
+    /// The concrete diagnostic type preserves conditional future thread safety.
+    ///
+    /// # Errors
+    /// Returns classified channel failures, optionally mapped by the observer.
+    async fn send_diagnosed<D: FailureObserver + ?Sized>(
+        &self,
+        request: Request<Vec<u8>>,
+        response_limit: usize,
+        observer: &D,
+    ) -> Result<Response<Vec<u8>>, Error> {
+        let procedure = request.uri().path().to_owned();
+        self.send_classified(request, response_limit)
+            .await
+            .map_err(|failure| {
+                let cause = failure.to_string();
+                observer
+                    .map_failure(&FailureDiagnostic {
+                        procedure: &procedure,
+                        kind: FailureKind::Channel,
+                        status: None,
+                        headers: None,
+                        body: None,
+                        parsed_error: None,
+                        cause: &cause,
+                        limit: Some(response_limit),
+                    })
+                    .unwrap_or_else(|| channel_error(failure))
+            })
+    }
+
+    /// Exchange a pulled body with optional host failure diagnostics.
+    /// Existing channels keep their streaming or buffered implementation.
+    /// Concrete body, sink and diagnostic types preserve conditional future
+    /// thread safety; explicitly erased or local callbacks remain supported.
+    ///
+    /// # Errors
+    /// Returns channel or callback failures.
+    async fn send_stream_diagnosed<
+        B: crate::RequestStream + ?Sized,
+        S: crate::ResponseStream + ?Sized,
+        D: FailureObserver + ?Sized,
+    >(
+        &self,
+        request: Request<()>,
+        body: &mut B,
+        response_limit: usize,
+        sink: &mut S,
+        _observer: &D,
+    ) -> Result<(), Error> {
+        self.send_stream(request, body, response_limit, sink).await
+    }
+
+    /// Exchange a pulled request body and incrementally deliver the decoded
+    /// response. The default buffers both sides through `send_classified`;
+    /// native channels can override it to retain only bounded chunks.
+    ///
+    /// # Errors
+    /// Returns channel failures or the request/response callback's typed error.
+    async fn send_stream<B: crate::RequestStream + ?Sized, S: crate::ResponseStream + ?Sized>(
+        &self,
+        request: Request<()>,
+        body: &mut B,
+        response_limit: usize,
+        sink: &mut S,
+    ) -> Result<(), Error> {
+        crate::stream::buffered(self, request, body, response_limit, sink).await
+    }
+
     /// Classify channel failures without inferring retry safety from messages.
     /// Existing channels remain terminal unless they explicitly classify an I/O
     /// failure as transient. The host still decides whether and when to retry.
@@ -57,6 +127,44 @@ pub trait HttpTransport {
     }
 }
 
+/// Host-supplied I/O bound carried locally in HTTP request extensions. Channels
+/// that support it shorten their configured budget; it never appears on wire.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RequestTimeout(pub Duration);
+
+/// Request extension asking a native channel to advertise its effective I/O
+/// budget. The marker alone supplies no timeout and does not change signatures.
+#[derive(Clone, Copy, Debug)]
+pub struct AdvertiseRequestTimeout;
+
+fn channel_error(error: ChannelError) -> Error {
+    match error {
+        ChannelError::Transient(cause) => Error::Connection(cause),
+        ChannelError::TimedOut(cause) => Error::RequestTimeout(cause),
+        ChannelError::Refused(cause) => Error::Transport(cause),
+    }
+}
+
+struct PolicyObserver<'a, P: RequestPolicy + ?Sized> {
+    policy: Option<&'a P>,
+    procedure: &'a str,
+}
+impl<P: RequestPolicy + ?Sized> FailureObserver for PolicyObserver<'_, P> {
+    fn map_failure(&self, failure: &FailureDiagnostic<'_>) -> Option<Error> {
+        self.policy.and_then(|policy| {
+            policy.map_failure(&FailureDiagnostic {
+                procedure: self.procedure,
+                ..*failure
+            })
+        })
+    }
+    fn response_profile(&self) -> ResponseProfile {
+        self.policy.map_or_else(ResponseProfile::default, |policy| {
+            policy.response_profile(self.procedure)
+        })
+    }
+}
+
 /// A channel's explicit distinction between exchange failures and refusals.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[non_exhaustive]
@@ -65,7 +173,8 @@ pub enum ChannelError {
     /// reached the server; a retry must retain the authenticated identity.
     #[error("{0}")]
     Transient(String),
-    /// The channel's request budget elapsed. Scheduling remains host-owned.
+    /// The per-request I/O budget ended. This is terminal for the channel's
+    /// logical call; a host may decide to start another operation.
     #[error("{0}")]
     TimedOut(String),
     /// A security, negotiation, framing or resource-bound refusal. Repeating
@@ -260,7 +369,7 @@ pub enum Error {
     /// An explicitly transient channel failure. Scheduling remains host-owned.
     #[error("transport: {0}")]
     Connection(String),
-    /// A channel request budget elapsed without a complete response.
+    /// The channel's request budget expired, without an automatic retry.
     #[error("transport: {0}")]
     RequestTimeout(String),
     #[error("signing: {0}")]
@@ -379,7 +488,7 @@ pub(crate) struct Signed {
     pub(crate) identity: Identity,
 }
 
-type Raw = (Vec<u8>, HeaderMap, Option<Identity>);
+type Raw = (Vec<u8>, HeaderMap, Option<Identity>, http::StatusCode);
 
 impl<'a, T, S, C> Rpc<'a, T, S, C> {
     pub(crate) fn signed(
@@ -434,10 +543,52 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
     ) -> Result<(R, Option<Identity>), Error> {
         let body = message.encode_to_vec();
         let commitment = format!("body:{}", to_hex(&hash(&body)));
-        let (bytes, _, identity) = self.call(method, body, &commitment, false, opts).await?;
-        let value =
-            R::decode_from_slice(&bytes).map_err(|_| Error::Invalid("protobuf response"))?;
+        let (bytes, headers, identity, status) =
+            self.call(method, body, &commitment, false, opts).await?;
+        let value = self.decode_message(method, &bytes, &headers, status)?;
         Ok((value, identity))
+    }
+
+    /// Owner statements and deployment epochs intentionally carry no envelope.
+    pub(crate) async fn unsigned_unary<Q: Message, R: Message + Default>(
+        &self,
+        method: &str,
+        message: &Q,
+        include_repository: bool,
+    ) -> Result<(R, Option<Identity>), Error> {
+        let unsigned = Self {
+            transport: self.transport,
+            auth: None,
+            unsigned_clock: None,
+            observer: self.observer,
+            request_policy: self.request_policy,
+            destination: self.destination,
+            deadline_ms: self.deadline_ms,
+        };
+        let body = message.encode_to_vec();
+        let commitment = format!("body:{}", to_hex(&hash(&body)));
+        let mut request = unsigned
+            .build(method, body, &commitment, false, Opts::default(), 1)
+            .await?
+            .request;
+        if !include_repository {
+            request.headers_mut().remove("x-repository");
+        }
+        let (bytes, headers, status) = unsigned.send_response(&request, RESPONSE_LIMIT).await?;
+        if let Some(policy) = self.request_policy {
+            let procedure = format!("{SERVICE}{method}");
+            policy.after_unsigned_response(
+                &UnsignedRequestContext {
+                    procedure: &procedure,
+                    audience: &self.destination.origin,
+                    repository: &self.destination.repository,
+                    intent: None,
+                },
+                &headers,
+            );
+        }
+        let value = self.decode_message(method, &bytes, &headers, status)?;
+        Ok((value, None))
     }
 
     pub(crate) async fn stream_with<Q: Message, R: Message + Default>(
@@ -447,17 +598,25 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         commitment: &str,
         opts: Opts<'_>,
     ) -> Result<(R, Option<Identity>), Error> {
-        let mut body = Vec::new();
-        for message in messages {
-            frame(&mut body, &message.encode_to_vec())?;
-        }
-        let (bytes, _, identity) = self.call(method, body, commitment, true, opts).await?;
-        let frames = decode_stream(&bytes)?;
-        if frames.len() != 1 {
-            return Err(Error::Invalid("stream response count"));
-        }
-        let value =
-            R::decode_from_slice(frames[0]).map_err(|_| Error::Invalid("protobuf response"))?;
+        let opts = self.response_options(method, opts);
+        let mut body = crate::stream::Chunks(
+            messages
+                .into_iter()
+                .map(|message| framed(&message.encode_to_vec())),
+        );
+        let sink = crate::stream::Decoder::profiled(
+            crate::stream::SingleFrame::default(),
+            opts.limit,
+            self.response_profile(method),
+        );
+        let (sink, identity, headers, status) = self
+            .stream_call(method, Vec::new(), &mut body, commitment, opts, sink)
+            .await?;
+        let bytes = sink
+            .sink
+            .bytes
+            .ok_or(Error::Invalid("stream response count"))?;
+        let value = self.decode_message(method, &bytes, &headers, status)?;
         Ok((value, identity))
     }
 
@@ -473,18 +632,15 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
             .0)
     }
 
-    /// Download one pack of at most `cap` bytes. The buffered response is
-    /// bounded by the cap plus Connect and chunk framing.
+    /// Download one pack of at most `cap` bytes. Incremental channels retain
+    /// one bounded Connect frame beside the returned pack.
     pub(crate) async fn download_with(
         &self,
         key: Hash,
         cap: u64,
         opts: Opts<'_>,
     ) -> Result<(Vec<u8>, Option<Identity>), Error> {
-        use crate::proto::{
-            DownloadPackRequest, DownloadPackResponse, download_pack_response::Body,
-        };
-        let request = DownloadPackRequest {
+        let request = crate::proto::DownloadPackRequest {
             pack_id: Some(key.to_vec()),
             ..Default::default()
         };
@@ -496,57 +652,76 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         let limit = usize::try_from(cap)
             .unwrap_or(usize::MAX)
             .saturating_add(overhead);
-        let (bytes, _, identity) = self
-            .call(
+        let opts = self.response_options("DownloadPack", Opts { limit, ..opts });
+        let limit = opts.limit;
+        let mut chunks = crate::stream::Chunks(std::iter::once(Ok(body)));
+        let sink = crate::stream::Decoder::profiled(
+            crate::stream::Pack::profiled(key, cap, self.response_profile("DownloadPack")),
+            limit,
+            self.response_profile("DownloadPack"),
+        );
+        let (sink, identity, _, _) = self
+            .stream_call(
                 "DownloadPack",
-                body,
+                Vec::new(),
+                &mut chunks,
                 &commitment,
-                true,
                 Opts { limit, ..opts },
+                sink,
             )
             .await?;
-        let mut out = Vec::new();
-        let mut expected: Option<u64> = None;
-        let mut last = false;
-        for frame in Frames::new(&bytes) {
-            let frame = frame?;
-            let response = DownloadPackResponse::decode_from_slice(frame)
-                .map_err(|_| Error::Invalid("download protobuf"))?;
-            match response.body {
-                Some(Body::Header(header)) if expected.is_none() && out.is_empty() => {
-                    let size = header.total_bytes.ok_or(Error::Invalid("download size"))?;
-                    if size > cap {
-                        return Err(Error::Limit("pack download"));
-                    }
-                    expected = Some(size);
-                    // Reserve once, so growth never holds two copies. A lying
-                    // header cannot reserve more than the response holds.
-                    out.reserve_exact(usize::try_from(size).unwrap_or(0).min(bytes.len()));
-                }
-                Some(Body::Chunk(chunk)) if expected.is_some() && !last => {
-                    if chunk.pack_id.as_deref() != Some(key.as_slice())
-                        || chunk.offset != Some(out.len() as u64)
-                    {
-                        return Err(Error::Invalid("download chunk identity"));
-                    }
-                    let data = chunk
-                        .data
-                        .as_deref()
-                        .ok_or(Error::Invalid("download chunk"))?;
-                    if (out.len() as u64).saturating_add(data.len() as u64) > expected.unwrap_or(0)
-                    {
-                        return Err(Error::Invalid("download exceeds declared size"));
-                    }
-                    out.extend_from_slice(data);
-                    last = chunk.last.ok_or(Error::Invalid("download last marker"))?;
-                }
-                _ => return Err(Error::Invalid("download order")),
-            }
+        Ok((sink.sink.bytes, identity))
+    }
+
+    fn apply_ref_hint<B>(
+        &self,
+        method: &str,
+        request: &mut Request<B>,
+        hint: Option<&str>,
+    ) -> Result<(), Error> {
+        let hint = hint.filter(|hint| {
+            !self.response_profile(method).ignore_invalid_ref_hints
+                || mkit_core::refs::validate_ref_name(hint)
+        });
+        if let Some(hint) = hint {
+            request.headers_mut().insert(
+                "x-mkit-ref",
+                HeaderValue::from_str(hint).map_err(|_| Error::Invalid("ref hint"))?,
+            );
         }
-        if !last || expected != Some(out.len() as u64) || mkit_core::pack::pack_key(&out) != key {
-            return Err(Error::Invalid("pack content commitment"));
-        }
-        Ok((out, identity))
+        Ok(())
+    }
+
+    async fn stream_call<B: crate::RequestStream + ?Sized, R: crate::ResponseStream>(
+        &self,
+        method: &str,
+        body: Vec<u8>,
+        chunks: &mut B,
+        commitment: &str,
+        opts: Opts<'_>,
+        sink: R,
+    ) -> Result<(R, Option<Identity>, HeaderMap, http::StatusCode), Error> {
+        let Built {
+            mut request,
+            identity,
+        } = self.build(method, body, commitment, true, opts, 1).await?;
+        self.apply_ref_hint(method, &mut request, opts.hint)?;
+        let (parts, _) = request.into_parts();
+        let request = Request::from_parts(parts, ());
+        let procedure = format!("{SERVICE}{method}");
+        let diagnostics = PolicyObserver {
+            policy: self.request_policy,
+            procedure: &procedure,
+        };
+        let mut checked =
+            crate::stream::Checked::diagnosed(&request, sink, opts.limit, &diagnostics);
+        self.transport
+            .send_stream_diagnosed(request, chunks, opts.limit, &mut checked, &diagnostics)
+            .await?;
+        self.observe_response(method, commitment, opts, identity, checked.headers()?)?;
+        let headers = checked.headers()?.clone();
+        let status = checked.status()?;
+        Ok((checked.sink, identity, headers, status))
     }
 
     async fn call(
@@ -563,13 +738,68 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         } = self
             .build(method, body, commitment, streaming, opts, 1)
             .await?;
-        if let Some(hint) = opts.hint {
-            request.headers_mut().insert(
-                "x-mkit-ref",
-                HeaderValue::from_str(hint).map_err(|_| Error::Invalid("ref hint"))?,
-            );
+        self.apply_ref_hint(method, &mut request, opts.hint)?;
+        let (bytes, headers, status) = self.send_response(&request, opts.limit).await?;
+        self.observe_response(method, commitment, opts, identity, &headers)?;
+        Ok((bytes, headers, identity, status))
+    }
+
+    fn response_options<'b>(&self, method: &str, opts: Opts<'b>) -> Opts<'b> {
+        let procedure = format!("{SERVICE}{method}");
+        Opts {
+            limit: self.request_policy.map_or(opts.limit, |policy| {
+                policy.response_limit(&procedure, opts.limit)
+            }),
+            ..opts
         }
-        let (bytes, headers) = self.send(&request, opts.limit).await?;
+    }
+    pub(crate) fn response_profile(&self, method: &str) -> ResponseProfile {
+        let procedure = format!("{SERVICE}{method}");
+        self.request_policy
+            .map_or_else(ResponseProfile::default, |policy| {
+                policy.response_profile(&procedure)
+            })
+    }
+    fn decode_message<R: Message + Default>(
+        &self,
+        method: &str,
+        bytes: &[u8],
+        headers: &HeaderMap,
+        status: http::StatusCode,
+    ) -> Result<R, Error> {
+        R::decode_from_slice(bytes).map_err(|error| {
+            let procedure = format!("{SERVICE}{method}");
+            let kind = if matches!(error, buffa::DecodeError::ElementMemoryLimitExceeded) {
+                FailureKind::DecodeResourceLimit
+            } else {
+                FailureKind::Decode
+            };
+            let cause = error.to_string();
+            self.request_policy
+                .and_then(|policy| {
+                    policy.map_failure(&FailureDiagnostic {
+                        procedure: &procedure,
+                        kind,
+                        status: Some(status),
+                        headers: Some(headers),
+                        body: Some(bytes),
+                        parsed_error: None,
+                        cause: &cause,
+                        limit: None,
+                    })
+                })
+                .unwrap_or(Error::Invalid("protobuf response"))
+        })
+    }
+
+    fn observe_response(
+        &self,
+        method: &str,
+        commitment: &str,
+        opts: Opts<'_>,
+        identity: Option<Identity>,
+        headers: &HeaderMap,
+    ) -> Result<(), Error> {
         if let (Some(policy), Some((signer, _)), Some(identity)) =
             (self.request_policy, self.auth, identity)
         {
@@ -591,7 +821,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
                 intent: opts.intent.copied(),
                 public_key: signer.public_key(),
             };
-            policy.after_response(&context, &headers);
+            policy.after_response(&context, headers);
         } else if let Some(policy) = self.request_policy {
             let procedure = format!("{SERVICE}{method}");
             policy.after_unsigned_response(
@@ -601,10 +831,10 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
                     repository: &self.destination.repository,
                     intent: opts.intent.copied(),
                 },
-                &headers,
+                headers,
             );
         }
-        Ok((bytes, headers, identity))
+        Ok(())
     }
 
     /// Build (and sign) one request. A caller-supplied identity is used
@@ -653,6 +883,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
             {
                 return Err(Error::Deadline);
             }
+            self.apply_request_timeout(method, &mut request)?;
             if let (Some(clock), Some(identity)) = (self.unsigned_clock, identity)
                 && clock.now_ms() >= identity.expires_at_ms
             {
@@ -664,10 +895,35 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         let signed = self.sign(&procedure, commitment, opts, attempt).await?;
         let mut request = self.destination.plain_request(method, body, streaming)?;
         request.headers_mut().extend(signed.headers);
+        self.apply_request_timeout(method, &mut request)?;
         Ok(Built {
             request,
             identity: Some(signed.identity),
         })
+    }
+
+    fn apply_request_timeout(
+        &self,
+        method: &str,
+        request: &mut Request<Vec<u8>>,
+    ) -> Result<(), Error> {
+        let procedure = format!("{SERVICE}{method}");
+        if self
+            .request_policy
+            .is_some_and(|policy| policy.advertise_request_timeout(&procedure))
+        {
+            request.extensions_mut().insert(AdvertiseRequestTimeout);
+        }
+        if let Some(timeout) = self
+            .request_policy
+            .and_then(|policy| policy.request_timeout(&procedure))
+        {
+            if timeout.is_zero() {
+                return Err(Error::Deadline);
+            }
+            request.extensions_mut().insert(RequestTimeout(timeout));
+        }
+        Ok(())
     }
 
     async fn unsigned_metadata(
@@ -894,11 +1150,46 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         request: &Request<Vec<u8>>,
         limit: usize,
     ) -> Result<(Vec<u8>, HeaderMap), Error> {
+        let (bytes, headers, _) = self.send_response(request, limit).await?;
+        Ok((bytes, headers))
+    }
+
+    async fn send_response(
+        &self,
+        request: &Request<Vec<u8>>,
+        limit: usize,
+    ) -> Result<(Vec<u8>, HeaderMap, http::StatusCode), Error> {
         let mut copy = Request::new(request.body().clone());
         *copy.method_mut() = request.method().clone();
         *copy.uri_mut() = request.uri().clone();
         *copy.headers_mut() = request.headers().clone();
-        send_checked(self.transport, copy, limit).await
+        if let Some(timeout) = request.extensions().get::<RequestTimeout>() {
+            copy.extensions_mut().insert(*timeout);
+        }
+        if request
+            .extensions()
+            .get::<AdvertiseRequestTimeout>()
+            .is_some()
+        {
+            copy.extensions_mut().insert(AdvertiseRequestTimeout);
+        }
+        let procedure = request.uri().path();
+        let limit = self
+            .request_policy
+            .map_or(limit, |policy| policy.response_limit(procedure, limit));
+        let diagnostics = PolicyObserver {
+            policy: self.request_policy,
+            procedure,
+        };
+        let content_type = copy.headers().get("content-type").cloned();
+        let response = self
+            .transport
+            .send_diagnosed(copy, limit, &diagnostics)
+            .await?;
+        let status = response.status();
+        let (bytes, headers) =
+            decode_response_diagnosed(response, content_type.as_ref(), limit, &diagnostics)?;
+        Ok((bytes, headers, status))
     }
 }
 
@@ -917,37 +1208,175 @@ pub(crate) async fn send_checked<T: HttpTransport>(
                 ChannelError::TimedOut(cause) => Error::RequestTimeout(cause),
                 ChannelError::Refused(cause) => Error::Transport(cause),
             })?;
+    decode_response(response, content_type.as_ref(), limit)
+}
+
+pub(crate) fn decode_response(
+    response: Response<Vec<u8>>,
+    content_type: Option<&HeaderValue>,
+    limit: usize,
+) -> Result<(Vec<u8>, HeaderMap), Error> {
+    decode_response_diagnosed(
+        response,
+        content_type,
+        limit,
+        &PolicyObserver::<NoRequestPolicy> {
+            policy: None,
+            procedure: "",
+        },
+    )
+}
+
+pub(crate) fn decode_response_diagnosed<D: FailureObserver + ?Sized>(
+    response: Response<Vec<u8>>,
+    content_type: Option<&HeaderValue>,
+    limit: usize,
+    observer: &D,
+) -> Result<(Vec<u8>, HeaderMap), Error> {
+    let profile = observer.response_profile();
     if response.body().len() > limit {
-        return Err(Error::Limit("RPC response"));
+        return Err(observer
+            .map_failure(&FailureDiagnostic {
+                procedure: "",
+                kind: FailureKind::WireLimit,
+                status: Some(response.status()),
+                headers: Some(response.headers()),
+                body: Some(&response.body()[..limit]),
+                parsed_error: None,
+                cause: "RPC response exceeds limit",
+                limit: Some(limit),
+            })
+            .unwrap_or(Error::Limit("RPC response")));
     }
     if !response.status().is_success() {
-        let parsed = serde_json::from_slice::<RemoteError>(response.body());
+        let parsed = parse_remote_error(response.body(), response.status(), profile);
         if response.status().as_u16() == 402 || challenged(parsed.as_ref().ok()) {
             return Err(Error::PaymentRequired(Box::new(admission_required(
                 parsed.ok().as_ref(),
                 response.headers(),
             )?)));
         }
-        let mut error = parsed.map_err(|_| Error::Invalid("Connect error JSON"))?;
+        let mut error = parsed.map_err(|error| {
+            observer
+                .map_failure(&FailureDiagnostic {
+                    procedure: "",
+                    kind: FailureKind::Http,
+                    status: Some(response.status()),
+                    headers: Some(response.headers()),
+                    body: Some(response.body()),
+                    parsed_error: None,
+                    cause: &error.to_string(),
+                    limit: Some(limit),
+                })
+                .unwrap_or(Error::Invalid("Connect error JSON"))
+        })?;
         error.status = response.status().as_u16();
         error.headers = response.headers().clone();
-        return Err(Error::Remote(Box::new(error)));
+        let mapped = observer.map_failure(&FailureDiagnostic {
+            procedure: "",
+            kind: FailureKind::Http,
+            status: Some(response.status()),
+            headers: Some(response.headers()),
+            body: Some(response.body()),
+            parsed_error: Some(&error),
+            cause: &error.message,
+            limit: Some(limit),
+        });
+        return Err(mapped.unwrap_or_else(|| Error::Remote(Box::new(error))));
     }
-    if response.status() != http::StatusCode::OK
-        || response.headers().get("content-type") != content_type.as_ref()
+    let supplied_type = response.headers().get("content-type");
+    let type_ok = supplied_type == content_type
+        || (supplied_type.is_none() && profile.allow_missing_content_type)
+        || (profile.allow_content_type_prefix
+            && supplied_type
+                .zip(content_type)
+                .is_some_and(|(supplied, expected)| {
+                    supplied.as_bytes().starts_with(expected.as_bytes())
+                }));
+    if (!profile.allow_other_success_status && response.status() != http::StatusCode::OK)
+        || !type_ok
         || response
             .headers()
             .get("content-encoding")
-            .is_some_and(|v| v != "identity")
+            .is_some_and(|value| value != "identity")
         || response
             .headers()
             .get("connect-content-encoding")
-            .is_some_and(|v| v != "identity")
+            .is_some_and(|value| value != "identity")
     {
-        return Err(Error::Invalid("Connect response status/encoding"));
+        return Err(observer
+            .map_failure(&FailureDiagnostic {
+                procedure: "",
+                kind: FailureKind::Headers,
+                status: Some(response.status()),
+                headers: Some(response.headers()),
+                body: Some(response.body()),
+                parsed_error: None,
+                cause: "Connect response status/encoding",
+                limit: Some(limit),
+            })
+            .unwrap_or(Error::Invalid("Connect response status/encoding")));
     }
     let (parts, body) = response.into_parts();
     Ok((body, parts.headers))
+}
+
+fn parse_remote_error(
+    bytes: &[u8],
+    status: http::StatusCode,
+    profile: ResponseProfile,
+) -> Result<RemoteError, serde_json::Error> {
+    #[derive(Deserialize)]
+    struct Fields {
+        code: Option<String>,
+        message: Option<String>,
+        #[serde(default)]
+        details: Vec<Detail>,
+    }
+    if !profile.allow_incomplete_error_fields {
+        return serde_json::from_slice(bytes);
+    }
+    let fields: Fields = serde_json::from_slice(bytes)?;
+    let fallback = match status.as_u16() {
+        400 => "internal",
+        401 => "unauthenticated",
+        403 => "permission_denied",
+        404 => "unimplemented",
+        408 => "deadline_exceeded",
+        429 | 502 | 503 | 504 => "unavailable",
+        _ => "unknown",
+    };
+    let code = fields
+        .code
+        .filter(|code| {
+            matches!(
+                code.as_str(),
+                "canceled"
+                    | "unknown"
+                    | "invalid_argument"
+                    | "deadline_exceeded"
+                    | "not_found"
+                    | "already_exists"
+                    | "permission_denied"
+                    | "resource_exhausted"
+                    | "failed_precondition"
+                    | "aborted"
+                    | "out_of_range"
+                    | "unimplemented"
+                    | "internal"
+                    | "unavailable"
+                    | "data_loss"
+                    | "unauthenticated"
+            )
+        })
+        .unwrap_or_else(|| fallback.to_owned());
+    Ok(RemoteError {
+        code,
+        message: fields.message.unwrap_or_default(),
+        details: fields.details,
+        status: status.as_u16(),
+        headers: HeaderMap::new(),
+    })
 }
 
 fn strip_type(url: &str) -> &str {
@@ -1115,10 +1544,12 @@ pub(crate) fn frame(body: &mut Vec<u8>, bytes: &[u8]) -> Result<(), Error> {
 /// Lazily parsed Connect frames: yields each data frame, then stops at a clean
 /// end frame; a missing, malformed or error end frame is an `Err`. Nothing is
 /// collected, so a hostile run of tiny frames costs no allocation here.
+#[cfg(test)]
 pub(crate) struct Frames<'a> {
     rest: &'a [u8],
     done: bool,
 }
+#[cfg(test)]
 impl<'a> Frames<'a> {
     pub(crate) fn new(bytes: &'a [u8]) -> Self {
         Self {
@@ -1127,6 +1558,7 @@ impl<'a> Frames<'a> {
         }
     }
 }
+#[cfg(test)]
 impl<'a> Iterator for Frames<'a> {
     type Item = Result<&'a [u8], Error>;
 
@@ -1167,7 +1599,7 @@ impl<'a> Iterator for Frames<'a> {
 
 /// The end frame of a stream: `{}` or `{"error": ...}`. A challenge error
 /// becomes `PaymentRequired`, like a unary one.
-fn end_error(frame: &[u8]) -> Result<(), Error> {
+pub(crate) fn end_error(frame: &[u8]) -> Result<(), Error> {
     let end: serde_json::Value =
         serde_json::from_slice(frame).map_err(|_| Error::Invalid("Connect end JSON"))?;
     let Some(error) = end.get("error") else {
@@ -1184,6 +1616,7 @@ fn end_error(frame: &[u8]) -> Result<(), Error> {
     Err(Error::Remote(Box::new(remote)))
 }
 
+#[cfg(test)]
 pub(crate) fn decode_stream(bytes: &[u8]) -> Result<Vec<&[u8]>, Error> {
     Frames::new(bytes).collect()
 }
@@ -1202,7 +1635,7 @@ mod channel_tests {
         }
     }
 
-    struct ClassifiedChannel;
+    struct ClassifiedChannel(bool);
     impl HttpTransport for ClassifiedChannel {
         async fn send(&self, _: Request<Vec<u8>>, _: usize) -> Result<Response<Vec<u8>>, String> {
             panic!("classified send must be used")
@@ -1213,7 +1646,13 @@ mod channel_tests {
             _: Request<Vec<u8>>,
             _: usize,
         ) -> Result<Response<Vec<u8>>, ChannelError> {
-            Err(ChannelError::Transient("connection reset".to_owned()))
+            if self.0 {
+                Err(ChannelError::TimedOut(
+                    "client-side deadline exceeded".to_owned(),
+                ))
+            } else {
+                Err(ChannelError::Transient("connection reset".to_owned()))
+            }
         }
     }
 
@@ -1224,6 +1663,77 @@ mod channel_tests {
             std::task::Poll::Ready(value) => value,
             std::task::Poll::Pending => panic!("test channel must complete immediately"),
         }
+    }
+
+    struct TimeoutPolicy(Duration);
+    impl RequestPolicy for TimeoutPolicy {
+        fn headers(&self, _: &RequestContext<'_>) -> Result<crate::RequestHeaders, crate::Veto> {
+            Ok(crate::RequestHeaders::new())
+        }
+        fn request_timeout(&self, procedure: &str) -> Option<Duration> {
+            assert_eq!(procedure, "/mkit.transport.v1.TransportService/ReadRef");
+            Some(self.0)
+        }
+    }
+    struct TimeoutChannel(std::cell::Cell<Option<Duration>>);
+    impl HttpTransport for TimeoutChannel {
+        async fn send(
+            &self,
+            request: Request<Vec<u8>>,
+            _: usize,
+        ) -> Result<Response<Vec<u8>>, String> {
+            self.0.set(
+                request
+                    .extensions()
+                    .get::<RequestTimeout>()
+                    .map(|timeout| timeout.0),
+            );
+            let reply = crate::proto::ReadRefResponse {
+                exists: Some(false),
+                ..Default::default()
+            };
+            Ok(Response::builder()
+                .header("content-type", "application/proto")
+                .body(reply.encode_to_vec())
+                .unwrap())
+        }
+    }
+    #[test]
+    fn host_request_timeout_is_preserved_through_the_rpc_request_copy() {
+        let channel = TimeoutChannel(std::cell::Cell::new(None));
+        let destination =
+            Destination::new("https://example.invalid".to_owned(), "default".to_owned()).unwrap();
+        let policy = TimeoutPolicy(Duration::from_millis(25));
+        let client = crate::Client::anonymous(&channel, destination).with_request_policy(&policy);
+        ready(client.read_ref("refs/heads/main", None)).unwrap();
+        assert_eq!(channel.0.get(), Some(Duration::from_millis(25)));
+    }
+
+    #[test]
+    fn a_zero_host_budget_refuses_before_dispatch() {
+        let channel = TimeoutChannel(std::cell::Cell::new(None));
+        let destination =
+            Destination::new("https://example.invalid".to_owned(), "default".to_owned()).unwrap();
+        let policy = TimeoutPolicy(Duration::ZERO);
+        let client = crate::Client::anonymous(&channel, destination).with_request_policy(&policy);
+        assert!(matches!(
+            ready(client.read_ref("refs/heads/main", None)),
+            Err(Error::Deadline)
+        ));
+        assert_eq!(channel.0.get(), None);
+    }
+
+    #[test]
+    fn explicit_channel_timeouts_remain_distinct_from_transient_io() {
+        let error = ready(send_checked(
+            &ClassifiedChannel(true),
+            Request::new(Vec::new()),
+            1024,
+        ))
+        .expect_err("request timeout");
+        assert!(
+            matches!(error, Error::RequestTimeout(cause) if cause == "client-side deadline exceeded")
+        );
     }
 
     #[test]
@@ -1242,7 +1752,7 @@ mod channel_tests {
     #[test]
     fn explicit_channel_transience_survives_the_rpc_boundary() {
         let error = ready(send_checked(
-            &ClassifiedChannel,
+            &ClassifiedChannel(false),
             Request::new(Vec::new()),
             1024,
         ))

@@ -281,7 +281,9 @@ connectrpc = { version = "0.9.0", default-features = false, features = ["server"
 # graph, where mkit-server stays at `ssh` + `fs`.
 mkit-server = { version = "0.5", path = "../mkit-server", default-features = false, features = ["ssh", "fs", "connect", "memory"] }
 http = "1"
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "time", "sync"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "time", "sync", "io-util"] }
+# Real TLS proxy for the Connect CLI regression matrix.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 futures = "0.3"
 # tests/cli_transcripts.rs: declarative `.trycmd` transcript tests for
 # simple, deterministic CLI output (error messages, not full help text —

@@ -213,6 +213,7 @@ pub fn filter_headers(
 
 /// Run the normal retry ladder, then one helper-backed ladder on a challenge.
 /// The responder runs in the caller thread, outside every executor `block_on`.
+#[cfg(test)]
 pub(crate) fn retry_once<T>(
     policy: Option<&AdmissionPolicy>,
     runs: &AtomicUsize,

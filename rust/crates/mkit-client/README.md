@@ -286,3 +286,17 @@ copy. The default retained sealed input limit is 64 MiB; it includes a reserved
 packlist node. Multipart receipts are held for the current operation; a host
 restart can resend the same content under the live ticket. Durable receipt
 caching and cancellation are implemented at the host transport boundary.
+
+## Streaming channels
+
+`HttpTransport::send_stream` consumes a runtime-free `RequestStream` and delivers
+response bytes to a `ResponseStream`. Its default buffers and calls the existing
+channel API. Native channels can override it to send one frame at a time and
+decode incoming Connect frames incrementally. Wire and inflated response bounds,
+frame ordering, end markers, protobuf chunk offsets, and content commitments
+still apply. A failure returns no complete pack.
+
+`RequestPolicy::request_timeout` can shorten a request budget. The client stores
+it in a `RequestTimeout` extension; native channels take the smaller of that
+budget and their configured metadata or transfer limit. A zero policy budget
+refuses dispatch. Recovery and scheduling remain in the host.

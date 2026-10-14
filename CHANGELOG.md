@@ -33,6 +33,16 @@ collect the applicable entries between their old and new immutable pins.
   wire, or stored-format change; no wipe. See the
   [Extract call report](docs/operations/extract-calls.md).
 
+- `mkit+https` and `mkit+http` push, fetch, pull, and clone route through
+  `ClientSource` and `mkit-client`. `mkit-transport-connect` retains a native
+  host adapter and its public transport, epoch, and visibility APIs; its
+  independent per-RPC driver is removed. Native uploads and downloads stream
+  through bounded frames. Metadata/transfer budgets and recovery limits remain;
+  attempts are clipped to remaining advance time. The adapter guide records
+  HTTP, coding, runtime, connection, and stricter failure-validation differences.
+  Pack and packmap bytes and ids, receipts, CLI output, and exit codes stay
+  unchanged. No server, wire, or stored-format change; wipe: no.
+
 - A signed `mkit-sync::ClientSource` supports native push through `mkit-client`
   per-RPC writes. Caller-owned request policy supplies grants and admission
   credentials; `WriteRecovery` owns helper execution and scheduling. Shared
@@ -43,7 +53,7 @@ collect the applicable entries between their old and new immutable pins.
   Shared `PartReceiptStore` types preserve durable part acknowledgements and resume
   across fresh client or transport instances. Unsigned clients with an explicit
   clock retain write nonce and expiry metadata without a signer. Client additions
-  are additive; the CLI routing stays unchanged. No wire or stored-format change; wipe: no.
+  are additive. No wire or stored-format change; wipe: no.
 
 - Ingest and read paths skip block and denial-action reads when
   `PipelineConfig.takedown_denial` is false. Holder, inventory, membership,
@@ -881,6 +891,12 @@ collect the applicable entries between their old and new immutable pins.
   URL-token reads, supplied hooks, cold outcome retry and injected slice recovery.
 
 ### Breaking (toward 0.6)
+
+- Unstable CLI library API: `remote_dispatch::open_trusted` returns `Remote`
+  instead of `Arc<dyn Transport>`. Migration: use `Remote::with_source` to lend
+  the configured source for a complete repository operation. Existing public
+  transport-based push, fetch, and pull helpers remain available. Published
+  client and transport APIs are additive; no stored-format change or wipe.
 
 - [embedder: breaking API] Raw `ContentIndex::{block, install_block_action,
   install_stored_block_action}` writers require a `DenialCapability` obtained

@@ -221,9 +221,12 @@ Ticketed uploads and advances never invoke admission recovery. The callback also
 reports multipart progress after durable persistence and can cancel before a part.
 The host must bound its retry ladder and waits.
 
-The CLI continues to use `TransportSource` in this change. Its routing switch and
-native streaming parity are separate work. Native extra-CA and configuration
-wiring remain host-owned. The protocol client's own push API is unchanged.
+The CLI uses a configured `ClientSource` for `mkit+https` and `mkit+http` push,
+fetch, pull, and clone. Native extra-CA, bearer credentials, grants, helpers, and
+configuration remain host-owned. Other schemes retain `TransportSource`.
+`NativeHttp` streams upload frames and incrementally decodes downloads; generic
+HTTP transports retain an additive buffered fallback. The protocol client's
+whole-push API is unchanged.
 
 A missing repository, a private one read anonymously and one read by a signer
 the server denies all come back as the same `SyncError::RepositoryNotFound`
