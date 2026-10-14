@@ -1146,3 +1146,89 @@ impl ShardMap for Spread {
         D34Shards.object_index_partitions(repo)
     }
 }
+
+fn planned() -> job::ForkPlan {
+    job::ForkPlan {
+        packmap: [2; 32],
+        generation: 3,
+        packs: vec![PackRow {
+            id: [2; 32],
+            len: 10,
+            objects: 1,
+            node: true,
+            base: false,
+        }],
+    }
+}
+
+fn view(packmap: Hash, generation: u64) -> plan::SourceView {
+    plan::SourceView {
+        packmap,
+        sequence: 1,
+        generation,
+    }
+}
+
+#[test]
+fn a_carried_plan_is_refused_unless_the_pair_is_the_one_it_was_computed_from() {
+    // A moved packmap head or membership generation, same tip: not the set
+    // that was planned and admitted.
+    for (packmap, generation) in [([9; 32], 3), ([2; 32], 4)] {
+        let mut job = job();
+        job.phase = Phase::Plan;
+        assert_eq!(
+            planned()
+                .carry(&view(packmap, generation), &mut job)
+                .unwrap_err(),
+            ForkError::TipChanged
+        );
+        assert_eq!(job.phase, Phase::Plan);
+        assert!(job.packs.is_empty());
+    }
+    let mut job = job();
+    job.phase = Phase::Plan;
+    planned().carry(&view([2; 32], 3), &mut job).unwrap();
+    assert_eq!(
+        (job.phase, job.cursor, job.packs.len()),
+        (Phase::Trees, 0, 1)
+    );
+    assert!(job.deps.is_empty());
+}
+
+#[test]
+fn a_carried_plan_larger_than_the_admitted_bytes_is_refused_before_the_job_exists() {
+    let mut job = job();
+    job.phase = Phase::Plan;
+    job.settle = Some(SettleV1 {
+        rid: String::new(),
+        pending: Vec::new(),
+        repository: String::new(),
+        replay: None,
+        charges: Vec::new(),
+        namespace_cap: None,
+        declared_bytes: 9,
+    });
+    assert_eq!(
+        planned().carry(&view([2; 32], 3), &mut job).unwrap_err(),
+        ForkError::Quota(OVER_ADMITTED)
+    );
+    job.settle.as_mut().unwrap().declared_bytes = 10;
+    planned().carry(&view([2; 32], 3), &mut job).unwrap();
+    assert_eq!(job.phase, Phase::Trees);
+}
+
+#[test]
+fn wave_width_is_one_without_a_known_allowance_and_bounded_by_the_slice() {
+    let known = Probe::default();
+    let unknown = Probe {
+        opaque_allowance: true,
+        ..Probe::default()
+    };
+    let whole = crate::budget::SliceBudget::new(SLICE_CALLS);
+    assert_eq!(wave_width(&known, &whole, 8), WAVE_WIDTH);
+    assert_eq!(wave_width(&unknown, &whole, 8), 1);
+    let tight = crate::budget::SliceBudget::new(24);
+    assert_eq!(wave_width(&known, &tight, 8), 3);
+    let spent = crate::budget::SliceBudget::new(7);
+    assert_eq!(wave_width(&known, &spent, 8), 1);
+}

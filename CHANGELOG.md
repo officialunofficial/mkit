@@ -48,6 +48,22 @@ collect the applicable entries between their old and new immutable pins.
   discard it; no store reset otherwise. Code that builds a `ForkJobV1` literal
   adds `lanes: Vec::new()`; reading jobs through `decode_job` needs no change.
   No wire change.
+
+- A fork takes fewer serial storage rounds. Without pack-level takedown denial it
+  skips the closure walk and writes no cleared set (nothing read it; enabling
+  denial later makes the first advance of such a destination a full walk, slower
+  but equally strict, and bound by the usual per-advance item capacity). A plan that fits one slice is computed once, before
+  admission, and carried into the job, which refuses it unless the source
+  still publishes the same tip, packmap head and membership generation; the
+  first proof of each pack after admission now precedes its membership write, so
+  a takedown landing in that gap fails the fork after registration like any
+  later refusal. Without denial, and where the store reports a known read
+  allowance, planning reads up to six packs at once and publication writes and
+  proves the members other than the head in waves, then writes the head last.
+  A 500-file fork of a two-commit source takes 101 rounds instead of 142 and
+  a 3,000-file one 178 instead of 219. New additive API: `fork::plan_fork`,
+  `fork::ForkPlan` and `fork::start_planned` (`start_with` and `plan_bytes`
+  are unchanged). No wire or stored-format change; no wipe.
 - The reachability walk behind object reads now expands trees first and then
   alternates history with a small, doubling file batch, instead of locating every
   file entry of a tree before following any commit parent. Reading an older

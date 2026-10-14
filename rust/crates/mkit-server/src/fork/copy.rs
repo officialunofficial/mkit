@@ -186,7 +186,7 @@ pub(crate) async fn require_scannable<S: NamespaceStore>(
                 let debits = layers.saturating_mul(2).saturating_add(2);
                 usize::try_from(allowance.min(budget.remaining()) / debits)
                     .unwrap_or(6)
-                    .clamp(1, 6)
+                    .clamp(1, super::WAVE_WIDTH)
             }
             _ => 1,
         };

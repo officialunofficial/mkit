@@ -1,8 +1,10 @@
 # Fork wave bounds and latency model
 
 Fork work overlaps independent storage operations within existing units.
-It does not overlap fork phases, pack publication boundaries, or cursor commits.
-The index copy overlaps source partitions; see "Index copy waves".
+It does not overlap fork phases or cursor commits. Without pack-level denial it
+also overlaps independent pack units of planning and publication, as described
+under [plan and publish waves](#plan-and-publish-waves). The index copy overlaps
+source partitions; see "Index copy waves".
 
 ## Calls and ordering
 
@@ -95,6 +97,40 @@ holder write is safe for the reason above.
 Rounds are measured on a store that sleeps 30 ms per call and reports a known
 read allowance (`tests/fork_copy_rounds.rs`); extraction is deployed at 64 KiB
 and the files are small, so no holder is copied.
+
+## Plan and publish waves
+
+Without pack-level denial a pack's unit is a few fixed calls: planning reads the
+pack's member row, its proof and its sealed head (at most eight calls); a
+publication write reads the source pair, proves the pack, reads the
+destination's two rows and applies the guarded write (at most eight calls).
+Both overlap up to six packs. The width is chosen before dispatch from the
+store's known read allowance and the slice's remaining calls at
+`2 * layers + 1` debits per call, the same conservative rule as the loops
+above; an unknown allowance, or denial, keeps one pack at a time. A wave starts
+only with at least a whole unit reserve (300 calls for planning, 60 for a
+publication unit) in the slice. Replies are consumed in input order, so the
+first failure in pack order is the reported one; packs before it are kept and
+the discarded reads of later packs are repeated by the next wave or slice.
+
+Planning merges each pack's facts in order (the packs it names, its external
+bases) and a wave never plans a pack that an earlier pack of the same wave
+adds: those are read by the next wave. A pack with external bases scans its
+dependency rows serially while it is merged, as before.
+
+Publication keeps the member and head order of the serial path with three
+stages recorded in `job.part`: the members other than the head are written
+together (`2`), proved again together (`3`), and then the head is written and
+proved alone (`0`, `1`). The head's rows, whose flag says every other inherited
+pack is a member, are therefore written last of all. A job in stage `2` or `3`
+resumes under any driver: one that cannot run waves does the same stage one
+pack at a time. A write that failed may leave later packs' rows of the same wave
+written; a replay finds them identical and an unrelated row is never
+overwritten.
+
+When the plan fits one slice the request carries it into the job, which then
+starts after its planning phase. The carry is refused as a moved tip unless the
+source still publishes the same packmap head and membership generation.
 
 ## Memory and security bounds
 

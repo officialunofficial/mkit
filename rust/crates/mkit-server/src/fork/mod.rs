@@ -29,7 +29,10 @@ pub(crate) use plan::read_published;
 
 pub(crate) use crate::store::CONTENT_APPLY_WINDOW_MS as CONTENT_WINDOW;
 pub use completed::CompletedFork;
-pub use job::{ForkTimer, StartOutcome, StepReport, plan_bytes, start, start_with, step};
+pub use job::{
+    ForkPlan, ForkTimer, StartOutcome, StepReport, plan_bytes, plan_fork, start, start_planned,
+    start_with, step,
+};
 pub use request::ForkRequest;
 pub use settle::SettleV1;
 pub use settle::{ChargeV1, ReplayV1};
@@ -75,6 +78,43 @@ pub const MAX_SCANNED_ROWS: u64 = 262_144;
 pub const MAX_FORK_DEPS: usize = 2_048;
 /// Most external-base ids one pack may name (its scan costs a quarter call each).
 pub const MAX_PACK_DEPS: u64 = 1_800;
+/// Most units of one wave that run at once.
+pub(crate) const WAVE_WIDTH: usize = 6;
+
+/// The most storage calls one plan or publication unit costs without a
+/// takedown proof. Plan: the member row, the proof's two reads and the sealed
+/// head. Publication: the source pair, the proof's reads, the destination's
+/// rows and the guarded write.
+pub(crate) const WAVE_UNIT_CALLS: u32 = 8;
+
+/// How many units that each cost at most `unit_calls` storage calls may run
+/// at once, up to [`WAVE_WIDTH`]. The slice and the store's read allowance
+/// must cover every unit's calls before dispatch, at `2 * layers + 1` debits
+/// per call: each accounting layer inherited by the store can debit two
+/// ledgers, shared ancestors can overlap, and an opaque leaf needs one more.
+/// A zero-call reservation exposes the layers without spending anything. A
+/// store that does not know its allowance runs one unit at a time, so a
+/// later refusal cannot mask an earlier unit's I/O error.
+pub(crate) fn wave_width<S: NamespaceStore>(
+    store: &S,
+    budget: &crate::budget::SliceBudget,
+    unit_calls: u32,
+) -> usize {
+    let (Some(allowance), Ok(reservation)) =
+        (store.read_call_allowance(), store.reserve_read_calls(0))
+    else {
+        return 1;
+    };
+    let layers = reservation
+        .as_ref()
+        .map_or(0, crate::store::ReadReservation::accounting_layers);
+    let debits = layers.saturating_mul(2).saturating_add(1);
+    let per_unit = unit_calls.max(1).saturating_mul(debits);
+    usize::try_from(allowance.min(budget.remaining()) / per_unit)
+        .unwrap_or(1)
+        .clamp(1, WAVE_WIDTH)
+}
+
 /// Whether a slice's allowance is still whole: it is at least the default
 /// slice and only the job row read and the reservation check have been spent. A unit that fails for budget on a whole
 /// allowance can never succeed, which is a bound of the implementation; on a
