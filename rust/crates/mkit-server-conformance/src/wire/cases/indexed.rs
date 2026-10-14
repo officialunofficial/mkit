@@ -379,11 +379,13 @@ async fn advance_with_concurrent_read(
     ctx: &Ctx,
     repository: &str,
     advance: &Signed,
+    expected_head: Hash,
 ) -> Result<Result<AdvanceRefsResponse, RpcError>, Failure> {
     let started = std::time::Instant::now();
     let held = ctx.send::<AdvanceRefsResponse>(advance);
     tokio::pin!(held);
     tokio::select! {
+        biased;
         reply = &mut held => {
             return Err(format!("advance finished before the concurrency probe: {reply:?}").into());
         }
@@ -400,12 +402,18 @@ async fn advance_with_concurrent_read(
     );
     let read_started = std::time::Instant::now();
     tokio::select! {
-        reply = ctx.send::<ReadRefResponse>(&read) => {
-            let response = want_ok(reply?, "same-shard concurrent read")?;
-            ensure!(response.object_id.is_none(), "held advance already published its head");
-        }
+        biased;
         reply = &mut held => {
             return Err(format!("held advance finished before the same-shard read: {reply:?}").into());
+        }
+        reply = ctx.send::<ReadRefResponse>(&read) => {
+            let response = want_ok(reply?, "same-shard concurrent read")?;
+            // The commit may linearize before its HTTP reply arrives. Either
+            // snapshot is valid; an unrelated head is never valid.
+            ensure!(
+                response.object_id.is_none() || response.object_id.as_deref() == Some(expected_head.as_slice()),
+                "same-shard concurrent read returned an unexpected head"
+            );
         }
     }
     ctx.set_note(format!(
@@ -479,7 +487,7 @@ async fn commit_pack(
             && ctx.case == "indexed.async_verification_commits"
             && ctx.profile().features.contains(&Feature::AdvanceHold)
         {
-            advance_with_concurrent_read(ctx, &repository, &advance).await?
+            advance_with_concurrent_read(ctx, &repository, &advance, head).await?
         } else {
             send_launch_retry::<AdvanceRefsResponse>(ctx, &advance).await?
         };
