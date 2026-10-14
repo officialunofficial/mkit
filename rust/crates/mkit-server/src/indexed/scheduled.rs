@@ -12,10 +12,6 @@
 //! must be members, §9.3(c)), the head's type, and the MKPL rule. Every
 //! answer depends only on repository state and ticket age (no oracle, §9.4).
 
-#[cfg(not(feature = "perf-metrics"))]
-use self::retry_after as selected_retry_after;
-#[cfg(feature = "perf-metrics")]
-use self::retry_after_observed as selected_retry_after;
 use super::{
     IndexedConfig,
     checkpoint::{
@@ -64,40 +60,6 @@ const MAX_PENDING_HINT_SECS: u64 = 3;
 /// A polling hint from this consumed job's persisted timer, not a completion ETA.
 /// Bound inspection to four pages. Tiny delivery waits have a 100 ms floor;
 /// other or unobserved wakes use one second. Distant wakes have the same cap.
-#[cfg(feature = "perf-metrics")]
-async fn retry_after_observed<N: NamespaceStore>(
-    store: &N,
-    source: &Partition,
-    repo: &RepoId,
-    pack: &Hash,
-    clock: &dyn Clock,
-    job: &VerifyJobV1,
-    metrics: &dyn Metrics,
-) -> Result<u64, ServerError> {
-    let result = retry_after(store, source, repo, pack, clock, job).await;
-    if job.phase == super::checkpoint::Phase::AwaitDelivery
-        && let Ok(hint) = result
-    {
-        metrics.observe_ms(
-            "mkit_server_verification_await_hint_ms",
-            &[],
-            f64::from(u32::try_from(hint).unwrap_or(u32::MAX)),
-        );
-        tracing::info!(
-            event = "verification_await_hint_histogram",
-            hint_ms = hint,
-            ms_100 = u64::from(hint <= 100),
-            ms_250 = u64::from(hint > 100 && hint <= 250),
-            ms_500 = u64::from(hint > 250 && hint <= 500),
-            ms_1000 = u64::from(hint > 500 && hint <= 1_000),
-            ms_2000 = u64::from(hint > 1_000 && hint <= 2_000),
-            ms_3000 = u64::from(hint > 2_000 && hint <= 3_000),
-            ms_inf = u64::from(hint > 3_000)
-        );
-    }
-    result
-}
-
 async fn retry_after<N: NamespaceStore>(
     store: &N,
     source: &Partition,
@@ -777,6 +739,8 @@ async fn check_optional<B: BlobStore, N: NamespaceStore>(
     } else {
         ADVANCE_CALLS
     });
+    #[cfg(feature = "perf-metrics")]
+    let mut await_hint = None;
     let result = check_inner(
         &super::budget::Budgeted::new(blobs, &budget),
         &super::budget::Budgeted::new(store, &budget),
@@ -790,10 +754,31 @@ async fn check_optional<B: BlobStore, N: NamespaceStore>(
         clock,
         metrics,
         inspection_limit,
+        #[cfg(feature = "perf-metrics")]
+        &mut await_hint,
     )
     .await;
     if result.is_err() && budget.remaining() == 0 {
         return Err(ServerError::invalid_argument("object index limit exceeded"));
+    }
+    #[cfg(feature = "perf-metrics")]
+    if let Some(hint) = await_hint {
+        metrics.observe_ms(
+            "mkit_server_verification_await_hint_ms",
+            &[],
+            f64::from(u32::try_from(hint).unwrap_or(u32::MAX)),
+        );
+        tracing::info!(
+            event = "verification_await_hint_histogram",
+            hint_ms = hint,
+            ms_100 = u64::from(hint <= 100),
+            ms_250 = u64::from(hint > 100 && hint <= 250),
+            ms_500 = u64::from(hint > 250 && hint <= 500),
+            ms_1000 = u64::from(hint > 500 && hint <= 1_000),
+            ms_2000 = u64::from(hint > 1_000 && hint <= 2_000),
+            ms_3000 = u64::from(hint > 2_000 && hint <= 3_000),
+            ms_inf = u64::from(hint > 3_000)
+        );
     }
     result
 }
@@ -812,6 +797,7 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
     clock: &dyn Clock,
     metrics: &dyn Metrics,
     inspection_limit: Option<usize>,
+    #[cfg(feature = "perf-metrics")] await_hint: &mut Option<u64>,
 ) -> Result<StagedCommits, ServerError> {
     // A same-build restart may lower the advertised cap. Refuse before any
     // job read, claim, extraction group or usable-result reuse.
@@ -847,6 +833,8 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
     let mut inspection_packs = Vec::new();
     let mut ready_packs = BTreeSet::new();
     let mut pending: Option<u64> = None;
+    #[cfg(feature = "perf-metrics")]
+    let mut pending_await = false;
     for (i, (ticket, id)) in tickets.iter().zip(ticket_ids).enumerate() {
         let job = rows[2 * i]
             .as_ref()
@@ -885,20 +873,14 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
             return Err(outcome_error(outcome, now, ticket, bound));
         }
         if !(job.usable() && verified) {
+            #[cfg(feature = "perf-metrics")]
+            {
+                pending_await |= job.phase == super::checkpoint::Phase::AwaitDelivery;
+            }
             pending = Some(
-                pending.unwrap_or(0).max(
-                    selected_retry_after(
-                        store,
-                        source,
-                        repo,
-                        &ticket.pack_id,
-                        clock,
-                        &job,
-                        #[cfg(feature = "perf-metrics")]
-                        metrics,
-                    )
-                    .await?,
-                ),
+                pending
+                    .unwrap_or(0)
+                    .max(retry_after(store, source, repo, &ticket.pack_id, clock, &job).await?),
             );
             continue;
         }
@@ -927,6 +909,10 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
         }
     }
     if let Some(ms) = pending {
+        #[cfg(feature = "perf-metrics")]
+        if pending_await {
+            *await_hint = Some(ms);
+        }
         return Err(super::pending(ms));
     }
     let inspection_count = ready

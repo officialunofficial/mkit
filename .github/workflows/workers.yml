@@ -486,7 +486,7 @@ jobs:
         if: always() && (failure() || steps.wire-diagnostics.outputs.keep == 'true')
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: workers-wire-logs
+          name: workers-wire-logs-perf-${{ matrix.perf_metrics }}
           path: ${{ runner.temp }}/wire-logs/**
           if-no-files-found: warn
           retention-days: 7

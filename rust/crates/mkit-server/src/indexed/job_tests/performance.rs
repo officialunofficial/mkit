@@ -198,3 +198,119 @@ fn verification_instrumentation_cost_probe() {
         "verification_cost iterations=50 slices={slices} calls={calls} total_rows={total_rows} total_bytes={total_bytes} rows={rows} bytes={bytes} digest={digest}"
     );
 }
+
+#[cfg(feature = "perf-metrics")]
+mod await_hints {
+    use super::*;
+
+    #[derive(Default)]
+    struct Hints(Mutex<Vec<f64>>);
+
+    impl Metrics for Hints {
+        fn incr(&self, _: &'static str, _: &[(&'static str, &str)], _: u64) {}
+        fn observe_ms(&self, name: &'static str, _: &[(&'static str, &str)], ms: f64) {
+            if name == "mkit_server_verification_await_hint_ms" {
+                self.0.lock().unwrap().push(ms);
+            }
+        }
+    }
+
+    struct Fixture {
+        rig: Rig,
+        tickets: Vec<TicketV1>,
+        ids: Vec<Hash>,
+        head: Hash,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let rig = Rig::new();
+            let (tiny, head) = tree_pack(1, 32);
+            let other = tree_pack(16, 32).0;
+            let (first, first_id) = rig.add(&tiny);
+            let (second, second_id) = rig.add(&other);
+            let items = [(&first, first_id), (&second, second_id)];
+            // Claim a coherent consumed set so the check reaches each job.
+            assert_eq!(
+                rig.check(&items, head).unwrap_err().public_message(),
+                "pack verification pending"
+            );
+            let mut job = rig.job(&first.pack_id).unwrap();
+            job.phase = Phase::AwaitDelivery;
+            job.kind = Kind::Pack;
+            job.entries = 3;
+            job.version = u32::from_le_bytes(tiny[4..8].try_into().unwrap());
+            assert!(job.tiny());
+            block_on(rig.store.apply(
+                &rig.source(),
+                Batch::new().put(
+                    keys::verify_job(&rig.repo.name, &first.pack_id),
+                    checkpoint::encode_job(&job),
+                ),
+            ))
+            .unwrap();
+            // The first timer is already due: its tiny Await floor is 100 ms.
+            let first_error = rig.check(&items[..1], head).unwrap_err();
+            assert_eq!(
+                first_error.details(),
+                super::super::super::pending(100).details()
+            );
+            Self {
+                rig,
+                tickets: vec![first, second],
+                ids: vec![first_id, second_id],
+                head,
+            }
+        }
+
+        fn check(&self, metrics: &Hints) -> crate::ServerError {
+            block_on(scheduled::check(
+                self.rig.blobs.as_ref(),
+                self.rig.store.as_ref(),
+                self.rig.shards.as_ref(),
+                &self.rig.repo,
+                &self.rig.source(),
+                &self.tickets,
+                &self.ids,
+                self.head,
+                self.rig.cfg,
+                self.rig.clock.as_ref(),
+                metrics,
+            ))
+            .unwrap_err()
+        }
+    }
+
+    #[test]
+    fn await_hint_records_the_selected_maximum_once() {
+        let fixture = Fixture::new();
+        let metrics = Hints::default();
+        let error = fixture.check(&metrics);
+        assert_eq!(
+            error.details(),
+            super::super::super::pending(1_000).details()
+        );
+        assert_eq!(*metrics.0.lock().unwrap(), vec![1_000.0]);
+    }
+
+    #[test]
+    fn await_hint_is_absent_when_a_later_job_has_a_terminal_outcome() {
+        let fixture = Fixture::new();
+        let mut job = fixture.rig.job(&fixture.tickets[1].pack_id).unwrap();
+        job.outcome = Some(checkpoint::Outcome::Blocked);
+        block_on(fixture.rig.store.apply(
+            &fixture.rig.source(),
+            Batch::new().put(
+                keys::verify_job(&fixture.rig.repo.name, &fixture.tickets[1].pack_id),
+                checkpoint::encode_job(&job),
+            ),
+        ))
+        .unwrap();
+        let metrics = Hints::default();
+        assert_eq!(
+            fixture.check(&metrics).code(),
+            crate::Code::PermissionDenied
+        );
+        assert!(metrics.0.lock().unwrap().is_empty());
+    }
+}

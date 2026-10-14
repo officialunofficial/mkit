@@ -136,6 +136,9 @@ milliseconds; structured stage durations retain the full integer value.
 Bucket fields are disjoint, not cumulative: sum each
 bucket across events before computing a distribution. Hint values describe
 client advice, not delivery completion estimates.
+The Await histogram records one selected response hint when a pending
+AwaitDelivery job participates. It includes the maximum selected across all
+consumed tickets; candidates suppressed by a terminal error produce no row.
 
 ## Query Workers observability
 
