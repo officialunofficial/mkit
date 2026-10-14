@@ -1,7 +1,7 @@
 //! Registration, the index-row copy and the one-time storage count.
 
 use super::{
-    COPY_PUTS, ForkEnv, ForkError, ForkJobV1, MAX_SCANNED_ROWS, SCAN_PAGE_ROWS, set, sets,
+    COPY_PUTS, CopyLane, ForkEnv, ForkError, ForkJobV1, MAX_SCANNED_ROWS, SCAN_PAGE_ROWS, set, sets,
 };
 use crate::budget::SliceBudget;
 use crate::indexed::budget::Budgeted;
@@ -213,7 +213,19 @@ pub(crate) async fn require_scannable<S: NamespaceStore>(
     Ok(())
 }
 
-/// What a copy page needs, fixed for the whole copy.
+/// Source partitions one copy wave reads together. Six is the number of
+/// simultaneous subrequests a Worker keeps open.
+const COPY_WAVE: usize = 6;
+/// Rows per source index scan when holders are copied. A page whose holder
+/// candidates exceed what one wave may copy resumes inside the page (see
+/// [`CopyLane::held`]), so the page size does not bound the holder work.
+const HOLDER_PAGE_ROWS: u32 = 256;
+/// Holder candidates one wave copies, at most.
+const HOLDERS_PER_WAVE: usize = 64;
+/// Calls budgeted to one holder candidate: the source read and a mutation.
+const HOLDER_CALLS: u32 = 6;
+
+/// What a copy wave needs, fixed for the whole copy.
 struct Page<'a> {
     source: crate::repo::RepoId,
     dest: crate::repo::RepoId,
@@ -227,8 +239,41 @@ struct Page<'a> {
     budget: &'a SliceBudget,
 }
 
-/// Scan the source's index rows and copy those of the pack set. One scan page
-/// per unit; every index write is a put of the same row.
+impl Page<'_> {
+    /// Calls one lane of a wave needs besides holders: its scan and its
+    /// writes, with one spare.
+    fn lane_reserve(&self) -> u32 {
+        let writes = (self.rows as usize).div_ceil(self.per_batch);
+        2 + u32::try_from(writes).unwrap_or(u32::MAX)
+    }
+    /// Remaining calls below which no wave starts.
+    fn wave_reserve(&self) -> u32 {
+        self.lane_reserve()
+            + if self.holders.is_some() {
+                2 * HOLDER_CALLS
+            } else {
+                0
+            }
+    }
+}
+
+/// What one lane of a wave read from its partition and decided to copy.
+struct Fetched {
+    lane: usize,
+    /// Rows the scan returned.
+    scanned: u64,
+    /// Rows of the pack set: the page's rows to write and count.
+    copied: u64,
+    next: Option<Cursor>,
+    /// Destination writes by target partition.
+    writes: BTreeMap<Partition, Vec<(crate::store::Key, crate::store::Value)>>,
+    /// Source key and object of each holder candidate, in key order.
+    candidates: Vec<(crate::store::Key, Hash)>,
+}
+
+/// Scan the source's index rows and copy those of the pack set, up to
+/// [`COPY_WAVE`] partitions at a time. Every index write is a put of the same
+/// row.
 pub(crate) async fn copy<S: NamespaceStore>(
     env: &ForkEnv<'_, S>,
     job: &mut ForkJobV1,
@@ -258,7 +303,7 @@ pub(crate) async fn copy<S: NamespaceStore>(
         range: keys::object_index_repo_range(&source.name),
         packs: job.pack_ids(),
         rows: if holders.is_some() {
-            64
+            HOLDER_PAGE_ROWS
         } else {
             SCAN_PAGE_ROWS
         },
@@ -270,19 +315,39 @@ pub(crate) async fn copy<S: NamespaceStore>(
         source,
         dest,
     };
-    let reserve = if holders.is_some() { 64 * 6 + 40 } else { 60 };
+    if job.lanes.is_empty() {
+        job.lanes = vec![CopyLane::default(); partitions.len()];
+    } else if job.lanes.len() != partitions.len() {
+        return Err(ForkError::Unavailable("fork shard map"));
+    }
     let expected = job.object_total();
     let fresh = super::fresh(budget);
     let mut progressed = false;
-    while (job.part as usize) < partitions.len() {
-        if budget.remaining() < reserve {
+    loop {
+        let open: Vec<usize> = (0..job.lanes.len())
+            .filter(|&lane| !job.lanes[lane].done)
+            .collect();
+        if open.is_empty() {
+            break;
+        }
+        if budget.remaining() < page.wave_reserve() {
             return Ok(false);
         }
-        let before = (job.part, job.after.clone(), job.scanned, job.copied);
-        match copy_page(env, &store, job, &page, expected).await {
-            Ok(()) => progressed = true,
+        let before = (job.lanes.clone(), job.scanned, job.copied);
+        match copy_wave(env, &store, job, &page, expected, &open).await {
+            Ok(true) => progressed = true,
+            // No lane could move: the slice cannot pay for one more step.
+            Ok(false) => {
+                return if progressed || !fresh {
+                    Ok(false)
+                } else {
+                    Err(ForkError::TooLarge)
+                };
+            }
+            // A wave that spends the slice keeps nothing; its writes are
+            // puts of the same rows and holders that only raise a sequence.
             Err(error) if super::spent(&error, budget) => {
-                (job.part, job.after, job.scanned, job.copied) = before;
+                (job.lanes, job.scanned, job.copied) = before;
                 return if progressed || !fresh {
                     Ok(false)
                 } else {
@@ -300,31 +365,299 @@ pub(crate) async fn copy<S: NamespaceStore>(
     Ok(true)
 }
 
-async fn copy_page<S: NamespaceStore>(
+/// One wave: a page of each of the first partitions that are still open.
+/// Reads, then writes, then holders, each stage completing for the whole wave
+/// and consuming its replies in partition order, so the wave answers as the
+/// same lanes taken one after another would: the first failing lane's error,
+/// and no lane after it counted. Returns whether any lane moved.
+async fn copy_wave<S: NamespaceStore>(
     env: &ForkEnv<'_, S>,
     store: &Budgeted<'_, S>,
     job: &mut ForkJobV1,
     page: &Page<'_>,
     expected: u64,
-) -> Result<(), ForkError> {
-    let partition = &page.partitions[job.part as usize];
-    let after = job.after.clone().map(Cursor::new);
-    let scanned = store
-        .scan(
-            partition,
-            &page.range.0,
-            &page.range.1,
-            after.as_ref(),
-            page.rows,
+    open: &[usize],
+) -> Result<bool, ForkError> {
+    let (wave, replies) = scan_wave(store, job, page, open).await?;
+
+    // Fold the replies in lane order. The totals run across the wave, pages
+    // that wait for holders included, so a bound can trip a wave before the
+    // serial walk would reach it; the outcome is the same failure.
+    let (mut scanned, mut copied) = (job.scanned, job.copied);
+    let mut ready: Vec<Fetched> = Vec::new();
+    let mut failure = None;
+    for (&lane, reply) in wave.iter().zip(replies) {
+        match fetched(
+            env,
+            page,
+            lane,
+            reply,
+            (&mut scanned, &mut copied),
+            expected,
+        ) {
+            Ok(lane) => ready.push(lane),
+            Err(error) => {
+                failure = Some(error);
+                break;
+            }
+        }
+    }
+
+    // Keep the lanes whose writes the slice can still pay for (the first
+    // always stays: a wave of one is the serial walk). The rest wait for the
+    // next wave, and so does a failure that belonged to one of them.
+    let mut room = page
+        .budget
+        .remaining()
+        .saturating_sub(if page.holders.is_some() {
+            2 * HOLDER_CALLS
+        } else {
+            0
+        });
+    let mut keep = 0;
+    for lane in &ready {
+        let calls = if job.lanes[lane.lane].held.is_some() {
+            0
+        } else {
+            let chunks: usize = lane
+                .writes
+                .values()
+                .map(|puts| puts.len().div_ceil(page.per_batch))
+                .sum();
+            u32::try_from(chunks).unwrap_or(u32::MAX)
+        };
+        if keep > 0 && calls > room {
+            break;
+        }
+        room = room.saturating_sub(calls);
+        keep += 1;
+    }
+    if keep < ready.len() {
+        ready.truncate(keep);
+        failure = None;
+    }
+
+    if let Some((index, error)) = write_wave(env, store, job, page, &ready).await {
+        // The failing lane and every lane after it end here.
+        ready.truncate(index);
+        failure = Some(error);
+    }
+
+    // Holders of the lanes that reached here, within what the slice can pay
+    // for. Candidates the wave cannot take wait for the next one.
+    let (objects, steps) = holder_steps(job, page, &ready);
+    if !objects.is_empty() {
+        copy_holders(
+            env,
+            store,
+            page.budget,
+            job,
+            &page.source,
+            &page.dest,
+            &objects,
         )
         .await?;
-    job.scanned += scanned.entries.len() as u64;
-    if job.scanned > MAX_SCANNED_ROWS {
+    }
+    if let Some(error) = failure {
+        return Err(error);
+    }
+
+    let mut moved = false;
+    for (lane, step) in ready.iter().zip(steps) {
+        let cursor = &mut job.lanes[lane.lane];
+        if step.take == step.waiting {
+            if let Some(next) = &lane.next {
+                cursor.after = Some(next.as_bytes().to_vec());
+            } else {
+                cursor.done = true;
+                cursor.after = None;
+            }
+            cursor.held = None;
+            job.scanned += lane.scanned;
+            job.copied += lane.copied;
+            moved = true;
+        } else if step.take > 0 {
+            cursor.held = step.last;
+            moved = true;
+        } else if cursor.held.is_none() {
+            // The wave had no room for this lane's holders, but its rows are
+            // written: an empty mark keeps the next wave from writing them again.
+            cursor.held = Some(Vec::new());
+        }
+    }
+    Ok(moved)
+}
+
+/// Scan one page in each lane of the wave: as many of `open` as the known
+/// allowance and the slice's calls cover.
+async fn scan_wave<'a, S: NamespaceStore>(
+    store: &Budgeted<'_, S>,
+    job: &ForkJobV1,
+    page: &Page<'_>,
+    open: &'a [usize],
+) -> Result<
+    (
+        &'a [usize],
+        Vec<Result<crate::store::ScanPage, crate::store::StoreError>>,
+    ),
+    ForkError,
+> {
+    // Reserve the first read before choosing the width: its reservation shows
+    // the accounting depth, and a wave narrows where the remaining calls
+    // cannot cover shared ancestors. An unknown allowance stays serial.
+    let first = store.reserve_read_calls(1)?;
+    let layers = first
+        .as_ref()
+        .map_or(0, crate::store::ReadReservation::accounting_layers);
+    let debits = layers.saturating_mul(2).saturating_add(1);
+    let by_allowance = usize::try_from(store.read_call_allowance().unwrap_or(0) / debits)
+        .unwrap_or(COPY_WAVE)
+        .clamp(1, COPY_WAVE);
+    let by_budget = usize::try_from(page.budget.remaining() / page.lane_reserve()).unwrap_or(1);
+    let wave = &open[..open.len().min(by_allowance).min(by_budget).max(1)];
+
+    let mut first = Some(first);
+    let replies = futures::future::join_all(wave.iter().map(|&lane| {
+        let reservation = if let Some(first) = first.take() {
+            Ok(first)
+        } else {
+            store.reserve_read_calls(1)
+        };
+        let after = job.lanes[lane].after.clone().map(Cursor::new);
+        let partition = &page.partitions[lane];
+        async move {
+            let reservation = reservation?;
+            crate::store::ReadReservation::scope(
+                &[reservation],
+                store.scan(
+                    partition,
+                    &page.range.0,
+                    &page.range.1,
+                    after.as_ref(),
+                    page.rows,
+                ),
+            )
+            .await
+        }
+    }))
+    .await;
+    Ok((wave, replies))
+}
+
+/// Write the rows of `ready`, at most six batches at a time. A lane that
+/// already copied some of its page's holders wrote its rows in an earlier
+/// wave. Returns the first failing batch's lane (an index into `ready`) and
+/// its error.
+async fn write_wave<S: NamespaceStore>(
+    env: &ForkEnv<'_, S>,
+    store: &Budgeted<'_, S>,
+    job: &ForkJobV1,
+    page: &Page<'_>,
+    ready: &[Fetched],
+) -> Option<(usize, ForkError)> {
+    let mut units = Vec::new();
+    for (index, lane) in ready.iter().enumerate() {
+        if job.lanes[lane.lane].held.is_some() {
+            continue;
+        }
+        for (target, puts) in &lane.writes {
+            for chunk in puts.chunks(page.per_batch) {
+                units.push((index, target, chunk));
+            }
+        }
+    }
+    for group in units.chunks(COPY_WAVE) {
+        let replies =
+            futures::future::join_all(group.iter().map(|&(_, target, chunk)| async move {
+                // A slice outlives one apply window: stamp each write when it is made.
+                let mut batch = Batch::new().require(Precondition::NotAfter(
+                    env.now().saturating_add(CONTENT_APPLY_WINDOW_MS),
+                ));
+                for (key, value) in chunk {
+                    batch = batch.put(key.clone(), value.clone());
+                }
+                store.apply(target, batch).await
+            }))
+            .await;
+        for (&(index, _, _), reply) in group.iter().zip(replies) {
+            match reply {
+                Ok(crate::store::BatchOutcome::Committed) => {}
+                Ok(_) => return Some((index, ForkError::Unavailable("fork copy contended"))),
+                Err(error) => return Some((index, error.into())),
+            }
+        }
+    }
+    None
+}
+
+/// How far one lane's holders get in a wave.
+struct HolderStep {
+    /// Candidates copied now.
+    take: usize,
+    /// Candidates still to copy at the wave's start.
+    waiting: usize,
+    /// The source key of the last one copied.
+    last: Option<Vec<u8>>,
+}
+
+/// The holders each lane of the wave copies, in lane and key order, and the
+/// objects they name. The wave copies at most [`HOLDERS_PER_WAVE`], and no more
+/// than the slice's remaining calls pay for.
+fn holder_steps(
+    job: &ForkJobV1,
+    page: &Page<'_>,
+    ready: &[Fetched],
+) -> (Vec<Hash>, Vec<HolderStep>) {
+    let mut room = HOLDERS_PER_WAVE.min(
+        usize::try_from(page.budget.remaining().saturating_sub(4) / HOLDER_CALLS)
+            .unwrap_or(HOLDERS_PER_WAVE),
+    );
+    let mut objects = Vec::new();
+    let mut steps = Vec::new();
+    for lane in ready {
+        let held = job.lanes[lane.lane].held.as_deref();
+        let waiting: Vec<&(crate::store::Key, Hash)> = lane
+            .candidates
+            .iter()
+            // Scan order is key byte order, so "after the mark" is a prefix cut.
+            .filter(|(key, _)| held.is_none_or(|held| key.as_bytes() > held))
+            .collect();
+        let take = waiting.len().min(room);
+        room -= take;
+        objects.extend(waiting[..take].iter().map(|(_, object)| *object));
+        steps.push(HolderStep {
+            take,
+            waiting: waiting.len(),
+            last: waiting[..take]
+                .last()
+                .map(|(key, _)| key.as_bytes().to_vec()),
+        });
+    }
+    (objects, steps)
+}
+
+/// Read one lane's page: the rows of the pack set to write and the holder
+/// candidates among them. `totals` are the wave's running scanned and copied
+/// counts, which the bounds are checked against.
+fn fetched<S: NamespaceStore>(
+    env: &ForkEnv<'_, S>,
+    page: &Page<'_>,
+    lane: usize,
+    reply: Result<crate::store::ScanPage, crate::store::StoreError>,
+    totals: (&mut u64, &mut u64),
+    expected: u64,
+) -> Result<Fetched, ForkError> {
+    let (scanned_total, copied_total) = totals;
+    let scanned = reply?;
+    let rows = scanned.entries.len() as u64;
+    *scanned_total += rows;
+    if *scanned_total > MAX_SCANNED_ROWS {
         return Err(ForkError::TooLarge);
     }
-    let mut grouped: BTreeMap<Partition, Vec<(crate::store::Key, crate::store::Value)>> =
+    let mut writes: BTreeMap<Partition, Vec<(crate::store::Key, crate::store::Value)>> =
         BTreeMap::new();
-    let mut candidates: Vec<Hash> = Vec::new();
+    let mut candidates = Vec::new();
+    let mut copied = 0;
     for (key, value) in scanned.entries {
         let Some(keys::ParsedKey::ObjectIndex {
             repo,
@@ -341,59 +674,34 @@ async fn copy_page<S: NamespaceStore>(
         if page.holders.is_some_and(|min| located.decoded_size >= min)
             || page.manifests.contains(&object)
         {
-            candidates.push(object);
+            candidates.push((key, object));
         }
-        grouped
+        writes
             .entry(env.shards.object_index(&page.dest, &object))
             .or_default()
             .push((
                 keys::object_index(&page.dest.name, &object, &pack_id),
                 value,
             ));
-        job.copied += 1;
+        copied += 1;
     }
-    if job.copied > expected {
+    *copied_total += copied;
+    if *copied_total > expected {
         // More rows than the sealed inventories hold: the index and the
         // inventories disagree.
         return Err(ForkError::NotFound);
     }
-    if job.copied > env.limits.max_objects {
+    if *copied_total > env.limits.max_objects {
         return Err(ForkError::TooLarge);
     }
-    for (target, puts) in grouped {
-        for chunk in puts.chunks(page.per_batch) {
-            // A slice outlives one apply window: stamp each write when it is made.
-            let mut batch = Batch::new().require(Precondition::NotAfter(
-                env.now().saturating_add(CONTENT_APPLY_WINDOW_MS),
-            ));
-            for (key, value) in chunk {
-                batch = batch.put(key.clone(), value.clone());
-            }
-            match store.apply(&target, batch).await? {
-                crate::store::BatchOutcome::Committed => {}
-                _ => return Err(ForkError::Unavailable("fork copy contended")),
-            }
-        }
-    }
-    if !candidates.is_empty() {
-        copy_holders(
-            env,
-            store,
-            page.budget,
-            job,
-            &page.source,
-            &page.dest,
-            &candidates,
-        )
-        .await?;
-    }
-    if let Some(next) = scanned.next {
-        job.after = Some(next.as_bytes().to_vec());
-    } else {
-        job.part += 1;
-        job.after = None;
-    }
-    Ok(())
+    Ok(Fetched {
+        lane,
+        scanned: rows,
+        copied,
+        next: scanned.next,
+        writes,
+        candidates,
+    })
 }
 
 /// The destination becomes a holder of each extracted object the source holds.
@@ -560,6 +868,7 @@ mod tests {
             cursor: 0,
             deps: Vec::new(),
             part: 0,
+            lanes: Vec::new(),
             after: None,
             scanned: 0,
             copied: 0,

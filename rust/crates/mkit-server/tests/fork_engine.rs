@@ -1424,6 +1424,58 @@ async fn a_ref_created_during_the_job_stops_it_before_registration() {
 }
 
 #[tokio::test]
+async fn a_copy_of_many_holders_cut_by_small_slices_matches_one_slice() {
+    let files = 1_100_u32;
+    let source = Source::build("source", files).await;
+    let index = ContentIndex::new(source.store.inner.clone());
+    let from = Holder::new(source.repo.namespace.clone(), source.repo.name.clone());
+    let objects: Vec<Hash> = (0..files).map(|n| blob(n, 8).0).collect();
+    for object in &objects {
+        index
+            .add_holder(
+                object,
+                &from,
+                &[7; 32],
+                None,
+                u64::try_from(source.clock.now_ms()).unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+    let mut env = env(&source);
+    env.extract_min_bytes = Some(1);
+    let mut finished = Vec::new();
+    let mut marked = false;
+    for (name, calls) in [("forked", 600), ("forked-small", 330)] {
+        let spec = spec(&source, name);
+        mkit_server::fork::start(&env, &spec, None).await.unwrap();
+        let dest_id = dest(&source, name);
+        let mut slices = 0;
+        let job = loop {
+            slices += 1;
+            let report = mkit_server::fork::step(&env, &dest_id, &SliceBudget::new(calls))
+                .await
+                .unwrap();
+            assert!(slices < 500, "{:?}", report.job.phase);
+            // A slice that ends inside a page leaves the holder mark behind.
+            marked |= report.job.lanes.iter().any(|lane| lane.held.is_some());
+            if report.job.finished() {
+                break report.job;
+            }
+        };
+        assert_eq!(job.phase, Phase::Done, "{:?}", job.failure);
+        let to = Holder::new(dest_id.namespace.clone(), dest_id.name.clone());
+        for object in &objects {
+            assert!(index.holder_record(object, &to).await.unwrap().is_some());
+        }
+        finished.push((job.result.unwrap().object_count, slices));
+    }
+    assert_eq!(finished[0].0, finished[1].0);
+    assert!(finished[1].1 > finished[0].1, "{finished:?}");
+    assert!(marked, "no slice ended inside a page of holders");
+}
+
+#[tokio::test]
 async fn a_fork_spanning_many_small_slices_ends_where_one_big_slice_does() {
     let mut source = Source::build_with("source", 4, denial).await;
     // History: 24 more commits, each a new tree and two more packs for the

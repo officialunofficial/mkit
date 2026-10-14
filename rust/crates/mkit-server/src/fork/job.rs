@@ -167,6 +167,7 @@ fn new_job(
         cursor: 0,
         deps: Vec::new(),
         part: 0,
+        lanes: Vec::new(),
         after: None,
         scanned: 0,
         copied: 0,
