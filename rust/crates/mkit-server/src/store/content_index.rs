@@ -658,10 +658,12 @@ impl<S: NamespaceStore> ContentIndex<S> {
     /// [`MAX_BLOCK_REASON_BYTES`].
     pub async fn block(
         &self,
+        capability: &crate::takedown::DenialCapability,
         object: &Hash,
         entry: &BlockEntry,
         now_ms: u64,
     ) -> Result<(), StoreError> {
+        let _ = capability;
         if entry.reason.len() > MAX_BLOCK_REASON_BYTES {
             return Err(StoreError::Invalid("block reason too long".into()));
         }
@@ -685,30 +687,39 @@ impl<S: NamespaceStore> ContentIndex<S> {
     /// Install an independent V2 action without replacing any current V1 denial.
     pub async fn install_block_action(
         &self,
+        capability: &crate::takedown::DenialCapability,
         object: &Hash,
         action: &crate::takedown::denial::BlockAction,
         now_ms: u64,
     ) -> Result<(), StoreError> {
         let staged =
             crate::takedown::denial::stage_action(&self.store, object, action, now_ms).await?;
-        self.install_stored_block_action(object, &staged, now_ms)
+        self.install_stored_block_action(capability, object, &staged, now_ms)
             .await
     }
 
     /// Activate already verified immutable metadata without reading source bytes.
     pub async fn install_stored_block_action(
         &self,
+        capability: &crate::takedown::DenialCapability,
         object: &Hash,
         staged: &crate::takedown::denial::StoredAction,
         now_ms: u64,
     ) -> Result<(), StoreError> {
-        self.install_stored_block_action_with_batch(object, staged, now_ms, Batch::new())
-            .await
+        self.install_stored_block_action_with_batch(
+            capability,
+            object,
+            staged,
+            now_ms,
+            Batch::new(),
+        )
+        .await
     }
 
     /// Commit source-local safety effects atomically with a new denial action.
     pub(crate) async fn install_stored_block_action_with_batch(
         &self,
+        _capability: &crate::takedown::DenialCapability,
         object: &Hash,
         staged: &crate::takedown::denial::StoredAction,
         now_ms: u64,
@@ -1165,7 +1176,13 @@ mod tests {
             .unwrap()
             .unwrap();
         let entry = BlockEntry::new("dmca", 9);
-        block_on(idx.block(&obj, &entry, 5_002)).unwrap();
+        block_on(idx.block(
+            &crate::takedown::DenialCapability::for_test(),
+            &obj,
+            &entry,
+            5_002,
+        ))
+        .unwrap();
         assert!(!block_on(idx.commit_collect(stale)).unwrap());
         assert!(!state(&idx, &obj).deleting);
         // A blocklist entry is not a hold. The plan prunes the expired hold
@@ -1224,7 +1241,13 @@ mod tests {
         let idx = ContentIndex::new(kv());
         let obj = [5; 32];
         let entry = BlockEntry::new("csam", 1);
-        block_on(idx.block(&obj, &entry, 1)).unwrap();
+        block_on(idx.block(
+            &crate::takedown::DenialCapability::for_test(),
+            &obj,
+            &entry,
+            1,
+        ))
+        .unwrap();
         let before = state(&idx, &obj);
         assert_eq!(
             block_on(idx.add_hold(&obj, &[1; 32], 100, 2)).unwrap(),
@@ -1306,7 +1329,12 @@ mod tests {
                 2 | 3 => block_on(idx.add_holder(&obj, &holder("a"), &OP, None, now)).map(drop),
                 4 => block_on(idx.remove_holder(&obj, &holder("a"), last_seq, now)).map(drop),
                 5 => block_on(idx.release_hold(&obj, &[9; 32], now)),
-                6 => block_on(idx.block(&obj, &entry, now)),
+                6 => block_on(idx.block(
+                    &crate::takedown::DenialCapability::for_test(),
+                    &obj,
+                    &entry,
+                    now,
+                )),
                 7 => block_on(idx.unblock(&obj, now)),
                 _ => block_on(idx.release_hold(&obj, &[1; 32], now)),
             }
@@ -1328,7 +1356,12 @@ mod tests {
         ));
         let long = BlockEntry::new("x".repeat(MAX_BLOCK_REASON_BYTES + 1), 0);
         assert!(matches!(
-            block_on(idx.block(&obj, &long, 1)),
+            block_on(idx.block(
+                &crate::takedown::DenialCapability::for_test(),
+                &obj,
+                &long,
+                1
+            )),
             Err(StoreError::Invalid(_))
         ));
         assert_eq!(state(&idx, &obj), last, "rejected calls write nothing");
@@ -1343,7 +1376,13 @@ mod tests {
         block_on(idx.add_holder(&a, &holder("x"), &OP, None, 1)).unwrap();
         held(block_on(idx.add_hold(&a, &[1; 32], 99, 1)));
         let entry = BlockEntry::new("r", 1);
-        block_on(idx.block(&a, &entry, 1)).unwrap();
+        block_on(idx.block(
+            &crate::takedown::DenialCapability::for_test(),
+            &a,
+            &entry,
+            1,
+        ))
+        .unwrap();
         assert_eq!(block_on(idx.state(&b)).unwrap(), None);
         assert_eq!(block_on(idx.blocked(&b)).unwrap(), None);
         assert_eq!(block_on(idx.blocked(&a)).unwrap(), Some(entry));

@@ -3083,6 +3083,7 @@ async fn late_blocked_holder_handoff(v2: bool) {
     let blocked = crate::store::BlockEntry::new("late", 101);
     if v2 {
         idx.install_block_action(
+            &crate::takedown::DenialCapability::for_test(),
             &object,
             &crate::takedown::denial::BlockAction {
                 id: [0x4a; 32],
@@ -3096,7 +3097,14 @@ async fn late_blocked_holder_handoff(v2: bool) {
         .await
         .unwrap();
     } else {
-        idx.block(&object, &blocked, 101).await.unwrap();
+        idx.block(
+            &crate::takedown::DenialCapability::for_test(),
+            &object,
+            &blocked,
+            101,
+        )
+        .await
+        .unwrap();
     }
     append(
         &local,
@@ -3250,9 +3258,14 @@ async fn duplicate_holder_intent_after_block_has_only_watermark_effects() {
             crate::store::HoldOutcome::Held
         );
         if initially_blocked {
-            idx.block(&object, &crate::store::BlockEntry::new("initial", 100), 100)
-                .await
-                .unwrap();
+            idx.block(
+                &crate::takedown::DenialCapability::for_test(),
+                &object,
+                &crate::store::BlockEntry::new("initial", 100),
+                100,
+            )
+            .await
+            .unwrap();
         }
         append(
             &local,
@@ -3264,6 +3277,7 @@ async fn duplicate_holder_intent_after_block_has_only_watermark_effects() {
         fire(&h, &local).await.unwrap();
         assert!(queued(&local).await.is_empty());
         idx.block(
+            &crate::takedown::DenialCapability::for_test(),
             &object,
             &crate::store::BlockEntry::new("after delivery", 100),
             100,

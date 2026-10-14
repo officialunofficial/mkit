@@ -92,7 +92,7 @@ fn guard_waves_share_six_call_admission_and_reserve_before_dispatch() {
         let budget = SliceBudget::new(13);
         let io = ReadIo::new();
         let store = Budgeted::new(&backend, &budget).with_io(&io);
-        let checks = Checks::new(&store);
+        let checks = Checks::new(&store, true);
         let ids = ids(13);
         let start = tokio::time::Instant::now();
         checks.prefetch(&ids).await.unwrap();
@@ -108,7 +108,7 @@ fn guard_waves_share_six_call_admission_and_reserve_before_dispatch() {
         let budget = SliceBudget::new(5);
         let io = ReadIo::new();
         let store = Budgeted::new(&limited, &budget).with_io(&io);
-        assert!(Checks::new(&store).prefetch(&ids).await.is_err());
+        assert!(Checks::new(&store, true).prefetch(&ids).await.is_err());
         assert!(limited.batches.lock().unwrap().is_empty());
     });
 }
@@ -121,7 +121,7 @@ fn guard_groups_deduplicate_and_keep_pair_order() {
         let mut b = a;
         b[31] = 2;
         block(&backend, &b);
-        let checks = Checks::new(&backend);
+        let checks = Checks::new(&backend, true);
         checks.prefetch(&[b, a, b, a]).await.unwrap();
         assert!(!crate::takedown::denial::denied(&checks, &a).await.unwrap());
         assert!(crate::takedown::denial::denied(&checks, &b).await.unwrap());
@@ -142,7 +142,7 @@ fn final_guard_phase_observes_changed_targets_and_packs() {
     runtime().block_on(async {
         for changed in ids(2) {
             let backend = Backend::default();
-            let checks = Checks::new(&backend);
+            let checks = Checks::new(&backend, true);
             checks.prefetch(&ids(2)).await.unwrap();
             block(&backend, &changed);
             checks.reset();
@@ -168,7 +168,7 @@ fn failed_pack_guard_remains_lazy_and_short_replies_fail_closed() {
             .lock()
             .unwrap()
             .insert(crate::store::content_shard(&ids[1]));
-        let checks = Checks::new(&backend);
+        let checks = Checks::new(&backend, true);
         checks.prefetch(&ids).await.unwrap();
         assert!(
             crate::takedown::denial::denied(&checks, &ids[0])
@@ -201,7 +201,7 @@ fn cancelled_guard_wave_releases_shared_allowances_without_refunding_calls() {
         let budget = SliceBudget::new(6);
         let io = ReadIo::new();
         let store = Budgeted::new(&backend, &budget).with_io(&io);
-        let checks = Checks::new(&store);
+        let checks = Checks::new(&store, true);
         assert!(
             tokio::time::timeout(Duration::from_millis(1), checks.prefetch(&ids(6)))
                 .await
@@ -242,7 +242,7 @@ fn prefetched_guard_rows_and_retained_bytes_are_bounded() {
                 .unwrap()
                 .insert(crate::takedown::denial::action_key(id), value.clone());
         }
-        let checks = Checks::new(&backend);
+        let checks = Checks::new(&backend, true);
         checks.prefetch(&ids).await.unwrap();
         let cache = checks.cache.lock().unwrap();
         assert_eq!(cache.slots.len(), MAX_CHECKS);
@@ -268,7 +268,7 @@ fn inherited_wave_budget_refuses_before_any_dispatch_and_charges_once() {
             let outer = SliceBudget::new(100);
             let io = ReadIo::new();
             let store = Budgeted::new(&inner, &outer).with_io(&io);
-            let reply = Checks::new(&store).prefetch(&ids(6)).await;
+            let reply = Checks::new(&store, true).prefetch(&ids(6)).await;
             if allowance == 5 {
                 assert!(reply.is_err());
                 assert!(backend.batches.lock().unwrap().is_empty());
@@ -279,5 +279,96 @@ fn inherited_wave_budget_refuses_before_any_dispatch_and_charges_once() {
                 assert_eq!(outer.used(), 6);
             }
         }
+    });
+}
+
+fn locations(count: u16) -> Vec<(Hash, crate::store::index::LocatedObject)> {
+    let all_ids = ids(count * 2);
+    all_ids[..usize::from(count)]
+        .iter()
+        .zip(&all_ids[usize::from(count)..])
+        .map(|(&id, &pack)| {
+            (
+                id,
+                crate::store::index::LocatedObject {
+                    pack,
+                    value: crate::store::index::IndexValue {
+                        frame_offset: 12,
+                        frame_length: 15,
+                        wire_type: 0,
+                        decoded_size: 10,
+                        chain_depth: 0,
+                        delta_base: None,
+                    },
+                },
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn disabled_denial_never_plans_uncached_guards_after_cache_exhaustion() {
+    runtime().block_on(async {
+        let locations = locations(300);
+        let backend = Backend::default();
+        let budget = SliceBudget::new(0);
+        let io = ReadIo::new();
+        let store = Budgeted::new(&backend, &budget).with_io(&io);
+        let checks = Checks::new(&store, false);
+        for (id, location) in &locations {
+            for guard in [id, &location.pack] {
+                assert!(
+                    !crate::takedown::denial::denied(&checks, guard)
+                        .await
+                        .unwrap()
+                );
+            }
+        }
+        assert_eq!(checks.cache.lock().unwrap().slots.len(), MAX_CHECKS);
+        assert!(checks.uncached_locations(&locations).is_empty());
+        checks.prefetch_locations(&locations).await.unwrap();
+        assert_eq!(budget.used(), 0);
+        assert!(backend.batches.lock().unwrap().is_empty());
+        assert_eq!(backend.peak.load(Ordering::SeqCst), 0);
+    });
+}
+
+#[test]
+fn enabled_denial_keeps_overflow_location_guards_live() {
+    runtime().block_on(async {
+        let locations = locations(300);
+        let backend = Backend::default();
+        let budget = SliceBudget::new(602);
+        let io = ReadIo::new();
+        let store = Budgeted::new(&backend, &budget).with_io(&io);
+        let checks = Checks::new(&store, true);
+        for (id, location) in &locations {
+            for guard in [id, &location.pack] {
+                assert!(
+                    !crate::takedown::denial::denied(&checks, guard)
+                        .await
+                        .unwrap()
+                );
+            }
+        }
+        assert_eq!(checks.cache.lock().unwrap().slots.len(), MAX_CHECKS);
+        let remaining = checks.uncached_locations(&locations);
+        let expected: std::collections::BTreeSet<_> = locations[MAX_CHECKS / 2..]
+            .iter()
+            .flat_map(|(id, location)| [*id, location.pack])
+            .collect();
+        assert_eq!(remaining, expected);
+        assert_eq!(remaining.len(), 600 - MAX_CHECKS);
+        let (id, location) = locations.last().unwrap();
+        block(&backend, id);
+        block(&backend, &location.pack);
+        assert!(crate::takedown::denial::denied(&checks, id).await.unwrap());
+        assert!(
+            crate::takedown::denial::denied(&checks, &location.pack)
+                .await
+                .unwrap()
+        );
+        assert_eq!(budget.used(), 602);
+        assert_eq!(backend.batches.lock().unwrap().len(), 602);
     });
 }

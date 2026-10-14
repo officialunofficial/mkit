@@ -397,6 +397,7 @@ impl Rig {
 
     fn handler(&self) -> VerifyTimer<Shared<MemoryKv>, Shared<MemoryBlobStore>, Arc<Windows>> {
         VerifyTimer {
+            takedown_denial: true,
             remote: Shared(self.store.clone()),
             blobs: Shared(self.blobs.clone()),
             windows: self.windows.clone(),
@@ -2301,6 +2302,7 @@ fn co_consumed_jobs_share_the_decode_budget() {
             &native_tickets.iter().map(|(_, id)| *id).collect::<Vec<_>>(),
             head,
             oracle.cfg,
+            true,
             oracle.clock.as_ref(),
             oracle.recorder.as_ref(),
         ));
@@ -2462,6 +2464,7 @@ fn a_single_closure_id_over_one_full_slice_ends_terminal() {
     rig.tick();
     let h = rig.handler();
     let registry = TimerRegistry::new().register(VerifyTimer {
+        takedown_denial: true,
         remote: SmallPages(h.remote),
         blobs: h.blobs,
         windows: h.windows,
@@ -2845,6 +2848,7 @@ fn seven_captured_job_guards_have_an_explicit_opaque_etag_byte_ledger() {
         }));
         let ordinary = rig.handler();
         let handler = VerifyTimer {
+            takedown_denial: true,
             remote: ordinary.remote,
             blobs: ordinary.blobs,
             windows: OpaqueEtagWindows {
@@ -3301,6 +3305,7 @@ fn a_crash_inside_a_batch_cannot_lose_a_dependency_or_settle_an_open_child() {
 fn small_pages_tick(rig: &Rig) -> RunReport {
     let h = rig.handler();
     let registry = TimerRegistry::new().register(VerifyTimer {
+        takedown_denial: true,
         remote: SmallPages(h.remote),
         blobs: h.blobs,
         windows: h.windows,

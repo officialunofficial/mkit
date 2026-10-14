@@ -153,6 +153,7 @@ async fn probe(objects: u16, full_tree: bool) -> (u64, i64, u32) {
         .unwrap_err();
     assert_eq!(error.public_message(), "pack verification pending");
     let handler = VerifyTimer {
+        takedown_denial: true,
         remote: store.clone(),
         blobs: blobs.clone(),
         windows: Windows {

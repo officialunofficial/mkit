@@ -658,7 +658,14 @@ mod tests {
             let held = idx.add_hold(&b, &[1; 32], 99, 2).await.unwrap();
             assert_eq!(held, HoldOutcome::Held);
             let entry = BlockEntry::new("r", 3);
-            idx.block(&b, &entry, 3).await.unwrap();
+            idx.block(
+                &crate::takedown::DenialCapability::for_test(),
+                &b,
+                &entry,
+                3,
+            )
+            .await
+            .unwrap();
             let mut batch = Batch::new()
                 .put(
                     keys::layout_version(),

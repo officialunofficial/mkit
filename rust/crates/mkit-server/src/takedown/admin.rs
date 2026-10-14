@@ -286,6 +286,15 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
     }
 }
 impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> AdminOperations for Work<N, B, P> {
+    fn pre_dispatch(&self, path: &str) -> Result<(), ServerError> {
+        if path == admin::TAKEDOWN_PATH {
+            self.denial_capability
+                .as_ref()
+                .ok_or_else(super::capability::disabled)?;
+        }
+        Ok(())
+    }
+
     fn preserved_now_ms(&self) -> Result<i64, ServerError> {
         let now = self.clock.now_ms();
         if now < 0 {
@@ -311,6 +320,7 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> AdminOperations for 
                         self.shards.clone(),
                     )
                     .with_namespace_mode(self.namespace_mode)
+                    .with_denial_capability(self.denial_capability)
                     .with_purge(self.purge.clone())
                     .plan(path, input, digest, now, budget)
                     .await
@@ -389,6 +399,7 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> AdminOperations for 
                 self.shards.clone(),
             )
             .with_namespace_mode(self.namespace_mode)
+            .with_denial_capability(self.denial_capability)
             .with_purge(self.purge.clone())
             .after_commit(path, input, response, now, budget)
             .await

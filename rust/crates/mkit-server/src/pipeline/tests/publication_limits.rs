@@ -395,7 +395,12 @@ impl World {
         };
         block_on(
             crate::store::ContentIndex::new(BorrowedStore(&self.env.pipe.meta))
-                .install_block_action(id, &action, at),
+                .install_block_action(
+                    &crate::takedown::DenialCapability::for_test(),
+                    id,
+                    &action,
+                    at,
+                ),
         )
         .unwrap();
     }

@@ -210,6 +210,10 @@ pub fn blob(tag: u16, size: usize) -> (Hash, Vec<u8>) {
 pub struct Ledger {
     pub by_class: std::collections::BTreeMap<String, u64>,
     pub calls: u64,
+    pub block_reads: u64,
+    pub holder_writes: u64,
+    /// The modeled ingest interval ends before publication is driven.
+    pub ingest_complete: bool,
     pub inventory_reads: u64,
     pub inventory_applies: u64,
     pub cas_retries: u64,
@@ -240,8 +244,11 @@ impl Slow {
                 .entry(p.map_or("none", |p| p.kind()).to_owned())
                 .or_default() += 1;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        self.clock.advance(50);
+        let ingest_complete = self.ledger.lock().unwrap().ingest_complete;
+        if !ingest_complete {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            self.clock.advance(50);
+        }
     }
 }
 impl NamespaceStore for Slow {
@@ -258,6 +265,9 @@ impl NamespaceStore for Slow {
         {
             self.ledger.lock().unwrap().inventory_reads += 1;
         }
+        if matches!(keys::parse(key), Some(keys::ParsedKey::Block(_))) {
+            self.ledger.lock().unwrap().block_reads += 1;
+        }
         let value = self.inner.get(partition, key).await?;
         if key.as_bytes().ends_with(b"\0inventory-head")
             && let Some(barrier) = &self.barrier
@@ -273,6 +283,10 @@ impl NamespaceStore for Slow {
         key: &[Key],
     ) -> Result<Vec<Option<Value>>, StoreError> {
         self.pause_p(Some(partition)).await;
+        self.ledger.lock().unwrap().block_reads += key
+            .iter()
+            .filter(|key| matches!(keys::parse(key), Some(keys::ParsedKey::Block(_))))
+            .count() as u64;
         self.inner.get_many(partition, key).await
     }
     async fn scan_many(
@@ -309,6 +323,7 @@ impl NamespaceStore for Slow {
                 })
                 .count();
             let jobs = u64::try_from(jobs).unwrap();
+            ledger.holder_writes += batch.writes.iter().filter(|write| matches!(write, Write::Put(key, _) if matches!(keys::parse(key), Some(keys::ParsedKey::Holder { .. })))).count() as u64;
             ledger.job_writes += jobs;
             ledger.job_batches += u64::from(jobs > 0);
             ledger.max_batch_ops = ledger
@@ -351,7 +366,12 @@ impl NamespaceStore for Slow {
             if let Some(id) = raced {
                 let now = u64::try_from(self.clock.now_ms()).unwrap();
                 mkit_server::ContentIndex::new(self.inner.clone())
-                    .block(&id, &mkit_server::store::BlockEntry::new("race", now), now)
+                    .block(
+                        &denial_capability_for_test(),
+                        &id,
+                        &mkit_server::store::BlockEntry::new("race", now),
+                        now,
+                    )
                     .await
                     .unwrap();
             }
@@ -467,4 +487,31 @@ impl tracing::Subscriber for Events {
         event.record(&mut fields);
         self.0.lock().unwrap().push(fields.0);
     }
+}
+
+fn denial_capability_for_test() -> mkit_server::takedown::DenialCapability {
+    use mkit_server::pipeline::{AuthMode, Hooks, Pipeline, PipelineConfig};
+    let mut cfg = PipelineConfig::new(
+        mkit_server::Addressing::Multi(mkit_server::MultiAddressing::new()),
+        AuthMode::AuthV2(
+            mkit_server::auth_v2::AuthV2Config::new("http://localhost", "default").unwrap(),
+        ),
+        mkit_server::upload::UploadLimits::new(1 << 20, 64),
+    );
+    cfg.indexed = Some(mkit_server::indexed::IndexedConfig::default());
+    cfg.ticket_keys =
+        Some(mkit_server::upload::token::TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap());
+    cfg.begin_upload_threshold_bytes = 0;
+    cfg.takedown_denial = true;
+    Pipeline::new(
+        mkit_server::MemoryBlobStore::default(),
+        mkit_server::MemoryKv::default(),
+        Hooks::new(),
+        cfg,
+        std::sync::Arc::new(mkit_server::SystemClock),
+        std::sync::Arc::new(mkit_server::NoopMetrics),
+    )
+    .unwrap()
+    .denial_capability()
+    .unwrap()
 }

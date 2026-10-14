@@ -71,6 +71,7 @@ fn free_plan_caps_lease_sweep_source_subrequests_at_sixteen() {
             ShardClass::NsCoordinator,
             Ok(source_client.clone()),
             Some("free"),
+            true,
         );
         let report = run_due(
             &coordinator_store,
@@ -151,7 +152,7 @@ fn relay_uses_one_watermark_read_and_one_atomic_apply_per_target() {
             source.apply(&source_partition, batch).await.unwrap(),
             BatchOutcome::Committed
         );
-        let registry = timer_registry(ShardClass::RefShard, Ok(target.clone()), Some("free"));
+        let registry = timer_registry(ShardClass::RefShard, Ok(target.clone()), Some("free"), true);
         let clock = ManualClock::new(i64::try_from(now).unwrap());
         let report = run_due(
             &source,
@@ -288,7 +289,7 @@ fn relay_is_registered_only_on_ref_shards() {
                 )
                 .await
                 .unwrap();
-            let registry = timer_registry(class, Ok(target.clone()), None);
+            let registry = timer_registry(class, Ok(target.clone()), None, true);
             let report = run_due(
                 &source,
                 &partition,
@@ -313,7 +314,8 @@ fn relay_is_registered_only_on_ref_shards() {
                     true,
                 )
                 .await;
-                let recovered = timer_registry(ShardClass::RefShard, Ok(target.clone()), None);
+                let recovered =
+                    timer_registry(ShardClass::RefShard, Ok(target.clone()), None, true);
                 let report = run_due(
                     &source,
                     &partition,
@@ -355,7 +357,7 @@ fn relay_config_failure_retries_the_stored_timer() {
             .unwrap();
         let target: Result<DoNamespaceStore<Loopback>, _> =
             Err(ConfigError("AUTH_REPOSITORY is not configured".into()));
-        let registry = timer_registry(ShardClass::RefShard, target, Some("free"));
+        let registry = timer_registry(ShardClass::RefShard, target, Some("free"), true);
         let report = run_due(
             &source,
             &partition,
@@ -380,7 +382,7 @@ fn relay_config_failure_retries_the_stored_timer() {
         .await;
         let dir = tempfile::tempdir().unwrap();
         let target = Loopback::store(dir.path().to_path_buf(), DoConfig::default());
-        let recovered = timer_registry(ShardClass::RefShard, Ok(target), Some("free"));
+        let recovered = timer_registry(ShardClass::RefShard, Ok(target), Some("free"), true);
         let report = run_due(
             &source,
             &partition,
@@ -420,7 +422,7 @@ fn worker_plan_caps_relay_fires_per_alarm() {
                 );
             }
             source.apply(&partition, batch).await.unwrap();
-            let registry = timer_registry(ShardClass::RefShard, Ok(target.clone()), plan);
+            let registry = timer_registry(ShardClass::RefShard, Ok(target.clone()), plan, true);
             let report = run_due(
                 &source,
                 &partition,
@@ -464,7 +466,8 @@ fn worker_relay_defers_chunks_after_two_target_calls_per_fire() {
                 batch = batch.put(keys::relay(seq), codec::encode_relay(&row).unwrap());
             }
             source.apply(&partition, batch).await.unwrap();
-            let registry = timer_registry(ShardClass::RefShard, Ok(target.clone()), Some(plan));
+            let registry =
+                timer_registry(ShardClass::RefShard, Ok(target.clone()), Some(plan), true);
             let mut due = 100;
             for seq in 1..=3u64 {
                 let before = target.transport().calls();

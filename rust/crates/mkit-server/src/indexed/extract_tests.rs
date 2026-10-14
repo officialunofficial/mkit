@@ -137,6 +137,7 @@ fn run<B: MultipartBlobStore, S: NamespaceStore>(
         &ids,
         head,
         cfg,
+        true,
         clock,
         &NoopMetrics,
     ))
@@ -1396,11 +1397,12 @@ fn a_blocked_object_is_refused_at_the_hold_and_at_the_holder() {
     let staged = staged_of(&[(id, raw, object)]);
     let repo = repo("a");
     let world = World::new();
-    block_on(
-        world
-            .content()
-            .block(&id, &crate::store::BlockEntry::new("dmca", 1), NOW as u64),
-    )
+    block_on(world.content().block(
+        &crate::takedown::DenialCapability::for_test(),
+        &id,
+        &crate::store::BlockEntry::new("dmca", 1),
+        NOW as u64,
+    ))
     .unwrap();
     let ex = extractor(&world.blobs, &world.store, &repo, &world.clock, &staged);
     let e = extract_one(&ex, id, Kind::Blob).unwrap_err();
@@ -1634,7 +1636,13 @@ fn a_block_between_the_hold_and_the_holder_records_no_holder_and_releases_the_ho
         let kv = kv.clone();
         move |_: &BlobKey| {
             let index = ContentIndex::new(BorrowedStore(&*kv));
-            now(index.block(&id, &crate::store::BlockEntry::new("dmca", 1), NOW as u64)).unwrap();
+            now(index.block(
+                &crate::takedown::DenialCapability::for_test(),
+                &id,
+                &crate::store::BlockEntry::new("dmca", 1),
+                NOW as u64,
+            ))
+            .unwrap();
         }
     };
     *blobs.before_commit.lock().unwrap() = Some(Box::new(block));
@@ -2233,6 +2241,7 @@ fn native_distinct_tickets_for_one_pack_preserve_fresh_pending_and_verified_reus
             ids,
             head,
             IndexedConfig::default(),
+            true,
             w.clock.as_ref(),
             &NoopMetrics,
         ))

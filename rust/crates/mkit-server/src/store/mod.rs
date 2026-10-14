@@ -19,6 +19,8 @@ pub use codec::{AbortReason, OutcomeRef, PendingOp, ReservationV1, StoredProcedu
 pub use tickets::TicketCaps;
 
 mod content_index;
+mod denial_reads;
+pub use denial_reads::DenialReads;
 mod pending_holder;
 pub use pending_holder::PendingHolderV1;
 mod error;

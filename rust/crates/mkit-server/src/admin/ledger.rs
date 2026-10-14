@@ -369,6 +369,9 @@ impl<S: NamespaceStore> Engine<S> {
         streaming: bool,
     ) -> Result<Response, ServerError> {
         let verified = self.config.verify(path, headers, wire, now)?;
+        if let Some(operations) = &self.operations {
+            operations.pre_dispatch(path)?;
+        }
         let budget = crate::indexed::budget::SliceBudget::new(crate::limits::REQUEST_CALLS);
         let nonce_key = key("an", verified.replay_key.as_bytes());
         let nonce = Nonce {

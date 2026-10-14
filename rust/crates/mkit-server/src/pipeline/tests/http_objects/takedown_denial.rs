@@ -60,6 +60,7 @@ pub(super) fn shared_chunk_stop() -> (Fx, Hash, Hash, Hash, String) {
     .unwrap();
     block_on(
         ContentIndex::new(BorrowedStore(&fx.pipe.meta)).install_block_action(
+            &crate::takedown::DenialCapability::for_test(),
             &id(&blocked),
             &BlockAction {
                 id: [19; 32],
@@ -154,7 +155,7 @@ fn shared_chunk_stop_precedes_extracted_http_validators_proofs_and_pack_reads() 
 }
 
 #[test]
-fn default_off_keeps_cached_reads_bounded_and_legacy_leaf_denial_strong() {
+fn default_off_keeps_cached_reads_bounded_without_block_reads() {
     let (fx, data) = published();
     assert!(!fx.pipe.cfg.takedown_denial);
     let url = fx.object_url("room", &id(&data.big));
@@ -166,23 +167,27 @@ fn default_off_keeps_cached_reads_bounded_and_legacy_leaf_denial_strong() {
         "default-off read performed deployment-wide work"
     );
     block_on(ContentIndex::new(BorrowedStore(&fx.pipe.meta)).block(
+        &crate::takedown::DenialCapability::for_test(),
         &id(&data.big),
         &crate::store::BlockEntry::new("manual", T0 as u64),
         T0 as u64,
     ))
     .unwrap();
-    assert_uniform_404(&fx.get(&url));
-    assert_uniform_404(&fx.get(&fx.ref_url("room", "main", "big.bin")));
+    fx.pipe.meta.seen.lock().unwrap().clear();
+    assert_eq!(fx.get(&url).status, 200);
+    assert_eq!(fx.get(&fx.ref_url("room", "main", "big.bin")).status, 200);
+    super::read_rounds::assert_no_denial_rows(&fx.pipe.meta.seen());
 }
 
 #[test]
 fn legacy_pack_denial_precedes_exists_download_and_already_present() {
-    let fx = fixture();
+    let fx = fixture_tweaked(Hooks::new(), http_cfg(), |c| c.takedown_denial = true);
     let data = data();
     let pack = fx.push("room", &data.refs(), data.head(), None);
     let extracted = fx.object_url("room", &id(&data.big));
     assert_eq!(fx.get(&extracted).status, 200);
     block_on(ContentIndex::new(BorrowedStore(&fx.pipe.meta)).block(
+        &crate::takedown::DenialCapability::for_test(),
         &pack,
         &crate::store::BlockEntry::new("manual", T0 as u64),
         T0 as u64,
@@ -243,6 +248,7 @@ fn pre_action_plan_may_publish_but_blocked_bytes_remain_unservable() {
             {
                 ContentIndex::new(BorrowedStore(&self.store))
                     .install_block_action(
+                        &crate::takedown::DenialCapability::for_test(),
                         &self.object,
                         &BlockAction {
                             id: [93; 32],

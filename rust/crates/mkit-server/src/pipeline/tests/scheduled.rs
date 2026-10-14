@@ -93,6 +93,7 @@ fn scheduled() -> IndexedConfig {
 /// The alarms of `source`'s Durable Object until nothing verification-related is due.
 fn alarms(env: &Env, source: &Partition, rounds: u32) {
     let handler = VerifyTimer {
+        takedown_denial: env.pipe.cfg.takedown_denial,
         remote: Ref(&env.pipe.meta),
         blobs: Ref(&env.pipe.blobs),
         windows: BlobWindows(&env.pipe.blobs),
@@ -113,7 +114,10 @@ fn alarms(env: &Env, source: &Partition, rounds: u32) {
             target: Ref(&env.pipe.meta),
             hook: NoHook,
             budget: RelayBudget::default(),
-        });
+        })
+        .register(crate::timers::publication_recheck::PublicationRecheck::new(
+            Ref(&env.pipe.meta),
+        ));
     for _ in 0..rounds {
         let now = u64::try_from(env.clock.now_ms()).unwrap();
         block_on(run_due(
@@ -678,3 +682,77 @@ fn lower_pack_cap_stops_scheduled_decode_before_blob_work() {
 }
 
 mod latency;
+
+#[test]
+fn ticketless_member_reuse_observes_the_deployments_denial_mode() {
+    for takedown_denial in [false, true] {
+        let (mut env, owner, identity) = environment_with(Sharding::D34, scheduled());
+        env.pipe.cfg.takedown_denial = takedown_denial;
+        let (bytes, head) = pack();
+        let pack_id = hash(&bytes);
+        let ticket = begin_and_upload(&env, &owner, &identity, &bytes, 194_100);
+        let packmap_bytes = mkit_core::transfer::encode_packlist(None, &[pack_id]).unwrap();
+        let packmap = hash(&packmap_bytes);
+        let map_ticket = begin_and_upload(&env, &owner, &identity, &packmap_bytes, 194_103);
+        let request = signed(&owner, &identity, Procedure::AdvanceRefs, 194_101);
+        let repo = env.auth(&request).unwrap().repo().repo.clone();
+        let source = env.pipe.shards.ref_shard(&repo, HEAD);
+        advance(
+            &env,
+            &owner,
+            &identity,
+            194_101,
+            head,
+            packmap,
+            vec![ticket, map_ticket],
+        )
+        .unwrap_err();
+        alarms(&env, &source, 20);
+        assert_eq!(
+            advance(
+                &env,
+                &owner,
+                &identity,
+                194_101,
+                head,
+                packmap,
+                vec![ticket, map_ticket]
+            )
+            .unwrap(),
+            AdvanceOutcome::Committed
+        );
+        alarms(&env, &source, 20);
+        env.pipe.meta.seen.lock().unwrap().clear();
+        let request = signed(&owner, &identity, Procedure::UpdateRef, 194_102);
+        let auth = env.auth(&request).unwrap();
+        assert_eq!(
+            block_on(env.pipe.update_ref(
+                &auth,
+                RefUpdate {
+                    name: "refs/tags/reused".into(),
+                    condition: Missing,
+                    new: Some(head),
+                }
+            ))
+            .unwrap(),
+            UpdateRefResult::Committed
+        );
+        let block_reads = env
+            .pipe
+            .meta
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|key| matches!(keys::parse(key), Some(keys::ParsedKey::Block(_))))
+            .count();
+        if takedown_denial {
+            assert!(block_reads > 0, "member reuse checks denial when enabled");
+        } else {
+            assert_eq!(
+                block_reads, 0,
+                "member reuse performs no block reads when disabled"
+            );
+        }
+    }
+}

@@ -382,6 +382,7 @@ fn measure_inner(
     assert_eq!(limits.resident_bytes, 48 << 20);
     assert_eq!(limits.max_subrequests, 256);
     let registry = TimerRegistry::new().register(VerifyTimer {
+        takedown_denial: true,
         remote: store.clone(),
         blobs: MemoryBlobStore::default(),
         windows: AcquiredWindows {

@@ -179,6 +179,7 @@ async fn fixture_delta_encoding(
         config.discovery_margin_ms = 5000;
         config.profile = acquisition::Profile::scheduled();
         Work::new(metadata, serving, MemoryBlobStore::default(), config)
+            .with_denial_capability(Some(crate::takedown::DenialCapability::for_test()))
     };
     Fixture {
         work,
@@ -199,6 +200,7 @@ async fn accept(f: &Fixture, operation: &str, pack: Option<Hash>, objects: &[Has
         f.work.root.clone(),
         f.work.shards.clone(),
     )
+    .with_denial_capability(Some(crate::takedown::DenialCapability::for_test()))
     .with_purge(f.work.purge.clone());
     let budget = SliceBudget::new(crate::limits::REQUEST_CALLS);
     let prepared = service
@@ -332,6 +334,7 @@ fn fault_work(
             f.work.preserved.clone(),
             config,
         )
+        .with_denial_capability(Some(crate::takedown::DenialCapability::for_test()))
     }
 }
 async fn fault_advance(
@@ -878,6 +881,7 @@ async fn any_denies_immediately_preserves_named_repository_and_never_claims_disc
         f.work.root.clone(),
         f.work.shards.clone(),
     )
+    .with_denial_capability(Some(crate::takedown::DenialCapability::for_test()))
     .with_purge(f.work.purge.clone());
     assert!(
         service
@@ -1339,6 +1343,7 @@ async fn timer15_uses_firing_local_store_for_owner_and_durable_copy_intents() {
             f.work.preserved.clone(),
             config,
         )
+        .with_denial_capability(Some(crate::takedown::DenialCapability::for_test()))
     };
     let ctx = TimerCtx {
         store: f.work.metadata.as_ref(),
@@ -1730,6 +1735,7 @@ fn purge_service(f: &Fixture) -> Service<Arc<MemoryKv>> {
         f.work.root.clone(),
         f.work.shards.clone(),
     )
+    .with_denial_capability(Some(crate::takedown::DenialCapability::for_test()))
     .with_purge(f.work.purge.clone())
 }
 #[tokio::test]
@@ -1976,6 +1982,7 @@ async fn multi_action_activation_shares_one_immediate_allowance_with_parent_call
         f.work.root.clone(),
         f.work.shards.clone(),
     )
+    .with_denial_capability(Some(crate::takedown::DenialCapability::for_test()))
     .with_purge(f.work.purge.clone());
     let prepared = service
         .plan(
@@ -2062,6 +2069,7 @@ async fn fifty_hop_acquisition_preserves_identical_bytes_across_cold_restart() {
                 f.work.preserved.clone(),
                 config,
             )
+            .with_denial_capability(Some(crate::takedown::DenialCapability::for_test()))
         };
         let (state, used) = advance(&f, id, 20_000).await;
         calls = calls.max(used);
@@ -2100,4 +2108,27 @@ async fn fifty_hop_acquisition_preserves_identical_bytes_across_cold_restart() {
         }
     }
     panic!("fifty-hop preservation failed to finish");
+}
+
+#[tokio::test]
+async fn disabled_work_and_admin_refuse_before_writes() {
+    let mut f = fixture(&[small()], false).await;
+    f.work = f.work.with_denial_capability(None);
+    let budget = SliceBudget::new(100);
+    let before = f.work.metadata.stats(&f.work.root).await.unwrap();
+    assert!(matches!(
+        f.work
+            .step(f.work.metadata.as_ref(), [1; 32], 10, &budget)
+            .await,
+        Err(StoreError::TakedownDenialDisabled)
+    ));
+    let error = f
+        .work
+        .plan(TAKEDOWN_PATH, &json!({}), "digest", 10, &budget)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), crate::Code::FailedPrecondition);
+    assert_eq!(error.to_string(), "takedown denial disabled");
+    assert_eq!(budget.used(), 0);
+    assert_eq!(f.work.metadata.stats(&f.work.root).await.unwrap(), before);
 }

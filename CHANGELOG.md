@@ -15,6 +15,14 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Changed
 
+- Ingest and read paths skip block and denial-action reads when
+  `PipelineConfig.takedown_denial` is false. Holder, inventory, membership,
+  index, and proof-structure writes continue. Takedown-enabled checks retain
+  their storage calls, freshness, and failure precedence. Enabling takedown on
+  an existing store requires holder, inventory, and proof backfills; previously
+  ingested objects are checked on read after activation. No wire or
+  stored-format change; wipe: no.
+
 - Share pure packmap advance planning between the protocol client and CLI in
   `mkit-core::transfer::packmap`. Node bytes, CAS conditions, retries, and
   driver-specific limits and errors are unchanged. No wire or stored-format
@@ -808,6 +816,36 @@ collect the applicable entries between their old and new immutable pins.
   URL-token reads, supplied hooks, cold outcome retry and injected slice recovery.
 
 ### Breaking (toward 0.6)
+
+- [embedder: breaking API] Raw `ContentIndex::{block, install_block_action,
+  install_stored_block_action}` writers require a `DenialCapability` obtained
+  through `Pipeline::denial_capability()` with `takedown_denial=true`.
+  Takedown services and work handlers default to denial disabled and refuse
+  writer operations with `failed_precondition` and `takedown denial disabled`
+  before any write. Migration: pass the pipeline's capability through
+  `with_denial_capability` to `takedown::{Service, work::Work, late_owner::LateOwner}`
+  and to raw writer calls. No wire or stored-format change; wipe: no.
+
+- [embedder: breaking API] `reads::ReadAccess::new` takes a final
+  `takedown_denial` argument. Typed object lookup and canonical member reads use
+  the same denial gate as pipeline reads. Migration: pass the deployment's
+  exact mode, or use `Pipeline::read_access()` to inherit it. No wire or
+  stored-format change; wipe: no.
+
+- [embedder: breaking API] `indexed::job::VerifyTimer` now requires a
+  `takedown_denial` field, and `indexed::verify::{verify_ticketed,
+  verify_ticketed_inspected}` take a `takedown_denial` argument immediately after
+  `IndexedConfig`. Migration: pass the same value as
+  `PipelineConfig.takedown_denial` to every scheduled and inline verifier.
+  No wire or stored-format change; wipe: no.
+
+- [embedder: breaking API] Workers `adapter::{timer_registry,
+  timer_registry_with_blobs}` take a final `takedown_denial` argument, and
+  `verify::with_verification_timers` takes the mode after `authority_fence`.
+  Migration: pass the same mode as the validated pipeline configuration so
+  timer reads use the deployment's denial policy. The rooted production alarm
+  registry separately receives the pipeline's denial-write capability.
+  No wire or stored-format change; wipe: no.
 
 - [embedder: breaking API] `mkit-sync::RemoteSource` read methods now return
   backend-neutral `SourceError`; `SyncError::Transport` is replaced by

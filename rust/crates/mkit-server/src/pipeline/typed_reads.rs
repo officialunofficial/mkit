@@ -12,6 +12,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             &self.meta,
             self.shards.as_ref(),
             self.cfg.default_repo_visibility,
+            self.cfg.takedown_denial,
         )
     }
 }

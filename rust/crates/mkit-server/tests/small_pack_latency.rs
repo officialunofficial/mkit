@@ -132,6 +132,7 @@ async fn measure(objects: u16, chain: u32, tiny_slices: u32) -> Run {
     )
     .unwrap();
     let handler = VerifyTimer {
+        takedown_denial: true,
         remote: store.clone(),
         blobs: blobs.clone(),
         windows: Windows {

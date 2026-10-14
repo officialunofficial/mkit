@@ -192,8 +192,12 @@ frame lookup) and `checkpoint_ms` (the guarded cursor commits).
 `denial_ms` measures the wall time of bounded denial waves, including failed
 waves; it does not sum overlapping per-call durations. Each wave awaits all
 responses before inspecting failures in input order. Decode, EmitIndex, and
-the inline verifier's post-staging index writes share this helper. Successful batches still
-issue one denial call per object. A failing wave finishes its already-issued
+the inline verifier's post-staging index writes share this helper. With
+`takedown_denial=true`, successful batches issue one denial call per object.
+With `takedown_denial=false`, the shared gate reports clear without block or
+denial-action reads, and Decode records zero `denial_calls`. Modeled denial I/O
+time is zero; `denial_ms` can still include local work around the gate.
+A failing wave finishes its already-issued
 calls, then stops without issuing later waves or recording that batch's entries.
 `inventory_batches` counts staging applies and `slice_calls` the slice's total
 remote-budget charges. Time not covered by these fields and `staging_duration_ms`
@@ -219,6 +223,9 @@ The existing attempt marker and timer checkpoint remain. These writes consume no
 remote slice calls and preserve the portable 100-operation, 1 MiB apply bounds.
 Readers acquire no additional guard or lease: their reads cannot change the
 inventory head or job-generation CAS.
+
+The denial-wave behavior below applies with `takedown_denial=true`. With denial
+disabled, the same staging and provisional writes proceed without denial I/O.
 
 Up to sixteen decoded reference-free entries share one inventory read (the head
 and their entry rows) and one guarded apply (at most 83 of the 100 operations:
@@ -586,6 +593,13 @@ operator mount while preserving canonical signature verification. Keep operator
 ingress trusted and network-restricted; the remaining unauthenticated admin-body
 lifetime issue must be hardened before offering admin to untrusted ingress.
 
+The Worker derives `PipelineConfig.takedown_denial` from its validated takedown
+configuration. With denial disabled, ingest and read paths perform no block or
+denial-action reads. Holder, inventory, membership, index, and proof-structure
+writes still run. Core takedown writers refuse with `failed_precondition` and
+`takedown denial disabled` before any write; store-level writers require a
+capability from a pipeline with denial enabled.
+
 With `takedown_denial=false`, the in-process Public reader and batch URL
 issuance (`issue_urls`) can use a cached positive reachability proof. Only a
 fresh walk records a proof, and a cache hit never extends it, so a ref rewind or
@@ -941,6 +955,8 @@ not an in-progress success, and retrying does not necessarily resolve it.
 Operator rules:
 
 - Do not enable takedown on an existing store as a configuration-only change.
+  Activation is a migration: backfill holder, inventory, and proof structures.
+  Objects ingested while denial was off are checked on read once it is on.
   Before activation, copy the store and rehearse the representative worst
   case on the copy: the longest history and packmap depth, tags, new branches
   off the largest heads, force pushes, the real denial directory size and the

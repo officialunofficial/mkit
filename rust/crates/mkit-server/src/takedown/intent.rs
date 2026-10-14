@@ -162,6 +162,7 @@ pub(super) struct Draft {
 /// Factory-only operator extension. Production adapters remain disabled until PR2.
 #[derive(Clone)]
 pub struct Service<N> {
+    denial_capability: Option<super::DenialCapability>,
     pub(super) store: N,
     root: Partition,
     shards: Arc<dyn ShardMap>,
@@ -179,12 +180,19 @@ impl<N: NamespaceStore + Clone> Service<N> {
     /// Construct the inert intent extension over durable operator metadata.
     pub fn new(store: N, root: Partition, shards: Arc<dyn ShardMap>) -> Self {
         Self {
+            denial_capability: None,
             store,
             root,
             shards,
             purge: None,
             namespace_mode: crate::namespace::NamespaceMode::SelfCertifying,
         }
+    }
+    /// Authorize denial writes using the deployment pipeline's capability.
+    #[must_use]
+    pub fn with_denial_capability(mut self, capability: Option<super::DenialCapability>) -> Self {
+        self.denial_capability = capability;
+        self
     }
     /// Select the deployment grammar for incoming operator repository selectors.
     #[must_use]
@@ -286,6 +294,7 @@ impl<N: NamespaceStore + Clone> Service<N> {
         self.resume_with_local_budget(id, now, request_budget, &local)
             .await
     }
+    #[allow(clippy::too_many_lines)] // Authorization, activation and cursor persistence share one replayable lifecycle.
     pub(crate) async fn resume_with_local_budget(
         &self,
         id: Hash,
@@ -293,6 +302,10 @@ impl<N: NamespaceStore + Clone> Service<N> {
         request_budget: &SliceBudget,
         local_budget: &crate::purge::SliceBudget,
     ) -> Result<(), ServerError> {
+        let capability = self
+            .denial_capability
+            .as_ref()
+            .ok_or_else(super::capability::disabled)?;
         let phase_budget = SliceBudget::new(CALLS);
         let request_store = Budgeted::new(&self.store, request_budget);
         let store = Budgeted::new(&request_store, &phase_budget);
@@ -351,7 +364,13 @@ impl<N: NamespaceStore + Clone> Service<N> {
             .await
             .map_err(|_| unavailable())?;
             ContentIndex::new(BorrowedStore(&store))
-                .install_stored_block_action_with_batch(&reference.object, &staged, now, purge)
+                .install_stored_block_action_with_batch(
+                    capability,
+                    &reference.object,
+                    &staged,
+                    now,
+                    purge,
+                )
                 .await
                 .map_err(|_| unavailable())?;
             crate::purge::automatic::invalidate_repository(
@@ -390,6 +409,15 @@ impl<N: NamespaceStore + Clone> Service<N> {
     }
 }
 impl<N: NamespaceStore + Clone> AdminOperations for Service<N> {
+    fn pre_dispatch(&self, path: &str) -> Result<(), ServerError> {
+        if path == crate::admin::TAKEDOWN_PATH {
+            self.denial_capability
+                .as_ref()
+                .ok_or_else(super::capability::disabled)?;
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_lines)] // Immutable staging and root acceptance share one replayable lifecycle.
     fn plan<'a>(
         &'a self,
@@ -403,6 +431,9 @@ impl<N: NamespaceStore + Clone> AdminOperations for Service<N> {
             if path != crate::admin::TAKEDOWN_PATH {
                 return Err(invalid());
             }
+            self.denial_capability
+                .as_ref()
+                .ok_or_else(super::capability::disabled)?;
             let request = Request::parse(input)?;
             self.namespace_mode
                 .admin_repository(&request.repository)
@@ -569,6 +600,9 @@ impl<N: NamespaceStore + Clone> AdminOperations for Service<N> {
     ) -> crate::BoxFuture<'a, Result<Response, ServerError>> {
         Box::pin(async move {
             if path == crate::admin::TAKEDOWN_PATH && matches!(response.status, 200 | 503) {
+                self.denial_capability
+                    .as_ref()
+                    .ok_or_else(super::capability::disabled)?;
                 let local_budget =
                     crate::purge::SliceBudget::with_parent(64, request_budget.clone());
                 let reply: Json =

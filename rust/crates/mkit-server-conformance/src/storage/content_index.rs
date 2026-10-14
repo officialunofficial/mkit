@@ -244,11 +244,17 @@ pub async fn idx_block_unblock<H: KvHarness>(h: H) -> Outcome {
     let obj = [0x27; 32];
     let idx = index!(h, obj);
     let entry = BlockEntry::new("dmca", 9);
-    ok!(idx.block(&obj, &entry, t(1)).await);
+    ok!(idx
+        .block(&denial_capability_for_test()?, &obj, &entry, t(1))
+        .await);
     ensure_eq!(ok!(idx.blocked(&obj).await), Some(entry.clone()));
     let before = state(&idx, &obj).await?;
     let long = BlockEntry::new("x".repeat(MAX_BLOCK_REASON_BYTES + 1), 0);
-    ensure_err!(idx.block(&obj, &long, t(2)).await, StoreError::Invalid(_));
+    ensure_err!(
+        idx.block(&denial_capability_for_test()?, &obj, &long, t(2))
+            .await,
+        StoreError::Invalid(_)
+    );
     ensure_eq!(state(&idx, &obj).await?, before);
     ok!(idx.unblock(&obj, t(3)).await);
     ensure_eq!(ok!(idx.blocked(&obj).await), None);
@@ -266,7 +272,14 @@ pub async fn idx_objects_in_different_shards_isolated<H: KvHarness>(h: H) -> Out
         ok!(idx.add_hold(&a, &[1; 32], t(99), t(1)).await),
         HoldOutcome::Held
     );
-    ok!(idx.block(&a, &BlockEntry::new("r", 1), t(1)).await);
+    ok!(idx
+        .block(
+            &denial_capability_for_test()?,
+            &a,
+            &BlockEntry::new("r", 1),
+            t(1)
+        )
+        .await);
     for other in [b, c] {
         ensure_eq!(ok!(idx.state(&other).await), None);
         ensure_eq!(ok!(idx.blocked(&other).await), None);
@@ -323,7 +336,9 @@ pub async fn idx_blocked_on_add<H: KvHarness>(h: H) -> Outcome {
     let obj = [0x2a; 32];
     let idx = index!(h, obj);
     let entry = BlockEntry::new("csam", 1);
-    ok!(idx.block(&obj, &entry, t(1)).await);
+    ok!(idx
+        .block(&denial_capability_for_test()?, &obj, &entry, t(1))
+        .await);
     let before = state(&idx, &obj).await?;
     let hold = ok!(idx.add_hold(&obj, &[1; 32], t(100), t(2)).await);
     ensure_eq!(hold, HoldOutcome::Blocked(entry.clone()));
@@ -377,7 +392,14 @@ pub async fn idx_expired_holds_pruned_on_mutation<H: KvHarness>(h: H) -> Outcome
         ok!(idx.add_hold(&obj, &[2; 32], t(900), t(600)).await),
         HoldOutcome::Held
     );
-    ok!(idx.block(&obj, &BlockEntry::new("r", 1), t(700)).await);
+    ok!(idx
+        .block(
+            &denial_capability_for_test()?,
+            &obj,
+            &BlockEntry::new("r", 1),
+            t(700)
+        )
+        .await);
     ensure_eq!(hold_row(&idx, &obj, &[2; 32]).await?, Some(t(900)));
     ensure!(remove(&idx, &obj, "a", t(901)).await?, "holder removed");
     ensure_eq!(hold_row(&idx, &obj, &[2; 32]).await?, None);
@@ -494,7 +516,9 @@ pub async fn idx_holder_unless_blocked_releases_the_hold<H: KvHarness>(h: H) -> 
         HoldOutcome::Held
     );
     let entry = BlockEntry::new("dmca", 1);
-    ok!(idx.block(&obj, &entry, t(2)).await);
+    ok!(idx
+        .block(&denial_capability_for_test()?, &obj, &entry, t(2))
+        .await);
     let out = ok!(idx
         .add_holder_unless_blocked(&obj, &holder("a")?, &OP, Some(&[1; 32]), t(3))
         .await);
@@ -534,4 +558,34 @@ pub async fn idx_hold_alone_beats_commit_collect<H: KvHarness>(h: H) -> Outcome 
     );
     ensure!(!state(&idx, &obj).await?.deleting, "marked deleting");
     Ok(Pass)
+}
+
+fn denial_capability_for_test() -> Result<mkit_server::takedown::DenialCapability, String> {
+    use mkit_server::pipeline::{AuthMode, Hooks, Pipeline, PipelineConfig};
+    let mut cfg = PipelineConfig::new(
+        mkit_server::Addressing::Multi(mkit_server::MultiAddressing::new()),
+        AuthMode::AuthV2(
+            mkit_server::auth_v2::AuthV2Config::new("http://localhost", "default")
+                .map_err(|error| error.to_string())?,
+        ),
+        mkit_server::upload::UploadLimits::new(1 << 20, 64),
+    );
+    cfg.indexed = Some(mkit_server::indexed::IndexedConfig::default());
+    cfg.ticket_keys = Some(
+        mkit_server::upload::token::TicketKeys::new(vec![("test".into(), [7; 32])])
+            .map_err(|error| error.to_string())?,
+    );
+    cfg.begin_upload_threshold_bytes = 0;
+    cfg.takedown_denial = true;
+    Pipeline::new(
+        mkit_server::MemoryBlobStore::default(),
+        mkit_server::MemoryKv::default(),
+        Hooks::new(),
+        cfg,
+        std::sync::Arc::new(mkit_server::SystemClock),
+        std::sync::Arc::new(mkit_server::NoopMetrics),
+    )
+    .map_err(|error| error.to_string())?
+    .denial_capability()
+    .ok_or_else(|| "denial-enabled conformance pipeline issued no capability".into())
 }

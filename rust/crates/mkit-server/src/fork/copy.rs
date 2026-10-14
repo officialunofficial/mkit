@@ -360,7 +360,8 @@ async fn copy_holders<S: NamespaceStore>(
     dest: &crate::repo::RepoId,
     objects: &[Hash],
 ) -> Result<(), ForkError> {
-    let index = ContentIndex::new(BorrowedStore(store));
+    let denial_reads = crate::store::DenialReads::new(store, env.takedown_denial);
+    let index = ContentIndex::new(BorrowedStore(&denial_reads));
     let from = Holder::new(source.namespace.clone(), source.name.clone());
     let to = Holder::new(dest.namespace.clone(), dest.name.clone());
     for object in objects {

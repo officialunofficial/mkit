@@ -440,6 +440,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 .with_session(&io.calls)
                 .flagging(&capped)
                 .with_io(admission);
+            let budgeted_meta = meta;
+            let meta =
+                crate::store::DenialReads::new(&budgeted_meta, self.pipe.cfg.takedown_denial);
             let blobs = Budgeted::new(&self.pipe.blobs, calls)
                 .with_session(&io.calls)
                 .with_encoded(&io.encoded)
@@ -468,7 +471,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             if contained.is_empty() {
                 return Ok(all_none());
             }
-            let checks = super::super::reader_checks::Checks::new(&meta);
+            let checks =
+                super::super::reader_checks::Checks::new(&meta, self.pipe.cfg.takedown_denial);
             let view = ViewStore {
                 store: &checks,
                 repo: &self.repo,
@@ -553,7 +557,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 if !resolve::type_of(bytes).is_some_and(|kind| role.accepts(kind)) {
                     continue;
                 }
-                meta.charge().map_err(|_| exhausted())?;
+                budgeted_meta.charge().map_err(|_| exhausted())?;
                 if matches!(
                     self.seams.takedown.check(&self.repo, id).await?,
                     TakedownVerdict::Clear
@@ -595,7 +599,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 BTreeMap::new()
             };
             if self.pipe.cfg.takedown_denial {
-                let quiet_meta = meta.unflagged();
+                let quiet_budget = budgeted_meta.unflagged();
+                let quiet_meta =
+                    crate::store::DenialReads::new(&quiet_budget, self.pipe.cfg.takedown_denial);
                 let quiet_view = ViewStore {
                     store: &quiet_meta,
                     ..live_view
@@ -950,7 +956,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 .with_session(&session.io.calls)
                 .flagging(&capped)
                 .with_io(admission);
-            let checks = super::super::reader_checks::Checks::new(&meta);
+            let budgeted_meta = meta;
+            let meta =
+                crate::store::DenialReads::new(&budgeted_meta, self.pipe.cfg.takedown_denial);
+            let checks =
+                super::super::reader_checks::Checks::new(&meta, self.pipe.cfg.takedown_denial);
             let view = ViewStore {
                 store: &checks,
                 repo: &self.repo,
@@ -970,7 +980,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             }
             let locations: Vec<_> = nodes.iter().map(|node| (node.id, node.location)).collect();
             for node in nodes {
-                meta.charge().map_err(|_| exhausted())?;
+                budgeted_meta.charge().map_err(|_| exhausted())?;
                 if !matches!(
                     self.seams.takedown.check(&self.repo, &node.id).await?,
                     TakedownVerdict::Clear
@@ -1008,7 +1018,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             } else {
                 BTreeMap::new()
             };
-            let quiet_meta = meta.unflagged();
+            let quiet_budget = budgeted_meta.unflagged();
+            let quiet_meta =
+                crate::store::DenialReads::new(&quiet_budget, self.pipe.cfg.takedown_denial);
             let quiet_view = ViewStore {
                 store: &quiet_meta,
                 ..live_view

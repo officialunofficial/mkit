@@ -18,6 +18,7 @@ fn inline_result(
         &[id],
         head,
         rig.cfg,
+        true,
         rig.clock.as_ref(),
         rig.recorder.as_ref(),
     ))

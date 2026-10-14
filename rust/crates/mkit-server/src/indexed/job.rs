@@ -245,6 +245,8 @@ impl SliceExtension for FailClosedExtraction {
 /// namespace client, budgeted per fire); the fire's own store serves the ref
 /// shard's rows, timers and outbox.
 pub struct VerifyTimer<R, B, W, X = FailClosedExtraction> {
+    /// Whether this deployment permits takedown denial reads and writers.
+    pub takedown_denial: bool,
     /// Cross-partition store: index shards, membership shards, coordinator.
     pub remote: R,
     /// Member packs, read for external bases.
@@ -313,7 +315,8 @@ where
                 }
             };
             let budget = SliceBudget::new(self.limits.max_subrequests);
-            let remote = Budgeted::new(&self.remote, &budget);
+            let budgeted_remote = Budgeted::new(&self.remote, &budget);
+            let remote = crate::store::DenialReads::new(&budgeted_remote, self.takedown_denial);
             let blobs = Budgeted::new(&self.blobs, &budget);
             let run = Run {
                 h: self,
@@ -467,7 +470,7 @@ struct Run<'a, S, R, B, W, X> {
     repo: RepoId,
     pack: Hash,
     budget: &'a SliceBudget,
-    remote: &'a Budgeted<'a, R>,
+    remote: &'a crate::store::DenialReads<&'a Budgeted<'a, R>>,
     blobs: &'a Budgeted<'a, B>,
     now: u64,
     continuation_deadline_ms: Option<i64>,
@@ -1582,7 +1585,7 @@ where
         let calls = self.budget.used();
         let clear = crate::takedown::denial::require_clear_many(
             self.remote,
-            batch.iter().map(|item| item.id),
+            self.remote.enabled_ids(batch.iter().map(|item| item.id)),
         )
         .await;
         // Wall time of the bounded waves, including failed reads, rather than
@@ -2085,13 +2088,12 @@ where
             let mut batch = Batch::new().require(Precondition::NotAfter(self.deadline()));
             crate::takedown::denial::require_clear_many(
                 self.remote,
-                direct
-                    .puts
-                    .iter()
-                    .filter_map(|(key, _)| match keys::parse(key) {
+                self.remote.enabled_ids(direct.puts.iter().filter_map(
+                    |(key, _)| match keys::parse(key) {
                         Some(keys::ParsedKey::ObjectIndex { object, .. }) => Some(object),
                         _ => None,
-                    }),
+                    },
+                )),
             )
             .await
             .map_err(|error| {

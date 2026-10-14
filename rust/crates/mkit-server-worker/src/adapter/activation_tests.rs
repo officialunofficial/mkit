@@ -216,6 +216,8 @@ fn content_audit_registration_uses_actual_single_and_d34_roots_and_atomic_dedup(
                     None,
                     Some(&root),
                     None,
+                    true,
+                    Some(denial_capability_for_test()),
                 );
                 let before = allowance.used();
                 run_due(
@@ -261,6 +263,8 @@ fn content_audit_registration_uses_actual_single_and_d34_roots_and_atomic_dedup(
                     None,
                     Some(&root),
                     None,
+                    true,
+                    Some(denial_capability_for_test()),
                 );
                 run_due(
                     &source,
@@ -308,6 +312,8 @@ fn content_audit_refuses_remote_effects_at_shared_physical_limit_and_progresses_
             None,
             Some(&root),
             None,
+            true,
+            Some(denial_capability_for_test()),
         );
         run_due(
             &source,
@@ -449,6 +455,8 @@ fn audit_groups_near_one_mib_make_bounded_progress() {
                 None,
                 Some(&root),
                 None,
+                true,
+                Some(denial_capability_for_test()),
             );
             let before = allowance.used();
             run_due(
@@ -504,6 +512,8 @@ fn audit_target_conflict_lost_reply_and_registry_restart_keep_one_gapless_append
                     None,
                     Some(&root),
                     None,
+                    true,
+                    Some(denial_capability_for_test()),
                 );
                 let before = target.calls.load(Ordering::SeqCst);
                 run_due(
@@ -590,6 +600,8 @@ fn late_owner_reserves_before_any_effect_and_keeps_durable_purge_and_audit_after
             Some(&root),
             Some(&root),
             Some(&purge),
+            true,
+            Some(denial_capability_for_test()),
         );
         run_due(
             store.as_ref(),
@@ -970,6 +982,7 @@ fn audit_single_actual_oversize_still_rolls_back_atomically() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // Keep the corruption and retry matrix at one audited boundary.
 fn audit_corrupt_zero_head_fails_closed_without_history_repair() {
     block_on(async {
         let clock = Arc::new(ManualClock::new(10));
@@ -1040,6 +1053,8 @@ fn audit_corrupt_zero_head_fails_closed_without_history_repair() {
                 None,
                 Some(&root),
                 None,
+                true,
+                Some(denial_capability_for_test()),
             );
             let before = allowance.used();
             run_due(

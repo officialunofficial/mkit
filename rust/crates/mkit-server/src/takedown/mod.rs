@@ -1,6 +1,8 @@
 //! Lean denial and durable takedown intents; adapters control activation.
 pub mod acquisition;
 mod admin;
+mod capability;
+pub use capability::DenialCapability;
 mod closure;
 mod copy;
 pub mod denial;

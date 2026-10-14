@@ -21,6 +21,8 @@ enum Op {
     Show { sizes: bool },
     Cat,
     ListRefs,
+    GetReadGate,
+    BeforeGetReadGate,
     Log(usize),
     Page1(usize),
     CanonicalLog(usize),
@@ -122,12 +124,12 @@ async fn run(
     session: &mut ReaderSession,
 ) -> Result<(), crate::ServerError> {
     let fx = &shape.fx;
-    let req = signed(
-        &fx.owner,
-        &fx.identity("room"),
-        Procedure::ListRefs,
-        fx.number(),
-    );
+    let procedure = if matches!(op, Op::GetReadGate | Op::BeforeGetReadGate) {
+        Procedure::PackExists
+    } else {
+        Procedure::ListRefs
+    };
+    let req = signed(&fx.owner, &fx.identity("room"), procedure, fx.number());
     let lookup = |name: &str| {
         req.headers
             .iter()
@@ -141,15 +143,25 @@ async fn run(
         unary_body: Some(&req.body),
         transport_principal: None,
     };
-    if matches!(op, Op::ListRefs) {
+    if matches!(op, Op::ListRefs | Op::GetReadGate | Op::BeforeGetReadGate) {
         let request = if owner {
             req
         } else {
-            Req::unsigned(Procedure::ListRefs).header("x-repository", &fx.identity("room"))
+            Req::unsigned(procedure).header("x-repository", &fx.identity("room"))
         };
         let auth = fx.auth(&request);
-        let refs = fx.pipe.list_refs(&auth, "").await?;
-        assert!(!refs.is_empty());
+        if matches!(op, Op::GetReadGate | Op::BeforeGetReadGate) {
+            let key = PackKey::new(*shape.packs.last().unwrap());
+            let visible = if matches!(op, Op::BeforeGetReadGate) {
+                before_get_read_gate(fx, &auth, key).await?
+            } else {
+                fx.pipe.pack_exists(&auth, key).await?
+            };
+            assert!(visible);
+        } else {
+            let refs = fx.pipe.list_refs(&auth, "").await?;
+            assert!(!refs.is_empty());
+        }
         return Ok(());
     }
     let reader = fx
@@ -176,7 +188,7 @@ async fn run(
                 assert!(answers.iter().all(Option::is_some));
             }
         }
-        Op::ListRefs => unreachable!(),
+        Op::ListRefs | Op::GetReadGate | Op::BeforeGetReadGate => unreachable!(),
         Op::Cat => {
             let read = reader
                 .read_commit_path_in(
@@ -268,6 +280,7 @@ fn measure_latency(
     let fx = &shape.fx;
     let (kv, gets) = (fx.pipe.meta.calls(), get_count(fx));
     fx.pipe.meta.touched.lock().unwrap().clear();
+    fx.pipe.meta.seen.lock().unwrap().clear();
     fx.pipe
         .meta
         .latency_ms
@@ -303,6 +316,9 @@ fn measure_latency(
         }
     };
     runtime.block_on(operation).unwrap();
+    if !fx.pipe.cfg.takedown_denial && !matches!(op, Op::BeforeGetReadGate) {
+        assert_no_denial_rows(&fx.pipe.meta.seen());
+    }
     let elapsed = runtime.block_on(async { tokio::time::Instant::now() - start });
     fx.pipe.meta.latency_ms.store(0, Ordering::SeqCst);
     fx.pipe.blobs.latency_ms.store(0, Ordering::SeqCst);
@@ -358,21 +374,21 @@ const BASELINE: [(&str, u32); 5] = [
 ];
 const CEILING: [u32; 5] = [38, 34, 30, 38, 420];
 
-// Current baseline for every matrix row, in denial/view/operation order.
+// Measured before this change on the same runtime, in denial/view/operation order.
 // No row may increase KV calls.
 const MEASURED_BASELINE: [[(u32, u32); 13]; 4] = [
     [
         (34, 68),
         (30, 38),
         (24, 37),
-        (26, 56),
+        (25, 56),
         (34, 52),
         (42, 64),
         (80, 124),
-        (85, 129),
-        (17, 17),
+        (84, 129),
+        (4, 17),
         (380, 603),
-        (384, 607),
+        (383, 607),
         (73, 86),
         (73, 73),
     ],
@@ -380,44 +396,44 @@ const MEASURED_BASELINE: [[(u32, u32); 13]; 4] = [
         (31, 69),
         (31, 39),
         (22, 38),
-        (25, 57),
+        (24, 57),
         (35, 53),
         (43, 65),
         (81, 125),
-        (85, 129),
-        (17, 17),
+        (84, 129),
+        (4, 17),
         (381, 604),
-        (385, 608),
+        (384, 608),
         (64, 87),
         (74, 74),
     ],
     [
         (49, 135),
-        (54, 114),
+        (50, 114),
         (36, 88),
-        (37, 106),
-        (73, 156),
-        (90, 190),
-        (173, 360),
-        (177, 364),
-        (17, 17),
-        (833, 1719),
-        (837, 1723),
+        (36, 106),
+        (60, 156),
+        (73, 190),
+        (139, 360),
+        (142, 364),
+        (4, 17),
+        (659, 1719),
+        (662, 1723),
         (113, 256),
         (113, 243),
     ],
     [
         (46, 136),
-        (55, 115),
+        (51, 115),
         (34, 89),
-        (36, 107),
-        (74, 157),
-        (91, 191),
-        (174, 361),
-        (178, 365),
-        (17, 17),
-        (834, 1720),
-        (838, 1724),
+        (35, 107),
+        (61, 157),
+        (74, 191),
+        (140, 361),
+        (143, 365),
+        (4, 17),
+        (660, 1720),
+        (663, 1724),
         (104, 257),
         (114, 244),
     ],
@@ -461,6 +477,13 @@ fn embedder_read_shapes_report_rounds() {
                         "{op:?}: rounds increased from {old_rounds} to {rounds}"
                     );
                 }
+                if denial && std::env::var_os("MKIT_BENCH_RANGED_HEAD").is_none() {
+                    assert!(
+                        (rounds.round() - f64::from(old_rounds)).abs() < f64::EPSILON,
+                        "{op:?}: denial-on rounds changed"
+                    );
+                    assert_eq!(kv, old_kv, "{op:?}: denial-on KV calls changed");
+                }
                 assert!(
                     kv <= old_kv,
                     "{op:?}: KV calls increased from {old_kv} to {kv}"
@@ -472,6 +495,15 @@ fn embedder_read_shapes_report_rounds() {
                 if guard {
                     guarded.push(rounds);
                 }
+            }
+            let (rounds, kv, _) = measure(&c, owner, Op::GetReadGate);
+            if !denial {
+                let (before_rounds, before_kv, _) = measure(&c, owner, Op::BeforeGetReadGate);
+                assert!((before_rounds - rounds - 1.0).abs() < f64::EPSILON);
+                assert_eq!(before_kv, kv + 1);
+                println!(
+                    "ROUND_DELTA denial={denial} owner={owner} op=GetReadGate rounds_before={before_rounds:.0} rounds_after={rounds:.0} KV_before={before_kv} KV_after={kv}"
+                );
             }
             if !denial && !owner && std::env::var_os("MKIT_BENCH_RANGED_HEAD").is_none() {
                 for ((name, baseline), (rounds, ceiling)) in
@@ -501,4 +533,42 @@ fn first_parent_log_models_cold_first_touches() {
             }
         }
     }
+}
+
+#[path = "denial_off_reads.rs"]
+mod denial_off_reads;
+
+/// Exact block/action rows, excluding the descriptor directories and chunk pages.
+pub(super) fn assert_no_denial_rows(seen: &[Key]) {
+    for key in seen {
+        let bytes = key.as_bytes();
+        assert!(
+            !(bytes.starts_with(b"b\0")
+                && (bytes.len() == 34 || (bytes.len() == 42 && bytes.ends_with(b"\0actions")))),
+            "denial disabled read a block or action row: {key:?}"
+        );
+    }
+}
+
+/// Empty-denial-index model of the former pack-serving gate. Restore its unconditional
+/// block/action lookup at the membership-to-blob boundary; all other work uses
+/// the same production helpers as the current gate. This runs only with denial
+/// disabled, so the restored lookup is exactly one sequential KV round.
+async fn before_get_read_gate(
+    fx: &Fx,
+    auth: &Authenticated,
+    key: PackKey,
+) -> Result<bool, ServerError> {
+    assert!(!fx.pipe.cfg.takedown_denial);
+    let op = fx.pipe.identify(auth, OpKind::PackExists { key })?;
+    let authorized = fx.pipe.authorize_read(&op).await?;
+    if !fx
+        .pipe
+        .pack_is_member(auth, &key, authorized.facts.caller_view)
+        .await?
+    {
+        return Ok(false);
+    }
+    crate::takedown::denial::require_clear(&fx.pipe.meta, &key.0).await?;
+    Ok(fx.pipe.blobs.head(&key.into()).await.unwrap().is_some())
 }

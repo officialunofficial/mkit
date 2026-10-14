@@ -5,6 +5,7 @@ use crate::store::{BorrowedStore, ContentIndex};
 
 fn block(fx: &Fx, object: Hash) {
     block_on(ContentIndex::new(BorrowedStore(&fx.pipe.meta)).block(
+        &crate::takedown::DenialCapability::for_test(),
         &object,
         &crate::store::BlockEntry::new("manual", T0 as u64),
         T0 as u64,
@@ -26,7 +27,7 @@ fn owner_meta<'a>(req: &'a Req, lookup: &'a dyn Fn(&str) -> Option<String>) -> R
 fn warm_session_still_checks_target_pack_and_manifest_denial() {
     for blocked in ["target", "pack", "manifest"] {
         for writer in [false, true] {
-            let fx = fixture();
+            let fx = fixture_tweaked(Hooks::new(), http_cfg(), |c| c.takedown_denial = true);
             let d = data();
             let pack = fx.push("room", &d.refs(), d.head(), None);
             let req = signed(
@@ -83,7 +84,7 @@ fn warm_session_still_checks_target_pack_and_manifest_denial() {
 #[test]
 fn warm_session_still_checks_external_base_and_its_pack() {
     for pack_block in [false, true] {
-        let fx = fixture();
+        let fx = fixture_tweaked(Hooks::new(), http_cfg(), |c| c.takedown_denial = true);
         let base = blob(b"base payload");
         let old_root = tree(&[("base", EntryMode::Blob, &base)]);
         let old_head = commit(&old_root, &[], "old");

@@ -20,13 +20,13 @@ struct Cache {
 }
 
 pub(super) struct Checks<'a, S> {
-    store: &'a S,
+    store: crate::store::DenialReads<&'a S>,
     cache: Mutex<Cache>,
 }
 impl<'a, S> Checks<'a, S> {
-    pub(super) fn new(store: &'a S) -> Self {
+    pub(super) fn new(store: &'a S, takedown_denial: bool) -> Self {
         Self {
-            store,
+            store: crate::store::DenialReads::new(store, takedown_denial),
             cache: Mutex::new(Cache::default()),
         }
     }
@@ -38,9 +38,8 @@ impl<'a, S> Checks<'a, S> {
             .cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        locations
-            .iter()
-            .flat_map(|(id, loc)| [*id, loc.pack])
+        self.store
+            .enabled_ids(locations.iter().flat_map(|(id, loc)| [*id, loc.pack]))
             .filter(|id| {
                 cache
                     .slots
@@ -85,9 +84,9 @@ impl<S: NamespaceStore> Checks<'_, S> {
     /// its pack, even if that pack's batched read failed.
     pub(super) async fn prefetch(&self, ids: &[Hash]) -> Result<(), StoreError> {
         let mut partitions = BTreeMap::<Partition, Vec<_>>::new();
-        for id in ids
-            .iter()
-            .copied()
+        for id in self
+            .store
+            .enabled_ids(ids.iter().copied())
             .collect::<std::collections::BTreeSet<_>>()
         {
             let partition = crate::store::content_shard(&id);

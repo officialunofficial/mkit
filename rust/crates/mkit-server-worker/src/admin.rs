@@ -197,12 +197,15 @@ fn build_work(
     config.namespace_mode = cfg.namespace_mode;
     config.purge = purge_config(cfg, metadata.clone(), request)?;
     config.discovery_margin_ms = indexed.relay_lag_bound_ms;
+    let serving = blob(cfg.blob_binding, crate::r2::PACKS_KEYSPACE);
+    let capability = crate::adapter::denial_capability(cfg, serving.clone(), metadata.clone())?;
     Ok(mkit_server::takedown::work::Work::new(
         metadata,
-        blob(cfg.blob_binding, crate::r2::PACKS_KEYSPACE),
+        serving,
         blob(PRESERVATION_BINDING, "preserved"),
         config,
-    ))
+    )
+    .with_denial_capability(capability))
 }
 #[cfg(any(target_arch = "wasm32", test))]
 fn supported_path(path: &str, cfg: &crate::adapter::WorkerConfig) -> bool {

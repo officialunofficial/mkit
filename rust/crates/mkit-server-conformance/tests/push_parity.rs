@@ -843,6 +843,7 @@ async fn drain_indexed(env: &VerificationEnv) {
     use mkit_server::timers::{TickBudget, TimerRegistry, run_due};
     let registry = TimerRegistry::new()
         .register(VerifyTimer {
+            takedown_denial: true,
             remote: env.kv.clone(),
             blobs: env.blobs.clone(),
             windows: BlobWindows(&env.blobs),

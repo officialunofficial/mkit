@@ -179,6 +179,7 @@ impl WorkConfig {
 /// All runtime dependencies; preservation is a separately provisioned blob store.
 #[non_exhaustive]
 pub struct Work<N, B, P> {
+    pub(super) denial_capability: Option<super::DenialCapability>,
     pub metadata: N,
     /// Automatic cache purge settings shared with signed and late intake.
     pub purge: Option<crate::purge::PurgeConfig>,
@@ -199,6 +200,7 @@ impl<N, B, P> Work<N, B, P> {
     #[must_use]
     pub fn new(metadata: N, serving: B, preserved: P, config: WorkConfig) -> Self {
         Self {
+            denial_capability: None,
             metadata,
             serving,
             preserved,
@@ -212,6 +214,12 @@ impl<N, B, P> Work<N, B, P> {
             purge: config.purge,
             clock: config.clock,
         }
+    }
+    /// Authorize denial writes using the deployment pipeline's capability.
+    #[must_use]
+    pub fn with_denial_capability(mut self, capability: Option<super::DenialCapability>) -> Self {
+        self.denial_capability = capability;
+        self
     }
 }
 impl<N, B, P> std::fmt::Debug for Work<N, B, P> {
@@ -239,6 +247,7 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
             self.root.clone(),
             self.shards.clone(),
         )
+        .with_denial_capability(self.denial_capability)
         .with_purge(self.purge.clone());
         let (record, _) = service
             .record(store, &id)
@@ -381,12 +390,16 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
         now: u64,
         budget: &SliceBudget,
     ) -> Result<Fired, StoreError> {
+        self.denial_capability
+            .as_ref()
+            .ok_or(StoreError::TakedownDenialDisabled)?;
         let local_budget = crate::purge::SliceBudget::with_parent(64, budget.clone());
         let service = Service::new(
             LocalStore::new(store, &self.root, store),
             self.root.clone(),
             self.shards.clone(),
         )
+        .with_denial_capability(self.denial_capability)
         .with_purge(self.purge.clone());
         service
             .resume_with_local_budget(id, now, budget, &local_budget)

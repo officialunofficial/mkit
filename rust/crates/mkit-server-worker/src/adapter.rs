@@ -1177,6 +1177,59 @@ pub fn plan_capacity(plan: Option<&str>) -> Result<Capacity, (ConfigError, Capac
 /// Relay delivery belongs only to [`crate::classes::ShardClass::RefShard`].
 /// The kind-5 quota rollup is registered on the `RefShard`, `NsCoordinator`
 /// and `RefStore` classes (the ones that hold `qs`/`qc` rows) and on no other.
+// This pipeline validates the complete deployment policy and only issues the
+// denial capability. Its hooks reject operations; it performs no storage I/O.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn denial_capability<
+    B: mkit_server::MultipartBlobStore,
+    N: mkit_server::NamespaceStore,
+>(
+    cfg: &WorkerConfig,
+    blobs: B,
+    metadata: N,
+) -> Result<Option<mkit_server::takedown::DenialCapability>, ConfigError> {
+    use mkit_server::pipeline::{
+        Admission, AdmissionDecision, AdmissionInput, Authorizer, Hooks, Pipeline,
+    };
+    use mkit_server::{AuthzFacts, Operation};
+    struct NoOperations;
+    impl Authorizer for NoOperations {
+        async fn authorize(&self, _: &Operation) -> Result<AuthzFacts, mkit_server::ServerError> {
+            Err(mkit_server::ServerError::failed_precondition(
+                "operation unavailable",
+            ))
+        }
+    }
+    impl Admission for NoOperations {
+        async fn admit(
+            &self,
+            _: &AdmissionInput<'_>,
+        ) -> Result<AdmissionDecision, mkit_server::ServerError> {
+            Err(mkit_server::ServerError::failed_precondition(
+                "operation unavailable",
+            ))
+        }
+    }
+    let defaults = Hooks::new();
+    let hooks = Hooks {
+        authorizer: NoOperations,
+        admission: NoOperations,
+        pre_receive: defaults.pre_receive,
+        receipts: defaults.receipts,
+        outcomes: defaults.outcomes,
+    };
+    let pipeline = Pipeline::new(
+        blobs,
+        metadata,
+        hooks,
+        cfg.pipeline_config()?,
+        Arc::new(crate::clock::WorkerClock),
+        Arc::new(mkit_server::telemetry::NoopMetrics),
+    )
+    .map_err(|error| ConfigError(error.to_string()))?;
+    Ok(pipeline.denial_capability())
+}
+
 /// A configuration failure retains its relay timers for retry, rather than
 /// leaving them without a registered handler. `target` uses the deployment's
 /// placement and `plan` is its `WORKERS_PLAN` value.
@@ -1185,17 +1238,29 @@ pub fn timer_registry<S, T>(
     class: crate::classes::ShardClass,
     target: Result<T, ConfigError>,
     plan: Option<&str>,
+    takedown_denial: bool,
 ) -> mkit_server::timers::TimerRegistry<'static, S>
 where
     S: mkit_server::NamespaceStore,
     T: mkit_server::NamespaceStore + 'static,
 {
-    timer_registry_budgeted(class, target, plan, None, None, None, None)
+    timer_registry_budgeted(
+        class,
+        target,
+        plan,
+        None,
+        None,
+        None,
+        None,
+        takedown_denial,
+        None,
+    )
 }
 
 #[allow(
     clippy::too_many_lines,
-    reason = "Keep allocated timer ownership together"
+    clippy::too_many_arguments,
+    reason = "Keep allocated timer ownership and deployment policy together"
 )]
 fn timer_registry_budgeted<
     S: mkit_server::NamespaceStore,
@@ -1208,13 +1273,20 @@ fn timer_registry_budgeted<
     takedown_root: Option<&mkit_server::Partition>,
     relay_root: Option<&mkit_server::Partition>,
     purge: Option<&mkit_server::purge::PurgeConfig>,
+    takedown_denial: bool,
+    denial_capability: Option<mkit_server::takedown::DenialCapability>,
 ) -> mkit_server::timers::TimerRegistry<'static, S> {
     use crate::classes::ShardClass;
     use mkit_server::relay::{RelayBudget, RelayHandler};
     use mkit_server::timers::{TimerRegistry, lease_sweep::LeaseSweep};
 
     // One target client serves the class's relay or lease sweep and its rollup.
-    let target = target.map(|store| SharedStore(Arc::new(store), alarm_budget.cloned()));
+    let target = target.map(|store| {
+        SharedStore(
+            Arc::new(mkit_server::store::DenialReads::new(store, takedown_denial)),
+            alarm_budget.cloned(),
+        )
+    });
     let registry = TimerRegistry::new();
     let registry = match class {
         ShardClass::NsCoordinator => {
@@ -1245,7 +1317,8 @@ fn timer_registry_budgeted<
                         store,
                         root.clone(),
                     )
-                    .with_purge(purge.cloned()),
+                    .with_purge(purge.cloned())
+                    .with_denial_capability(denial_capability),
                     max_subrequests: 700,
                 },
                 budget: alarm_budget.cloned(),
@@ -1353,13 +1426,14 @@ pub fn timer_registry_with_blobs<S, T, B>(
     target: Result<T, ConfigError>,
     plan: Option<&str>,
     blobs: B,
+    takedown_denial: bool,
 ) -> mkit_server::timers::TimerRegistry<'static, S>
 where
     S: mkit_server::NamespaceStore,
     T: mkit_server::NamespaceStore + 'static,
     B: mkit_server::MultipartBlobStore + 'static,
 {
-    let registry = timer_registry(class, target, plan);
+    let registry = timer_registry(class, target, plan, takedown_denial);
     match class {
         crate::classes::ShardClass::RefStore | crate::classes::ShardClass::RefShard => {
             registry.register(mkit_server::timers::ticket_expiry::TicketExpiry { blobs })
@@ -2909,6 +2983,21 @@ mod glue {
             _ => (None, None),
         };
         let relay_root = cfg.as_ref().ok().map(WorkerConfig::probe_partition);
+        let denial_capability = match (&cfg, &target) {
+            (Ok(cfg), Ok(target)) => super::denial_capability(
+                cfg,
+                crate::r2::R2BlobStore::new(
+                    crate::r2::EnvBucket::new(env.clone(), cfg.blob_binding),
+                    crate::r2::PACKS_KEYSPACE,
+                ),
+                target.clone(),
+            )
+            .unwrap_or_else(|error| {
+                crate::log_failure(&error.to_string());
+                None
+            }),
+            _ => None,
+        };
         let registry = super::timer_registry_budgeted(
             class,
             target,
@@ -2917,6 +3006,8 @@ mod glue {
             takedown_root.as_ref(),
             relay_root.as_ref(),
             purge.as_ref(),
+            cfg.as_ref().is_ok_and(|cfg| cfg.takedown_denial),
+            denial_capability,
         );
         let registry = if let (Ok(cfg), Some(budget)) = (&cfg, &alarm_budget)
             && cfg.takedown.is_some()
@@ -3309,6 +3400,34 @@ mod glue {
 mod activation_tests;
 
 #[cfg(test)]
+fn denial_capability_for_test() -> mkit_server::takedown::DenialCapability {
+    use mkit_server::pipeline::{AuthMode, Hooks, Pipeline, PipelineConfig};
+    let mut cfg = PipelineConfig::new(
+        mkit_server::Addressing::Multi(mkit_server::MultiAddressing::new()),
+        AuthMode::AuthV2(
+            mkit_server::auth_v2::AuthV2Config::new("http://localhost", "default").unwrap(),
+        ),
+        mkit_server::upload::UploadLimits::new(1 << 20, 64),
+    );
+    cfg.indexed = Some(mkit_server::indexed::IndexedConfig::default());
+    cfg.ticket_keys =
+        Some(mkit_server::upload::token::TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap());
+    cfg.begin_upload_threshold_bytes = 0;
+    cfg.takedown_denial = true;
+    Pipeline::new(
+        mkit_server::MemoryBlobStore::default(),
+        mkit_server::MemoryKv::default(),
+        Hooks::new(),
+        cfg,
+        std::sync::Arc::new(mkit_server::SystemClock),
+        std::sync::Arc::new(mkit_server::NoopMetrics),
+    )
+    .unwrap()
+    .denial_capability()
+    .unwrap()
+}
+
+#[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
@@ -3417,6 +3536,8 @@ mod tests {
                 None,
                 None,
                 None,
+                true,
+                Some(denial_capability_for_test()),
             );
             let report = run_due(
                 &kv,
@@ -4132,6 +4253,7 @@ mod tests {
                 limit: 2,
             }),
             Some("free"),
+            true,
         );
         let report = block_on(run_due(
             &local,
@@ -4226,6 +4348,7 @@ mod tests {
             crate::classes::ShardClass::ContentIndexShard,
             Ok(MemoryKv::default()),
             Some("paid"),
+            true,
         );
         assert!(format!("{content:?}").contains("TimerKind(13)"));
     }
@@ -4826,6 +4949,7 @@ mod tests {
                 class,
                 Ok(mkit_server::MemoryKv::default()),
                 Some("paid"),
+                true,
             );
             assert!(
                 !format!("{registry:?}").contains("TimerKind(7)"),
@@ -5147,7 +5271,12 @@ mod tests {
         };
         let partition = mkit_server::store::content_shard(&request.identity.object);
         ContentIndex::new(store.clone())
-            .block(&request.identity.object, &request.blocked, 1000)
+            .block(
+                &denial_capability_for_test(),
+                &request.identity.object,
+                &request.blocked,
+                1000,
+            )
             .await
             .unwrap();
         let row = keys::content_takedown(&request.identity.object, &request.identity.intent);
@@ -5179,6 +5308,7 @@ mod tests {
                 crate::classes::ShardClass::ContentIndexShard,
                 Ok(store.clone()),
                 Some("paid"),
+                false,
             );
             run_due(
                 store.as_ref(),
@@ -5208,6 +5338,8 @@ mod tests {
                 Some(&root),
                 Some(&root),
                 None,
+                true,
+                Some(denial_capability_for_test()),
             );
             run_due(
                 store.as_ref(),

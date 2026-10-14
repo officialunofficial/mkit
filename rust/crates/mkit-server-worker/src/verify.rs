@@ -207,6 +207,7 @@ pub fn with_verification_timers<S, T, B, W>(
     class: ShardClass,
     indexed: Option<IndexedConfig>,
     authority_fence: bool,
+    takedown_denial: bool,
     plan: Option<&str>,
     remote: T,
     blobs: B,
@@ -225,6 +226,7 @@ where
         class,
         indexed,
         authority_fence,
+        takedown_denial,
         plan,
         remote,
         blobs,
@@ -241,6 +243,7 @@ fn with_verification_timers_budgeted<S, T, B, W>(
     class: ShardClass,
     indexed: Option<IndexedConfig>,
     authority_fence: bool,
+    takedown_denial: bool,
     plan: Option<&str>,
     remote: T,
     blobs: B,
@@ -264,6 +267,7 @@ where
     }
     registry.register(crate::purge::Budgeted {
         handler: VerifyTimer {
+            takedown_denial,
             remote,
             blobs,
             windows,
@@ -342,6 +346,7 @@ pub(crate) fn register_configured_budgeted<S: NamespaceStore>(
     let blobs = R2BlobStore::new(bucket(), PACKS_KEYSPACE);
     registry.register(crate::purge::Budgeted {
         handler: VerifyTimer {
+            takedown_denial: cfg.takedown_denial,
             remote: WorkerNamespaceStore::new(
                 StubTransport::new(env.clone(), cfg.placement.clone()),
                 probe,
@@ -534,6 +539,7 @@ mod tests {
             TimerRegistry::<MemoryKv>::new(),
             class,
             indexed,
+            false,
             false,
             plan,
             MemoryKv::default(),
