@@ -2899,7 +2899,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// `IssueObjectUrl`'s reuse.
     async fn authorize_read(&self, op: &Operation) -> Result<ReadAuth, ServerError> {
         let authorization = self.authorize_read_with_meta(op, &self.meta, None);
-        if op.auth.is_some() && !matches!(op.kind, OpKind::ListRefs { .. }) {
+        if op.auth.is_some()
+            && matches!(self.cfg.addressing, Addressing::Multi(_))
+            && matches!(
+                op.kind,
+                OpKind::PackExists { .. } | OpKind::DownloadPack { .. }
+            )
+        {
             let (result, ()) =
                 futures::future::join(authorization, self.meta.prepare_repo_read(&op.repo)).await;
             result

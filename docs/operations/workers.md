@@ -1023,9 +1023,10 @@ An incoming request activates a non-running object and invokes its constructor
 An authenticated, validated read starts sixteen internal `ping` requests in one
 concurrent wave, joined with the authorization prologue. Owner object readers
 validate their signed envelope and repository binding before starting that wave;
-canonical and history reads reuse the same entry. Signed pack/ref reads use their
-existing authenticated operation. Anonymous and public object readers do not
-start waves. `ListRefs` scans RefIndex rather than RepoIndex and does not warm
+canonical and history reads reuse the same entry. Signed Multi pack reads use
+their existing authenticated operation. Pack reads with Single addressing and
+standalone ref reads do not touch RepoIndex and skip the wave. Anonymous and
+public object readers do not start waves. `ListRefs` scans RefIndex rather than RepoIndex and does not warm
 RepoIndex. Repository statistics reads also skip the wave.
 
 The wave adds sixteen calls and zero rounds to the warm-latency probe when

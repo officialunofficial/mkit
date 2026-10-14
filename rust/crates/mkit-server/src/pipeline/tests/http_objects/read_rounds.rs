@@ -576,7 +576,6 @@ async fn before_get_read_gate(
     }
     crate::takedown::denial::require_clear(&fx.pipe.meta, &key.0).await?;
     Ok(fx.pipe.blobs.head(&key.into()).await.unwrap().is_some())
-
 }
 
 /// Same canonical fixtures and loader graph; only repository activation differs.
@@ -671,5 +670,46 @@ fn repository_index_prewake_rpc_validation_precedes_activation() {
     assert!(block_on(fx.pipe.read_ref(&auth, "invalid")).is_err());
     assert_eq!(fx.pipe.meta.warm_calls.load(Ordering::SeqCst), 0);
     assert!(block_on(fx.pipe.read_ref(&auth, HEAD)).unwrap().is_some());
+    assert_eq!(fx.pipe.meta.warm_calls.load(Ordering::SeqCst), 0);
+    let pack = mkit_core::protocol::PackKey::new(shape.packs[0]);
+    let unsigned =
+        Req::unsigned(Procedure::PackExists).header("x-repository", &fx.identity("room"));
+    assert!(block_on(fx.pipe.pack_exists(&fx.auth(&unsigned), pack)).unwrap());
+    assert_eq!(fx.pipe.meta.warm_calls.load(Ordering::SeqCst), 0);
+    // A different authenticated procedure cannot prepare the pack read.
+    assert!(block_on(fx.pipe.pack_exists(&auth, pack)).is_err());
+    assert_eq!(fx.pipe.meta.warm_calls.load(Ordering::SeqCst), 0);
+    let req = signed(
+        &fx.owner,
+        &fx.identity("room"),
+        Procedure::PackExists,
+        fx.number(),
+    );
+    let auth = fx.auth(&req);
+    assert!(block_on(fx.pipe.pack_exists(&auth, pack)).unwrap());
     assert_eq!(fx.pipe.meta.warm_calls.load(Ordering::SeqCst), 16);
+}
+
+#[test]
+fn repository_index_prewake_skips_single_addressing_pack_reads() {
+    let clock = super::super::clock();
+    let mut config = super::super::cfg(super::super::authv2());
+    config.sharding = Sharding::D34;
+    let env = super::super::build(
+        config,
+        Spy::new(super::super::store(&clock)),
+        Hooks::new(),
+        clock,
+    );
+    env.pipe.meta.prewake.store(true, Ordering::SeqCst);
+    let request = Req::signed(&key(7), Procedure::PackExists, b"{}", &nonce(42), T0);
+    let auth = env.auth(&request).unwrap();
+    assert!(
+        !block_on(
+            env.pipe
+                .pack_exists(&auth, mkit_core::protocol::PackKey::new([1; 32]))
+        )
+        .unwrap()
+    );
+    assert_eq!(env.pipe.meta.warm_calls.load(Ordering::SeqCst), 0);
 }
