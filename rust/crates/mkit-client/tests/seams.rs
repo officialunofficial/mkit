@@ -1607,3 +1607,119 @@ fn a_pack_with_a_delta_entry_reports_no_new_objects() {
     assert_eq!(seen[0].method, "UploadPack");
     assert!(seen[0].new_objects.is_none());
 }
+
+struct Credentials {
+    calls: Cell<usize>,
+    replies: Cell<usize>,
+    ordinary_reserved: bool,
+}
+impl mkit_client::RequestPolicy for Credentials {
+    fn headers(
+        &self,
+        request: &mkit_client::RequestContext<'_>,
+    ) -> Result<mkit_client::RequestHeaders, Veto> {
+        assert_eq!(request.public_key, [1; 32]);
+        assert_eq!(request.signing.audience, "https://vcs.example.org");
+        let count = self.calls.get() + 1;
+        self.calls.set(count);
+        if self.ordinary_reserved {
+            return Ok(mkit_client::RequestHeaders::new().with("x-write-grant", "forbidden"));
+        }
+        Ok(mkit_client::RequestHeaders::new()
+            .with_write_grant(format!("grant-{count}"))
+            .with_authorization("admission-token"))
+    }
+
+    fn after_response(&self, _: &mkit_client::RequestContext<'_>, headers: &http::HeaderMap) {
+        assert_eq!(headers["payment-receipt"], "opaque");
+        self.replies.set(self.replies.get() + 1);
+    }
+}
+
+#[test]
+fn request_policy_selects_fresh_credentials_for_signed_reads_and_observes_receipts() {
+    let log = log();
+    let transport = Script::new(&log, |index, request| {
+        assert_eq!(
+            header(request, "x-write-grant"),
+            format!("grant-{}", index + 1)
+        );
+        assert_eq!(request.headers()["authorization"], "admission-token");
+        let mut response = unary(&proto::ReadRefResponse::default())?;
+        response
+            .headers_mut()
+            .insert("payment-receipt", "opaque".parse().unwrap());
+        Ok(response)
+    });
+    let signer = PolicySigner::new(&log);
+    let clock = TestClock::new();
+    let observer = Recorder::new(&log);
+    let policy = Credentials {
+        calls: Cell::new(0),
+        replies: Cell::new(0),
+        ordinary_reserved: false,
+    };
+    let client = Client::signed(&transport, destination(), &signer, &clock)
+        .with_request_policy(&policy)
+        .with_observer(&observer);
+    assert_eq!(client.public_key(), Some([1; 32]));
+    assert_eq!(client.now_ms(), Some(clock.now_ms()));
+    block_on(client.read_ref("refs/heads/main", None)).unwrap();
+    block_on(client.read_ref("refs/heads/main", None)).unwrap();
+    assert_eq!(policy.calls.get(), 2);
+    assert_eq!(policy.replies.get(), 2);
+    assert!(observer.seen.borrow().is_empty());
+}
+
+#[test]
+fn request_policy_ordinary_reserved_headers_fail_before_signing_or_dispatch() {
+    let log = log();
+    let transport = Script::new(&log, |_, _| panic!("must not dispatch"));
+    let signer = PolicySigner::new(&log);
+    let clock = TestClock::new();
+    let policy = Credentials {
+        calls: Cell::new(0),
+        replies: Cell::new(0),
+        ordinary_reserved: true,
+    };
+    let client =
+        Client::signed(&transport, destination(), &signer, &clock).with_request_policy(&policy);
+    assert!(
+        matches!(block_on(client.read_ref("refs/heads/main", None)), Err(Error::ReservedHeader(name)) if name == "x-write-grant")
+    );
+    assert!(signer.seen.borrow().is_empty());
+    assert_eq!(transport.sent(), 0);
+}
+
+#[test]
+fn request_policy_survives_both_builder_orders_on_writes() {
+    for policy_first in [false, true] {
+        let log = log();
+        let transport = Script::new(&log, |_, request| {
+            assert_eq!(request.headers()["x-write-grant"], "grant-1");
+            let mut response = unary(&proto::UpdateRefResponse::default())?;
+            response
+                .headers_mut()
+                .insert("payment-receipt", "opaque".parse().unwrap());
+            Ok(response)
+        });
+        let signer = PolicySigner::new(&log);
+        let clock = TestClock::new();
+        let observer = Recorder::new(&log);
+        let policy = Credentials {
+            calls: Cell::new(0),
+            replies: Cell::new(0),
+            ordinary_reserved: false,
+        };
+        let client = Client::signed(&transport, destination(), &signer, &clock);
+        let client = if policy_first {
+            client.with_request_policy(&policy).with_observer(&observer)
+        } else {
+            client.with_observer(&observer).with_request_policy(&policy)
+        };
+        block_on(client.update_ref("refs/heads/main", RefWriteCondition::Missing, [2; 32], None))
+            .unwrap();
+        assert_eq!(policy.calls.get(), 1);
+        assert_eq!(observer.seen.borrow().len(), 1);
+    }
+}

@@ -17,7 +17,7 @@ use crate::proto::{
     PackExistsResponse, ReadRefRequest, ReadRefResponse, RefRedaction, UpdateRefResponse,
     UploadPackResponse, UploadPartResponse, UploadTicket,
 };
-use crate::seams::{NoObserver, Observer, WriteIntent, procedures};
+use crate::seams::{NoObserver, Observer, RequestPolicy, WriteIntent, procedures};
 use mkit_core::{
     hash::Hash, refs::RefWriteCondition, upload_parts::PartPlan, write_auth::ContentCommitment,
 };
@@ -84,7 +84,8 @@ pub struct RefPage {
 ///
 /// [`Client::anonymous`] sends unsigned reads. [`Client::signed`] signs every
 /// RPC except discovery, as the spec requires of a client that has a signer
-/// (SPEC-TRANSPORT-CONNECT §7.1). Writes need a signed client.
+/// (SPEC-TRANSPORT-CONNECT §7.1). Unsigned writes require explicit
+/// [`Client::with_unsigned_writes`] opt-in and server authorization.
 ///
 /// [`Client::with_observer`] adds host policy that runs before every write is
 /// signed or sent (see "Host policy seams" in the crate README).
@@ -93,6 +94,8 @@ pub struct Client<'a, T, S = NoSigner, C = NoClock, O = NoObserver> {
     destination: Destination,
     auth: Option<(&'a S, &'a C)>,
     observer: &'a O,
+    request_policy: Option<&'a dyn RequestPolicy>,
+    unsigned_writes: bool,
 }
 
 impl<T, S, C, O> std::fmt::Debug for Client<'_, T, S, C, O> {
@@ -113,6 +116,8 @@ impl<'a, T: HttpTransport> Client<'a, T> {
             destination,
             auth: None,
             observer: &NoObserver,
+            request_policy: None,
+            unsigned_writes: false,
         }
     }
 }
@@ -139,11 +144,38 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Client<'a, T, S, C> {
             destination,
             auth: Some((signer, clock)),
             observer: &NoObserver,
+            request_policy: None,
+            unsigned_writes: false,
         }
     }
 }
 
 impl<'a, T, S, C, O> Client<'a, T, S, C, O> {
+    /// Permit unsigned transport write calls. The server still authorizes
+    /// every request, using credentials supplied by the host transport. The
+    /// default anonymous client remains read-only; visibility changes and
+    /// envelope signing always require a signer.
+    #[must_use]
+    pub fn with_unsigned_writes(mut self) -> Self {
+        self.unsigned_writes = true;
+        self
+    }
+
+    /// Whether transport write calls are enabled for this client.
+    #[must_use]
+    pub fn supports_writes(&self) -> bool {
+        self.auth.is_some() || self.unsigned_writes
+    }
+
+    /// Select host-owned credentials for every signed request, including reads.
+    /// The policy runs after the write observer and before signing. Discovery
+    /// and anonymous requests do not consult it.
+    #[must_use]
+    pub fn with_request_policy(mut self, policy: &'a dyn RequestPolicy) -> Self {
+        self.request_policy = Some(policy);
+        self
+    }
+
     /// Run `observer` before every write RPC this client sends: it can veto the
     /// write and add per-attempt headers. Order: observer, signer, deadline
     /// check, dispatch.
@@ -154,6 +186,8 @@ impl<'a, T, S, C, O> Client<'a, T, S, C, O> {
             destination: self.destination,
             auth: self.auth,
             observer,
+            request_policy: self.request_policy,
+            unsigned_writes: self.unsigned_writes,
         }
     }
 }
@@ -169,10 +203,30 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Client<'_, T, S, C, O> 
             transport: self.transport,
             auth: self.auth,
             observer: self.observer,
+            request_policy: self.request_policy,
             destination: &self.destination,
             // Per-RPC calls have no push deadline; the signed window bounds them.
             deadline_ms: i64::MAX,
         }
+    }
+
+    /// The configured signing public key, absent for anonymous clients.
+    #[must_use]
+    pub fn public_key(&self) -> Option<Hash> {
+        self.auth.map(|(signer, _)| signer.public_key())
+    }
+
+    /// Current host clock time, absent for anonymous clients.
+    #[must_use]
+    pub fn now_ms(&self) -> Option<i64> {
+        self.auth.map(|(_, clock)| clock.now_ms())
+    }
+
+    fn require_write_auth(&self) -> Result<(), Error> {
+        if !self.supports_writes() {
+            return Err(Error::Invalid("signed client required"));
+        }
+        Ok(())
     }
 
     fn require_signer(&self) -> Result<(), Error> {
@@ -395,7 +449,8 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Client<'_, T, S, C, O> 
     /// precondition is a remote error for which [`Error::is_ref_conflict`] holds.
     ///
     /// # Errors
-    /// An anonymous client, an observer veto, a signer refusal, or transport and
+    /// An anonymous client without unsigned-write opt-in, an observer veto,
+    /// a signer refusal, or transport and
     /// remote failures.
     pub async fn update_ref(
         &self,
@@ -404,7 +459,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Client<'_, T, S, C, O> 
         new_id: Hash,
         identity: Option<&Identity>,
     ) -> Result<Reply<UpdateRefResponse>, Error> {
-        self.require_signer()?;
+        self.require_write_auth()?;
         reply(calls::update_ref(&self.rpc(), name, expected, Some(new_id), identity).await)
     }
 
@@ -418,7 +473,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Client<'_, T, S, C, O> 
         expected: RefWriteCondition,
         identity: Option<&Identity>,
     ) -> Result<Reply<UpdateRefResponse>, Error> {
-        self.require_signer()?;
+        self.require_write_auth()?;
         reply(calls::update_ref(&self.rpc(), name, expected, None, identity).await)
     }
 
@@ -464,21 +519,23 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Client<'_, T, S, C, O> 
     /// and expectations must be well formed: the observer is told the exact ref moves it carries.
     ///
     /// # Errors
-    /// An anonymous client, a malformed request, an observer veto, a signer
+    /// An anonymous client without unsigned-write opt-in, a malformed request,
+    /// an observer veto, a signer
     /// refusal, or transport and remote failures.
     pub async fn advance_refs(
         &self,
         request: &AdvanceRefsRequest,
         identity: Option<&Identity>,
     ) -> Result<Reply<AdvanceRefsResponse>, Error> {
-        self.require_signer()?;
+        self.require_write_auth()?;
         reply(calls::advance_refs(&self.rpc(), request, identity).await)
     }
 
     /// `BeginUpload`: reserve an upload for `head_ref`.
     ///
     /// # Errors
-    /// An anonymous client, an observer veto, a signer refusal, or transport and
+    /// An anonymous client without unsigned-write opt-in, an observer veto,
+    /// a signer refusal, or transport and
     /// remote failures (including [`Error::PaymentRequired`] when the server
     /// admits uploads).
     pub async fn begin_upload(
@@ -488,7 +545,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Client<'_, T, S, C, O> 
         bytes: u64,
         identity: Option<&Identity>,
     ) -> Result<Reply<BeginUploadResponse>, Error> {
-        self.require_signer()?;
+        self.require_write_auth()?;
         reply(calls::begin_upload(&self.rpc(), head_ref, pack_id, bytes, None, identity).await)
     }
 
@@ -507,7 +564,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Client<'_, T, S, C, O> 
         ticket_token: Option<&[u8]>,
         identity: Option<&Identity>,
     ) -> Result<Reply<UploadPackResponse>, Error> {
-        self.require_signer()?;
+        self.require_write_auth()?;
         reply(
             calls::upload_pack(
                 &self.rpc(),
@@ -536,7 +593,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Client<'_, T, S, C, O> 
         part: &[u8],
         identity: Option<&Identity>,
     ) -> Result<Reply<UploadPartResponse>, Error> {
-        self.require_signer()?;
+        self.require_write_auth()?;
         let expected = plan
             .expected_len(index)
             .map_err(|_| Error::Invalid("part length"))?;
@@ -570,7 +627,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Client<'_, T, S, C, O> 
         receipts: Vec<Vec<u8>>,
         identity: Option<&Identity>,
     ) -> Result<Reply<CompleteUploadResponse>, Error> {
-        self.require_signer()?;
+        self.require_write_auth()?;
         reply(
             calls::complete_upload(
                 &self.rpc(),
@@ -653,4 +710,68 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Client<'_, T, S, C, O> 
 pub struct SignedEnvelope {
     pub headers: http::HeaderMap,
     pub identity: Identity,
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod unsigned_write_tests {
+    use super::*;
+    use buffa::Message as _;
+    use std::cell::Cell;
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
+    struct UnsignedChannel(Cell<u32>);
+
+    impl HttpTransport for UnsignedChannel {
+        async fn send(
+            &self,
+            request: http::Request<Vec<u8>>,
+            _: usize,
+        ) -> Result<http::Response<Vec<u8>>, String> {
+            assert!(request.uri().path().ends_with("/UpdateRef"));
+            assert!(request.headers().get("x-signature").is_none());
+            assert!(request.headers().get("idempotency-key").is_none());
+            self.0.set(self.0.get() + 1);
+            Ok(http::Response::builder()
+                .status(200)
+                .header("content-type", "application/proto")
+                .body(UpdateRefResponse::default().encode_to_vec())
+                .unwrap())
+        }
+    }
+
+    fn ready<F: Future>(future: F) -> F::Output {
+        let mut future = std::pin::pin!(future);
+        match future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        {
+            Poll::Ready(value) => value,
+            Poll::Pending => panic!("test channel must complete immediately"),
+        }
+    }
+
+    #[test]
+    fn anonymous_write_requires_opt_in_and_stays_unsigned() {
+        let channel = UnsignedChannel(Cell::new(0));
+        let destination =
+            Destination::new("https://vcs.example.org".into(), "default".into()).unwrap();
+        let client = Client::anonymous(&channel, destination);
+        assert!(!client.supports_writes());
+        assert!(matches!(
+            ready(client.update_ref("refs/heads/main", RefWriteCondition::Missing, [1; 32], None)),
+            Err(Error::Invalid("signed client required"))
+        ));
+        assert_eq!(channel.0.get(), 0);
+        let client = client.with_unsigned_writes().with_observer(&NoObserver);
+        assert!(client.supports_writes());
+        let reply =
+            ready(client.update_ref("refs/heads/main", RefWriteCondition::Missing, [1; 32], None))
+                .unwrap();
+        assert!(reply.identity.is_none());
+        assert_eq!(channel.0.get(), 1);
+        assert!(ready(client.set_repo_visibility(Visibility::Public, None)).is_err());
+        assert_eq!(channel.0.get(), 1);
+    }
 }

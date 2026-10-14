@@ -9,6 +9,10 @@
 //! read from the environment or from user config.
 
 use std::future::Future;
+use std::sync::Arc;
+
+mod write;
+pub use write::{ClientSession, UploadEvent, WriteRecovery};
 
 use mkit_client::{
     Client, Clock, Error as ClientError, HttpTransport, NoObserver, Observer, Signer,
@@ -42,11 +46,14 @@ impl Executor for FuturesExecutor {
 /// A packmap node is small; this is the response cap `mkit-client` uses.
 const NODE_LIMIT: u64 = 1024 * 1024;
 
-/// The read side of a remote repository reached through a [`Client`]. The
+/// A remote repository reached through a [`Client`]. The
 /// engine calls it one operation at a time.
 pub struct ClientSource<'a, T, S, C, E, O = NoObserver> {
     client: &'a Client<'a, T, S, C, O>,
     executor: &'a E,
+    writes: write::WriteState,
+    session: Option<&'a ClientSession>,
+    recovery: Option<&'a dyn WriteRecovery>,
 }
 
 impl<T, S, C, E, O> std::fmt::Debug for ClientSource<'_, T, S, C, E, O> {
@@ -62,7 +69,31 @@ impl<'a, T, S, C, E, O> ClientSource<'a, T, S, C, E, O> {
     /// runtime, pass the transport itself if it is an [`Executor`].
     #[must_use]
     pub fn new(client: &'a Client<'a, T, S, C, O>, executor: &'a E) -> Self {
-        Self { client, executor }
+        Self {
+            client,
+            executor,
+            writes: write::WriteState::default(),
+            session: None,
+            recovery: None,
+        }
+    }
+
+    fn write_state(&self) -> &write::WriteState {
+        self.session.map_or(&self.writes, |session| &session.state)
+    }
+
+    /// Persist acknowledged parts through a caller-owned durable store.
+    #[must_use]
+    pub fn with_receipt_store(self, store: Arc<dyn mkit_client::PartReceiptStore>) -> Self {
+        self.write_state().receipts.replace(store);
+        self
+    }
+
+    /// Let the host schedule typed failures and supply admission recovery.
+    #[must_use]
+    pub fn with_write_recovery(mut self, recovery: &'a dyn WriteRecovery) -> Self {
+        self.recovery = Some(recovery);
+        self
     }
 }
 
@@ -89,6 +120,7 @@ fn source_error(error: ClientError) -> SourceError {
         })),
         // HttpTransport does not classify its string errors. Refused redirects
         // and malformed/oversized responses must not become transient failures.
+        ClientError::Connection(_) => SourceError::ServerError { status: 503 },
         ClientError::Transport(cause) => SourceError::RemoteError(format!("transport: {cause}")),
         ClientError::PaymentRequired(challenges) => SourceError::PaymentRequired { challenges },
         ClientError::PendingVerification { retry_after } => {
@@ -116,6 +148,23 @@ fn source_error(error: ClientError) -> SourceError {
 impl<T: HttpTransport, S: Signer, C: Clock, E: Executor, O: Observer>
     ClientSource<'_, T, S, C, E, O>
 {
+    /// Reuse cached upload tickets and capabilities across borrowed clients.
+    /// A session binds to this destination and public key on first use.
+    /// Configure its receipt store on the session or after selecting it.
+    ///
+    /// # Errors
+    /// A session already bound to another destination or signer is refused.
+    pub fn with_session(mut self, session: &'a ClientSession) -> Result<Self, SourceError> {
+        let destination = self.client.destination();
+        session.bind(
+            destination.origin(),
+            destination.repository(),
+            self.client.public_key(),
+        )?;
+        self.session = Some(session);
+        Ok(self)
+    }
+
     fn list_branches_with_page_limit(&self, max_pages: u32) -> Result<Vec<Ref>, SourceError> {
         let mut listing = mkit_core::ref_listing::RefListing::new(max_pages);
         while listing.can_request() {
@@ -151,6 +200,66 @@ impl<T: HttpTransport, S: Signer, C: Clock, E: Executor, O: Observer>
 impl<T: HttpTransport, S: Signer, C: Clock, E: Executor, O: Observer> RemoteSource
     for ClientSource<'_, T, S, C, E, O>
 {
+    fn supports_push(&self) -> bool {
+        self.client.supports_writes()
+    }
+
+    fn upload_pack_via_ref(
+        &self,
+        bytes: &[u8],
+        key: &PackKey,
+        name: &str,
+    ) -> Result<(), SourceError> {
+        self.write_upload(bytes, key, name)
+    }
+
+    fn upload_blob_via_ref(
+        &self,
+        bytes: &[u8],
+        key: &PackKey,
+        name: &str,
+    ) -> Result<(), SourceError> {
+        self.write_upload(bytes, key, name)
+    }
+
+    fn update_ref(
+        &self,
+        name: &str,
+        condition: mkit_core::refs::RefWriteCondition,
+        tip: &Hash,
+    ) -> Result<(), SourceError> {
+        self.write_update_ref(name, condition, tip)
+    }
+
+    fn advance_refs_committing(
+        &self,
+        head: &str,
+        head_condition: mkit_core::refs::RefWriteCondition,
+        tip: &Hash,
+        packmap: &str,
+        packmap_condition: mkit_core::refs::RefWriteCondition,
+        node: &Hash,
+        keys: &[PackKey],
+    ) -> Result<mkit_core::protocol::CommitOutcome, SourceError> {
+        self.write_advance_refs_committing(
+            head,
+            head_condition,
+            tip,
+            packmap,
+            packmap_condition,
+            node,
+            keys,
+        )
+    }
+
+    fn upload_limits(&self) -> mkit_core::protocol::UploadLimits {
+        self.write_upload_limits()
+    }
+
+    fn supports_atomic_advance(&self) -> bool {
+        self.write_supports_atomic_advance()
+    }
+
     fn list_branches(&self) -> Result<Vec<Ref>, SourceError> {
         self.list_branches_with_page_limit(mkit_core::ref_listing::MAX_PAGES)
     }
@@ -472,6 +581,39 @@ mod tests {
             Pages(RefCell::new(pages.into())),
             Destination::new("https://vcs.example.org".into(), "default".into()).unwrap(),
         )
+    }
+
+    #[test]
+    fn shared_session_refuses_destination_or_signer_changes() {
+        let (transport, destination) = source_over(Vec::new());
+        let session = ClientSession::default();
+        let first = Client::anonymous(&transport, destination.clone());
+        ClientSource::new(&first, &FuturesExecutor)
+            .with_session(&session)
+            .unwrap();
+        let fresh = Client::anonymous(&transport, destination.clone());
+        ClientSource::new(&fresh, &FuturesExecutor)
+            .with_session(&session)
+            .unwrap();
+        for (origin, repository) in [
+            ("https://other.example.org", "default"),
+            ("https://vcs.example.org", "another"),
+        ] {
+            let changed = Client::anonymous(
+                &transport,
+                Destination::new(origin.into(), repository.into()).unwrap(),
+            );
+            assert!(matches!(
+                ClientSource::new(&changed, &FuturesExecutor).with_session(&session),
+                Err(SourceError::InvalidResponse)
+            ));
+        }
+        let signed = Client::signed(&transport, destination, &TestSigner, &TestClock);
+        assert!(matches!(
+            ClientSource::new(&signed, &FuturesExecutor).with_session(&session),
+            Err(SourceError::InvalidResponse)
+        ));
+        assert!(transport.0.borrow().is_empty());
     }
 
     #[test]

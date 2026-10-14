@@ -1,4 +1,7 @@
-use crate::seams::{Attempt, NoObserver, Observer, SignError, SigningRequest, WriteIntent};
+use crate::seams::{
+    Attempt, NoObserver, Observer, RequestContext, RequestPolicy, SignError, SigningRequest,
+    UnsignedRequestContext, WriteIntent,
+};
 use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
@@ -36,6 +39,36 @@ pub trait HttpTransport {
         request: Request<Vec<u8>>,
         response_limit: usize,
     ) -> Result<Response<Vec<u8>>, String>;
+
+    /// Classify channel failures without inferring retry safety from messages.
+    /// Existing channels remain terminal unless they explicitly classify an I/O
+    /// failure as transient. The host still decides whether and when to retry.
+    ///
+    /// # Errors
+    /// Returns a classified channel failure when the exchange cannot complete.
+    async fn send_classified(
+        &self,
+        request: Request<Vec<u8>>,
+        response_limit: usize,
+    ) -> Result<Response<Vec<u8>>, ChannelError> {
+        self.send(request, response_limit)
+            .await
+            .map_err(ChannelError::Refused)
+    }
+}
+
+/// A channel's explicit distinction between exchange failures and refusals.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ChannelError {
+    /// A connection, response-body I/O or timeout failure. Its request may have
+    /// reached the server; a retry must retain the authenticated identity.
+    #[error("{0}")]
+    Transient(String),
+    /// A security, negotiation, framing or resource-bound refusal. Repeating
+    /// the request unchanged cannot be assumed safe or useful.
+    #[error("{0}")]
+    Refused(String),
 }
 
 /// Host-owned epoch clock, secure entropy and scheduling. No runtime or
@@ -221,6 +254,9 @@ pub enum Error {
     Invalid(&'static str),
     #[error("transport: {0}")]
     Transport(String),
+    /// An explicitly transient channel failure. Scheduling remains host-owned.
+    #[error("transport: {0}")]
+    Connection(String),
     #[error("signing: {0}")]
     Signing(String),
     #[error("Connect {0:?}")]
@@ -298,6 +334,7 @@ pub(crate) struct Rpc<'a, T, S, C, O = NoObserver> {
     /// `None` makes every request anonymous.
     pub(crate) auth: Option<(&'a S, &'a C)>,
     pub(crate) observer: &'a O,
+    pub(crate) request_policy: Option<&'a dyn RequestPolicy>,
     pub(crate) destination: &'a Destination,
     pub(crate) deadline_ms: i64,
 }
@@ -349,6 +386,7 @@ impl<'a, T, S, C> Rpc<'a, T, S, C> {
             transport,
             auth: Some((signer, clock)),
             observer: &NoObserver,
+            request_policy: None,
             destination,
             deadline_ms,
         }
@@ -361,6 +399,7 @@ impl<'a, T, S, C, O> Rpc<'a, T, S, C, O> {
             transport: self.transport,
             auth: self.auth,
             observer,
+            request_policy: self.request_policy,
             destination: self.destination,
             deadline_ms: self.deadline_ms,
         }
@@ -520,6 +559,40 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Rpc<'_, T, S, C, O> {
             );
         }
         let (bytes, headers) = self.send(&request, opts.limit).await?;
+        if let (Some(policy), Some((signer, _)), Some(identity)) =
+            (self.request_policy, self.auth, identity)
+        {
+            let procedure = format!("{SERVICE}{method}");
+            let context = RequestContext {
+                signing: SigningRequest {
+                    procedure: &procedure,
+                    audience: &self.destination.origin,
+                    repository: &self.destination.repository,
+                    commitment: ContentCommitment::parse(commitment)
+                        .map_err(|_| Error::Invalid("signed operation"))?,
+                    attempt: Attempt::new(
+                        1,
+                        identity.nonce,
+                        identity.created_at_ms,
+                        identity.expires_at_ms,
+                    ),
+                },
+                intent: opts.intent.copied(),
+                public_key: signer.public_key(),
+            };
+            policy.after_response(&context, &headers);
+        } else if let Some(policy) = self.request_policy {
+            let procedure = format!("{SERVICE}{method}");
+            policy.after_unsigned_response(
+                &UnsignedRequestContext {
+                    procedure: &procedure,
+                    audience: &self.destination.origin,
+                    repository: &self.destination.repository,
+                    intent: opts.intent.copied(),
+                },
+                &headers,
+            );
+        }
         Ok((bytes, headers, identity))
     }
 
@@ -539,11 +612,27 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Rpc<'_, T, S, C, O> {
             if opts.identity.is_some() && self.auth.is_none() {
                 return Err(Error::Invalid("identity requires a signer"));
             }
-            let request = if method == "GetServerInfo" {
+            let mut request = if method == "GetServerInfo" {
                 self.destination.info_request()?
             } else {
                 self.destination.plain_request(method, body, streaming)?
             };
+            if method != "GetServerInfo"
+                && let Some(policy) = self.request_policy
+            {
+                let procedure = format!("{SERVICE}{method}");
+                let context = UnsignedRequestContext {
+                    procedure: &procedure,
+                    audience: &self.destination.origin,
+                    repository: &self.destination.repository,
+                    intent: opts.intent.copied(),
+                };
+                let headers = policy
+                    .unsigned_headers(&context)
+                    .map_err(|veto| Error::Vetoed(veto.reason().to_owned()))?
+                    .validate()?;
+                request.headers_mut().extend(headers);
+            }
             if let Some((_, clock)) = self.auth
                 && opts.identity.is_none()
                 && clock.now_ms() >= self.deadline_ms
@@ -629,7 +718,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Rpc<'_, T, S, C, O> {
         };
         // 1. Observer: may veto, may add headers. Reserved names are refused
         //    here, before a signature exists.
-        let extra = match opts.intent {
+        let mut extra = match opts.intent {
             Some(intent) => self
                 .observer
                 .before_dispatch(intent, &attempt)
@@ -646,6 +735,22 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer> Rpc<'_, T, S, C, O> {
             commitment: parsed,
             attempt,
         };
+        if let Some(policy) = self.request_policy {
+            let context = RequestContext {
+                signing: request,
+                intent: opts.intent.copied(),
+                public_key: signer.public_key(),
+            };
+            let headers = policy
+                .headers(&context)
+                .map_err(|veto| Error::Vetoed(veto.reason().to_owned()))?
+                .validate()?;
+            for (name, value) in &headers {
+                if extra.insert(name.clone(), value.clone()).is_some() {
+                    return Err(Error::Invalid("duplicate request policy header"));
+                }
+            }
+        }
         let signature = signer
             .sign_operation(&request, &digest)
             .await
@@ -702,10 +807,14 @@ pub(crate) async fn send_checked<T: HttpTransport>(
     limit: usize,
 ) -> Result<(Vec<u8>, HeaderMap), Error> {
     let content_type = request.headers().get("content-type").cloned();
-    let response = transport
-        .send(request, limit)
-        .await
-        .map_err(Error::Transport)?;
+    let response =
+        transport
+            .send_classified(request, limit)
+            .await
+            .map_err(|error| match error {
+                ChannelError::Transient(cause) => Error::Connection(cause),
+                ChannelError::Refused(cause) => Error::Transport(cause),
+            })?;
     if response.body().len() > limit {
         return Err(Error::Limit("RPC response"));
     }
@@ -979,3 +1088,64 @@ pub(crate) fn decode_stream(bytes: &[u8]) -> Result<Vec<&[u8]>, Error> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod channel_tests {
+    use super::*;
+    use std::future::Future as _;
+
+    struct ExistingChannel;
+    impl HttpTransport for ExistingChannel {
+        async fn send(&self, _: Request<Vec<u8>>, _: usize) -> Result<Response<Vec<u8>>, String> {
+            Err("unavailable: deterministic refusal".to_owned())
+        }
+    }
+
+    struct ClassifiedChannel;
+    impl HttpTransport for ClassifiedChannel {
+        async fn send(&self, _: Request<Vec<u8>>, _: usize) -> Result<Response<Vec<u8>>, String> {
+            panic!("classified send must be used")
+        }
+
+        async fn send_classified(
+            &self,
+            _: Request<Vec<u8>>,
+            _: usize,
+        ) -> Result<Response<Vec<u8>>, ChannelError> {
+            Err(ChannelError::Transient("connection reset".to_owned()))
+        }
+    }
+
+    fn ready<F: std::future::Future>(future: F) -> F::Output {
+        match std::pin::pin!(future)
+            .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+        {
+            std::task::Poll::Ready(value) => value,
+            std::task::Poll::Pending => panic!("test channel must complete immediately"),
+        }
+    }
+
+    #[test]
+    fn existing_string_channels_are_terminal_without_message_inference() {
+        let error = ready(send_checked(
+            &ExistingChannel,
+            Request::new(Vec::new()),
+            1024,
+        ))
+        .expect_err("channel refusal");
+        assert!(
+            matches!(error, Error::Transport(cause) if cause == "unavailable: deterministic refusal")
+        );
+    }
+
+    #[test]
+    fn explicit_channel_transience_survives_the_rpc_boundary() {
+        let error = ready(send_checked(
+            &ClassifiedChannel,
+            Request::new(Vec::new()),
+            1024,
+        ))
+        .expect_err("connection failure");
+        assert!(matches!(error, Error::Connection(cause) if cause == "connection reset"));
+    }
+}

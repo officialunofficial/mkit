@@ -201,6 +201,9 @@ pub struct WriteIntent<'a> {
     /// `AdvanceRefs` consumes. A per-RPC `upload_pack` or `complete_upload`
     /// takes only the opaque token, so it reports none; a whole push does.
     pub ticket_ids: &'a [Hash],
+    /// Whether this request carries or consumes an upload ticket, even when
+    /// the caller knows only its opaque token.
+    pub ticketed: bool,
     pub part_index: Option<u32>,
     /// Ids of the objects the pack introduces, on every RPC of its upload
     /// (`BeginUpload`, `UploadPack`, `UploadPart`, `CompleteUpload`) in a whole
@@ -220,6 +223,7 @@ impl<'a> WriteIntent<'a> {
             pack_id: None,
             bytes: None,
             ticket_ids: &[],
+            ticketed: false,
             part_index: None,
             new_objects: None,
         }
@@ -248,6 +252,12 @@ impl<'a> WriteIntent<'a> {
     #[must_use]
     pub fn with_tickets(mut self, ids: &'a [Hash]) -> Self {
         self.ticket_ids = ids;
+        self
+    }
+    /// Mark a request that carries or consumes ticket credentials.
+    #[must_use]
+    pub fn with_ticketed(mut self, ticketed: bool) -> Self {
+        self.ticketed = ticketed;
         self
     }
     #[must_use]
@@ -360,3 +370,122 @@ pub trait Observer {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoObserver;
 impl Observer for NoObserver {}
+
+/// A signed request whose host-owned credentials are selected before signing.
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct RequestContext<'a> {
+    /// The operation and signed validity window.
+    pub signing: SigningRequest<'a>,
+    /// Present for writes; absent for signed reads.
+    pub intent: Option<WriteIntent<'a>>,
+    /// The public key that will sign this request.
+    pub public_key: [u8; 32],
+}
+
+/// An unsigned request, with no signing identity or public key.
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct UnsignedRequestContext<'a> {
+    pub procedure: &'a str,
+    pub audience: &'a str,
+    pub repository: &'a str,
+    pub intent: Option<WriteIntent<'a>>,
+}
+
+/// Host-owned credential selection, consulted for every signed envelope.
+///
+/// The host selects grants and validated admission headers here. Challenge
+/// recovery, helper execution, trust and grant verification remain in the host.
+/// This synchronous callback must not run a blocking admission helper.
+pub trait RequestPolicy {
+    /// Select headers before the signer runs. A refusal prevents dispatch.
+    ///
+    /// # Errors
+    /// Returns a refusal when host policy disallows the request.
+    fn headers(&self, request: &RequestContext<'_>) -> Result<RequestHeaders, Veto>;
+
+    /// Observe headers from a successful HTTP response. The host may record
+    /// bounded admission receipts here; response decoding still follows.
+    fn after_response(&self, _request: &RequestContext<'_>, _headers: &HeaderMap) {}
+
+    /// Select credentials for an unsigned RPC. Discovery bypasses this seam.
+    /// Unsigned writes require the client's explicit host opt-in.
+    ///
+    /// # Errors
+    /// Returns a refusal when host policy disallows the request.
+    fn unsigned_headers(
+        &self,
+        _request: &UnsignedRequestContext<'_>,
+    ) -> Result<RequestHeaders, Veto> {
+        Ok(RequestHeaders::new())
+    }
+
+    /// Observe a successful unsigned RPC response, before protobuf decoding.
+    fn after_unsigned_response(&self, _request: &UnsignedRequestContext<'_>, _headers: &HeaderMap) {
+    }
+}
+
+/// Per-request credentials and ordinary extra headers from a host policy.
+///
+/// Only the dedicated setters allow a write grant or authorization value.
+/// The host must prevent authorization from replacing a transport credential
+/// and validate its admission helper's allowlist before supplying these values.
+#[derive(Clone, Default)]
+pub struct RequestHeaders {
+    extra: AttemptHeaders,
+    write_grant: Option<String>,
+    authorization: Option<String>,
+}
+impl std::fmt::Debug for RequestHeaders {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RequestHeaders")
+            .field("has_write_grant", &self.write_grant.is_some())
+            .field("has_authorization", &self.authorization.is_some())
+            .finish_non_exhaustive()
+    }
+}
+impl RequestHeaders {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add an ordinary header, subject to the observer's reserved-header rules.
+    #[must_use]
+    pub fn with(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.extra = self.extra.with(name, value);
+        self
+    }
+
+    /// Attach the opaque grant selected and checked by the host.
+    #[must_use]
+    pub fn with_write_grant(mut self, value: impl Into<String>) -> Self {
+        self.write_grant = Some(value.into());
+        self
+    }
+
+    /// Attach admission authorization after the host has checked that no
+    /// transport authorization is already carried.
+    #[must_use]
+    pub fn with_authorization(mut self, value: impl Into<String>) -> Self {
+        self.authorization = Some(value.into());
+        self
+    }
+
+    pub(crate) fn validate(self) -> Result<HeaderMap, Error> {
+        let mut headers = self.extra.validate()?;
+        for (name, value) in [
+            ("x-write-grant", self.write_grant),
+            ("authorization", self.authorization),
+        ] {
+            if let Some(value) = value {
+                let mut value = HeaderValue::from_str(&value)
+                    .map_err(|_| Error::Invalid("request credential value"))?;
+                value.set_sensitive(true);
+                headers.insert(name, value);
+            }
+        }
+        Ok(headers)
+    }
+}

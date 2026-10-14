@@ -19,7 +19,7 @@
 //! The fetch engine reads through the [`RemoteSource`] trait. The always-on
 //! backend, [`TransportSource`], wraps mkit-core's synchronous `Transport`, so
 //! every transport scheme keeps working. With the `client` feature,
-//! `ClientSource` reads `mkit+https` and `mkit+http` remotes through
+//! `ClientSource` accesses `mkit+https` and `mkit+http` remotes through
 //! `mkit_client::Client` with an injected signer; with `connect-native`,
 //! `NativeHttp` is a small native HTTP channel (gzip only, adding no zstd) for it.
 
@@ -53,7 +53,9 @@ pub mod worktree;
 
 pub use applied_packs::AppliedPacks;
 #[cfg(feature = "client")]
-pub use client_source::{ClientSource, Executor, FuturesExecutor};
+pub use client_source::{
+    ClientSession, ClientSource, Executor, FuturesExecutor, UploadEvent, WriteRecovery,
+};
 pub use clone::{
     CloneError, CloneInitError, CloneRemote, CloneReport, DEFAULT_REMOTE_NAME, clone,
     init_clone_dir,

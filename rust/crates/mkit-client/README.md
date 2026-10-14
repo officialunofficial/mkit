@@ -49,6 +49,37 @@ idempotent and keep no reply). An identity past its expiry is rejected by the
 server. Without one, each call draws a fresh
 identity from the clock and returns it. The window is at most 300 s.
 
+## Request credentials and receipts
+
+`HttpTransport::send_classified` can distinguish transient I/O from a channel
+refusal through `ChannelError`. Its default preserves string-only transports as
+terminal `Error::Transport`; explicit transience becomes `Error::Connection`.
+The client still performs one exchange per RPC and leaves recovery to its caller.
+
+Anonymous clients remain read-only by default. A host that uses bearer or
+unsigned write authentication explicitly enables per-RPC writes with
+`Client::with_unsigned_writes()`. The server still enforces its authentication
+mode; ticketed upload reservations require a signer. Signed visibility and
+external-envelope methods remain signer-only. Unsigned RPC policy uses
+`UnsignedRequestContext`, without a synthetic nonce or public key.
+
+`Client::with_request_policy(&policy)` installs host-owned `RequestPolicy`.
+The client consults it for each signed request, including reads, after the write
+observer and before signing. `RequestContext` carries the operation, public key,
+and optional write intent. `WriteIntent::ticketed` identifies ticket credentials
+even when the caller knows only their opaque token. Dedicated `RequestHeaders` setters carry a write grant
+or authorization credential; ordinary extra headers retain reserved-name checks.
+The host verifies grant authority and scope, filters helper headers, and prevents
+replacement of a transport credential. Policy callbacks do not run helpers or
+schedule retries. `after_response` observes successful response headers so the
+host can record bounded payment receipts.
+
+`PartReceiptStore`, `TicketMetadata`, and `StoredPart` describe caller-owned
+multipart acknowledgement persistence. `put` must finish durably before returning;
+`load` rejects mismatched ticket bindings and part geometry. `MemoryPartReceiptStore`
+is a process-local fallback. Native upload orchestration in `mkit-sync` consumes
+this seam; per-RPC client calls remain independent of filesystem storage.
+
 ## Host policy seams: signer and observer
 
 The client carries no policy; it gives the host two places to run its own,

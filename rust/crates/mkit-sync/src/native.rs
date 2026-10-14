@@ -18,7 +18,7 @@ use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client as HyperClient;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
-use mkit_client::{Clock, HttpTransport};
+use mkit_client::{ChannelError, Clock, HttpTransport};
 use mkit_core::hash::Hash;
 use rustls::{ClientConfig, RootCertStore};
 
@@ -177,6 +177,24 @@ fn chain(error: &dyn std::error::Error) -> String {
     text
 }
 
+// Hyper's typed parsing and user-error markers are terminal. Other exchange
+// failures (including an interrupted body) are explicitly transient; never
+// infer either class from the diagnostic string.
+fn exchange_error(context: &str, error: &(dyn std::error::Error + 'static)) -> NativeHttpError {
+    let message = format!("{context}: {}", chain(error));
+    let mut current = Some(error);
+    while let Some(cause) = current {
+        if cause
+            .downcast_ref::<hyper::Error>()
+            .is_some_and(|error| error.is_parse() || error.is_user())
+        {
+            return NativeHttpError::Exchange(message);
+        }
+        current = cause.source();
+    }
+    NativeHttpError::Connection(message)
+}
+
 /// Loopback hosts, the same set the Connect transport admits for plain HTTP.
 /// `localhost` is trusted by name, as there; the resolver is not consulted.
 fn is_loopback_host(host: &str) -> bool {
@@ -189,13 +207,18 @@ fn is_loopback_host(host: &str) -> bool {
 
 /// Read at most `limit` bytes of `body`, refusing a longer one while it is
 /// received.
-async fn read_bounded(mut body: hyper::body::Incoming, limit: usize) -> Result<Vec<u8>, String> {
+async fn read_bounded(
+    mut body: hyper::body::Incoming,
+    limit: usize,
+) -> Result<Vec<u8>, NativeHttpError> {
     let mut out = Vec::new();
     while let Some(frame) = body.frame().await {
-        let frame = frame.map_err(|e| format!("response body: {}", chain(&e)))?;
+        let frame = frame.map_err(|e| exchange_error("response body", &e))?;
         if let Some(data) = frame.data_ref() {
             if out.len().saturating_add(data.len()) > limit {
-                return Err("response exceeds the size limit".to_owned());
+                return Err(NativeHttpError::Exchange(
+                    "response exceeds the size limit".to_owned(),
+                ));
             }
             out.extend_from_slice(data);
         }
@@ -224,9 +247,12 @@ pub enum NativeHttpError {
     /// Negotiation names a coding other than gzip/identity, or is malformed.
     #[error("unsupported accept-encoding (gzip and identity only)")]
     UnsupportedAcceptEncoding,
-    /// An HTTP, TLS, response-limit or timeout failure.
+    /// A redirect, cleartext, response-limit or response-coding refusal.
     #[error("{0}")]
     Exchange(String),
+    /// An HTTP/TLS exchange, response-body I/O or timeout failure.
+    #[error("{0}")]
+    Connection(String),
 }
 
 /// Preserve every supplied value. Refuse negotiation we cannot decode,
@@ -309,11 +335,11 @@ impl NativeHttp {
                 .client
                 .request(request)
                 .await
-                .map_err(|e| format!("request failed: {}", chain(&e)))?;
+                .map_err(|e| exchange_error("request failed", &e))?;
             // Redirects are never followed: a redirect would carry a signed
             // request to an origin the signature was not made for.
             if response.status().is_redirection() {
-                return Err("redirect refused".to_owned());
+                return Err(NativeHttpError::Exchange("redirect refused".to_owned()));
             }
             let (mut parts, body) = response.into_parts();
             let wire = read_bounded(body, response_limit).await?;
@@ -322,18 +348,28 @@ impl NativeHttp {
                 (None, _) => None,
                 (Some(v), None) => Some(
                     v.to_str()
-                        .map_err(|_| "unreadable content-encoding".to_owned())?
+                        .map_err(|_| {
+                            NativeHttpError::Exchange("unreadable content-encoding".to_owned())
+                        })?
                         .trim()
                         .to_ascii_lowercase(),
                 ),
                 (Some(_), Some(_)) => {
-                    return Err("unsupported content-encoding (gzip only)".to_owned());
+                    return Err(NativeHttpError::Exchange(
+                        "unsupported content-encoding (gzip only)".to_owned(),
+                    ));
                 }
             };
             let bytes = match coding.as_deref() {
                 None | Some("identity") => wire,
-                Some("gzip") => gunzip_bounded(&wire, response_limit)?,
-                Some(_) => return Err("unsupported content-encoding (gzip only)".to_owned()),
+                Some("gzip") => {
+                    gunzip_bounded(&wire, response_limit).map_err(NativeHttpError::Exchange)?
+                }
+                Some(_) => {
+                    return Err(NativeHttpError::Exchange(
+                        "unsupported content-encoding (gzip only)".to_owned(),
+                    ));
+                }
             };
             parts.headers.remove(CONTENT_ENCODING);
             parts.headers.remove(CONTENT_LENGTH);
@@ -341,12 +377,24 @@ impl NativeHttp {
         };
         tokio::time::timeout(timeout, exchange)
             .await
-            .map_err(|_| NativeHttpError::Exchange("request timed out".to_owned()))?
-            .map_err(NativeHttpError::Exchange)
+            .map_err(|_| NativeHttpError::Connection("request timed out".to_owned()))?
     }
 }
 
 impl HttpTransport for NativeHttp {
+    async fn send_classified(
+        &self,
+        request: Request<Vec<u8>>,
+        response_limit: usize,
+    ) -> Result<Response<Vec<u8>>, ChannelError> {
+        self.send_typed(request, response_limit)
+            .await
+            .map_err(|error| match error {
+                NativeHttpError::Connection(cause) => ChannelError::Transient(cause),
+                refusal => ChannelError::Refused(refusal.to_string()),
+            })
+    }
+
     async fn send(
         &self,
         request: Request<Vec<u8>>,

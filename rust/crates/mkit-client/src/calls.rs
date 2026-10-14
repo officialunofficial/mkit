@@ -51,6 +51,7 @@ pub(crate) async fn upload_pack<T: HttpTransport, S: Signer, C: Clock, O: Observ
 ) -> Called<UploadPackResponse> {
     let tickets: Vec<Hash> = ticket_id.into_iter().collect();
     let intent = WriteIntent::new(procedures::UPLOAD_PACK)
+        .with_ticketed(ticket_token.is_some())
         .with_tickets(&tickets)
         .with_pack(*pack_id, pack.len() as u64)
         .with_new_objects(new_objects);
@@ -81,6 +82,7 @@ pub(crate) async fn upload_part<T: HttpTransport, S: Signer, C: Clock, O: Observ
     let commitment = part_commitment(ticket_id, plan, index, part)?;
     let tickets = [ticket_id];
     let intent = WriteIntent::new(procedures::UPLOAD_PART)
+        .with_ticketed(true)
         .with_tickets(&tickets)
         .with_part(index, part.len() as u64)
         .with_new_objects(new_objects);
@@ -113,6 +115,7 @@ pub(crate) async fn complete_upload<T: HttpTransport, S: Signer, C: Clock, O: Ob
     };
     let tickets: Vec<Hash> = ticket_id.into_iter().collect();
     let intent = WriteIntent::new(procedures::COMPLETE_UPLOAD)
+        .with_ticketed(true)
         .with_tickets(&tickets)
         .with_new_objects(new_objects);
     let opts = Opts {
@@ -233,6 +236,7 @@ impl Advance {
 
     pub(crate) fn intent(&self) -> WriteIntent<'_> {
         WriteIntent::new(procedures::ADVANCE_REFS)
+            .with_ticketed(!self.tickets.is_empty())
             .with_ref_moves(&self.moves)
             .with_tickets(&self.tickets)
     }

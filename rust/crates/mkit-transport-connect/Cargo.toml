@@ -30,6 +30,7 @@ authors.workspace = true
 all = { level = "warn", priority = -1 }
 
 [dependencies]
+mkit-client = { version = "0.5", path = "../mkit-client", default-features = false }
 mkit-rpc = { version = "0.5", path = "../mkit-rpc", features = ["transport"] }
 # Inter-workspace deps need explicit version + path so `cargo publish`
 # accepts them.

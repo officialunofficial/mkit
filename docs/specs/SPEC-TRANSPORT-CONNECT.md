@@ -2030,18 +2030,21 @@ remain in the drivers; no wire or stored-format change results. See [the client 
 for bounds and the API. This library adds no wire change.
 
 The native `mkit-sync` source adapters preserve per-RPC resumable outcomes in
-backend-neutral `SourceError`, carried by `SyncError::Source`; they never sleep
-or retry them. Raw Connect failures retain code, message, details, HTTP status,
+backend-neutral `SourceError`, carried by `SyncError::Source`. Reads return
+these outcomes immediately; writes retry only through an installed host recovery
+callback. Raw Connect failures retain code, message, details, HTTP status,
 and response headers for host policy. An observed signed `Client` also works
 as a `ClientSource`; reads do not invoke its write observer. This adapter API
 does not change the wire contract or the synchronous Connect transport's own
 polling policy.
 
 Native push runs through `RemoteSource`. `TransportSource` supports every
-existing scheme, including `mkit+https`. `ClientSource` remains read-only and
-reports `supports_push() == false`: grants, admission and 402 helpers, durable
-receipt persistence, and resumable parts still need adapter parity. Native
-extra-CA and configuration wiring remain host-owned. The extraction preserves
-pack and packmap ids, ref moves, CAS retries, limits, and resumability; it changes
-no wire or stored format and requires no wipe. Push backend failures remain
+existing scheme, including `mkit+https`. A signed `ClientSource` supports writes
+through the canonical per-RPC client. Its caller supplies request policy,
+scheduling and admission recovery, and a durable receipt store. Acknowledged
+parts are persisted before progress callbacks or later uploads; fresh instances
+recover the open ticket with `BeginUpload` and reuse matching receipts.
+Native extra-CA and configuration wiring remain host-owned. Pack and packmap
+ids, ref moves, CAS retries, limits, and receipt records stay unchanged. No wire
+or stored-format change or wipe results. Push backend failures remain
 `SourceError`, carried by `PushError::Sync(SyncError::Source(_))`.

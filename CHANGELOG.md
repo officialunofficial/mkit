@@ -33,6 +33,16 @@ collect the applicable entries between their old and new immutable pins.
   wire, or stored-format change; no wipe. See the
   [Extract call report](docs/operations/extract-calls.md).
 
+- A signed `mkit-sync::ClientSource` supports native push through `mkit-client`
+  per-RPC writes. Caller-owned request policy supplies grants and admission
+  credentials; `WriteRecovery` owns helper execution and scheduling. Shared
+  `ClientSession` retains upload commitments across borrowed clients and refuses
+  reuse at another destination or signer. Channels can distinguish transient I/O
+  from terminal refusals through additive `send_classified`/`ChannelError` APIs.
+  Shared `PartReceiptStore` types preserve durable part acknowledgements and resume
+  across fresh client or transport instances. Client additions are additive;
+  the CLI routing stays unchanged. No wire or stored-format change; wipe: no.
+
 - Ingest and read paths skip block and denial-action reads when
   `PipelineConfig.takedown_denial` is false. Holder, inventory, membership,
   index, and proof-structure writes continue. Takedown-enabled checks retain
