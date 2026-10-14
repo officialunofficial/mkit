@@ -122,7 +122,9 @@ The general status query reports other valid jobs without imposing that deployme
 Recovery requires current destination authorization by your caller.
 Compare returned authority and reservation identity with your trusted retained landing evidence before adopting the result.
 Recovery accepts owner-admitted completions with an authority generation.
-It requires no quota charges, grant, namespace cap, or namespace creation.
+It requires no quota charges, grant, or namespace cap.
+A fork that created its destination namespace (`ForkAuthority::creates_namespace`) is recovered like any other: creation changes neither the reservation nor the replay record, and recovery also requires the namespace record to be present and well formed, read in the same batch.
+A job carrying a grant epoch is refused: the pipeline never records one, and a grant a later epoch may have revoked cannot be proven from retained evidence.
 Use the general status query for other valid jobs and the pipeline for authenticated retries.
 It does not authenticate an expired envelope, admit work, read the source, publish refs, or run effects.
 Missing, pending, and failed jobs return no completed result.

@@ -2571,3 +2571,126 @@ fn denial_capability_for_test() -> mkit_server::takedown::DenialCapability {
     .denial_capability()
     .unwrap()
 }
+
+/// A first fork into a brand-new namespace, run by the real engine, is
+/// recovered by the typed read; the retained settlement is the same as for a
+/// fork into an existing namespace.
+#[tokio::test]
+async fn a_fork_that_created_its_namespace_is_recovered_by_the_typed_read() {
+    use mkit_server::fork::{FenceV1, ForkSpec, StartOutcome};
+    use mkit_server::reads::ForkReplayIdentity;
+    let source = Source::build("source", 6).await;
+    let env = env(&source);
+    let reads = source.pipe.read_access();
+    let fresh = mkit_core::repo_identity::Namespace::Ed25519(
+        *ed25519_dalek::SigningKey::from_bytes(&[8; 32])
+            .verifying_key()
+            .as_bytes(),
+    );
+    for (created, namespace) in [
+        (true, mkit_server::NamespaceKey::from_namespace(&fresh)),
+        (false, source.repo.namespace.clone()),
+    ] {
+        let dest = RepoId {
+            namespace,
+            name: RepoName::new(if created { "first" } else { "second" }).unwrap(),
+        };
+        let spec = ForkSpec {
+            source: source.repo.clone(),
+            source_ref: "refs/heads/main".into(),
+            expected_tip: source.head,
+            dest: dest.clone(),
+            dest_visibility: Visibility::Public,
+        };
+        let coordinator = source.shards.coordinator(&dest.namespace);
+        assert_eq!(
+            source
+                .store
+                .inner
+                .get(&coordinator, &keys::namespace_record())
+                .await
+                .unwrap()
+                .is_none(),
+            created
+        );
+        let mut settle = settlement::admit(&source, &dest).await;
+        settle.charges.clear();
+        if !created {
+            // Where an authority registers the namespace, its generation row
+            // is the registration.
+            source
+                .store
+                .inner
+                .apply(
+                    &coordinator,
+                    mkit_server::Batch::new().put(
+                        keys::authority_generation(),
+                        mkit_server::store::adapter_spi::codec::encode_u64(1),
+                    ),
+                )
+                .await
+                .unwrap();
+        }
+        let fence = FenceV1 {
+            authority_generation: Some(u64::from(!created)),
+            grant_epoch: None,
+            create_namespace: created,
+        };
+        let started = mkit_server::fork::start_with(&env, &spec, Some(settle), Some(fence))
+            .await
+            .unwrap();
+        assert!(matches!(started, StartOutcome::Started(_)));
+        let mut job = None;
+        for _ in 0..200 {
+            let report = mkit_server::fork::step(&env, &dest, &SliceBudget::new(600))
+                .await
+                .unwrap();
+            if report.job.finished() {
+                job = Some(report.job);
+                break;
+            }
+        }
+        let job = job.expect("fork did not finish");
+        assert_eq!(job.phase, Phase::Done, "{:?}", job.failure);
+        assert!(
+            source
+                .store
+                .inner
+                .get(&coordinator, &keys::namespace_record())
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let original = ForkReplayIdentity {
+            scope: [3; 32],
+            fingerprint: [4; 32],
+            expires_at_ms: source.clock.now_ms() + 300_000,
+        };
+        let recovered = reads
+            .recover_completed_fork(&spec, &original)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(Some(&recovered.result), job.result.as_ref());
+        assert_eq!(recovered.authority.creates_namespace, created);
+        assert_eq!(recovered.reservation.id, settlement::RID);
+        // Losing the namespace record fails recovery closed.
+        if created {
+            source
+                .store
+                .inner
+                .apply(
+                    &coordinator,
+                    mkit_server::Batch::new().delete(keys::namespace_record()),
+                )
+                .await
+                .unwrap();
+            assert!(
+                reads
+                    .recover_completed_fork(&spec, &original)
+                    .await
+                    .is_err()
+            );
+        }
+    }
+}
