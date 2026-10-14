@@ -85,6 +85,7 @@ pub mod launch;
 pub mod naming;
 pub mod ns_client;
 pub mod ns_object;
+pub mod publication_fence;
 pub mod purge;
 pub mod r2;
 pub mod relay;

@@ -2769,6 +2769,11 @@ An irreversible abort changes the armed marker before completing the coordinator
 Completion requires a terminal source marker and every required projection watermark.
 Durable source relay cleanup can prove those watermarks without another target fanout.
 Pending intents never expire by elapsed time. Repeated receipts do not decrement the count twice.
+Worker recovery wakes commit atomically with invalidation and bind its exact intent.
+A superseded wake cannot cancel or follow a newer publication attempt.
+Opt-in foreground and alarm writes share the durable source driver.
+The hosting partition uses local SQL; remote authorities never reside in that local store.
+Lost replies resolve from terminal markers. Original guard failures require proven noncommit.
 Bootstrap receipts bind the repository, namespace coordinator, generation, revision, and readiness row.
 Restore requires an externally allocated incarnation that no previous token used.
 
@@ -2786,3 +2791,4 @@ A post-write notification cannot close the interval before its delivery.
 **Enforced by:** `store::adapter_spi::publication_fence`, guarded publication planning, and the final SQL transaction validator.
 Native tests cover split delivery, duplicates, concurrent sources, aborts, recovery, and generation changes.
 Real relay and SQLite tests cover target effects, source cleanup, and transaction-extension tampering.
+Physical alarm tests cover crash-before-arm recovery and real relay completion through the source driver.

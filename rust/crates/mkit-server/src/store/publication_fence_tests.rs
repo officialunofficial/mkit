@@ -776,3 +776,413 @@ fn unrelated_partitions_skip_source_fence_lookup() {
     })
     .unwrap();
 }
+
+#[test]
+fn durable_inspection_recovers_before_arm_and_retains_old_generation_attempts() {
+    block_on(async {
+        let store = MemoryKv::default();
+        let fence = setup(&store).await;
+        assert_eq!(fence.generation(&store).await.unwrap(), generation(1));
+        assert_eq!(
+            fence.latest_intent(&store, &source("main")).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            fence.source_marker(&store, &source("main")).await.unwrap(),
+            None
+        );
+        let intent = begin(&store, &fence, "main", 1).await;
+        // Reconstruct the driver after a crash immediately following begin.
+        let recovered = PublicationFence::new(&repo());
+        let record = recovered
+            .latest_intent(&store, &source("main"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.intent(), &intent);
+        assert!(!record.complete());
+        assert_eq!(
+            recovered
+                .source_marker(&store, &source("main"))
+                .await
+                .unwrap(),
+            None
+        );
+        recovered.arm(&store, record.intent()).await.unwrap();
+        let marker = recovered
+            .source_marker(&store, &source("main"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(marker.intent(), &intent);
+        assert_eq!(marker.status(), SourceStatus::Armed);
+        abort(&store, &intent).await;
+        assert_eq!(
+            recovered
+                .source_marker(&store, &source("main"))
+                .await
+                .unwrap()
+                .unwrap()
+                .status(),
+            SourceStatus::Aborted
+        );
+        assert!(
+            !recovered
+                .latest_intent(&store, &source("main"))
+                .await
+                .unwrap()
+                .unwrap()
+                .complete()
+        );
+        recovered
+            .source_receipt(
+                &store,
+                &SourceReceipt::verify(&store, &intent).await.unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            recovered
+                .latest_intent(&store, &source("main"))
+                .await
+                .unwrap()
+                .unwrap()
+                .complete()
+        );
+        recovered.rotate(&store, generation(2)).await.unwrap();
+        assert_eq!(recovered.generation(&store).await.unwrap(), generation(2));
+        let prior = recovered
+            .latest_intent(&store, &source("main"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(prior.intent().generation(), generation(1));
+        assert_eq!(prior.intent().attempt(), 1);
+        assert_eq!(
+            recovered
+                .source_marker(&store, &source("main"))
+                .await
+                .unwrap()
+                .unwrap()
+                .intent()
+                .generation(),
+            generation(1)
+        );
+        assert!(
+            recovered
+                .latest_intent(&store, &Partition::Coordinator(repo().namespace))
+                .await
+                .is_err()
+        );
+    });
+}
+
+#[test]
+fn durable_inspection_reports_committed_before_coordinator_receipt() {
+    block_on(async {
+        let store = MemoryKv::default();
+        let fence = setup(&store).await;
+        let intent = begin(&store, &fence, "main", 1).await;
+        fence.arm(&store, &intent).await.unwrap();
+        commit(&store, &intent, "main").await;
+        let marker = fence
+            .source_marker(&store, &source("main"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(marker.intent(), &intent);
+        assert_eq!(marker.status(), SourceStatus::Committed);
+        assert!(
+            !fence
+                .latest_intent(&store, &source("main"))
+                .await
+                .unwrap()
+                .unwrap()
+                .complete()
+        );
+        let mut rebound = repo();
+        rebound.name = RepoName::new("other").unwrap();
+        let other = PublicationFence::new(&rebound);
+        assert!(other.latest_intent(&store, &source("main")).await.is_err());
+        assert!(other.source_marker(&store, &source("main")).await.is_err());
+    });
+}
+
+struct RootCasLoss<'a> {
+    store: &'a MemoryKv,
+    coordinator: Partition,
+    root: Key,
+    inject: std::sync::atomic::AtomicBool,
+}
+impl NamespaceStore for RootCasLoss<'_> {
+    fn capabilities(&self) -> crate::StoreCapabilities {
+        self.store.capabilities()
+    }
+    async fn get(&self, p: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
+        self.store.get(p, key).await
+    }
+    async fn scan(
+        &self,
+        p: &Partition,
+        start: &Key,
+        end: &Key,
+        after: Option<&crate::Cursor>,
+        limit: u32,
+    ) -> Result<crate::ScanPage, StoreError> {
+        self.store.scan(p, start, end, after, limit).await
+    }
+    async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+        if *p == self.coordinator && self.inject.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            let raw = self
+                .store
+                .get(p, &self.root)
+                .await?
+                .ok_or_else(|| invalid("missing fixture authority"))?;
+            let mut root: Root = decode(&raw)?;
+            root.revision = increment(root.revision)?;
+            let competing = Batch::new()
+                .require(Precondition::Equals(self.root.clone(), raw))
+                .put(self.root.clone(), encode(&root)?);
+            if self.store.apply(p, competing).await? != BatchOutcome::Committed {
+                return Err(invalid("fixture competing root CAS failed"));
+            }
+        }
+        self.store.apply(p, batch).await
+    }
+    async fn stats(&self, p: &Partition) -> Result<crate::PartitionStats, StoreError> {
+        self.store.stats(p).await
+    }
+    async fn probe(&self) -> Result<(), StoreError> {
+        self.store.probe().await
+    }
+}
+
+#[test]
+fn recovery_wake_is_atomic_with_intent_and_survives_crash_before_arm() {
+    block_on(async {
+        let store = MemoryKv::default();
+        let fence = setup(&store).await;
+        let p = plan("main", 1);
+        let due = 1234;
+        let intent = fence
+            .begin_with_recovery(
+                &store,
+                &source("main"),
+                1,
+                p.digest,
+                targets("main", 1),
+                due,
+            )
+            .await
+            .unwrap();
+        let (timer, expected) = fence.recovery_timer(&intent, due).unwrap();
+        let payload = store
+            .get(&fence.coordinator, &timer)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(payload, expected);
+        assert_eq!(fence.recovery_source(&payload).unwrap(), source("main"));
+        assert_eq!(fence.recovery_intent(&payload).unwrap(), intent);
+        assert_eq!(
+            PublicationFence::decode_recovery_intent(&payload).unwrap(),
+            intent
+        );
+        assert!(matches!(
+            keys::parse(&timer),
+            Some(keys::ParsedKey::Timer { kind: 17, .. })
+        ));
+        assert_eq!(fence.root(&store).await.unwrap().1.pending, 1);
+        assert_eq!(
+            fence.source_marker(&store, &source("main")).await.unwrap(),
+            None
+        );
+        let recovered = PublicationFence::new(&repo());
+        let record = recovered
+            .latest_intent(&store, &recovered.recovery_source(&payload).unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.intent(), &intent);
+        recovered.arm(&store, record.intent()).await.unwrap();
+        abort(&store, record.intent()).await;
+        recovered
+            .source_receipt(
+                &store,
+                &SourceReceipt::verify(&store, record.intent())
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(recovered.stable(&store).await.unwrap().is_some());
+        let later_due = due + 10;
+        recovered
+            .begin_with_recovery(
+                &store,
+                &source("main"),
+                1,
+                p.digest,
+                targets("main", 1),
+                later_due,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get(
+                    &fence.coordinator,
+                    &fence.recovery_timer(&intent, later_due).unwrap().0
+                )
+                .await
+                .unwrap(),
+            None
+        );
+        assert_ne!(
+            fence.recovery_reference(&source("main")).unwrap(),
+            fence.recovery_reference(&source("other")).unwrap()
+        );
+        let mut other = repo();
+        other.name = RepoName::new("other").unwrap();
+        assert!(
+            PublicationFence::new(&other)
+                .recovery_source(&payload)
+                .is_err()
+        );
+        assert!(
+            fence
+                .recovery_source(&Value::new(vec![0; MAX_ROW_BYTES + 1]))
+                .is_err()
+        );
+    });
+}
+
+#[test]
+fn failed_begin_cas_leaves_neither_orphan_recovery_timer_nor_pending_intent() {
+    block_on(async {
+        let store = MemoryKv::default();
+        let fence = setup(&store).await;
+        let racing = RootCasLoss {
+            store: &store,
+            coordinator: fence.coordinator.clone(),
+            root: fence.root_key(),
+            inject: std::sync::atomic::AtomicBool::new(true),
+        };
+        let p = plan("main", 1);
+        let expected = Intent {
+            generation: generation(1),
+            source: source("main").encode().unwrap().to_vec(),
+            attempt: 1,
+            digest: p.digest,
+            targets: targets("main", 1),
+        };
+        assert!(
+            fence
+                .begin_with_recovery(
+                    &racing,
+                    &source("main"),
+                    1,
+                    p.digest,
+                    targets("main", 1),
+                    1234
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            fence.latest_intent(&store, &source("main")).await.unwrap(),
+            None
+        );
+        assert_eq!(fence.root(&store).await.unwrap().1.pending, 0);
+        assert_eq!(
+            store
+                .get(
+                    &fence.coordinator,
+                    &fence.recovery_timer(&expected, 1234).unwrap().0
+                )
+                .await
+                .unwrap(),
+            None
+        );
+        let intent = fence
+            .begin_with_recovery(
+                &store,
+                &source("main"),
+                1,
+                p.digest,
+                targets("main", 1),
+                1234,
+            )
+            .await
+            .unwrap();
+        let revision = fence.root(&store).await.unwrap().1.revision;
+        assert_eq!(
+            fence
+                .begin_with_recovery(
+                    &store,
+                    &source("main"),
+                    1,
+                    p.digest,
+                    targets("main", 1),
+                    1234
+                )
+                .await
+                .unwrap(),
+            intent
+        );
+        assert_eq!(fence.root(&store).await.unwrap().1.revision, revision);
+        assert_eq!(fence.root(&store).await.unwrap().1.pending, 1);
+    });
+}
+
+#[test]
+fn stale_recovery_payload_retains_its_exact_attempt_and_generation() {
+    block_on(async {
+        let store = MemoryKv::default();
+        let fence = setup(&store).await;
+        let p = plan("main", 1);
+        let old = fence
+            .begin_with_recovery(
+                &store,
+                &source("main"),
+                1,
+                p.digest,
+                targets("main", 1),
+                1000,
+            )
+            .await
+            .unwrap();
+        let (key, _) = fence.recovery_timer(&old, 1000).unwrap();
+        let payload = store.get(&fence.coordinator, &key).await.unwrap().unwrap();
+        fence.arm(&store, &old).await.unwrap();
+        abort(&store, &old).await;
+        fence
+            .source_receipt(&store, &SourceReceipt::verify(&store, &old).await.unwrap())
+            .await
+            .unwrap();
+        let current = begin(&store, &fence, "main", 2).await;
+        let wake = fence.recovery_intent(&payload).unwrap();
+        assert_eq!(wake, old);
+        assert_ne!(wake, current);
+        assert_ne!(
+            wake,
+            *fence
+                .latest_intent(&store, &source("main"))
+                .await
+                .unwrap()
+                .unwrap()
+                .intent()
+        );
+        fence.rotate(&store, generation(2)).await.unwrap();
+        assert_eq!(
+            fence.recovery_intent(&payload).unwrap().generation(),
+            generation(1)
+        );
+        let mut noncanonical = payload.as_bytes().to_vec();
+        noncanonical.push(b' ');
+        assert!(fence.recovery_intent(&Value::new(noncanonical)).is_err());
+        let mut unknown = payload.as_bytes().to_vec();
+        unknown[0] = 2;
+        assert!(fence.recovery_intent(&Value::new(unknown)).is_err());
+    });
+}

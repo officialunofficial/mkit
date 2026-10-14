@@ -20,6 +20,13 @@ collect the applicable entries between their old and new immutable pins.
   enable them. Deployments must integrate writers, alarms, bootstrap, and restore
   fencing before consuming stable cache tokens. Additive stored rows; no reset
   is required for existing disabled deployments.
+- Add an opt-in Worker source driver shared by foreground and alarm writes.
+  Recovery wakes (timer kind 17) commit atomically with coordinator invalidation.
+  Lost replies resolve from durable source markers, and actual relay cleanup
+  can complete projection receipts. `NsObject::with_publication_store` installs
+  this driver and its recovery handler after the ordinary timer registry.
+  Bootstrap and external restore fencing remain the embedding's responsibility;
+  default factories and response caches remain disabled.
 - Worker SQL transaction extensions preserve the checked guard prefix and
   evaluate appended guards before writes. Enrolled publication sources validate
   the final transaction against their prepared intent.

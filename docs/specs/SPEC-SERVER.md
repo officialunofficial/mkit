@@ -2668,6 +2668,26 @@ Its digest binds the original preconditions, ordered writes, and source identity
 Every published ref effect MUST match its routed durable projection relay.
 Relay sequences MUST exceed the guarded previous source outbox sequence.
 
+The optional Worker driver applies source transactions through `PressureStore`,
+including SDK-owned alarm handlers. It MUST route the hosting source partition
+to its local SQL store and coordinator/projection partitions to their remote
+authorities. It MUST retain the ordinary audit extension and final SQL validator.
+Original guard failures retain their indices only after a durable abort proves
+noncommit. A lost commit reply MUST be resolved from the exact terminal marker.
+
+`begin_with_recovery` writes a kind-17 `PUBLICATION_FENCE_RECOVERY` timer in the
+same coordinator CAS as the intent and pending count. Its reference is the
+32-byte BLAKE3 hash of the canonical source partition; its value is the exact
+version-one intent, including generation, attempt, digest, and targets, under
+the same 32 KiB bound. An exact active retry can repair the wake under root and
+intent guards without incrementing pending again. Completed retries add no wake.
+Every wake MUST match its exact intent against the current source row. A
+superseded wake MUST finish without recovering or canceling a newer attempt.
+Recovery can arm and irreversibly abort an interrupted pre-arm attempt. It MUST
+retain a committed attempt while any allocated relay remains undelivered.
+No scheduled time is evidence of completion. Actual relay cleanup can reconcile
+the committed intent immediately; the durable wake remains a recovery fallback.
+
 The final SQL transaction MUST validate the complete extended batch before writes.
 An extension MUST preserve the checked original guard prefix. Appended guards
 MUST hold in that same transaction. A publication on an enrolled source MUST
@@ -2685,6 +2705,11 @@ revision, and durable readiness row. Integration MUST reconcile legacy writers
 and queued relays before sealing. Restore MUST allocate a never-reused incarnation
 outside imported state. Incrementing a restored generation alone is insufficient.
 Old callbacks MUST NOT complete work in another generation.
+
+Worker default factories do not activate this integration. The opt-in embedding
+installs `NsObject::with_publication_store` after its ordinary timer registry;
+all source writers and coordinator recovery handlers share the same externally
+allocated generation. Initialization or rotation is never inferred from absence.
 
 ### 10.3 Every reader surface uses the published view
 

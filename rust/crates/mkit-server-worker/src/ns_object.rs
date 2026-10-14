@@ -59,6 +59,7 @@ pub struct PressureStore<C> {
     backup_interval_ms: Option<u64>,
     backup_seeded: AtomicBool,
     seeded_due: Mutex<Option<u64>>,
+    publication: Option<Arc<dyn crate::publication_fence::SourcePublication<C>>>,
 }
 
 impl<C> core::fmt::Debug for PressureStore<C> {
@@ -88,7 +89,24 @@ impl<C: SqlConn> PressureStore<C> {
             backup_interval_ms: None,
             backup_seeded: AtomicBool::new(false),
             seeded_due: Mutex::default(),
+            publication: None,
         }
+    }
+
+    /// Enroll every publishing source write, including timer-handler writes.
+    /// The authority must already exist under this externally fenced identity;
+    /// this method does not bootstrap, rotate, or grant stable read permission.
+    #[must_use]
+    pub fn with_publication_store<R: NamespaceStore + 'static>(
+        mut self,
+        remote: R,
+        generation: mkit_server::store::adapter_spi::publication_fence::Generation,
+    ) -> Self {
+        self.publication = Some(Arc::new(crate::publication_fence::RemotePublication {
+            remote,
+            generation,
+        }));
+        self
     }
 
     /// Seed a backup after the first committed Put in each partition.
@@ -240,15 +258,26 @@ impl<C: SqlConn> NamespaceStore for PressureStore<C> {
     async fn apply(&self, partition: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
         let has_put = batch.has_put();
         let p = partition.clone();
-        let outcome = self
-            .inner
-            .apply_extended(partition, batch, move |get, batch, _now| {
-                mkit_server::admin::extend_audit_batch(&p, batch, |key| {
-                    get(key).map_err(StoreError::from)
-                })
-                .map_err(|_| SqlError::Corrupt("automatic audit extension"))?;
-                Ok(())
-            })?;
+        let outcome =
+            if let (Some(publication), Partition::Ref { .. }) = (&self.publication, partition) {
+                let now = u64::try_from(self.clock.now_ms())
+                    .map_err(|_| StoreError::unavailable("invalid publication recovery clock"))?;
+                let due = now.checked_add(10_000).ok_or_else(|| {
+                    StoreError::unavailable("publication recovery clock overflow")
+                })?;
+                publication
+                    .apply(&self.inner, partition, batch, due)
+                    .await?
+            } else {
+                self.inner
+                    .apply_extended(partition, batch, move |get, batch, _now| {
+                        mkit_server::admin::extend_audit_batch(&p, batch, |key| {
+                            get(key).map_err(StoreError::from)
+                        })
+                        .map_err(|_| SqlError::Corrupt("automatic audit extension"))?;
+                        Ok(())
+                    })?
+            };
         if has_put && outcome == BatchOutcome::Committed {
             self.observe_pressure(partition);
             self.seed_backup_if_needed(partition).await;
@@ -592,6 +621,10 @@ mod object {
         /// Volatile raw-index rotation; durable retry keys survive cold starts.
         timer_cursor: Cell<Option<TimerCursor>>,
         alarm_budget: Option<mkit_server::purge::SliceBudget>,
+        publication: Option<(
+            crate::ns_client::WorkerNamespaceStore,
+            mkit_server::store::adapter_spi::publication_fence::Generation,
+        )>,
     }
 
     impl core::fmt::Debug for NsObject {
@@ -628,6 +661,7 @@ mod object {
                 alarm_armed: Cell::new(false),
                 timer_cursor: Cell::new(None),
                 alarm_budget: None,
+                publication: None,
             };
             (object, state)
         }
@@ -660,6 +694,26 @@ mod object {
             self
         }
 
+        /// Enable the same publication driver for foreground and alarm writes.
+        /// Call after installing the ordinary registry. Initialization and
+        /// legacy reconciliation must precede activation; restore identities
+        /// must be allocated outside imported SQL state.
+        #[must_use]
+        pub fn with_publication_store(
+            mut self,
+            remote: crate::ns_client::WorkerNamespaceStore,
+            generation: mkit_server::store::adapter_spi::publication_fence::Generation,
+        ) -> Self {
+            self.registry = self
+                .registry
+                .register(crate::publication_fence::RecoveryHandler {
+                    remote: remote.clone(),
+                    generation,
+                });
+            self.publication = Some((remote, generation));
+            self
+        }
+
         /// Enable post-commit backup seeding for this object.
         #[must_use]
         pub fn with_backup_interval(mut self, interval_ms: u64) -> Self {
@@ -682,6 +736,9 @@ mod object {
             );
             if let Some(interval_ms) = self.backup_interval_ms {
                 store = store.with_backup_interval(interval_ms);
+            }
+            if let Some((remote, generation)) = &self.publication {
+                store = store.with_publication_store(remote.clone(), *generation);
             }
             Ok(self.store.get_or_init(|| store))
         }

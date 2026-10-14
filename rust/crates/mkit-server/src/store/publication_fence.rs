@@ -1,6 +1,6 @@
 //! Durable publication invalidation before source writes, with proven completion.
 //!
-//! This core is not wired into writers or reads yet. Bootstrap readiness is an
+//! Default factories and readers do not enable this core. Bootstrap readiness is an
 //! integration-owned assertion: reconciliation must fence every legacy writer
 //! and relay before writing it. Incarnations must come from authority outside an
 //! imported snapshot; incrementing a restored generation alone cannot prevent ABA.
@@ -172,6 +172,65 @@ impl Row {
     }
 }
 
+/// Typed status observed from the durable local source marker.
+/// This observation is not a completion receipt or permission to mutate it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceStatus {
+    /// Publication or irreversible abort must still win the guarded source CAS.
+    Armed,
+    /// The exact publication transaction committed with its terminal marker.
+    Committed,
+    /// Every prepared commit using the old armed marker is irreversibly fenced.
+    Aborted,
+}
+impl From<Disposition> for SourceStatus {
+    fn from(value: Disposition) -> Self {
+        match value {
+            Disposition::Armed => Self::Armed,
+            Disposition::Committed => Self::Committed,
+            Disposition::Aborted => Self::Aborted,
+        }
+    }
+}
+/// Latest coordinator record for one source, including an older generation.
+/// Read it freshly before selecting a monotonic source attempt; the observation
+/// is not a lock and the existing begin CAS still resolves concurrent writers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoordinatorIntent {
+    intent: Intent,
+    complete: bool,
+}
+impl CoordinatorIntent {
+    /// Exact binding needed to recover a crash before local arming.
+    #[must_use]
+    pub fn intent(&self) -> &Intent {
+        &self.intent
+    }
+    /// Whether this coordinator record accepted proven terminal completion.
+    #[must_use]
+    pub fn complete(&self) -> bool {
+        self.complete
+    }
+}
+/// Durable local source observation, distinct from a verified receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalSourceMarker {
+    intent: Intent,
+    status: SourceStatus,
+}
+impl LocalSourceMarker {
+    /// Exact binding recorded in the local guarded transaction.
+    #[must_use]
+    pub fn intent(&self) -> &Intent {
+        &self.intent
+    }
+    /// Current durable local disposition.
+    #[must_use]
+    pub fn status(&self) -> SourceStatus {
+        self.status
+    }
+}
+
 /// Receipt verified by reading an immutable terminal source marker.
 /// Fields are private: an arbitrary boolean cannot complete an intent.
 #[derive(Debug, Clone)]
@@ -248,6 +307,13 @@ pub struct BootstrapReceipt {
     ready: Value,
 }
 
+struct BeginRequest {
+    attempt: u64,
+    digest: Hash,
+    targets: Vec<Target>,
+    recovery_due_at_ms: Option<u64>,
+}
+
 /// One repository's coordinator authority; each source has a separate row.
 #[derive(Debug)]
 pub struct PublicationFence {
@@ -287,6 +353,78 @@ impl PublicationFence {
             .ok_or_else(|| invalid("publication fence not initialized"))?;
         let root: Root = decode(&value)?;
         Ok((value, root))
+    }
+    /// Read the current coordinator recovery identity, even while unsealed.
+    ///
+    /// # Errors
+    /// Refuses an absent, corrupt or unavailable authority.
+    pub async fn generation<S: NamespaceStore>(&self, store: &S) -> Result<Generation, StoreError> {
+        Ok(self.root(store).await?.1.generation)
+    }
+    fn check_source(&self, source: &Partition) -> Result<(), StoreError> {
+        if matches!(source, Partition::Ref { ns, repo, .. } if *ns == self.repo.namespace && *repo == self.repo.name)
+        {
+            Ok(())
+        } else {
+            Err(invalid("publication source outside repository"))
+        }
+    }
+    /// Read one source's latest coordinator intent without scanning a manifest.
+    /// Previous generations are intentionally returned for restore reconciliation
+    /// and attempt discovery; they must not be treated as current active authority.
+    ///
+    /// # Errors
+    /// Refuses a source outside this repository or malformed/rebound records.
+    pub async fn latest_intent<S: NamespaceStore>(
+        &self,
+        store: &S,
+        source: &Partition,
+    ) -> Result<Option<CoordinatorIntent>, StoreError> {
+        self.check_source(source)?;
+        let Some(raw) = store
+            .get(&self.coordinator, &self.row_key(&source.encode()?))
+            .await?
+        else {
+            return Ok(None);
+        };
+        let row: Row = decode(&raw)?;
+        row.validate()?;
+        if row.intent.source()? != *source {
+            return Err(StoreError::Corrupt(
+                "coordinator publication source rebound".into(),
+            ));
+        }
+        Ok(Some(CoordinatorIntent {
+            intent: row.intent,
+            complete: row.complete,
+        }))
+    }
+    /// Read this source's actual durable marker, including prior generations.
+    /// Merely observing `Committed` or `Aborted` does not construct a receipt:
+    /// callers still use `SourceReceipt::verify` against their exact intent.
+    ///
+    /// # Errors
+    /// Refuses a source outside this repository or malformed/rebound markers.
+    pub async fn source_marker<S: NamespaceStore>(
+        &self,
+        store: &S,
+        source: &Partition,
+    ) -> Result<Option<LocalSourceMarker>, StoreError> {
+        self.check_source(source)?;
+        let Some(raw) = store.get(source, &source_key()).await? else {
+            return Ok(None);
+        };
+        let marker: SourceMarker = decode(&raw)?;
+        marker.intent.validate()?;
+        if marker.intent.source()? != *source {
+            return Err(StoreError::Corrupt(
+                "local publication source rebound".into(),
+            ));
+        }
+        Ok(Some(LocalSourceMarker {
+            intent: marker.intent,
+            status: marker.disposition.into(),
+        }))
     }
     async fn apply<S: NamespaceStore>(&self, store: &S, batch: Batch) -> Result<(), StoreError> {
         match store.apply(&self.coordinator, batch).await? {
@@ -438,6 +576,119 @@ impl PublicationFence {
         digest: Hash,
         targets: Vec<Target>,
     ) -> Result<Intent, StoreError> {
+        self.begin_inner(
+            store,
+            source,
+            BeginRequest {
+                attempt,
+                digest,
+                targets,
+                recovery_due_at_ms: None,
+            },
+        )
+        .await
+    }
+    /// Invalidate and durably schedule recovery in the same coordinator CAS.
+    /// The due time comes from the driver's actual clock. It schedules work;
+    /// elapsed time never proves abort, delivery or completion.
+    ///
+    /// # Errors
+    /// Refuses rebound/overlapping attempts and loses atomically on concurrent CAS.
+    #[allow(clippy::too_many_arguments)] // Extends the existing begin contract with its one wake deadline.
+    pub async fn begin_with_recovery<S: NamespaceStore>(
+        &self,
+        store: &S,
+        source: &Partition,
+        attempt: u64,
+        digest: Hash,
+        targets: Vec<Target>,
+        due_at_ms: u64,
+    ) -> Result<Intent, StoreError> {
+        self.begin_inner(
+            store,
+            source,
+            BeginRequest {
+                attempt,
+                digest,
+                targets,
+                recovery_due_at_ms: Some(due_at_ms),
+            },
+        )
+        .await
+    }
+    /// Decode an exact versioned recovery intent before selecting its repository.
+    /// This is an observation, not a receipt or permission to recover the newest
+    /// source attempt. Handlers must also check coordinator namespace and match
+    /// the current durable coordinator intent before taking recovery action.
+    ///
+    /// # Errors
+    /// Refuses malformed, noncanonical, oversized or non-ref source payloads.
+    pub fn decode_recovery_intent(payload: &Value) -> Result<Intent, StoreError> {
+        let intent: Intent = decode(payload)?;
+        intent.validate()?;
+        let source = intent.source()?;
+        if !matches!(source, Partition::Ref { .. })
+            || source.encode()?.as_ref() != intent.source.as_slice()
+            || encode(&intent)? != *payload
+        {
+            return Err(invalid("publication recovery intent not canonical"));
+        }
+        Ok(intent)
+    }
+    /// Decode the exact recovery intent and additionally verify repository scope.
+    /// A wake never authorizes recovery of a different or newer source attempt.
+    ///
+    /// # Errors
+    /// Refuses invalid or foreign intent payloads.
+    pub fn recovery_intent(&self, payload: &Value) -> Result<Intent, StoreError> {
+        let intent = Self::decode_recovery_intent(payload)?;
+        self.check_source(&intent.source()?)?;
+        Ok(intent)
+    }
+    /// Decode the source from an exact intent payload, retaining the same checks.
+    ///
+    /// # Errors
+    /// Refuses invalid recovery intents; callers must use `recovery_intent` when
+    /// deciding which attempt to recover rather than selecting the newest one.
+    pub fn recovery_source(&self, payload: &Value) -> Result<Partition, StoreError> {
+        self.recovery_intent(payload)?.source()
+    }
+    /// Deterministic source identity for initial wakes and timer reschedules.
+    ///
+    /// # Errors
+    /// Refuses sources outside this repository or the durable payload bound.
+    pub fn recovery_reference(&self, source: &Partition) -> Result<Hash, StoreError> {
+        self.check_source(source)?;
+        let encoded = source.encode()?;
+        if encoded.len() > MAX_PARTITION_BYTES {
+            return Err(invalid("publication recovery source too long"));
+        }
+        Ok(hash(&encoded))
+    }
+    fn recovery_timer(&self, intent: &Intent, due_at_ms: u64) -> Result<(Key, Value), StoreError> {
+        intent.validate()?;
+        let reference = self.recovery_reference(&intent.source()?)?;
+        Ok((
+            keys::timer(
+                due_at_ms,
+                crate::timers::registry::kinds::PUBLICATION_FENCE_RECOVERY.get(),
+                &reference,
+            ),
+            encode(intent)?,
+        ))
+    }
+    async fn begin_inner<S: NamespaceStore>(
+        &self,
+        store: &S,
+        source: &Partition,
+        request: BeginRequest,
+    ) -> Result<Intent, StoreError> {
+        let BeginRequest {
+            attempt,
+            digest,
+            targets,
+            recovery_due_at_ms,
+        } = request;
         if !matches!(source, Partition::Ref { ns, repo, .. } if *ns == self.repo.namespace && *repo == self.repo.name)
         {
             return Err(invalid("publication source outside repository"));
@@ -457,6 +708,19 @@ impl PublicationFence {
             let row: Row = decode(raw)?;
             row.validate()?;
             if row.intent == intent {
+                if let Some(due_at_ms) = recovery_due_at_ms
+                    && !row.complete
+                {
+                    let (timer, payload) = self.recovery_timer(&intent, due_at_ms)?;
+                    self.apply(
+                        store,
+                        Batch::new()
+                            .require(Precondition::Equals(self.root_key(), root_raw))
+                            .require(Precondition::Equals(key, raw.clone()))
+                            .put(timer, payload),
+                    )
+                    .await?;
+                }
                 return Ok(intent);
             }
             if attempt != increment(row.intent.attempt)?
@@ -475,15 +739,16 @@ impl PublicationFence {
             receipts: 0,
             complete: false,
         };
-        self.apply(
-            store,
-            Batch::new()
-                .require(Precondition::Equals(self.root_key(), root_raw))
-                .require(guard(key.clone(), prior))
-                .put(key, encode(&row)?)
-                .put(self.root_key(), encode(&root)?),
-        )
-        .await?;
+        let mut batch = Batch::new()
+            .require(Precondition::Equals(self.root_key(), root_raw))
+            .require(guard(key.clone(), prior))
+            .put(key, encode(&row)?)
+            .put(self.root_key(), encode(&root)?);
+        if let Some(due_at_ms) = recovery_due_at_ms {
+            let (timer, payload) = self.recovery_timer(&intent, due_at_ms)?;
+            batch = batch.put(timer, payload);
+        }
+        self.apply(store, batch).await?;
         Ok(intent)
     }
     /// Arm after durable begin. The source marker is the local CAS guard for
