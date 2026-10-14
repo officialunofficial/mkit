@@ -239,11 +239,10 @@ pub(super) async fn page<S: BucketSource>(
     merge(repo, prefix, scans, page_size, byte_budget)
 }
 
-/// Waved counterpart of `page` for a read operation: the sources are independent scans, so each
-/// wave of up to [`crate::store::read_io::parallelism`] of them is reserved
-/// against the operation's call ledger and dispatched together. The page is
-/// the same; only the number of sequential rounds changes. A failed source
-/// fails the entire page, and every dispatched reply of a failed wave is drained.
+/// Rolling counterpart of `page`: keep up to six independently reserved
+/// scans in flight, replenishing immediately after a successful completion.
+/// Unknown/tight call allowances stay serial. A failure stops new launches;
+/// all dispatched replies drain before returning the earliest source's error.
 pub(super) async fn page_in_waves<S: BucketSource, N: NamespaceStore>(
     store: &N,
     sources: &[S],
@@ -253,39 +252,64 @@ pub(super) async fn page_in_waves<S: BucketSource, N: NamespaceStore>(
     page_size: u32,
     byte_budget: usize,
 ) -> Result<ListPage, StoreError> {
+    use futures::StreamExt as _;
     assert!(!sources.is_empty() && page_size > 0);
     let per_source = per_source(page_size, sources.len());
-    let mut scans = Vec::with_capacity(sources.len());
+    let mut scans: Vec<Option<Scan>> = (0..sources.len()).map(|_| None).collect();
+    let mut pending = futures::stream::FuturesUnordered::new();
     let mut offset = 0;
-    while offset < sources.len() {
-        let width = (sources.len() - offset).min(crate::store::read_io::parallelism());
+    let mut failure: Option<(usize, StoreError)> = None;
+    let dispatch = |index: usize, reservation: Option<crate::store::ReadReservation>| {
+        let scan = sources[index].scan(repo, prefix, last, per_source);
+        async move {
+            (
+                index,
+                crate::store::ReadReservation::scope(&[reservation], scan).await,
+            )
+        }
+    };
+    loop {
+        let required = (sources.len() - offset).min(crate::store::read_io::parallelism());
         let width = if store
             .read_call_allowance()
-            .is_some_and(|calls| calls >= u32::try_from(width).unwrap_or(u32::MAX))
+            .is_some_and(|calls| calls >= u32::try_from(required).unwrap_or(u32::MAX))
         {
-            width
+            crate::store::read_io::parallelism()
         } else {
             1
         };
-        let wave = &sources[offset..offset + width];
-        // RPC stores can reserve inherited invocation calls even without an
-        // object-reader admission facade. Unknown/tight allowances stay serial.
-        let reservation = store.reserve_read_calls(u32::try_from(width).unwrap_or(u32::MAX))?;
-        let replies = crate::store::ReadReservation::scope(
-            &[reservation],
-            futures::future::join_all(
-                wave.iter()
-                    .map(|source| source.scan(repo, prefix, last, per_source)),
-            ),
-        )
-        .await;
-        for reply in replies {
-            let scan = reply?;
-            continued_boundary(&scan)?;
-            scans.push(scan);
+        while failure.is_none() && offset < sources.len() && pending.len() < width {
+            match store.reserve_read_calls(1) {
+                Ok(reservation) => pending.push(dispatch(offset, reservation)),
+                Err(error) => {
+                    failure = Some((offset, error));
+                    break;
+                }
+            }
+            offset += 1;
         }
-        offset += width;
+        let Some((index, reply)) = pending.next().await else {
+            break;
+        };
+        match reply.and_then(|scan| {
+            continued_boundary(&scan)?;
+            Ok(scan)
+        }) {
+            Ok(scan) => scans[index] = Some(scan),
+            Err(error) => {
+                if failure.as_ref().is_none_or(|(first, _)| index < *first) {
+                    failure = Some((index, error));
+                }
+            }
+        }
     }
+    if let Some((_, error)) = failure {
+        return Err(error);
+    }
+    let scans = scans
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| StoreError::Corrupt("missing completed ref scan".into()))?;
     merge(repo, prefix, scans, page_size, byte_budget)
 }
 
@@ -380,6 +404,227 @@ mod tests {
                 more,
             })
         }
+    }
+
+    struct RollingBucket {
+        index: usize,
+        started: Arc<Mutex<Vec<usize>>>,
+        zero: Arc<Mutex<Option<futures::channel::oneshot::Receiver<()>>>>,
+        six: Arc<Mutex<Option<futures::channel::oneshot::Sender<()>>>>,
+    }
+    impl BucketSource for RollingBucket {
+        async fn scan(
+            &self,
+            _repo: &RepoId,
+            _prefix: &str,
+            _last: Option<&str>,
+            _limit: u32,
+        ) -> Result<Scan, StoreError> {
+            self.started
+                .lock()
+                .expect("start record lock")
+                .push(self.index);
+            if self.index == 0 {
+                let receive = self
+                    .zero
+                    .lock()
+                    .expect("receiver lock")
+                    .take()
+                    .expect("bucket zero owns receiver");
+                receive
+                    .await
+                    .map_err(|_| StoreError::unavailable("bucket six did not unlock zero"))?;
+            }
+            if self.index == 6 {
+                self.six
+                    .lock()
+                    .expect("sender lock")
+                    .take()
+                    .expect("bucket six owns sender")
+                    .send(())
+                    .expect("bucket zero remains pending");
+            }
+            Ok(Scan {
+                rows: vec![],
+                more: false,
+            })
+        }
+    }
+    #[test]
+    fn rolling_page_starts_seventh_bucket_while_first_is_blocked() {
+        let (send, receive) = futures::channel::oneshot::channel();
+        let started = Arc::new(Mutex::new(Vec::new()));
+        let zero = Arc::new(Mutex::new(Some(receive)));
+        let six = Arc::new(Mutex::new(Some(send)));
+        let sources: Vec<_> = (0..16)
+            .map(|index| RollingBucket {
+                index,
+                started: started.clone(),
+                zero: zero.clone(),
+                six: six.clone(),
+            })
+            .collect();
+        let backend = crate::MemoryKv::default();
+        let repo = repo("a");
+        let mut read = Box::pin(page_in_waves(&backend, &sources, &repo, "", None, 10, 2048));
+        let mut cx = std::task::Context::from_waker(futures::task::noop_waker_ref());
+        let polled = read.as_mut().poll(&mut cx);
+        assert!(
+            started.lock().unwrap().contains(&6),
+            "bucket six must start before bucket zero can finish"
+        );
+        match polled {
+            std::task::Poll::Ready(result) => result,
+            std::task::Poll::Pending => block_on(read),
+        }
+        .unwrap();
+    }
+
+    struct ActiveScan(Arc<std::sync::atomic::AtomicUsize>);
+    impl Drop for ActiveScan {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    struct LedgerBucket<'a, N> {
+        store: &'a N,
+        active: Arc<std::sync::atomic::AtomicUsize>,
+        peak: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl<N: NamespaceStore> BucketSource for LedgerBucket<'_, N> {
+        async fn scan(
+            &self,
+            _repo: &RepoId,
+            _prefix: &str,
+            _last: Option<&str>,
+            limit: u32,
+        ) -> Result<Scan, StoreError> {
+            let active = self
+                .active
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            self.peak
+                .fetch_max(active, std::sync::atomic::Ordering::SeqCst);
+            let _active = ActiveScan(self.active.clone());
+            let mut yielded = false;
+            futures::future::poll_fn(|cx| {
+                if yielded {
+                    std::task::Poll::Ready(())
+                } else {
+                    yielded = true;
+                    cx.waker().wake_by_ref();
+                    std::task::Poll::Pending
+                }
+            })
+            .await;
+            self.store
+                .scan(
+                    &Partition::Namespace(NamespaceKey::deployment_default()),
+                    &Key::new(vec![0]),
+                    &Key::new(vec![255]),
+                    None,
+                    limit,
+                )
+                .await?;
+            Ok(Scan {
+                rows: vec![],
+                more: false,
+            })
+        }
+    }
+    struct UnknownAllowance<'a>(&'a crate::MemoryKv);
+    impl NamespaceStore for UnknownAllowance<'_> {
+        fn capabilities(&self) -> crate::StoreCapabilities {
+            self.0.capabilities()
+        }
+        async fn get(&self, p: &Partition, key: &Key) -> Result<Option<crate::Value>, StoreError> {
+            self.0.get(p, key).await
+        }
+        async fn scan(
+            &self,
+            p: &Partition,
+            start: &Key,
+            end: &Key,
+            after: Option<&crate::Cursor>,
+            limit: u32,
+        ) -> Result<crate::ScanPage, StoreError> {
+            self.0.scan(p, start, end, after, limit).await
+        }
+        async fn apply(
+            &self,
+            p: &Partition,
+            batch: crate::Batch,
+        ) -> Result<crate::BatchOutcome, StoreError> {
+            self.0.apply(p, batch).await
+        }
+        async fn stats(&self, p: &Partition) -> Result<crate::PartitionStats, StoreError> {
+            self.0.stats(p).await
+        }
+        async fn probe(&self) -> Result<(), StoreError> {
+            self.0.probe().await
+        }
+    }
+    #[test]
+    fn rolling_page_charges_each_inherited_ledger_once_and_peaks_at_six() {
+        let backend = crate::MemoryKv::default();
+        let parent_calls = crate::budget::SliceBudget::new(16);
+        let child_calls = crate::budget::SliceBudget::new(16);
+        let parent = crate::indexed::budget::Budgeted::new(&backend, &parent_calls);
+        let child = crate::indexed::budget::Budgeted::new(&parent, &child_calls);
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sources: Vec<_> = (0..16)
+            .map(|_| LedgerBucket {
+                store: &child,
+                active: active.clone(),
+                peak: peak.clone(),
+            })
+            .collect();
+        block_on(page_in_waves(
+            &child,
+            &sources,
+            &repo("a"),
+            "",
+            None,
+            10,
+            2048,
+        ))
+        .unwrap();
+        assert_eq!(parent_calls.used(), 16);
+        assert_eq!(child_calls.used(), 16);
+        assert!(!parent_calls.refused() && !child_calls.refused());
+        assert_eq!(peak.load(std::sync::atomic::Ordering::SeqCst), 6);
+        assert_eq!(active.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+    #[test]
+    fn rolling_page_unknown_allowance_stays_serial_without_double_charge() {
+        let backend = crate::MemoryKv::default();
+        let unknown = UnknownAllowance(&backend);
+        let calls = crate::budget::SliceBudget::new(16);
+        let store = crate::indexed::budget::Budgeted::new(&unknown, &calls);
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sources: Vec<_> = (0..16)
+            .map(|_| LedgerBucket {
+                store: &store,
+                active: active.clone(),
+                peak: peak.clone(),
+            })
+            .collect();
+        block_on(page_in_waves(
+            &store,
+            &sources,
+            &repo("a"),
+            "",
+            None,
+            10,
+            2048,
+        ))
+        .unwrap();
+        assert_eq!(calls.used(), 16);
+        assert!(!calls.refused());
+        assert_eq!(peak.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(active.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     struct OrderedFailureBucket {
