@@ -35,6 +35,7 @@ fn settle<H: HookSet>(env: &Env<H>, source: &Partition) {
         windows: BlobWindows(&env.pipe.blobs),
         shards: env.pipe.shards.clone(),
         cfg: env.pipe.cfg.indexed.unwrap(),
+        takedown_denial: env.pipe.cfg.takedown_denial,
         limits: SliceLimits::default(),
         lease: LeaseParams::from(&env.pipe.cfg),
         clock: env.clock.clone(),
