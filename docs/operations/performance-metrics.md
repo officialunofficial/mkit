@@ -222,7 +222,8 @@ attempt and one per kind-16 timer fire that reaches a step — emits one
 `fork_step` row, and the step whose apply committed `Done` or `Failed` emits
 one `fork_step_summary`
 row. A timer fire that lands on an already-terminal job emits its own
-`fork_step` row but no second summary; a fire on a deleted job emits none.
+`fork_step` row but no second summary; a fire on a deleted job ends its timer
+before stepping and emits none.
 Events carry constant labels, counts,
 and durations only: `job` is the truncated request-binding hash, never a
 repository name or object id.
