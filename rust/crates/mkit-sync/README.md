@@ -91,8 +91,10 @@ absent from the chain, the walk continues to the root. When both the
 listed tip and packmap head match, no nodes or packs download. Cancellation
 checks and the local closure check still run. A missing local object triggers
 the existing applied-pack recovery, resolving and downloading the full chain
-with no skips. Stale-listing reads and the concurrent re-baseline retry retain
-their existing behavior.
+with no skips. If decoding a new delta fails because its base is missing from
+an omitted prefix, fetch first retries the full walk with the current pack
+record, matching the original download order and skip behavior. Stale-listing
+reads and the concurrent re-baseline retry retain their existing behavior.
 
 New packs still pass digest and signature verification. Only after successful
 application and closure verification does fetch durably publish the tracking

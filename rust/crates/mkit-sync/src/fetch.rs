@@ -129,7 +129,11 @@ pub(crate) struct Applied {
 ///
 /// # Self-heal
 ///
-/// Exactly one failure mode is treated as local staleness: the closure check
+/// An omitted prefix may contain a delta base missing from the local store.
+/// On that unpack failure, resolve the full chain once using the current
+/// applied-pack skips, restoring the behavior of the original full walk.
+///
+/// Local staleness recovery remains limited to the closure check
 /// reporting [`SyncError::RemoteMissingObject`] on a run that skipped at least
 /// one recorded pack. The record claimed packs were applied but their objects
 /// are not in the store (for example `.mkit/objects` was wiped while
@@ -162,7 +166,7 @@ pub(crate) fn apply_fetched_chain(
         mut chain,
         downloaded,
         head,
-        prefix_packs,
+        mut prefix_packs,
         ..
     } = fetched;
     let mut stats = Applied {
@@ -170,8 +174,26 @@ pub(crate) fn apply_fetched_chain(
         packs_skipped: chain.len() + prefix_packs - downloaded.packs.len(),
         objects_unpacked: 0,
     };
-    stats.objects_unpacked +=
-        unpack_downloaded_packs(store, observer, downloaded, applied, require_signed)?;
+    match unpack_downloaded_packs(store, observer, downloaded, applied, require_signed) {
+        Ok(count) => stats.objects_unpacked += count,
+        Err(SyncError::Pack(mkit_core::pack::PackError::DeltaBaseMissing(_)))
+            if prefix_packs > 0 =>
+        {
+            // The original full walk would have downloaded any unrecorded
+            // prefix packs before decoding this delta. Restore that ordering
+            // once, preserving applied-pack skips and all verification errors.
+            drop(chain);
+            chain = resolve_pack_chain(source, observer, branch, head)?;
+            prefix_packs = 0;
+            let downloaded =
+                download_pack_chain(source, observer, branch, &chain, applied, stage_parent)?;
+            stats.packs_downloaded = downloaded.packs.len();
+            stats.packs_skipped = chain.len() - downloaded.packs.len();
+            stats.objects_unpacked +=
+                unpack_downloaded_packs(store, observer, downloaded, applied, require_signed)?;
+        }
+        Err(e) => return Err(e),
+    }
 
     // Closure completeness. With skips this is the sole guarantee the store
     // is whole, and a `RemoteMissingObject` here is the ONLY self-heal

@@ -106,10 +106,13 @@ impl Remote {
                 )
                 .unwrap();
         }
-        let pack = writer.finish().unwrap();
-        let pack_key = pack::pack_key(&pack);
+        self.publish_pack(&writer.finish().unwrap(), tip, reset);
+    }
+
+    fn publish_pack(&self, pack: &[u8], tip: Hash, reset: bool) {
+        let pack_key = pack::pack_key(pack);
         self.tx
-            .upload_pack(&pack, &PackKey::from_hash(pack_key))
+            .upload_pack(pack, &PackKey::from_hash(pack_key))
             .unwrap();
         let prev = if reset {
             None
@@ -1110,6 +1113,97 @@ fn checkpoint_self_heals_a_missing_prefix_and_verifies_new_signatures() {
     assert_eq!(
         refs::read_remote_ref(&layout, "default", "main").unwrap(),
         Some(second)
+    );
+}
+
+#[test]
+fn omitted_prefix_restores_delta_bases_when_applied_record_is_missing() {
+    let remote = Remote::new();
+    let base = Object::Blob(Blob {
+        data: vec![b'a'; 1024],
+    });
+    let first = remote.publish(None, &[("a", &vec![b'a'; 1024])], true);
+    let source = remote.source();
+    let counted = identified(&source);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone(
+        &target,
+        &counted,
+        &default_remote("mkit+memory://x"),
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    let checkpoint = checkpoint_file(&target);
+    let before = std::fs::read(&checkpoint).unwrap();
+    let (objects, second) = remote.build(Some(first), &[("a", &vec![b'b'; 1024])], true);
+    let mut writer = PackWriter::new();
+    let base_bytes = mkit_core::serialize::serialize(&base).unwrap();
+    let target_bytes = mkit_core::serialize::serialize(&objects[0]).unwrap();
+    let delta = mkit_core::delta::encode(&base_bytes, &target_bytes).unwrap();
+    writer.push_delta(&base.id().unwrap(), &delta).unwrap();
+    for object in &objects[1..] {
+        writer
+            .push_raw(
+                object.id().unwrap(),
+                &mkit_core::serialize::serialize(object).unwrap(),
+            )
+            .unwrap();
+    }
+    remote.publish_pack(&writer.finish().unwrap(), second, false);
+    let layout = RepoLayout::single(&target);
+    std::fs::remove_dir_all(layout.objects_dir()).unwrap();
+    std::fs::create_dir_all(layout.objects_dir()).unwrap();
+    // A stale applied-pack record already failed this way before checkpoints.
+    // Falling back must retain those skips rather than broaden that recovery.
+    let error = fetch(
+        &target,
+        &counted,
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        SyncError::Pack(pack::PackError::DeltaBaseMissing(_))
+    ));
+    assert_eq!(std::fs::read(&checkpoint).unwrap(), before);
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(first)
+    );
+    // With no pack record, the original full walk restores the raw prefix
+    // before decoding its delta. An omitted prefix must preserve that behavior.
+    std::fs::remove_file(layout.applied_packs_dir().join("default")).unwrap();
+    counted.take();
+    let report = fetch(
+        &target,
+        &counted,
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(report.packs_downloaded, 2);
+    assert_eq!(counted.take().len(), 8); // suffix attempt, then one full walk
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(second)
+    );
+    assert_ne!(std::fs::read(checkpoint).unwrap(), before);
+    fetch(
+        &target,
+        &counted,
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(
+        counted.take(),
+        ["ListRefs", "ReadRef refs/mkit/packmap/main"]
     );
 }
 
