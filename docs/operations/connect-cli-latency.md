@@ -27,7 +27,8 @@ measurement. Shared-host timing noise is shown in the ranges.
 The old-path source is merged #1438 (`e1dff395`); its CLI, adapter, native channel
 and lockfile match the separately built approved parent tree. The switch before
 reuse is `7df65e1b`. The second comparison changes only native connection reuse
-and TCP_NODELAY in production. No other builds ran during either measurement.
+and TCP_NODELAY in production. This task launched no concurrent builds during
+either measurement; unrelated work on the shared host was uncontrolled.
 
 Before the fix, median milliseconds (min–max), and new TLS connections:
 
