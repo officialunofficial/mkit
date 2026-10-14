@@ -81,6 +81,9 @@ jobs:
       # Library-only avoids dev-dependency feature unification. Depth two
       # and the per-crate timeout bound the combinatorial cost. SQL is
       # unconditional in the Workers adapter, outside the core feature graph.
+      - name: Check feature names
+        working-directory: rust
+        run: python3 ../scripts/check-feature-names.py
       - name: Clippy feature powerset (depth two)
         working-directory: rust
         run: cargo hack clippy --locked -p ${{ matrix.crate }} --lib --feature-powerset --depth 2 -- -D warnings
@@ -232,7 +235,9 @@ jobs:
       - name: Clippy
         if: env.SHOULD_RUN == 'true'
         working-directory: rust
-        run: cargo clippy --all-targets --all-features --workspace -- -D warnings
+        run: |
+          python3 ../scripts/check-feature-names.py
+          cargo clippy --all-targets --all-features --workspace -- -D warnings
 
       - name: Build
         if: env.SHOULD_RUN == 'true'

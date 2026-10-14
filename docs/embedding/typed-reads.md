@@ -13,6 +13,8 @@ No accessor returns storage keys, encoded rows, or codec types.
 | Does a repository exist, and what visibility is stored? | `repository_visibility` | Visibility and an opaque equality revision, or absence |
 | Which branch pair is published? | `published_branch` | Head, packmap, last applied sequence, published sequence, and membership generation |
 | Which member pack holds an object, and is it denied now? | `locate_object` or `locate_objects` | Pack, frame location, decode metadata, and live object-or-pack denial |
+| Which of these packs index an object? | `object_index_in_packs` | Exact pack IDs and validated frame/decode metadata, in supplied order |
+| Is a pack currently visible in the chosen view? | `pack_witness` and `PackWitness::visible` | Fresh member and published-member witnesses, decoded independently |
 | What canonical kind does a member have? | `member_inventory` | Validated kind, canonical and logical lengths, and delta base |
 | What are a member's canonical bytes? | `read_member_canonical` | Verified bytes, delta depth, and aggregate decoded bytes |
 | What happened to the exact accepted fork? | `fork_job_status` | Phase, failure, completed result, inventory, authority, replay, and reservation identity |
@@ -37,8 +39,18 @@ When takedown denial is enabled, denial observations remain fresh per returned m
 When disabled, member locations report `denied = false` and canonical reads do not consult block or denial-action rows.
 Inventory and other metadata reads continue in both modes.
 Enabling denial on an existing store requires the migration and backfill described in the operations documentation.
+`object_index_in_packs` accepts at most `MAX_OBJECT_INDEX_PACKS` (1,024) packs,
+reads at most `OBJECT_INDEX_BATCH_SIZE` (128) exact keys per batch, and uses at most eight store calls.
+An empty query uses no calls. Present answers retain input order and duplicates;
+missing rows are omitted. Supply trusted lengths in `PackRef::len`, for example
+from a confirmed `ForkPack::bytes`. Every frame must fit its corresponding pack.
+This query reads indexes only: it does not establish membership, publication,
+denial clearance, or ref reachability. Validate witnesses separately.
+`pack_witness` uses one two-key read on the membership partition.
+Both accessors charge through the supplied store, including failed reads;
+an error discards the entire answer. Neither increases the caller's budget.
 Canonical decoding uses your `MemberReadLimits` and a fresh operation-local memo.
-The canonical resolver keeps its live object and pack denial checks, including delta bases.
+When denial is enabled, the canonical resolver keeps its live object and pack denial checks, including delta bases.
 A false `denied` observation never replaces a final serving guard.
 Trusted policy code can inspect denied membership and immutable inventory.
 
@@ -48,6 +60,23 @@ Membership queries report only the requested repository's member evidence.
 Corrupt consulted rows and exhausted lookup caps fail closed with an error.
 A missing publication ledger does not fall back to live heads or projections.
 The applied sequence can exceed the published sequence when advances await clearance.
+
+## Pack visibility witnesses
+
+`PackWitness::visible(writer, generation)` requires **both** `member` and
+`published` rows to exist. Each witness must be unheld, match the supplied
+membership generation, and either have `published = true` or be observed in a
+writer view. A hold blocks writers too. Sequence and boundary fields do not
+change this rule. The serving profile currently uses generation zero; do not
+substitute namespace authority generation. This is the internal witness
+clearance rule applied to both rows, as required for confirmed lineage evidence.
+The internal serving view's own row selection and policy checks remain unchanged.
+
+Both rows are decoded even if one is missing or invisible. The empty immediate
+membership representation decodes to generation/sequence zero, published true,
+held false, boundary false, exactly as in the internal reader. A corrupt partner
+is an error. Visibility is a fresh observation, not authorization, a denial
+check, an atomic multi-call snapshot, or a final disclosure guard.
 
 ## Visibility consistency
 
@@ -73,6 +102,8 @@ Recheck policy at the final disclosure boundary.
 | `adapter_spi::keys::{repo_record, repo_visibility}` and coordinator construction | Route repository metadata without knowing keys | `repository_visibility` through the configured `ReadAccess` |
 | `adapter_spi::publication::read` and ref-shard construction | Published head and packmap, sequence, and generation | `published_branch` |
 | `adapter_spi::index::{locate_many, LocatedObject}` | Repository membership and pack location | `locate_objects` for batches, or `locate_object` for one ID |
+| `adapter_spi::keys::object_index` and `codec::decode_object_index` | Exact index rows within retained packs and frame bounds | `object_index_in_packs` with trusted `PackRef` lengths |
+| `adapter_spi::keys::{membership, published_member}` and `publication::Witness::decode` | Joint live pack visibility | `pack_witness` and `PackWitness::visible` |
 | `takedown::inventory::entry` | Validated canonical kind and size | `member_inventory` |
 | `indexed::resolve::{member_object, MemberCache}` and `NoopMetrics` | Bounded canonical manifest and external-base decoding | `read_member_canonical`; use `decoded_bytes` to debit aggregate work |
 | `fork::{read_job, ForkJobV1, SettleV1, binding}` | Exact job binding, lifecycle, result, inherited packs, and retained landing evidence | `fork_job_status` |
@@ -83,6 +114,8 @@ For public branch disclosure, keep your authorized `Pipeline::read_ref` check an
 A stored pair alone does not authorize a public read.
 
 For confirmed lineage, require `Phase::Done` and compare `status.result` with your retained confirmed result.
+`status.packs` already contains the full confirmed inventory, including pack lengths
+in `ForkPack::bytes`, object counts, packmap markers, and delta-base markers.
 Require an authority generation, no grant epoch, and no namespace creation if your landing requires owner admission.
 The general status query reports other valid jobs without imposing that deployment policy.
 
@@ -100,3 +133,16 @@ Public contracts such as `ContentIndex::holders`, `RepoId`, and `ShardMap` remai
 Storage adapter implementations can still use `store::adapter_spi` for maintenance.
 Embedding business logic should use the typed accessors instead.
 This change adds APIs. It changes no wire or stored format and requires no store reset.
+
+## Test fixtures
+
+Enable `mkit-server/test-support` only in test dependencies. It is off by default.
+Use `mkit_server::test_support::TestSeeder` to seed repository records, visibility,
+and pack witnesses through the core's current codecs and routing. Read seeded
+visibility through `ReadAccess::repository_visibility` and compare the typed
+answer. These fixture writes bypass authorization and effects; they are for
+tests, not application mutations. Use pipeline operations for real writes.
+
+`store::adapter_spi` remains for storage adapters. Embedders' tests should use
+`test-support` instead of encoding storage rows directly, so fixtures track
+format changes. This feature introduces no wire or stored-format change.

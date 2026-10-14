@@ -63,6 +63,8 @@ pub mod storage_error;
 pub mod store;
 pub mod takedown;
 pub mod telemetry;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 pub mod timers;
 pub mod upload;
 pub mod url_token;

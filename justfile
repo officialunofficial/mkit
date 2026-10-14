@@ -57,6 +57,7 @@ ci-linux:
     #!/usr/bin/env bash
     set -euo pipefail
     ( cd rust && cargo fmt --check )
+    python3 scripts/check-feature-names.py
     ( cd rust && cargo clippy --all-targets --all-features --workspace -- -D warnings )
     ( cd rust && cargo build --locked --workspace )
     ( cd contrib/signers && cargo fmt --check )
@@ -86,6 +87,7 @@ ci-macos:
     #!/usr/bin/env bash
     set -euo pipefail
     ( cd rust && cargo fmt --check )
+    python3 scripts/check-feature-names.py
     ( cd rust && cargo clippy --all-targets --all-features --workspace -- -D warnings )
     ( cd rust && cargo build --locked --workspace )
     ( cd contrib/signers && cargo fmt --check )
@@ -157,6 +159,7 @@ ci-scripts:
     just ci-proto
     python3 scripts/golden/url_token_ref.py rust/tests/golden/url-token --no-b3sum
     bash scripts/check-wasm-dep-graph.sh
+    python3 scripts/check-feature-names.py
     python3 scripts/check-launch-feature-graph.py
     python3 scripts/test-server-gates.py
     python3 scripts/test-workers-wire-diagnostics.py
@@ -173,6 +176,7 @@ ci-scripts:
     ( cd rust && cargo check --locked -p mkit-server --target wasm32-unknown-unknown )
     ( cd rust && cargo check --locked -p mkit-server --features remote-hooks --target wasm32-unknown-unknown )
     ( cd rust && cargo check --locked -p mkit-server --features http-objects --target wasm32-unknown-unknown )
+    ( cd rust && cargo check --locked -p mkit-server --no-default-features --features test-support --target wasm32-unknown-unknown )
     ( cd rust && cargo build --locked -p mkit-server-worker --target wasm32-unknown-unknown )
     ( cd apps/embedded-worker && cargo clippy --locked --target wasm32-unknown-unknown -- -D warnings )
     bash scripts/wasm-ruzstd-check.sh
@@ -195,12 +199,14 @@ ci-connect-deadlines:
 ci-server:
     #!/usr/bin/env bash
     set -euo pipefail
+    python3 scripts/check-feature-names.py
     just ci-server-allocator
     ( cd rust && cargo nextest run --locked -p mkit-server \
         -p mkit-server-conformance -p mkit-server-worker --all-features )
     ( cd rust && cargo check --locked -p mkit-server --target wasm32-unknown-unknown \
         && cargo check --locked -p mkit-server --features remote-hooks --target wasm32-unknown-unknown \
         && cargo check --locked -p mkit-server --features http-objects --target wasm32-unknown-unknown \
+        && cargo check --locked -p mkit-server --no-default-features --features test-support --target wasm32-unknown-unknown \
         && cargo build --locked -p mkit-server-worker --target wasm32-unknown-unknown )
     ( cd rust && cargo clippy --locked -p mkit-server -p mkit-server-worker \
         --target wasm32-unknown-unknown -- -D warnings )

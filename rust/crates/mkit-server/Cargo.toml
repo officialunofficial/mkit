@@ -97,6 +97,9 @@ connect = [
 # In-memory reference backends (`MemoryKv`, `MemoryBlobStore`): the template
 # for third-party backends. Always compiled for this crate's own unit tests.
 memory = []
+# Typed fixture writes for embedder tests; never a production default.
+# Independent of `memory`, so tests may seed their own storage adapter.
+test-support = []
 pack-ruzstd = ["mkit-core/pack-ruzstd"]
 # The pipeline's test seam: `FaultHooks` at five points and per-request
 # `TestDirectives` (`x-mkit-test-fault`, `x-mkit-test-clock-skew-ms`).
@@ -157,3 +160,7 @@ tower = { version = "0.5", features = ["util"] }
 [[test]]
 name = "connect_dispatch"
 required-features = ["connect", "memory"]
+
+[[test]]
+name = "test_support"
+required-features = ["test-support", "memory"]

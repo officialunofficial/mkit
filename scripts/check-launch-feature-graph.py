@@ -27,6 +27,8 @@ def check(manifest, features=()):
     for name in ("mkit-server", "mkit-server-worker"):
         if "__test-faults" in resolved[name]:
             raise SystemExit(f"{manifest}: launch enables internal fault injection")
+    if "test-support" in resolved["mkit-server"]:
+        raise SystemExit(f"{manifest}: launch enables test fixture writes")
     if "sql" in resolved["mkit-server"]:
         raise SystemExit(f"{manifest}: SQL belongs in the Workers adapter")
     if "pack-zstd" in resolved["mkit-core"]:

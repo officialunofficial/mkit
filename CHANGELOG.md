@@ -13,6 +13,16 @@ Combine tags when applicable; every breaking API entry states a replacement and
 every stored-format entry states whether a store reset is required. Embedders
 collect the applicable entries between their old and new immutable pins.
 
+### Added
+
+- Typed embedding reads now include exact object-index lookups within supplied
+  packs, with validated frame bounds and ordered results, plus fresh membership
+  and published-member witnesses with the internal clearance rule.
+  `ForkJobStatus::packs` already includes confirmed pack lengths in `bytes`.
+  The opt-in `mkit-server/test-support` feature supplies typed test seeders;
+  embedders' tests should use it instead of `adapter_spi` codecs.
+  APIs are additive. No wire or stored-format change; no wipe.
+
 ### Changed
 
 - Ingest and read paths skip block and denial-action reads when
