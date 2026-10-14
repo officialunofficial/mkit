@@ -25,6 +25,14 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Changed
 
+- The reachability walk behind object reads now expands trees first and then
+  alternates one history batch with one file batch, instead of locating every
+  file entry of a tree before following any commit parent. Reading an older
+  commit, or anything inside it, no longer costs O(entries) of the wide tip tree
+  per read. The proven reachable set, uniform absence, takedown stops, walk and
+  decode caps and error precedence are unchanged; only the order of exploration
+  differs, so a walk that hits a cap may now hide different objects. No API,
+  wire or stored-format change; no wipe.
 - `ReadAccess::recover_completed_fork` now recovers a completed fork that created
   its destination namespace (a first fork into a new namespace) instead of failing
   closed. Replay, reservation and settlement checks are unchanged; the namespace

@@ -160,21 +160,56 @@ fn manifest_sized(size: u64) -> bool {
         && (size - MANIFEST_FIXED).is_multiple_of(32)
 }
 
+/// Files located by the first file batch taken while history is waiting.
+const FIRST_FILE_BATCH: usize = 8;
+
 /// The queues one walk drains, bounded by `cap` distinct objects so a wide
 /// tree cannot grow them without limit.
+///
+/// Order: trees first (a target is found when its parent object is
+/// *expanded*, so a tree is the cheap way to the next level), then history
+/// and files alternate. A file entry is located only to learn whether it is
+/// manifest-sized and so might hide chunk targets; a plain file is located
+/// just to be skipped, and a locate costs one index scan per id. Draining the
+/// files of a wide tip tree before following a parent edge made an older
+/// commit cost O(entries). While history waits, the file batch therefore
+/// starts small and doubles (up to `BATCH`) with every history batch: an
+/// older commit `d` hops back costs about `FIRST_FILE_BATCH * 2^d` locates
+/// instead of every entry, and a chunk target behind a tip manifest, `p`
+/// files in, waits for only about `log2(p)` history batches. Once history is
+/// exhausted, files drain at the full batch size.
 struct Frontier {
     cap: usize,
     seen: BTreeSet<Hash>,
-    /// Commits, remixes and tags: history, walked after the trees.
+    /// Commits, remixes and tags: history.
     nodes: VecDeque<Hash>,
-    /// Trees and files: tip trees are the likeliest targets.
-    work: VecDeque<(Hash, Kind)>,
+    /// Trees: expanded before anything else.
+    trees: VecDeque<Hash>,
+    /// Blob and `ChunkedBlob` entries, located only to find manifests.
+    files: VecDeque<Hash>,
+    /// Whether the next non-tree batch is a file batch.
+    files_turn: bool,
+    /// The size of the next file batch taken while history waits.
+    file_quota: usize,
     /// A reference was not queued because of `cap`, or an object was skipped
     /// because of the decode budget: the walk is incomplete.
     incomplete: Option<Miss>,
 }
 
 impl Frontier {
+    fn new(cap: usize) -> Self {
+        Self {
+            cap,
+            seen: BTreeSet::new(),
+            nodes: VecDeque::new(),
+            trees: VecDeque::new(),
+            files: VecDeque::new(),
+            files_turn: false,
+            file_quota: FIRST_FILE_BATCH,
+            incomplete: None,
+        }
+    }
+
     fn push(&mut self, id: Hash, kind: Kind) {
         if self.seen.contains(&id) {
             return;
@@ -186,29 +221,34 @@ impl Frontier {
         self.seen.insert(id);
         match kind {
             Kind::Node => self.nodes.push_back(id),
-            Kind::Tree | Kind::File => self.work.push_back((id, kind)),
+            Kind::Tree => self.trees.push_back(id),
+            Kind::File => self.files.push_back(id),
         }
     }
 
-    /// The next batch: trees and files first, then history.
+    /// The next batch: trees, then history and files alternately. Every
+    /// queued id is eventually popped, so an exhaustive walk visits the same
+    /// set in any order.
     fn batch(&mut self) -> Vec<(Hash, Kind)> {
-        let mut batch = Vec::new();
-        if self.work.is_empty() {
-            while batch.len() < BATCH {
-                let Some(id) = self.nodes.pop_front() else {
-                    break;
-                };
-                batch.push((id, Kind::Node));
-            }
-        } else {
-            while batch.len() < BATCH {
-                let Some(item) = self.work.pop_front() else {
-                    break;
-                };
-                batch.push(item);
-            }
+        fn take(queue: &mut VecDeque<Hash>, kind: Kind, most: usize) -> Vec<(Hash, Kind)> {
+            let n = queue.len().min(most);
+            queue.drain(..n).map(|id| (id, kind)).collect()
         }
-        batch
+        if !self.trees.is_empty() {
+            return take(&mut self.trees, Kind::Tree, BATCH);
+        }
+        if self.nodes.is_empty() {
+            return take(&mut self.files, Kind::File, BATCH);
+        }
+        let files_turn = self.files_turn;
+        self.files_turn = !files_turn;
+        if files_turn && !self.files.is_empty() {
+            let most = self.file_quota;
+            self.file_quota = (most * 2).min(BATCH);
+            take(&mut self.files, Kind::File, most)
+        } else {
+            take(&mut self.nodes, Kind::Node, BATCH)
+        }
     }
 }
 
@@ -297,13 +337,7 @@ pub(crate) async fn walk_many_memo<B: BlobStore, N: NamespaceStore>(
     mut memo: Option<&mut crate::pipeline::read_proofs::ReadProofs>,
 ) -> Result<(BTreeSet<Hash>, Option<Miss>), Miss> {
     let mut reached = BTreeSet::new();
-    let mut frontier = Frontier {
-        cap: env.cfg.max_walk_objects,
-        seen: BTreeSet::new(),
-        nodes: VecDeque::new(),
-        work: VecDeque::new(),
-        incomplete: None,
-    };
+    let mut frontier = Frontier::new(env.cfg.max_walk_objects);
     let mut record = |id| {
         if targets.contains(&id) {
             reached.insert(id);
@@ -424,6 +458,72 @@ mod tests {
         cache.record(&a, &[3; 32], 16_000);
         assert!(known(&cache, &a, 3, 16_000));
         assert!(!known(&cache, &a, 1, 16_000));
+    }
+
+    fn hash_of(n: usize) -> Hash {
+        let mut h = [0; 32];
+        h[..8].copy_from_slice(&(n as u64).to_be_bytes());
+        h
+    }
+
+    #[test]
+    fn trees_come_first_and_files_ramp_up_while_history_waits() {
+        let mut frontier = Frontier::new(10_000);
+        frontier.push(hash_of(1), Kind::Tree);
+        frontier.push(hash_of(2), Kind::Node);
+        for n in 0..1_000 {
+            frontier.push(hash_of(100 + n), Kind::File);
+        }
+        let first = frontier.batch();
+        assert_eq!(first.len(), 1);
+        assert!(first.iter().all(|(_, kind)| *kind == Kind::Tree));
+        // History, then a small file batch, then history again, and so on.
+        let mut sizes = Vec::new();
+        for turn in 0..8 {
+            if turn % 2 == 0 {
+                let batch = frontier.batch();
+                assert!(batch.iter().all(|(_, kind)| *kind == Kind::Node));
+                frontier.push(hash_of(10_000 + turn), Kind::Node);
+            } else {
+                let batch = frontier.batch();
+                assert!(batch.iter().all(|(_, kind)| *kind == Kind::File));
+                sizes.push(batch.len());
+            }
+        }
+        assert_eq!(sizes, [8, 16, 32, 64]);
+    }
+
+    #[test]
+    fn an_exhaustive_walk_pops_every_queued_id_once() {
+        let mut frontier = Frontier::new(10_000);
+        for n in 0..3_000 {
+            let kind = [Kind::Node, Kind::Tree, Kind::File][n % 3];
+            frontier.push(hash_of(n), kind);
+        }
+        let mut popped = BTreeSet::new();
+        loop {
+            let batch = frontier.batch();
+            if batch.is_empty() {
+                break;
+            }
+            assert!(batch.len() <= BATCH);
+            for (id, _) in batch {
+                assert!(popped.insert(id), "popped twice");
+            }
+        }
+        assert_eq!(popped.len(), 3_000);
+        assert_eq!(frontier.seen.len(), 3_000);
+    }
+
+    #[test]
+    fn the_cap_still_hides_references_and_reports_incomplete() {
+        let mut frontier = Frontier::new(2);
+        frontier.push(hash_of(1), Kind::Node);
+        frontier.push(hash_of(2), Kind::File);
+        assert!(frontier.incomplete.is_none());
+        frontier.push(hash_of(3), Kind::Tree);
+        assert_eq!(frontier.incomplete, Some(Miss::Capped));
+        assert!(frontier.trees.is_empty());
     }
 
     #[test]
