@@ -2413,7 +2413,9 @@ lookup prefix or one ancestry/decode step. Only a previous canonical accumulator
 and one decoded frame are resident; descriptors and fragments use existing vc4.
 Every decoded frame and accumulator matches its core object identity before upload, and
 completed source charge advances atomically with the chunk cursor. Restart cannot
-lose or double that charge.
+lose or double that charge. Extraction boxes each stage future at the serial
+loop boundary so backend future storage does not accumulate in enclosing slice
+futures. The 50-hop quota-boundary test retains a 512 KiB stack.
 
 **Because:** a native-valid 50-hop source can exceed a single alarm's 256 calls
 while fitting its 48 MiB live-memory allowance. Retrying a whole chain would stall.
@@ -2424,7 +2426,10 @@ or unverified canonical content reaches the object store.
 **Enforced by:** `job/extraction/member.rs` and the guarded `Stop::Yield` path.
 `extraction_budget_tests` compares native results, per-alarm progress/calls and
 restart midway through a 50-hop chain, including 250 KiB nodes and the exact
-whole-source decode-budget boundary. Apply validation retains 100 ops / 1 MiB.
+whole-source decode-budget boundary. `extraction_step_futures_stay_small` bounds
+unpolled coroutine sizes with both ordinary and counted stores. These steps are
+shared with wasm32; the native size guard complements the wasm32 build and
+Workers wire-conformance checks. Apply validation retains 100 ops / 1 MiB.
 
 ## Launch inspection checks the complete bounded set before apply
 

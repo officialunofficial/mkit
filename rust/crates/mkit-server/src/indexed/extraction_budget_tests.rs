@@ -2938,3 +2938,35 @@ fn a_bad_future_frame_offset_does_not_fail_an_earlier_chunk() {
     assert!(fire_with(&rig, &handler, pack).is_err());
     assert_eq!(rig.job(&pack).unwrap().extraction, before);
 }
+
+#[test]
+fn extraction_step_futures_stay_small() {
+    let rig = Rig::new();
+    let handler = extraction_handler(&rig, TestExtraction::new(&rig));
+    let counted = counted_extraction(&rig, Arc::default(), [0; 32]);
+    // These are the same step functions used on wasm32. Check the concrete
+    // store wrappers from the small-stack fixture without polling or doing I/O.
+    for sizes in [
+        handler.extraction_future_sizes(rig.store.as_ref(), &rig.source(), rig.repo.clone()),
+        counted.extraction_future_sizes(rig.store.as_ref(), &rig.source(), rig.repo.clone()),
+    ] {
+        eprintln!("extraction future sizes: {sizes:?}");
+        for (name, bytes) in sizes {
+            // `extraction` is ~1.8 KiB once its stage future is boxed and
+            // ~5.7 KiB if the stage is stored inline, so the 2 KiB cap is the
+            // load-bearing check. The 5 KiB child cap only stops a child from
+            // growing wholesale; the small-stack tests above remain the
+            // poll-time guard. Revisit the numbers if a toolchain bump shifts
+            // layouts without a real regression.
+            let limit = if name == "extraction" {
+                2 << 10
+            } else {
+                5 << 10
+            };
+            assert!(
+                bytes <= limit,
+                "{name} future is {bytes} bytes, exceeds {limit}"
+            );
+        }
+    }
+}
