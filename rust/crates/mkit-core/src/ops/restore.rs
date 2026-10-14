@@ -786,10 +786,7 @@ where
             let writer = scope.spawn(move || -> io::Result<u64> {
                 let mut written: u64 = 0;
                 for bufs in rx {
-                    for buf in &bufs {
-                        out.write_all(buf)?;
-                        written += buf.len() as u64;
-                    }
+                    written += write_batch_vectored(out, &bufs)?;
                 }
                 Ok(written)
             });
@@ -823,12 +820,34 @@ where
 
     let mut written: u64 = 0;
     for batch in chunks.chunks(batch_size) {
-        for buf in &read_batch(batch)? {
-            out.write_all(buf)?;
-            written += buf.len() as u64;
-        }
+        written += write_batch_vectored(out, &read_batch(batch)?)?;
     }
     Ok(written)
+}
+
+/// Most `IoSlice`s handed to one `write_vectored` call (Linux `IOV_MAX`
+/// is 1024; `RESTORE_CHUNK_BATCH` is far below it).
+const WRITEV_SLICES: usize = 64;
+
+/// Append every buffer in `bufs` to `out` with `writev`, so a batch of
+/// chunks costs one syscall instead of one per chunk. Handles short
+/// writes; returns the total bytes written.
+fn write_batch_vectored(out: &mut fs::File, bufs: &[Vec<u8>]) -> io::Result<u64> {
+    use std::io::IoSlice;
+    let total: u64 = bufs.iter().map(|b| b.len() as u64).sum();
+    for group in bufs.chunks(WRITEV_SLICES) {
+        let mut slices: Vec<IoSlice<'_>> = group.iter().map(|b| IoSlice::new(b)).collect();
+        let mut rest: &mut [IoSlice<'_>] = &mut slices;
+        while !rest.is_empty() {
+            match out.write_vectored(rest) {
+                Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+                Ok(n) => IoSlice::advance_slices(&mut rest, n),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    Ok(total)
 }
 
 /// Default `read_chunks`: reads and type-checks each chunk hash in
