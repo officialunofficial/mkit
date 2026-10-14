@@ -131,6 +131,79 @@ class AlarmWrapperTests(unittest.TestCase):
         self.assertFalse((self.root / wrapper.BASE_NAME).exists())
         self.assertEqual(list(self.root.iterdir()), [self.shim])
 
+    def test_direct_runtime_registers_base_only_for_wrapped_shim(self):
+        runtime = SCRIPT.with_name("workers-wire-runtime.cjs")
+        artifacts = {}
+        for mode in ("wrapped", "plain"):
+            artifact = self.root / mode
+            worker = artifact / "worker"
+            worker.mkdir(parents=True)
+            shim = worker / "shim.mjs"
+            shim.write_text(fixture())
+            if mode == "wrapped":
+                wrapper.enable(shim)
+            else:
+                # A stale base from an earlier opt-in build must stay unregistered.
+                (worker / wrapper.BASE_NAME).write_text(fixture())
+            artifacts[mode] = str(artifact)
+        binary_directory = self.root / "bin"
+        binary_directory.mkdir()
+        (binary_directory / "wrangler").write_text("fake executable")
+        result = self.node(
+            "import assert from 'node:assert/strict';\n"
+            "import fs from 'node:fs';\n"
+            "import path from 'node:path';\n"
+            "import vm from 'node:vm';\n"
+            "import {createRequire} from 'node:module';\n"
+            f"const runtime = {json.dumps(str(runtime))};\n"
+            f"const artifacts = {json.dumps(artifacts)};\n"
+            f"const binaryDirectory = {json.dumps(str(binary_directory))};\n"
+            "const realRequire = createRequire(runtime);\n"
+            "for (const [mode, artifact] of Object.entries(artifacts)) {\n"
+            "  let captured, disposed = false;\n"
+            "  const errors = [];\n"
+            "  const modules = {\n"
+            "    wrangler: {unstable_getMiniflareWorkerOptions() {\n"
+            "      return {workerOptions: {name: 'probe', bindings: {}},\n"
+            "        main: path.join(artifact, 'worker/shim.mjs'), externalWorkers: []};\n"
+            "    }},\n"
+            "    miniflare: {\n"
+            "      convertV4MiniflareOptions(options) {captured = options; return options;},\n"
+            "      Log: class {}, LogLevel: {DEBUG: 0},\n"
+            "      Miniflare: class {\n"
+            "        async unsafeGetDirectURL() {return new URL('http://127.0.0.1:9000');}\n"
+            "        async dispose() {disposed = true;}\n"
+            "      },\n"
+            "    },\n"
+            "  };\n"
+            "  const fakeProcess = {\n"
+            "    env: {PATH: binaryDirectory},\n"
+            "    argv: ['node', runtime, 'config', artifact, 'state', '9000'],\n"
+            "    once(_signal, callback) {queueMicrotask(callback);},\n"
+            "  };\n"
+            "  vm.runInNewContext(fs.readFileSync(runtime, 'utf8'), {\n"
+            "    process: fakeProcess,\n"
+            "    console: {log() {}, error(error) {errors.push(error);}},\n"
+            "    require(name) {\n"
+            "      if (name === 'node:module') return {createRequire() {\n"
+            "        return name => {assert.ok(name in modules); return modules[name];};\n"
+            "      }};\n"
+            "      return realRequire(name);\n"
+            "    },\n"
+            "  }, {filename: runtime});\n"
+            "  await new Promise(resolve => setImmediate(resolve));\n"
+            "  assert.deepEqual(errors, []);\n"
+            "  assert.equal(disposed, true);\n"
+            "  const registered = captured.workers[0].modules;\n"
+            "  const base = path.join(artifact, 'worker/alarm-base.mjs');\n"
+            "  const matching = registered.filter(module => module.path === base);\n"
+            "  assert.equal(matching.length, mode === 'wrapped' ? 1 : 0, mode);\n"
+            "  if (mode === 'wrapped') assert.equal(matching[0].type, 'ESModule');\n"
+            "  assert.equal(new Set(registered.map(module => module.path)).size, registered.length);\n"
+            "}\n"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_missing_base_is_rejected(self):
         wrapper.enable(self.shim)
         (self.root / wrapper.BASE_NAME).unlink()

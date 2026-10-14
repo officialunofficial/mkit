@@ -15,7 +15,7 @@ The explicit post-build step preserves the SDK's default and named exports.
 It replaces only the five classes' `alarm(info)` methods, forwarding to the
 feature's additive `alarmWithInfo` export. Class identity, constructor, fetch,
 WebSocket, connect, and other methods and static exports remain with the SDK. Repeat the step after every
-fresh build. The wire harness does this only for its feature-enabled matrix.
+fresh build and include both generated modules when packaging the Worker. The wire harness does this only for its feature-enabled matrix.
 Default builds retain the original shim. Other embedders can use the same
 helper on their generated shim or explicitly forward metadata to
 `NsObject::alarm_with_info`.
