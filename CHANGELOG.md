@@ -27,7 +27,7 @@ collect the applicable entries between their old and new immutable pins.
 
 - Scheduled indexed extraction boxes each stage future so nested backend reads
   leave room for frame decoding on a small stack. The 50-hop quota-boundary
-  regression retains its 512 KiB stack, and a future-size guard covers the
+  regression retains its 512 KiB stack, and a native future-size guard covers the
   extraction steps shared with wasm32. Checks, source charging, stored bytes,
   public APIs, and wire formats are unchanged; no store reset is required.
 

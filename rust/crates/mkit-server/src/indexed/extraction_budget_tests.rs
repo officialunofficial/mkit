@@ -2952,6 +2952,12 @@ fn extraction_step_futures_stay_small() {
     ] {
         eprintln!("extraction future sizes: {sizes:?}");
         for (name, bytes) in sizes {
+            // `extraction` is ~1.8 KiB once its stage future is boxed and
+            // ~5.7 KiB if the stage is stored inline, so the 2 KiB cap is the
+            // load-bearing check. The 5 KiB child cap only stops a child from
+            // growing wholesale; the small-stack tests above remain the
+            // poll-time guard. Revisit the numbers if a toolchain bump shifts
+            // layouts without a real regression.
             let limit = if name == "extraction" {
                 2 << 10
             } else {
