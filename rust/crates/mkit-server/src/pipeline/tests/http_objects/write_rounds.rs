@@ -155,6 +155,8 @@ fn tag(key: &Key) -> &'static str {
         b"ae" => "ae",
         b"ai" => "ai",
         b"ps" => "ps",
+        b"d" => "d",
+        b"work" => "work",
         _ => "?",
     }
 }
@@ -359,18 +361,19 @@ struct BlobProbe {
 }
 
 impl BlobProbe {
+    /// Record the call always — like `ProbeKv` — and wait out its
+    /// virtual latency when the model is armed.
     async fn call(&self, op: &'static str, key: BlobKey) {
         let warm = self.latency_ms.load(Ordering::SeqCst);
-        if warm == 0 {
-            return;
+        if warm != 0 {
+            let cold = self.cold_ms.load(Ordering::SeqCst);
+            let ms = if cold != 0 && !self.touched.swap(true, Ordering::SeqCst) {
+                cold
+            } else {
+                warm
+            };
+            read_probe::delay(ms, "blob").await;
         }
-        let cold = self.cold_ms.load(Ordering::SeqCst);
-        let ms = if cold != 0 && !self.touched.swap(true, Ordering::SeqCst) {
-            cold
-        } else {
-            warm
-        };
-        read_probe::delay(ms, "blob").await;
         self.calls.lock().unwrap().push((op, key));
     }
 }
@@ -909,13 +912,14 @@ impl Admission for EffectAdmission {
     }
 }
 
-/// The hooks row for the AD1 matrix variant.
-fn effect_hooks() -> Hooks<OpenAuthorizer, EffectAdmission, NoPreReceive, NoReceipts, NoOutcomes> {
+/// The hooks row for the AD1 matrix variant; `effects` is shared so the
+/// test can prove the hook really ran.
+fn effect_hooks(
+    effects: Arc<Mutex<Vec<RefEffect>>>,
+) -> Hooks<OpenAuthorizer, EffectAdmission, NoPreReceive, NoReceipts, NoOutcomes> {
     Hooks {
         authorizer: OpenAuthorizer,
-        admission: EffectAdmission {
-            effects: Arc::new(Mutex::new(Vec::new())),
-        },
+        admission: EffectAdmission { effects },
         pre_receive: NoPreReceive,
         receipts: NoReceipts,
         outcomes: NoOutcomes,
@@ -1302,6 +1306,7 @@ fn pin(cell: &str, cold: bool, result: &str, report: &Report, expect: &Expect) -
 fn signed_write_shapes_report_rounds() {
     let mut failures = Vec::new();
     for (op, cells) in &SHAPES {
+        let effects = Arc::new(Mutex::new(Vec::new()));
         for sharding in [Sharding::Single, Sharding::D34] {
             for denial in [false, true] {
                 let expect =
@@ -1312,8 +1317,14 @@ fn signed_write_shapes_report_rounds() {
                     if let Some(mismatch) = pin(&cell, cold, &result, &report, expect) {
                         failures.push(mismatch);
                     }
-                    let (ad_result, ad_report) =
-                        measured(sharding, denial, effect_hooks, *op, cold);
+                    let handle = effects.clone();
+                    let (ad_result, ad_report) = measured(
+                        sharding,
+                        denial,
+                        move || effect_hooks(handle.clone()),
+                        *op,
+                        cold,
+                    );
                     if let Some(mismatch) = pin(
                         &format!("{cell} hooks=ad1"),
                         cold,
@@ -1326,6 +1337,11 @@ fn signed_write_shapes_report_rounds() {
                 }
             }
         }
+        // An identical-measurement pin is only meaningful if admission ran.
+        assert!(
+            !effects.lock().unwrap().is_empty(),
+            "{op:?}: AD1 hook recorded no effects — admission never ran"
+        );
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

@@ -3,7 +3,8 @@
 The write-round probe measures signed ref writes the way
 `pipeline/tests/http_objects/read_rounds.rs` measures reads: every namespace
 and blob call is recorded, tagged with a pipeline phase, and priced on a paused
-clock — 30 ms per call warm, 300 ms for each cold first touch of a partition.
+clock — 30 ms per call warm, 300 ms for the first touch of each index or
+content partition (and once for the blob store).
 Rounds count dependent calls (overlapping delays coalesce), not elapsed
 production latency; the numbers size mkit's share of an embedder's per-write
 wall time and expose serial work.
@@ -18,12 +19,14 @@ cargo test -p mkit-server --all-features --lib write_rounds -- --nocapture
 
 ## Signed write shapes
 
-Each cell is one request on a seeded repository (`refs/heads/main` plus its
-packmap, both members verified). `UpdateRef Match` moves `main` to the child
-commit inside the same pack. Denial on sets `takedown_denial`; an "open
-closure" cell is the public error the request ends with — a ticketless create
-cannot carry a packlist under denial, so only `AdvanceRefs` with an explicit
-packmap, or a `Match` move inside an existing packlist, can commit.
+Each cell is one request on a seeded repository (two published branches,
+`refs/heads/main` and `refs/heads/two`, each with its packmap, all members
+verified). `UpdateRef Match` moves `main` to the child commit inside the same
+pack. Denial on sets `takedown_denial`; an "open closure" cell is the public
+error the request ends with — a ticketless create cannot carry a packlist
+under denial, so on the branch ops only `AdvanceRefs` with an explicit
+packmap, or a `Match` move inside an existing packlist, can commit. `Tag
+create` commits under denial because tag refs carry no packmap to prove.
 
 | Shape | Shard | Denial | Outcome | KV | Blobs | Warm ms | Cold ms | Rounds |
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
@@ -55,9 +58,11 @@ mid-request CAS writes, not only the final commit.
 
 Denial off, a signed ref write is 4–7 KV calls and one batch: the fused
 read-ahead, the object-index lookup and membership read, then the apply. The
-embedder's plain writes are cheap in mkit's model — about five dependent
-rounds, 150 ms warm, well under half a second even at a generous real per-call
-latency. The denial-on row is where the rounds are.
+embedder's plain writes are cheap in mkit's model — five dependent rounds,
+150 ms warm on Single; D34 adds the coordinator lease and outbox for creates
+(8 rounds, 240 ms), and `source_ref` runs 9–12 rounds (270–360 ms). All stay
+well under half a second at a generous real per-call latency. The denial-on
+row is where the rounds are.
 
 ## Embedder flow: upload, scheduled verify, ticketed advance
 
@@ -104,9 +109,10 @@ out-of-band verification pump. With denial the request path nearly triples
 (82 calls, 2580 ms warm modeled) because the committing advance pays the full
 denial price. Against a reported multi-second per-write latency, mkit's
 request-path model is ~1.1 s warm without denial and ~2.6 s with it; cold
-first touches add up to ~1.1 s more. Anything beyond that needs numbers from
-the real store's per-call latency — the probe's 30 ms unit is deliberately
-conservative, and the dependent chains below are what scale with it.
+first touches add ~0.3 s more without denial and ~1.4 s with it. Anything
+beyond that needs numbers from the real store's per-call latency — the probe's
+30 ms unit is deliberately conservative, and the dependent chains below are
+what scale with it.
 
 ## Findings (measurement only — fixes belong to a follow-up lane)
 
@@ -158,9 +164,10 @@ warm-model upper bounds for the serialized work, not predicted wall-clock.
    "pending" reply as cheap should note it costs a full plan+apply.
 
 4. **The commit retry re-reads verify-job rows serially.** The retry's
-   usability check does `get_many(vc,vs)` then two `scan(vc)` plus two
-   `get(vc)` per ticket (`indexed/job.rs`, `pipeline/begin.rs:84-95`) —
-   ~6 serial calls ≈ 180 ms warm per ticket before the fused re-read.
+   usability check does `get_many(vc,vs)` then `scan(vc)` ranges plus
+   per-member `get` reads per ticket (`indexed/scheduled.rs:809-821`,
+   `scheduled.rs:952-1012`, `scheduled.rs:200-228`) — ~6 serial calls ≈ 180 ms
+   warm per ticket before the fused re-read.
 
 5. **Duplicate whole-pack blob reads on the request path.** `Tag create`
    Single/denial fetches the target commit's pack **four times** and the
@@ -186,7 +193,10 @@ warm-model upper bounds for the serialized work, not predicted wall-clock.
    runs `observe_lease` + `admit_lease` twice — once before planning and again
    inside the apply loop because `prove` forces re-admission
    (`pipeline/lease.rs:631`, `lease.rs:718`, `pipeline/mod.rs:4257-4275`) —
-   4 coordinator calls ≈ 3 extra rounds on every D34 denial write.
+   4 coordinator calls ≈ 3 extra rounds on the D34 denial cells that lease
+   (advances, creates and tag creates); a `Match` move inside an existing
+   packlist takes no lease at all, and a `Missing` create rejected at plan
+   pays only the first admission.
 
 8. **The settle pump is serial per job.** Scheduled verification drives
    ~9-call checkpoint rounds per fired job — `scan(w)` claim, `vc`/`vs` reads,
@@ -211,8 +221,11 @@ warm-model upper bounds for the serialized work, not predicted wall-clock.
 
 - The 30 ms unit is a modeling constant, not a store benchmark; real savings
   scale with the deployment's per-call latency. Cold-modeled cells charge
-  300 ms only for the first touch of each partition — an upper bound when
-  partitions stay warm across requests.
+  300 ms only for the first touch of each index or content partition and once
+  for the blob store (`read_probe::partition_latency_ms`) — an upper bound
+  when partitions stay warm across requests.
+- The settle step is a fixed pump: twelve `run_due` ticks at 1 ms apart, so
+  its call counts are for this two-pack flow, not a general settlement price.
 - `PlanSnapshot` over-attributes: the probe tags by key class, so denial proof
   and resume work inside `plan_and_apply` all land there.
 - Rounds measure the dependent chain under the paused clock, not wall time;
