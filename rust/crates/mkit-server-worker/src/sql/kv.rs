@@ -100,6 +100,11 @@ impl<C> fmt::Debug for SqlKvStore<C> {
 }
 
 impl<C: SqlConn> SqlKvStore<C> {
+    /// Admission threshold for bounded metadata writes outside portable KV.
+    pub(super) fn metadata_soft_limit(&self) -> Option<u64> {
+        self.capacity.map(|capacity| capacity.soft_limit())
+    }
+
     /// A store over `conn`, initializing a fresh schema or requiring the current one
     /// ([`schema::initialize`]).
     ///
@@ -336,6 +341,7 @@ where
     batch
         .validate(&StoreCapabilities::full())
         .map_err(|_| SqlError::Corrupt("extended batch exceeds limits"))?;
+    super::publication_maintenance::reject_paused_writes(conn, part, &batch)?;
     let SqlValue::Blob(encoded_partition) = part else {
         return Err(SqlError::Corrupt("invalid publication fence partition"));
     };

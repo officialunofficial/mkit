@@ -2792,3 +2792,26 @@ A post-write notification cannot close the interval before its delivery.
 Native tests cover split delivery, duplicates, concurrent sources, aborts, recovery, and generation changes.
 Real relay and SQLite tests cover target effects, source cleanup, and transaction-extension tampering.
 Physical alarm tests cover crash-before-arm recovery and real relay completion through the source driver.
+
+## Local publication pauses survive portable imports and protect pruning reserve
+
+**Always:** an explicit maintenance pause binds a logical partition to its external
+generation in a private SQL table. The final transaction checks this barrier after
+extensions and rejects every write to a paused partition, including portable imports.
+Already-open stores observe the committed barrier. Reads remain available.
+New or changed pause metadata obeys the ordinary storage soft limit; an exact
+retry performs no write and remains available at that limit.
+Pause rows are outside portable KV exports. Native physical backups include them.
+There is no resume path, and default factories install no pause.
+A local pause receipt proves neither complete source inventory nor bootstrap readiness.
+Deployments must fence new source creation, delayed outbound effects and every target
+before sealing a global publication root.
+
+**Because:** restoring portable data must not remove a live executor's maintenance
+barrier, and maintenance metadata must not consume the reserve needed for pruning.
+
+**If violated:** an old writer or imported snapshot changes paused publication state,
+or unrelated partitions lose delete-only recovery capacity.
+
+**Enforced by:** `sql::publication_maintenance`, final SQL transaction validation,
+SQLite reopen/import/extension tests and small-capacity admission regressions.

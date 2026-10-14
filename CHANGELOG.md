@@ -15,6 +15,13 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Changed
 
+- Add an explicit local SQL maintenance pause outside portable KV exports.
+  Paused partitions reject all writes after transaction extensions; reads and
+  exact pause retries remain available. Metadata growth respects the storage
+  soft limit. Native physical backups include this additive private table;
+  portable imports cannot replace it. No store reset is required. Default
+  factories do not pause partitions, and a local receipt does not establish
+  complete inventory, global bootstrap readiness or restore fencing.
 - Add adapter publication-fence primitives with bounded intents, guarded source
   transitions, and durable projection receipts. Default Worker factories do not
   enable them. Deployments must integrate writers, alarms, bootstrap, and restore

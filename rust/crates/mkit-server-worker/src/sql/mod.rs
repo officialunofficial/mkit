@@ -18,6 +18,7 @@ mod capacity;
 mod kv;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod publication_fence_tests;
+pub mod publication_maintenance;
 pub mod schema;
 #[cfg(test)]
 mod tests;
@@ -71,6 +72,9 @@ pub enum SqlError {
     /// A row did not have the expected shape.
     #[error("corrupt sql row: {0}")]
     Corrupt(&'static str),
+    /// A durable maintenance barrier rejects every write in this partition.
+    #[error("publication partition paused for maintenance")]
+    PublicationPaused,
 }
 
 impl From<SqlError> for StoreError {
@@ -78,7 +82,9 @@ impl From<SqlError> for StoreError {
         match e {
             SqlError::Full => Self::Full,
             SqlError::Corrupt(what) => Self::Corrupt(what.into()),
-            e @ (SqlError::Backend(_) | SqlError::Constraint) => Self::unavailable(e),
+            e @ (SqlError::Backend(_) | SqlError::Constraint | SqlError::PublicationPaused) => {
+                Self::unavailable(e)
+            }
         }
     }
 }

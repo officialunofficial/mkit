@@ -4912,6 +4912,26 @@ names, platform requirements and deployment procedure belong to the
 deployment's operator documentation; the Cloudflare Workers adapter's are in
 [the Workers operator guide](../operations/workers.md).
 
+**Optional Worker maintenance barrier.** The SQL adapter can explicitly pause
+a logical partition under a trusted external publication generation. Its private
+`mkit_publication_pause` table binds the canonical encoded partition to a version-1
+generation value: byte `0x01` followed by canonical JSON for the adapter's
+`publication_fence::Generation`. Values are limited to 512 bytes and partition
+encodings to 4,096 bytes. Unknown, malformed or noncanonical values fail closed.
+The table is additive and created lazily; existing stores require no reset.
+It is outside portable KV export/import, but is included in physical SQL backups.
+The final SQL transaction MUST reject every write to a paused partition after
+extensions. Reads remain available. Installing or rebinding a pause uses exact
+previous-generation comparison and storage soft-limit admission before metadata
+growth; an exact current-generation retry MUST perform no write. There is no
+resume operation. Default Worker factories do not install pauses.
+
+A pause receipt proves only the responding executor's local barrier. It MUST NOT
+be used as complete inventory, bootstrap readiness, or external restore-fencing
+evidence. An embedding must separately fence new source creation and delayed
+outbound effects at all targets before enabling publication-root cache reuse.
+No public protocol or launch-profile conformance changes are implied.
+
 **Full profile.** The server implements every section that applies to its
 configuration, including §9–§16. An indexed deployment MUST support per-ref
 storage leases (§12.1).
