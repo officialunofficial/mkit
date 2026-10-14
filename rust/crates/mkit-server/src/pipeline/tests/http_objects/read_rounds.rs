@@ -602,7 +602,7 @@ fn repository_index_prewake_models_cold_reads_and_warm_rounds() {
         assert_eq!(shape.fx.pipe.meta.warm_calls.swap(0, Ordering::SeqCst), 16);
         if matches!(op, Op::GetReadGate) {
             // This pack gate touches one index shard; overlap preserves its latency.
-            assert_eq!(after.0, before.0);
+            assert!((after.0 - before.0).abs() < f64::EPSILON);
         } else {
             assert!(after.0 < before.0);
         }
