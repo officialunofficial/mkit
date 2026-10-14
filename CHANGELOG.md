@@ -25,6 +25,13 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Fixed
 
+- `ReadAccess::recover_completed_fork` now recovers a Done fork whose reservation
+  was deleted by outcome acknowledgement or whose replay row was pruned after
+  envelope expiry. The Done job is committed atomically with both rows and stays
+  authoritative: its result and settle identity are still matched exactly against
+  the caller's identity, the authority and namespace checks are unchanged, and a
+  row that is still present must agree with the job or recovery fails closed. No
+  wire or stored-format change; no wipe.
 - Scheduled indexed extraction boxes each stage future so nested backend reads
   leave room for frame decoding on a small stack. The 50-hop quota-boundary
   regression retains its 512 KiB stack, and a native future-size guard covers the

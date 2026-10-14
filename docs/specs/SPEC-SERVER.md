@@ -5233,6 +5233,7 @@ These queries route through the configured shard map and never return encoded ro
 Callers retain repository authorization, their own policy journal, and final disclosure checks.
 Existing authorized pipeline readers keep uniform absence and their final guards.
 A visibility revision compares stored observations; it is not a monotonic policy journal.
-Fork recovery checks original replay and reservation evidence without authenticating an expired envelope.
+Fork recovery trusts the Done job, which is committed atomically with its replay and reservation rows, and checks the caller's identity against it without authenticating an expired envelope.
+A replay or reservation row that is still present must match the job; a row removed by outcome acknowledgement or replay expiry is accepted as absent.
 The caller verifies current destination authority and its trusted retained landing evidence.
 This additive surface changes no wire or stored format and requires no reset.
