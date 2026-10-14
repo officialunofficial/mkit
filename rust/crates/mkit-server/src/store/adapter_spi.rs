@@ -16,6 +16,10 @@ pub mod keys;
 pub mod outbox;
 #[path = "publication.rs"]
 pub mod publication;
+#[path = "publication_fence.rs"]
+pub mod publication_fence;
+#[path = "publication_fence_plan.rs"]
+pub mod publication_fence_plan;
 #[path = "tickets.rs"]
 pub mod tickets;
 #[path = "watermark.rs"]

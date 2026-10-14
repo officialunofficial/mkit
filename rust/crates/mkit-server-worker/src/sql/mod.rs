@@ -16,6 +16,8 @@
 
 mod capacity;
 mod kv;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod publication_fence_tests;
 pub mod schema;
 #[cfg(test)]
 mod tests;

@@ -15,6 +15,15 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Changed
 
+- Add adapter publication-fence primitives with bounded intents, guarded source
+  transitions, and durable projection receipts. Default Worker factories do not
+  enable them. Deployments must integrate writers, alarms, bootstrap, and restore
+  fencing before consuming stable cache tokens. Additive stored rows; no reset
+  is required for existing disabled deployments.
+- Worker SQL transaction extensions preserve the checked guard prefix and
+  evaluate appended guards before writes. Enrolled publication sources validate
+  the final transaction against their prepared intent.
+
 - Share pure packmap advance planning between the protocol client and CLI in
   `mkit-core::transfer::packmap`. Node bytes, CAS conditions, retries, and
   driver-specific limits and errors are unchanged. No wire or stored-format

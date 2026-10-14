@@ -58,6 +58,11 @@ async fn apply(
     outbox
         .try_finish(&mut b.preconditions, &mut b.writes)
         .unwrap();
+    if shards.ref_index_partitions(&repo).len() > 1 {
+        let plan =
+            super::super::adapter_spi::publication_fence_plan::publication_batch(&p, &b).unwrap();
+        assert_eq!(plan.is_some(), deleted || state.published == state.sequence);
+    }
     assert_eq!(kv.apply(&p, b).await.unwrap(), BatchOutcome::Committed);
     state
 }
@@ -87,6 +92,7 @@ async fn finish(
     let eligible = prefix(kv, &p, &repo.name, &name, &state, &changed)
         .await
         .unwrap();
+    let publishes = eligible.0 > state.published;
     let os = kv.get(&p, &keys::outbox_sequence()).await.unwrap();
     let oc = kv.get(&p, &keys::outcome_backlog()).await.unwrap();
     let mut o = OutboxBuilder::new(os.as_ref(), oc.as_ref()).unwrap();
@@ -107,8 +113,56 @@ async fn finish(
     .unwrap();
     o.relay_at(2);
     o.try_finish(&mut b.preconditions, &mut b.writes).unwrap();
+    if shards.ref_index_partitions(&repo).len() > 1 {
+        let plan =
+            super::super::adapter_spi::publication_fence_plan::publication_batch(&p, &b).unwrap();
+        assert_eq!(plan.is_some(), publishes);
+    }
     assert_eq!(kv.apply(&p, b).await.unwrap(), BatchOutcome::Committed);
     read(kv, &p, &repo.name, &name).await.unwrap()
+}
+
+#[test]
+fn publication_fence_plan_covers_immediate_delayed_and_deleted_branch_pairs() {
+    block_on(async {
+        let kv = MemoryKv::default();
+        let shards = D34Shards;
+        assert_eq!(
+            apply(
+                &kv,
+                &shards,
+                "refs/heads/main",
+                advance(1, Clearance::Cleared),
+                false
+            )
+            .await
+            .published,
+            1,
+        );
+        assert_eq!(
+            apply(
+                &kv,
+                &shards,
+                "refs/heads/main",
+                advance(4, Clearance::Pending),
+                false
+            )
+            .await
+            .published,
+            1,
+        );
+        assert_eq!(
+            finish(&kv, &shards, "refs/heads/main", 2, Clearance::Cleared)
+                .await
+                .published,
+            2,
+        );
+        let mut deletion = advance(7, Clearance::Cleared);
+        deletion.value = Pair::default();
+        deletion.additions.clear();
+        let deleted = apply(&kv, &shards, "refs/heads/main", deletion, true).await;
+        assert_eq!((deleted.published, deleted.boundary), (3, 3));
+    });
 }
 #[test]
 fn out_of_order_membership_does_not_skip_the_pointer() {

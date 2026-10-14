@@ -142,7 +142,8 @@ impl<C: SqlConn> SqlKvStore<C> {
     }
 
     /// Apply with a synchronous target-local extension inside the guarded transaction.
-    /// The extension reads local keys and appends writes only after all input guards hold.
+    /// The extension reads local keys and appends guards and writes after input guards hold.
+    /// It preserves the original guard prefix. Added guards are checked in the same transaction.
     ///
     /// # Errors
     /// Invalid batches, extension errors, or backend failures roll back every effect.
@@ -268,6 +269,37 @@ fn check_and_write<C: SqlConn>(
     check_and_write_extended(conn, part, batch, soft_limit, |_, _, _| Ok(()))
 }
 
+fn check_preconditions<C: SqlConn>(
+    conn: &C,
+    part: &SqlValue,
+    preconditions: &[Precondition],
+    first_index: usize,
+    now: u64,
+) -> Result<Option<BatchOutcome>, SqlError> {
+    for (offset, pre) in preconditions.iter().enumerate() {
+        let index = first_index + offset;
+        let (holds, observed) = match pre {
+            Precondition::NotAfter(deadline) if now > *deadline => {
+                return Ok(Some(BatchOutcome::DeadlinePassed { backend_now: now }));
+            }
+            Precondition::NotAfter(_) => continue,
+            Precondition::Absent(key) => {
+                let current = read(conn, part, key)?;
+                (current.is_none(), current)
+            }
+            Precondition::Present(key) => (read(conn, part, key)?.is_some(), None),
+            Precondition::Equals(key, value) => {
+                let current = read(conn, part, key)?;
+                (current.as_ref() == Some(value), current)
+            }
+        };
+        if !holds {
+            return Ok(Some(BatchOutcome::PreconditionFailed { index, observed }));
+        }
+    }
+    Ok(None)
+}
+
 fn check_and_write_extended<C: SqlConn, F>(
     conn: &C,
     part: &SqlValue,
@@ -284,30 +316,37 @@ where
 {
     // Rule 8: the backend's own clock, read inside the transaction.
     let now = conn.now_ms();
-    for (index, pre) in batch.preconditions.iter().enumerate() {
-        let (holds, observed) = match pre {
-            Precondition::NotAfter(deadline) if now > *deadline => {
-                return Ok(BatchOutcome::DeadlinePassed { backend_now: now });
-            }
-            Precondition::NotAfter(_) => continue,
-            Precondition::Absent(key) => {
-                let current = read(conn, part, key)?;
-                (current.is_none(), current)
-            }
-            Precondition::Present(key) => (read(conn, part, key)?.is_some(), None),
-            Precondition::Equals(key, value) => {
-                let current = read(conn, part, key)?;
-                (current.as_ref() == Some(value), current)
-            }
-        };
-        if !holds {
-            return Ok(BatchOutcome::PreconditionFailed { index, observed });
-        }
+    if let Some(outcome) = check_preconditions(conn, part, &batch.preconditions, 0, now)? {
+        return Ok(outcome);
     }
+    let checked = batch.preconditions.clone();
     extend(&|key| read(conn, part, key), &mut batch, now)?;
+    if !batch.preconditions.starts_with(&checked) {
+        return Err(SqlError::Corrupt("extension changed checked preconditions"));
+    }
+    if let Some(outcome) = check_preconditions(
+        conn,
+        part,
+        &batch.preconditions[checked.len()..],
+        checked.len(),
+        now,
+    )? {
+        return Ok(outcome);
+    }
     batch
         .validate(&StoreCapabilities::full())
         .map_err(|_| SqlError::Corrupt("extended batch exceeds limits"))?;
+    let SqlValue::Blob(encoded_partition) = part else {
+        return Err(SqlError::Corrupt("invalid publication fence partition"));
+    };
+    let partition = Partition::decode(encoded_partition)
+        .map_err(|_| SqlError::Corrupt("invalid publication fence partition"))?;
+    mkit_server::store::adapter_spi::publication_fence::validate_source_transaction(
+        &partition,
+        &batch,
+        |key| read(conn, part, key).map_err(StoreError::from),
+    )
+    .map_err(|_| SqlError::Corrupt("invalid publication fence transaction"))?;
     if let Some(limit) = soft_limit
         && batch.has_put()
         && !is_relay_scan_checkpoint(&batch)

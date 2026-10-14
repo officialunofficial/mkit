@@ -2758,3 +2758,31 @@ configured clients cannot be used through the sync adapter.
 metadata/overload tests, and `observed_signed_client_composes_as_source`.
 CLI transport display parity and the existing CLI golden suites retain output
 and exit-code behavior. No authorization, wire, or stored-format boundary moves.
+
+## Publication-fence primitives retain uncertainty until durable completion
+
+**Always:** a coordinator invalidates its revision before returning a publication intent.
+Each source keeps one bounded intent row. No row retains an attempt history.
+A stable token requires a sealed bootstrap cut and zero pending intents.
+The source transaction binds its exact guarded batch and projection allocations to the intent.
+An irreversible abort changes the armed marker before completing the coordinator intent.
+Completion requires a terminal source marker and every required projection watermark.
+Durable source relay cleanup can prove those watermarks without another target fanout.
+Pending intents never expire by elapsed time. Repeated receipts do not decrement the count twice.
+Bootstrap receipts bind the repository, namespace coordinator, generation, revision, and readiness row.
+Restore requires an externally allocated incarnation that no previous token used.
+
+The SQL backend validates enrolled source transitions after transaction extensions and before writes.
+Extensions preserve the checked guard prefix. The transaction checks every appended guard.
+An unenrolled legacy source retains its original behavior.
+Default Worker factories do not enroll sources or consume these tokens.
+A deployment must integrate all writers, alarms, bootstrap reconciliation, and restore fencing before enabling cache use.
+
+**Because:** foreground writes and delayed publication can change different projections at different times.
+A post-write notification cannot close the interval before its delivery.
+
+**If violated:** a cache can reuse stale ref tips, accept a partial branch pair, or revive pre-restore state.
+
+**Enforced by:** `store::adapter_spi::publication_fence`, guarded publication planning, and the final SQL transaction validator.
+Native tests cover split delivery, duplicates, concurrent sources, aborts, recovery, and generation changes.
+Real relay and SQLite tests cover target effects, source cleanup, and transaction-extension tampering.

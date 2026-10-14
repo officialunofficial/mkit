@@ -1,0 +1,230 @@
+//! Bind a D34 publication transaction to its durable projection obligations.
+
+use std::collections::BTreeMap;
+
+use mkit_core::hash::Hash;
+
+use crate::pipeline::{D34Shards, ShardMap};
+use crate::repo::RepoId;
+
+use super::{
+    Batch, Partition, Precondition, StoreCapabilities, StoreError, Value, Write, codec, keys,
+};
+
+/// A publication transaction and the last required relay for each target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicationBatch {
+    /// Digest of the original guarded transaction, before fence bookkeeping.
+    pub digest: Hash,
+    /// Target partition and source outbox sequence, in canonical order.
+    pub targets: Vec<(Partition, u64)>,
+}
+
+fn invalid() -> StoreError {
+    StoreError::Invalid("publication lacks matching projection obligations".into())
+}
+
+fn field(hash: &mut blake3::Hasher, bytes: &[u8]) {
+    hash.update(&(bytes.len() as u64).to_be_bytes());
+    hash.update(bytes);
+}
+
+fn batch_digest(source: &Partition, batch: &Batch) -> Result<Hash, StoreError> {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"mkit.publication-fence-batch.v1\0");
+    field(&mut hash, &source.encode()?);
+    hash.update(&(batch.preconditions.len() as u64).to_be_bytes());
+    for precondition in &batch.preconditions {
+        match precondition {
+            Precondition::Absent(key) => {
+                hash.update(&[0]);
+                field(&mut hash, key.as_bytes());
+            }
+            Precondition::Present(key) => {
+                hash.update(&[1]);
+                field(&mut hash, key.as_bytes());
+            }
+            Precondition::Equals(key, value) => {
+                hash.update(&[2]);
+                field(&mut hash, key.as_bytes());
+                field(&mut hash, value.as_bytes());
+            }
+            Precondition::NotAfter(deadline) => {
+                hash.update(&[3]);
+                hash.update(&deadline.to_be_bytes());
+            }
+        }
+    }
+    hash.update(&(batch.writes.len() as u64).to_be_bytes());
+    for write in &batch.writes {
+        match write {
+            Write::Put(key, value) => {
+                hash.update(&[0]);
+                field(&mut hash, key.as_bytes());
+                field(&mut hash, value.as_bytes());
+            }
+            Write::Delete(key) => {
+                hash.update(&[1]);
+                field(&mut hash, key.as_bytes());
+            }
+        }
+    }
+    Ok(*hash.finalize().as_bytes())
+}
+
+fn published_effects(
+    source: &Partition,
+    batch: &Batch,
+) -> Result<BTreeMap<String, Option<Value>>, StoreError> {
+    let mut published: BTreeMap<String, Option<Value>> = BTreeMap::new();
+    for write in &batch.writes {
+        let (key, value) = match write {
+            Write::Put(key, value) => (key, Some(value.clone())),
+            Write::Delete(key) => (key, None),
+        };
+        if let Some(keys::ParsedKey::PublishedRef { repo, name }) = keys::parse(key) {
+            let Partition::Ref {
+                ns,
+                repo: source_repo,
+                ..
+            } = source
+            else {
+                return Err(StoreError::Unsupported(
+                    "publication fence requires D34".into(),
+                ));
+            };
+            let repository = RepoId {
+                namespace: ns.clone(),
+                name: repo.clone(),
+            };
+            if &repo != source_repo || D34Shards.ref_shard(&repository, &name) != *source {
+                return Err(invalid());
+            }
+            if let Some(value) = &value {
+                codec::decode_ref_id(value)?;
+            }
+            published.insert(name, value);
+        }
+    }
+    Ok(published)
+}
+
+fn prior_outbox_sequence(batch: &Batch) -> Result<u64, StoreError> {
+    let mut previous = None;
+    for precondition in &batch.preconditions {
+        let observed = match precondition {
+            Precondition::Absent(key) if *key == keys::outbox_sequence() => Some(0),
+            Precondition::Equals(key, value) if *key == keys::outbox_sequence() => {
+                Some(codec::decode_u64(value)?)
+            }
+            Precondition::Present(key) if *key == keys::outbox_sequence() => {
+                return Err(invalid());
+            }
+            _ => None,
+        };
+        if let Some(observed) = observed
+            && previous.replace(observed).is_some()
+        {
+            return Err(invalid());
+        }
+    }
+    previous.ok_or_else(invalid)
+}
+
+/// Inspect a source transaction without changing its guards or effects.
+///
+/// Each authoritative published ref must have the same final effect in its
+/// routed durable projection relay. Relays may include other work, but that
+/// work cannot replace a required ref obligation. A transaction with no
+/// published-ref effects returns `None`.
+///
+/// # Errors
+/// A publication outside a D34 ref source, a malformed or misrouted row,
+/// or a missing projection obligation is refused.
+pub fn publication_batch(
+    source: &Partition,
+    batch: &Batch,
+) -> Result<Option<PublicationBatch>, StoreError> {
+    batch.validate(&StoreCapabilities::full())?;
+    let published = published_effects(source, batch)?;
+    if published.is_empty() {
+        return Ok(None);
+    }
+    let previous = prior_outbox_sequence(batch)?;
+    let Partition::Ref { ns, repo, .. } = source else {
+        return Err(invalid());
+    };
+    let repository = RepoId {
+        namespace: ns.clone(),
+        name: repo.clone(),
+    };
+    let mut projected: BTreeMap<String, (Option<Value>, Partition, u64)> = BTreeMap::new();
+    let mut relays: BTreeMap<u64, Value> = BTreeMap::new();
+    let mut allocated = None;
+    for write in &batch.writes {
+        match write {
+            Write::Put(key, value) => {
+                if *key == keys::outbox_sequence() {
+                    allocated = Some(codec::decode_u64(value)?);
+                }
+                if let Some(keys::ParsedKey::Relay(sequence)) = keys::parse(key) {
+                    relays.insert(sequence, value.clone());
+                }
+            }
+            Write::Delete(key) => {
+                if *key == keys::outbox_sequence() {
+                    allocated = None;
+                }
+                if let Some(keys::ParsedKey::Relay(sequence)) = keys::parse(key) {
+                    relays.remove(&sequence);
+                }
+            }
+        }
+    }
+    for (sequence, raw) in relays {
+        if sequence <= previous || allocated.is_none_or(|last| last <= previous || sequence > last)
+        {
+            return Err(invalid());
+        }
+        let relay = codec::decode_relay(&raw)?;
+        for (key, value) in relay
+            .puts
+            .iter()
+            .map(|(key, value)| (key, Some(value)))
+            .chain(relay.deletes.iter().map(|key| (key, None)))
+        {
+            if let Some(keys::ParsedKey::PublishedIndex {
+                repo: target_repo,
+                name,
+            }) = keys::parse(key)
+            {
+                if target_repo != *repo
+                    || D34Shards.ref_shard(&repository, &name) != *source
+                    || D34Shards.ref_index(&repository, &name) != relay.target
+                {
+                    return Err(invalid());
+                }
+                projected.insert(name, (value.cloned(), relay.target.clone(), sequence));
+            }
+        }
+    }
+    let mut targets: BTreeMap<Vec<u8>, (Partition, u64)> = BTreeMap::new();
+    for (name, expected) in published {
+        let (actual, target, sequence) = projected.remove(&name).ok_or_else(invalid)?;
+        if actual != expected {
+            return Err(invalid());
+        }
+        let entry = targets
+            .entry(target.encode()?.to_vec())
+            .or_insert((target, sequence));
+        entry.1 = entry.1.max(sequence);
+    }
+    Ok(Some(PublicationBatch {
+        digest: batch_digest(source, batch)?,
+        targets: targets.into_values().collect(),
+    }))
+}
+
+#[cfg(test)]
+#[path = "publication_fence_plan_tests.rs"]
+mod tests;

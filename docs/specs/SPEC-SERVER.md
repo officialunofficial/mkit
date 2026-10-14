@@ -2637,6 +2637,55 @@ Published equals live exactly while no advance on that ref is held or
 pending (and no hit awaits resolution). A deployment with only
 synchronous inspectors MUST still maintain the published view.
 
+#### 10.2.1 Adapter publication-fence primitives
+
+The optional `store::adapter_spi::publication_fence` primitives coordinate a
+publication before its authoritative source transaction can commit. Default
+Worker factories do not enable them. A deployment MUST integrate every
+foreground and alarm publication before using their tokens for a response cache.
+These primitives do not grant read permission or replace live serving checks.
+
+One namespace coordinator stores the following additive version-one records.
+`scope` is the 32-byte BLAKE3 hash of the repository name. A source identity
+uses the canonical `Partition::encode` bytes.
+
+| Key | Meaning |
+| --- | --- |
+| `pf 00 <scope:32>` | Generation, monotonic revision, pending count, and bootstrap seal. |
+| `pi 00 <scope:32> <source-hash:32>` | Latest source attempt, transaction digest, targets, disposition, and receipts. |
+| `pb 00 <scope:32>` | Exact generation and revision of an integration-owned bootstrap readiness cut. |
+| `pc 00` in the source Ref partition | Exact armed or terminal source intent. |
+
+Each value starts with byte `1`, followed by strict JSON. A value MUST NOT
+exceed 32 KiB. An intent holds at most 16 distinct target partitions.
+Each encoded partition is at most 1 KiB. No record retains an attempt history.
+Existing publication and relay records retain their formats.
+
+`begin` MUST atomically advance the coordinator revision and pending count
+with the source intent. A source MUST arm that exact intent before publication.
+The source commit MUST carry its exact armed-marker guard and terminal marker.
+Its digest binds the original preconditions, ordered writes, and source identity.
+Every published ref effect MUST match its routed durable projection relay.
+Relay sequences MUST exceed the guarded previous source outbox sequence.
+
+The final SQL transaction MUST validate the complete extended batch before writes.
+An extension MUST preserve the checked original guard prefix. Appended guards
+MUST hold in that same transaction. A publication on an enrolled source MUST
+NOT bypass its armed-marker transition. An abort MUST fence previously prepared
+commits and MUST NOT publish refs or allocate relay effects.
+
+Completion MUST prove the terminal source disposition and every allocated
+projection watermark. Target watermarks commit with their projection effects.
+Source cleanup after target acknowledgment can provide the same evidence.
+Uncertainty MUST remain pending; elapsed time MUST NOT clear an intent.
+
+A stable token requires a sealed bootstrap cut and zero pending intents.
+The readiness receipt MUST bind its exact coordinator, repository, generation,
+revision, and durable readiness row. Integration MUST reconcile legacy writers
+and queued relays before sealing. Restore MUST allocate a never-reused incarnation
+outside imported state. Incrementing a restored generation alone is insufficient.
+Old callbacks MUST NOT complete work in another generation.
+
 ### 10.3 Every reader surface uses the published view
 
 `ListRefs`, `ReadRef`, `PackExists`, `DownloadPack`, `X-Mkit-Ref`, snapshots,
