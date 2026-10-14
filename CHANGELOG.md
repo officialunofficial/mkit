@@ -49,14 +49,6 @@ collect the applicable entries between their old and new immutable pins.
   the earliest source error. Complete ref coverage, pagination, response bounds,
   and wire/stored formats are unchanged; no store reset is required.
 
-- Workers deployments can enable `REPO_INDEX_PREWAKE=true` to activate all
-  sixteen repository index objects concurrently with signed-read authorization.
-  `REPO_INDEX_PREWAKE_TTL_SECONDS` defaults to 90 and accepts 1 through 120.
-  The option defaults off, uses a bounded volatile cache and a separate
-  sixteen-call warm-up allowance inside the existing request budget, and
-  suppresses failures. Anonymous reads and single sharding skip the wave.
-  No public wire, stored-format, or store-reset change.
-
 - Share pure packmap advance planning between the protocol client and CLI in
   `mkit-core::transfer::packmap`. Node bytes, CAS conditions, retries, and
   driver-specific limits and errors are unchanged. No wire or stored-format
@@ -748,6 +740,14 @@ collect the applicable entries between their old and new immutable pins.
   request deadline. Scope changes discard proofs without refunding budgets;
   authorization, membership and denial remain live.
   No persisted cache or writer proofs in the shared published cache.
+
+- Workers deployments can enable `REPO_INDEX_PREWAKE=true` to activate all
+  sixteen repository index objects concurrently with signed-read authorization.
+  `REPO_INDEX_PREWAKE_TTL_SECONDS` defaults to 90 and accepts 1 through 120.
+  The option defaults off, uses a bounded volatile cache and a separate
+  sixteen-call warm-up allowance inside the existing request budget, and
+  suppresses failures. Anonymous reads and single sharding skip the wave.
+  No public wire, stored-format, or store-reset change.
 
 ### Changed
 
