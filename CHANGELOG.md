@@ -57,6 +57,13 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Changed
 
+- Additive `ForkEnv::from_config` and `ForkTimer::from_config` constructors share
+  fork proof settings with `PipelineConfig`; the pipeline and configured Worker
+  timer use them. Existing fields and low-level registration remain available.
+  The operations runbook now covers backfill, draining forks, and the permanent
+  4,096-item publication limit when enabling takedown denial after running with
+  it off. No behavior, wire or stored-format change; no wipe.
+
 - [embedder: breaking API] Typed embedding reads now classify errors. Corrupt
   or contradictory stored rows fail as permanent `internal`; malformed replies
   and backend faults stay retryable `unavailable`, and `invalid_argument` is
