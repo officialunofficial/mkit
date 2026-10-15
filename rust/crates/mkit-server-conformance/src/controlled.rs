@@ -505,6 +505,8 @@ fn recovery_consistent(
         || recovered.reservations.len() != 3
         || before.reservations.len() != 3
         || recovered.reservations[..2] != before.reservations[..2]
+        || original.reservations.len() != 3
+        || (original.reservations[2].is_some() && recovered.reservations[2].is_none())
         || recovered.reservations[2]
             .as_ref()
             .is_some_and(|reservation| {

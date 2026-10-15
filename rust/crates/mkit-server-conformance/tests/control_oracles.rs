@@ -224,6 +224,9 @@ async fn run_mutant(fault: Fault, filter: &str) -> usize {
     );
     assert_eq!(report.cases.len(), 1);
     let expected = match fault {
+        Fault::RollbackOnRestart if filter == "acceptance.before_acceptance_restart" => {
+            "recovery exposed a partial acceptance before replay"
+        }
         Fault::RollbackOnRestart => "recovery lost or changed accepted state",
         Fault::ChargeOnRefusal => "guard failure changed quota charge",
         Fault::CommitOnRefusal => "exactly one aborted ref reservation",
@@ -267,4 +270,16 @@ async fn final_guard_rejects_a_charge_or_committed_reservation_on_refusal() {
     for fault in [Fault::ChargeOnRefusal, Fault::CommitOnRefusal] {
         run_mutant(fault, "guard.authority_final_boundary").await;
     }
+}
+
+#[tokio::test]
+async fn pending_reservation_loss_is_detected_before_replay_can_replace_it() {
+    assert_eq!(
+        run_mutant(
+            Fault::RollbackOnRestart,
+            "acceptance.before_acceptance_restart"
+        )
+        .await,
+        0
+    );
 }

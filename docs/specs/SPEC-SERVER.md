@@ -83,9 +83,17 @@ The adapter move changes no statements, stored formats, or store semantics.
 
 ## 2. Pipeline order
 
-**Protocol requirement.**
+**Protocol requirement.** A conforming server MUST preserve the observable
+processing dependencies required by STC §7.1, including its replay
+short-circuit, and the authorization and admission ordering in STC §7.5 and
+§5.1. Authorization precedes quota or replay-record allocation; an admission
+challenge or denial writes no RPC effects under those rules. A granted pending
+reservation is recorded only after admission and before guarded acceptance
+(§5). Signed reads skip the replay ledger. These requirements do not prescribe
+a fixed set of execution stages. Stage numbers used below name the corresponding
+semantic events, without requiring another server to use this orchestration.
 
-The stages are numbered 0–9. An operation visits the stages applicable
+**Reference-server behavior.** The reference extension points are numbered 0–9. An operation visits the stages applicable
 to its RPC and configured hooks. The signed-write processing order is
 as STC §7.1 requires; this list names server-internal extension points.
 
@@ -298,6 +306,8 @@ obligation that the current server cannot interpret.
 
 ## 5. Outcomes, lifecycle events and the outbox
 
+**Protocol requirement.**
+
 Every reservation granted by admission MUST get exactly one terminal
 outcome: `Committed`, `Aborted`, or `Expired`; a paid read instead uses
 `ReadServed`. Repeated delivery of that outcome is not another terminal
@@ -317,9 +327,9 @@ If the guarded apply definitely fails, the server MUST replace the pending
 reservation with `Aborted` in a separate atomic unit. The failed apply
 MUST NOT leave the operation's guarded effects committed.
 
-The periodic reconcile pass MUST record `Aborted` with reason
-`ABORT_REASON_ABANDONED` for a pending reservation whose operation's
-authentication validity interval has passed without replacement.
+The server MUST eventually resolve a pending reservation whose operation's
+authentication validity interval has passed without replacement by durably
+recording `Aborted` with reason `ABORT_REASON_ABANDONED`.
 The interval is the one STC §7.1 requires, bounded by 300,000 ms.
 This rule covers a crash between recording the pending reservation
 and recording either a successful apply result or an abort.
@@ -341,9 +351,8 @@ the same pending-record arbiter below.
 [SPEC-HTTP-OBJECTS](SPEC-HTTP-OBJECTS.md) fixes read ordering and admission input.
 
 An unconsumed ticket that expires MUST produce `Expired`, as STC
-§7.7 requires. The periodic reconcile pass MUST produce `Expired`
-for a ticket-backed reservation with no outcome once its ticket has
-expired. It MUST NOT classify that reservation as an abandoned pending
+§7.7 requires. The server MUST eventually record `Expired` for a ticket-backed
+reservation with no outcome once its ticket has expired. It MUST NOT classify that reservation as an abandoned pending
 operation after a successful `BeginUpload`.
 
 The pending record is the arbiter. Every replacement of a pending
@@ -360,11 +369,14 @@ outcome across crashes and concurrent attempts. A reconcile pass MUST
 NOT replace an existing terminal outcome. A committed reservation MUST
 NOT later become `Aborted` or `Expired`.
 
-Informative: recording a pending reservation costs an additional atomic
-unit for each admitted write that has a reservation id. Default quota
-admission without a reservation id does not pay this cost.
+**Reference-server behavior.** The reference server resolves abandoned and
+expired reservations through periodic reconciliation. Recording a pending
+reservation costs it an additional atomic unit per admitted write with a
+reservation id; default quota admission without a reservation id avoids that
+write. Other servers may use different recovery scheduling and storage while
+preserving the terminal-resolution and atomicity requirements above.
 
-The server MUST retain an outcome until acknowledged. Delivery MUST
+**Protocol requirement.** The server MUST retain an outcome until acknowledged. Delivery MUST
 be at least once, using the reservation id as the idempotency key.
 There is no ordering guarantee between reservations. A receiver MUST
 treat a repeated outcome for the same reservation as the same result.
@@ -2252,7 +2264,72 @@ This additive embedding surface does not alter URL grammar or HTTP serving.
 
 #### Authenticated history continuations
 
-**Protocol requirement.**
+**Protocol requirement.** A server MAY offer authenticated selected-ref history
+continuations across requests. A continuation MUST authenticate its scope and
+history position, and MUST NOT confer permission. Its scope MUST distinguish
+the backend, full repository identity, selected ref, reader or writer view, and
+verified credential scope. An audience, signer, grant, or bound credential-header
+change MUST invalidate it. A fresh request nonce or signature-verification time
+alone MUST NOT change that credential scope.
+
+Each redemption MUST authenticate current credentials and repeat applicable
+visibility, authority, grant, membership, reconstruction, denial, and ancestry
+checks before disclosing history. Earlier success MUST NOT cache authorization
+or denial clearance. A public continuation MUST anchor to the authoritative
+published value. Continuation evidence MUST NOT authorize an unrelated operation.
+Authentication material used for continuations MUST remain independent of the
+other configured key roles. A retired continuation key MUST NOT validate a token.
+These requirements do not select an authentication algorithm or key-storage API.
+
+A continuation MUST bind the selected ref and its authoritative publication
+state, including sequence, deletion boundary, membership generation, and
+published value. Redemption MUST atomically validate the bound ref and
+publication state against authoritative state, together with the fixed expiry.
+An observation of multiple values alone MUST NOT be assumed atomic. Missing or
+incomplete authoritative evidence MUST fail closed. Ref append, rewind,
+deletion/recreation, replacement, publication/incarnation changes, and intervening
+visibility changes MUST invalidate the continuation even when values later
+return to the same hash or visibility. Delayed projections MUST NOT restore
+invalidated evidence. A ref change after successful atomic validation is
+concurrent with that redemption and invalidates subsequent redemptions.
+
+The server MUST preserve the requested traversal and canonical page order.
+First-parent paging MUST remain distinct from all-parent traversal. Continuing a
+timestamp-discovery walk MUST preserve the ordering semantics of
+[SPEC-HISTORY-ORDER](SPEC-HISTORY-ORDER.md), including pending history and its
+ordering keys. Evidence used to continue the walk MUST establish the selected
+history's lineage, object kinds, and applicable timestamps. A disagreement with
+verified history MUST refuse the page; imported state MUST NOT silently change
+the requested order. Every returned object retains current source, integrity,
+membership, reconstruction-dependency, authorization, and denial checks.
+
+A continuation MUST have a fixed expiry bounded by the configured token lifetime
+and any applicable write-grant expiry. Successors and replay MUST retain that
+original expiry. Each page MUST carry a currently valid request envelope when
+required; the issuing envelope's expiry and request-local proof lifetime MUST
+NOT limit the continuation's own lifetime. Each redemption's evidence remains
+subject to its own request deadline, permitted freshness interval, and token
+expiry. Expiry reached during redemption MUST refuse disclosure. Redeeming a
+token MUST NOT extend its expiry or a request deadline.
+
+Invalid authenticity, scope, anchor, publication boundary, expiry, retired key,
+or inaccessible state MUST return uniform absence in either view without
+revealing cursor membership. Storage failures and resource refusals retain their
+applicable classifications. Token values MUST NOT be logged or placed in URLs or headers;
+they travel in request and response bodies. Request-body limits MUST be enforced
+on received data rather than relying on a declared Content-Length.
+
+A caller MAY replay a continuation within its scope and fixed expiry, including
+to recover a lost response. The same token and page parameters MUST return the
+same canonical page when every current check still permits it. Each redemption
+MUST repeat those checks. The caller restarts at the selected ref when the token
+expires or its bound anchor, credentials, or authority changes.
+
+**Reference-server behavior.** The remainder of this subsection describes the
+reference embedding API and its private continuation implementation. Other
+conforming servers may use different token formats, cryptographic mechanisms,
+storage, evidence retention, and validation operations while preserving the
+observable requirements above.
 
 See the [Workers embedding guide](../embedding/workers.md#one-reader-and-one-session-per-request)
 for request composition and the [history paging measurements](../operations/history-paging.md)
@@ -2266,7 +2343,7 @@ continuation of an all-parent timestamp-discovery walk
 ([SPEC-HISTORY-ORDER](SPEC-HISTORY-ORDER.md)) MUST retain its sealed ordering
 state in the token.
 
-**Reference-server behavior.** The reference embedding API exposes
+The reference embedding API exposes
 `walk_history_page_in` and `walk_history_page_with_options_in`; selected-ref
 sessions use `with_selected_ref`. Its opaque version-2 tokens use the following
 private format, which other servers need not expose.
@@ -2290,7 +2367,7 @@ witness IDs, a missing or misplaced root, forward predecessors, a malformed
 snapshot, an unsealed or outstanding-selected reducer, and any pending ID
 absent from the witness.
 
-**Protocol requirement.** The credential digest includes the trusted auth audience, signer, grant and captured credential headers;
+The credential digest includes the trusted auth audience, signer, grant and captured credential headers;
 it excludes envelope nonce, fingerprint and verification time so a fresh signed
 request can continue the same credential scope. The security digest binds the
 repository record, visibility row including change time, monotonic visibility
@@ -2302,10 +2379,10 @@ continuations; it MUST NOT reset on deletion/recreation. This
 fences a public/private/public return even within one clock millisecond. Digests frame each component's
 length to avoid concatenation ambiguity.
 
-**Reference-server behavior.** The reference MAC is keyed BLAKE3 with a key
+The reference MAC is keyed BLAKE3 with a key
 derived using that exact purpose as its domain.
 
-**Protocol requirement.** The source secret MUST be independent of URL, upload, scanner, hook, receipt,
+The source secret MUST be independent of URL, upload, scanner, hook, receipt,
 authority, admin and client/owner keys. Reuse the deployment secret-management
 pattern of URL tokens: dedicated secret binding/key file, zeroized owned source,
 redacted diagnostics, and explicit key replacement. This MAC is symmetric:
@@ -2315,12 +2392,12 @@ even when their repository names and auth audiences coincide.
 
 MAC, format, expiry and stateless scope checks MUST precede sensitive reads.
 
-**Reference-server behavior.** Reference token parsing is bounded to a 65,536-byte decoded payload, an 87,426-byte token,
+Reference token parsing is bounded to a 65,536-byte decoded payload, an 87,426-byte token,
 1,024 witness nodes, and the SPEC-HISTORY-ORDER §4 reducer bounds (256 pending
 slots, 192 emitted IDs). Version 1 JSON claims are rejected at every deployment
 boundary; a caller holding one restarts paging at the selected ref.
 
-**Protocol requirement.** The token's order MUST equal the requested order
+The token's order MUST equal the requested order
 before any sensitive read. The server MUST authenticate current credentials and recheck visibility, epoch, grants and
 authorizer before importing evidence. It MUST strongly read the selected ref
 and authoritative publication fence, and compare them again at the closing
@@ -2387,13 +2464,13 @@ Invalid scope, MAC, anchor, boundary, expiry, retired key and inaccessible state
 MUST return uniform absence for either view, without probing cursor membership.
 Storage faults and owner resource exhaustion retain their existing classifications.
 
-**Reference-server behavior.** Reference issuance uses
+Reference issuance uses
 `issue_history_continuation_in` and performs no object or storage proof calls;
 it bounds supplied-ID memo lookups to 448 and witness traversals to 1,024.
 Redemption hydrates pending keys within a six-call read envelope and reports
 `HistoryStateLimit` for retained-state capacity exhaustion.
 
-**Protocol requirement.** A caller MAY replay a continuation within its scope and fixed expiry, including
+A caller MAY replay a continuation within its scope and fixed expiry, including
 to retry a lost response. The same token and page parameters serve the same
 canonical page when every live check still permits it. Each redemption MUST
 repeat those checks; a previous success MUST NOT cache authority or denial.
