@@ -439,8 +439,8 @@ jobs:
         working-directory: rust
         run: |
           cargo check --locked -p mkit-server-conformance --no-default-features --lib
-          cargo tree --locked -p mkit-server-conformance --no-default-features -e normal --prefix none --format '{p}' > portable-conformance-deps.txt
-          if rg '^(mkit-server|mkit-server-worker) v' portable-conformance-deps.txt; then
+          cargo tree --locked -p mkit-server-conformance --no-default-features -e normal --prefix none --format '{p}' > "${RUNNER_TEMP}/portable-conformance-deps.txt"
+          if rg '^(mkit-server|mkit-server-worker) v' "${RUNNER_TEMP}/portable-conformance-deps.txt"; then
             echo '::error::portable conformance depends on reference orchestration'
             exit 1
           fi
