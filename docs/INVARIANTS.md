@@ -2986,7 +2986,13 @@ and the pair is read again before it is used.
 proved, an admitted charge could differ from the pack set forked, or a reader
 could see the head's flag without the packs it promises.
 
-**Enforced by:** the fork engine tests for the denial-on full walk, the carried
+The supported pipeline and timer construction paths derive denial mode and
+extraction settings from the same `PipelineConfig` through
+`ForkEnv::from_config` and `ForkTimer::from_config`. Low-level public fields
+remain caller-controlled; drain fork jobs before switching denial mode.
+
+**Enforced by:** the Worker configured-timer mode regression for both denial
+settings, the fork engine tests for the denial-on full walk, the carried
 pair check, the plan fallback, the publication stage order and the round probe.
 
 ## Fork waves retain checkpoint and failure order

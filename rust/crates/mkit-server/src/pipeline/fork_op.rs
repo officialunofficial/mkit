@@ -17,8 +17,8 @@ use super::{
 use crate::budget::SliceBudget;
 use crate::error::{Code, ServerError};
 use crate::fork::{
-    self, ChargeV1, FenceV1, ForkEnv, ForkError, ForkLimits, ForkRequest, ForkResult, JOB_TTL_MS,
-    ReplayV1, SLICE_CALLS, SettleV1, StartOutcome,
+    self, ChargeV1, FenceV1, ForkEnv, ForkError, ForkRequest, ForkResult, JOB_TTL_MS, ReplayV1,
+    SLICE_CALLS, SettleV1, StartOutcome,
 };
 use crate::op::{Commitment, OpKind, Operation};
 use crate::pipeline::hooks::{Admission, AdmissionInput, ForkAdmission};
@@ -200,14 +200,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     }
 
     fn fork_env(&self) -> ForkEnv<'_, N> {
-        ForkEnv {
-            store: &self.meta,
-            shards: self.shards.as_ref(),
-            clock: self.clock.as_ref(),
-            takedown_denial: self.cfg.takedown_denial,
-            extract_min_bytes: self.cfg.indexed.map(|indexed| indexed.extract_min_bytes),
-            limits: ForkLimits::default(),
-        }
+        ForkEnv::from_config(
+            &self.meta,
+            self.shards.as_ref(),
+            self.clock.as_ref(),
+            &self.cfg,
+        )
     }
 
     #[allow(clippy::too_many_lines)] // One request lifecycle: the stages share their locals.

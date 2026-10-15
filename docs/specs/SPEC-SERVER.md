@@ -2052,7 +2052,12 @@ copied, and:
   exactly as strict, since the denial proof covers every pack the walk reaches.
   It is also bound by the walk's usual per-advance item capacity, so a
   deployment that may enable denial later and forks repositories whose closure
-  exceeds that capacity should fork with denial on.
+  exceeds that capacity should fork with denial on. The implementation's
+  `MAX_ADVANCE_ITEMS` is 4,096; exceeding it is a permanent capacity refusal,
+  so affected destinations cannot advance after activation and should be
+  re-forked with denial on. Drain in-flight fork jobs before changing the mode;
+  follow the [activation runbook](../operations/fork-waves.md#enabling-takedown-denial-after-running-with-it-off)
+  and §14.2's backfill requirements.
 
 **Request.** `ForkRequest` names the source repository, the branch
 `refs/heads/<x>`, the `expected_tip` (required) and the destination

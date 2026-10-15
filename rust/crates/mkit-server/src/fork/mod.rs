@@ -265,6 +265,7 @@ pub struct ForkEnv<'a, S> {
     /// `PipelineConfig::takedown_denial` of the pipeline that serves the
     /// destination: it selects the pack proof, and the publication walk
     /// honours the cleared set only under it.
+    /// Use [`Self::from_config`] to share the pipeline configuration.
     pub takedown_denial: bool,
     /// The extraction threshold; `None` when extraction is not deployed, in
     /// which case no holder rows are copied.
@@ -282,7 +283,26 @@ impl<S> core::fmt::Debug for ForkEnv<'_, S> {
     }
 }
 
-impl<S> ForkEnv<'_, S> {
+impl<'a, S> ForkEnv<'a, S> {
+    /// Build the fork environment from the configuration used by the pipeline.
+    /// This is the supported construction path for pipeline and timer drivers.
+    #[must_use]
+    pub fn from_config(
+        store: &'a S,
+        shards: &'a dyn ShardMap,
+        clock: &'a dyn Clock,
+        config: &crate::pipeline::PipelineConfig,
+    ) -> Self {
+        Self {
+            store,
+            shards,
+            clock,
+            takedown_denial: config.takedown_denial,
+            extract_min_bytes: config.indexed.map(|indexed| indexed.extract_min_bytes),
+            limits: ForkLimits::default(),
+        }
+    }
+
     pub(crate) fn now(&self) -> u64 {
         u64::try_from(self.clock.now_ms()).unwrap_or(0)
     }

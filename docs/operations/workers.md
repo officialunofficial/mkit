@@ -648,6 +648,9 @@ denial-action reads. Holder, inventory, membership, index, and proof-structure
 writes still run. Core takedown writers refuse with `failed_precondition` and
 `takedown denial disabled` before any write; store-level writers require a
 capability from a pipeline with denial enabled.
+Before enabling denial on an existing store, follow the
+[fork migration runbook](fork-waves.md#enabling-takedown-denial-after-running-with-it-off),
+including backfill, draining fork jobs, and the 4,096-item publication limit.
 
 With `takedown_denial=false`, the in-process Public reader and batch URL
 issuance (`issue_urls`) can use a cached positive reachability proof. Only a

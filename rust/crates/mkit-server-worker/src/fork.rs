@@ -8,9 +8,10 @@
 //! allowance cannot hold is retried on a later alarm. Like indexed
 //! verification it needs a Paid alarm budget, so Free registers nothing.
 //!
-//! The handler's `takedown_denial` and `extract_min_bytes` MUST equal the
-//! pipeline's: the first selects the pack proof and whether the publication
-//! walk honours the fork's cleared set, the second which holder rows are copied.
+//! Configured registration uses the pipeline configuration for
+//! `takedown_denial` and `extract_min_bytes`: the first selects the pack proof
+//! and whether the publication walk honors the fork's cleared set, the second
+//! which holder rows are copied.
 
 use std::sync::Arc;
 
@@ -30,6 +31,8 @@ const _: () = assert!(FORK_ALARM_CALLS < crate::purge::LAUNCH_ALARM_OPERATIONS);
 /// Register kind 16 on a Paid deployment's namespace coordinators when it
 /// runs indexed mode on leased sharding; on every other class or deployment
 /// `registry` comes back as it was. `store` reaches every partition.
+/// Low-level registration: callers must match the pipeline settings. Configured
+/// deployments should build [`ForkTimer::from_config`] and register that handler.
 #[must_use]
 pub fn with_fork_timer<S, T>(
     registry: TimerRegistry<'static, S>,
@@ -44,6 +47,28 @@ where
     S: NamespaceStore,
     T: NamespaceStore + 'static,
 {
+    register_timer(
+        registry,
+        class,
+        enabled,
+        ForkTimer {
+            store,
+            shards: Arc::new(D34Shards),
+            clock,
+            takedown_denial,
+            extract_min_bytes: Some(extract_min_bytes),
+        },
+        alarm_budget,
+    )
+}
+
+fn register_timer<S: NamespaceStore, T: NamespaceStore + 'static>(
+    registry: TimerRegistry<'static, S>,
+    class: ShardClass,
+    enabled: bool,
+    timer: ForkTimer<T>,
+    alarm_budget: Option<mkit_server::purge::SliceBudget>,
+) -> TimerRegistry<'static, S> {
     let Some(budget) = alarm_budget else {
         return registry;
     };
@@ -51,16 +76,19 @@ where
         return registry;
     }
     registry.register(crate::purge::Budgeted {
-        handler: ForkTimer {
-            store,
-            shards: Arc::new(D34Shards),
-            clock,
-            takedown_denial,
-            extract_min_bytes: Some(extract_min_bytes),
-        },
+        handler: timer,
         budget: Some(budget),
         calls: FORK_ALARM_CALLS,
     })
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn configured_timer<T>(
+    config: &mkit_server::pipeline::PipelineConfig,
+    store: T,
+    clock: Arc<dyn Clock>,
+) -> ForkTimer<T> {
+    ForkTimer::from_config(store, Arc::new(D34Shards), clock, config)
 }
 
 /// [`with_fork_timer`] for a Durable Object of `env`.
@@ -74,22 +102,24 @@ pub(crate) fn register_configured<S: NamespaceStore>(
     cfg: &crate::adapter::WorkerConfig,
 ) -> TimerRegistry<'static, S> {
     use crate::ns_client::{StubTransport, WorkerNamespaceStore};
-    let Some(indexed) = cfg.indexed else {
-        return registry;
+    let config = match cfg.pipeline_config() {
+        Ok(config) => config,
+        Err(error) => {
+            crate::log_failure(&error.to_string());
+            return registry;
+        }
     };
-    let enabled = cfg.sharding == mkit_server::pipeline::Sharding::D34;
-    with_fork_timer(
-        registry,
-        class,
-        enabled,
-        (cfg.takedown_denial, indexed.extract_min_bytes),
+    let enabled =
+        config.sharding == mkit_server::pipeline::Sharding::D34 && config.indexed.is_some();
+    let timer = configured_timer(
+        &config,
         WorkerNamespaceStore::new(
             StubTransport::new(env.clone(), cfg.placement.clone()),
             cfg.probe_partition(),
         ),
         Arc::new(crate::clock::WorkerClock),
-        alarm_budget,
-    )
+    );
+    register_timer(registry, class, enabled, timer, alarm_budget)
 }
 
 #[cfg(test)]
@@ -108,6 +138,44 @@ mod tests {
             budget.then(|| mkit_server::purge::SliceBudget::new(960)),
         );
         format!("{registry:?}")
+    }
+
+    #[test]
+    fn configured_fork_timer_matches_pipeline_denial_mode() {
+        use crate::adapter::WorkerConfig;
+        use mkit_server::fork::ForkEnv;
+
+        for denial in [false, true] {
+            let mut worker = WorkerConfig::from_vars(|key| match key {
+                "AUTH_AUDIENCE" => Some("https://vcs.example".into()),
+                "AUTH_REPOSITORY" => Some("default".into()),
+                _ => None,
+            })
+            .unwrap();
+            worker.takedown_denial = denial;
+            worker.indexed = Some(mkit_server::indexed::IndexedConfig::default());
+            let config = worker.pipeline_config().unwrap();
+            assert_eq!(config.takedown_denial, denial);
+            let timer =
+                configured_timer(&config, MemoryKv::default(), Arc::new(ManualClock::new(0)));
+            let env = ForkEnv::from_config(
+                &timer.store,
+                timer.shards.as_ref(),
+                timer.clock.as_ref(),
+                &config,
+            );
+            assert_eq!(timer.takedown_denial, config.takedown_denial);
+            assert_eq!(timer.takedown_denial, env.takedown_denial);
+            assert_eq!(timer.extract_min_bytes, env.extract_min_bytes);
+            let registry = register_timer::<MemoryKv, _>(
+                TimerRegistry::new(),
+                ShardClass::NsCoordinator,
+                true,
+                timer,
+                Some(mkit_server::purge::SliceBudget::new(960)),
+            );
+            assert!(format!("{registry:?}").contains("TimerKind(16)"));
+        }
     }
 
     #[test]

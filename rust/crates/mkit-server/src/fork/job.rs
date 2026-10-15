@@ -776,10 +776,35 @@ pub struct ForkTimer<N> {
     pub shards: std::sync::Arc<dyn crate::pipeline::ShardMap>,
     /// The business clock.
     pub clock: std::sync::Arc<dyn crate::rt::Clock>,
-    /// Whether pack-level takedown denial is on.
+    /// Whether pack-level takedown denial is on. Must match the pipeline.
+    /// Use [`Self::from_config`] rather than wiring this field independently.
     pub takedown_denial: bool,
     /// The extraction threshold, if extraction is deployed.
     pub extract_min_bytes: Option<u64>,
+}
+
+impl<N> ForkTimer<N> {
+    /// Build a timer from the same configuration that serves its destination.
+    /// This is the supported construction path; keep that configuration fixed
+    /// until all in-flight fork jobs finish before changing denial mode.
+    #[must_use]
+    pub fn from_config(
+        store: N,
+        shards: std::sync::Arc<dyn crate::pipeline::ShardMap>,
+        clock: std::sync::Arc<dyn crate::rt::Clock>,
+        config: &crate::pipeline::PipelineConfig,
+    ) -> Self {
+        let env = ForkEnv::from_config(&store, shards.as_ref(), clock.as_ref(), config);
+        let takedown_denial = env.takedown_denial;
+        let extract_min_bytes = env.extract_min_bytes;
+        Self {
+            store,
+            shards,
+            clock,
+            takedown_denial,
+            extract_min_bytes,
+        }
+    }
 }
 
 impl<N> core::fmt::Debug for ForkTimer<N> {

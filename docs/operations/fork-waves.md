@@ -155,6 +155,41 @@ their existing boundaries. Reader paths, hooks, outcomes, wire bytes, stored
 formats, and public APIs do not change. Pack-serving proofs retain their serial
 public entry point; upload admission uses a private write entry point. No store reset is required.
 
+## Enabling takedown denial after running with it off
+
+Enabling denial on an existing store is a migration, not a config flip.
+[SPEC-SERVER §14.2](../specs/SPEC-SERVER.md#142-blocklist) requires holder,
+inventory, and proof-structure backfill before activation, and checks of objects
+ingested with denial off when they are read after activation. See also the
+[Worker denial configuration](workers.md#embedding).
+
+1. Stop admitting new fork jobs and drain or finish every in-flight fork before
+   changing the mode. Deploy the same configuration to request pipelines and
+   fork timers; use `ForkTimer::from_config` with the pipeline configuration.
+   The job row does not record a denial mode, so changing it mid-job is unsafe.
+2. Inventory destinations forked while denial was off. Those forks built no
+   cleared set or recorded external-base set. Under denial, their first
+   publication walk covers the full inherited object closure and discovers
+   external bases itself; every reached pack receives the advance-time denial
+   proof. See [SPEC-SERVER §9.9](../specs/SPEC-SERVER.md#99-fork).
+3. Measure the closure that each destination's proposed publication must walk
+   against `MAX_ADVANCE_ITEMS` (4,096), including inherited history and the new
+   commit. The walk also bounds packmap, pack and dependency sets. Repository
+   byte size or file count alone does not establish that it fits. There is no
+   existing operator command or typed read that reports this publication-closure
+   size or inventories destinations by their creation-time denial mode; operators
+   need their own fork records and closure inspection. Do not assume an unknown
+   closure fits.
+4. A destination whose required walk exceeds 4,096 items cannot advance after
+   switching: `Step::Capacity` is permanent, and retries do not shrink the walk.
+   Plan to re-fork affected destinations into empty destinations after switching,
+   with denial on, so the fork builds the cleared set. For new deployments or
+   forks that may exceed this limit, fork with denial on from the start.
+
+This runbook does not supply backfill or migration tooling and does not raise
+the cap. Complete the §14.2 backfill before enabling denial; re-forking addresses
+this fork publication limit, not the other activation prerequisites.
+
 ## Latency model
 
 This model uses sixteen ref-index and object-index partitions. It assumes
