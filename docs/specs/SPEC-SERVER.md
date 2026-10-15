@@ -494,8 +494,8 @@ within the requested namespace, and its repository name need not exist. The
 operation is **namespace-scoped**, as STC §7.10 requires. A repository-specific
 read allowance MUST NOT imply permission to enumerate other private names.
 Non-owner authority callers retain the public listing unless the deployment
-explicitly opts in with `PipelineConfig::list_repos_authority_full` (default
-false) and the hook Allow returns `writer_view = true` for the entire namespace.
+explicitly enables namespace-wide authority listing (disabled by default) and
+the hook Allow returns `writer_view = true` for the entire namespace.
 Authority `permission_denied`/`not_found` denials select the public listing even
 for the owner; hook failures fail closed. A Check hook cannot widen any listing
 view and its denial or failure propagates.
@@ -713,7 +713,7 @@ key requires fresh keys or incarnation/operation binding in that service.
 A deployment MAY configure `namespace_mode = authority`. The default is
 `self_certifying`, which retains STC §7.4's owner-key and owner-address grammar
 and authorization rules. Authority mode MUST require Multi addressing,
-`AuthorizerRole::Authority`, the §6.2.1 authority-generation fence, and
+an authority authorizer, the §6.2.1 authority-generation fence, and
 `namespace_policy = any`. Startup MUST refuse any inconsistent combination;
 the fence's auth-v2, transactional storage, and non-open hook prerequisites
 still apply. Namespace mode is a deployment setting, never a request header.
@@ -768,15 +768,22 @@ The 16-key bound and 1,024-namespace exact-scope bound remain. Authority keys
 MUST remain separate from owner, hook, ticket, URL-token, admin, publication,
 scanner, and history-token keys wherever those roles are configured.
 
-In authority mode, a signed auth-v2 ListRefs envelope with Authority-hook
-`caller_view = Writer` MUST satisfy the writer authority required by
-`repo_storage`, `repo_storage_many`, `ReaderView::Owner` object reads, and
-owner-view `issue_urls`. A reader allowance alone MUST NOT satisfy it.
-Unauthorized principals receive the same repository-absence response for
-existing and missing repositories; batched counters return `None` for both.
-The ordinary publication, reachability, visibility, and denial checks remain.
-Namespace-wide private listing still requires the explicit
-`list_repos_authority_full` opt-in and a namespace-scoped hook writer allowance.
+In authority mode, a signed auth-v2 ListRefs envelope with an authority-hook
+writer allowance MUST satisfy the writer authority required by owner-view
+storage queries, object reads, and URL issuance. A reader allowance alone MUST
+NOT satisfy it. Unauthorized principals MUST receive the same repository-absence
+response for existing and missing repositories. The ordinary publication,
+reachability, visibility, and denial checks remain. Namespace-wide private
+listing still requires the explicit opt-in and a namespace-scoped hook writer
+allowance.
+
+**Reference-server behavior.** The listing opt-in is
+`PipelineConfig::list_repos_authority_full`. Authority mode uses
+`AuthorizerRole::Authority`. The writer allowance satisfies `repo_storage`,
+`repo_storage_many`, `ReaderView::Owner` reads, and owner-view `issue_urls`;
+batched counters return `None` for both missing and unauthorized repositories.
+
+**Protocol requirement.**
 
 Under `namespace_policy = any`, namespace discovery is not exhaustive.
 Authority deployments MUST NOT claim complete deployment-wide takedown from
@@ -1998,18 +2005,23 @@ visibility may differ. The requested destination visibility MUST agree with
 any prior owner declaration for that name.
 
 Admission MUST see the inherited byte charge in both `declared_bytes` and
-`new_to_repo_bytes`. Quota charges MUST apply at most once for the same fork
-binding. A fork MUST NOT inherit more bytes than admission permitted. Joining
-an existing binding MUST NOT charge again, and a separately granted joining
-reservation MUST terminate as a replay race. Construction MUST retain durable
-recovery responsibility and MUST NOT outlive its reservation without a
+`new_to_repo_bytes`. Quota charges MUST apply at most once within one admitted
+construction attempt. Resuming a durably retained attempt for the same binding
+MUST NOT charge again, and a separately granted joining reservation MUST
+terminate as a replay race. A fork MUST NOT inherit more bytes than admission
+permitted. A server MAY discard a definitely failed attempt that has established
+neither an accepted destination nor a saved terminal fork result. A later request
+for the same binding then begins a new admitted attempt and MAY charge again;
+it is not a replay or continuation of the discarded attempt. Construction MUST
+retain durable recovery responsibility and MUST NOT outlive its reservation without a
 terminal disposition. An externally settled reservation MUST prevent further
 construction and acceptance.
 
 A pending fork answers `unavailable` and `fork in progress` with a `Retry-After`
 hint. Both the original signed identity and a fresh signed request for the same
-binding may resume it. A terminal failure MUST be replayed. A completed result
-identifies the source, branch, tip, source publication sequence, packmap head,
+binding may resume it. A retained terminal failure MUST be replayed. Retrying a
+discarded definitely failed attempt follows the new-admission exception above.
+A completed result identifies the source, branch, tip, source publication sequence, packmap head,
 pack count and bytes, copied index-entry count, sorted-pack-id digest, and
 destination membership generation.
 
@@ -2033,7 +2045,11 @@ completed replay evidence, and then runs the embedding server's dispatch policy.
 The public embedding guide and crate documentation define this API.
 
 The reference implementation constructs a durable job with bounded resumable
-work and a 24-hour lifetime. It registers the destination, copies index entries,
+work and a 24-hour lifetime. A failure before destination registration aborts
+its reservation and discards the job; a retry is a new admitted attempt, and
+the failed attempt's quota charge remains spent. A failure after registration
+retains its terminal failure for later callers. It registers the destination,
+copies index entries,
 counts packs, establishes holders, and writes membership incrementally. Its
 limits are 1,024 packs, 16,384 index rows, 8,000 working-set ids, 2,048 unresolved
 external-base ids (1,800 per pack), and 262,144 scanned source index rows. These
@@ -2192,8 +2208,8 @@ authorization and proof revalidation MUST precede the live inventory/descriptor
 checks. Source guards MUST then start fresh after that work and all callbacks;
 inventory facts MUST NOT establish additional traversal edges.
 
-Selected-ref reader sessions MUST be explicitly opt-in: `with_selected_ref`
-narrows only session canonical and metadata reads on that reader. The
+Selected-ref reader sessions MUST be explicitly opt-in. Selecting a ref narrows
+only session canonical and metadata reads on that reader. The
 session's root capture MUST read only the selected ref through the
 authoritative anchor — the owner view's live ref, the public view's published
 head — where a missing or empty publication ledger is uniformly absent, and
@@ -2236,17 +2252,24 @@ This additive embedding surface does not alter URL grammar or HTTP serving.
 
 #### Authenticated history continuations
 
+**Protocol requirement.**
+
 See the [Workers embedding guide](../embedding/workers.md#one-reader-and-one-session-per-request)
 for request composition and the [history paging measurements](../operations/history-paging.md)
 for bounded fixture results.
 
 As an explicit exception to request-local structural evidence, a server MAY
 authenticate a selected-ref history cursor across requests. The continuation
-MUST NOT confer permission. `walk_history_page_in` exposes first-parent paging
-separately from the all-parent traversal above; it MUST NOT silently narrow an
-all-parent log. `walk_history_page_with_options_in` additionally continues an
-all-parent `TimestampDiscovery` walk ([SPEC-HISTORY-ORDER](SPEC-HISTORY-ORDER.md)),
-whose sealed reducer state travels in the token.
+MUST NOT confer permission. First-parent paging MUST remain distinct from
+all-parent traversal; it MUST NOT silently narrow an all-parent log. A
+continuation of an all-parent timestamp-discovery walk
+([SPEC-HISTORY-ORDER](SPEC-HISTORY-ORDER.md)) MUST retain its sealed ordering
+state in the token.
+
+**Reference-server behavior.** The reference embedding API exposes
+`walk_history_page_in` and `walk_history_page_with_options_in`; selected-ref
+sessions use `with_selected_ref`. Its opaque version-2 tokens use the following
+private format, which other servers need not expose.
 
 Version 2 is `<base64url(binary claims)>.<base64url(32-byte MAC)>`, with strict
 unpadded encoding and a MAC string of exactly 43 characters. Claims are a
@@ -2265,8 +2288,9 @@ linear chain and the last node is the cursor. Decoding rejects truncation,
 trailing bytes, an unknown order, an empty or oversized witness, duplicate
 witness IDs, a missing or misplaced root, forward predecessors, a malformed
 snapshot, an unsealed or outstanding-selected reducer, and any pending ID
-absent from the witness. The credential digest
-includes the trusted auth audience, signer, grant and captured credential headers;
+absent from the witness.
+
+**Protocol requirement.** The credential digest includes the trusted auth audience, signer, grant and captured credential headers;
 it excludes envelope nonce, fingerprint and verification time so a fresh signed
 request can continue the same credential scope. The security digest binds the
 repository record, visibility row including change time, monotonic visibility
@@ -2278,8 +2302,10 @@ continuations; it MUST NOT reset on deletion/recreation. This
 fences a public/private/public return even within one clock millisecond. Digests frame each component's
 length to avoid concatenation ambiguity.
 
-The MAC is keyed BLAKE3 with a key derived using that exact purpose as its domain.
-The source secret MUST be independent of URL, upload, scanner, hook, receipt,
+**Reference-server behavior.** The reference MAC is keyed BLAKE3 with a key
+derived using that exact purpose as its domain.
+
+**Protocol requirement.** The source secret MUST be independent of URL, upload, scanner, hook, receipt,
 authority, admin and client/owner keys. Reuse the deployment secret-management
 pattern of URL tokens: dedicated secret binding/key file, zeroized owned source,
 redacted diagnostics, and explicit key replacement. This MAC is symmetric:
@@ -2288,13 +2314,14 @@ invalidates outstanding tokens. Deployment realms MUST distinguish backends
 even when their repository names and auth audiences coincide.
 
 MAC, format, expiry and stateless scope checks MUST precede sensitive reads.
-Parsing is bounded to a 65,536-byte decoded payload, an 87,426-byte token,
+
+**Reference-server behavior.** Reference token parsing is bounded to a 65,536-byte decoded payload, an 87,426-byte token,
 1,024 witness nodes, and the SPEC-HISTORY-ORDER §4 reducer bounds (256 pending
-slots, 192 emitted IDs). The token's order MUST equal the requested order
-before any sensitive read. Version 1 JSON claims are rejected at every
-deployment boundary; a caller holding one restarts paging at the selected ref.
-The server
-MUST authenticate current credentials and recheck visibility, epoch, grants and
+slots, 192 emitted IDs). Version 1 JSON claims are rejected at every deployment
+boundary; a caller holding one restarts paging at the selected ref.
+
+**Protocol requirement.** The token's order MUST equal the requested order
+before any sensitive read. The server MUST authenticate current credentials and recheck visibility, epoch, grants and
 authorizer before importing evidence. It MUST strongly read the selected ref
 and authoritative publication fence, and compare them again at the closing
 boundary. A write-free guarded apply defines the strict-ref validation cut:
@@ -2315,15 +2342,13 @@ Delayed projections MUST NOT reinstate an invalidated continuation.
 
 Issuance is memo-only. The caller seeds the walk at the selected tip peeled
 through any tags to its commit/remix; the checkpoint keeps the unpeeled
-anchor. `issue_history_continuation_in` re-fences the retained capture
-checkpoint — credential, selected ref, anchor, security and expiry — against
+anchor. Issuance revalidates the retained capture checkpoint &mdash; credential,
+selected ref, anchor, security, and expiry &mdash; against
 live state, and validates the caller's sealed walk against session evidence
 alone. Every pending or emitted ID MUST be recorded in the session
 memo on the selected ref: an emitted ID must be a proven commit/remix with its
 decoded timestamp, and a pending ID must hold a recorded history edge whose
-decoded timestamp, when known, supplies the reducer key. Issuance performs zero
-object or storage proof calls — at most 448 supplied-ID memo lookups plus at
-most 1,024 witness traversals. An outstanding selected candidate, an unsealed
+decoded timestamp, when known, supplies the reducer key. An outstanding selected candidate, an unsealed
 walk, a pending ID that is off-ref or never read, an emitted ID that is not a
 proven history object, or a supplied key that disagrees with the recorded
 timestamp refuses issuance as uniform absence; invalid reader or walk state is
@@ -2332,12 +2357,11 @@ checkpoint tip; emitted IDs are not carried.
 
 A timestamp-discovery redemption restores the sealed snapshot and emits the
 next page in canonical order. Pending IDs whose priority keys the token does
-not carry are hydrated in batches within the existing six-call read envelope
-before output selection; a key the token carries is rechecked against the live
-object at emission, and any disagreement refuses the page — carried state is
+not carry MUST obtain those keys before output selection; a key the token
+carries MUST be rechecked against the live object at emission, and any disagreement refuses the page — carried state is
 never reordered or amended. History state caps are explicit rather than
 absent: frontier or emitted-set overflow, oversized witness and oversized
-payload each report `HistoryStateLimit` typed in both public and owner views.
+payload each report a typed history-state limit in both public and owner views.
 A redemption NEVER extends expiry, mints no records, and pages a token it can
 replay.
 
@@ -2363,7 +2387,13 @@ Invalid scope, MAC, anchor, boundary, expiry, retired key and inaccessible state
 MUST return uniform absence for either view, without probing cursor membership.
 Storage faults and owner resource exhaustion retain their existing classifications.
 
-A caller MAY replay a continuation within its scope and fixed expiry, including
+**Reference-server behavior.** Reference issuance uses
+`issue_history_continuation_in` and performs no object or storage proof calls;
+it bounds supplied-ID memo lookups to 448 and witness traversals to 1,024.
+Redemption hydrates pending keys within a six-call read envelope and reports
+`HistoryStateLimit` for retained-state capacity exhaustion.
+
+**Protocol requirement.** A caller MAY replay a continuation within its scope and fixed expiry, including
 to retry a lost response. The same token and page parameters serve the same
 canonical page when every live check still permits it. Each redemption MUST
 repeat those checks; a previous success MUST NOT cache authority or denial.
@@ -3528,28 +3558,32 @@ bytes represented under a different id can evade that block.
 
 **Protocol requirement.**
 
-The deployment's `takedown_denial` option selects whether global content denial is
-enabled. When it is false, ingest and read paths MUST NOT consult block or
-denial-action rows; their denial checks MUST report clear without storage I/O.
-Holder, inventory, membership, index, and proof-structure writes MUST continue
-in this mode. Every path that creates or activates a block or denial action
-MUST refuse with `failed_precondition` and the exact public message
-`takedown denial disabled` before any write. Raw store writers MUST require a
-capability obtained from a pipeline with denial enabled.
+A deployment MAY disable global content denial. While disabled, denial checks
+MUST report clear; holder, inventory, membership, index, and proof-structure
+obligations remain applicable. Every operation that creates or activates a block
+or denial action MUST refuse with `failed_precondition` and the exact public
+message `takedown denial disabled` before any write.
+
+**Reference-server behavior.** The `takedown_denial` configuration selects this
+mode. When disabled, ingest and read paths skip block and denial-action storage
+reads. Raw store writers require a capability obtained from a pipeline with
+denial enabled. These API and I/O mechanisms do not constrain other servers.
+
+**Protocol requirement.**
 
 Enabling takedown on an existing store is a migration, not a configuration-only
 change. Objects ingested with denial disabled MUST be checked on read once
 denial is enabled. Holder, inventory, and proof structures require a backfill
 before activation. The following blocklist checks and denial-specific
-deduplication requirements apply when `takedown_denial` is true.
+deduplication requirements apply when global content denial is enabled.
 
-The server MUST maintain a strongly consistent global blocklist with
-one row per object id. The row holds a set of active actions. Each
+The server MUST maintain a strongly consistent global blocklist associating
+each object id with its set of active actions. Each
 action has a distinct `block_action_id`, source `takedown` or `manual`,
 an optional `takedown_id`, a §14.6 reason token, and its `blockedAtMs`.
 An action carrying a takedown id MUST have source `takedown`; a manual
 action MUST NOT carry one. The object stays blocked while any action
-remains, and the row disappears only when the set is empty. §16 defines
+remains; its blocklist entry is absent only when the set is empty. §16 defines
 `AddBlock` and `RemoveBlock`. A manual block of an id with known holders
 also starts a takedown action for those holders. `RemoveBlock` MUST
 remove only a named manual action without a takedown id; only §14.8

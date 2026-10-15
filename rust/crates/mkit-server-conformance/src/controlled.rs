@@ -181,10 +181,11 @@ pub const CASES: &[Case] = &[
         controls: &[
             "observe",
             "fixture.opaque_refs",
+            "fixture.ref_reservation",
             "authority.bump",
             "pause.before_acceptance",
         ],
-        features: &[Feature::AuthV2, Feature::Replay, Feature::AtomicAdvance],
+        features: ACCEPT,
     },
     Case {
         name: "replay.moves_and_generation",
@@ -409,7 +410,9 @@ async fn acceptance(
 ) -> Result<(), Failure> {
     let fixture = fixture(ctx).await?;
     let before = control.observe(&fixture.query).await?;
-    if let Some(step) = step {
+    consistent(&before, false)?;
+    let required_commit = step != Some("before_acceptance");
+    let original = if let Some(step) = step {
         control
             .command(&Request::Pause {
                 step: step.into(),
@@ -427,32 +430,95 @@ async fn acceptance(
         });
         control.wait_paused().await?;
         let paused = control.observe(&fixture.query).await?;
-        consistent(&paused, step != "before_acceptance")?;
+        consistent(&paused, required_commit)?;
         quota_consistent(
             &before,
             &paused,
-            step != "before_acceptance",
+            required_commit,
             fixture.query.quota.is_some(),
         )?;
-        // Lose the original response. Restart must retain every accepted unit;
-        // unaccepted commands may disappear. Resolve only with the same identity.
+        // Drop the response, then inspect recovery before any request can
+        // reconstruct an acknowledged unit that the server lost.
         request.abort();
-        control
-            .command(&Request::Restart { mode: mode.into() })
-            .await?;
-        control.command(&Request::Resume).await?;
+        paused
     } else {
         committed(&fixture.ctx, &fixture.op).await?;
-        consistent(&control.observe(&fixture.query).await?, true)?;
-        control
-            .command(&Request::Restart { mode: mode.into() })
-            .await?;
-    }
+        let accepted = control.observe(&fixture.query).await?;
+        consistent(&accepted, true)?;
+        quota_consistent(&before, &accepted, true, fixture.query.quota.is_some())?;
+        accepted
+    };
+    control
+        .command(&Request::Restart { mode: mode.into() })
+        .await?;
+    let recovered = control.observe(&fixture.query).await?;
+    let recovered_accepted = recovery_consistent(
+        &before,
+        &original,
+        &recovered,
+        required_commit,
+        fixture.query.quota.is_some(),
+    )?;
+    control.command(&Request::Resume).await?;
     let ctx = fixture.ctx.reconnect()?;
     committed(&ctx, &fixture.op).await?;
     let after = control.observe(&fixture.query).await?;
     consistent(&after, true)?;
-    quota_consistent(&before, &after, true, fixture.query.quota.is_some())
+    quota_consistent(&before, &after, true, fixture.query.quota.is_some())?;
+    if recovered_accepted && recovered != after {
+        return Err(Failure::Fail(format!(
+            "replay changed recovered acceptance: recovered={recovered:?}, after={after:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// A committed unit must already exist on recovery. Replaying first would let
+/// a server repair lost durability and hide the loss from the conformance case.
+fn recovery_consistent(
+    before: &Observation,
+    original: &Observation,
+    recovered: &Observation,
+    required_commit: bool,
+    quota_enabled: bool,
+) -> Result<bool, Failure> {
+    if required_commit {
+        if recovered != original {
+            return Err(Failure::Fail(format!(
+                "recovery lost or changed accepted state before replay: original={original:?}, recovered={recovered:?}"
+            )));
+        }
+        consistent(recovered, true)?;
+        return Ok(true);
+    }
+    if recovered.head == Some(to_hex(&A)) && recovered.packmap == Some(to_hex(&B)) {
+        consistent(recovered, true)?;
+        quota_consistent(before, recovered, true, quota_enabled)?;
+        return Ok(true);
+    }
+    if recovered.head != before.head
+        || recovered.packmap != before.packmap
+        || recovered.replay != before.replay
+        || recovered.tickets != before.tickets
+        || recovered.memberships != before.memberships
+        || recovered.quota != before.quota
+        || recovered.reservations.len() != 3
+        || before.reservations.len() != 3
+        || recovered.reservations[..2] != before.reservations[..2]
+        || recovered.reservations[2]
+            .as_ref()
+            .is_some_and(|reservation| {
+                !matches!(
+                    (reservation.state.as_str(), reservation.terminal_count),
+                    ("pending", 0) | ("aborted", 1)
+                )
+            })
+    {
+        return Err(Failure::Fail(format!(
+            "recovery exposed a partial acceptance before replay: before={before:?}, recovered={recovered:?}"
+        )));
+    }
+    Ok(false)
 }
 
 fn quota_consistent(
@@ -508,6 +574,12 @@ async fn uncertain(ctx: Ctx, control: &ControlClient) -> Result<(), Failure> {
                 "uncertain storage result must remain an uncertain error, got {other:?}"
             )));
         }
+    }
+    let recovered = control.observe(&fixture.query).await?;
+    if before != recovered {
+        return Err(Failure::Fail(format!(
+            "uncertain result changed accepted state before replay: before={before:?}, recovered={recovered:?}"
+        )));
     }
     committed(&fixture.ctx, &fixture.op).await?;
     let after = control.observe(&fixture.query).await?;
@@ -571,84 +643,152 @@ async fn guard(ctx: Ctx, control: &ControlClient) -> Result<(), Failure> {
             );
             committed(&ctx, &seed).await?;
         }
-        let mut req = advance_req((&head, Exp::Any, &C), (&packmap, Exp::Any, &C));
-        if kind == "delete" {
-            req.head_new_id = None;
-            req.packmap_new_id = None;
-            req.delete = Some(true);
-            req.head_expectation = Some(
-                mkit_transport_connect::generated::RefExpectation::REF_EXPECTATION_MATCH.into(),
-            );
-            req.packmap_expectation = Some(
-                mkit_transport_connect::generated::RefExpectation::REF_EXPECTATION_MATCH.into(),
-            );
-            req.head_expected_id = Some(A.to_vec());
-            req.packmap_expected_id = Some(B.to_vec());
-        }
-        let op = if kind == "update" {
-            sign_unary(
-                &signer,
-                Rpc::UpdateRef,
-                &update_req(&head, Exp::Any, &C),
-                |_| {},
-            )
-        } else {
-            sign_unary(&signer, Rpc::AdvanceRefs, &req, |_| {})
-        };
+        let op = guard_operation(&signer, kind, &head, &packmap);
         let query = ObservationQuery {
             repository: op.header("x-repository").into(),
-            head: head.clone(),
+            head,
             replay: Some(identity(&op)),
+            quota: ctx.profile().quota.map(|_| control::QuotaQuery {
+                signer: signer.public_key_hex(),
+                window_start_ms: None,
+            }),
             ..Default::default()
         };
-        let before = control.observe(&query).await?;
-        control
-            .command(&Request::Pause {
-                step: "before_acceptance".into(),
-                decision_class: None,
-                occurrence: None,
-                on_resume: None,
-                repository: query.repository.clone(),
-                head,
-            })
-            .await?;
-        let pending = tokio::spawn({
-            let ctx = ctx.clone();
-            let op = op.clone();
-            async move {
-                ctx.client()
-                    .post(
-                        op.rpc.procedure(),
-                        "application/proto",
-                        &op.headers,
-                        op.body,
-                    )
-                    .await
-            }
-        });
-        control.wait_paused().await?;
-        control
-            .command(&Request::BumpAuthority {
-                namespace: namespace(&query.repository)?.into(),
-            })
-            .await?;
-        control.command(&Request::Resume).await?;
-        let reply = pending.await.map_err(|e| e.to_string())??;
-        let decoded = crate::wire::client::decode_unary::<UpdateRefResponse>(&reply)?;
-        want_code(decoded, "permission_denied", "authority final guard")?;
-        let after = control.observe(&query).await?;
-        if before.head != after.head
-            || before.packmap != after.packmap
-            || after.replay.as_ref().is_some_and(|r| {
-                r.result
-                    .as_deref()
-                    .is_some_and(|r| r.ends_with("committed"))
-            })
-        {
-            return Err(Failure::Fail(format!(
-                "guard failure committed acceptance effects: {after:?}"
-            )));
+        guard_refused(&ctx, control, &op, &query).await?;
+    }
+    // A stale final guard must also leave ticket reservations and local
+    // memberships untouched, while aborting the separate ref reservation.
+    let ticketed = fixture(ctx).await?;
+    guard_refused(&ticketed.ctx, control, &ticketed.op, &ticketed.query).await
+}
+
+fn guard_operation(
+    signer: &crate::wire::sign::Signer,
+    kind: &str,
+    head: &str,
+    packmap: &str,
+) -> Signed {
+    if kind == "update" {
+        return sign_unary(
+            signer,
+            Rpc::UpdateRef,
+            &update_req(head, Exp::Any, &C),
+            |_| {},
+        );
+    }
+    let mut req = advance_req((head, Exp::Any, &C), (packmap, Exp::Any, &C));
+    if kind == "delete" {
+        req.head_new_id = None;
+        req.packmap_new_id = None;
+        req.delete = Some(true);
+        req.head_expectation =
+            Some(mkit_transport_connect::generated::RefExpectation::REF_EXPECTATION_MATCH.into());
+        req.packmap_expectation =
+            Some(mkit_transport_connect::generated::RefExpectation::REF_EXPECTATION_MATCH.into());
+        req.head_expected_id = Some(A.to_vec());
+        req.packmap_expected_id = Some(B.to_vec());
+    }
+    sign_unary(signer, Rpc::AdvanceRefs, &req, |_| {})
+}
+
+async fn guard_refused(
+    ctx: &Ctx,
+    control: &ControlClient,
+    op: &Signed,
+    query: &ObservationQuery,
+) -> Result<(), Failure> {
+    let before = control.observe(query).await?;
+    control
+        .command(&Request::Pause {
+            step: "before_acceptance".into(),
+            decision_class: None,
+            occurrence: None,
+            on_resume: None,
+            repository: query.repository.clone(),
+            head: query.head.clone(),
+        })
+        .await?;
+    let pending = tokio::spawn({
+        let ctx = ctx.clone();
+        let op = op.clone();
+        async move {
+            ctx.client()
+                .post(
+                    op.rpc.procedure(),
+                    "application/proto",
+                    &op.headers,
+                    op.body,
+                )
+                .await
         }
+    });
+    control.wait_paused().await?;
+    control
+        .command(&Request::BumpAuthority {
+            namespace: namespace(&query.repository)?.into(),
+        })
+        .await?;
+    control.command(&Request::Resume).await?;
+    let reply = pending.await.map_err(|e| e.to_string())??;
+    let decoded = crate::wire::client::decode_unary::<UpdateRefResponse>(&reply)?;
+    want_code(decoded, "permission_denied", "authority final guard")?;
+    let after = control.observe(query).await?;
+    guard_consistent(&before, &after, query.ticket_ids.len())
+}
+
+fn guard_consistent(
+    before: &Observation,
+    after: &Observation,
+    ticket_count: usize,
+) -> Result<(), Failure> {
+    if before.head != after.head
+        || before.packmap != after.packmap
+        || before.replay != after.replay
+        || before.tickets != after.tickets
+        || before.memberships != after.memberships
+    {
+        return Err(Failure::Fail(format!(
+            "guard failure committed acceptance effects: before={before:?}, after={after:?}"
+        )));
+    }
+    if before.quota != after.quota {
+        return Err(Failure::Fail(format!(
+            "guard failure changed quota charge: before={:?}, after={:?}",
+            before.quota, after.quota
+        )));
+    }
+    if before.tickets.len() != ticket_count
+        || before.memberships.len() != ticket_count
+        || before
+            .tickets
+            .iter()
+            .any(|ticket| ticket.as_ref().is_none_or(|ticket| ticket.state != "live"))
+        || before.memberships.iter().any(|member| *member)
+    {
+        return Err(Failure::Fail(format!(
+            "guard fixture lacks live tickets and absent memberships: {before:?}"
+        )));
+    }
+    if before.reservations.len() != ticket_count + 1
+        || after.reservations.len() != ticket_count + 1
+        || before.reservations[..ticket_count] != after.reservations[..ticket_count]
+        || before.reservations[..ticket_count]
+            .iter()
+            .any(|reservation| {
+                !reservation.as_ref().is_some_and(|reservation| {
+                    reservation.state == "ticketed" && reservation.terminal_count == 0
+                })
+            })
+        || !after.reservations[ticket_count]
+            .as_ref()
+            .is_some_and(|reservation| {
+                reservation.state == "aborted" && reservation.terminal_count == 1
+            })
+    {
+        return Err(Failure::Fail(format!(
+            "guard failure lacks unchanged ticket reservations and exactly one aborted ref reservation: before={:?}, after={:?}",
+            before.reservations, after.reservations
+        )));
     }
     Ok(())
 }
