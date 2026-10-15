@@ -172,11 +172,28 @@ fn closure_callback_slice_ceiling_holds_with_a_frozen_clock() {
 }
 
 #[test]
-fn closure_callback_replays_each_committed_slice_after_failure_or_lost_reply() {
-    replays_each_checkpoint(Phase::ClosureResolve);
+fn closure_callback_replays_checkpoints_1_and_2() {
+    replays_checkpoints(Phase::ClosureResolve, 1..=2);
 }
 
-fn replays_each_checkpoint(phase: Phase) {
+#[test]
+fn closure_callback_replays_checkpoints_3_and_4() {
+    replays_checkpoints(Phase::ClosureResolve, 3..=4);
+}
+
+#[test]
+fn closure_callback_replays_checkpoints_5_and_6() {
+    replays_checkpoints(Phase::ClosureResolve, 5..=6);
+}
+
+#[test]
+fn closure_callback_replays_checkpoints_7_and_8() {
+    replays_checkpoints(Phase::ClosureResolve, 7..=8);
+}
+
+// Keep each fault group bounded even when extraction runs one step per slice.
+// Together the four groups exercise both reply modes at all eight checkpoints.
+fn replays_checkpoints(phase: Phase, checkpoints: std::ops::RangeInclusive<u32>) {
     let reference = fixture(phase, 8, false);
     let store = Checkpoints {
         phase: reference.phase,
@@ -187,7 +204,7 @@ fn replays_each_checkpoint(phase: Phase) {
     };
     assert!(callback(&reference, &store) > 1);
     let boundaries = store.commits.load(Ordering::SeqCst);
-    assert!(boundaries > 1);
+    assert_eq!(boundaries, 8);
     drive(
         &reference.rig,
         &reference.extension,
@@ -195,7 +212,7 @@ fn replays_each_checkpoint(phase: Phase) {
     );
     let expected = durable_output(&reference);
     for lose_reply in [false, true] {
-        for fail_at in 1..=boundaries {
+        for fail_at in checkpoints.clone() {
             let f = fixture(phase, 8, false);
             let before = f.rig.job(&f.ticket.pack_id).unwrap();
             let store = Checkpoints {
@@ -373,8 +390,23 @@ fn emit_callback_slice_ceiling_holds_with_a_frozen_clock() {
 }
 
 #[test]
-fn emit_callback_replays_each_committed_slice_after_failure_or_lost_reply() {
-    replays_each_checkpoint(Phase::EmitIndex);
+fn emit_callback_replays_checkpoints_1_and_2() {
+    replays_checkpoints(Phase::EmitIndex, 1..=2);
+}
+
+#[test]
+fn emit_callback_replays_checkpoints_3_and_4() {
+    replays_checkpoints(Phase::EmitIndex, 3..=4);
+}
+
+#[test]
+fn emit_callback_replays_checkpoints_5_and_6() {
+    replays_checkpoints(Phase::EmitIndex, 5..=6);
+}
+
+#[test]
+fn emit_callback_replays_checkpoints_7_and_8() {
+    replays_checkpoints(Phase::EmitIndex, 7..=8);
 }
 
 #[test]
