@@ -185,7 +185,7 @@ pub async fn check_recovery<S: NamespaceStore>(
         )
         .await?;
     let [recovery, reconcile] = rows.as_slice() else {
-        return Err(WatermarkError::Store(StoreError::Corrupt(
+        return Err(WatermarkError::Store(StoreError::MalformedReply(
             "recovery get_many length".into(),
         )));
     };

@@ -28,6 +28,8 @@ pub enum MemoryFault {
     BlobWrite(u32),
     /// The next `PackSink::commit` fails before anything becomes visible.
     BlobCommit,
+    /// The next blob `get` fails before it reads anything.
+    BlobGet,
 }
 
 /// Lock `mutex`, recovering from poisoning: every critical section leaves

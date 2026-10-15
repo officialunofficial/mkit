@@ -642,6 +642,59 @@ fn inventory_and_canonical_single_and_d34_absence_corruption_and_bounds() {
 }
 
 #[test]
+fn member_canonical_classifies_denial_corruption_permanent_and_blob_faults_retryable() {
+    for shards in maps() {
+        let store = MemoryKv::with_clock(std::sync::Arc::new(crate::ManualClock::new(1)));
+        let repo = repo();
+        let reads = ReadAccess::new(&store, shards.as_ref(), RepoVisibility::Public, true);
+        let object = Object::Blob(Blob {
+            data: b"example".to_vec(),
+        });
+        let id = object.id().unwrap();
+        let bytes = mkit_core::serialize::serialize(&object).unwrap();
+        let mut writer = PackWriter::new_raw_only();
+        writer.push_raw(id, &bytes).unwrap();
+        let pack_bytes = writer.finish().unwrap();
+        let pack = mkit_core::hash::hash(&pack_bytes);
+        let blobs = MemoryBlobStore::new("reads");
+        let limits = MemberReadLimits {
+            max_delta_depth: 32,
+            max_decode_bytes: 1024,
+        };
+        upload(&blobs, pack, &pack_bytes);
+        seed_member(&store, shards.as_ref(), &repo, id, pack, bytes.len() as u64);
+        assert!(
+            block_on(reads.read_member_canonical(&blobs, &repo, id, limits))
+                .unwrap()
+                .is_some()
+        );
+        let blobs = blobs.with_fault(crate::MemoryFault::BlobGet);
+        assert_eq!(
+            code(block_on(
+                reads.read_member_canonical(&blobs, &repo, id, limits)
+            )),
+            crate::Code::Unavailable
+        );
+        put(
+            &store,
+            &crate::store::content_shard(&id),
+            keys::block(&id),
+            Value::new(vec![255]),
+        );
+        assert_eq!(
+            code(block_on(reads.locate_object(&repo, &id))),
+            crate::Code::Internal
+        );
+        assert_eq!(
+            code(block_on(
+                reads.read_member_canonical(&blobs, &repo, id, limits)
+            )),
+            crate::Code::Internal
+        );
+    }
+}
+
+#[test]
 fn batched_locations_route_order_absence_duplicates_bounds_and_corruption() {
     for shards in maps() {
         let store = MemoryKv::with_clock(std::sync::Arc::new(crate::ManualClock::new(1)));

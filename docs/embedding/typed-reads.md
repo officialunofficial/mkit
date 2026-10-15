@@ -60,7 +60,8 @@ Absence never consults global blob existence.
 use `declared_visibility` to read a declaration that precedes the record,
 for example a private-origin lock taken ahead of a fork.
 Membership queries report only the requested repository's member evidence.
-Corrupt consulted rows and exhausted lookup caps fail closed with an error.
+Corrupt consulted rows and a lookup cap that cannot change on retry fail
+closed with an error.
 A missing publication ledger does not fall back to live heads or projections.
 The applied sequence can exceed the published sequence when advances await clearance.
 
@@ -71,9 +72,10 @@ Every accessor reports one of three error classes.
 a lookup above the documented cap.
 A corrupt or undecodable stored row, or stored rows that contradict each
 other, is permanent: `internal`. A retry cannot fix stored data; repair or
-remove the row first.
-A store or I/O failure and a malformed reply, such as a wrong row count, are
-retryable: `unavailable`.
+remove the row first. An object-index row cap (`TooManyRows`) is also
+permanent, since the stored row count cannot shrink on retry.
+A store or I/O failure, a malformed reply such as a wrong row count, and a
+page or membership lookup cap are retryable: `unavailable`.
 Each accessor's `# Errors` section lists the classes it can return.
 
 You decide which errors reach your own clients. The wire answers of the

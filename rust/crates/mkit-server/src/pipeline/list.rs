@@ -75,7 +75,10 @@ impl<N: NamespaceStore> BucketSource for RefBucket<'_, N> {
             .iter()
             .map(|(key, value)| match keys::parse(key) {
                 Some(keys::ParsedKey::Ref { name, .. }) => Ok((name, codec::decode_ref_id(value)?)),
-                _ => Err(StoreError::Corrupt("malformed ref key".into())),
+                Some(_) => Err(StoreError::MalformedReply(
+                    "ref key outside scanned range".into(),
+                )),
+                None => Err(StoreError::Corrupt("malformed ref key".into())),
             })
             .collect::<Result<_, _>>()?;
         Ok(Scan {

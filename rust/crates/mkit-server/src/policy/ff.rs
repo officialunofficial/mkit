@@ -99,6 +99,9 @@ impl<B: BlobStore, S: NamespaceStore> Walk<'_, B, S> {
             Err(resolve::ResolveFailure::Capped) => {
                 return Ok(Step::Stop(self.unchecked("base")));
             }
+            Err(resolve::ResolveFailure::Store(_)) => {
+                return Err(ServerError::unavailable("object storage request failed"));
+            }
             Err(resolve::ResolveFailure::Corrupt(_)) => {
                 return Ok(Step::Stop(self.unchecked("member")));
             }

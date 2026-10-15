@@ -184,7 +184,7 @@ impl<S: NamespaceStore> NamespaceStore for DenialReads<S> {
             BatchOutcome::PreconditionFailed { index, observed } => {
                 Ok(BatchOutcome::PreconditionFailed {
                     index: *original.get(index).ok_or_else(|| {
-                        StoreError::Corrupt("invalid filtered precondition index".into())
+                        StoreError::MalformedReply("invalid filtered precondition index".into())
                     })?,
                     observed,
                 })

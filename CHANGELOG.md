@@ -48,11 +48,13 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Changed
 
-- Typed embedding reads now classify errors. Corrupt or contradictory stored
-  rows fail as permanent `internal`; malformed replies and backend faults stay
-  retryable `unavailable`, and `invalid_argument` is unchanged. Callers that
-  retried every `unavailable` now see `internal` only when stored data itself
-  is corrupt. Wire RPC error mapping and absence semantics are unchanged.
+- [embedder: breaking API] Typed embedding reads now classify errors. Corrupt
+  or contradictory stored rows fail as permanent `internal`; malformed replies
+  and backend faults stay retryable `unavailable`, and `invalid_argument` is
+  unchanged. Callers that retried every `unavailable` now see `internal` only
+  when stored data itself is corrupt: treat `internal` as permanent and keep
+  retrying `unavailable` only. Wire RPC error mapping and absence semantics
+  are unchanged.
 - Small pushes, including the commit right after a fork, no longer repeat
   identical backend reads inside one request. Each upload session now latches
   its unfenced authority-activation probe instead of re-reading the fence pair

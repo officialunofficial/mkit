@@ -381,6 +381,7 @@ impl BlobStore for MemoryBlobStore {
     ) -> Result<Option<BlobBody>, StoreError> {
         #[cfg(test)]
         self.shared.read_calls.fetch_add(1, Ordering::SeqCst);
+        take_fault(&self.shared.fault, MemoryFault::BlobGet)?;
         let Some(blob) = lock(&self.shared.blobs).get(key).cloned() else {
             return Ok(None);
         };

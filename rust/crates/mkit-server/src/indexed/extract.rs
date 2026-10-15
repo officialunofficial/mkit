@@ -817,6 +817,9 @@ impl<B: MultipartBlobStore, S: NamespaceStore> Extractor<'_, B, S> {
             resolve::ResolveFailure::Other(error) | resolve::ResolveFailure::Corrupt(error) => {
                 ExtractError::Server(error)
             }
+            resolve::ResolveFailure::Store(_) => {
+                ExtractError::Server(ServerError::unavailable("object storage request failed"))
+            }
             _ => inconsistent().into(),
         })?;
         if total > limit {

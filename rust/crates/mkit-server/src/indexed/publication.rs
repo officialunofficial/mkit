@@ -77,7 +77,9 @@ impl<S: NamespaceStore> NamespaceStore for PairStore<'_, S> {
     ) -> Result<Vec<Option<Value>>, StoreError> {
         let rows = self.store.get_many(p, keys).await?;
         if rows.len() != keys.len() {
-            return Err(StoreError::Corrupt("short pair membership read".into()));
+            return Err(StoreError::MalformedReply(
+                "short pair membership read".into(),
+            ));
         }
         // Do not hide malformed witnesses as ordinary absence.
         for (key, row) in keys.iter().zip(&rows) {
@@ -314,6 +316,9 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
             resolve::ResolveFailure::Other(e) if e.public_message() == "object blocked" => e,
             resolve::ResolveFailure::Missing => closed(),
             resolve::ResolveFailure::Capped => capped(),
+            resolve::ResolveFailure::Store(_) => {
+                ServerError::unavailable("object storage request failed")
+            }
             resolve::ResolveFailure::Other(e) | resolve::ResolveFailure::Corrupt(e) => e,
         })?;
         remaining = remaining

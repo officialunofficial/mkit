@@ -74,7 +74,15 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
         }
         answers
             .into_iter()
-            .map(|answer| answer.map_err(|_| failure()))
+            .map(|answer| {
+                answer.map_err(|lookup| match lookup {
+                    index::LookupError::TooManyRows => {
+                        ServerError::internal("object index row cap exceeded", lookup)
+                    }
+                    index::LookupError::TooManyPages
+                    | index::LookupError::TooManyMembershipReads => failure(),
+                })
+            })
             .collect()
     }
 
@@ -122,8 +130,9 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
     ///
     /// # Errors
     /// `invalid_argument` above [`MAX_OBJECT_LOOKUP_IDS`]; `internal` for
-    /// corrupt rows; `unavailable` for lookup caps, malformed replies, or
-    /// failed reads. Any failed proof refuses the batch.
+    /// corrupt rows or a lookup cap that cannot change on retry;
+    /// `unavailable` for retryable lookup caps, malformed replies, or failed
+    /// reads. Any failed proof refuses the batch.
     pub async fn locate_objects(
         &self,
         repo: &RepoId,
@@ -147,8 +156,9 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
     /// No repository authorization or ref reachability check runs here.
     ///
     /// # Errors
-    /// `internal` for a corrupt row; `unavailable` for lookup caps, malformed
-    /// replies, or storage failures.
+    /// `internal` for a corrupt row or a lookup cap that cannot change on
+    /// retry; `unavailable` for retryable lookup caps, malformed replies, or
+    /// storage failures.
     pub async fn locate_object(
         &self,
         repo: &RepoId,
@@ -165,8 +175,9 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
     /// Denial does not hide immutable inventory from trusted policy code.
     ///
     /// # Errors
-    /// `internal` for a corrupt or contradictory row; `unavailable` for lookup
-    /// caps, malformed replies, or storage failures.
+    /// `internal` for a corrupt or contradictory row or a lookup cap that
+    /// cannot change on retry; `unavailable` for retryable lookup caps,
+    /// malformed replies, or storage failures.
     pub async fn member_inventory(
         &self,
         repo: &RepoId,
@@ -209,8 +220,9 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
     ///
     /// # Errors
     /// Resolver errors for denied objects or exhausted decode bounds;
-    /// `internal` for a corrupt frame or row; `unavailable` for lookup caps,
-    /// malformed replies, or failed storage reads.
+    /// `internal` for a corrupt frame or row or a lookup cap that cannot
+    /// change on retry; `unavailable` for retryable lookup caps, malformed
+    /// replies, or failed storage reads.
     pub async fn read_member_canonical<B: BlobStore>(
         &self,
         blobs: &B,
@@ -237,6 +249,7 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
         )
         .await
         .map_err(|error| match error {
+            ResolveFailure::Store(error) => classify(error),
             ResolveFailure::Other(error) => error,
             ResolveFailure::Corrupt(error) => corrupt(error),
             ResolveFailure::Missing | ResolveFailure::Capped => failure(),

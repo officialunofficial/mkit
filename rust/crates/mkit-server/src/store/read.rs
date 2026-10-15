@@ -59,7 +59,10 @@ pub(crate) async fn list_refs<S: NamespaceStore>(
         .iter()
         .map(|(key, value)| match keys::parse(key) {
             Some(ParsedKey::Ref { name, .. }) => Ok((name, codec::decode_ref_id(value)?)),
-            _ => Err(StoreError::Corrupt("malformed ref key".into())),
+            Some(_) => Err(StoreError::MalformedReply(
+                "ref key outside scanned range".into(),
+            )),
+            None => Err(StoreError::Corrupt("malformed ref key".into())),
         })
         .collect::<Result<_, _>>()?;
     Ok(RefPage {
@@ -203,7 +206,10 @@ pub(crate) async fn expired_replay_keys<S: NamespaceStore>(
         .into_iter()
         .map(|(index, _)| match keys::parse(&index) {
             Some(ParsedKey::ReplayExpiry { scope, .. }) => Ok((index, keys::replay(&scope))),
-            _ => Err(StoreError::Corrupt("malformed replay expiry key".into())),
+            Some(_) => Err(StoreError::MalformedReply(
+                "replay expiry key outside scanned range".into(),
+            )),
+            None => Err(StoreError::Corrupt("malformed replay expiry key".into())),
         })
         .collect()
 }

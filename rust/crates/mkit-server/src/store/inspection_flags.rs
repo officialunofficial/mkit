@@ -187,7 +187,13 @@ impl<'a, S: NamespaceStore + ?Sized> InspectionFlags<'a, S> {
             .iter()
             .map(|id| keys::inspection_flag(&self.repo.name, id))
             .collect();
-        self.store.get_many(&self.partition, &keys).await
+        let rows = self.store.get_many(&self.partition, &keys).await?;
+        if rows.len() != keys.len() {
+            return Err(StoreError::MalformedReply(
+                "short inspection flag read".into(),
+            ));
+        }
+        Ok(rows)
     }
 
     fn record(id: &Hash, value: Option<&Value>) -> Result<Option<FlagV1>, StoreError> {

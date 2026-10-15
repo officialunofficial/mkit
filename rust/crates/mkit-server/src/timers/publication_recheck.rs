@@ -417,7 +417,9 @@ impl<T: NamespaceStore> PublicationRecheck<T> {
             ];
             let rows = ctx.store.get_many(ctx.partition, &wanted).await?;
             if rows.len() != wanted.len() {
-                return Err(StoreError::Corrupt("short publication recheck read".into()));
+                return Err(StoreError::MalformedReply(
+                    "short publication recheck read".into(),
+                ));
             }
             let raw = rows[0]
                 .as_ref()

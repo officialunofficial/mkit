@@ -230,15 +230,12 @@ impl<'a, N: NamespaceStore> ReadAccess<'a, N> {
         let stored = codec::decode_repo_visibility(&row).map_err(corrupt)?;
         let mut digest = blake3::Hasher::new();
         for bytes in [
-            Some(repo.namespace.as_str().as_bytes()),
-            Some(repo.name.as_str().as_bytes()),
-            Some(row.as_bytes()),
+            repo.namespace.as_str().as_bytes(),
+            repo.name.as_str().as_bytes(),
+            row.as_bytes(),
         ] {
-            digest.update(&[u8::from(bytes.is_some())]);
-            if let Some(bytes) = bytes {
-                digest.update(&(bytes.len() as u64).to_be_bytes());
-                digest.update(bytes);
-            }
+            digest.update(&(bytes.len() as u64).to_be_bytes());
+            digest.update(bytes);
         }
         Ok(Some(DeclaredVisibility {
             visibility: match stored.visibility {
