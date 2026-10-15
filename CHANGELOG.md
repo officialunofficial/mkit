@@ -42,6 +42,14 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Fixed
 
+- Fork publication absorbs a competing driver's exact witness pair after a
+  guard loss. Foreign rows still refuse the fork. Retryable job-step errors
+  now carry `Retry-After: 1`, retaining `unavailable` and HTTP 503. Error message
+  strings change: `fork publish contended` becomes `fork publish raced` for
+  unresolved races or `fork publish deadline` for expired apply windows;
+  `fork copy contended` becomes `fork copy deadline`. No API, wire schema, or
+  stored-format change; no drain or store reset is required.
+
 - `ReadAccess::recover_completed_fork` now recovers a Done fork whose reservation
   was deleted by outcome acknowledgement or whose replay row was pruned after
   envelope expiry. The Done job is committed atomically with both rows and stays

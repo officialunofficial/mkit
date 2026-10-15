@@ -206,9 +206,8 @@ async fn write_one<S: NamespaceStore>(
     // The rows are ours to create: an identical pair is a replay, and
     // anything else (a hold a takedown set, a writer's own membership) is
     // never overwritten.
-    let rows = store
-        .get_many(&target, &[live.clone(), published.clone()])
-        .await?;
+    let pair = [live.clone(), published.clone()];
+    let rows = store.get_many(&target, &pair).await?;
     match rows.as_slice() {
         [None, None] => {
             let batch = Batch::new()
@@ -221,10 +220,24 @@ async fn write_one<S: NamespaceStore>(
                 .require(Precondition::Absent(live.clone()))
                 .require(Precondition::Absent(published.clone()))
                 .put(live, witness.clone())
-                .put(published, witness);
+                .put(published, witness.clone());
             match store.apply(&target, batch).await? {
                 BatchOutcome::Committed => {}
-                _ => return Err(ForkError::Unavailable("fork publish contended")),
+                BatchOutcome::PreconditionFailed { .. } => {
+                    // Another driver may have published this exact unit.
+                    // Accept only its complete, byte-identical witness pair.
+                    let rows = store.get_many(&target, &pair).await?;
+                    match rows.as_slice() {
+                        [Some(a), Some(b)] if *a == witness && *b == witness => {}
+                        _ if rows.iter().flatten().any(|row| *row != witness) => {
+                            return Err(ForkError::NotEmpty);
+                        }
+                        _ => return Err(ForkError::Unavailable("fork publish raced")),
+                    }
+                }
+                BatchOutcome::DeadlinePassed { .. } => {
+                    return Err(ForkError::Unavailable("fork publish deadline"));
+                }
             }
         }
         [Some(a), Some(b)] if *a == witness && *b == witness => {}

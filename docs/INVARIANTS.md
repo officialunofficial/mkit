@@ -3016,6 +3016,21 @@ remain caller-controlled; drain fork jobs before switching denial mode.
 settings, the fork engine tests for the denial-on full walk, the carried
 pair check, the plan fallback, the publication stage order and the round probe.
 
+## Fork publication absorbs only exact witness replays
+
+**Always:** after a publication absent guard fails, the driver reads both rows
+again and accepts only the exact pair of witness bytes it intended to write.
+Any foreign value refuses the fork; partial or missing identical rows remain
+retryable. Proofs, the fresh source pair, and all write guards stay in place.
+
+**Because:** request and timer drivers can publish the same unit concurrently.
+
+**If violated:** an ordinary race could fail a request, or a foreign membership
+could be accepted as this job's publication.
+
+**Enforced by:** the publication guard-loss regressions for two drivers, foreign
+rows, and partial witnesses. See the [retryable error table](operations/fork-waves.md#retryable-fork-errors).
+
 ## Fork waves retain checkpoint and failure order
 
 **Always:** fork emptiness and statistics waves contain at most six operations;

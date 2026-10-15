@@ -132,6 +132,42 @@ When the plan fits one slice the request carries it into the job, which then
 starts after its planning phase. The carry is refused as a moved tip unless the
 source still publishes the same packmap head and membership generation.
 
+## Retryable fork errors
+
+The request and timer can drive the same job. If a publication guard loses,
+the losing driver re-reads both destination rows. It continues only when both
+are exactly the witness it intended to write. A foreign value gives
+`destination not empty`, a terminal refusal. A partial identical pair or missing
+rows requires another attempt. The source-pair re-read, proofs before and after
+the write, absent guards, and apply deadline remain in force.
+
+Every `ForkError::Unavailable` returned by a request's job step carries
+`Retry-After: 1`. The Connect code stays `unavailable` and its default HTTP
+status stays 503. Retry the same fork request after one second; persistent
+configuration or stored-state errors require operator investigation.
+
+| Message | Meaning |
+| --- | --- |
+| `fork publish raced` | A publication guard failed, and the re-read did not find the complete identical witness pair or a foreign value. |
+| `fork publish deadline` | The publication apply window expired. |
+| `fork copy deadline` | The index-copy apply window expired; these writes have no contention guard. |
+| `fork commit deadline` | The job checkpoint apply window expired. |
+| `fork start deadline` | The job-creation apply window expired. |
+| `fork start contended` | Creation could not find a winning job after bounded retries. |
+| `fork storage unavailable` | A backend operation failed. |
+| `fork unavailable` | A proof returned a retryable server error. |
+| `fork job missing` / `fork job corrupt` | The job row is absent or cannot be decoded. |
+| `fork publish state` | The publication cursor has an invalid stage. |
+| `fork shard map` | The shard map does not supply the required partitions. |
+| `fork requires authority fence` | Namespace enforcement requires an authority fence. |
+| `fork reservation` | The job's reservation is absent or inconsistent. |
+| `fork registration read` / `fork set read` | A batch read returned the wrong number of rows. |
+| `fork in progress` | The job needs another slice; the request already returns `Retry-After: 1`. |
+
+The creation labels can also arise before the first step; this header rule
+applies to errors from the step. `fork expired` is a terminal job failure, not
+an instruction to keep retrying.
+
 ## Memory and security bounds
 
 Six one-row emptiness replies retain at most 3 MiB of raw values plus keys.

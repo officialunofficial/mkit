@@ -820,3 +820,30 @@ fn denial_capability_for_test() -> mkit_server::takedown::DenialCapability {
     .denial_capability()
     .unwrap()
 }
+
+#[tokio::test]
+async fn publish_deadlines_have_retry_after_for_new_and_joining_requests() {
+    let source = Source::build_with("source", 4, denial).await;
+    let dest = source.at("forked");
+    let req = request(&source);
+    for nonce in 1..=2 {
+        let clock = source.clock.clone();
+        *source.store.trigger.lock().unwrap() = Some((
+            "m",
+            Arc::new(move || {
+                let clock = clock.clone();
+                Box::pin(async move {
+                    clock.advance(10_001);
+                })
+            }),
+        ));
+        let error = call(source.pipe.as_ref(), &dest, nonce, &req)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Code::Unavailable);
+        assert_eq!(error.public_message(), "fork publish deadline");
+        // The default unavailable status mapping is retained.
+        assert_eq!(error.http_status(), None);
+        assert_eq!(error.headers(), &[("Retry-After".into(), "1".into())]);
+    }
+}

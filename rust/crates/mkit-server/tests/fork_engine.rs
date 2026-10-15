@@ -3361,3 +3361,150 @@ async fn a_start_refuses_a_plan_whose_source_pair_moved_and_leaves_nothing() {
         0
     );
 }
+
+// The request reaches the absent guards first, but the timer commits first.
+#[tokio::test]
+async fn a_publish_guard_loser_continues_after_the_other_driver_finishes_once() {
+    use std::sync::atomic::Ordering;
+    let source = Arc::new(Source::build("source", 4).await);
+    source.store.latency_ms.store(0, Ordering::SeqCst);
+    let fork_env = env(&source);
+    mkit_server::fork::start(&fork_env, &spec(&source, "forked"), None)
+        .await
+        .unwrap();
+    let winner = source.clone();
+    *source.store.trigger.lock().unwrap() = Some((
+        "m",
+        Arc::new(move || {
+            let winner = winner.clone();
+            Box::pin(async move {
+                let job = drive(&env(&winner), &dest(&winner, "forked"))
+                    .await
+                    .unwrap();
+                assert_eq!(job.phase, Phase::Done);
+            })
+        }),
+    ));
+    source.store.record.store(true, Ordering::SeqCst);
+    let report =
+        mkit_server::fork::step(&fork_env, &dest(&source, "forked"), &SliceBudget::new(600))
+            .await
+            .unwrap();
+    assert_eq!(report.job.phase, Phase::Done);
+    let done = source
+        .store
+        .committed
+        .lock()
+        .unwrap()
+        .iter()
+        .flat_map(|(_, batch)| &batch.writes)
+        .filter(|write| {
+            matches!(write, mkit_server::Write::Put(key, value)
+            if *key == keys::fork_job(&dest(&source, "forked").name)
+                && mkit_server::fork::decode_job(value).is_ok_and(|job| job.phase == Phase::Done))
+        })
+        .count();
+    assert_eq!(done, 1);
+}
+
+#[tokio::test]
+async fn a_publish_guard_loss_refuses_foreign_rows_and_retries_partial_witnesses() {
+    use mkit_server::fork::{Failure, ForkError};
+    for (published, foreign) in [(false, true), (true, true), (false, false), (true, false)] {
+        let source = Source::build("source", 4).await;
+        let fork_env = env(&source);
+        mkit_server::fork::start(&fork_env, &spec(&source, "forked"), None)
+            .await
+            .unwrap();
+        let store = source.store.inner.clone();
+        let id = dest(&source, "forked");
+        let partition = source.shards.membership(&id, &BlobKey::pack(source.pack));
+        let key = if published {
+            keys::published_member(&id.name, &source.pack)
+        } else {
+            keys::membership(&id.name, &source.pack)
+        };
+        // A valid held witness is still foreign: matching generation and
+        // sequence never substitutes for exact bytes. Exercise either row.
+        let value = Witness {
+            generation: mkit_server::fork::MEMBERSHIP_GENERATION,
+            sequence: 0,
+            published: true,
+            held: foreign,
+            boundary: false,
+        }
+        .encode();
+        *source.store.trigger.lock().unwrap() = Some((
+            "m",
+            Arc::new(move || {
+                let (store, partition, key, value) =
+                    (store.clone(), partition.clone(), key.clone(), value.clone());
+                Box::pin(async move {
+                    store
+                        .apply(&partition, mkit_server::Batch::new().put(key, value))
+                        .await
+                        .unwrap();
+                })
+            }),
+        ));
+        let result = drive(&fork_env, &id).await;
+        if foreign {
+            assert_eq!(result.unwrap().failure, Some(Failure::Changed));
+        } else {
+            assert!(
+                matches!(result, Err(ForkError::Unavailable("fork publish raced"))),
+                "{result:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn publish_wave_deadline_keeps_input_order_against_a_missing_source_member() {
+    use mkit_server::fork::{Failure, ForkError};
+    use std::sync::atomic::Ordering;
+    for deadline_first in [true, false] {
+        let source = long_source(2, no_denial).await;
+        let env = env_denial(&source, false);
+        let spec = spec(&source, "forked");
+        let planned = mkit_server::fork::plan_fork(&env, &spec).await.unwrap();
+        mkit_server::fork::start_planned(&env, &spec, None, None, planned)
+            .await
+            .unwrap();
+        let id = dest(&source, "forked");
+        let mut order: Vec<Hash> = job_of(&source, &id)
+            .await
+            .packs
+            .into_iter()
+            .map(|p| p.id)
+            .filter(|p| *p != source.packmap)
+            .collect();
+        order.sort_unstable();
+        drop_source_member(&source, order[usize::from(deadline_first)]).await;
+        source.store.waves.store(true, Ordering::SeqCst);
+        source.store.sleep_ms.store(10, Ordering::SeqCst);
+        let clock = source.clock.clone();
+        *source.store.trigger.lock().unwrap() = Some((
+            "m",
+            Arc::new(move || {
+                let clock = clock.clone();
+                Box::pin(async move {
+                    clock.advance(10_001);
+                })
+            }),
+        ));
+        let outcome = drive(&env, &id).await;
+        if deadline_first {
+            assert!(
+                matches!(
+                    outcome,
+                    Err(ForkError::Unavailable("fork publish deadline"))
+                ),
+                "{outcome:?}"
+            );
+        } else {
+            assert_eq!(outcome.unwrap().failure, Some(Failure::NotFound));
+        }
+        assert!(member(&source, &id, source.packmap).await.is_none());
+    }
+}
