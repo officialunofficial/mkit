@@ -58,8 +58,9 @@ fn storage_failed() -> ServerError {
 const MAX_PENDING_HINT_SECS: u64 = 3;
 
 /// A polling hint from this consumed job's persisted timer, not a completion ETA.
-/// Bound inspection to four pages. Tiny delivery waits have a 100 ms floor;
-/// other or unobserved wakes use one second. Distant wakes have the same cap.
+/// Bound inspection to four pages. Tiny-job waits (SP2's `VerifyJobV1::tiny`)
+/// have a 100 ms floor; other or unobserved wakes use one second. Distant
+/// wakes have the same cap.
 async fn retry_after<N: NamespaceStore>(
     store: &N,
     source: &Partition,
@@ -87,7 +88,7 @@ async fn retry_after<N: NamespaceStore>(
             {
                 let now = u64::try_from(clock.now_ms()).unwrap_or(0);
                 let delay = due_at_ms.saturating_sub(now);
-                let hint = if job.tiny() && job.phase == super::checkpoint::Phase::AwaitDelivery {
+                let hint = if job.tiny() {
                     delay.clamp(100, MAX_PENDING_HINT_SECS * 1_000)
                 } else {
                     delay.div_ceil(1_000).clamp(1, MAX_PENDING_HINT_SECS) * 1_000

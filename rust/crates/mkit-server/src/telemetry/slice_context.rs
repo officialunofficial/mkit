@@ -101,6 +101,12 @@ pub(crate) fn timer_scope<F: Future>(
     scope(context, future)
 }
 
+/// The timer scope active on this poll, if any. Reading it consumes nothing:
+/// callers driving a slice decide their own event shape.
+pub(crate) fn timer() -> Option<TimerMetadata> {
+    ACTIVE.with(|active| active.borrow().timer)
+}
+
 #[derive(Clone, Copy, Debug)]
 struct SlowestRpc {
     prefix: &'static str,

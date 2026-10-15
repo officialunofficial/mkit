@@ -1679,9 +1679,9 @@ misses found when the advance checks the consumed set, and a base that is
 still absent after the window is the permanent §9.4 answer, as inline.
 
 Informative. Scheduled verification polling hints use the consumed job's
-persisted timer with a 3,000 ms cap. Tiny decoded packs awaiting relay delivery
-use a 100 ms floor and preserve millisecond precision in the typed detail.
-Other phases round up to whole seconds with a 1,000 ms floor. A missing job or a
+persisted timer with a 3,000 ms cap. Tiny decoded packs use a 100 ms floor and
+preserve millisecond precision in the typed detail. Other phases round up to
+whole seconds with a 1,000 ms floor. A missing job or a
 wake not found within bounded inspection uses 1,000 ms. The HTTP Retry-After
 header always rounds the detail up to whole seconds; neither value promises
 completion. Clients retain STC's one-second polling clamp.
@@ -1960,7 +1960,9 @@ and a visibility the owner declared for the name before it existed stands
 
 **Job.** The fork is a durable job in the destination's coordinator, advanced
 in slices of at most 600 storage calls by the request that started it and
-then by the fork timer (timer kind 16). The pack set is planned once before
+then by the fork timer (timer kind 16). The timer row is due at job
+creation: on a request-driven runtime the alarm is a second driver from
+t=0, which `fork_step` events attribute per driver. The pack set is planned once before
 admission, which charges its exact bytes; when that plan fits one slice it is
 carried into the job, which then begins after its planning phase. The carry is
 used only if the source still publishes the pair it was computed from: the

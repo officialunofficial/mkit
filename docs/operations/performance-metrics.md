@@ -215,6 +215,32 @@ cause; the retry metadata alone cannot establish a disconnect. Unknown
 scheduling or failure fields cannot establish a cause. The Workers
 clock limitation still applies to synchronous work within the slice.
 
+## Fork step events
+
+With the feature enabled, every `fork::step` execution — one per request
+attempt and one per kind-16 timer fire that reaches a step — emits one
+`fork_step` row, and the step whose apply committed `Done` or `Failed` emits
+one `fork_step_summary`
+row. A timer fire that lands on an already-terminal job emits its own
+`fork_step` row but no second summary; a fire on a deleted job ends its timer
+before stepping and emits none.
+Events carry constant labels, counts,
+and durations only: `job` is the truncated request-binding hash, never a
+repository name or object id.
+
+| Event | Fields |
+|---|---|
+| `fork_step` | `driver` (`request` or `alarm`, from the runtime's timer context), `job`, `phase_in`, `phase_out`, `wall_ms`, `calls` and per-partition-kind splits (`calls_coordinator`, `calls_content`, `calls_ref`, `calls_repo_index`, `calls_ref_index`, `calls_namespace`), `serial_rounds` (calls that started while no other call was in flight), `applies`, `cas_losses` (applies lost to `PreconditionFailed`), `budget_calls` (slice-budget spend), `progressed`, `finished`, `error`, and when `driver = alarm` the same timer metadata fields as `verification_slice_result` (`timer_scheduled_ms`, `logical_due_ms`, `timer_retry_attempt`, `timer_delay_ms`) |
+| `fork_step_summary` | `job`, `request_steps`, `alarm_steps`, `cas_losses`: totals over every step that ran the job to its terminal phase |
+
+Phase names are `plan`, `trees`, `walk`, `register`, `copy`, `count`,
+`publish`, `done`, `failed`, and `absent` (no job row on entry); `phase_out`
+is `-` when the step errored before reporting. The `driver`
+split and `cas_losses` answer the dual-driver question directly: an alarm
+that fires while the request's slices run the job appears as interleaved
+`request`/`alarm` rows for one `job`, and each `PreconditionFailed` apply is
+a lost slice's commit.
+
 ## Query Workers observability
 
 Enable JSON log collection in the deployment's Wrangler configuration:

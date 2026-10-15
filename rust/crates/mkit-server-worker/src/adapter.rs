@@ -2872,6 +2872,11 @@ mod glue {
             if let Some(pack) = path.strip_prefix(test::RELAY_PATH_PREFIX) {
                 return Ok(cors(test::relay(req.method(), pack, &env, cfg).await?));
             }
+            if path == test::FORK_PATH {
+                return Ok(cors(
+                    test::fork(&mut req, &env, cfg, &request_budget).await?,
+                ));
+            }
         }
         if !scanner_request && exceeds_body_cap(&req, cfg) {
             let body = body_too_large_json(cfg.max_body_bytes);
@@ -3453,6 +3458,54 @@ mod glue {
             match result {
                 Ok(state) => Response::from_json(&state),
                 Err(error) => Response::error(error.to_string(), 503),
+            }
+        }
+
+        /// `POST /__mkit_test/fork`: the fork probe. `ForkRepo` has no
+        /// Connect route, so measuring its request/alarm drivers on a real
+        /// Worker needs this entry: the exact canonical body the caller
+        /// signed, forwarded headers, and the same pipeline fetch would
+        /// build (deployment guard included) via [`embedded_dispatch`].
+        /// Honoured only in `__test-faults` builds.
+        pub(super) const FORK_PATH: &str = "/__mkit_test/fork";
+
+        pub(super) async fn fork(
+            req: &mut Request,
+            env: &Env,
+            cfg: &super::WorkerConfig,
+            request_budget: &mkit_server::indexed::budget::SliceBudget,
+        ) -> worker::Result<Response> {
+            if req.method() != Method::Post {
+                return Response::error("method not allowed", 405);
+            }
+            let headers: std::collections::BTreeMap<String, String> = req
+                .headers()
+                .entries()
+                .map(|(name, value)| (name.to_lowercase(), value))
+                .collect();
+            let header = move |name: &str| headers.get(name).cloned();
+            let body = req.bytes().await?;
+            let hooks = crate::hooks::build::hooks_from_env(env, cfg)
+                .map_err(|e| worker::Error::RustError(e.0))?;
+            let dispatch = super::embedded_dispatch(env, cfg, hooks, request_budget)
+                .map_err(|e| worker::Error::RustError(e.0))?;
+            match dispatch
+                .dispatch_fork(&header, &body, &mkit_server::pipeline::NoGate)
+                .await
+            {
+                Ok((result, _meta)) => Response::from_json(&serde_json::json!({
+                    "tip": mkit_core::hash::to_hex(&result.tip),
+                    "pack_count": result.pack_count,
+                    "pack_bytes": result.pack_bytes,
+                    "object_count": result.object_count,
+                    "source_sequence": result.source_sequence,
+                    "membership_generation": result.membership_generation,
+                })),
+                Err(error) => Ok(Response::from_json(&serde_json::json!({
+                    "code": error.code().as_str(),
+                    "message": error.public_message(),
+                }))?
+                .with_status(error.http_status().unwrap_or(500))),
             }
         }
 

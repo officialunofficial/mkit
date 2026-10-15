@@ -3073,6 +3073,8 @@ mod extraction_tests;
 #[path = "scheduled_reclaim_tests.rs"]
 mod scheduled_reclaim_tests;
 
+mod pending_hint_tests;
+
 #[path = "header_tests.rs"]
 mod header_tests;
 
