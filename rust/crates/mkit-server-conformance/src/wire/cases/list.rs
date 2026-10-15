@@ -185,7 +185,7 @@ pub(super) async fn large_response_within_limit(ctx: Ctx) -> CaseResult {
     if n == 0 {
         return Err(Failure::Skip("the profile sets list_refs = 0".to_owned()));
     }
-    let lag = Duration::from_millis(mkit_server::relay::RELAY_LAG_BOUND_MS);
+    let lag = Duration::from_millis(crate::wire::VISIBILITY_WAIT_MS);
     let (_, pages, _) = large_listing(&ctx, n, FILL, lag).await?;
     ctx.set_note(format!("{n} refs across {pages} pages"));
     Ok(())
@@ -202,7 +202,7 @@ pub(super) async fn merge_paging_over_32_mib(ctx: Ctx) -> CaseResult {
         ));
     }
     // Names at the 512-byte cap, less the counter and rounding: 510 bytes.
-    let fill = mkit_server::refs::MAX_REF_NAME_BYTES.saturating_sub(ctx.head("").len() + 8) / 2;
+    let fill = mkit_core::refs::MAX_REF_NAME_BYTES.saturating_sub(ctx.head("").len() + 8) / 2;
     // The large source-shard backlog can take minutes on a shared machine;
     // this case measures paging correctness, rather than a throughput bar.
     let (_, pages, bytes) = large_listing(&ctx, n, fill, Duration::from_mins(20)).await?;

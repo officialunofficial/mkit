@@ -238,6 +238,7 @@
 //! | `auth.v2_pack_commitment_mismatch` | `auth-v2` | length, id or kind differs from the upload header: any error (no code in the spec yet), nothing stored |
 //! | `auth.v2_gzip_signed_fails_closed` | `auth-v2`, `strict-gzip-auth` | opt-in until the M2 spec decides §9.2: a signature over gzip bytes is rejected and writes nothing |
 //! | `auth.v2_reads_unsigned_ok` | `auth-v2` | M0 reads need no signature |
+//! | `replay.observed_pair_has_saved_result` | `auth-v2`, `replay`, `atomic-advance` | Observed paired acceptance replays after a later pair move, without restoring old refs. |
 //! | `replay.same_op_returns_saved_result_after_ref_moved` | `auth-v2`, `replay` | the `auth_v2.mjs` a, b, a sequence |
 //! | `replay.concurrent_duplicates_all_succeed` | `auth-v2`, `replay` | 16 parallel duplicates, one effect |
 //! | `replay.nonce_reuse_different_op_invalid_argument` | `auth-v2`, `replay` | |
@@ -355,7 +356,38 @@
 // Planned (receipts): `receipts.*`.
 // Planned (admin): `admin.*`.
 
-mod cases;
+mod url_token_fixture;
+
+/// Optional in-process fixture clock, independent of any server runtime.
+/// Live HTTP runners normally use wall time or pin clocks through Tier 2.
+pub trait TestClock: std::fmt::Debug + Send + Sync {
+    /// Current business time, Unix milliseconds.
+    fn now_ms(&self) -> i64;
+    /// Advance business time for a controlled in-process fixture.
+    fn advance(&self, delta_ms: i64);
+}
+
+/// Bounded fixture wait; a runner policy, not a server layout requirement.
+pub(crate) const VISIBILITY_WAIT_MS: u64 = 60_000;
+
+/// Keeps tokens out of fixture diagnostics.
+#[derive(Clone)]
+pub(crate) struct Secret(String);
+impl Secret {
+    pub(crate) fn new(value: String) -> Self {
+        Self(value)
+    }
+    pub(crate) fn expose(&self) -> &str {
+        &self.0
+    }
+}
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[redacted]")
+    }
+}
+
+pub(crate) mod cases;
 pub(crate) mod challenges;
 pub mod client;
 pub mod profile;

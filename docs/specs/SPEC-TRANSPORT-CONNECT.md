@@ -12,8 +12,8 @@ service: one deployment served one repository, and a valid auth v2
 signature was enough to write. Version 2 is a semantic revision of the
 same wire package. It adds multi-repository addressing (§7.4), namespace
 and write policy (§7.5), `GetServerInfo` (§2.1), upload tickets and
-resumable parts (§7.6), ref deletion (§7.8), the consistency and
-paging rules of a sharded server (§7.9), admission challenges (§5.1),
+resumable parts (§7.6), ref deletion (§7.8), read consistency and
+paging (§7.9), admission challenges (§5.1),
 and the per-RPC upload lifecycle (§7.7). `mkit.transport.v1` evolves
 additively: v2 adds RPCs and fields and never renumbers or removes one,
 so `buf breaking` stays green. The breaks are semantic only. mkit is
@@ -171,6 +171,8 @@ Endpoints follow the standard Connect convention:
 
 ### 2.1 `GetServerInfo`
 
+**Protocol requirement.**
+
 `GetServerInfo` tells a client what a deployment supports before the
 client relies on it. The request is empty. It MAY carry `X-Repository`
 (§7.4). The response MUST NOT depend on whether that repository exists,
@@ -197,15 +199,23 @@ headers or a bearer token. The response MAY be cached with
 | `receipt_public_key`, `receipt_key_id` | Raw 32-byte current receipt-and-notice signing public key and its 64-lowercase-hex BLAKE3 key id (SPEC-SERVER §15.5). Both empty only when that role key is not configured. Historical keys are in the well-known list, not this response. |
 | `grant_schemes` | The owner signature schemes the deployment accepts on grants and epoch statements ([SPEC-WRITE-GRANTS §4](SPEC-WRITE-GRANTS.md#4-owner-signature-schemes)). Empty on a deployment that accepts no grants. |
 | `namespace_policy` | `allowlist`, `any`, or `single-repository` (§7.5). `single-repository` is advertised, never configured. |
-| `index_fanout` | The fixed object-id-prefix fan-out of the deployment's repository index (§7.9). The default is 16, the top four bits of the object id. |
-| `max_delta_chain_depth` | Delta-chain depth cap (SPEC-SERVER §9.8), default 50 in indexed mode; `0` when indexed mode is off. |
+| `index_fanout` | The deployment's repository-index fan-out advertisement (§7.9). This field does not require a particular index layout. |
+| `max_delta_chain_depth` | The advertised delta-chain depth cap (SPEC-SERVER §9.8); `0` when indexed mode is off. |
 | `leases` | Whether the deployment enforces storage leases under SPEC-SERVER §12. |
 | `async_inspection` | Whether any asynchronous inspector is configured (SPEC-SERVER §10–§11). Writers MUST sign reads to see their own pending content that is not held. Held content is hidden from every caller, including when this field is false and a synchronous inspector holds it. |
-| `inspection_max_objects` | Maximum distinct objects in one advance's complete inspected set (SPEC-SERVER §11.1), 1–10,000. Present only when inspectors are configured; absence imposes no inspection-specific object-count limit. A client exceeding the advertised limit MUST replan into smaller advances; the server rejects the oversized advance before calling inspectors or applying changes. The server checks a conservative bound before enumeration: all added-pack entry counts. Duplicates and structural entries can therefore cause refusal below the distinct-set cap. At launch, the set consists of the added packs' Blob and ChunkedBlob entries, surplus included; the configured `inspect_batch_max_objects` also bounds the whole advance, so each inspector receives one complete batch. |
+| `inspection_max_objects` | Maximum distinct objects in one advance's complete inspected set (SPEC-SERVER §11.1). Present only when inspectors are configured; absence imposes no inspection-specific object-count limit. A client exceeding the advertised limit MUST replan into smaller advances; the server rejects the oversized advance before calling inspectors or accepting changes. |
 
 A client MUST NOT assume atomic advance without `atomic_advance = true`
 from this call. `atomic_advance` replaces the client-side opt-in of v1
 (§7.3): a client reads it here instead of from local configuration.
+
+**Reference-server behavior.** The repository index uses fan-out 16 (the top
+four object-id bits), and indexed mode defaults to delta-chain depth 50.
+The synchronous inspection cap is configurable from 1 to 10,000 objects.
+The reference server conservatively checks all added-pack entry counts before
+enumeration, so duplicates and structural entries can cause refusal below the
+distinct-set cap. Its inspected set contains added packs' Blob and ChunkedBlob
+entries, including surplus entries; each inspector receives one complete set.
 
 ### 2.2 `GetReceipt`
 
@@ -307,6 +317,8 @@ caller that invokes the operation again.
 
 ## 4. Atomic two-ref advance &mdash; `AdvanceRefs`
 
+**Protocol requirement.**
+
 `Transport::advance_refs` updates a branch's head ref and its packmap
 ref together, each under its own CAS precondition, so the
 delta-transfer invariant ("if `head_ref` resolves to `T`, the packmap
@@ -352,25 +364,26 @@ MUST be empty on either conflict and when receipts are disabled. The
 receipt attests the live committed pair; it reveals no inspection or
 publication state. On authenticated replay of a committed operation,
 the server returns the identical receipt envelope bytes.
-The `max_tickets_per_advance` limit is seven: an `AdvanceRefs` with
-more than seven `ticket_ids` MUST receive `invalid_argument` before
-apply. SPEC-SERVER §15.2 uses this bound to guarantee the receipt's
-65,536-byte envelope cap.
+A server offering atomic advance MUST commit both writes atomically and MUST
+advertise `atomic_advance = true` through `GetServerInfo` (§2.1). A server that
+does not offer atomic advance MUST NOT advertise it; its fallback writes the
+packmap before the head. That fallback is available only to writes outside the
+signed replay-protected write contract. Every accepted signed ref write MUST
+satisfy atomic acceptance under SPEC-SERVER §3.1, including both sides of an
+`AdvanceRefs` or paired deletion.
 
-Per `Transport::supports_atomic_advance`'s doc comment, a server
-backed by a transactional ref store (a single Durable Object
-transaction, a database transaction) SHOULD commit both writes
-atomically and MUST advertise this through `GetServerInfo`'s
-`atomic_advance` field (§2.1). A non-transactional server MUST fall
-back to the same packmap-then-head ordering the trait's default
-`advance_refs` implementation uses, and MUST NOT advertise atomic support if it
-uses that fallback.
-
-A server whose ref state is sharded per branch (§7.9) MAY require `packmap_ref` to be
-`refs/mkit/packmap/<x>` when `head_ref` is `refs/heads/<x>` (SPEC-REFS §2), and answer any other pairing with
+A server MAY require `packmap_ref` to be `refs/mkit/packmap/<x>` when
+`head_ref` is `refs/heads/<x>` (SPEC-REFS §2), and answer any other pairing with
 `invalid_argument`; every mkit client already sends that pairing.
 
+**Reference-server behavior.** The reference server limits
+`max_tickets_per_advance` to seven and rejects a larger `ticket_ids` list with
+`invalid_argument` before acceptance. This limit bounds its receipt envelope
+under SPEC-SERVER §15.2; it is not a required limit for other servers.
+
 ### 4.1 Create a branch from a published source
+
+**Protocol requirement.**
 
 The additive `AdvanceRefsRequest.source_ref = 11` form selects a published
 source branch in the same repository. `head_ref = 1` names the destination
@@ -385,8 +398,8 @@ This form requires atomic metadata; a server without it MUST return
 `failed_precondition`. It reads one authoritative published pair and
 retains ordinary ticketless advance conflict outcomes, replay, admission,
 quota, receipt and outcome semantics. SPEC-SERVER §9.3 specifies uniform
-source absence, optional expected-tip errors and the fence before each
-destination apply. A source move after that fence may precede the
+source absence, optional expected-tip errors, and the final source fence before
+destination acceptance. A source move after that fence may precede the
 destination commit; success still copies exactly the captured pair.
 No upload, membership addition or stored-byte charge is introduced.
 The immediate path copies the source's coverage as it stands; configured
@@ -395,6 +408,8 @@ publication verification still checks the destination (SPEC-SERVER §10.2).
 ---
 
 ## 5. Error taxonomy &mdash; `TransportError` to Connect code
+
+**Protocol requirement.**
 
 Connect carries structured errors natively (a code plus a message),
 so &mdash; unlike the SSH wire's hand-rolled `mkit.rpc.v1.Error` message,
@@ -470,7 +485,7 @@ excludes.
 | A delta base is tombstoned in this repository (SPEC-SERVER §14.5) | `failed_precondition`, exact message `delta base not available in this repository`, with applicable writer `RedactionNotice` details and no lag interval; this is the existing self-contained replan case |
 | `DownloadPack` names a superseded pack (SPEC-SERVER §14.5) | `not_found` with the `RedactionNotice` details of the caller's view whose `rewrites` name the requested pack, before streaming; otherwise plain `not_found`; `PackExists` returns `false` |
 | A writer is denied by a repository- or namespace-level takedown (SPEC-SERVER §14.1) | `permission_denied`, exact existing message `lease suspended`, with applicable writer `RedactionNotice` details; readers keep §12.2's byte-identical absent answer |
-| A missed commit deadline (`NotAfter`), a full shard, or outbox backpressure. Nothing commits, and a retry with the same nonce is safe. | `unavailable`, never `resource_exhausted` |
+| A missed acceptance deadline, authoritative-state capacity exhaustion, or pending-delivery backpressure. Nothing commits, and a retry with the same nonce is safe. | `unavailable`, never `resource_exhausted` |
 | Receipt signing fails after a successful apply (SPEC-SERVER §15.1). The advance remains committed; a same-nonce retry returns that result with its signed receipt. | Retryable `unavailable` |
 | A signed nonce already recorded with a different operation fingerprint (§7.1) | `invalid_argument` |
 | A signed nonce whose operation is still `in_flight` (§7.1). The request never reaches admission. | `aborted` (retryable) |
@@ -489,6 +504,8 @@ because clients retry that code on the backoff ladder. For the same
 reason, no admission challenge or denial is `resource_exhausted`.
 
 ### 5.1 Admission challenges
+
+**Protocol requirement.**
 
 A server MAY refuse a request until the caller does something outside
 this protocol. Examples are a payment, a quota top-up, or verifying an
@@ -594,10 +611,14 @@ step `creates_namespace` and `creates_repo` (§7.5). It MUST NOT give
 the admission step the bytes new to the whole store, because a price
 that depends on them would reveal whether other repositories hold the
 content (§7.4, isolation). Those bytes are reported only in the
-`Committed` outcome (§7.7). Quota scopes that span namespaces, such as
-per payer or per signer across namespaces, cannot be atomic on a store
-sharded by namespace; a deployment keeps them best-effort, reserves
-and reconciles them, or keeps them in its own store (informative).
+`Committed` outcome (§7.7).
+
+**Reference-server behavior.** The reference server cannot atomically account
+for quota scopes spanning its namespace storage domains. An embedding server
+chooses an accounting mechanism suited to its declared atomic domain; storage
+colocation alone does not establish an atomicity guarantee.
+
+**Protocol requirement.**
 
 **Binding (informative).** Binding a challenge to one request, for
 example an HMAC over the MPP challenge parameters, an `opaque` value,
@@ -801,6 +822,8 @@ If the requested `pack_id` is absent, the server returns
 
 ### 6.3 Streaming on Cloudflare Workers &mdash; design answer and open risk
 
+**Reference-server behavior.**
+
 The reference Worker (§7.1) is the one deployment target where
 Connect streaming has a known, previously-hit failure mode:
 `apps/repo-worker/README.md` §"WatchRefs / streaming (issue #705, building on the #697 spike)"
@@ -865,6 +888,8 @@ dialect:
 
 ### 7.1 Reference Worker
 
+**Reference-server behavior.**
+
 A `connectrpc` and `workers-rs` service
 ([`apps/vcs-worker`](../../apps/vcs-worker), mkit#699), reusing
 `apps/repo-worker`'s proven patterns: vendored `generated/` staged by
@@ -885,10 +910,12 @@ The deployment config supplies `AUTH_AUDIENCE` (exact canonical
 HTTP(S) origin) and, on a single-repository deployment, `AUTH_REPOSITORY`
 (the configured repository identity, §7.4). Repo Worker instead obtains
 the repository identity from the decoded room; Keys Worker uses `keys`.
-Host or forwarded request headers MUST NOT establish the server's
+**Protocol requirement.** Host or forwarded request headers MUST NOT establish the server's
 trusted audience.
 
 #### Auth v2 contract
+
+**Protocol requirement.**
 
 All producers and verifiers MUST use the following eight newline-separated
 UTF-8 fields, with no final newline:
@@ -908,8 +935,8 @@ The signature is strict Ed25519 over the 32-byte BLAKE3 of those bytes. The
 origin is the URL's lowercase ASCII HTTP(S) origin with no userinfo, path,
 query, fragment, trailing dot, or default port. `<repository>` is the full
 repository identity of §7.4, exactly as `X-Repository` carries it.
-Repository and procedure are nonempty printable ASCII fields; newlines and whitespace are rejected. The
-shared `mkit_core::write_auth` validator enforces bounded canonical fields.
+Repository and procedure are nonempty printable ASCII fields; newlines and
+whitespace are rejected.
 A unary commitment is `body:<64 lowercase hex BLAKE3 of exact request bytes>`.
 An UploadPack commitment is `pack:<64 lowercase hex pack id>:<decimal byte count>`.
 An UploadPart commitment is `part:<ticket>:<index>:<subtree-hash>:<len>` (§7.6).
@@ -959,10 +986,11 @@ persist, for every signed write except the replay-exempt uploads of §7.6
 audience/repository/signer, together with the full authenticated operation
 fingerprint. Reusing a nonce for a different operation MUST fail.
 Same-operation retries MUST return the saved result and MUST NOT repeat
-mutable effects or charge quota again. Nonce, quota, reference changes
-(including both AdvanceRefs writes), chat sequence, and reaction toggles MUST
-commit in one explicit SQLite transaction. A transaction failure rolls them
-all back; broadcasts occur only after commit. Replay records MUST remain until
+mutable effects or charge quota again. A signed ref write MUST atomically commit
+its replay result, applicable quota, and reference changes (including both sides
+of a paired advance or deletion), as [SPEC-SERVER §3.1](SPEC-SERVER.md#31-atomic-acceptance) requires. A failed
+acceptance guard commits none of that unit's effects. Configured notifications
+occur only after durable commit. Replay records MUST remain until
 the signed expiry has passed.
 
 A server processes a signed write in this order:
@@ -998,20 +1026,20 @@ A server processes a signed write in this order:
 Concurrent duplicates of a new operation that both complete step 2 before
 either reserves may each reach admission; an admission hook MUST treat
 payment credentials as single-use (e.g. by challenge id) so at most one
-is charged. For unary writes the reserve, apply and commit transaction
-has no externally observable in-flight window; holding admission does
-not create one.
+is charged. For unary writes, reservation, acceptance effects, and saved result
+form one atomic unit with no externally observable in-flight window; holding
+admission does not create one.
 
-For a unary write, steps 4 to 6 commit together in the one transaction
-required above. §7.7 states what each RPC's apply writes. A challenge,
+For a unary write, steps 4 to 6 commit together in the atomic unit
+required above. §7.7 states each RPC's durable effects. A challenge,
 a `PendingVerification` answer (§7.6), a membership-lag `unavailable`
 (SPEC-SERVER §9.4), and a synchronous inspector's `fail_closed`
 `unavailable` (SPEC-SERVER §11.2) MUST NOT be stored as replay results: the
 server leaves no record for the attempt, and removes any `in_flight` record it
 inserted, so a retry with the same nonce is evaluated again from step 2.
-When receipt signing is enabled, that transaction also fixes the
-statement bytes and signing key and durably records the pending-signature
-row (SPEC-SERVER §15.1). A post-apply signing failure is the
+When receipt signing is enabled, that unit also fixes the
+statement bytes and signing key and durably records responsibility for the
+pending signature (SPEC-SERVER §15.1). A post-apply signing failure is the
 committed-result exception above; it MUST NOT discard the replay
 record or create a second commit.
 
@@ -1024,10 +1052,12 @@ under the per-RPC lifecycle of §7.7. The single-repository un-ticketed
 `UploadPack` exception above may resume through its replay record. An
 unreachable ledger or failed quota read fails closed.
 
-`AUTH_AUDIENCE` must be explicitly configured for every deployment and local
-development origin.
+**Reference-server behavior.** `AUTH_AUDIENCE` is explicitly configured for
+every deployment and local development origin.
 
 ### 7.2 `mkit-server` (library and adapters)
+
+**Reference-server behavior.**
 
 The same generated `TransportService` binding (`mkit-server`'s `connect`
 module over its pipeline) is served on Workers by the `mkit-server-worker`
@@ -1045,6 +1075,8 @@ and with them the axum-hosted `TransportServer` of
 `mkit-transport-connect`'s former `server` feature.
 
 ### 7.3 Native CLI Connect client
+
+**Reference-server behavior.**
 
 `mkit-client` owns the runtime-independent protocol implementation: canonical
 messages, signed envelopes, Connect framing, and response decoding.
@@ -1343,10 +1375,11 @@ server to give both to its admission step.
 
 ### 7.6 Upload tickets and resumable parts
 
+**Protocol requirement.**
+
 A ticket reserves an upload before the client sends any pack bytes. It
-names the ref the upload will advance, so the ticket lives with that
-ref's strongly consistent state (§7.9). Parts let a client upload a
-large pack in pieces and resume after a failure, without the server
+binds the ref whose accepted advance may consume it (§7.9). Parts let a client
+upload a large pack in pieces and resume after a failure, without the server
 ever holding a whole part in memory.
 
 **`BeginUpload`.** `BeginUpload(repository, ref, pack_id, bytes)` is a
@@ -1477,7 +1510,7 @@ commitment. It sends no `part:` commitment and no `CompleteUpload`.
 
 **Threshold.** A multi-repository deployment MUST advertise
 `begin_upload_threshold_bytes = 0`: every upload needs a ticket, so
-membership is always recorded in a ref shard. On a single-repository
+upload completion alone never grants repository membership. On a single-repository
 deployment, packs under the threshold MAY skip `BeginUpload`; a stored
 pack is a member. When the deployment runs admission or configures an
 inspector
@@ -1493,7 +1526,10 @@ naming the tickets it consumes. A ticket can be consumed only by an
 advance of the ref it names; any other advance is `failed_precondition`.
 A head-only `UpdateRef` consumes no tickets. Packlist nodes (`MKPL`) are
 uploads like any other pack, and need tickets too.
-An advance names at most seven tickets (§4; SPEC-SERVER §15.2).
+**Reference-server behavior.** An advance names at most seven tickets (§4;
+SPEC-SERVER §15.2).
+
+**Protocol requirement.**
 
 **Binding.** The ticket's audience, repository, and signer MUST equal
 the request's, and the ticket's `pack_id` and `bytes` MUST equal the
@@ -1532,10 +1568,10 @@ After that it signs a new operation.
 **Pending verification.** In indexed mode, an `AdvanceRefs` that
 consumes a pack still under verification MUST fail with `unavailable`
 and exactly one `PendingVerification` detail (SPEC-SERVER §9.5).
-Before returning this answer, a server MAY hold a ticketed call for a
-configured duration, default zero and at most 2,000 milliseconds. Waiting
-MUST stay within the request's remaining elapsed allowance and the signed
-envelope's validity window minus a safety margin. It MUST NOT hold leases,
+Before returning this answer, a server MAY wait for verification on a
+ticketed call. Waiting MUST remain within the request deadline and the signed
+envelope's validity window with sufficient margin to enforce the final
+acceptance deadline. It MUST NOT hold leases,
 reservations, or guarded state. If verification becomes usable, the server
 MUST run the full normal advance path with fresh authorization, admission,
 denial, replay, CAS, and final guards. If waiting times out, it MUST return
@@ -1553,6 +1589,12 @@ envelope is valid and sign a new operation after it lapses (§7.1,
 at most 300 seconds). A server MUST NOT store this answer as a replay
 result (§7.1).
 
+**Reference-server behavior.** Pending-verification waits default to zero
+and are configurable up to 2,000 milliseconds. Waiting also respects the
+reference server's execution allowance.
+
+**Protocol requirement.**
+
 **Storage visibility (informative).** On every backend, the storage
 commit is the point at which a pack becomes visible. On an object store
 with multipart uploads, the server completes the multipart upload only
@@ -1562,10 +1604,14 @@ completion.
 
 ### 7.7 Lifecycle per RPC
 
-This section is normative. It fixes, for each RPC of a ticketed upload,
-whether admission (§5.1) runs and what the RPC's apply writes. The
-shards are those of §7.9: a strongly consistent shard per (repository,
-ref), and eventually consistent repository index shards.
+**Protocol requirement.**
+
+This section fixes, for each RPC of a ticketed upload,
+whether admission (§5.1) runs and which effects become durable.
+
+Atomic acceptance, replay immunity, declared durability, and recovery follow
+[SPEC-SERVER §3.1–§3.2](SPEC-SERVER.md#31-atomic-acceptance). These requirements
+apply to any conforming server, independently of its storage implementation.
 
 Every RPC carries its own nonce: `BeginUpload`, each `UploadPart`,
 `CompleteUpload`, a ticketed `UploadPack`, and `AdvanceRefs` are
@@ -1577,19 +1623,19 @@ consumes no ticket. Allowing, challenging or denying it is deployment
 policy. A configured non-default admission also runs on ticketed
 `AdvanceRefs` and the same-session implicit consuming `UpdateRef` (§7.4).
 That admission covers ref effects with zero bytes; uploads keep their
-independent byte reservations. The built-in default retains its existing
-skipped paths and quota accounting.
+independent byte reservations.
 
-| RPC | Admission | What its apply writes |
+| RPC | Admission | Durable effects |
 |---|---|---|
-| `BeginUpload` (unary; names its target ref) | Yes | In the target ref's shard: the replay record, a reservation row, and the ticket. |
-| `UploadPart`, `CompleteUpload`, and a ticketed `UploadPack` (the part path, §7.6) | No | Pack or part bytes, authorized by the stateless ticket token. A ticketed `UploadPack` MAY also write server-internal content-addressed blobs, including its upload marker (R-113). The part path writes nothing to a metadata shard. The ticket's audience, repository, and signer MUST equal the request's, and for a ticketed `UploadPack` its `pack_id` and byte count MUST equal the request's `pack:` commitment; otherwise the request is `permission_denied` (§7.6). |
-| `AdvanceRefs` | Yes for configured non-default admission; the built-in default skips ticket consumption | In the same ref shard: the head and the packmap, the ref's membership additions, which the server propagates to the repository index shards at least once, one `Committed` outcome for each consumed ticket, and the separate zero-byte ref reservation's outcome when granted. Tickets are local to the ref shard, so there is no cross-shard handoff. |
+| `BeginUpload` (unary; names its target ref) | Yes | The replay result, reservation responsibility, and ticket in one atomic unit. |
+| `UploadPart`, `CompleteUpload`, and a ticketed `UploadPack` (the part path, §7.6) | No | Pack or part bytes, authorized by the ticket token; no replay or repository-membership effects. The ticket's audience, repository, and signer MUST equal the request's, and for a ticketed `UploadPack` its `pack_id` and byte count MUST equal the request's `pack:` commitment; otherwise the request is `permission_denied` (§7.6). |
+| `AdvanceRefs` | Yes when ref admission is configured | In one atomic acceptance unit: the head and packmap effects, replay result, applicable quota effects, consumed-ticket state, added membership, one terminal `Committed` outcome per consumed-ticket reservation, and the separately granted zero-byte ref reservation's outcome. Responsibility for propagating any deferred membership projection is durable in that unit; read indexes may lag under §7.9. |
 
 - **Membership.** A pack becomes a member of the repository only at the
-  apply of the `AdvanceRefs` that consumes its ticket, or at the completion
-  by the final phase of a server-side fork into an empty repository
-  (SPEC-SERVER §9.9). Until then,
+  acceptance of the `AdvanceRefs` that consumes its ticket, or after the
+  guarded acceptance of a server-side fork into an empty repository
+  (SPEC-SERVER §9.9). A fork MUST NOT expose destination membership or accept
+  destination writes before that acceptance. Until membership is established,
   `BeginUpload` for the same signer, ref, and pack returns the existing
   ticket, never `AlreadyPresent` (§7.6). A `BeginUpload` that finds such
   a live ticket returns it after authorization and before admission: it
@@ -1598,10 +1644,12 @@ skipped paths and quota accounting.
   granted gets exactly one outcome: `Committed`, `Aborted`, or
   `Expired`. `Committed` reports the bytes stored, the bytes new to the
   repository, the bytes new to the store, and the refs advanced.
-- **Aborted.** If the apply of an admitted RPC fails after
-  `Allow{reservation}`, for example an `UpdateRef` compare-and-swap
-  loss, an epoch mismatch or a replay race, the server records `Aborted`
-  in a separate transaction. A missing ticket pack is also a defensive
+- **Aborted.** If the apply of an admitted RPC definitely fails after
+  an admission allowance with a reservation, for example an `UpdateRef`
+  compare-and-swap loss, an epoch mismatch, or a replay race, the server records
+  `Aborted` independently of the rejected acceptance unit. An uncertain result
+  MUST NOT be reported as a definite abort; recovery uses the original identity
+  (SPEC-SERVER §3.2). A missing ticket pack is also a defensive
   abort case; conforming server GC retains every unexpired ticket pack
   as a root (SPEC-SERVER §13), so it cannot normally collect that pack
   before the advance consumes the ticket.
@@ -1616,9 +1664,14 @@ skipped paths and quota accounting.
 
 A deployment settles a payment on `Committed` and releases it on
 `Aborted` or `Expired`, so an aborted upload settles nothing
-(informative). How outcomes reach the deployment, through a
-transactional outbox delivered at least once and keyed by reservation
-id, is specified in [SPEC-SERVER](SPEC-SERVER.md).
+(informative). Outcome delivery is at least once with a stable reservation
+identity for deduplication, as [SPEC-SERVER](SPEC-SERVER.md) specifies. Repeated
+delivery does not create another terminal outcome or settlement.
+
+**Reference-server behavior.** The built-in default admission in mkit-server
+retains its skipped paths and quota accounting: ticket consumption does not
+invoke it again. Non-default admission also covers the zero-byte ref effects.
+A transactional outbox retains pending outcome-delivery responsibility.
 
 ### 7.8 Ref deletion
 
@@ -1648,10 +1701,10 @@ This document requires no client command for deletion (informative: a
 
 ### 7.9 Consistency and paging
 
-A multi-repository deployment keeps each ref's state in a strongly
-consistent shard and its repository-wide indexes in eventually
-consistent shards (§7.1). This section states what a client can rely
-on.
+**Protocol requirement.**
+
+This section states the consistency guarantees a client can rely on,
+independently of the server's storage layout.
 
 **Strong.** `ReadRef` of a specific ref is strongly consistent, and so
 is every write. Push compare-and-swap MUST use `ReadRef`. A deployment
@@ -1679,8 +1732,8 @@ of these:
 
 A lag never exposes another repository's data and never acts as an
 existence oracle (§7.4).
-An index lags per bucket, so a listing need not reflect a single instant;
-a branch head and its packmap may appear at different ages.
+A listing need not reflect a single instant; a branch head and its packmap
+may appear at different ages.
 
 **Stale listings.** A client that fetches every listed branch MUST
 tolerate a listing that names a branch deleted since the listing. When
@@ -1688,7 +1741,7 @@ the `ReadRef` of a listed branch's packmap finds no ref, the client MUST
 re-read `refs/heads/<name>` strongly. If that head is also absent, the
 listing was stale: the client MUST skip the branch and MUST NOT create or
 update its tracking ref. If the head is present, the remote is corrupt (a
-head and its packmap share one strongly consistent shard) and the client
+paired head and packmap effects are atomic) and the client
 MUST fail. A transport error on either read MUST fail the fetch and MUST
 NOT be treated as a stale listing.
 
@@ -1700,9 +1753,8 @@ packmap listed the pack:
 X-Mkit-Ref: <refname>
 ```
 
-The server then also resolves membership against that ref's strongly
-consistent shard, which holds the membership additions the ref's
-advances recorded. So a pusher sees its own advance at once, despite
+The server then also resolves membership against the authoritative
+added membership recorded by that ref's accepted advances. So a pusher sees its own advance at once, despite
 index lag. The answer is always subject to the caller's view. A caller
 without write access gets the published view, so a pack that an
 advance still in quarantine added stays invisible through the header,
@@ -1739,11 +1791,14 @@ without a notice detail; their frozen protocols do not gain notice
 fields.
 
 **Advertised values.** `GetServerInfo` advertises `index_fanout` and
-the `ListRefs` page bound (§2.1).
+the `ListRefs` page bound (§2.1). Neither field requires a particular
+internal index layout.
 
 ---
 
 ### 7.10 Namespace repository listing
+
+**Protocol requirement.**
 
 `ListRepos` is an additive unary read RPC. `ListReposRequest` carries
 `namespace = 1`, an opaque `page_token = 2`, `page_size = 3`, and optional
@@ -1755,8 +1810,7 @@ whitespace and matches raw name bytes. Empty matches every repository.
 `RepoEntry` carries its complete namespace-local `name = 1` and effective
 `visibility = 2`, using the existing `RepoVisibility` enum. Names MUST be sorted
 by ascending byte order and MUST NOT be duplicated. No existing field changes
-meaning. The registry has no cheap head or last-update projection, so neither
-is included. A page MUST contain at most 100 entries and its encoded protobuf
+meaning. Entries carry no head or last-update value. A page MUST contain at most 100 entries and its encoded protobuf
 response MUST fit in 64 KiB. An empty continuation ends the listing.
 
 Addressing and authentication retain §7.1 and §7.4: `X-Repository` is an
@@ -1776,8 +1830,8 @@ Multi listing rights are deliberately narrower than repository read rights:
 - A signed namespace owner receives the full registered repository listing,
   subject to a configured authorizer's check.
 - In `authority` mode, non-owner callers receive the public view by default.
-  A deployment MAY explicitly enable `PipelineConfig::list_repos_authority_full`
-  (default false) only for an authority that understands namespace-wide listing.
+  A deployment MAY explicitly enable full authority listings (disabled by
+  default) only for an authority that understands namespace-wide listing.
   With this opt-in, a signed non-owner caller without a grant receives the full
   registry only if the hook Allow also returns `writer_view = true`. A repository-scoped
   read Allow alone MUST NOT confer namespace listing rights. Authority hooks MUST
@@ -1796,47 +1850,55 @@ Its denial or failure MUST propagate; an allowance cannot widen the public view.
 Like authority hooks, this check concerns the entire requested namespace rather
 than the selector repository name.
 
-A public listing MUST NOT scan or filter private registry rows. In Multi mode,
-the namespace coordinator (Namespace partition under Single sharding) maintains
-`rl 00 p 00 <name>` for registered explicitly-public repositories and
-`rl 00 d 00 <name>` for registered repositories without an explicit visibility.
-Values are empty. The latter prefix participates only when deployment default
-visibility is public. A bounded k-way merge across those sorted prefixes gives
-the public listing. Owners and approved authority sources scan `rr` and batch
-read `rv` for the emitted page's effective visibility. `RepoIndex` object shards
-are not repository-name indexes and are not scanned by this RPC.
+Private repository registrations MUST NOT affect public listing results or
+continuations. Public listing eligibility MUST change atomically with repository
+creation or a visibility change, so a concurrent listing cannot expose a
+repository through stale visibility. Visibility on an uncreated repository
+MUST NOT make it appear in a listing. Explicit visibility settings take
+precedence over the deployment default. A default-visibility change includes
+or excludes repositories inheriting that default without changing explicitly
+configured visibility.
 
-These index rows MUST change atomically in the same coordinator apply as repo
-creation or `SetRepoVisibility`; visibility on an uncreated repository MUST NOT
-create a listing row. Creation guards its observed `rv`, and visibility updates
-guard observed registration, so competing applies cannot leave stale public
-rows. Changing the deployment default automatically includes/excludes the
-inherited prefix; explicit settings always win. Only fresh stores are supported;
-there is no backfill or pre-launch persisted-format migration.
+**Reference-server behavior.** Public listings do not scan or filter private
+repository registration records. The reference server maintains separate sorted
+public-name indexes for explicitly public and default-visibility repositories.
+It merges those indexes for public listings and reads effective visibility for
+full listings. Its repository-object indexes do not supply repository names.
+Source documentation for `pipeline::list_repos` describes the layout and the
+exact registration and visibility guards; other servers need not use it.
+
+**Protocol requirement.**
 
 The token MUST be integrity-protected and bound to the namespace, name prefix,
 caller, listing view, deployment audience, and default visibility. It resumes
-strictly after the last returned name. Tokens use a dedicated MAC domain derived
-from deployment ticket keys; retained keys verify after rotation. Foreign,
-malformed, tampered, or binding-mismatched tokens are `invalid_argument`, checked
-before scanning. A token gives no authorization: owner/authority classification
-is repeated on every page. Multi deployments need configured MAC keys; otherwise
-listing is `failed_precondition`. Tokens are opaque to callers; no internal scan
+strictly after the last returned name. Foreign, malformed, tampered, or
+binding-mismatched tokens are `invalid_argument`, checked before listing work.
+A token gives no authorization: owner/authority classification is repeated on
+every page. Tokens are opaque to callers; no internal scan
 cursor or private filtering position is returned in the public view.
 
-There is no snapshot across pages. Concurrent creation or visibility changes may
-add/remove names; subsequent pages still resume in name order. Storage errors
-are `unavailable`, never successful partial listings. Public scans have fan-out
-at most two and fetch at most 101 rows per scan. Short backend pages, including
-empty pages with a continuation, MUST resume using the backend cursor for the
-same range before merging. Every scan counts against the 102-call top-level
-`NamespaceStore` budget per RPC; exhausting it is `resource_exhausted`, never
-successful truncation. Full listings reserve one of those calls for the batched
-visibility read. Worker stores implement that read in one call; a backend
-using the default `get_many` implementation performs at most 201 primitive calls. All applies retain the 100-op/1-MiB limits and Worker
-requests retain their shared call budgets. An empty namespace and one containing
-only unreadable private repositories MUST have identical public results,
-including the absence of a continuation.
+There is no snapshot across pages. Concurrent creation or visibility changes
+may add or remove names; subsequent pages still resume in name order. Storage
+errors are `unavailable`, never successful partial listings. Exhausting a
+listing's resource allowance is `resource_exhausted`, never successful
+truncation. An empty namespace and one containing only unreadable private
+repositories MUST have identical public results, including the absence of a
+continuation.
+
+**Reference-server behavior.** Tokens use a dedicated MAC domain derived from
+deployment ticket keys; retained keys verify after rotation. Multi-repository
+reference deployments require configured MAC keys for listing and return
+`failed_precondition` when none are configured.
+
+Public scans use fan-out at most two and fetch
+at most 101 records per scan. Short backend pages, including empty pages with a
+continuation, resume using that range's backend cursor before merging. The
+reference server permits 102 top-level storage calls per listing; full listings
+reserve one for a batched visibility read. Worker stores perform that read in
+one call; the default storage adapter performs at most 201 primitive calls.
+Its atomic writes retain 100-operation and 1-MiB limits, and Worker requests
+retain their shared call budgets. These are reference-server bounds, not
+protocol limits.
 
 
 ## 8. Out of scope
@@ -1950,6 +2012,8 @@ reference Worker).
 
 ## Wasm server deadline policy
 
+**Reference-server behavior.**
+
 The mkit wasm binding ignores `connect-timeout-ms` and `grpc-timeout` before
 Connect dispatch, and does not apply configured Connect deadline policies.
 Native bindings retain deadline enforcement. This runtime policy leaves body
@@ -1958,6 +2022,8 @@ platform clock and timer.
 
 
 ## Runtime-independent client (informative)
+
+**Reference-server behavior.**
 
 Complete ref listings in the Rust client, sync adapter, and Connect transport
 share a runtime-free accumulator in `mkit-core`. It rejects unordered or duplicate

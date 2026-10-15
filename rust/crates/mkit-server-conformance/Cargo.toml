@@ -8,12 +8,15 @@
 #       server's internals.
 # Native only: it drives each case on a tokio runtime.
 #
-# `publish = false`: a test and conformance harness, not a release artifact.
+# Published as a library and standalone runner with the next release.
 # Never a dependency of `mkit-cli`.
 [package]
 name = "mkit-server-conformance"
-description = "Conformance suites for mkit-server storage backends and mkit.transport.v1 servers"
-publish = false
+include = ["src/**", "fixtures/**", "README.md", "Cargo.toml"]
+description = "Portable wire and server-control conformance suites for mkit servers"
+keywords = ["mkit", "vcs", "conformance", "testing", "connectrpc"]
+categories = ["network-programming", "development-tools::testing"]
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -25,17 +28,20 @@ authors.workspace = true
 workspace = true
 
 [features]
+# Optional extra suite for servers built on the reference storage SPI.
+storage-spi = ["dep:mkit-server"]
 # Lets the pipeline baseline serve with mkit-server's `__test-faults` seam
 # (the clock-skew directive, plus the baseline's `GET /__mkit_test/stats`)
 # so the `TestFaults` wire cases run. The wire suite itself never needs it.
-__test-faults = ["mkit-server/__test-faults"]
-http-objects = ["mkit-server/http-objects"]
+__test-faults = ["storage-spi", "mkit-server/__test-faults"]
+http-objects = ["storage-spi", "mkit-server/http-objects"]
 # `stubs`: in-process stand-ins for external services a server talks to.
 # `stubs::hook` is a `mkit.server.hooks.v1` hook service that verifies every
 # SPEC-SERVER §7.1 signed request (with mkit-server's `HookVerifier`), answers from a script and records calls
 # (WP-3.8; WP-3.12 builds its payment stub on it). A test utility: never in a
 # release binary.
 stubs = [
+    "storage-spi",
     "dep:axum",
     "dep:hmac",
     "tokio/net",
@@ -45,12 +51,14 @@ stubs = [
 # Test-only in-process server for contract consumers. It is deliberately
 # opt-in, and the API refuses to compile in release builds.
 test-host = [
+    "storage-spi",
     "__test-faults",
     "http-objects",
     "stubs",
     "dep:axum",
     "dep:reqwest",
     "dep:tower-http",
+    "dep:tower",
     "tokio/io-util",
     "tokio/net",
 ]
@@ -58,7 +66,7 @@ test-host = [
 [dependencies]
 mkit-rpc = { version = "0.5", path = "../mkit-rpc" }
 base64 = "0.22"
-mkit-server = { version = "0.5", path = "../mkit-server", features = ["memory"] }
+mkit-server = { version = "0.5", path = "../mkit-server", features = ["memory"], optional = true }
 mkit-core = { version = "0.5", path = "../mkit-core", default-features = false }
 mkit-attest = { version = "0.5", path = "../mkit-attest", default-features = false, features = ["grants"] }
 k256 = { version = "0.14", features = ["ecdsa"] }
@@ -98,12 +106,13 @@ reqwest = { version = "0.13", default-features = false, features = [
     "rustls",
     "stream",
 ], optional = true }
+tower = { version = "0.5", features = ["util"], optional = true }
 tower-http = { version = "0.6", default-features = false, features = ["cors"], optional = true }
 
 [dev-dependencies]
-mkit-client = { path = "../mkit-client" }
+mkit-client = { version = "0.5", path = "../mkit-client" }
 base64 = "0.22"
-mkit-cli = { path = "../mkit-cli" }
+mkit-cli = { version = "0.5", path = "../mkit-cli" }
 # The `.mkit`-layout stores `mkit serve` uses, for tests/fs_backends.rs.
 mkit-server = { version = "0.5", path = "../mkit-server", features = ["memory", "fs"] }
 tempfile = "3"
@@ -114,3 +123,19 @@ tokio = { version = "1", features = ["net"] }
 [[bin]]
 name = "mkit-server-conformance"
 path = "src/bin/mkit-server-conformance.rs"
+
+[[test]]
+name = "memory_backends"
+required-features = ["storage-spi"]
+
+[[test]]
+name = "fs_backends"
+required-features = ["storage-spi"]
+
+[[test]]
+name = "suite_selftest"
+required-features = ["storage-spi"]
+
+[[test]]
+name = "baseline_pipeline_memory"
+required-features = ["storage-spi"]

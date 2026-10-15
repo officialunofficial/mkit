@@ -9,7 +9,7 @@ audience: implementers of mkit.transport.v1 servers and of deployment business l
 
 ## 1. Scope and relation to SPEC-TRANSPORT-CONNECT
 
-This specification defines server-internal pipeline guarantees, durable
+**Protocol requirement.** This specification defines server acceptance guarantees, durable
 outcomes and lifecycle events, storage leases, server garbage collection,
 takedown and redaction notices, and the contract between a server and
 deployment business logic.
@@ -20,7 +20,7 @@ An independent hook implementation can use this contract and the
 defines the client-visible `mkit.transport.v1` wire contract. Its rules
 remain authoritative for client authentication, replay handling,
 authorization, admission challenges, upload tickets, and RPC lifecycle.
-References to STC below add internal guarantees or describe hook messages;
+References to STC below add observable safety guarantees or describe hook messages;
 they do not replace those wire rules.
 
 MUST, MUST NOT, SHOULD, SHOULD NOT, MAY, and REQUIRED have the meanings
@@ -42,18 +42,18 @@ policy, moderation policy, or the deployment's account model.
 [SPEC-WRITE-GRANTS](SPEC-WRITE-GRANTS.md) remains authoritative for grants,
 their verification, and the preconditions they carry into apply.
 
-Sections 10–18 cover the M5 contracts: §§10–11 specify the published view
+Sections 10–18 cover the lifecycle contracts: §§10–11 specify the published view
 and inspection, §§12–13 specify storage leases, lifecycle events, and
 server garbage collection, §14 specifies takedown, §15 specifies storage
-receipts, and §16 specifies administration. The other M5 sections remain
-reserved. Inspection, notice, and receipt fields extend the original hook
+receipts, and §16 specifies administration. The other reserved sections remain
+unspecified. Inspection, notice, and receipt fields extend the original hook
 and transport shapes additively.
 Section 16 applies to native and Workers deployments when an admin key
 list is configured; without that list its routes are absent.
 For a branch, its head and packmap share one publication sequence even
 when either is written through `UpdateRef` (§10.2).
 
-**Current implementation profile.** This map describes the shipped core and
+**Reference-server behavior. Current implementation profile.** This map describes the shipped core and
 Workers adapter; §18 defines their conformance scope. Future full-profile rules
 remain normative for implementations that adopt them. A future collector does
 not weaken today's holder/hold safety, notice-key or admin contracts.
@@ -67,11 +67,13 @@ not weaken today's holder/hold safety, notice-key or admin contracts.
 | Future integration | Async inspection/holds/review (§§10–11), leases and lifecycle Events (§12), GC (§13), takedown rewrite/substitution/completion/notices (§14), and storage receipt issuance (§15). |
 | Future deployment facilities | Edge caching and the exhaustive namespace catalog. Current purge delivery and known-holder/finite-root discovery remain implemented; discovery under open namespace policy remains incomplete (§18). |
 
-The hosted embedding acceptance selects Paid/indexed/D34, in-process hooks and
-URL tokens, with takedown off and no inspection. Single/Free remains supported;
-optional capabilities require their own configuration and enforcement evidence.
+The reference embedding fixture selects indexed mode, partitioned storage,
+in-process hooks, and URL tokens, with takedown off and no inspection. Other
+supported configurations require their own enforcement evidence.
 
 ### Storage adapter boundary
+
+**Reference-server behavior.**
 
 `mkit-server` defines the engine-neutral `NamespaceStore` contract. The
 SQLite implementation (`mkit_server_worker::sql::{SqlConn, SqlKvStore}`),
@@ -80,6 +82,8 @@ to `mkit-server-worker`. Core has no `sql` feature or SQLite dependency.
 The adapter move changes no statements, stored formats, or store semantics.
 
 ## 2. Pipeline order
+
+**Protocol requirement.**
 
 The stages are numbered 0–9. An operation visits the stages applicable
 to its RPC and configured hooks. The signed-write processing order is
@@ -116,9 +120,9 @@ as STC §7.1 requires; this list names server-internal extension points.
 8. **Outcome delivery.** Deliver the durable outcome to the configured
    sink under §5 and, for remote hooks, §6.5 and §8.
 9. **Asynchronous inspection and lifecycle events.** Run configured
-   asynchronous inspection after apply. Storage-lease timers perform
-   transition side effects and durably record configured events under §12; request
-   enforcement evaluates storage leases independently of those timers.
+   asynchronous inspection after apply. Storage-lease background work performs
+   transition side effects and durably records configured events under §12; request
+   enforcement evaluates storage leases independently of that work.
 
 Stages before stage 4 MUST NOT write server state. Admission may plan a
 default quota reservation, but that reservation MUST be committed with
@@ -133,24 +137,26 @@ Signed reads skip the replay ledger, as STC §7.1 requires. Their
 identity, authorization, and optional admission decisions use the
 applicable stages without allocating replay state.
 
-Informative: stage 6 is the commit point for the operation's guarded
+**Protocol requirement.** Acceptance is the commit point for the operation's guarded
 effects. Storage receipt signing and delivery may happen later; §15 fixes
 the statement bytes at apply. An outcome
 delivery failure does not undo an already committed operation.
 
 ## 3. Per-RPC lifecycle
 
+**Protocol requirement.**
+
 Each RPC's admission eligibility and apply effects are as STC §7.7
-requires. The following rules specify the internal atomic boundaries;
+requires. The following rules specify the authoritative atomic boundaries;
 they do not reproduce its lifecycle table.
 
 - For `BeginUpload`, the replay record, reservation, and ticket MUST
-  commit in one atomic unit in the target ref's shard, as STC §7.7
+  commit in one atomic unit, as STC §7.7
   requires. The successful apply replaces the pending reservation
   described in §5 with the ticket-backed reservation.
 - For an `AdvanceRefs` that consumes tickets, the head, packmap,
   membership additions, and one `Committed` outcome per consumed ticket
-  MUST commit in one atomic unit in the target ref's shard, as STC §7.7
+  MUST commit in one atomic unit, as STC §7.7
   requires. A configured non-default Admission also admits the ref effects
   with zero bytes. Its separate reservation, when granted, MUST settle in
   that same unit, with zero byte totals. Pack reservations remain independent.
@@ -175,10 +181,7 @@ they do not reproduce its lifecycle table.
   grants a reservation, the visibility row, its listing-index projection and
   the `Committed` outcome (no refs, no bytes) MUST commit in one atomic
   unit, replacing the pending reservation; a failed attempt records
-  `Aborted` as below, and a reconciled abandonment is `ABANDONED`. The
-  default admission charges no quota for a visibility change (no bytes and
-  no operation): the change is owner-only and stores no object bytes, and
-  the per-namespace charge is planned only with the writes it aggregates.
+  `Aborted` as below, and a reconciled abandonment is `ABANDONED`.
   Charges another admission returns for it are applied, in the same unit,
   to the quota scope each charge names. When the deployment also plans an
   automatic cache purge for the change, the purge, the audit and the outcome
@@ -191,7 +194,7 @@ they do not reproduce its lifecycle table.
   current value is not exempt. An `Allow`'s receipt headers are returned on
   the committed success only.
 - An `Aborted` outcome MUST be written in a separate atomic unit after
-  a failed apply, as STC §7.7 requires. That unit replaces the pending
+  a definitely failed apply, as STC §7.7 requires. That unit replaces the pending
   reservation with `Aborted` when a pending reservation exists.
 - An `AdvanceRefs` typed conflict consumes no ticket and records no ticket
   outcome; its tickets remain usable until expiry, as STC §7.7 requires.
@@ -204,6 +207,75 @@ The pending-reservation write precedes these guarded atomic units.
 It does not move ticket creation or ref publication into admission.
 Ticket eligibility, token checks, and part handling remain as STC
 §7.6 requires.
+
+### 3.1 Atomic acceptance
+
+**Protocol requirement.** For an accepted signed ref write, a conforming
+server MUST durably commit these effects in one atomic unit:
+
+- the authoritative live ref effects, including both sides of a paired
+  advance or deletion;
+- the saved replay result and applicable quota effects;
+- consumed ticket state and the corresponding repository membership additions;
+- one terminal outcome for each consumed-ticket reservation and the outcome
+  of a separately granted ref reservation, when applicable.
+
+The same unit MUST retain durable responsibility for projections whose
+indexes or counters may lag under their specified delivery rules. A failed
+acceptance guard MUST commit none of that unit's effects. A typed ref conflict
+is a separate guarded decision with its own replay and settlement rules (§3),
+not an accepted ref write.
+
+An observer MUST NOT see an accepted live ref effect without its durably
+recorded replay result and terminal-outcome responsibility. Permitted replay
+expiry and acknowledged-outcome pruning do not invalidate an earlier acceptance.
+The earlier pending reservation does not itself establish acceptance.
+
+### 3.2 Replay, durability, and recovery
+
+**Protocol requirement.** A committed replay MUST answer with its saved result
+without repeating any acceptance effect, quota charge, ticket consumption, or
+terminal-outcome creation. Within the required retention period, response loss
+or an uncertain storage outcome MUST resolve through the original operation
+identity. A server MUST NOT report uncertainty as a definite abort unless
+authoritative recovery proves that the acceptance did not commit. Cancellation
+or a timeout alone is not that proof. Replay does not extend an envelope's
+validity or the wire replay lifetime.
+
+`Committed` means durable to the server's declared durability profile. The
+server MUST declare its process, host, and storage or failover guarantees;
+a volatile profile MUST identify itself and MUST NOT claim persistent
+conformance. Several commits MAY share a durable log sync, but none may be
+acknowledged before its own writes and required earlier dependencies are durable.
+Reads, failed-guard results, publication, relay dispatch, and external outcome
+delivery that depend on a commit MUST wait for that durability too. Holding
+only the originating response is insufficient.
+
+A server MUST separate atomic acceptance, durable acknowledgement, and
+visibility. It MUST check current guards, ownership, and server-clock deadlines
+at the final irrevocable acceptance point. Queue admission is not that point.
+Waiting for durability MUST NOT extend authorization or permit a later unchecked
+acceptance. A server relying on a bounded clock-to-commit span MUST preserve
+that bound or provide an equivalent drain and fencing guarantee. A revocation
+or ownership-transfer acknowledgement MUST cover already accepted writes so
+they cannot emerge as new effects afterward.
+
+Cancellation MUST leave the decision entirely before or entirely after
+acceptance, never torn; once the accepted state is observed, cancellation MUST
+NOT restore the prior state. Command ownership and recovery responsibility MUST
+survive caller cancellation. Graceful shutdown MUST drain accepted commands or
+retain their durable recovery responsibility. Restart MUST recover an atomic,
+dependency-closed state containing every commit acknowledged within the declared
+durability profile. A durability or ownership failure MUST stop successful
+acknowledgement and dependent publication until safety is re-established.
+
+### 3.3 Default admission
+
+**Reference-server behavior.** mkit-server's default admission charges no
+quota for a visibility change: it is owner-only, stores no object bytes,
+and consumes no quota operation. It plans its namespace charge with the ref
+and upload writes it aggregates. Other admission profiles may grant charges
+under §3's atomic rules.
 
 ## 4. Fail-closed rules
 
@@ -241,7 +313,7 @@ pending reservation with the ticket-backed reservation in that apply's
 atomic unit. On a successful direct admitted write, it MUST replace
 the pending reservation with `Committed` in the ref write's atomic unit.
 
-If the guarded apply fails, the server MUST replace the pending
+If the guarded apply definitely fails, the server MUST replace the pending
 reservation with `Aborted` in a separate atomic unit. The failed apply
 MUST NOT leave the operation's guarded effects committed.
 
@@ -382,6 +454,8 @@ Informative end-to-end admission sequence:
 
 ### 6.2 Authorize
 
+**Protocol requirement.**
+
 `AuthorizeRequest.operation` describes the authenticated operation
 before admission. The deployment MUST configure remote Authorize in
 one of these two roles:
@@ -412,7 +486,7 @@ requires; remote Allow does not bypass them.
 | `refs` | The intended ref changes, in decision order. |
 | `owner` | Whether the principal owns the namespace under STC §7.5 rule 1; set on both Authorize and Admit requests. |
 | `grant` | The write grant used under STC §7.5 rule 2, if any, and its checked epoch; set on both Authorize and Admit requests. |
-| `fork` | Present only for a fork (§9.9): the source repository, branch and expected tip, the source's visibility and visibility revision read together in one coordinator read (and checked again before the job starts), and the requested destination visibility. `operation.repository` is the destination. |
+| `fork` | Present only for a fork (§9.9): the source repository, branch and expected tip, the source's visibility and visibility revision observed consistently (and checked again before construction starts), and the requested destination visibility. `operation.repository` is the destination. |
 | `source_ref`, `source_head`, `source_packmap`, `source_generation`, `source_publication_sequence` | Present only for published-source `AdvanceRefs` (§9.3): the source branch and the pair, generation and published prefix captured from its authoritative row, in `operation.repository`. Intended destination writes still appear in `refs`; admission declares zero bytes. |
 
 For `ListRepos`, `operation.repository` is an arbitrary caller-chosen selector
@@ -504,6 +578,8 @@ to denials from all three hooks.
 
 ### 6.2.1 Optional namespace authority-generation fence
 
+**Protocol requirement.**
+
 A deployment MAY enable an independent, monotonically increasing unsigned
 64-bit authority generation per namespace. It MUST be disabled by default,
 require the Authority authorizer role and transactional storage, and MUST NOT
@@ -513,24 +589,19 @@ When enabled, every Authority allowance for a write MUST carry
 `authority_generation`, including zero. Missing or invalid facts MUST fail
 closed. Trusted Authority facts MUST survive admission, planning and retries;
 the established owner and grant facts MUST remain intact. Final acceptance
-MUST atomically compare those facts with the authoritative generation, or with
-the guarded shard lease's authority generation. A mismatch MUST return
+MUST atomically compare those facts with the current authoritative generation. A mismatch MUST return
 `permission_denied`, accept nothing, consume no tickets, and abort any admission
 reservation. This covers ref advances/deletes, ticketless upload acceptance,
 reserved `BeginUpload`, and authority envelope visibility writes. Upload tickets
 MUST bind the generation; ticket-only uploads and multipart operations MUST
 reject stale generations before staging additional bytes and before completion.
 Client-frame validation MUST remain independent of storage-write checkpoints.
-Implementations MAY privately coalesce frames in a bounded 256 KiB buffer;
-private buffering is not backend staging. Each actual staging write MUST check
-the authoritative generation before and after its backend await. Completion,
-authenticated part receipts, and verification markers retain their independent
-final checks. A revoked stream MUST stage no subsequent checkpoint or succeed
-at completion; an already in-flight checkpoint may leave unaccepted shared bytes.
-For the Worker 64 MiB single-upload limit this requires at most 512 routed
-staging checks plus five opening/finalization checks, regardless of framing.
-The default 8 MiB part requires at most 64 staging checks plus four receipt
-boundary checks; multipart completion independently requires three checks.
+Private buffering does not establish accepted upload state. Every actual
+backend staging write MUST retain generation checks before and after its await.
+Completion, authenticated part receipts, and verification markers retain their
+independent final checks. A revoked stream MUST stage no subsequent write or
+succeed at completion; an already in-flight write may leave unaccepted shared
+bytes.
 Already accepted inspection/publication work is not cancelled by this fence.
 
 `GetAuthorityGeneration` and `SetAuthorityGeneration` are namespace-level RPCs
@@ -560,93 +631,84 @@ statements for the same target MUST resume completion, including after restart.
 A caller MAY refresh an expired statement for the same target. Reusing a nonce
 cannot authorize a different target or namespace without a new signature.
 
-Generation changes MUST serialize with lease grants. Durable leases MUST carry
-both independent generations and acknowledgements; pushes MUST precede their
-acknowledgements, and renewing a live row MUST preserve each acknowledgement.
-Completion MUST wait for every old leased shard to acknowledge or expire,
-including cache/recovery holdoffs. Completion scans MUST remain bounded independently of elapsed clock time and use
-independent checkpoints for grant and authority barriers. Each slice reads at most
-eight pages of four rows and attempts at most four pushes; each push makes one
-attempt. A setter attempts at most one slice. Pending counts are
-conservative lower bounds, including one when an unscanned suffix remains. A pending setter MUST
-return `unavailable` with a `Retry-After` header in delay-seconds. Sharded batches
-MUST retain backend-evaluated
-`NotAfter(min(lease_expires - margin, plan_time + MAX_APPLY_WINDOW))`.
-After setter success, no older-generation acceptance may commit. Returning a
-previously committed replay result performs no new acceptance. An executor that
-cannot decode generation-bearing leases MUST NOT serve a fenced deployment.
+A generation-change acknowledgement MUST establish a barrier after which no
+older-generation acceptance can commit. Concurrent writes MUST either precede
+that barrier or compare the new generation and refuse. Recovery and cached
+authority evidence MUST preserve this guarantee. A pending setter MUST return
+`unavailable` with a `Retry-After` header in delay-seconds. A completed replay
+performs no new acceptance.
+
+**Reference-server behavior.** The reference server serializes generation
+changes with lease grants. Leases carry independent grant and authority
+generations and acknowledgements; pushes precede acknowledgement. Completion
+waits for every old lease to acknowledge or expire, including recovery holdoffs.
+Independent durable scan checkpoints bound each request to eight pages of four
+rows and four single-attempt pushes. Pending counts are conservative lower
+bounds. Backend deadlines constrain the lease and apply window. These leases,
+page sizes, checkpoints, and call bounds are implementation mechanisms.
+
+**Protocol requirement.**
 
 Under `namespace_policy = any`, `GetAuthorityGeneration` and
 `SetAuthorityGeneration` MUST NOT require the namespace record: the deployment
 key signs each statement, so a statement MAY precede the namespace's first
 write. Under an allowlist the namespace MUST be listed.
 
-A fenced namespace-creation batch (the coordinator batch that registers a new
-namespace or repository outside a shard lease) MUST carry the same guarded
-`ag` comparison as the ref batch. A stale Authority generation MUST create no
-namespace or repository row.
+Namespace or repository creation MUST compare the same current authority
+facts as other acceptance. A stale generation MUST create neither.
 
 When `BeginUpload` finds an unexpired ticket for the same binding (ref, pack
 and signer) issued under an older authority generation than the current
 Authority allowance, the server MUST NOT answer `permission_denied`. It MUST,
-in one guarded batch in the ref shard, close that ticket (the ticket row and
-its expiry timer deleted), repoint the index row to the new ticket, guard both
-open-ticket counters so they net unchanged, write an `Aborted` outcome with
-reason `ABORT_REASON_EPOCH_MISMATCH` and procedure `BeginUpload` for the old
-reservation, open the new ticket and reservation under normal admission, and
-clear the pack's verification state and kick its scheduled job exactly as the
-old ticket's expiry would. The batch MUST be guarded by the old ticket, the
-index and counter rows, the old reservation row, the membership and
-verification-state rows (a present job's timer is kicked, unguarded) and the
-generation. Under single-partition sharding the generation guard is a
-direct comparison of `ag`; under leased sharding it is the epoch lease `el`,
-which carries the generation, as for every other shard write. The ticket-count
-caps do not apply because the counters net to zero. The server MUST NOT
-refund admission charges for the old reservation. After commit, and outside
-any write serialization, the server SHOULD abort the old multipart session,
-best effort: a lost commit acknowledgement or a crash between commit and abort
-leaves that session to backend sweeps and lifecycle rules, and failed aborts
-are counted with the expiry handler's. Only an older generation is replaced: a
+in one atomic unit, close the old ticket, preserve open-ticket counts,
+record its reservation's `Aborted` outcome with reason
+`ABORT_REASON_EPOCH_MISMATCH` and procedure `BeginUpload`, and open the new
+ticket and reservation under normal admission. The decision MUST compare the
+old ticket, its binding, relevant counts and reservation, applicable membership
+and verification state, and current generation. It MUST invalidate verification
+state just as expiry would. Net-zero replacement MUST NOT consume additional open-ticket allowance or
+refund the old reservation's admission charges. After commit, the server SHOULD
+abort the old multipart session best effort. A lost acknowledgement or crash
+leaves physical cleanup to backend lifecycle recovery.
+Only an older generation is replaced: a
 ticket from the same or a newer generation than the allowance still answers as
 before (idempotent return or `permission_denied`), and a ticket issued before
 fencing was enabled (no generation) is never replaced and answers
 `permission_denied` until it expires. Racing consumption, expiry or a second
 replacement fails a guard and re-plans or answers a retryable `aborted`.
 
-Activation MUST durably persist the authority mode and `ag = 0` atomically,
-without creating a business namespace or suppressing first-write admission and
-creation charges. Before the first fenced acceptance, it MUST finish the shared
-initial barrier, including old generation-zero leases. Activation MAY return
-bounded `unavailable` with `Retry-After: 1` while that barrier is pending. The
-optional authority mode and ready state live in the already-read `lr` record;
-a pure activation marker has no actual recovery timestamp, holdoff or
-watermark-reconciliation meaning. Fenced lease grants copy the ready state only
-after this barrier. Legacy records omit these fields and retain their encoding.
-An executor with fencing disabled MUST refuse generation-bearing leases or
-tickets and persisted namespace fence mode, including generation zero. It MUST
-NOT convert those records into unfenced grants. Truly unfenced records remain
-usable. Legacy tickets require one bounded authoritative mode read; ticket-only
-staging and completion revalidate after backend awaits before returning success.
-A retained shared pack or proof marker MUST NOT permit a stale ticket to create
-repository membership.
+Activation MUST durably establish fencing mode and initial generation zero
+in one atomic unit, without registering a business namespace or suppressing
+first-write admission and creation charges. Before the first fenced acceptance,
+it MUST establish the generation-change barrier, including previously issued
+authority evidence. Activation MAY return `unavailable` with `Retry-After: 1`
+while pending. An executor with fencing disabled MUST refuse persisted fenced
+state, including generation zero; it MUST NOT reinterpret it as unfenced.
+Unfenced tickets MUST NOT become usable as fenced tickets. Ticket-only staging
+and completion MUST revalidate current authority after backend awaits. Shared
+bytes or retained proof evidence MUST NOT let a stale ticket create membership.
 
-Bounded scan progress MUST survive separate executor instances. Coordinator
-`fc 00 00` and `fc 00 01` hold independent version-one grant/authority cursors,
-bound to the exact generation and recovery/mode observation. Saves and resets
-MUST guard their prior value, generation and recovery/mode row. A failed push
-MUST retain the earliest unresolved prefix. Completion MUST revalidate current
-coordinator state and successfully guard the final cursor reset. Recovery and
-portable restore MUST invalidate cursors, preserve authority mode and generation,
-and refuse reconstruction or rollback of missing authoritative fence state.
-The setter's conservative metadata-call ceiling is 43, including three CAS
-transition attempts, activation, eight scan pages, four single-attempt pushes,
-cursor load/save and final validation; it does not require a Paid Worker plan.
+Recovery and portable restore MUST preserve authority mode and generation,
+invalidate incomplete barrier observations, and refuse reconstruction or
+rollback of missing authoritative fence state. Barrier progress MUST survive
+executor replacement. A failed comparison MUST retain unresolved work; barrier
+completion MUST revalidate the current authoritative state.
+
+**Reference-server behavior.** The reference server stores separate grant and
+authority barrier cursors and guards cursor saves and resets against the
+observed generation and recovery state. Its setter has a conservative ceiling
+of 43 metadata calls. Fencing mode and readiness are retained with lease-recovery
+state; leased grants copy readiness only after the initial barrier.
+
+**Protocol requirement.**
 
 The authority service must stop delegate authorization, persist its target,
 complete this barrier, then acknowledge revocation. Re-enrolling an identical
 key requires fresh keys or incarnation/operation binding in that service.
 
 ### 6.2.2 Opt-in authority-owned namespaces
+
+**Protocol requirement.**
 
 A deployment MAY configure `namespace_mode = authority`. The default is
 `self_certifying`, which retains STC §7.4's owner-key and owner-address grammar
@@ -667,15 +729,14 @@ URL addressing accepts the union of both grammars
 ([SPEC-TRANSPORT-CONNECT §7.4](SPEC-TRANSPORT-CONNECT.md#74-repository-addressing)).
 
 Registration: a namespace in authority mode is registered when its
-authority-generation row exists, which a verified `SetAuthorityGeneration`
+authority generation has been durably established, which a verified `SetAuthorityGeneration`
 statement (including generation 0) creates before any write. A write,
 `BeginUpload` or visibility change for an unregistered namespace MUST be
 refused with `permission_denied` (`namespace not registered`) before the
 Authority hook, Admission or any store write, so a first write is always
 fenced and no namespace can be squatted by a client. The check runs in
-authorization on every sharding (a read-only comparison under leased
-sharding, activation under single-partition sharding), so no transport or
-upload path reaches the hook, Admission or a replay or charge row for an
+authorization under every supported storage arrangement, so no transport or
+upload path reaches the hook, admission, or replay or charge recording for an
 unregistered namespace. Registration status is not confidential: an
 unsigned `GetAuthorityGeneration` already reveals a generation of 1 or more, and
 a write probe can tell an unregistered namespace from one registered at 0. `GetAuthorityGeneration`
@@ -938,6 +999,8 @@ invalidates the response under §6.6.
 
 ### 6.5 Outcome
 
+**Protocol requirement.**
+
 `Committed` means **Sent, never Delivered**. It is the terminal result of
 live apply, including when inspection or membership dependencies delay
 publication. It MUST NOT later become `Aborted`. Delivery is reported by the
@@ -947,14 +1010,14 @@ publication transition (§12.4), when the published prefix reaches that send.
 §5. `OutcomeResponse` is empty; its successful Connect response
 acknowledges delivery under §8.
 
-For in-process `OutcomeSink` embedders, delivery runs from the durable outbox
+For any configured outcome receiver, delivery runs from durable responsibility
 **after commit**. Sink errors or timeouts never roll back that commit; the
 refused row remains queued for retry. Delivery is at least once and **not
 ordered**: later rows can overtake a refused row, which does not block the
 rows behind it. Receivers deduplicate by `reservation_id` and retain the
 highest per-repository `RepoStorageChanged.version` (§6.5.1).
 
-Persistent sink failure grows the outbox backlog. The core's
+**Reference-server behavior.** Persistent sink failure grows the outbox backlog. The core's
 `OutboxBacklogCap` defaults to 100,000 rows and 64 MiB per outbox. Its
 admission check refuses reservation-granting writes and admitted HTTP reads
 when `rows > cap.rows || bytes > cap.bytes`; equality is still admitted.
@@ -967,7 +1030,7 @@ prior commits. Embedders should monitor `mkit_server_outbox_backlog`, with `unit
 labels per `shard_kind`, and restore the sink before the configured cap is
 exceeded.
 
-The shared `Outcome` fields are:
+**Protocol requirement.** The shared `Outcome` fields are:
 
 | Field | Meaning |
 |---|---|
@@ -984,7 +1047,7 @@ The shared `Outcome` fields are:
 | Field | Meaning |
 |---|---|
 | `bytes_stored` | The unsigned count of bytes stored by the operation. |
-| `new_to_repo` | The unsigned count of pack bytes this write observed as new to the repository. Exact where the repository's counter lives in the writing partition; otherwise an observation by the consuming shard. It is not the accounting source: use `repo_storage_changed` (§6.5.1). |
+| `new_to_repo` | The unsigned count of pack bytes this write observed as new to the repository. An observation at acceptance; an asynchronously updated accounting projection may lag. It is not the accounting source: use `repo_storage_changed` (§6.5.1). |
 | `new_to_store` | The unsigned count of bytes new to the entire store; in opaque mode, an upper bound: the declared pack bytes. |
 | `refs` | The refs committed by the operation, in decision order. |
 
@@ -997,6 +1060,8 @@ the 32-byte committed target, or empty when `deleted` is true.
 
 #### 6.5.1 Repository storage accounting
 
+**Protocol requirement.**
+
 The server keeps an exact, generic stored-bytes counter per repository of a
 multi-repository deployment so an embedder can bill per owner by summing its
 repositories. The basis is pack bytes: the sum of the sizes of the distinct
@@ -1005,32 +1070,23 @@ counts once in each; nothing is deduplicated across repositories, and
 physical garbage collection does not change the counter. Membership is never
 removed, so the counter never decreases.
 
-The counter is created, at zero with version zero, in the same batch that
-registers the repository in its coordinator. A repository without a counter
-is a corrupt store, never a reportable state: a write that would count a
-pack into it fails, a coordinator keeps the relay rows carrying its markers
-queued until the counter exists (the stuck rows also hold that source's relay
-watermark, so consumers of the namespace relay watermark, such as takedown
-discovery, wait too; the counter `mkit_server_relay_storage_counter_missing_total`
-counts such failures), and `Pipeline::repo_storage` fails.
-A deployment with single-repository addressing keeps no counter.
+The repository counter MUST begin at zero with version zero when the repository
+is registered. Missing authoritative accounting state MUST fail closed, never
+produce a fabricated total. A pack MUST count exactly once per repository,
+regardless of retries, concurrent consumption, or crashes. Consumption establishes
+durable accounting responsibility even when inspection or publication is pending.
+The counter MAY trail that responsibility through a durable projection, but MUST
+converge to the exact distinct-member byte total. Every change increments
+`version`. Physical cleanup and takedown do not reduce this membership total.
 
-A pack is added to the counter exactly once per repository: when the
-repository's coordinator first records the pack as counted. A ticket's
-consumption, an implicit session consumption and a deferred publication all
-count at consumption, whether or not the advance has been published, so a
-held advance still counts. Where the consuming partition is the coordinator
-(single-partition deployments) the consuming batch counts the pack and changes
-the counter atomically. Under D34 the consuming ref shard relays a marker for
-each pack through its outbox to the coordinator, whose relay delivery counts a
-marker only if the pack is not yet counted, in the same batch that applies the
-relay row and advances its watermark. Counting is part of delivering to a
-coordinator, not an embedder hook. A shard relays a marker only for a pack it
-does not already hold, since the batch that made it a member relayed it. First recording is therefore decided in
-one partition by one guarded batch, however many ref shards consume the pack
-and however often a relay row is redelivered or a source crashes. The value is
-**eventually consistent and exact**: it trails consumption by the relay lag
-and is never wrong. Every counter change increments `version`.
+**Reference-server behavior.** The reference server keeps accounting at a
+repository's registration authority. Local consumption updates it atomically;
+remote consumption retains durable relay responsibility. Delivery compares a
+counted-pack marker and updates the total and delivery watermark together, so
+redelivery cannot count twice. Missing counter state stalls delivery rather than
+losing its responsibility. Single-repository addressing retains no counter.
+
+**Protocol requirement.**
 
 Every counter change queues one `repo_storage_changed` outcome through the
 ordinary outcome delivery (§5, §8). Its `reservation_id` is
@@ -1038,27 +1094,18 @@ ordinary outcome delivery (§5, §8). Its `reservation_id` is
 the repository's absolute total after the change and `version` is monotonic per
 repository. Delivery is at least once and MAY be out of order: a receiver
 keeps the value with the highest `version` and ignores the rest. The outcome's
-`procedure` is absent.
+`procedure` is absent. Admission reservations MUST NOT use the reserved `rs:`
+or `s:` prefixes.
 
-`Pipeline::repo_storage` returns `{ stored_bytes, version }` for a repository
-in one coordinator read, authorized as an owner read of the repository
-(`Unimplemented` without multi-repository addressing). The Worker embedding
-exposes the pipeline's method. `Pipeline::repo_storage_many(namespace, repos,
-meta)` accepts at most `MAX_REPO_STORAGE_BATCH` (100) repository names, returns
-optional counters in input order (including duplicates), and fetches counters
-and authorization state with one coordinator `get_many`. Empty batches make
-no storage call. A signed `ListRefs` envelope selects the namespace; its
-repository name need not exist. Each requested repository receives the same
-owner/grant and authorizer checks as the single read. Missing and unauthorized
-repositories both return `None`. Authorized missing or corrupt counters remain
-store errors. The Worker embedding exposes this method and the batch limit.
+**Reference-server behavior.** The embedding storage query returns the counter
+and version after owner/grant and authorizer checks. Its batch form accepts at
+most 100 repository names and preserves input order and duplicates. Missing and
+unauthorized repositories return the same absence result; corrupt authorized
+state remains a store error. Storage-change outcomes use reserved `rs:` ids and
+the consumption plan's time, with queued delivery included in backlog telemetry.
+These queries and batching limits are not public transport procedures.
 
-The `repo_storage_changed` `occurred_unix_ms` is the consuming batch's plan
-time. Its `reservation_id` prefix `rs:` is reserved: an admission reservation
-id beginning with `rs:` (or `s:`) is invalid. The coordinator's queued outcome
-rows are visible in the existing `mkit_server_outbox_backlog` gauge
-(`shard_kind="coordinator"`); the backlog adds no cap. Held, quarantined and
-later taken-down packs stay counted: membership is never removed.
+**Protocol requirement.**
 
 `Aborted.reason` classifies why the reservation did not commit:
 
@@ -1394,6 +1441,8 @@ commit under the existing atomic lifecycle in §3 and STC §7.7.
 
 ### 9.3 Verification obligations
 
+**Protocol requirement.**
+
 Before an `AdvanceRefs` that consumes a pack commits, the server MUST
 have verified all of the following:
 
@@ -1446,15 +1495,13 @@ differs from `expected_tip` MUST return `failed_precondition` with
 membership, denial, admission, quota, replay, receipts and outcomes follow
 ordinary ticketless advances. The operation adds no bytes.
 
-Source and destination branches can occupy different partitions. Before
-EVERY destination apply attempt, the server MUST reauthorize the source and
+Before every destination acceptance attempt, the server MUST reauthorize the source and
 compare its complete authoritative publication row with the captured row,
 including the committed sequence and deletion boundary. A difference MUST
 refuse apply (`source tip changed` when the expected-tip comparison fails;
 otherwise retryable `unavailable`). A source change after this fence is
 concurrent with creation: success MUST copy exactly the captured published
-pair, never values selected by separate reads. This fence is not a
-cross-partition atomic source CAS. A completed replay returns its stored
+pair, never values selected by separate reads. This fence does not promise an atomic source-and-destination CAS. A completed replay returns its stored
 advance result without selecting a new source pair.
 
 Object identity is checked on the reconstructed object, not on an
@@ -1480,13 +1527,17 @@ rule):
 These are permanent failures. Clients MUST NOT retry the rejected
 upload as though polling or backoff could make its content valid. The last
 row is a per-lookup index cap and is also this error on the resumable
-publication path. Informative: during publication verification the indexed
+publication path.
+
+**Reference-server behavior.** During publication verification the indexed
 decode budget is charged over the whole packmap chain and reachable closure,
 so it is history-scoped; it keeps its existing `invalid_argument` errors
 (`object index limit exceeded` or `pack exceeds indexed decode budget` on the
 canonical path, `pack exceeds indexed decode budget` on the resumable path,
 whose budget is cumulative over the pair) until a separate amendment of this
-input contract. Running out of an
+input contract.
+
+**Protocol requirement.** Running out of an
 execution allowance, or of an implementation's retained-evidence capacity, is
 not a verification failure of the content and is not in this table: §10.2
 classifies it as `unavailable`.
@@ -1505,7 +1556,7 @@ resulting-pair coverage under §10.2, denial under §14.2, or configured ref
 policy. Verification of every entry in the consumed packs, including entries
 outside the advanced head's closure, remains required.
 
-Informative: the scheduled verifier may run up to eight durably checkpointed
+**Reference-server behavior.** The scheduled verifier may run up to eight durably checkpointed
 Extract selection slices in one callback. Slices share the existing call
 allowance, two-second elapsed cutoff and physical callback deadline; each keeps
 its 16-step and batch-operation ceilings. Every boundary remains resumable and
@@ -1587,41 +1638,24 @@ or public error response.
 
 ### 9.5 Asynchronous verification
 
-Inventory staging MUST plan each bounded page or entry write with a fresh
-business-clock timestamp before reading its guarded snapshot. Its 10-second
-`NotAfter` bound limits stale plans, not the duration of a whole pack or alarm.
-Snapshot CAS preconditions MUST remain in the same atomic batch. Expiry and CAS
-contention MUST have distinct typed causes and telemetry labels.
+**Protocol requirement.** A server that verifies asynchronously MUST retain
+restart-resumable progress. Verification evidence MUST remain bound to its
+repository, uploaded content, and current authorization and denial facts.
+Interrupted work MUST NOT expose unverified membership or lose durable recovery
+responsibility. Checkpoint reuse MUST NOT waive current guards, expiry, or denial.
+When denial is disabled, independent integrity, membership, and holder safety
+obligations remain applicable.
 
-Informative: an entry without history references can reuse its preliminary
-inventory lookup in the guarded apply: no reference-page I/O separates that
-snapshot from the head read. Its planning deadline precedes the entry read.
-Entries with reference pages refresh the entry plan after staging those pages.
-The early replay exit and stored representation are unchanged.
+**Reference-server behavior.** The reference verifier writes bounded inventory
+pages with fresh business-clock plans and a ten-second backend deadline. It
+guards checkpoints with their job and verification state. Entry provisional
+writes precede or share the checkpoint that advances its cursor. Denial reads
+precede frame and index writes in bounded waves of at most sixteen objects;
+failed waves retain deterministic refusal order. Inline and scheduled paths
+retain their final denial checks. Partial immutable pages stay unreachable until
+staging is complete, and inventory sealing follows complete verification.
 
-When the deployment's `takedown_denial` mode is enabled (§14.2), scheduled Decode denial
-reads MUST follow completion of the batch's inventory
-staging and precede all of its frame, candidate, and index rows. Reads MAY run
-in bounded concurrent waves. A failed wave MUST report the first failing object
-in batch order among the reads it issued, whether blocked or unavailable, and
-MUST NOT admit the batch. A wave whose all-or-nothing read reservation is
-refused issues no reads and reports unavailable.
-Informative: denial waves contain at most sixteen per-object reads, matching
-the inventory staging batch cap, without changing other read parallelism. A
-failing wave can issue up to fifteen reads after the first failing object.
-Scheduled and inline direct index writes use the same bounded waves,
-preserving ObjectIndex put order and rechecking denial before each apply.
-The earlier inline pre-staging check uses the same waves at its existing boundary.
-When denial is disabled, these checks MUST report clear without reading block
-or denial-action rows. Inventory staging, holder registration, membership, and
-index writes MUST still run.
-
-A scheduled Decode checkpoint MUST commit after, or atomically with, the completed
-entry's provisional writes and include its post-entry cursor, under the existing job and verification
-state guards. Retries resume that durable boundary. Interrupted entry writes may
-be replayed idempotently; completed entries MUST NOT be discarded by a later
-storage error. Partial immutable reference pages remain unreachable until the
-entry is staged, and the inventory seal still follows complete verification.
+**Protocol requirement.**
 
 Verification MAY run asynchronously after upload completion. While a
 consumed pack is still unverified, `AdvanceRefs` MUST fail with
@@ -1630,8 +1664,7 @@ consumed pack is still unverified, `AdvanceRefs` MUST fail with
 requires. This answer MUST NOT be stored as a replay result, under
 STC §7.1; a retry must be able to observe verification progress.
 
-A deployment MAY hold a pending ticketed advance before returning, with a
-zero default and a 2,000 ms maximum. The wait MUST release all attempt-local
+A deployment MAY hold a pending ticketed advance before returning. The wait MUST release all attempt-local
 observations and hold no lease, reservation, or guard. Its allowance MUST
 end before both the request deadline and signed envelope expiry, with a
 safety margin. Durable job readiness is only a wake signal: a woken request
@@ -1640,14 +1673,15 @@ live authorization, admission, denial, CAS, and final guards. A timed-out
 hold returns the original pending answer and typed hint. Cancellation adds
 no durable continuation or replay result; a retry follows normal semantics.
 
-Informative: the implementation polls all consumed job rows in one batched
+**Reference-server behavior.** The reference implementation defaults the hold
+to zero with a 2,000 ms maximum. It polls all consumed job rows in one batched
 KV call every 100 ms. At the 2,000 ms cap it adds one ticket-resolution call
 and at most nineteen job reads before the timeout, for twenty KV calls.
 Each batch has at most seven rows. A woken attempt adds the ordinary advance
 path's calls. The injected host deadline and envelope expiry leave a 250 ms
 margin; less than 100 ms remaining disables the hold.
 
-`PendingVerification.retry_after_ms` is the server's suggested poll
+**Protocol requirement.** `PendingVerification.retry_after_ms` is the server's suggested poll
 interval in milliseconds. The server SHOULD send at least 1,000, except when
 bounded tiny-pack work is expected to finish sooner. For a
 verification that is still progressing it SHOULD NOT send more than 5,000:
@@ -1677,7 +1711,7 @@ reported only on the consuming `AdvanceRefs`.
 Asynchronous scheduling does not turn a permanent validation failure
 into a successful completion of the advance.
 
-Informative. A server that verifies in scheduled slices answers
+**Reference-server behavior.** The scheduled reference verifier answers
 `PendingVerification` while a delta base is not yet a member inside the
 membership lag window (§9.4), where an inline verifier answers
 `repository membership not yet visible`: the pack is simply not verified
@@ -1685,7 +1719,7 @@ yet. The membership message applies to the closure, head and packlist
 misses found when the advance checks the consumed set, and a base that is
 still absent after the window is the permanent §9.4 answer, as inline.
 
-Informative. Scheduled verification polling hints use the consumed job's
+**Reference-server behavior.** Scheduled verification polling hints use the consumed job's
 persisted timer with a 3,000 ms cap. Tiny decoded packs use a 100 ms floor and
 preserve millisecond precision in the typed detail. Other phases round up to
 whole seconds with a 1,000 ms floor. A missing job or a
@@ -1693,7 +1727,7 @@ wake not found within bounded inspection uses 1,000 ms. The HTTP Retry-After
 header always rounds the detail up to whole seconds; neither value promises
 completion. Clients retain STC's one-second polling clamp.
 
-Consecutive slices for one to three entries and at most 16 KiB of encoded and
+**Reference-server behavior.** Consecutive slices for one to three entries and at most 16 KiB of encoded and
 decoded data, or canonical packlists of at most 256 bytes, MAY share one
 handler's existing call allowance. Each intermediate
 checkpoint MUST commit before the next slice begins, retaining durable recovery
@@ -1706,7 +1740,7 @@ handler, under the same physical alarm limits. Target delivery, source cleanup,
 and guarded wakeups retain their existing ordering and idempotence. Verification
 still waits for required relay delivery before writing Verified.
 
-Informative. The scheduled implementation may run several Extract selection
+**Reference-server behavior.** The scheduled implementation may run several Extract selection
 steps within one bounded slice and guarded checkpoint, with a fixed 16-step
 ceiling independent of the Worker clock. It may also decode a staged,
 local, non-delta member frame in the call that consults its staged row
@@ -1723,7 +1757,7 @@ starts in a later slice. On entering the index-delivery wait, it checks after
 300 ms and then once per second until delivery; the client-facing poll hint
 still has its one-second floor.
 
-Verification state is per `(repository, pack)`. A pack verified for
+**Protocol requirement.** Verification state is per `(repository, pack)`. A pack verified for
 one repository is not thereby verified for another. Global byte
 reuse does not carry repository membership or verification authority
 from one repository into another.
@@ -1872,14 +1906,18 @@ contract (D33).
 
 ### 9.8 Limits advertised
 
+**Protocol requirement.**
+
 `GetServerInfo.max_pack_bytes` is the effective accepted pack-size
 limit in the deployment's mode, as STC §2.1 requires. An indexed
 deployment MAY advertise a lower limit than an opaque deployment.
 Clients plan uploads against the advertised effective value.
 
 `GetServerInfo.max_delta_chain_depth` is the delta-chain depth cap.
-The default in indexed mode is 50. A chain deeper than the advertised
-cap fails under §9.3, even if all its bases are visible in the repository.
+A chain deeper than the advertised cap fails under §9.3, even if all its
+bases are visible in the repository.
+
+**Reference-server behavior.** The indexed default is 50.
 
 The reference server resolves member chains with iterative descent and reverse
 reconstruction. It retains at most the configured number of pending delta
@@ -1891,7 +1929,7 @@ extraction boxes each serial stage future to bound the storage carried through
 enclosing slice futures, leaving stack space for frame decoding. This changes
 neither the durable cursor nor the check and charging order.
 
-When indexed mode is off, the server MUST advertise
+**Protocol requirement.** When indexed mode is off, the server MUST advertise
 `max_delta_chain_depth = 0`. That value indicates that the indexed
 verification cap is inapplicable; it does not enable indexed validation
 in an opaque deployment.
@@ -1908,7 +1946,7 @@ response below:
 | Indexed pack size | `invalid_argument` | `pack exceeds indexed max_pack_bytes` |
 | Indexed decode budget | `invalid_argument` | `pack exceeds indexed decode budget` |
 
-Indexed canonical entries MUST NOT exceed 1,048,586 bytes, including object
+**Reference-server behavior.** Indexed canonical entries MUST NOT exceed 1,048,586 bytes, including object
 framing. An oversized entry is refused at indexed verification with the
 `invalid_argument` decode-limit message above; this limit and its refusal are
 unchanged. Very large trees and chunk manifests can exceed it, so clients
@@ -1916,295 +1954,114 @@ should split very large flat directories into smaller subdirectories.
 
 ### 9.9 Fork
 
-A deployment in indexed mode with Multi addressing MAY implement a
-server-side fork: the published tip of one source branch and its history
-become the published membership of an empty destination repository, without
-a ref. It is an embedder-facing operation, `Pipeline::fork_repo` (no Connect
-binding in this revision). This section specifies the request, its
-authorization and admission, what a completed fork guarantees and what a later
-publication may rely on.
+**Protocol requirement.** A server in indexed mode with multi-repository
+addressing MAY offer a server-side fork. A fork inherits the current published
+head `T` and paired packmap head `M` of one source branch into an empty
+destination's membership, without creating a destination ref. The inherited
+pack set contains the complete packmap chain, its listed packs, and the packs
+that transitively supply their external delta bases. Packs are inherited whole,
+including entries outside the closure of `T`.
 
-**What is forked.** Only the current published value of one source branch
-`refs/heads/<x>`: head `T` and its paired packmap head `M`. The pack set `F`
-is the packmap chain from `M` (every MKPL node through `prev`), the packs those
-nodes list, and, transitively, the packs that supply the external delta bases
-of any pack in the set (read from the sealed inventories' dependency rows and
-mapped to source packs by the object index). No tags, other branches or
-other packs of the source are copied. A pack in `F` is copied whole,
-including entries outside the closure of `T` (§9.3 verifies every entry).
+A server that offers fork MUST build destination membership as staged state.
+It MUST record guarded acceptance, including the terminal result, saved replay
+result, and terminal outcome responsibility, in one atomic unit. Acceptance
+MUST compare the recorded authority facts on which the operation relied. A
+server that also offers authority fencing MUST compare those recorded facts
+both at acceptance and at every commit that advances the fork. Stale authority
+facts MUST prevent that commit; authority-generation mismatch has the
+`permission_denied` class under §6.2.1.
 
-**Refusal.** A source that cannot be forked answers `not_found`
-`source not found`, byte-identically, whether the source or ref is absent, the
-caller may not read it, `M` or any pack of `F` is not a published unheld
-member of the source's current generation, a sealed inventory is missing, or
-any pack or object of `F` is blocked or superseded (§14.2). The only
-source-side answer that differs is `failed_precondition` `source tip changed`
-when the published head is not the caller's `expected_tip`, which reveals
-nothing the authorized reader does not see. `resource_exhausted`
-`fork too large` appears only after read authorization: a bound of the
-implementation (1,024 packs, 16,384 index rows, 8,000 ids in a working set,
-2,048 unresolved external-base ids and 1,800 per pack, 262,144 source index
-rows scanned) was exceeded. A refusal found before the destination is
-registered (planning, the cleared-set walk where it runs, the emptiness and scan-size checks
-that precede registration, a proof too large for one slice) deletes the job, leaves nothing
-else behind (a timer already scheduled ends on its next fire) and lets the
-same request be retried; one found later (a takedown after planning, a moved
-source) is recorded in the job, which then abandons the destination: the
-registered repository, copied index rows, holder rows, counted bytes and any
-membership already published remain until the embedder deletes the
-destination (mkit has no repository deletion today), and no other fork may
-use it. A published member whose sealed inventory is missing is refused like a
-blocked pack. The scan bound counts every index row of the source repository,
-so a small branch of a very large repository can be refused as too large.
+The destination's staged membership MUST NOT become reader-visible, and the
+server MUST NOT accept destination writes, before guarded acceptance. A failed
+fork's destination MUST remain inert: retained construction state does not
+authorize reads or writes. Making accepted fork membership reader-visible is
+its published clearance. Neither construction nor clearance creates a ref.
+A completed replay MUST return the saved result without repeating acceptance,
+charges, outcome creation, or construction effects (§3.2).
 
-**Destination.** The destination MUST be unregistered and have no refs and no
-members, or be the same fork (same request binding). Otherwise
-`failed_precondition` `destination not empty`. A fork creates its destination
-with the requested visibility (it is listed as explicitly set); it never
-adopts a registered repository's,
-and a visibility the owner declared for the name before it existed stands
-(a request for another is refused).
+**Protocol requirement.** The source read MUST be authorized before revealing
+its published tip or a tip mismatch. An absent, unreadable, unpublished, blocked,
+superseded, or otherwise ineligible source MUST answer uniformly with
+`not_found` and `source not found`. A readable source whose tip differs from
+`expected_tip` MUST answer `failed_precondition` and `source tip changed`.
+A capacity refusal MAY answer `resource_exhausted` and `fork too large` only
+after source-read authorization. The destination MUST be unregistered, with no
+refs or members, or belong to the same fork binding; otherwise the answer is
+`failed_precondition` and `destination not empty`.
 
-**Job.** The fork is a durable job in the destination's coordinator, advanced
-in slices of at most 600 storage calls by the request that started it and
-then by the fork timer (timer kind 16). The timer row is due at job
-creation: on a request-driven runtime the alarm is a second driver from
-t=0, which `fork_step` events attribute per driver. The pack set is planned once before
-admission, which charges its exact bytes; when that plan fits one slice it is
-carried into the job, which then begins after its planning phase. The carry is
-used only if the source still publishes the pair it was computed from: the
-tip, the packmap head and the membership generation are read again at the start
-and any difference is `failed_precondition` `source tip changed`. A plan that
-does not fit one slice is made again by the job. The plan proved every pack before admission; the first proof after admission
-is then the one that precedes each pack's membership write, so a takedown that
-lands in between fails the fork after registration, by the abandoned-destination
-rule above. Without pack-level denial the plan reads the next packs of the set
-together (at most six at once), merging them in order. Every effect is repeatable (a put of
-the same value, or a holder write that only raises a sequence), so a crash or
-a lost reply at any write resumes by repeating the state's slice. Order of effects: the destination is registered first (a
-takedown sweep enumerates the registry, so every destination that holds
-members is discoverable); the source's index rows for `F` are copied under the
-destination's repository; the packs are counted once (`rn` markers and `rb`,
-at most 45 packs per batch, one `RepoStorageChanged` outcome per batch);
-extracted objects the source holds are held by the destination; and published
-membership is written last, packmap head last of all. Membership of a forked
-pack is published, generation 0, sequence 0. No ref is written. Each pack is two units, the write
-(proof, rows) and the check after it, so a unit costs one proof; a pack whose
-proof cannot fit a slice is refused during planning. On a deployment without
-pack-level denial whose store reports a known read allowance, the units
-overlap: the members other than the head are written together in waves of at
-most six, then proved again in waves, and the packmap head is written and
-proved last, alone, after every other member write; a failure is the first one
-in pack order, and a wave's slice budget is reserved before it starts. A
-deployment with denial, or a store with an unknown allowance, writes and proves
-each pack in turn. The write's deadline is
-stamped when it is made: the check after it, not the age of the proof, is what
-closes the window between proof and write. Before each
-membership write the server re-reads the source's published value and
-re-proves the pack, writes the pair of membership rows only where both are
-absent (an identical pair is a replay; anything else, such as a hold a
-takedown set or a membership a writer created, fails the fork and is never
-overwritten), and proves the pack again after the write. A destination that
-gained a ref since the job began fails the fork before registration and
-before the first membership write.
+Destination write authorization MUST receive a consistent observation of the
+source visibility and visibility revision. The server MUST revalidate that
+observation after authorization and admission and before starting construction;
+a change answers `unavailable` and `source changed; retry`, releasing the
+reservation. The authorization profile decides whether source and destination
+visibility may differ. The requested destination visibility MUST agree with
+any prior owner declaration for that name.
 
-**Pack proof.** The proof of a pack is: its id is not blocked; its inventory
-is sealed; and no active descriptor intersects it. It does not re-read the
-inventory rows. This is sound because a sealed inventory is immutable
-(`put_entry` refuses a sealed head) and its sealing batch bound count and
-digest, and because a descriptor intersects a pack by exact marker lookup of
-the descriptor's own object in that pack's inventory plus, for a blocked
-chunked file, a pass over the pack's tree and manifest rows; neither needs
-the whole-inventory row scan of §14.2's pack-reuse proof, which only
-re-verifies a digest the seal already binds. With no active descriptor the
-cost of the proof does not depend on the pack's size; with descriptors it
-grows with the pack's tree and manifest rows per descriptor, as in the full
-proof.
+Admission MUST see the inherited byte charge in both `declared_bytes` and
+`new_to_repo_bytes`. Quota charges MUST apply at most once for the same fork
+binding. A fork MUST NOT inherit more bytes than admission permitted. Joining
+an existing binding MUST NOT charge again, and a separately granted joining
+reservation MUST terminate as a replay race. Construction MUST retain durable
+recovery responsibility and MUST NOT outlive its reservation without a
+terminal disposition. An externally settled reservation MUST prevent further
+construction and acceptance.
 
-**Cleared set and publication boundary.** On a deployment with pack-level
-takedown denial (§14.2), the fork records, in the
-destination's coordinator, the commits and trees of the closure of `T`
-(cleared set) and the inherited external-base packs; a deployment without it
-builds neither, since nothing reads them, and skips the walk that would. The
-fork always flags the
-destination's membership witness for `M` (a twentieth byte equal to 1 after
-the nineteen-byte witness; every other witness is unchanged). A publication
-walk (§10.2) that reads the flag while walking the packmap chain, on a
-deployment with pack-level takedown denial (§14.2), MUST load the cleared set
-and MAY skip an object in it: it neither locates nor expands it, and a skipped
-tree skips its subtree, so blobs are never listed. This waives only the
-structural re-walk of objects the source already proved and the fork already
-copied, and:
+A pending fork answers `unavailable` and `fork in progress` with a `Retry-After`
+hint. Both the original signed identity and a fresh signed request for the same
+binding may resume it. A terminal failure MUST be replayed. A completed result
+identifies the source, branch, tip, source publication sequence, packmap head,
+pack count and bytes, copied index-entry count, sorted-pack-id digest, and
+destination membership generation.
 
-- it applies only to a pair whose packmap chain contains the flagged head, so
-  the published chain always lists the inherited packs and a clone of the
-  destination receives them;
-- it never waives denial: the skipped objects' packs stay in the advance's
-  dependencies (the chain is still walked), the inherited external-base packs
-  are added to the advance's external bases, and the advance-time denial proof
-  (§14.2) covers every dependency pack and external base. A takedown of an
-  inherited object or pack therefore stops the advance exactly as it does in
-  an ordinary repository, and read-time denial stops serving it. A deployment
-  without pack-level denial runs no such proof, so it does not honor the
-  cleared set: the walk visits every object, as its own per-object block check
-  requires;
-- a takedown that supersedes or blocks a pack of the chain stops every pair
-  that lists it, so the cleared set cannot outlive the packs it describes; a
-  rewritten chain that no longer contains the flagged head gets the full walk;
-- a repository that was never forked carries no flag and reads nothing extra;
-- a destination flagged by a fork that built no cleared set has none to load:
-  if denial is enabled later, a publication walk that reads the flag finds no
-  cleared objects and no recorded base packs, so it visits every object and
-  discovers every external base itself. That first advance is slower and
-  exactly as strict, since the denial proof covers every pack the walk reaches.
-  It is also bound by the walk's usual per-advance item capacity, so a
-  deployment that may enable denial later and forks repositories whose closure
-  exceeds that capacity should fork with denial on. The implementation's
-  `MAX_ADVANCE_ITEMS` is 4,096; exceeding it is a permanent capacity refusal,
-  so affected destinations cannot advance after activation and should be
-  re-forked with denial on. Drain in-flight fork jobs before changing the mode;
-  follow the [activation runbook](../operations/fork-waves.md#enabling-takedown-denial-after-running-with-it-off)
-  and §14.2's backfill requirements.
+The fork MUST preserve repository isolation, immutable-object verification,
+current denial, and complete takedown discovery for inherited members. It MAY
+reuse structural evidence already established by the source, but that evidence
+MUST NOT waive current denial or published-membership dependencies. Reused
+evidence MUST remain bound to the inherited packmap chain and packs; removing
+that binding requires fresh evidence. Inherited objects do not undergo a new
+signer, ref-policy, or inspection decision. Later source changes do not alter
+an accepted destination.
 
-**Request.** `ForkRequest` names the source repository, the branch
-`refs/heads/<x>`, the `expected_tip` (required) and the destination
-visibility; the operation's repository is the destination. It has a canonical
-body of five `\n`-separated lines with no trailing newline (`mkit-fork:v1`,
-`<source namespace>/<source name>`, the branch, the tip in 64 lowercase hex
-digits, `public` or `private`), and the signed request's `body:` commitment
-MUST be the digest of exactly that body, so a signature binds what is forked.
-The request is signed (auth v2) for procedure `/mkit.server.v1/ForkRepo`;
-a grant never authorizes it. `Pipeline::fork_repo` requires multi-repository
-addressing, leased sharding and indexed mode, and answers `failed_precondition`
-otherwise.
+**Reference-server behavior.** The reference server currently exposes fork
+through an embedding API rather than a Connect route. Its canonical signed
+body has five LF-separated lines without a final LF: `mkit-fork:v1`, the source
+repository, branch, 64-lowercase-hex expected tip, and `public` or `private`.
+The auth-v2 procedure is `/mkit.server.v1/ForkRepo`; the body commitment binds
+exactly those canonical bytes, and grants do not authorize it.
+Its embedding dispatch authenticates, checks deployment compatibility, resolves
+completed replay evidence, and then runs the embedding server's dispatch policy.
+The public embedding guide and crate documentation define this API.
 
-**Authorization.** In order: a finished fork of the same signed request
-returns its stored result (a replay); the caller MUST be able to read the
-source (the read allowance the source's `ReadRef` gets), and every refusal of
-that, including an absent source, is the uniform `not_found` `source not
-found`; the destination write is then authorized like any write of the
-namespace, with the source's visibility and visibility revision, read together
-in one coordinator read, passed to the Authorize hook in the operation's `fork`
-field. mkit encodes no visibility policy: whether a private source may become a
-public destination is the hook's decision. Just before the job starts, after
-the hooks have answered, the server reads them again; if either changed it
-refuses the request with `unavailable` `source changed; retry` and releases the
-reservation. The hook's decision therefore holds for the visibility the job
-starts under, within one read; the fork does not track the source afterwards,
-and a later change to it does not alter the destination.
+The reference implementation constructs a durable job with bounded resumable
+work and a 24-hour lifetime. It registers the destination, copies index entries,
+counts packs, establishes holders, and writes membership incrementally. Its
+limits are 1,024 packs, 16,384 index rows, 8,000 working-set ids, 2,048 unresolved
+external-base ids (1,800 per pack), and 262,144 scanned source index rows. These
+are reference-server limits, not protocol limits. Work uses 600-call slices and
+bounded concurrent waves. The operator guide describes scheduling and
+[resource bounds](../operations/fork-waves.md).
 
-**Admission and quota.** Admission sees `fork` with the bytes the charge
-covers: the summed length of the packs the fork inherits, computed from the
-sealed inventories of the pack set of the published pair the request pins (so it is exact, and a
-source the fork would refuse is refused before anything is admitted or
-reserved). The plan costs up to one slice (600 storage calls) before admission, whatever admission then decides. When that plan does not fit one slice, the source's counted bytes
-(§6.5.1) stand in: an upper bound that can trail by the relay lag, in which case
-a pack set larger than it fails the fork as below. `declared_bytes` and
-`new_to_repo_bytes` equal it, since every inherited pack is new to the empty
-destination. The quota charges are applied once, in the
-batch that creates the job, so the quota is a hard bound: a window that cannot
-hold the fork refuses it with `resource_exhausted` before any work, and a
-charge is never applied at completion. The charge is the per-signer
-quota charge the admission decided and, under the default admission in Multi
-addressing, the same bytes against the namespace's aggregate cap, as for an
-upload, in the same batch: either window being exhausted refuses the fork
-before any work, with nothing charged. A custom Admission decides its own
-limits and sees the fork's bytes. A concurrent write to a charged quota row (the signer's or the namespace's) while the job is created re-plans the
-charge (three attempts), then the request answers `unavailable`. A failure before the destination is
-registered deletes the job so the request can be retried, and the retry is a new
-admission that pays again. A fork whose resolved pack set is larger
-than the bytes it was admitted for (the source gained packs between the
-admission and the plan) fails before the destination is registered with
-`resource_exhausted` `fork exceeds the bytes admitted; retry`; the charge stays
-spent for its window. An abandoned or failed fork keeps its charge, and a
-second request for the same fork (same binding, another nonce) joins the job
-and is not charged; it releases its own reservation as a replay race.
+When denial is enabled, the reference server retains a cleared structural set
+and external-base evidence. Its witness flag enables later structural reuse;
+current denial still applies. Without denial it omits that set, so a later
+activation performs a fresh structural walk. Its `MAX_ADVANCE_ITEMS` limit of
+4,096 can refuse that walk. Operators must follow the
+[activation runbook](../operations/fork-waves.md#enabling-takedown-denial-after-running-with-it-off).
 
-The reservation of a fork is bound to the job, not to the apply window: it
-expires with the job (24 hours), after which the next step aborts it with the
-normal `Aborted` outcome. Admission MUST give the pending reservation a
-reconcile time after the job's expiry, or the reservation reconciler would
-abort it under the running job; starting a fork with an earlier one is
-refused. The authority facts a request was authorized under (the namespace
-authority generation, the grant epoch, and whether the fork may create the
-namespace; a job started without them may not) are recorded in the job and
-re-checked when the destination is registered, since the job may run long after
-the request; a change fails the fork before anything is written, with the
-refusal an ordinary write gets for it. A persisted authority fence requires a
-fence on the fork. The embedder that exposes the operation owns what the
-engine does not see (the storage-lease executor and lease-recovery modes of
-§12) and MUST apply them before it starts a fork, and MUST configure the fork
-timer (kind 16) with the same `takedown_denial` and extraction threshold as the
-pipeline. An abandoned fork therefore holds its reservation for at most that
-long, as does a reservation whose request ended between its recording and the
-job's creation; a deployment without the kind-16 timer (the Free Workers plan)
-never expires an abandoned job until a request polls it. The job re-checks the pending row before every unit of work, and a
-reservation settled elsewhere fails the job. The final batch commits the
-`Committed` outcome (`bytes_stored` and `new_to_repo` equal the inherited
-bytes, no ref change) and the replay record atomically.
-
-**Result and replay.** The request advances the job by one slice (up to 600
-storage calls) before it answers, so the embedder MUST call it from a context
-that can make them. While the job runs, the request answers `unavailable`
-`fork in progress` with a `Retry-After` hint, and the client repeats the same
-request (a fresh nonce attaches to the same job; the original nonce also works
-and returns the result once the job has finished). A finished fork returns the
-lineage anchor: the source, branch, tip, the source's publication sequence,
-the packmap head, the pack count and bytes, the number of index rows copied, a
-digest of the sorted pack ids and the membership generation. A terminal
-failure is replayed to later callers. The destination MUST NOT exist before the
-first request: the fork registers it, and a destination registered by anything
-else answers `destination not empty`.
-
-**Takedown reachability.** A destination holds members from its first
-membership write on, is registered before it, and carries an `i` row for every
-member entry; the takedown holder sweep reads the registry, those index rows
-and the clearance witness of each membership (empty for an immediate upload).
-
-**Non-effects.** The fork does not re-run signer, allowed-signer, fast-forward
-or inspection policy on inherited objects, copies no acceptance metadata, and
-creates no link between source and destination: later changes to the source
-do not alter the destination, and mkit cannot revoke a completed fork.
-Packs have no holders today (§13.4); when pack holders are produced the fork
-MUST record them through the same helper as an advance.
-
-**Embedded dispatch.** A fork has no Connect route, so an embedder dispatches
-it in process through one typed entry, `Pipeline::dispatch_fork` (the Workers
-adapter wraps it as `EmbeddedDispatch::dispatch_fork`, adding the deployment
-guard of the fetch path). The entry takes the request headers and the exact
-canonical body. Header callbacks implement `Fn(&str) -> Option<String>` plus
-`MaybeSync`: native callbacks must be `Sync`, and native dispatch futures are
-`Send`; wasm32 callbacks remain unrestricted. The entry runs, in this order:
-authentication as `Procedure::Fork`
-(auth v2, body commitment; no storage is read, so an unauthenticated or
-mis-signed request is refused before anything below runs); the deployment
-check (the Workers adapter runs the same sharding and addressing marker guard
-as the fetch path, `unavailable` on an incompatible stored layout); a
-completed-replay check; the embedder's optional pre-dispatch policy; and
-`fork_repo`. The policy is skipped only when the request is a replay of a
-fork that already finished: the replay record is committed for this very
-signed request, and the destination's job is `Done`, has no failure, and
-agrees with the request on its binding, destination, source, branch and tip,
-and its stored result agrees with the job on source, branch, tip, packmap and
-source sequence. The check fails closed: a
-storage failure, a record whose job is missing, corrupt or disagrees, is an
-error (`unavailable "fork evidence inconsistent"` for a disagreement) and the
-policy neither runs nor is skipped. `Pipeline::completed_fork` exposes the same
-check as a read-only query that answers a witness (`CompletedFork`), never a
-result: the result of a fork always comes from `fork_repo`, so no result is
-returned past the pipeline's authorization and admission. Every error is the
-pipeline's `ServerError` unchanged (code, HTTP status, `Retry-After` of a
-pending fork, admission challenge details), and success carries the
-admission response headers. The entry is generic over the procedure
-(`EmbeddedProcedure`) so another procedure without a Connect route can use it.
-An embedder that signs with `mkit-client` can produce the request headers
-with `Client::sign_envelope`, which signs a procedure that has no Connect
-route; the entry has no dependency on that crate. It adds no wire change and
-no stored row.
+**Reference-server behavior. Known conformance gaps.** The reference server
+currently makes construction membership visible before terminal acceptance and
+does not gate destination writes on that acceptance. It also checks recorded
+authority facts at destination registration rather than at every advancing
+commit and terminal acceptance. The tier-2 destination-gate and authority-fence
+cases declare skips with these reasons until those safety mechanisms are
+implemented. These gaps do not weaken the protocol requirements above, and
+successful reference construction tests do not establish compliance with them.
 
 ## 10. Published view
 
 ### 10.1 Caller's view
+
+**Protocol requirement.**
 
 A **caller's view** is the pair of visible ref values and visible repository
 membership used to answer that request. View selection MUST NOT grant
@@ -2245,7 +2102,7 @@ see published ref values and published membership only. These rules
 apply on every serving surface, including HTTP consumers of this
 abstract view.
 
-Server-side object-reader embedders MAY share an additive per-session ledger
+**Reference-server behavior.** Server-side object-reader embedders MAY share an additive per-session ledger
 across calls. The ledger bounds storage call units, canonical decode work,
 encoded pack-range reservations and canonical output bytes, including duplicate
 outputs. Failed work MUST NOT refund consumed allowances. Read-path cap hits
@@ -2259,10 +2116,10 @@ Embedders MAY opt into canonical/metadata batches of up to 45 ids; the default
 is 16. This MUST NOT raise storage, row, byte, decode or output allowances or
 change the 16-target URL issuance cap.
 
-An operation MAY reuse verified locations and sealed inventory across its denial
+**Protocol requirement.** An operation MAY reuse verified locations and sealed inventory across its denial
 and metadata consumers. Inventory batches MUST validate completion, entry digest,
 type/length facts and reconstruction dependencies. Repeated target/pack denial
-reads MAY be coalesced within one operation phase; the final access phase MUST
+reads MAY be coalesced within one decision; final disclosure checks MUST
 start fresh after independently loaded objects complete. A strongly empty denial
 directory MUST NOT be cached across calls. Final access gates and external-base
 membership/denial remain mandatory.
@@ -2273,7 +2130,7 @@ can retain serial admission. Continuation activation writes retain their
 ordered boundary; the closing guarded apply remains the
 validation cut before its pure closing reads.
 
-Independent reader I/O MAY run concurrently with one shared concurrency, transient
+**Reference-server behavior.** Independent reader I/O MAY run concurrently with one shared concurrency, transient
 row and byte admission envelope across scans, membership groups and object loads.
 Every wave MUST reserve page, row, byte and call allowances before dispatch, drain
 all dispatched replies on failure, and process replies deterministically. Served
@@ -2286,7 +2143,7 @@ their combined encoded frames and canonical results MUST fit that allowance.
 Retained earlier results remain subject to batch/output bounds; synchronous
 decoder scratch and canonical conversion overlap only one member at a time.
 
-A reader session MAY also retain bounded structural reachability proofs. These
+**Protocol requirement.** A reader session MAY also retain bounded structural reachability proofs. These
 MUST be privately bound to its reader/backend, full repository identity, view
 and verified credential scope. A context change MUST discard proofs without
 resetting allowances. Roots are captured during initialization, not at an atomic
@@ -2445,7 +2302,8 @@ it compares both the original publication record and live ref bytes and
 checks the fixed expiry on the backend clock. It allocates no paging state.
 The server MUST NOT assume that a multi-key read is atomic. Closing
 security/anchor reads MAY reject subsequently observed changes, then live
-object validation MUST be the last asynchronous phase before output.
+object validation MUST complete immediately before disclosure, with no
+intervening work that could stale its authorization or denial evidence.
 Independent stores and hooks do not provide a simultaneous snapshot. Ref
 changes after the validation cut are concurrent with that redemption and
 invalidate later redemption of either the original token or its successor.
@@ -2532,6 +2390,8 @@ ref when the token expires or its bound anchor or authority changes.
 
 ### 10.2 Per-ref clearance and publication
 
+**Protocol requirement.**
+
 Each ref MUST have an ordered advance sequence. The branch head
 `refs/heads/<x>` and `refs/mkit/packmap/<x>` share one sequence: every
 successful `AdvanceRefs`, head-only `UpdateRef`, or packmap-only
@@ -2570,28 +2430,25 @@ re-read a newer publication row and guard only that row, which would validate
 evidence derived from the older one. The binding is request-local and adds no
 stored field.
 
-Exhaustion of an invocation, slice or alarm execution allowance MUST NOT be
-treated as evidence of malformed content or a missing closure member. A server
-MUST preserve any valid bounded continuation, or refuse without publication
-using `unavailable`. The same capacity cause MUST have the same classification
-in preparation, dependency verification and final clearance, whichever call
-the allowance runs out on: classification follows the allowance itself, not
-the shape of the error that surfaced. A publication request MUST draw all of
-that work, including every optimistic retry of the final apply and its own
-snapshot, lease, checkpoint and commit calls, from one allowance, counting
-every dispatched metadata and blob call for that work from publication
-preparation onward, whether or not it failed. Admission work before preparation,
-policy hooks, inspector calls, authority activation inside lease reads and
-full-partition prune recovery are outside this ledger. An implementation SHOULD
-stop
-proof work short of the allowance to leave headroom for settlement; a
-settlement call the allowance cannot cover is refused as capacity. Explicit per-input index, inspection, decode and delta-depth
-limits retain their specified errors. An implementation unable to verify
-historical support within its supported limits, such as a retained-evidence
-bound, MUST fail closed with `unavailable` and document the operational
-limitation; unsupported work MUST be recorded as a terminal stop rather than
-rescheduled by every alarm, and it MUST NOT claim that an ordinary retry
-necessarily resolves it.
+**Protocol requirement.** Exhaustion of implementation execution capacity MUST
+NOT be treated as malformed content or a missing closure member. A server MUST
+retain valid recovery responsibility or refuse without publication using
+`unavailable`. The same capacity cause MUST retain its classification throughout
+preparation, dependency verification, and final clearance, including retries.
+Explicit advertised input limits retain their specified errors. A server unable
+to verify historical support within its supported limits MUST fail closed with
+`unavailable`, document that limitation, and MUST NOT imply that an ordinary
+retry necessarily resolves permanently unsupported work.
+
+**Reference-server behavior.** Reference publication work shares one request
+allowance across preparation, dependency checks and final-apply retries,
+including snapshots, leases, checkpoints, commits, and failed dispatched calls.
+Admission before preparation, hooks, inspectors, lease-read authority activation,
+and full-partition prune recovery are outside this ledger. The implementation
+reserves headroom for settlement and records permanently unsupported historical
+capacity as a terminal stop rather than repeatedly rescheduling it.
+
+**Protocol requirement.**
 
 Each advance has a clearance state:
 
@@ -2654,7 +2511,7 @@ The scheduled work MUST be retained until completed and MUST run within
 a bounded time. The same rule applies when takedown replacement packs
 become published.
 
-Informative: a retained periodic timer per blocked advance can satisfy this
+**Reference-server behavior.** A retained periodic timer per blocked advance can satisfy this
 scheduling requirement without an unbounded cross-ref reverse index. It must
 survive restarts, recheck delayed membership projections without client traffic,
 and remain scheduled while dependencies, inspection obligations, holds, hits,
@@ -2671,7 +2528,7 @@ at that witness, never beyond it. Launch published-membership projections are
 monotonic within a generation; mutable source-local witnesses are re-read in
 full on each fire rather than trusted across checkpoints.
 
-A pack added by another advance that has not cleared or resolved blocks
+**Protocol requirement.** A pack added by another advance that has not cleared or resolved blocks
 clearance. `AlreadyPresent` establishes live membership, not published
 membership. Thus branch B reusing a pack from pending branch A cannot
 publish it; neither can a tag pointing at a commit whose containing pack
@@ -2748,6 +2605,8 @@ because only synchronous inspectors are configured.
 
 ### 11.1 Configuration and inspected set
 
+**Protocol requirement.**
+
 Each configured inspector, remote or in-process, has a phase, `sync` or
 `async`, and an `on_unavailable` setting, `fail_closed` or `publish`.
 These settings govern only unavailability (§8); they MUST NOT override
@@ -2798,24 +2657,32 @@ channel (R-193), rather than through server-side role classification.
 This set is complete for the launch profile because every membership addition
 passes synchronous inspection before apply, including all file entries of every
 consumed pack ticket. Existing membership was therefore already inspected,
-even when D34 relay lag leaves its publication pending. Newly reachable files
+even when asynchronous membership projection leaves publication pending. Newly reachable files
 in such pending packs need not belong to the current advance's added packs;
 they are covered by the earlier inspection. Upload completion or verification
 alone establishes no membership, and ref deletion does not erase that coverage.
 Enabling inspection over existing, unscanned content is unsupported in this
 profile; an inspection deployment MUST start from an empty store. No durable
 inspection-mode marker is introduced at launch; the marker and full-profile
-activation rules are deferred and not implemented (the `store::inspection_*`
-modules are unintegrated groundwork). Enumeration uses verified
-frame/checkpoint rows, in pages of at most 1,000 rows per storage call, without
-an inspection tree walk, reference-page reads or object-store reads.
+activation rules are deferred and not implemented.
 
-**Launch input bound (R-200).** `inspect_batch_max_objects` MUST be positive
-and at most 10,000 (default 10,000). It bounds the whole advance's inspected
-set, with exactly one batch per inspector, subject also to §6.6. The server
-MUST advertise the effective bound as `GetServerInfo.inspection_max_objects`
-when inspection is enabled, and omit that optional field otherwise.
-Before enumerating added-pack entries, the server MUST preflight the sum of
+**Reference-server behavior.** The `store::inspection_*` modules are unintegrated
+groundwork. Enumeration uses verified frame/checkpoint rows in pages of at most
+1,000 rows per storage call without a tree walk, reference-page reads, or
+object-store reads.
+
+**Protocol requirement. Launch input bound.** A launch server MUST advertise
+its positive whole-advance inspection bound as
+`GetServerInfo.inspection_max_objects` when inspection is enabled, and omit
+that optional field otherwise. It MUST refuse unsupported input before any
+Inspect call or acceptance using `invalid_argument` and
+`object index limit exceeded`, with ordinary entry-count-limit replay semantics
+(STC §7.1). It MUST NOT classify this input limit as inspector unavailability
+or make surplus entries alone invalid.
+
+**Reference-server behavior.** The reference parameter `inspect_batch_max_objects`
+defaults to 10,000 and cannot exceed that value. Each inspector receives one
+complete batch. Before enumerating added-pack entries, the server MUST preflight the sum of
 entry counts already recorded in their pack headers or verification jobs.
 Pack entry counts are a conservative upper bound on the launch set,
 including duplicate and non-file entries. An upper bound above the configured
@@ -2825,7 +2692,7 @@ behavior (STC §7.1). It MUST NOT be reported as inspector unavailability.
 This bound applies regardless of reachability; surplus entries alone remain
 permitted. Inspection-disabled deployments retain their existing limits.
 
-**Full-profile batching (deferred, not implemented).** The full profile has no
+**Protocol requirement. Full-profile batching (deferred, not implemented).** The full profile has no
 launch whole-set bound. An inspected set larger than
 `inspect_batch_max_objects` MUST be sent
 in multiple Inspect calls of at most that many objects each. This named
@@ -2883,11 +2750,13 @@ storage by STC §7.1. A retry therefore re-runs the pre-receive check.
 
 ### 11.3 Asynchronous checks and resolution
 
+**Protocol requirement.**
+
 Full-profile semantics in this subsection are deferred and not implemented.
 
 Stage 6 commits live ref values, added membership, obligations, and
 durable scheduling in the same apply. Stage 9 calls MUST be scheduled
-from the outbox or a timer, resumable across restarts, and retried with
+through durable background responsibility, resumable across restarts, and retried with
 backoff. `AdvanceRefs` succeeds and records its applicable `Committed`
 outcomes under §3–§5; subsequent inspection MUST NOT change that outcome
 to `Aborted`, `Expired`, or rejection of the committed push.
@@ -2984,16 +2853,24 @@ mechanics, while §16 defines the admin release and audit contract.
 
 ### 11.4 Private scanner pack retrieval (R-193, launch)
 
-Launch inspection MAY enable a separate private retrieval channel on native
-and Workers servers. It is disabled by default and Paid-only. On Workers, the
-Paid Workers launch profile and complete valid scanner retrieval settings MUST be
-present at startup before the route is mounted; partial settings MUST be
-refused. Without enablement, the route MUST NOT be mounted. It grants no
+**Protocol requirement.**
+
+A server offering launch inspection MAY enable a private scanner retrieval
+channel. It MUST be disabled by default and MUST reject incomplete retrieval
+configuration before exposing the route. Without enablement, the route MUST
+NOT be mounted. It grants no
 public-serving, write, admin, or preservation-read permission. Global denial
 under §14 MUST remain authoritative when `takedown_denial` is enabled,
 including for staged packs and trusted scanners. When it is disabled, retrieval
-MUST skip block/action rows and denial-specific descriptor proofs under §14.2;
-credential, ticket, lifetime and range checks still apply.
+does not require denial-specific proofs under §14.2; credential, ticket,
+lifetime, and range checks still apply.
+
+**Reference-server behavior.** The reference retrieval channel requires its Paid
+storage profile. The Workers adapter requires the Paid launch profile and valid
+retrieval configuration at startup. With denial disabled it performs no reads of
+block or independent-action state.
+
+**Protocol requirement.**
 
 An enabled PRE_RECEIVE call MUST include `scanner_retrieval`, an
 `InspectRetrieval` message with the following fields:
@@ -3043,14 +2920,16 @@ returns HTTP 206 with that type and `Content-Range: bytes start-end/length`.
 Larger packs require bounded ranges; invalid or oversized ranges MUST fail
 uniformly as below. The route MUST emit no cache headers, MUST NOT use
 Workers Caching, and MUST bound storage calls and resident response bytes.
-Global-denial checks MAY prefetch the first descriptor page from at most
-eight shards concurrently, retaining at most 4 MiB of raw descriptor values.
-Keys, cursors and collection overhead MUST also remain bounded.
-Descriptor continuations and nested inventory, chunk and action proofs
-MUST remain sequential with their existing page and proof-context bounds.
-Every shard and nested proof MUST still be checked afresh under the
-request's shared 8,500-operation budget; prefetch grants no cache-based
-authorization.
+Current global denial MUST be checked before disclosure; retained retrieval
+authority does not cache denial clearance. The route MUST bound request work
+and resident response bytes.
+
+**Reference-server behavior.** Descriptor prefetch spans at most eight storage
+partitions and 4 MiB of raw descriptors. Continuations and nested proofs remain
+sequential under the request's shared 8,500-operation allowance. Prefetch grants
+no cache-based authorization.
+
+**Protocol requirement.**
 
 Informative: an added pack may use an external delta base permitted by §9.4.
 To decode that pack, the scanner needs an independently authorized resolver
@@ -3086,6 +2965,8 @@ checks MUST precede reading pack bytes.
 
 ### 12.1 Terms and scope
 
+**Protocol requirement.**
+
 Storage leases govern retention and access. They are unrelated to the
 namespace epoch leases of
 [SPEC-WRITE-GRANTS §5.4](SPEC-WRITE-GRANTS.md#54-epoch-leases-and-the-apply-check).
@@ -3107,9 +2988,8 @@ That profile MUST NOT accept lease terms or advertise lease, GC or receipt
 support that it does not implement. Leases, GC and receipts remain full-profile
 requirements when applicable to its configuration.
 
-For a deployment that supports leases, the ref shard
-holds the per-ref terms; the namespace coordinator holds the
-repository-level default and propagates changes with `config_version`.
+For a deployment that supports leases, authoritative per-ref terms and
+a repository-level default determine the effective lease.
 An explicit per-ref lease overrides that default while the repository
 remains undeleted; otherwise the ref uses the repository default. Opaque
 deployments support repository-level
@@ -3119,12 +2999,15 @@ including refs with explicit per-ref terms, and invalidates repository
 membership under §12.2. Per-ref terms do not restore the deleted
 repository generation.
 
-Repository-level changes MUST become effective within one epoch lease
-plus the configuration cache TTL. They MUST follow the visibility
-completion rule of
-[SPEC-WRITE-GRANTS §9.1](SPEC-WRITE-GRANTS.md#91-visibility): completion
-requires leased shards to acknowledge the change or lose their leases,
-and every other cached copy to expire or be invalidated.
+Repository-level changes MUST have a declared bounded completion interval.
+Acknowledged completion MUST ensure that no stale cached authorization or lease
+terms can authorize a later operation. Outstanding old authority must be revoked,
+expired, or fenced before completion, as required by
+[SPEC-WRITE-GRANTS §9.1](SPEC-WRITE-GRANTS.md#91-visibility).
+
+**Reference-server behavior.** The reference completion interval is one epoch
+lease plus the configuration cache TTL. It waits for lease acknowledgements or
+expiry and invalidates or expires every other cached copy.
 
 ### 12.2 State and request enforcement
 
@@ -3142,7 +3025,7 @@ pure function of those terms and `now`:
 An absent lease has state `active` without a time limit. Zero-length
 intervals are empty. The server MUST evaluate the effective storage-lease
 state on every repository request after authorization succeeds; access
-enforcement MUST NOT wait for a timer. An unauthorized caller MUST receive
+enforcement MUST NOT wait for background work. An unauthorized caller MUST receive
 the ordinary authorization denial, byte-identical whether the lease exists
 or not. Repository-independent deployment discovery remains as STC
 §2.1 requires: it MUST NOT resolve a repository or depend on its
@@ -3168,7 +3051,7 @@ Renewal during `grace` or `suspended`, with terms placing the lease in
 `active` at backend time, MUST restore `active`. `deleted` is terminal:
 a new lease permits new writes only and MUST NOT restore removed refs,
 published pointers, or the old lease's data. A late renewal MUST NOT
-cancel deletion of the old lease merely because timer work is delayed.
+cancel deletion of the old lease merely because background work is delayed.
 A write to a ref whose own lease is `deleted` is not ref creation. It MUST
 remain blocked until an administrator sets a new lease under §12.3.
 
@@ -3210,12 +3093,14 @@ leases govern ref visibility, not byte availability.
 
 ### 12.3 Setting leases and transition work
 
+**Protocol requirement.**
+
 `SetLease` assigns, replaces, or removes storage-lease terms for a
 repository default or, in indexed mode, an individual ref. The server
 MUST reject `SetLease` from any caller other than an administrator
 authorized for that scope. This authority includes shortening a lease.
 The server MUST evaluate shortened terms
-without waiting for a timer, subject to §12.1's completion bound for
+without waiting for background work, subject to §12.1's completion bound for
 repository defaults. This includes transitions directly to suspension
 or deletion.
 Removing a repository default makes undeleted refs without per-ref
@@ -3243,20 +3128,19 @@ This is a policy obligation, not a remote-hook wire addition.
 `AdmitAllow.lease` is deferred; admission does not assign lease terms
 through the current hooks schema.
 
-Timers MUST durably perform transition side effects and, when an Event
+The server MUST durably perform transition side effects and, when an Event
 sink is configured, record one event for each transition due to expiry,
 renewal, policy change, or administrative change. Work MUST survive
 restart and MUST NOT record the same logical transition as distinct
-events. Without an Event sink, no Event outbox row is required. Timer delay
+events. Without an Event sink, no Event outbox row is required. Delayed background work
 never delays request enforcement. Expiry work MUST be conditional on
 the applicable lease instance and terms, so old work cannot delete a
 renewed ref. Once a lease is deleted, its pending deletion MUST target
 only that lease's ref incarnation; a new lease MUST treat those old refs
 as absent even before cleanup finishes. Delayed work MUST NOT delete a
 ref created under the new lease.
-Deletion side effects MUST use authoritative per-ref terms and the
-coordinator's repository default at the current `config_version`, read
-under a valid epoch lease. They MUST NOT use cached lease terms.
+Deletion side effects MUST use authoritative current per-ref terms and
+repository defaults. They MUST NOT rely on stale cached lease terms.
 
 ### 12.4 Event messages and delivery
 
@@ -3392,6 +3276,8 @@ The parameter definitions are in
 
 ### 13.2 Roots and liveness
 
+**Protocol requirement.**
+
 Per-repository GC MUST include all of the following roots:
 
 - Every live ref value, including each branch's packmap chain.
@@ -3448,8 +3334,7 @@ branch without a readable packmap chain MUST receive the same protection:
 retain all member packs when the membership source is readable. An
 unreadable membership source still aborts the run under §13.5.
 
-A planned but unapplied write is a pending advance covered by the wait
-phase below. An advance value between the published pointer and live
+A planned but unapplied write is covered by the safe-removal barrier below. An advance value between the published pointer and live
 value can become published under §10 even when its clearance state is
 `cleared` and it is no longer the live value. A lease-deleted ref is not
 itself a root. After a per-ref deletion, surviving advance membership
@@ -3462,54 +3347,35 @@ server GC; their separate retention and purge rules are in §§14 and 16.
 
 ### 13.3 Per-repository mark, wait, re-check and drop
 
-GC MUST perform these phases in order for each repository:
+**Protocol requirement.** A server that offers GC MUST establish a complete,
+authoritative root set under §13.2 and protect all retained, pinned, held, or
+newly relied-on members before removal. It MUST account for in-flight accepted
+writes and their outstanding projection responsibility. A delay or an eventually
+consistent index alone MUST NOT establish completeness. GC MUST revalidate
+current authoritative lease terms, roots, and candidate state before removal.
+A concurrent new reference or changed candidate MUST defeat stale removal.
 
-1. **Mark.** Compute the complete live set and mark only unreachable,
-   unpinned candidates `gc_pending(since)`. `since` is the backend time
-   at which this mark was established; `mark` below denotes that time.
-   The mark clock and `now` in the wait phase MUST be within `margin`
-   of every shard backend's clock; the coordinator clock is one suitable
-   source. The decision that a lease-deleted ref is not a root MUST use
-   authoritative per-ref terms and the coordinator default at the
-   current `config_version`, read under a valid epoch lease, never cached
-   terms. Apply §13.2's distinction between surviving advance membership
-   after per-ref deletion and invalidated membership after repository-level
-   deletion.
-2. **Wait.** Removal MUST wait until all three conditions hold:
-   `now > mark + MAX_APPLY_WINDOW + margin`; the namespace relay
-   watermark has passed that point; and `since + gc_grace ≤ now`.
-   The watermark is the namespace's completed-relay frontier, including
-   outstanding work from active shards. A fixed sleep or a lagging
-   index MUST NOT substitute for that frontier.
-3. **Re-check.** Re-read the complete roots from strongly consistent
-   ref shards. The shard list MUST be the union of the ref index read
-   after the watermark condition holds and the coordinator's
-   active-shard table, never the eventually consistent ref index alone.
-   Re-check live refs, published pointers, all advance values between
-   the published pointer and live value regardless of clearance state,
-   surviving advance membership after per-ref deletion, `hit`
-   advances, takedown replacement packs, unexpired tickets, holds,
-   pins, object closure, and transitive external delta-base packs as
-   applicable. Do not root invalidated pending membership after a
-   repository-level deletion. Re-check authoritative
-   per-ref lease terms and the coordinator default at the current
-   `config_version` under a valid epoch lease, never from a cache.
-   A candidate that became live or pinned, or whose mark changed,
-   MUST NOT be removed.
-4. **Drop.** Only after that re-check, remove the candidate's repository
-   membership, associated repository index rows, and per-ref
-   membership-addition records used by `X-Mkit-Ref`. Each removal MUST
-   be guarded on the unchanged mark and last-change sequence so a
-   concurrent unmark or new reference makes it fail without removal.
-   Remove this repository's holder only after membership, index-row,
-   and per-ref membership-addition removal is durable, and only if the
-   repository no longer holds that member. Every holder removal,
-   including orphan reconciliation, MUST be conditional on the holder's
-   unchanged change sequence. Every holder write MUST advance that
-   sequence, including a relay re-record of an existing holder. A
-   re-added member therefore defeats a previously planned removal. GC
-   MUST reconcile orphaned holders, which are safe but retain bytes
-   unnecessarily.
+Repository membership, serving indexes, and ref-scoped membership evidence MUST
+become durably absent before the repository releases its holder. Holder removal
+MUST compare the unchanged holder identity or revision. Re-adding a member MUST
+defeat an earlier planned removal. Incomplete discovery or recovery MUST retain
+the candidate. A server MUST retain durable responsibility for unfinished cleanup.
+These requirements do not prescribe an implementation's execution stages.
+
+**Reference-server behavior.** The reference design uses mark, wait, re-check,
+and drop. Marks carry a backend timestamp. It waits for the apply deadline plus
+clock margin, the namespace's completed relay frontier, and `gc_grace`. Root
+enumeration uses strongly consistent ref storage plus the union of the ref index
+and active-storage registry. Re-checks include every root in §13.2, authoritative
+lease terms, pending advances and replacement packs. Guarded deletion compares
+the unchanged mark and last-change sequence; holder removal follows durable
+membership and index removal and compares the holder change sequence. Orphan
+holder reconciliation preserves that same guard. These timestamps, registries,
+frontiers, and stored marks are mechanisms for the requirements above.
+
+**Protocol requirement.** A server using collection marks MUST observe the
+following new-reliance rule; another implementation MUST provide equivalent
+protection against removing a concurrently referenced member.
 
 A planner relying on a `gc_pending` member MUST clear its mark before
 planning the use and MUST ensure the repository's holder exists. More
@@ -3530,8 +3396,7 @@ write MUST NOT rely on it and MUST answer retryable `unavailable` or cause a
 re-upload. If the member is gone, the write MUST NOT rely on it and answers
 as §9.4 answers a missing member; opaque mode uses the same responses.
 A new mark restarts the wait. This rule and the commit deadlines cover
-planned, unapplied advances without a cross-shard GC state precondition
-on ref apply. Without this rule, GC cannot safely drop membership: the
+planned, unapplied advances without requiring one global transaction. Without this rule, GC cannot safely drop membership: the
 drop guard sees changes only to the candidate member's own state, not a
 new ref that relies on it. A planner encountering `deleting` MUST
 return retryable `unavailable` or arrange a re-upload; it MUST NOT
@@ -3599,9 +3464,11 @@ not wire fields.
 
 ### 13.5 Fail-closed collection
 
+**Protocol requirement.**
+
 GC MUST abort the run on any unreadable root source, unreadable lease terms
 or repository default, unreadable advance or clearance state, unknown
-record kind, unreadable watermark or active-shard table, undecodable
+record kind, unreadable completeness or in-flight-write evidence, undecodable
 packlist node, unreadable external delta-base pack, missing root or
 referenced object, or truncated walk.
 The opaque-mode branch fallback in §13.2 applies only when the complete
@@ -3658,6 +3525,8 @@ across many namespaces. The blocklist is keyed by object id; the same
 bytes represented under a different id can evade that block.
 
 ### 14.2 Blocklist
+
+**Protocol requirement.**
 
 The deployment's `takedown_denial` option selects whether global content denial is
 enabled. When it is false, ingest and read paths MUST NOT consult block or
@@ -3717,7 +3586,7 @@ serving, or membership source. Bytes from an `object blocked`
 rejection remain subject to ordinary §13 GC; the rejection does not
 authorize immediate byte deletion.
 
-The implementation reads the block entry and independent actions together with
+**Reference-server behavior.** The implementation reads the block entry and independent actions together with
 `NamespaceStore::get_many`, including through borrowed stores. Each probe is
 one store batch, charged one unit when budgeted; batch-capable backends can
 serve it in one round trip. A member dependency check probes both the object
@@ -3725,6 +3594,8 @@ and its containing pack. This batching does not cache clearance or change the
 fail-closed requirement.
 
 ### 14.3 Lifecycle and completion
+
+**Protocol requirement.**
 
 For each content takedown, the server MUST perform the following durable,
 restart-resumable steps in order. A failed step leaves the serving stop
@@ -3750,16 +3621,12 @@ in force and MUST NOT report completion.
    Per-repository purges enqueued in step 3 need not wait for deletion
    of packs shared elsewhere. Shared-cache removal follows that
    interface's delivery latency.
-6. Let the safety cut be takedown time plus `MAX_APPLY_WINDOW + margin`
-   (§13.3). First wait until `now` is strictly after the cut. Next,
-   for each namespace being swept, wait until that namespace's relay
-   watermark has passed the cut. Only then enumerate and read that
-   namespace for the holder sweep below. Because each blocklist check
-   gating a write is at or after its `plan_time` (§14.2), `NotAfter`
-   bounds an apply that passed its check before the blocklist write:
-   it commits by the cut or commits nothing. The watermark then makes
-   its index and holder effects visible before the sweep reads them.
-   A later holder recorded by the relay schedules the same work.
+6. Establish a safe-discovery barrier that covers every write which could
+   have relied on clearance obtained before the block. The server MUST account
+   for accepted writes and outstanding holder or index projection responsibility
+   before enumerating affected repositories. A fixed delay alone MUST NOT prove
+   that no affected holder remains. A later-discovered holder MUST receive the
+   same takedown obligation.
 7. Delete the extracted serving copy under §13.4's takedown exemption.
    Delete superseded pack bytes at the completion of their last affected
    repository under the `gc_grace` exemption, only when every holder
@@ -3769,28 +3636,29 @@ in force and MUST NOT report completion.
    proof becomes available. Once proven, deletion MUST NOT wait for the
    ordinary seven-day grace.
 
-Holder discovery MUST first use pack-holder and extracted-object holder
-records. Each takedown MUST then always run a resumable sweep across the
-deployment over all named ids, including ids that have holder rows; it
-is the only read that catches a holder recorded after discovery. After the safety cut, it
-MUST enumerate namespaces from the coordinator namespace registry. For
-each namespace, after its relay watermark has passed the cut, it MUST
-enumerate the union of that namespace's repository registry and the
-coordinator's active-shard table. For each repository it MUST perform a
-bounded set of index reads checking all named ids, at most one read per
-distinct index partition of those ids. The sweep MUST durably record its
-position. An unreadable or incomplete enumeration or index read MUST be
-retried; completion MUST NOT be reported until every such read succeeds.
-Completeness is guaranteed for extracted objects, pack holders, and
-swept repositories. Global completion MUST wait for the sweep, all
-holder repositories, and the relay watermarks. It is used for reporting
-and §16's audit log; it does not block an unrelated repository's
+Holder discovery MUST use authoritative holder evidence and a durable,
+restart-resumable exhaustive sweep of every relevant namespace and repository.
+Known holders alone MUST NOT establish completeness. The sweep MUST retain its
+position and retry unreadable or incomplete enumeration and index observations.
+Global completion MUST wait for exhaustive discovery, every affected repository,
+and every outstanding effect covered by the safe-discovery barrier. It is used
+for reporting and §16's audit log; it does not block an unrelated repository's
 publication.
+
+**Reference-server behavior.** The reference design's safety cut is takedown
+time plus the maximum apply window and clock margin. It waits for time to pass
+that cut and each namespace relay watermark to cover it. Discovery enumerates
+the namespace registry and the union of repository and active-storage registries,
+then checks named ids in bounded index reads and persists its cursor. This is
+one implementation of complete discovery; its placement and relay frontiers
+are not requirements on other conforming servers.
+
+**Protocol requirement.**
 
 A repository's takedown is **complete** once its affected values,
 membership, indexes, tombstones, and notices are durable, its old packs
-are unservable there, its cache purge is enqueued, and its namespace relay
-watermark has passed the safety cut. A `hit` advance resolves on this
+are unservable there, its cache purge is durably scheduled, and its safe-discovery barrier is
+complete. A `hit` advance resolves on this
 per-repository completion only when the post-takedown chain also passes
 §10.2 condition 2 and its other obligations are met. The hit and
 its replacement packs remain §13.2 roots until then, even across a
@@ -3799,6 +3667,8 @@ takedown obligation without rewinding the published pointer. It leaves
 published membership as the replacement set after completion.
 
 ### 14.4 Rewrite, replacement and ref-value substitution
+
+**Protocol requirement.**
 
 For each affected repository, the server MUST rewrite every pack that
 contains a taken-down object or whose delta chain passes through it,
@@ -3827,12 +3697,12 @@ before commit, and use a guarded write with `NotAfter`. An in-progress
 `deleting` member produces retryable `unavailable`; a stale plan MUST
 re-plan rather than publish a partial chain. The server MUST pair each
 branch's unchanged head with its new packmap. It MUST substitute the
-packmap in one guarded ref-shard batch in the live value, the published
+packmap in one guarded atomic unit in the live value, the published
 value, and **every retained intermediate advance value** (§10.2).
 Sequence numbers and inspection decisions MUST remain unchanged.
 
 Replacement membership and serving index rows MUST become durable and
-visible first. The guarded ref-shard batch then substitutes the ref
+visible first. A guarded atomic unit then substitutes the ref
 values and each affected ref's membership-addition records used by
 `X-Mkit-Ref` (§13.3), and writes a tombstone per removed id and a
 per-ref flag for every affected closure or packlist. Old packs MUST
@@ -4009,6 +3879,8 @@ through CORS. It MUST NOT include preserved bytes or free-text reasons.
 
 ### 14.7 Preservation store
 
+**Protocol requirement.**
+
 The preservation store MUST be a restricted storage keyspace separate
 from serving and deduplication. It is reachable only through the audited
 §16 `ReadPreserved` admin operation. It MUST NOT serve clients, supply a
@@ -4025,7 +3897,7 @@ REQUIRED deployment configuration; startup without any of them MUST
 be refused. mkit defines no default for `preservation_retention`.
 `retain_until` is takedown time plus that duration.
 A legal hold suspends timed purge until audited `SetLegalHold` release
-under §16. A timer MUST purge expired records without an active hold,
+under §16. The server MUST purge expired records without an active hold,
 and the purge MUST be audited. Reinstatement marks the record
 reinstated but retains it until retention ends.
 
@@ -4064,6 +3936,8 @@ needed unless a separate content takedown remains active.
 
 ### 14.9 Interaction with GC, restore and caches
 
+**Protocol requirement.**
+
 §13.2 retains hit membership, including invalidated membership, and
 replacement packs until per-repository completion. §13.4 permits
 deletion of blocked extracted bytes and
@@ -4073,7 +3947,7 @@ follow §§14.2 and 14.7, not server GC.
 
 A portable restore MUST replay every takedown and reinstatement
 recorded after the snapshot time, in action order, before serving a
-restored shard. Active takedown and blocklist-action records MUST
+restored state. Active takedown and blocklist-action records MUST
 persist independently of audit pruning and snapshot restore (§16).
 They are the source for this replay.
 Restoring an older content or repository index MUST NOT resurrect
@@ -4595,6 +4469,8 @@ configuration, not through an unauthenticated discovery endpoint.
 
 ### 16.4 Replay and idempotency
 
+**Protocol requirement.**
+
 The server MUST maintain a durable replay ledger keyed by
 `(audience, key id, nonce)` until at least the envelope expiry.
 After envelope authentication, the server MUST first look up that key.
@@ -4612,7 +4488,7 @@ The launch `ReadPreserved` subset has the byte-free replay exception specified
 in §18. An accepted `Takedown` whose durable denial activation is unfinished
 returns retryable `unavailable` with the same takedown id while resuming its
 cursor. Its nonce and operation results become completed only after every
-requested denial is active, including recovery through timer 15. Completed
+requested denial is active, including after interrupted acceptance and recovery. Completed
 results retain the stored-response and role-independent replay rule above.
 Completed denial activation still returns `complete = false` for the remaining
 launch takedown lifecycle (§18).
@@ -4688,7 +4564,7 @@ and `terms`, `permanent`, or `remove` for a ref. `permanent` is an
 explicit per-ref override distinct from inheritance. Terms require a
 nonnegative grace and suspension duration and a valid expiry. The
 server MUST allow shortening, evaluate the new effective state
-without waiting for a timer, and obey §12.1's repository completion
+without waiting for background work, and obey §12.1's repository completion
 bound. Removing a default makes undeleted inheriting refs permanent;
 removing per-ref terms restores the default or permanent retention if
 none exists. Neither operation resurrects a deleted lease, ref,
@@ -4713,6 +4589,8 @@ owner-signed grant or namespace epoch.
 
 ### 16.6 Audit log
 
+**Protocol requirement.**
+
 The admin audit log is append-only and tamper-evident. Each entry has a
 gapless unsigned `seq`, backend `recordedAtMs`, `actor`, optional
 `operatorLabel`, `procedure`, lowercase `requestDigest`, `nonce`,
@@ -4722,7 +4600,9 @@ request's actor is its admin key id and its procedure is the full
 Connect path; its operator label is optional text in the signed body
 and MUST NOT be used as authorization. Automatic actors are exactly
 `system:inspector`, `system:timer`, or `system:relay`, with a stable
-`system:<actor>/<action>` procedure and empty nonce and request digest. Targets MUST be
+`system:<actor>/<action>` procedure and empty nonce and request digest. These
+are event categories for inspection, lifecycle, and propagation work; they do
+not require timers or a relay implementation. Targets MUST be
 stable canonical identities, not content bytes. Messages and details
 MUST each be at most 512 bytes of UTF-8; details MUST contain no
 credentials, private keys, bearer tokens, preserved bytes, or object
@@ -4755,14 +4635,14 @@ wrong-role and invalid-argument requests after identity verification.
 Every takedown, reinstatement, block, legal hold, suspension, lease
 change, release, re-inspection, waiver, grant change, and purge MUST
 append an entry.
-Automatic inspector hits, timer transitions, relay late-holder
+Automatic inspector hits, lifecycle transitions, propagation-discovered late-holder
 takedowns, releases, and purges MUST also have system entries. An
 unauthenticated attempt MUST go to metrics only, never the audit log;
 otherwise unauthenticated callers could flood durable audit storage.
 
 The log MUST be retained at least through the longest active
 preservation retention under §14 **Preservation store**, including
-legal holds. A timer MUST audit preservation-byte purge when retention
+legal holds. Background work MUST audit preservation-byte purge when retention
 ends and no legal hold remains. Preservation bytes and blocklist entries remain outside
 §13 GC; their retention and purge are governed by §14 **Preservation
 store**, §14 **Blocklist**, and audited `SetLegalHold`, `RemoveBlock`,
@@ -4836,6 +4716,8 @@ Reserved: this section is specified with M5 (see the version history).
 
 ## 18. Conformance scope
 
+**Protocol requirement.**
+
 A server conforms to one of three profiles and advertises which through
 `GetServerInfo` (STC §2.1). A client MUST NOT assume a feature of the full
 profile unless the server advertises it.
@@ -4869,9 +4751,8 @@ and receipt-issuance requirements of §§12–13 and §15 do not apply to this p
 §15.5 key publication still applies when takedown is enabled. Publication
 Event sinks are excluded at launch. Inspection and
 serving stops remain governed by §§10–11, subject to the launch amendments:
-only sync/fail-closed inspectors, at most four, one complete batch each, and a
-whole-advance input bound of `inspect_batch_max_objects` (positive and at most
-10,000; default 10,000), advertised as optional `inspection_max_objects`.
+only synchronous, fail-closed inspection, with the whole-advance input bound
+advertised as optional `inspection_max_objects` under §11.1.
 Inspection is optional; configured inspection MUST enable scanner byte
 retrieval following §11.4: a dedicated capability and
 scanner-signed request, checked against current open upload tickets and
@@ -4880,10 +4761,15 @@ The inspected set is every `Blob` and `ChunkedBlob` entry of the added packs,
 surplus included and ids deduplicated, using `BLOB` and `CHUNKED_FILE` respectively;
 chunk-only blobs MAY be `BLOB` and `CHUNK` is unused (§11.1). Earlier membership
 was already inspected before its membership apply, including membership whose
-publication is pending on D34 relay (§11.1). Enabling inspection
+publication is pending on asynchronous membership projection (§11.1). Enabling inspection
 over existing, unscanned content is unsupported: inspection deployments MUST
-start from an empty store. Enumeration reads frame/checkpoint pages of at most
-1,000 rows, without an inspection tree walk, reference pages or object-store reads.
+start from an empty store.
+
+**Reference-server behavior.** Inspection enumeration reads frame/checkpoint pages
+of at most 1,000 rows, without a tree walk, reference pages, or object-store reads.
+
+**Protocol requirement.**
+
 Synchronous inspection covers added-pack file entries under §11.1. A ref-only
 operation over previously admitted members does not require repeating that
 inspection. This does not waive §10.2 publication dependencies,
@@ -4893,24 +4779,24 @@ publication verifier; the Workers operator guide does so for the Worker
 adapter. Enabling inspection over an existing unscanned store remains
 unsupported.
 PRE_RECEIVE quarantine rejects with 403 and commits nothing. Startup MUST
-refuse async or unavailable-publish inspectors, clear deadlines and a fifth inspector.
+refuse asynchronous or unavailable-publish inspectors and clear deadlines.
+
+**Reference-server behavior.** The reference launch server permits at most four
+inspectors, one batch each, and at most 10,000 inspected entries per advance.
+Startup rejects a fifth inspector.
+
+**Protocol requirement.**
 The server MUST NOT create durable inspection continuations, outstanding
 inspection obligations or inspection holds at launch. No durable inspection-mode marker is required:
 disabling inspection stops only future scanning. Async inspection, holds,
 quarantine suspension, inspection review procedures, complete full-profile
 classification and unrestricted whole-set multi-batch inspection are deferred
-and not implemented. The `store::inspection_*` modules (the one-way mode
-marker, repository flags and repository-wide holds) are unintegrated
-groundwork for that follow-up: no pipeline or adapter path installs the marker
-or writes a flag or hold, and a deployment MUST NOT rely on them. Publication
-Event implementation and Worker proofs are post-launch work and are not
-implemented. The profile does not waive takedown
+and not implemented. The profile does not waive takedown
 or admin requirements applicable to its configuration. The profile and its
 permanent-retention/disabled-GC policy MUST be documented in deployment
 capabilities. It MUST NOT claim full-profile conformance.
 
-A deployment selects the launch profile explicitly, with indexed Multi
-addressing, sharded storage and ticketed uploads at threshold zero. Namespace
+A deployment selects the launch profile explicitly. Namespace
 policy is an allowlist, or open with explicit unsafe-open acknowledgment;
 under open policy, takedown discovery is incomplete. HTTP serving/URL tokens,
 remote hooks, inspection/retrieval, and admin/takedown are independent
@@ -4930,12 +4816,12 @@ deployment's operator documentation; the Cloudflare Workers adapter's are in
 configuration, including §9–§16. An indexed deployment MUST support per-ref
 storage leases (§12.1).
 
-After a committed timer write, the Worker adapter MUST retry a failed alarm
+**Reference-server behavior.** After a committed timer write, the Worker adapter MUST retry a failed alarm
 scheduling call at most twice inline. If scheduling still fails, it MUST return
 the error instead of acknowledging the write and mark its alarm state unarmed
 so the next activation checks the earliest durable timer again.
 
-**Launch admin subset.** A launch deployment MAY explicitly offer the following
+**Protocol requirement. Launch admin subset.** A launch deployment MAY explicitly offer the following
 admin foundation without claiming the full §16 procedure set. It MUST state
 its supported subset in its deployment documentation, and MUST NOT advertise
 unimplemented operations. The remaining lease, GC, inspection and takedown
@@ -4946,17 +4832,17 @@ requirements follow the deployment's declared launch scope.
 | Signed admin framework (§16.1–§16.4) | Dedicated role keys, exact request signatures, durable nonce/result replay and persistent operation-id deduplication. Disabled unless keys are configured. |
 | Audit (§16.6) | Gapless chain and ReadAuditLog, including authenticated reads/failures and automatic purge actions. |
 | Purge (§16.7) | Automatic durable purge intents and signed retry delivery; serving fences remain authoritative before acknowledgement. |
-| Manual PurgeCache | Optional asynchronous acceptance and audited completion under R-190 below. |
+| Manual PurgeCache | Optional asynchronous acceptance and audited completion below. |
 | Other admin procedures | Supported only by completed launch work; never advertise unimplemented operations. |
 
-The hosted adapter acceptance subset builds the embedding fixture with a locked
+**Reference-server behavior.** The adapter acceptance subset builds the embedding fixture with a locked
 wasm dependency graph and exercises paid indexed publication, published reads,
 URL tokens, supplied hooks and durable outcome retry with takedown off and no
 inspection. A separate fault-enabled case verifies slice recovery. This subset
 does not establish conformance for optional takedown or inspection; their
 retained scenario harnesses and core tests remain necessary when enabled.
 
-**Lean launch takedown (R-190).** A launch CONTENT `Takedown` names
+**Protocol requirement. Lean launch takedown.** A launch CONTENT `Takedown` names
 one repository for canonical source validation and exactly one of 1–256 distinct
 blob/manifest `object_ids` or one whole `pack_id` (admin schema field 9). This
 request shape overrides §16.5's repository-free CONTENT shape for this subset.
@@ -5000,14 +4886,20 @@ complete configured namespace allowlist; Single addressing MUST sweep its sole
 Root. Under `namespace_policy = any`, normal global denial and preservation
 from the named repository MUST remain supported. Discovery MUST sweep provable
 named-namespace and known-holder namespaces, but MUST NOT report discovery or
-repository/global takedown completion under Any. The exhaustive `nl` catalog is
-post-launch; this subset requires no catalog or new cross-partition protocol.
-Known holders MUST NOT substitute for exhaustive roots. Each sweep MUST persist
-its safety cut and cursor, wait until strictly after
-`takedown time + MAX_APPLY_WINDOW + margin`, and wait for each root's relay
-watermark to pass the cut before reading its repository-registry/active-shard
-union. It MUST retry incomplete enumeration/index reads and disclose incomplete
-discovery. Finishing a sweep alone does not establish takedown completion.
+repository/global takedown completion under Any. Known holders MUST NOT
+substitute for exhaustive roots. Each sweep MUST persist its discovery boundary
+and progress, account for in-flight acceptance and outstanding projection effects,
+and retry incomplete observations. Finishing a sweep alone does not establish
+takedown completion.
+
+**Reference-server behavior.** The launch reference implementation lacks an
+exhaustive catalog under open namespace policy. Its finite-root sweep retains a
+time cut and waits for relay watermarks before reading the union of repository
+and active-storage registries. Indexed multi-repository storage and ticketed
+uploads at threshold zero are its launch fixture selection, not protocol
+placement requirements.
+
+**Protocol requirement.**
 
 The restricted §14.7 record MUST bind verified canonical ids, kinds, sizes and
 bytes, including manifest order and every chunk, to the action and provenance.
@@ -5050,15 +4942,20 @@ failure during streaming MUST terminate with a Connect error and be audited,
 without preserved bytes in audit, logs or errors. An error MUST NOT emit `last`.
 
 Manual `PurgeCache` MAY be supported independently: acceptance MUST atomically
-commit its audit, replay result and timer-11 purge intent, return the purge id,
+commit its audit, replay result, and durable purge responsibility, return the purge id,
 and expose completion through the audit log rather than synchronous delivery.
 
-Automatic purge audit delivery MAY use the existing outbox relay. The triggering
-state apply MUST atomically record the purge intent, its delivery timer and the
-audit event. The root target MUST commit audit append, source-identity
-deduplication and relay watermark advancement together. The audit chain follows
-arrival order and retains the source event's occurred time. Purge delivery MUST
-NOT depend on successful audit delivery.
+Automatic purge delivery MUST retain durable intent with the triggering state
+change and audit responsibility. Delivery MUST NOT duplicate an audit entry for
+the same source event. Audit records retain the source event's occurred time;
+purge delivery MUST NOT depend on successful audit delivery.
+
+**Reference-server behavior.** The reference server records purge intent,
+delivery scheduling, and audit event in the source atomic unit. A relay target
+commits audit append, source deduplication, and delivery-frontier advancement
+together. Its audit chain follows arrival order.
+
+**Protocol requirement.**
 
 The mapping of profiles to conformance-suite cases is specified with M5.
 Local Workers wire diagnostics retain recovered connection losses and report
@@ -5067,10 +4964,47 @@ without changing the compiled Worker or suite assertions; see the [operator guid
 This evidence does not change conformance verdicts, replay policy or the
 client-visible error contract.
 
+### 18.1 Protocol conformance tiers
+
+**Protocol requirement.** Conformance applies to any server offering the
+specified feature. Tier 1 uses only ordinary transport requests. Tier 2 uses
+an explicitly test-only control interface to reach fault and recovery boundaries
+and obtain typed, layout-independent atomic observations. The
+[conformance runner and coverage table](../../rust/crates/mkit-server-conformance/README.md)
+specify version 1 capability negotiation, HTTP binding, case names, and declared
+skip semantics. The protocol-defined pause boundaries are:
+
+- `before_acceptance`: before the final guarded acceptance decision;
+- `after_durable_acceptance_before_response`: after the complete accepted unit
+  is durable, before the operation response is released;
+- `after_response`: after that response is released;
+- `before_published_clearance`: before the guarded decision that makes eligible
+  membership and the published value reader-visible.
+
+Boundary names identify observable decisions, not implementation steps. A
+control binding MUST NOT claim support for a boundary it cannot reach. A control
+request MAY select a protocol decision class, including `fork_acceptance` or
+`fork_progress`, and an occurrence to select an advancing commit. This reaches
+each guarded decision without naming engine steps. The runner may request graceful restart or host-supported kill-style restart,
+authority-generation changes, clock pinning or advancement, pause/resume, and
+an atomic observation of typed protocol state. Unsupported operations require
+declared skips with reasons. These controls MUST be disabled in production
+builds and MUST NOT become public transport procedures. A skip does not establish
+compliance with the asserted protocol rule.
+
+**Reference-server behavior.** The optional NamespaceStore SPI suite tests
+mkit-server adapters. Other conforming servers need not expose that API, its
+key layouts, or its internal batch representation.
+
 ## 19. Version history
+
+Informative: historical entries describe reference implementation changes as
+well as protocol revisions. They do not make a reference storage layout or
+scheduling mechanism a requirement on other conforming servers.
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | Classify protocol guarantees independently of storage placement and orchestration. Specify atomic signed-ref acceptance, replay recovery and durability, guarded fork acceptance and its declared reference-server gaps, and protocol-defined tier-2 pause boundaries. No public wire shape changes. |
 | 1 | draft | The membership-lag `unavailable` (§9.4, §9.7) carries an empty `MembershipNotVisible` detail; code, message and status are unchanged. Additive; no stored-format change. |
 | 1 | draft | Fork job rounds (§9.9): a deployment without pack-level denial builds no cleared set (a later switch to denial takes a full first walk); the pre-admission plan is carried into the job when it fits one slice, after an equality check of the source pair; and independent pack units of planning and publication overlap in waves, the packmap head last. No wire, stored-row or response change. |
 | 1 | draft | Embedded dispatch for a fork (§9.9): a typed in-process entry that authenticates, runs the deployment guard, recognises a completed replay with fail-closed evidence and runs the embedder's pre-dispatch policy before `fork_repo`. Additive API; no wire change, no stored-row change. |
@@ -5224,6 +5158,8 @@ The storage-receipt fixtures under `rust/tests/golden/receipts/` pin §15:
 | `MANIFEST.txt` | BLAKE3 hash of every other receipt fixture. |
 
 ## Public Rust API toward 0.6
+
+**Reference-server behavior.**
 
 The supported embedder surface is documented in the `mkit-server` crate docs.
 The [Workers guide](../embedding/workers.md) and

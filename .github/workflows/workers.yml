@@ -435,6 +435,16 @@ jobs:
           npx --yes --package wrangler@4.134.0 -c 'node scripts/workers-runtime-versions.cjs' \
             >"${RUNNER_TEMP}/wire-logs/runtime-versions.json"
 
+      - name: Portable conformance has no reference orchestration dependency
+        working-directory: rust
+        run: |
+          cargo check --locked -p mkit-server-conformance --no-default-features --lib
+          cargo tree --locked -p mkit-server-conformance --no-default-features -e normal --prefix none --format '{p}' > portable-conformance-deps.txt
+          if rg '^(mkit-server|mkit-server-worker) v' portable-conformance-deps.txt; then
+            echo '::error::portable conformance depends on reference orchestration'
+            exit 1
+          fi
+
       - name: Portable contracts on the native test host (show case verdicts)
         working-directory: rust
         env:

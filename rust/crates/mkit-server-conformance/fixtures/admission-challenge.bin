@@ -1,0 +1,5 @@
+
+u
+mppnPayment id="fake-example-not-valid", method="tempo", intent="charge", request="fake-example-request-not-valid"
+/
+x402'fake-example-payment-required-not-valid Example upload payment required.

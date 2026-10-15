@@ -382,7 +382,7 @@ pub(super) async fn challenge_402_typed_detail(ctx: Ctx) -> CaseResult {
         .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(raw))
         .map_err(|_| "detail encoding")?;
     ensure!(
-        bytes == include_bytes!("../../../../../tests/golden/transport/admission-challenge.bin"),
+        bytes == include_bytes!("../../../fixtures/admission-challenge.bin"),
         "challenge golden differs"
     );
     let fields: Vec<_> = reply

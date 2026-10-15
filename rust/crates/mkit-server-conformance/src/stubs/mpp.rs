@@ -235,8 +235,7 @@ impl Logic {
         if golden {
             // Golden protobuf is transport vocabulary, decoded rather than JSON written by hand.
             let detail: mkit_transport_connect::generated::AdmissionChallenge = Message::decode(
-                &mut include_bytes!("../../../../tests/golden/transport/admission-challenge.bin")
-                    .as_slice(),
+                &mut include_bytes!("../../fixtures/admission-challenge.bin").as_slice(),
             )
             .expect("golden challenge");
             challenges = detail

@@ -96,7 +96,7 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, Failure>>,
 {
-    let bound = Duration::from_millis(mkit_server::relay::RELAY_LAG_BOUND_MS);
+    let bound = Duration::from_millis(crate::wire::VISIBILITY_WAIT_MS);
     eventually_listed_within(bound, label, fetch, ready).await
 }
 
@@ -439,6 +439,7 @@ cases! {
     "auth.v2_pack_commitment_mismatch" => auth::v2_pack_commitment_mismatch, M0, [AuthV2], [];
     "auth.v2_gzip_signed_fails_closed" => auth::v2_gzip_signed_fails_closed, M0, [AuthV2, StrictGzipAuth], [];
     "auth.v2_reads_unsigned_ok" => auth::v2_reads_unsigned_ok, M0, [AuthV2], [];
+    "replay.observed_pair_has_saved_result" => replay::observed_pair_has_saved_result, M0, [AuthV2, Replay, AtomicAdvance], [];
     "replay.same_op_returns_saved_result_after_ref_moved" => replay::same_op_after_ref_moved, M0, [AuthV2, Replay], [];
     "replay.concurrent_duplicates_all_succeed" => replay::concurrent_duplicates, M0, [AuthV2, Replay], [];
     "replay.nonce_reuse_different_op_invalid_argument" => replay::nonce_reuse_different_op, M0, [AuthV2, Replay], [];
@@ -686,9 +687,7 @@ impl Ctx {
         self.profile
             .server_clock
             .as_ref()
-            .map_or_else(crate::wire::sign::now_ms, |clock| {
-                mkit_server::Clock::now_ms(clock.as_ref())
-            })
+            .map_or_else(crate::wire::sign::now_ms, |clock| clock.now_ms())
     }
 
     pub(crate) fn client(&self) -> &Client {
