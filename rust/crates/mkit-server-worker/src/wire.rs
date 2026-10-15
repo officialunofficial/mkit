@@ -386,7 +386,9 @@ impl NsReply {
             StoreError::Invalid(m) => (NsErrKind::Invalid, m.to_string()),
             StoreError::RangeNotSatisfiable { .. } => (NsErrKind::Invalid, e.to_string()),
             StoreError::Unsupported(m) => (NsErrKind::Unsupported, m.to_string()),
-            StoreError::Corrupt(m) => (NsErrKind::Corrupt, m.to_string()),
+            StoreError::Corrupt(m) | StoreError::MalformedReply(m) => {
+                (NsErrKind::Corrupt, m.to_string())
+            }
             StoreError::Full => (NsErrKind::Full, String::new()),
             _ => (NsErrKind::Unavailable, UNAVAILABLE_MESSAGE.to_owned()),
         };

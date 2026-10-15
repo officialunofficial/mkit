@@ -751,6 +751,7 @@ type ReadManyHook = Box<dyn Fn(&MemoryKv, &Partition, &[Key]) + Send + Sync>;
 /// A `MemoryKv` that records every key it sees and batch it applies, can
 /// run a hook before each apply, can yield at every call and can fail
 /// every read.
+#[allow(clippy::struct_excessive_bools)] // Each fault switch is one independent knob.
 struct Spy {
     #[cfg(feature = "http-objects")]
     prewake: AtomicBool,
@@ -775,6 +776,7 @@ struct Spy {
     yields: bool,
     fail_reads: bool,
     fail_read_many: bool,
+    short_denial_replies: bool,
     scan_limit: Option<u32>,
     seen: Mutex<Vec<Key>>,
     ops: Mutex<Vec<&'static str>>,
@@ -810,6 +812,7 @@ impl Spy {
             yields: false,
             fail_reads: false,
             fail_read_many: false,
+            short_denial_replies: false,
             scan_limit: None,
             seen: Mutex::default(),
             ops: Mutex::default(),
@@ -998,7 +1001,14 @@ impl NamespaceStore for Spy {
         for k in keys {
             self.saw(k);
         }
-        self.inner.get_many(p, keys).await
+        let mut rows = self.inner.get_many(p, keys).await?;
+        if self.short_denial_replies
+            && !keys.is_empty()
+            && keys.iter().all(|k| k.as_bytes().starts_with(b"b\0"))
+        {
+            rows.pop();
+        }
+        Ok(rows)
     }
 
     async fn scan(

@@ -49,7 +49,9 @@ pub(crate) async fn trees<S: NamespaceStore>(
             Ok(page) => page,
             Err(e) if crate::budget::is_exhausted(&e) && (progressed || !fresh) => break,
             Err(e) if crate::budget::is_exhausted(&e) => return Err(ForkError::TooLarge),
-            Err(crate::store::StoreError::Corrupt(_)) => return Err(ForkError::NotFound),
+            Err(
+                crate::store::StoreError::Corrupt(_) | crate::store::StoreError::MalformedReply(_),
+            ) => return Err(ForkError::NotFound),
             Err(e) => return Err(e.into()),
         };
         for (id, row) in rows {

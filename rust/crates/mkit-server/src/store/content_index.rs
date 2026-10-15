@@ -774,7 +774,7 @@ impl<S: NamespaceStore> ContentIndex<S> {
             )
             .await?;
         if rows.len() != 2 {
-            return Err(StoreError::Corrupt("short denial read".into()));
+            return Err(StoreError::MalformedReply("short denial read".into()));
         }
         let legacy = rows[0]
             .as_ref()
@@ -919,7 +919,7 @@ impl<S: NamespaceStore> ContentIndex<S> {
         for _ in 0..MAX_ATTEMPTS {
             let values = self.store.get_many(&p, &read).await?;
             if values.len() != read.len() {
-                return Err(StoreError::Corrupt("short content read".into()));
+                return Err(StoreError::MalformedReply("short content read".into()));
             }
             let mut values = values.into_iter();
             let (v, old, blocked) = (values.next(), values.next(), values.next());

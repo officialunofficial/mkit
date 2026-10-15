@@ -34,6 +34,9 @@ fn seeded_visibility_is_read_back_in_single_and_d34() {
         };
         block_on(seed.seed_visibility(&repo, visibility)).unwrap();
         assert_eq!(block_on(reads.repository_visibility(&repo)).unwrap(), None);
+        // The declaration is observable before the repository record exists.
+        let declared = block_on(reads.declared_visibility(&repo)).unwrap().unwrap();
+        assert_eq!(declared.visibility, RepoVisibility::Private);
         block_on(seed.seed_repository(&repo, 1)).unwrap();
         let private = block_on(reads.repository_visibility(&repo))
             .unwrap()
@@ -60,6 +63,9 @@ fn seeded_visibility_is_read_back_in_single_and_d34() {
             .unwrap();
         assert_eq!(public.visibility, RepoVisibility::Public);
         assert_ne!(private.revision, public.revision);
+        let declared_public = block_on(reads.declared_visibility(&repo)).unwrap().unwrap();
+        assert_eq!(declared_public.visibility, RepoVisibility::Public);
+        assert_ne!(declared.revision, declared_public.revision);
     }
 }
 

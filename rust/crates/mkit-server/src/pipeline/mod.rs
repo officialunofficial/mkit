@@ -615,7 +615,7 @@ fn store_error(op: StorageOp, err: StoreError) -> ServerError {
         return ServerError::failed_precondition("takedown denial disabled");
     }
     let op = match err {
-        StoreError::Corrupt(_) => StorageOp::MetaDecode,
+        StoreError::Corrupt(_) | StoreError::MalformedReply(_) => StorageOp::MetaDecode,
         _ => op,
     };
     let (line, err) = describe_and_map(op, err);

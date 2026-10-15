@@ -213,7 +213,7 @@ impl<B: MultipartBlobStore> TicketExpiry<B> {
                 Ok(Fired::Done(batch))
             };
             match fire.await {
-                Err(error @ StoreError::Corrupt(_)) => {
+                Err(error @ (StoreError::Corrupt(_) | StoreError::MalformedReply(_))) => {
                     tracing::warn!(%error, "corrupt ticket expiry row deferred for repair");
                     Ok(Fired::Reschedule {
                         due_at_ms: ctx.now_ms.saturating_add(60_000),

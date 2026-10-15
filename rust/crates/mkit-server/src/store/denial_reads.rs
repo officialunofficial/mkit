@@ -98,7 +98,7 @@ impl<S: NamespaceStore> NamespaceStore for DenialReads<S> {
             self.store.get_many(partition, &kept).await?
         };
         if values.len() != kept.len() {
-            return Err(StoreError::Corrupt("short denial-mode read".into()));
+            return Err(StoreError::MalformedReply("short denial-mode read".into()));
         }
         let mut values = values.into_iter();
         Ok(keys

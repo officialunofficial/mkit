@@ -115,7 +115,9 @@ pub(crate) async fn members_many<S: NamespaceStore>(
         .collect();
     let local = store.get_many(ref_shard, &keys).await?;
     if local.len() != packs.len() {
-        return Err(StoreError::Corrupt("short local membership read".into()));
+        return Err(StoreError::MalformedReply(
+            "short local membership read".into(),
+        ));
     }
     let mut found: Vec<_> = local.into_iter().map(|value| value.is_some()).collect();
     let mut grouped: BTreeMap<Partition, Vec<usize>> = BTreeMap::new();
@@ -131,7 +133,9 @@ pub(crate) async fn members_many<S: NamespaceStore>(
         let wanted: Vec<_> = indices.iter().map(|i| keys[*i].clone()).collect();
         let values = store.get_many(&partition, &wanted).await?;
         if values.len() != indices.len() {
-            return Err(StoreError::Corrupt("short membership index read".into()));
+            return Err(StoreError::MalformedReply(
+                "short membership index read".into(),
+            ));
         }
         for (i, value) in indices.into_iter().zip(values) {
             found[i] = value.is_some();

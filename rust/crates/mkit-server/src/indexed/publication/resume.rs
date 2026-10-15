@@ -665,7 +665,10 @@ async fn slice_with<S: NamespaceStore>(
                         .saturating_add(u64::from(budget.used() - started));
                     *progress = before;
                     progress.calls = calls;
-                    if matches!(error, StoreError::Corrupt(_)) {
+                    if matches!(
+                        error,
+                        StoreError::Corrupt(_) | StoreError::MalformedReply(_)
+                    ) {
                         progress.failure = Some(Exhaustion::Traversal);
                     } else if calls > TOTAL_CALLS {
                         progress.failure = Some(Exhaustion::IndexCalls);

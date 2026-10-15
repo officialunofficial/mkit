@@ -560,7 +560,7 @@ fn failure_class(error: &StoreError) -> &'static str {
             }
         }
         StoreError::Full => "storage_unavailable",
-        StoreError::Corrupt(_) => "decode_error",
+        StoreError::Corrupt(_) | StoreError::MalformedReply(_) => "decode_error",
         _ => "other",
     }
 }

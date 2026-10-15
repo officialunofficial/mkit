@@ -964,7 +964,9 @@ pub async fn require_pack_clear_sealed<S: NamespaceStore>(
     // inconsistent, not transient: it is refused like a blocked pack.
     match super::inventory::has_seal(&remote, pack).await {
         Ok(true) => {}
-        Ok(false) | Err(StoreError::Corrupt(_)) => return Err(blocked()),
+        Ok(false) | Err(StoreError::Corrupt(_) | StoreError::MalformedReply(_)) => {
+            return Err(blocked());
+        }
         Err(_) => return Err(unavailable()),
     }
     let start = Key::new(INDEX_PREFIX.to_vec());

@@ -167,7 +167,9 @@ async fn read_facts<S: NamespaceStore>(
     inventory::sealed_facts(store, id)
         .await
         .map_err(|e| match e {
-            crate::store::StoreError::Corrupt(_) => ForkError::NotFound,
+            crate::store::StoreError::Corrupt(_) | crate::store::StoreError::MalformedReply(_) => {
+                ForkError::NotFound
+            }
             other => other.into(),
         })
 }
@@ -262,7 +264,9 @@ async fn merge<S: NamespaceStore>(
         })
         .await
         .map_err(|e| match e {
-            crate::store::StoreError::Corrupt(_) => ForkError::NotFound,
+            crate::store::StoreError::Corrupt(_) | crate::store::StoreError::MalformedReply(_) => {
+                ForkError::NotFound
+            }
             other => other.into(),
         })?;
         let mut pending: BTreeSet<Hash> = job.deps.iter().copied().collect();

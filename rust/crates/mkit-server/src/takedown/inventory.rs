@@ -240,6 +240,11 @@ fn dependency_key(pack: &Hash, id: &Hash) -> Key {
 fn bad() -> StoreError {
     StoreError::Corrupt("invalid verified pack inventory".into())
 }
+/// The store's reply broke the read contract: a short `get_many`, a scan key
+/// outside its requested range, or a cursor that does not advance.
+fn bad_reply() -> StoreError {
+    StoreError::MalformedReply("invalid verified pack inventory".into())
+}
 fn encode<T: Serialize>(v: &T) -> Result<Value, StoreError> {
     let raw = serde_json::to_vec(v).map_err(|_| bad())?;
     if raw.len() > crate::store::MAX_VALUE_BYTES {
@@ -323,7 +328,7 @@ pub(super) async fn next<S: NamespaceStore>(
         let id: Hash = key
             .as_bytes()
             .strip_prefix(start.as_bytes())
-            .ok_or_else(bad)?
+            .ok_or_else(bad_reply)?
             .try_into()
             .map_err(|_| bad())?;
         if store
@@ -349,7 +354,7 @@ pub(super) async fn next<S: NamespaceStore>(
         .as_ref()
         .is_some_and(|next| after.as_ref() == Some(next))
     {
-        return Err(bad());
+        return Err(bad_reply());
     }
     state.after = page.next.map(|next| next.as_bytes().to_vec());
     let done = state.after.is_none();
@@ -526,12 +531,12 @@ async fn stage_flat<S: NamespaceStore>(
     let mut keys = vec![hk.clone()];
     keys.extend(items.iter().map(|item| entry_key(pack, &item.id)));
     let mut rows = store.get_many(&p, &keys).await?.into_iter();
-    let old = rows.next().ok_or_else(bad)?;
+    let old = rows.next().ok_or_else(bad_reply)?;
     // Rows that are already staged are skipped before the head is checked, as
     // a replay of one staged entry always was.
     let mut todo = Vec::new();
     for item in items {
-        let existing = rows.next().ok_or_else(bad)?;
+        let existing = rows.next().ok_or_else(bad_reply)?;
         let (canonical_len, logical_len) = lengths(item.object)?;
         let row = encode(&Entry {
             version: 1,
@@ -771,7 +776,7 @@ pub async fn entry<S: NamespaceStore>(
         )
         .await?;
     if values.len() != 2 {
-        return Err(bad());
+        return Err(bad_reply());
     }
     let raw = values[0].as_ref();
     if let Some(raw) = raw
@@ -840,7 +845,7 @@ pub(crate) async fn located_entries<S: NamespaceStore>(
         for ((_, chunk, pack_count, keys), reply) in wave.iter().zip(replies) {
             let values = reply?;
             if values.len() != keys.len() {
-                return Err(bad());
+                return Err(bad_reply());
             }
             for raw in &values[..*pack_count] {
                 let head: Head = decode(raw.as_ref().ok_or_else(bad)?)?;
@@ -1008,7 +1013,7 @@ pub async fn parent_page<S: NamespaceStore>(
             let id: Hash = key
                 .as_bytes()
                 .strip_prefix(prefix.as_bytes())
-                .ok_or_else(bad)?
+                .ok_or_else(bad_reply)?
                 .try_into()
                 .map_err(|_| bad())?;
             Ok(marker_key(pack, &id))
@@ -1016,14 +1021,14 @@ pub async fn parent_page<S: NamespaceStore>(
         .collect();
     let markers = store.get_many(&content_shard(pack), &markers?).await?;
     if markers.len() != page.entries.len() {
-        return Err(bad());
+        return Err(bad_reply());
     }
     let mut rows = Vec::with_capacity(markers.len());
     for ((key, raw), marker) in page.entries.into_iter().zip(markers) {
         let id: Hash = key
             .as_bytes()
             .strip_prefix(prefix.as_bytes())
-            .ok_or_else(bad)?
+            .ok_or_else(bad_reply)?
             .try_into()
             .map_err(|_| bad())?;
         if marker.as_ref().map(Value::as_bytes) != Some(entry_digest(&id, &raw).as_slice()) {
@@ -1090,7 +1095,7 @@ where
                 let id: Hash = key
                     .as_bytes()
                     .strip_prefix(start.as_bytes())
-                    .ok_or_else(bad)?
+                    .ok_or_else(bad_reply)?
                     .try_into()
                     .map_err(|_| bad())?;
                 Ok(marker_key(pack, &id))
@@ -1098,13 +1103,13 @@ where
             .collect();
         let markers = store.get_many(&content_shard(pack), &marker_keys?).await?;
         if markers.len() != page.entries.len() {
-            return Err(bad());
+            return Err(bad_reply());
         }
         for ((key, raw), marker) in page.entries.into_iter().zip(markers) {
             let id: Hash = key
                 .as_bytes()
                 .strip_prefix(start.as_bytes())
-                .ok_or_else(bad)?
+                .ok_or_else(bad_reply)?
                 .try_into()
                 .map_err(|_| bad())?;
             if marker.as_ref().map(Value::as_bytes) != Some(entry_digest(&id, &raw).as_slice()) {
@@ -1120,7 +1125,7 @@ where
         }
         match page.next {
             Some(next) if after.as_ref() != Some(&next) => after = Some(next),
-            Some(_) => return Err(bad()),
+            Some(_) => return Err(bad_reply()),
             None => break,
         }
     }

@@ -433,7 +433,9 @@ pub async fn prefix<S: NamespaceStore>(
         .collect();
     let rows = store.get_many(source, &wanted).await?;
     if rows.len() != wanted.len() {
-        return Err(StoreError::Corrupt("short publication prefix read".into()));
+        return Err(StoreError::MalformedReply(
+            "short publication prefix read".into(),
+        ));
     }
     let mut result = (state.published, state.value.clone());
     for (sequence, raw) in (state.published + 1..=state.sequence).zip(rows) {
