@@ -582,7 +582,7 @@ async fn write_wave<S: NamespaceStore>(
         for (&(index, _, _), reply) in group.iter().zip(replies) {
             match reply {
                 Ok(crate::store::BatchOutcome::Committed) => {}
-                Ok(_) => return Some((index, ForkError::Unavailable("fork copy contended"))),
+                Ok(_) => return Some((index, ForkError::Unavailable("fork copy deadline"))),
                 Err(error) => return Some((index, error.into())),
             }
         }

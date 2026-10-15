@@ -24,6 +24,7 @@ struct Probe {
     partition_exhausted: Option<u16>,
     scan_exhausted: std::sync::atomic::AtomicI32,
     apply_failures: Vec<u16>,
+    apply_deadlines: Vec<u16>,
     key_failure: Option<Key>,
     lost_reply: AtomicBool,
     stats_keys: Option<u64>,
@@ -46,6 +47,7 @@ impl Default for Probe {
             partition_exhausted: None,
             scan_exhausted: std::sync::atomic::AtomicI32::new(-1),
             apply_failures: Vec::new(),
+            apply_deadlines: Vec::new(),
             key_failure: None,
             lost_reply: AtomicBool::new(false),
             stats_keys: None,
@@ -164,6 +166,12 @@ impl NamespaceStore for Probe {
         if matches!(p, Partition::RepoIndex { prefix, .. } if self.apply_failures.contains(prefix))
         {
             return Err(StoreError::unavailable("injected apply"));
+        }
+        if matches!(p, Partition::RepoIndex { prefix, .. } if self.apply_deadlines.contains(prefix))
+        {
+            return Ok(BatchOutcome::DeadlinePassed {
+                backend_now: 10_001,
+            });
         }
         if let Some(object) = self.retry_object
             && *p == content_shard(&object)
@@ -1231,4 +1239,46 @@ fn wave_width_is_one_without_a_known_allowance_and_bounded_by_the_slice() {
     assert_eq!(wave_width(&known, &tight, 8), 3);
     let spent = crate::budget::SliceBudget::new(7);
     assert_eq!(wave_width(&known, &spent, 8), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn copy_wave_deadline_keeps_input_order_against_a_blocked_holder() {
+    for deadline_first in [true, false] {
+        let clock = ManualClock::new(0);
+        let store = Probe {
+            apply_deadlines: vec![u16::from(!deadline_first)],
+            ..Probe::default()
+        };
+        seed(&store.inner, &[3, 3], 10).await;
+        let object = object_of(usize::from(deadline_first), 1);
+        source_holders(&store.inner, &[object]).await;
+        store
+            .inner
+            .apply(
+                &content_shard(&object),
+                Batch::new().put(
+                    keys::block(&object),
+                    codec::encode_block_entry(&crate::store::BlockEntry::new("blocked", 0)),
+                ),
+            )
+            .await
+            .unwrap();
+        let mut job = copy_job(6);
+        let error = copy::copy(
+            &env_with(&store, &clock, Some(1)),
+            &mut job,
+            &crate::budget::SliceBudget::new(500),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error,
+            if deadline_first {
+                ForkError::Unavailable("fork copy deadline")
+            } else {
+                ForkError::NotFound
+            }
+        );
+        assert_eq!(job.lanes, vec![CopyLane::default(); 16]);
+    }
 }

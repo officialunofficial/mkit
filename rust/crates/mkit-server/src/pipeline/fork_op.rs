@@ -34,6 +34,17 @@ fn in_progress() -> ServerError {
         .with_header("Retry-After", "1")
 }
 
+/// Every retryable job-step refusal tells the client when to try again.
+fn step_error(error: &ForkError) -> ServerError {
+    let retryable = matches!(error, ForkError::Unavailable(_));
+    let error = error.error();
+    if retryable {
+        error.with_header("Retry-After", "1")
+    } else {
+        error
+    }
+}
+
 fn visibility_of(private: bool) -> mkit_attest::grant::Visibility {
     if private {
         mkit_attest::grant::Visibility::Private
@@ -306,7 +317,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }
             let report = fork::step(&env, &dest, &SliceBudget::new(SLICE_CALLS))
                 .await
-                .map_err(|error| error.error())?;
+                .map_err(|error| step_error(&error))?;
             return Self::fork_answer(report.job, ResponseMeta::default());
         }
         if !op.creation.repo {
@@ -402,7 +413,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
         let report = fork::step(&env, &dest, &SliceBudget::new(SLICE_CALLS))
             .await
-            .map_err(|error| error.error())?;
+            .map_err(|error| step_error(&error))?;
         let meta = if ours {
             response_meta(allowance)
         } else {

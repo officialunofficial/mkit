@@ -53,6 +53,8 @@ pub struct Counting {
     pub denial_reads: Arc<AtomicU64>,
     pub crash: Arc<Crash>,
     pub log: Arc<Mutex<Vec<(Partition, Batch)>>>,
+    /// Successful applies, recorded after commit when `record` is set.
+    pub committed: Arc<Mutex<Vec<(Partition, Batch)>>>,
     pub record: Arc<std::sync::atomic::AtomicBool>,
     /// Scans of repository index partitions.
     pub scans: Arc<AtomicU64>,
@@ -88,6 +90,7 @@ impl Counting {
             denial_reads: Arc::default(),
             crash: Arc::default(),
             log: Arc::default(),
+            committed: Arc::default(),
             record: Arc::default(),
             scans: Arc::default(),
             latency_ms: Arc::default(),
@@ -99,6 +102,19 @@ impl Counting {
             mark_key: Arc::default(),
             marks: Arc::default(),
         }
+    }
+    async fn apply_inner(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+        let entry = self
+            .record
+            .load(Ordering::SeqCst)
+            .then(|| (p.clone(), batch.clone()));
+        let outcome = self.inner.apply(p, batch).await?;
+        if matches!(outcome, BatchOutcome::Committed)
+            && let Some(entry) = entry
+        {
+            self.committed.lock().unwrap().push(entry);
+        }
+        Ok(outcome)
     }
     fn injected(&self, keys: &[Key]) -> Result<(), StoreError> {
         let failing = self.fail_keys.lock().unwrap();
@@ -233,11 +249,11 @@ impl NamespaceStore for Counting {
         {
             self.crash.armed.store(false, Ordering::SeqCst);
             if self.crash.lost_reply.load(Ordering::SeqCst) {
-                self.inner.apply(p, batch).await?;
+                self.apply_inner(p, batch).await?;
             }
             return Err(StoreError::Unavailable("injected crash".into()));
         }
-        self.inner.apply(p, batch).await
+        self.apply_inner(p, batch).await
     }
     async fn stats(&self, p: &Partition) -> Result<PartitionStats, StoreError> {
         self.tick();
