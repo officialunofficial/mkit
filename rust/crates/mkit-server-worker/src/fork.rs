@@ -51,7 +51,7 @@ where
         registry,
         class,
         enabled,
-        ForkTimer {
+        || ForkTimer {
             store,
             shards: Arc::new(D34Shards),
             clock,
@@ -66,7 +66,7 @@ fn register_timer<S: NamespaceStore, T: NamespaceStore + 'static>(
     registry: TimerRegistry<'static, S>,
     class: ShardClass,
     enabled: bool,
-    timer: ForkTimer<T>,
+    timer: impl FnOnce() -> ForkTimer<T>,
     alarm_budget: Option<mkit_server::purge::SliceBudget>,
 ) -> TimerRegistry<'static, S> {
     let Some(budget) = alarm_budget else {
@@ -76,7 +76,7 @@ fn register_timer<S: NamespaceStore, T: NamespaceStore + 'static>(
         return registry;
     }
     registry.register(crate::purge::Budgeted {
-        handler: timer,
+        handler: timer(),
         budget: Some(budget),
         calls: FORK_ALARM_CALLS,
     })
@@ -102,6 +102,13 @@ pub(crate) fn register_configured<S: NamespaceStore>(
     cfg: &crate::adapter::WorkerConfig,
 ) -> TimerRegistry<'static, S> {
     use crate::ns_client::{StubTransport, WorkerNamespaceStore};
+    if cfg.indexed.is_none()
+        || cfg.sharding != mkit_server::pipeline::Sharding::D34
+        || class != ShardClass::NsCoordinator
+        || alarm_budget.is_none()
+    {
+        return registry;
+    }
     let config = match cfg.pipeline_config() {
         Ok(config) => config,
         Err(error) => {
@@ -111,14 +118,16 @@ pub(crate) fn register_configured<S: NamespaceStore>(
     };
     let enabled =
         config.sharding == mkit_server::pipeline::Sharding::D34 && config.indexed.is_some();
-    let timer = configured_timer(
-        &config,
-        WorkerNamespaceStore::new(
-            StubTransport::new(env.clone(), cfg.placement.clone()),
-            cfg.probe_partition(),
-        ),
-        Arc::new(crate::clock::WorkerClock),
-    );
+    let timer = || {
+        configured_timer(
+            &config,
+            WorkerNamespaceStore::new(
+                StubTransport::new(env.clone(), cfg.placement.clone()),
+                cfg.probe_partition(),
+            ),
+            Arc::new(crate::clock::WorkerClock),
+        )
+    };
     register_timer(registry, class, enabled, timer, alarm_budget)
 }
 
@@ -168,7 +177,7 @@ mod tests {
                 TimerRegistry::new(),
                 ShardClass::NsCoordinator,
                 true,
-                timer,
+                || timer,
                 Some(mkit_server::purge::SliceBudget::new(960)),
             );
             assert!(format!("{registry:?}").contains("TimerKind(16)"));
