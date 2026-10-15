@@ -1,11 +1,12 @@
 # Verification slices and alarm callbacks
 
 The deterministic `verification_pipeline_round_probe` drives scheduled
-verification from a consumed pack to Usable. It compares single-slice Extract
-callbacks with the default ceiling of eight. Fixtures contain 500 or 3,000 files
-of 27 bytes, or three files above the extraction threshold as a control. Each
-fixture also contains its tree and signed commit. The probe uses D34 sharding
-with takedown denial enabled.
+verification from a consumed pack to Usable. It compares single-slice callbacks
+with the default ceilings of eight for ClosureResolve, EmitIndex, and Extract
+selection. Fixtures contain 500 or 3,000 files of 27 bytes, or three files of
+70,002 bytes above the extraction threshold as a control. Each fixture also
+contains its tree and signed commit. The probe uses D34 sharding and runs with
+takedown denial both on and off. Both variants share each encoded pack fixture.
 
 Run the probe from the repository root:
 
@@ -15,167 +16,262 @@ CARGO_BUILD_JOBS=3 just cargo-cached nextest run -p mkit-server \
 ```
 
 The latency model charges 30 ms per dependent warm transport round and 100 ms
-per alarm re-arm. Calls count storage-interface dispatches (`NamespaceStore`, `BlobStore`, and
-`PackSink`), not SQL statements or adapter-internal RPCs. Local storage calls
-have no modeled network latency.
-This is a scheduling model, not a production stopwatch or a measurement of
-synchronous CPU time. The injected business clock stays frozen during a callback
-so the probe also exercises count-based bounds. Synthetic transport waits use
-the paused Tokio clock; they do not advance that business clock. The model
-therefore describes the count- and call-bounded schedule, with CPU time set to
-zero. Separate clock-advancing regressions enforce elapsed and physical cutoffs.
+per alarm re-arm. Calls count storage-interface dispatches (`NamespaceStore`,
+`BlobStore`, and `PackSink`), not SQL statements or adapter-internal RPCs.
+Local storage calls have no modeled network latency. This is a scheduling
+model, not a production stopwatch or a measurement of synchronous CPU time.
+The business clock stays frozen during a callback. Synthetic transport waits
+use the paused Tokio clock and do not advance that business clock. Separate
+clock-advancing regressions enforce elapsed and physical cutoffs.
 
 A durable slice can visit several phases. Phase slice and callback counts
-therefore overlap and must not be added. Storage calls and applies belong to the
+therefore overlap and must not be added except for the stated comparison of
+ClosureResolve plus EmitIndex phase callbacks. Calls and applies belong to the
 phase active when they execute; a callback's re-arm belongs to its final active
-phase. Re-arms count continuations before Usable; initial scheduling and the
-later Watch maintenance timer are outside this interval. Extract substage rows
-exclude shared checkpoint-load and guard overhead.
-Zero rows mean the fixture never enters that stage. Stop counts distinguish
-slice/chain exits from successful phase/step boundaries.
+phase. Re-arms count continuations before Usable. Initial scheduling and the
+later Watch maintenance timer are outside this interval. Full baseline reports,
+including Extract substages and stop reasons, are pinned in
+**verification_probe_data/** beside the probe. Denial-off reports have their
+own files; the existing denial-on baseline files are unchanged.
 
 ## Scheduling choice and bounds
 
-Larger packs share the existing durable-slice driver with tiny packs for local
-selection. Tiny packs continue to use only their existing `tiny_chain_slices`
-setting, including when it is one. Both
-the entry checkpoint and the proposed next checkpoint must remain in Extract
-selection before the driver commits and continues. No inventory shortcut skips
-selection. Decode, index emission, relay delivery, extraction effects, and the
-Usable conditions retain their existing algorithms.
+ClosureResolve, EmitIndex, and Extract selection outside the tiny-pack path
+share the existing durable-slice driver. Each phase family has its own
+`SliceLimits` setting: `with_closure_chain_slices`, `with_emit_chain_slices`,
+and `with_extract_chain_slices`. A value of one restores single-slice callbacks
+for that family. Defaults are eight; larger values clamp to eight. Tiny packs
+continue to use only `tiny_chain_slices`, including when it is one.
 
 Every intermediate slice commits with the original timer and job guards before
-another slice begins. The next slice also checks its freshly read checkpoint's
-phase. A concurrent restart or advance to an effect stage ends the selection
-callback before that phase does any work. The original timer remains until the final reschedule.
-A crash before commit replays the slice; a crash or lost reply after commit
-resumes its durable checkpoint. Deterministic auxiliary writes retain their
-existing idempotence and guards. Every slice repeats source and denial checks.
+another slice begins. The next slice re-reads the checkpoint and checks its
+phase before work. Extract continuations also require a selection stage. A
+concurrent restart or phase advance ends the chain. Existing within-slice phase
+transitions keep their existing order. The original timer remains runnable until
+the final reschedule. A crash before commit replays the slice; a crash or lost
+reply after commit resumes the durable checkpoint.
 
-One default callback shares the existing 256-call allowance and stops before another
-slice when fewer than 128 calls remain. The driver never refreshes that budget.
-The physical callback deadline and two-second elapsed cutoff also stop it.
-Eight slices of at most sixteen selection steps bound synchronous work to 128
-selection steps with a frozen clock, returning control to the timer dispatcher.
-The existing per-slice operation ceiling and `MAX_BATCH_OPS` remain unchanged.
-Chained steps carry at most 80 guard/write operations. The unconditional first
-step retains its existing bound: a head reconstruction can carry 70 operations
-and at most 18 source guards from the other six packs. The checkpoint adds at
-most five operations, and timer fencing adds one for an intermediate commit or
-four for the final reschedule. The wider first-step case uses at most 97 of the
-100 operations; a chained commit uses at most 89.
-No wire or stored format changes.
+One callback shares the original 256-call allowance and never refreshes it.
+Before continuing, the driver requires at least 128 remaining calls. External
+closure lookup retains its larger full-slice reservation. Budgeted dispatches
+also charge before I/O, including lease retries. The physical callback deadline
+and two-second elapsed cutoff stop the driver, including after checkpoint I/O.
+Eight durable slices bound synchronous work even when the clock is frozen.
+The per-slice operation ceilings and `MAX_BATCH_OPS` do not change.
 
-`SliceLimits::with_extract_chain_slices(1)` selects the original callback shape.
-The default is eight; larger configured values clamp to eight. The separate
-tiny-pack ceiling exclusively governs tiny packs and retains its existing meaning.
+Each ClosureResolve slice settles at most 90 child rows. Deletions, the scan
+cursor, and satisfying-pack dependencies commit together. A crash cannot delete
+a child before recording its dependency. Each slice repeats its local-frame and
+member lookups; no lookup result is cached across slices.
+
+Each EmitIndex slice scans at most 64 frames. It retains the same sequence of
+effects: each direct batch checks denial and applies same-value index puts with
+`NotAfter`; relay rows renew the source epoch lease and commit under the existing
+lease and sequence guards; the slice then reads `last_relay_seq` and checkpoints.
+Nothing is hoisted or shared across slices. A crash after enqueue but before the
+checkpoint can re-emit that page with new outbox sequences, exactly as in
+single-slice mode. Index puts are identical, target holder intents fold, and
+AwaitDelivery waits on the newest recorded sequence. EmitIndex itself emits
+index rows; the holder regression separately exercises the shared relay hook.
+The next slice starts only after the previous checkpoint commits and the timer
+fence passes. Chaining adds no interleaving beyond the timer firing again
+immediately. Enqueue and checkpoint remain separate applies.
+
+Extract selection retains its existing 16-step ceiling: at most 128 steps per
+callback. Chained steps carry at most 80 guard/write operations. A head
+reconstruction's unconditional first step can carry 70 operations and at most
+18 source guards from the other six packs. The checkpoint adds at most five
+operations; timer fencing adds one for an intermediate commit or four for the
+final reschedule. The wider first-step case uses at most 97 of 100 operations;
+a chained selection commit uses at most 89. Effectful extraction retains its
+existing scheduling and threshold semantics. No wire or stored-format change.
 
 ## Regression evidence
 
-The probe pins the complete baseline table, compares non-Extract rows, and
-requires at least four times fewer Extract callbacks for 3,000 files. It compares
-durable verification output and extracted bytes. The extraction control also
-compares content and offsets through the callback regression suite.
+The phase callback regressions interrupt each intermediate commit before and
+after apply, lose replies, resume through the retained timer, and compare durable
+output and exact index bytes against single-slice scheduling. Each phase also
+has a frozen-clock ceiling, shared-budget stop, and concurrent-restart test.
+The EmitIndex relay replay test interrupts the second slice after enqueue and
+before checkpoint, then proves that duplicate target puts match, AwaitDelivery
+waits on the newest sequence, and Usable completes. The duplicate-holder test
+proves that new relay sequences fold one protected intent into one holder.
+Existing tiny-pack and Extract callback tests retain their assertions.
 
-The callback tests inject interruption and lost replies at each new checkpoint,
-resume through the retained timer, and compare the final result. They also check
-the frozen-clock slice ceiling and a shared allowance that runs out mid-chain.
-Existing slice-step, chunk, elapsed-cutoff, concurrent-guard, and extraction
-regressions retain their assertions.
+The probe compares durable verification output, every object-index shard, and
+extracted bytes. Decode attribution is identical before and after, and every
+callback's charged calls stay within its configured allowance. The 3,000-file
+case requires at least four times fewer combined ClosureResolve and EmitIndex
+phase callbacks in both denial modes. The existing fourfold Extract assertion
+also remains. The original probe timeout stays unchanged.
 
 ## Before and after
 
-The baseline reproduces the single-slice callback scheduling at `b402c005` by
-setting `extract_chain_slices` to one. The after run uses eight. All other
-fixture settings match. Both runs fix the per-slice selection cap at 16; the
-suite's one-step stress mode does not redefine this measurement. Each changed
-cell shows before → after; a single value
-is unchanged. The three complete baseline reports live beside the probe in
-**verification_probe_data/** and are checked on every run.
+Before sets the three non-tiny durable-slice ceilings to one; after sets them
+to eight. The original Extract baseline remains available, so its existing
+selection improvement is visible too. Each cell shows before → after when it
+changes. Slices, committed output, extraction thresholds, and checks are
+unchanged. Committed applies include relay delivery and cleanup, whose grouping
+changes when several EmitIndex pages queue in one callback.
 
-For 3,000 files, Extract retains all 564 durable slices and 3,612 committed
-applies. Callbacks fall from 564 to 71 (7.94 times fewer). The model drops from
-56.3 seconds to 7.0 seconds, saving 49.3 seconds. The 500-file model saves
-8.3 seconds, from 9.4 seconds to 1.1 seconds. The extraction control saves
-one callback and 100 ms; its 117 warm rounds and extracted bytes are unchanged.
-Every non-Extract row and every encoded object-index row matches exactly.
+For 3,000 files in either denial mode, ClosureResolve plus EmitIndex phase
+callbacks fall from 81 to 12 (6.75 times fewer), and re-arms fall from 79 to 10.
+Their model falls from 11,620 ms to 3,640 ms. Some relay delivery shifts into
+AwaitDelivery: including that phase gives 11,880 ms → 4,200 ms, a net saving of
+7,680 ms. For 500 files, including AwaitDelivery gives 2,840 ms → 1,380 ms.
+The control's closure, emission, and delivery costs stay unchanged.
 
-Decode and EmitIndex remain useful separate targets: for 3,000 files, Decode
-uses 622 warm rounds and 20 callbacks (20.66 modeled seconds), while EmitIndex
-uses 124 rounds and 47 callbacks (8.32 modeled seconds). This change does not
-alter either stage.
+### 500 files of 27 bytes, denial on
 
-### 500 files of 27 bytes
+| Phase | Slices | Callbacks | Re-arms | Calls | Rounds | Applies | Modeled ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Decode | 4 | 4 | 4 | 1624 | 113 | 556 | 3790 |
+| ClosureResolve | 6 | 6 → 1 | 5 → 0 | 46 → 41 | 0 | 11 | 500 → 0 |
+| EmitIndex | 8 | 8 → 2 | 7 → 1 | 191 → 89 | 44 → 8 | 52 → 22 | 2020 → 340 |
+| AwaitDelivery | 2 | 2 | 2 | 25 → 49 | 4 → 28 | 6 → 18 | 320 → 1040 |
+| Extract | 95 | 95 → 12 | 94 → 11 | 5197 → 5114 | 0 | 604 | 9400 → 1100 |
+| Verify | 1 | 1 | 0 | 5 | 2 | 3 | 60 |
 
-| Stage | Slices | Callbacks | Re-arms | Storage calls | Serial rounds | Committed applies | Modeled ms | Stop reasons |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| Decode | 4 | 4 | 4 | 1624 | 113 | 556 | 3790 | {"slice:decode_boundary": 4} |
-| ClosureResolve | 6 | 6 | 5 | 46 | 0 | 11 | 500 | {"phase_boundary": 1, "slice:phase_incomplete": 5} |
-| EmitIndex | 8 | 8 | 7 | 191 | 44 | 52 | 2020 | {"phase_boundary": 1, "slice:phase_incomplete": 7} |
-| AwaitDelivery | 2 | 2 | 2 | 25 | 4 | 6 | 320 | {"slice:durable_boundary": 1, "slice:pending_or_error": 1} |
-| Extract | 95 | 95 → 12 | 94 → 11 | 5197 → 5114 | 0 | 604 | 9400 → 1100 | {"chain:no_progress": 1, "chain:steps": 94, "phase_boundary": 1, "slice:phase_incomplete": 94} |
-| Extract/scan | 32 | 32 → 4 | 31 → 3 | 2079 | 0 | 541 | 3100 → 300 | {"chain:steps": 31, "slice:phase_incomplete": 31, "step_boundary": 472} |
-| Extract/closure | 1 | 1 | 0 | 1 | 0 | 0 | 0 | {"step_boundary": 2} |
-| Extract/dependencies | 1 | 1 | 0 | 1 | 0 | 0 | 0 | {"step_boundary": 2} |
-| Extract/members | 1 | 1 | 0 | 1 | 0 | 0 | 0 | {"step_boundary": 2} |
-| Extract/head | 1 | 1 | 0 | 1 | 0 | 0 | 0 | {"step_boundary": 1} |
-| Extract/select | 33 | 33 → 5 | 32 → 4 | 1571 | 0 | 32 | 3200 → 400 | {"chain:steps": 32, "slice:phase_incomplete": 32, "step_boundary": 471} |
-| Extract/choose | 32 | 32 → 5 | 31 → 4 | 1067 | 0 | 31 | 3100 → 400 | {"chain:no_progress": 1, "chain:steps": 31, "slice:phase_incomplete": 31, "step_boundary": 471} |
-| Extract/preflight | 0 | 0 | 0 | 0 | 0 | 0 | 0 | {} |
-| Extract/start | 0 | 0 | 0 | 0 | 0 | 0 | 0 | {} |
-| Extract/upload | 0 | 0 | 0 | 0 | 0 | 0 | 0 | {} |
-| Extract/complete | 0 | 0 | 0 | 0 | 0 | 0 | 0 | {} |
-| Extract/offsets | 0 | 0 | 0 | 0 | 0 | 0 | 0 | {} |
-| Extract/enqueue | 0 | 0 | 0 | 0 | 0 | 0 | 0 | {} |
-| Extract/delivery | 0 | 0 | 0 | 0 | 0 | 0 | 0 | {} |
-| Verify | 1 | 1 | 0 | 5 | 2 | 3 | 60 | {"slice:terminal": 1} |
+### 500 files of 27 bytes, denial off
 
-### 3,000 files of 27 bytes
+| Phase | Slices | Callbacks | Re-arms | Calls | Rounds | Applies | Modeled ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Decode | 1 | 1 | 1 | 1095 | 77 | 547 | 2410 |
+| ClosureResolve | 6 | 6 → 1 | 5 → 0 | 46 → 41 | 0 | 11 | 500 → 0 |
+| EmitIndex | 8 | 8 → 2 | 7 → 1 | 191 → 89 | 44 → 8 | 52 → 22 | 2020 → 340 |
+| AwaitDelivery | 2 | 2 | 2 | 25 → 49 | 4 → 28 | 6 → 18 | 320 → 1040 |
+| Extract | 95 | 95 → 12 | 94 → 11 | 5197 → 5114 | 0 | 604 | 9400 → 1100 |
+| Verify | 1 | 1 | 0 | 5 | 2 | 3 | 60 |
 
-| Stage | Slices | Callbacks | Re-arms | Storage calls | Serial rounds | Committed applies | Modeled ms | Stop reasons |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| Decode | 20 | 20 | 20 | 9628 | 622 | 3295 | 20660 | {"slice:decode_boundary": 20} |
-| ClosureResolve | 34 | 34 | 33 | 270 | 0 | 67 | 3300 | {"phase_boundary": 1, "slice:phase_incomplete": 33} |
-| EmitIndex | 47 | 47 | 46 | 1051 | 124 | 248 | 8320 | {"phase_boundary": 1, "slice:phase_incomplete": 46} |
-| AwaitDelivery | 2 | 2 | 2 | 23 | 2 | 5 | 260 | {"slice:durable_boundary": 1, "slice:pending_or_error": 1} |
-| Extract | 564 | 564 → 71 | 563 → 70 | 31023 → 30530 | 0 | 3612 | 56300 → 7000 | {"chain:no_progress": 1, "chain:steps": 563, "phase_boundary": 1, "slice:phase_incomplete": 563} |
-| Extract/scan | 188 | 188 → 24 | 187 → 23 | 12432 | 0 | 3236 | 18700 → 2300 | {"chain:steps": 187, "slice:phase_incomplete": 187, "step_boundary": 2816} |
-| Extract/closure | 1 | 1 | 0 | 1 | 0 | 0 | 0 | {"step_boundary": 2} |
-| Extract/dependencies | 1 | 1 | 0 | 1 | 0 | 0 | 0 | {"step_boundary": 2} |
-| Extract/members | 2 | 2 → 1 | 1 → 0 | 3 | 0 | 1 | 100 → 0 | {"chain:steps": 1, "slice:phase_incomplete": 1, "step_boundary": 1} |
-| Extract/head | 1 | 1 | 0 | 1 | 0 | 0 | 0 | {"step_boundary": 1} |
-| Extract/select | 188 | 188 → 24 | 187 → 23 | 9383 | 0 | 187 | 18700 → 2300 | {"chain:steps": 187, "slice:phase_incomplete": 187, "step_boundary": 2816} |
-| Extract/choose | 189 | 189 → 25 | 188 → 24 | 6381 | 0 | 188 | 18800 → 2400 | {"chain:no_progress": 1, "chain:steps": 188, "slice:phase_incomplete": 188, "step_boundary": 2814} |
-| Extract/preflight | 0 | 0 | 0 | 0 | 0 | 0 | 0 | {} |
-| Extract/start | 0 | 0 | 0 | 0 | 0 | 0 | 0 | {} |
-| Extract/upload | 0 | 0 | 0 | 0 | 0 | 0 | 0 | {} |
-| Extract/complete | 0 | 0 | 0 | 0 | 0 | 0 | 0 | {} |
-| Extract/offsets | 0 | 0 | 0 | 0 | 0 | 0 | 0 | {} |
-| Extract/enqueue | 0 | 0 | 0 | 0 | 0 | 0 | 0 | {} |
-| Extract/delivery | 0 | 0 | 0 | 0 | 0 | 0 | 0 | {} |
-| Verify | 1 | 1 | 0 | 5 | 2 | 3 | 60 | {"slice:terminal": 1} |
+### 3,000 files of 27 bytes, denial on
 
-### Control: three files of 70,002 bytes
+| Phase | Slices | Callbacks | Re-arms | Calls | Rounds | Applies | Modeled ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Decode | 20 | 20 | 20 | 9628 | 622 | 3295 | 20660 |
+| ClosureResolve | 34 | 34 → 5 | 33 → 4 | 270 → 241 | 0 | 67 | 3300 → 400 |
+| EmitIndex | 47 | 47 → 7 | 46 → 6 | 1051 → 575 | 124 → 88 | 248 → 150 | 8320 → 3240 |
+| AwaitDelivery | 2 | 2 | 2 | 23 → 33 | 2 → 12 | 5 → 10 | 260 → 560 |
+| Extract | 564 | 564 → 71 | 563 → 70 | 31023 → 30530 | 0 | 3612 | 56300 → 7000 |
+| Verify | 1 | 1 | 0 | 5 | 2 | 3 | 60 |
 
-| Stage | Slices | Callbacks | Re-arms | Storage calls | Serial rounds | Committed applies | Modeled ms | Stop reasons |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| Decode | 4 | 4 | 4 | 76 | 29 | 25 | 1270 | {"slice:decode_boundary": 4} |
-| ClosureResolve | 1 | 1 | 0 | 6 | 0 | 1 | 0 | {"phase_boundary": 1} |
-| EmitIndex | 1 | 1 | 0 | 9 | 2 | 3 | 60 | {"phase_boundary": 1} |
-| AwaitDelivery | 2 | 2 | 2 | 31 | 10 | 9 | 500 | {"slice:durable_boundary": 1, "slice:pending_or_error": 1} |
-| Extract | 23 | 23 → 22 | 22 → 21 | 438 → 437 | 117 | 70 | 5710 → 5610 | {"chain:effect_stage": 21, "chain:no_progress": 1, "chain:steps": 1, "phase_boundary": 1, "slice:phase_incomplete": 22} |
-| Extract/scan | 1 | 1 | 0 | 22 | 0 | 6 | 0 | {"step_boundary": 6} |
-| Extract/closure | 1 | 1 | 0 | 1 | 0 | 0 | 0 | {"step_boundary": 2} |
-| Extract/dependencies | 1 | 1 | 0 | 1 | 0 | 0 | 0 | {"step_boundary": 2} |
-| Extract/members | 1 | 1 | 0 | 1 | 0 | 0 | 0 | {"step_boundary": 2} |
-| Extract/head | 1 | 1 | 0 | 1 | 0 | 0 | 0 | {"step_boundary": 1} |
-| Extract/select | 2 | 2 → 1 | 1 → 0 | 24 | 0 | 4 | 100 → 0 | {"chain:steps": 1, "slice:phase_incomplete": 1, "step_boundary": 5} |
-| Extract/choose | 4 | 4 | 3 | 17 | 0 | 3 | 300 | {"chain:effect_stage": 3, "chain:no_progress": 1, "slice:phase_incomplete": 3, "step_boundary": 2} |
-| Extract/preflight | 6 | 6 | 6 | 93 | 42 | 21 | 1860 | {"chain:effect_stage": 6, "slice:phase_incomplete": 6} |
-| Extract/start | 3 | 3 | 3 | 24 | 15 | 6 | 750 | {"chain:effect_stage": 3, "slice:phase_incomplete": 3} |
-| Extract/upload | 0 | 0 | 0 | 0 | 0 | 0 | 0 | {} |
-| Extract/complete | 3 | 3 | 3 | 39 | 24 | 6 | 1020 | {"chain:effect_stage": 3, "slice:phase_incomplete": 3} |
-| Extract/offsets | 3 | 3 | 3 | 30 | 15 | 6 | 750 | {"chain:effect_stage": 3, "slice:phase_incomplete": 3} |
-| Extract/enqueue | 3 | 3 | 3 | 30 | 15 | 6 | 750 | {"chain:effect_stage": 3, "slice:phase_incomplete": 3} |
-| Extract/delivery | 3 | 3 | 0 | 9 | 0 | 3 | 0 | {"step_boundary": 3} |
-| Verify | 1 | 1 | 0 | 5 | 2 | 3 | 60 | {"slice:terminal": 1} |
+### 3,000 files of 27 bytes, denial off
+
+| Phase | Slices | Callbacks | Re-arms | Calls | Rounds | Applies | Modeled ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Decode | 4 | 4 | 4 | 6480 | 407 | 3246 | 12610 |
+| ClosureResolve | 34 | 34 → 5 | 33 → 4 | 270 → 241 | 0 | 67 | 3300 → 400 |
+| EmitIndex | 47 | 47 → 7 | 46 → 6 | 1051 → 575 | 124 → 88 | 248 → 150 | 8320 → 3240 |
+| AwaitDelivery | 2 | 2 | 2 | 23 → 33 | 2 → 12 | 5 → 10 | 260 → 560 |
+| Extract | 564 | 564 → 71 | 563 → 70 | 31023 → 30530 | 0 | 3612 | 56300 → 7000 |
+| Verify | 1 | 1 | 0 | 5 | 2 | 3 | 60 |
+
+### Control: three files of 70,002 bytes, denial on
+
+| Phase | Slices | Callbacks | Re-arms | Calls | Rounds | Applies | Modeled ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Decode | 4 | 4 | 4 | 76 | 29 | 25 | 1270 |
+| ClosureResolve | 1 | 1 | 0 | 6 | 0 | 1 | 0 |
+| EmitIndex | 1 | 1 | 0 | 9 | 2 | 3 | 60 |
+| AwaitDelivery | 2 | 2 | 2 | 31 | 10 | 9 | 500 |
+| Extract | 23 | 23 → 22 | 22 → 21 | 438 → 437 | 117 | 70 | 5710 → 5610 |
+| Verify | 1 | 1 | 0 | 5 | 2 | 3 | 60 |
+
+### Control: three files of 70,002 bytes, denial off
+
+| Phase | Slices | Callbacks | Re-arms | Calls | Rounds | Applies | Modeled ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Decode | 4 | 4 | 4 | 71 | 25 | 25 | 1150 |
+| ClosureResolve | 1 | 1 | 0 | 6 | 0 | 1 | 0 |
+| EmitIndex | 1 | 1 | 0 | 9 | 2 | 3 | 60 |
+| AwaitDelivery | 2 | 2 | 2 | 31 | 10 | 9 | 500 |
+| Extract | 23 | 23 → 22 | 22 → 21 | 432 → 431 | 111 | 70 | 5530 → 5430 |
+| Verify | 1 | 1 | 0 | 5 | 2 | 3 | 60 |
+
+## Decode attribution and deferred reduction
+
+The following calls and rounds are unchanged by chaining. Nested test-only
+scopes attribute every Decode call exactly once; each table sums to its Decode
+row above. Frame reads include local frame metadata and pack-window/etag reads.
+Writes cover buffered row flushes. Checkpoint includes per-entry row-and-cursor applies, checkpoint loads, ticket
+and attempt guards, Pending-state writes, and final rescheduling overhead.
+The denial/holder bucket includes admission denial checks and external-base
+holder resolution; these fixtures need no external bases.
+
+| Files | Denial | Sub-step | Calls | Rounds |
+| --- | --- | --- | ---: | ---: |
+| 500 | on | inventory | 76 | 76 |
+| 500 | on | denial/holder | 502 | 33 |
+| 500 | on | frames | 510 | 4 |
+| 500 | on | writes | 5 | 0 |
+| 500 | on | checkpoint | 531 | 0 |
+| 500 | off | inventory | 76 | 76 |
+| 500 | off | denial/holder | 0 | 0 |
+| 500 | off | frames | 504 | 1 |
+| 500 | off | writes | 5 | 0 |
+| 500 | off | checkpoint | 510 | 0 |
+| 3000 | on | inventory | 402 | 402 |
+| 3000 | on | denial/holder | 3002 | 197 |
+| 3000 | on | frames | 3048 | 23 |
+| 3000 | on | writes | 33 | 0 |
+| 3000 | on | checkpoint | 3143 | 0 |
+| 3000 | off | inventory | 400 | 400 |
+| 3000 | off | denial/holder | 0 | 0 |
+| 3000 | off | frames | 3016 | 7 |
+| 3000 | off | writes | 33 | 0 |
+| 3000 | off | checkpoint | 3031 | 0 |
+| control | on | inventory | 18 | 18 |
+| control | on | denial/holder | 5 | 4 |
+| control | on | frames | 19 | 7 |
+| control | on | writes | 0 | 0 |
+| control | on | checkpoint | 34 | 0 |
+| control | off | inventory | 18 | 18 |
+| control | off | denial/holder | 0 | 0 |
+| control | off | frames | 19 | 7 |
+| control | off | writes | 0 | 0 |
+| control | off | checkpoint | 34 | 0 |
+
+No Decode algorithm changes. For 3,000 files with denial on, inventory accounts
+for 402 of 622 rounds and denial for 197. Without denial, inventory accounts for
+400 of 407 rounds. Inventory already reads the pack head and up to 16 independent
+entries in one `get_many`, then commits a guarded apply. The apply depends on
+that read, and denial must follow staging. Denial already overlaps independent
+object reads in waves of up to 16.
+
+A contained follow-up could group same-partition denial reads within an admitted
+batch. It must retain all object/action/holder checks after staging and preserve
+input-order failure handling. These waves already consume one modeled round per
+16 objects; grouping collisions predicts zero warm-round savings for a full wave,
+although it can reduce calls and occasionally a callback. No positive round
+saving is established, so this change is deferred. Risks include short batch
+replies, different failure precedence, and accidentally reading denial before
+the staging commit. Reducing inventory's two dependent rounds would require a
+separate staging design and a guard/freshness audit, outside this change.
+
+## Charged remote calls per callback
+
+These are verification-handler budget debits, grouped by the phase at callback
+entry, not the storage-call totals above. Local outbox commits do not debit the
+remote allowance. Relay delivery has its own existing allowance. All measured
+callbacks assert at most 256 debits; the direct-emission stress regression also
+spends denial calls until the continuation reserve stops the chain.
+
+| Files | Denial | Entry phase | Before calls per callback (count) | After calls per callback (count) |
+| --- | --- | --- | --- | --- |
+| 500 | on | ClosureResolve | 0 (5), 2 (1) | 2 (1) |
+| 500 | on | EmitIndex | 0 (7) | 0 (1) |
+| 500 | on | Decode | 1 (1), 193 (2), 195 (1) | 1 (1), 193 (2), 195 (1) |
+| 500 | off | ClosureResolve | 0 (5), 2 (1) | 2 (1) |
+| 500 | off | EmitIndex | 0 (7) | 0 (1) |
+| 500 | off | Decode | 77 (1) | 77 (1) |
+| 3000 | on | ClosureResolve | 0 (33), 2 (1) | 0 (4), 2 (1) |
+| 3000 | on | EmitIndex | 0 (46) | 0 (6) |
+| 3000 | on | Decode | 8 (1), 39 (1), 99 (1), 193 (17) | 8 (1), 39 (1), 99 (1), 193 (17) |
+| 3000 | off | ClosureResolve | 0 (33), 2 (1) | 0 (4), 2 (1) |
+| 3000 | off | EmitIndex | 0 (46) | 0 (6) |
+| 3000 | off | Decode | 7 (1), 16 (1), 191 (1), 193 (1) | 7 (1), 16 (1), 191 (1), 193 (1) |
+| control | on | ClosureResolve | 2 (1) | 2 (1) |
+| control | on | EmitIndex | none | none |
+| control | on | Decode | 5 (3), 15 (1) | 5 (3), 15 (1) |
+| control | off | ClosureResolve | 2 (1) | 2 (1) |
+| control | off | EmitIndex | none | none |
+| control | off | Decode | 4 (3), 13 (1) | 4 (3), 13 (1) |

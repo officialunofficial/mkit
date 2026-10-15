@@ -57,6 +57,14 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Changed
 
+- Performance: ClosureResolve and EmitIndex outside the tiny-pack path share
+  up to eight durable slices per callback, with the original timer and job guards and
+  shared call and time limits. The additive
+  `SliceLimits::with_closure_chain_slices(1)` and `with_emit_chain_slices(1)`
+  settings restore single-slice callbacks for each phase.
+  Verification probes now cover takedown denial on and off and attribute
+  Decode storage work by sub-step. No wire or stored-format change; no wipe.
+
 - Additive `ForkEnv::from_config` and `ForkTimer::from_config` constructors share
   fork proof settings with `PipelineConfig`; the pipeline and configured Worker
   timer use them. Existing fields and low-level registration remain available.

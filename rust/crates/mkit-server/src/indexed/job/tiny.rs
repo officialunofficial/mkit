@@ -27,19 +27,23 @@ where
                 .is_some_and(|deadline| now >= deadline)
     }
 
-    // Selection callbacks reuse the tiny-pack driver's timer fencing and
-    // checkpoint protocol. Their independent ceiling cannot increase the
-    // original tiny-pack ceiling, and neither path refreshes the call budget.
+    // Phase callbacks reuse the tiny-pack driver's timer fencing and
+    // checkpoint protocol. Independent ceilings cannot increase the original
+    // tiny-pack ceiling, and no path refreshes the call budget.
     pub(super) async fn tiny_slices(&self, timer: &DueTimer) -> Result<Fired, StoreError> {
         let started = now_ms(self.h.clock.as_ref());
         let tiny_ceiling = self.h.limits.tiny_chain_slices.clamp(1, MAX_SLICES);
         let selection_ceiling = self.h.limits.extract_chain_slices.clamp(1, MAX_SLICES);
-        let ceiling = tiny_ceiling.max(selection_ceiling);
+        let closure_ceiling = self.h.limits.closure_chain_slices.clamp(1, MAX_SLICES);
+        let emit_ceiling = self.h.limits.emit_chain_slices.clamp(1, MAX_SLICES);
+        let ceiling = tiny_ceiling
+            .max(selection_ceiling)
+            .max(closure_ceiling.max(emit_ceiling));
         let key = keys::timer(timer.due_at_ms, timer.kind.get(), &timer.reference);
-        let mut selection_only = false;
+        let mut chain_only = None;
         for slice in 1..=ceiling {
             let mut local_closure = false;
-            let mut local_selection = false;
+            let mut local_chain = None;
             // Later durable boundaries refresh phase time while retaining the
             // same call allowance and physical deadline.
             let resumed = (slice > 1).then(|| Run {
@@ -49,12 +53,7 @@ where
             });
             let run = resumed.as_ref().unwrap_or(self);
             let fired = run
-                .slice(
-                    timer,
-                    &mut local_closure,
-                    &mut local_selection,
-                    selection_only,
-                )
+                .slice(timer, &mut local_closure, &mut local_chain, chain_only)
                 .await?;
             if slice == ceiling {
                 return Ok(fired);
@@ -74,16 +73,19 @@ where
                 NEXT_SLICE_CALLS
             };
             let now = now_ms(self.h.clock.as_ref()).max(self.now);
-            let selection = local_selection
-                && !job.tiny()
-                && job.phase == super::Phase::Extract
-                && job
-                    .extraction
-                    .as_ref()
-                    .is_some_and(|x| super::extraction::chains(x.stage))
-                && slice < selection_ceiling;
+            let selection = job
+                .extraction
+                .as_ref()
+                .is_some_and(|x| super::extraction::chains(x.stage));
+            let phase_ceiling = match job.phase {
+                super::Phase::ClosureResolve => closure_ceiling,
+                super::Phase::EmitIndex => emit_ceiling,
+                super::Phase::Extract if selection => selection_ceiling,
+                _ => 0,
+            };
+            let phase = !job.tiny() && local_chain == Some(job.phase) && slice < phase_ceiling;
             let tiny = slice < tiny_ceiling && tiny_continuation(&job, &self.pack);
-            if (!selection && !tiny)
+            if (!phase && !tiny)
                 || job.usable()
                 || *due_at_ms > now.saturating_add(1)
                 || self.budget.remaining() < required_calls
@@ -91,7 +93,7 @@ where
             {
                 return Ok(fired);
             }
-            selection_only = selection && !tiny;
+            chain_only = if tiny { None } else { Some(job.phase) };
             // Infrastructure retry keys retain an earlier logical due time.
             // Only the original timer row can fence intermediate checkpoints.
             if self.local.get(self.source, &key).await?.as_ref() != Some(&timer.value) {
