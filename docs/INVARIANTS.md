@@ -160,8 +160,7 @@ limit. The waves introduce no durable state or restart step.
 **Always:** tiny decoded packs share one handler's call allowance across at most
 eight slices. Canonical packlists qualify by their 256-byte encoded-size bound;
 ordinary packs require one to three frames and at most 16 KiB of encoded, decoded,
-and external-base data. Actual extraction and larger groups keep their separate
-slices. Each intermediate checkpoint atomically guards the job, verification
+and external-base data. Effectful extraction keeps its separate slices. Each intermediate checkpoint atomically guards the job, verification
 state, and original timer before the next slice begins. The original timer remains
 until the final guarded reschedule; retries with a different physical timer key
 retain single-slice scheduling. The physical tick's elapsed deadline, a two-second
@@ -181,6 +180,28 @@ allowance.
 
 **Enforced by:** `indexed::job::tiny`, `timers::inline_relay`, and the tiny-slice
 fault, delivery, backlog, and physical-budget tests.
+
+## Consecutive Extract selection slices preserve durable recovery
+
+**Always:** an Extract callback outside the tiny-pack path runs at most eight
+durable selection slices,
+sharing the existing call allowance, a two-second elapsed cutoff and the physical
+tick deadline. Both ends of an intermediate slice must remain selection stages. Each next
+slice checks its freshly read phase before work, so a concurrent restart or
+advance cannot run another phase inside the selection callback.
+Every intermediate checkpoint guards the original timer and job; the original
+timer remains runnable after a crash or lost reply. Each slice repeats all source
+and denial checks. Each slice retains its 16-step and batch-operation ceilings,
+so a frozen clock permits at most 128 selection steps per callback.
+
+**Because:** local selection should not require a physical alarm for every small
+checkpoint, and sharing a callback must not refresh its resource allowance.
+
+**If violated:** work could lose its timer after a crash, bypass a fresh guard,
+or starve other timers with unbounded synchronous work.
+
+**Enforced by:** `indexed::job::tiny` and the Extract callback crash, budget,
+output-parity and pipeline-probe regressions. No stored-format change.
 
 ## Chained Extract selection preserves guarded slice boundaries
 

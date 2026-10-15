@@ -27,6 +27,19 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 # can render failure annotations inline on PR diffs.
 path = "junit.xml"
 
+# The verification probe drives 500- and 3,000-file before/after packs and
+# an extraction control. It exceeded 60 s on a loaded host; retain every
+# fixture and assertion with a bounded envelope for this new probe alone.
+[[profile.default.overrides]]
+filter = 'package(mkit-server) and test(=indexed::job_tests::extraction_tests::verification_probe::verification_pipeline_round_probe)'
+threads-required = "num-test-threads"
+slow-timeout = { period = "180s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = 'package(mkit-server) and test(=indexed::job_tests::extraction_tests::verification_probe::verification_pipeline_round_probe)'
+threads-required = "num-test-threads"
+slow-timeout = { period = "180s", terminate-after = 1 }
+
 # The 3,000-object scheduled latency comparison drives over 9,000 modeled
 # alarm slices in its one-step baseline. Keep the full regression in both
 # profiles with a ceiling that covers the measured ~235 s debug run.

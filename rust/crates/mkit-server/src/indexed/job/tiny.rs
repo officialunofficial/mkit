@@ -5,7 +5,7 @@ use super::{
     PackWindows, Precondition, Run, SliceExtension, StoreError, keys, now_ms,
 };
 
-use super::checkpoint::{TINY_ENTRIES, TINY_PACK_BYTES, TINY_PACKLIST_BYTES};
+use super::checkpoint::{TINY_ENTRIES, TINY_PACK_BYTES, TINY_PACKLIST_BYTES, VerifyJobV1};
 
 const MAX_SLICES: u32 = 8;
 const MAX_ELAPSED_MS: u64 = 2_000;
@@ -27,24 +27,35 @@ where
                 .is_some_and(|deadline| now >= deadline)
     }
 
+    // Selection callbacks reuse the tiny-pack driver's timer fencing and
+    // checkpoint protocol. Their independent ceiling cannot increase the
+    // original tiny-pack ceiling, and neither path refreshes the call budget.
     pub(super) async fn tiny_slices(&self, timer: &DueTimer) -> Result<Fired, StoreError> {
         let started = now_ms(self.h.clock.as_ref());
-        let ceiling = self.h.limits.tiny_chain_slices.clamp(1, MAX_SLICES);
+        let tiny_ceiling = self.h.limits.tiny_chain_slices.clamp(1, MAX_SLICES);
+        let selection_ceiling = self.h.limits.extract_chain_slices.clamp(1, MAX_SLICES);
+        let ceiling = tiny_ceiling.max(selection_ceiling);
         let key = keys::timer(timer.due_at_ms, timer.kind.get(), &timer.reference);
+        let mut selection_only = false;
         for slice in 1..=ceiling {
             let mut local_closure = false;
-            let fired = if slice == 1 {
-                self.slice(timer, &mut local_closure).await?
-            } else {
-                // Each durable boundary starts a fresh phase-time observation,
-                // retaining the same call allowance and physical deadline.
-                let run = Run {
-                    repo: self.repo.clone(),
-                    now: now_ms(self.h.clock.as_ref()).max(self.now),
-                    ..*self
-                };
-                run.slice(timer, &mut local_closure).await?
-            };
+            let mut local_selection = false;
+            // Later durable boundaries refresh phase time while retaining the
+            // same call allowance and physical deadline.
+            let resumed = (slice > 1).then(|| Run {
+                repo: self.repo.clone(),
+                now: now_ms(self.h.clock.as_ref()).max(self.now),
+                ..*self
+            });
+            let run = resumed.as_ref().unwrap_or(self);
+            let fired = run
+                .slice(
+                    timer,
+                    &mut local_closure,
+                    &mut local_selection,
+                    selection_only,
+                )
+                .await?;
             if slice == ceiling {
                 return Ok(fired);
             }
@@ -63,25 +74,24 @@ where
                 NEXT_SLICE_CALLS
             };
             let now = now_ms(self.h.clock.as_ref()).max(self.now);
-            if !job.tiny()
+            let selection = local_selection
+                && !job.tiny()
+                && job.phase == super::Phase::Extract
+                && job
+                    .extraction
+                    .as_ref()
+                    .is_some_and(|x| super::extraction::chains(x.stage))
+                && slice < selection_ceiling;
+            let tiny = slice < tiny_ceiling && tiny_continuation(&job, &self.pack);
+            if (!selection && !tiny)
                 || job.usable()
-                || job.extract_needed
-                || job.owed > TINY_ENTRIES
-                || job.extraction_group.len() > 2
-                || job
-                    .extraction_group
-                    .iter()
-                    .any(|member| member.bytes > TINY_PACK_BYTES)
-                || (job.kind != Kind::Packlist
-                    && job.extraction_group.iter().any(|member| {
-                        member.pack != self.pack && member.bytes > TINY_PACKLIST_BYTES
-                    }))
                 || *due_at_ms > now.saturating_add(1)
                 || self.budget.remaining() < required_calls
                 || self.elapsed_cutoff(started)
             {
                 return Ok(fired);
             }
+            selection_only = selection && !tiny;
             // Infrastructure retry keys retain an earlier logical due time.
             // Only the original timer row can fence intermediate checkpoints.
             if self.local.get(self.source, &key).await?.as_ref() != Some(&timer.value) {
@@ -123,4 +133,20 @@ where
         }
         unreachable!()
     }
+}
+
+fn tiny_continuation(job: &VerifyJobV1, pack: &super::Hash) -> bool {
+    job.tiny()
+        && !job.extract_needed
+        && job.owed <= TINY_ENTRIES
+        && job.extraction_group.len() <= 2
+        && job
+            .extraction_group
+            .iter()
+            .all(|member| member.bytes <= TINY_PACK_BYTES)
+        && (job.kind == Kind::Packlist
+            || job
+                .extraction_group
+                .iter()
+                .all(|member| member.pack == *pack || member.bytes <= TINY_PACKLIST_BYTES))
 }

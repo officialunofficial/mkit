@@ -5,6 +5,9 @@ mod extraction_chain_tests;
 mod extraction_count_tests;
 #[path = "member_lookup_tests.rs"]
 mod member_lookup_tests;
+#[cfg(feature = "perf-metrics")]
+#[path = "job_tests/verification_probe.rs"]
+mod verification_probe;
 use super::*;
 use crate::indexed::budget::SliceBudget;
 use crate::indexed::job::SliceExtension;
@@ -1610,3 +1613,6 @@ fn denial_off_still_extracts_chunked_content_and_writes_holders_and_inventory() 
         "holder encoding is independent of denial mode"
     );
 }
+
+#[path = "job_tests/extract_callbacks.rs"]
+mod extract_callbacks;

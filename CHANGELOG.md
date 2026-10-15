@@ -63,6 +63,12 @@ collect the applicable entries between their old and new immutable pins.
   The operations runbook now covers backfill, draining forks, and the permanent
   4,096-item publication limit when enabling takedown denial after running with
   it off. No behavior, wire or stored-format change; no wipe.
+- Performance: Extract local selection outside the tiny-pack path can share up
+  to eight durably committed slices per alarm callback, retaining the existing
+  call, time, step and batch
+  limits and fresh checks at every checkpoint. Use the additive
+  `SliceLimits::with_extract_chain_slices(1)` setting for single-slice callbacks.
+  No wire or stored-format change; no wipe.
 
 - [embedder: breaking API] Typed embedding reads now classify errors. Corrupt
   or contradictory stored rows fail as permanent `internal`; malformed replies

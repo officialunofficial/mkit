@@ -1464,6 +1464,8 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
         job: &mut VerifyJobV1,
         x: &mut ExtractionV1,
     ) -> Result<(), Stop> {
+        #[cfg(test)]
+        tracing::trace!(event = "verification_probe_extract", stage = x.stage);
         match x.stage {
             SCAN => self.scan_group(st, x).await,
             CLOSURE | DEPENDENCIES => self.closure_rows(st, x).await,
@@ -1533,8 +1535,9 @@ const CHAIN_MIN_CALLS: u32 = super::ENTRY_RESERVE;
 // ceiling bounds the work even when the elapsed-time check cannot advance.
 const CHAIN_MAX_STEPS: u32 = 16;
 /// Guards plus settled writes a chained slice may carry, after the next step.
-/// The commit adds at most five more (deadline, job, state, header, body), so
-/// the batch stays within `MAX_BATCH_OPS` (100).
+/// The commit adds at most five more (deadline, job, state, header, body).
+/// Intermediate timer fencing adds one; final rescheduling adds four. Both
+/// stay within `MAX_BATCH_OPS` (100).
 const CHAIN_MAX_OPS: usize = 80;
 /// Business-clock milliseconds one chained slice may run.
 const CHAIN_MAX_MS: u64 = 2_000;
@@ -1575,7 +1578,7 @@ fn may_chain_chunks(
 
 /// Only selection stages without external effects chain; every stage with a durable
 /// external effect (upload, completion, holders, delivery) ends the slice.
-fn chains(stage: u8) -> bool {
+pub(super) fn chains(stage: u8) -> bool {
     matches!(
         stage,
         SCAN | CLOSURE | DEPENDENCIES | MEMBERS | HEAD | SELECT | CHOOSE
@@ -1583,13 +1586,19 @@ fn chains(stage: u8) -> bool {
 }
 /// Most guards plus settled writes one step of `stage` adds. A head
 /// reconstruction deletes up to one part of member-byte fragments.
-fn step_ops(stage: u8) -> usize {
+const fn step_ops(stage: u8) -> usize {
     if stage == HEAD { 70 } else { 4 }
 }
 
-// A chained slice's one commit stays within the apply limits: the cap, the
-// widest single step (a head reconstruction) and the five fixed operations.
-const _: () = assert!(CHAIN_MAX_OPS + 5 <= crate::store::MAX_BATCH_OPS);
+// Chained steps fit the cap plus checkpoint and final timer operations.
+// The unconditional first HEAD step can exceed the chaining cap: at most
+// three guards per other source plus 70 reconstruction operations. Intermediate
+// timer fencing needs only one operation, fewer than the final reschedule's four.
+const _: () = assert!(CHAIN_MAX_OPS + 5 + 4 <= crate::store::MAX_BATCH_OPS);
+const _: () = assert!(
+    (crate::store::outbox::MAX_TICKETS_PER_ADVANCE - 1) * 3 + step_ops(HEAD) + 5 + 4
+        <= crate::store::MAX_BATCH_OPS
+);
 
 #[cfg(all(test, feature = "memory"))]
 impl<R: NamespaceStore, B: BlobStore, W: PackWindows, X: SliceExtension>
