@@ -15,8 +15,8 @@
 use super::{
     IndexedConfig,
     checkpoint::{
-        ExtractionGroupMember, Kind, Outcome, VerifyJobV1, decode_frame, hydrate_job,
-        timer_reference, write_job,
+        ExtractionGroupMember, Kind, Outcome, VerifyJobV1, apply_member_body, decode_frame,
+        member_key, timer_reference, write_job,
     },
     resolve,
     state::VerificationV1,
@@ -27,8 +27,8 @@ use crate::pipeline::ShardMap;
 use crate::repo::RepoId;
 use crate::rt::Clock;
 use crate::store::{
-    Batch, BatchOutcome, BlobStore, Cursor, NamespaceStore, Partition, Precondition, Value,
-    codec::TicketV1, index::MAX_LOOKUP_IDS, keys, read,
+    Batch, BatchOutcome, BlobStore, Cursor, Key, NamespaceStore, Partition, Precondition,
+    RangeScan, ScanPage, Value, codec::TicketV1, index::MAX_LOOKUP_IDS, keys, read,
 };
 use crate::telemetry::Metrics;
 use crate::timers::registry::kinds;
@@ -193,45 +193,35 @@ struct Consumed<'a> {
 
 /// A new Advance may release a failed group only before extraction effects.
 /// The exact failed observation is included in the replacement transaction.
-async fn failed_group<N: NamespaceStore>(
-    store: &N,
-    source: &Partition,
+/// `members` holds each member's (ticket, `vs`, job) row, already fetched by
+/// [`member_rows`]; member order matches `job.extraction_group`.
+fn failed_group(
     repo: &RepoId,
     job: &VerifyJobV1,
+    members: &[[Option<Value>; 3]],
 ) -> Result<Option<Precondition>, ServerError> {
-    for member in &job.extraction_group {
+    for (member, [ticket_row, state_row, job_row]) in job.extraction_group.iter().zip(members) {
         let ticket = keys::ticket(&member.ticket);
-        if store
-            .get(source, &ticket)
-            .await
-            .map_err(|_| storage_failed())?
-            .is_none()
-        {
+        if ticket_row.is_none() {
             return Ok(Some(Precondition::Absent(ticket)));
         }
         let state = keys::verification(&repo.name, &member.pack);
-        if let Some(raw) = store
-            .get(source, &state)
-            .await
-            .map_err(|_| storage_failed())?
+        if let Some(raw) = state_row
             && matches!(
-                super::state::decode(&raw).map_err(|_| storage_failed())?,
+                super::state::decode(raw).map_err(|_| storage_failed())?,
                 VerificationV1::Rejected { .. }
             )
         {
-            return Ok(Some(Precondition::Equals(state, raw)));
+            return Ok(Some(Precondition::Equals(state, raw.clone())));
         }
         let key = keys::verify_job(&repo.name, &member.pack);
-        if let Some(raw) = store
-            .get(source, &key)
-            .await
-            .map_err(|_| storage_failed())?
+        if let Some(raw) = job_row
             && {
-                let peer = super::checkpoint::decode_job(&raw).map_err(|_| storage_failed())?;
+                let peer = super::checkpoint::decode_job(raw).map_err(|_| storage_failed())?;
                 peer.gone || peer.outcome.is_some()
             }
         {
-            return Ok(Some(Precondition::Equals(key, raw)));
+            return Ok(Some(Precondition::Equals(key, raw.clone())));
         }
     }
     Ok(None)
@@ -239,33 +229,114 @@ async fn failed_group<N: NamespaceStore>(
 
 /// A finished source remains pinned while an older group uses its facts.
 /// Guard every finished peer before changing that source's retention group.
-async fn finished_peers<N: NamespaceStore>(
-    store: &N,
-    source: &Partition,
+fn finished_peers(
     repo: &RepoId,
     job: &VerifyJobV1,
+    members: &[[Option<Value>; 3]],
 ) -> Result<Vec<Precondition>, ServerError> {
     let mut guards = Vec::new();
-    for member in &job.extraction_group {
+    for (member, [_, _, job_row]) in job.extraction_group.iter().zip(members) {
         if member.ticket == job.ticket_id {
             continue;
         }
         let key = keys::verify_job(&repo.name, &member.pack);
-        let raw = store
-            .get(source, &key)
-            .await
-            .map_err(|_| storage_failed())?;
-        if let Some(raw) = raw {
-            let peer = super::checkpoint::decode_job(&raw).map_err(|_| storage_failed())?;
+        if let Some(raw) = job_row {
+            let peer = super::checkpoint::decode_job(raw).map_err(|_| storage_failed())?;
             if !peer.gone && !peer.usable() && peer.outcome.is_none() {
                 return Err(super::pending(1_000));
             }
-            guards.push(Precondition::Equals(key, raw));
+            guards.push(Precondition::Equals(key, raw.clone()));
         } else {
             guards.push(Precondition::Absent(key));
         }
     }
     Ok(guards)
+}
+
+/// Every extraction-group member row the claim checks read, in one call: each
+/// member's ticket plus, for members whose pack is not itself consumed here,
+/// the `vs` and job rows (`rows` already fetched those for consumed packs).
+/// Entry `(i, m)` is member `m` of `jobs[i]` as (ticket, `vs`, job).
+async fn member_rows<N: NamespaceStore>(
+    store: &N,
+    source: &Partition,
+    repo: &RepoId,
+    tickets: &[TicketV1],
+    rows: &[Option<Value>],
+    jobs: &[Option<VerifyJobV1>],
+    needs: &[bool],
+) -> Result<Vec<Vec<[Option<Value>; 3]>>, ServerError> {
+    let mut wanted = Vec::new();
+    let mut back = Vec::new();
+    for (i, job) in jobs.iter().enumerate() {
+        let Some(job) = job.as_ref().filter(|_| needs[i]) else {
+            continue;
+        };
+        for (m, member) in job.extraction_group.iter().enumerate() {
+            wanted.push(keys::ticket(&member.ticket));
+            back.push((i, m, 0));
+            if tickets.iter().all(|t| t.pack_id != member.pack) {
+                wanted.push(keys::verification(&repo.name, &member.pack));
+                back.push((i, m, 1));
+                wanted.push(keys::verify_job(&repo.name, &member.pack));
+                back.push((i, m, 2));
+            }
+        }
+    }
+    let mut out: Vec<Vec<[Option<Value>; 3]>> = jobs
+        .iter()
+        .map(|job| {
+            vec![[None, None, None]; job.as_ref().map_or(0, |job| job.extraction_group.len())]
+        })
+        .collect();
+    if !wanted.is_empty() {
+        let fetched = store
+            .get_many(source, &wanted)
+            .await
+            .map_err(|_| storage_failed())?;
+        if fetched.len() != wanted.len() {
+            return Err(storage_failed());
+        }
+        for ((i, m, slot), row) in back.into_iter().zip(fetched) {
+            out[i][m][slot] = row;
+        }
+    }
+    for (i, job) in jobs.iter().enumerate() {
+        let Some(job) = job.as_ref().filter(|_| needs[i]) else {
+            continue;
+        };
+        for (m, member) in job.extraction_group.iter().enumerate() {
+            if let Some(c) = tickets.iter().position(|t| t.pack_id == member.pack) {
+                out[i][m][1].clone_from(&rows[2 * c + 1]);
+                out[i][m][2].clone_from(&rows[2 * c]);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The first page of every `ranges` in as few calls as the backend permits. A
+/// store may answer a prefix of a `scan_many` request; the unserved rest is
+/// re-requested until every range has a page.
+async fn first_pages<N: NamespaceStore>(
+    store: &N,
+    source: &Partition,
+    ranges: &[RangeScan],
+) -> Result<Vec<ScanPage>, ServerError> {
+    let mut pages = Vec::with_capacity(ranges.len());
+    let mut rest = ranges;
+    while !rest.is_empty() {
+        let served = store
+            .scan_many(source, rest)
+            .await
+            .map_err(|_| storage_failed())?;
+        if served.is_empty() || served.len() > rest.len() {
+            return Err(storage_failed());
+        }
+        rest = &rest[served.len()..];
+        pages.extend(served);
+    }
+    Ok(pages)
 }
 
 /// Claim every new member together. Waiting on a foreign unfinished group
@@ -338,6 +409,63 @@ async fn claim_extraction_group<N: NamespaceStore>(
             })
             })
             .collect::<Vec<_>>();
+    // Whether each live job's group changed and predates extraction effects,
+    // hoisted so the member-row fetch below can tell which jobs check peers.
+    let marks: Vec<(bool, bool)> = jobs
+        .iter()
+        .map(|job| {
+            let Some(job) = job.as_ref().filter(|job| !job.gone) else {
+                return (false, false);
+            };
+            let changed = job.extraction_head != Some(head)
+                || job
+                    .extraction_group
+                    .iter()
+                    .map(|m| (m.pack, m.ticket))
+                    .ne(tickets
+                        .iter()
+                        .zip(ticket_ids)
+                        .map(|(t, id)| (t.pack_id, *id)));
+            let before_effects = job.extraction.as_ref().is_none_or(|x| {
+                x.object.is_none() && (x.stage <= 2 || (10..=13).contains(&x.stage))
+            });
+            (changed, before_effects)
+        })
+        .collect();
+    // The group the claim batch would write, projected early so a usable
+    // prior job's stored group can be compared without touching the store.
+    let projected: Vec<ExtractionGroupMember> = tickets
+        .iter()
+        .zip(ticket_ids)
+        .enumerate()
+        .map(|(i, (ticket, id))| ExtractionGroupMember {
+            pack: ticket.pack_id,
+            ticket: *id,
+            bytes: ticket.bytes,
+            created_at_ms: ticket.created_at_ms,
+            already_verified: matches!(states[i], Some(VerificationV1::Verified { pack_len, .. })
+                if pack_len == ticket.bytes),
+        })
+        .collect();
+    // Member rows feed exactly three checks below: the failed-group witness
+    // scan, the finished-peer guards a new claim takes from usable jobs, and
+    // the group rewrite for usable jobs whose stored group differs. The last
+    // is only reachable when some claim or release reaches the claim batch.
+    let release_possible = marks.contains(&(true, true));
+    let batch_reached = new.iter().any(|n| *n) || release_possible;
+    let needs: Vec<bool> = jobs
+        .iter()
+        .enumerate()
+        .map(|(i, job)| {
+            job.as_ref().is_some_and(|job| {
+                !job.gone
+                    && (marks[i] == (true, true)
+                        || job.usable()
+                            && (new[i] || batch_reached && job.extraction_group != projected))
+            })
+        })
+        .collect();
+    let members = member_rows(store, source, repo, tickets, rows, &jobs, &needs).await?;
     let mut release = Vec::new();
     for (i, job) in jobs.iter().enumerate() {
         let Some(job) = job else {
@@ -346,22 +474,13 @@ async fn claim_extraction_group<N: NamespaceStore>(
         if job.gone {
             continue;
         }
-        let changed = job.extraction_head != Some(head)
-            || job
-                .extraction_group
-                .iter()
-                .map(|m| (m.pack, m.ticket))
-                .ne(tickets
-                    .iter()
-                    .zip(ticket_ids)
-                    .map(|(t, id)| (t.pack_id, *id)));
-        let before_effects = job
-            .extraction
-            .as_ref()
-            .is_none_or(|x| x.object.is_none() && (x.stage <= 2 || (10..=13).contains(&x.stage)));
+        let (changed, before_effects) = marks[i];
+        if (changed && before_effects) || (new[i] && job.usable()) {
+            debug_assert!(needs[i], "member check without member rows");
+        }
         if changed
             && before_effects
-            && let Some(witness) = failed_group(store, source, repo, job).await?
+            && let Some(witness) = failed_group(repo, job, &members[i])?
         {
             new[i] |= !job.usable();
             release.push(witness);
@@ -371,7 +490,7 @@ async fn claim_extraction_group<N: NamespaceStore>(
             return Err(super::pending(1_000));
         }
         if new[i] && job.usable() {
-            release.extend(finished_peers(store, source, repo, job).await?);
+            release.extend(finished_peers(repo, job, &members[i])?);
         }
     }
     if !new.iter().any(|new| *new) {
@@ -462,7 +581,8 @@ async fn claim_extraction_group<N: NamespaceStore>(
             && prior.usable()
             && prior.extraction_group != group
         {
-            for guard in finished_peers(store, source, repo, prior).await? {
+            debug_assert!(needs[i], "member check without member rows");
+            for guard in finished_peers(repo, prior, &members[i])? {
                 if !batch.preconditions.contains(&guard) {
                     batch.preconditions.push(guard);
                 }
@@ -618,20 +738,31 @@ async fn staged_commits<N: NamespaceStore>(
         if parents.len() >= limit {
             break;
         }
-        for held in &packs {
-            let key = keys::verify_row(
-                &repo.name,
-                &held.ticket.pack_id,
-                keys::VC_HISTORY,
-                Some(&id),
-            );
-            let Some(raw) = store
-                .get(source, &key)
+        // Every consumed pack's history row for this commit in one call; the
+        // first present row wins, as the serial loop's break did.
+        let history_keys: Vec<Key> = packs
+            .iter()
+            .map(|held| {
+                keys::verify_row(
+                    &repo.name,
+                    &held.ticket.pack_id,
+                    keys::VC_HISTORY,
+                    Some(&id),
+                )
+            })
+            .collect();
+        let found = if history_keys.is_empty() {
+            Vec::new()
+        } else {
+            store
+                .get_many(source, &history_keys)
                 .await
                 .map_err(|_| storage_failed())?
-            else {
-                continue;
-            };
+        };
+        if found.len() != history_keys.len() {
+            return Err(storage_failed());
+        }
+        if let Some(raw) = found.into_iter().find_map(|row| row) {
             if raw.as_bytes().len() % 32 != 0 {
                 return Err(storage_failed());
             }
@@ -646,7 +777,6 @@ async fn staged_commits<N: NamespaceStore>(
                 }
             }
             parents.insert(id, edges);
-            break;
         }
     }
     let (objects, bytes) = totals;
@@ -850,7 +980,7 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
         if let Some(VerificationV1::Rejected { code, message }) = &state {
             return Err(stored_error(code, message));
         }
-        let Some(mut job) = job.filter(|job| !job.gone) else {
+        let Some(job) = job.filter(|job| !job.gone) else {
             create_job(store, source, repo, ticket, *id, clock, rows[2 * i].clone()).await?;
             pending = Some(pending.map_or(1_000, |p: u64| p.max(1_000)));
             continue;
@@ -895,9 +1025,6 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
         // Pack facts and decode charges belong to the consumed pack union.
         // Every ticket is still validated and consumed by the advance planner.
         if ready_packs.insert(ticket.pack_id) {
-            hydrate_job(store, source, &repo.name, &ticket.pack_id, &mut job)
-                .await
-                .map_err(|_| storage_failed())?;
             if inspection_limit.is_some() && job.kind == Kind::Pack {
                 inspection_packs.push(super::inspection::ScheduledPack {
                     pack: ticket.pack_id,
@@ -915,6 +1042,36 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
             *await_hint = Some(ms);
         }
         return Err(super::pending(ms));
+    }
+    // Member bodies are content addressed and immutable: a pending reply never
+    // reads them, and every ready job's body arrives in this one call.
+    let wanted: Vec<Key> = ready
+        .iter()
+        .filter(|held| !held.job.gone)
+        .filter_map(|held| {
+            held.job
+                .member_body_id
+                .map(|id| member_key(&repo.name, &held.ticket.pack_id, &id))
+        })
+        .collect();
+    let mut bodies = if wanted.is_empty() {
+        Vec::new().into_iter()
+    } else {
+        let fetched = store
+            .get_many(source, &wanted)
+            .await
+            .map_err(|_| storage_failed())?;
+        if fetched.len() != wanted.len() {
+            return Err(storage_failed());
+        }
+        fetched.into_iter()
+    };
+    for held in &mut ready {
+        if !held.job.gone && held.job.member_body_id.is_some() {
+            let raw = bodies.next().flatten().ok_or_else(storage_failed)?;
+            apply_member_body(&mut held.job, &raw).map_err(|_| storage_failed())?;
+        }
+        held.job.members_loaded = true;
     }
     let inspection_count = ready
         .iter()
@@ -950,15 +1107,27 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
     // all intermediate source packs, even when co-consumed in this advance.
     let mut dependencies: BTreeMap<Hash, Option<u64>> =
         satisfying.into_iter().map(|pack| (pack, None)).collect();
-    for held in &packs {
-        let (start, end) =
-            keys::verify_range(&repo.name, &held.ticket.pack_id, Some(keys::VC_DEPENDENCY));
-        let mut cursor = None;
+    // The first page of every consumed pack's dependency range in one call;
+    // only a pack whose list spills past a page pays a serial continuation.
+    let dep_ranges: Vec<RangeScan> = packs
+        .iter()
+        .map(|held| {
+            let (start, end) =
+                keys::verify_range(&repo.name, &held.ticket.pack_id, Some(keys::VC_DEPENDENCY));
+            RangeScan {
+                start,
+                end,
+                after: None,
+                limit: LOCAL_PAGE,
+            }
+        })
+        .collect();
+    for (i, (held, mut page)) in packs
+        .iter()
+        .zip(first_pages(store, source, &dep_ranges).await?)
+        .enumerate()
+    {
         loop {
-            let page = store
-                .scan(source, &start, &end, cursor.as_ref(), LOCAL_PAGE)
-                .await
-                .map_err(|_| storage_failed())?;
             for (key, _) in page.entries {
                 let Some(keys::ParsedKey::VerifyCursor { id: Some(pack), .. }) = keys::parse(&key)
                 else {
@@ -970,7 +1139,18 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
                 }));
             }
             match page.next {
-                Some(next) => cursor = Some(next),
+                Some(next) => {
+                    page = store
+                        .scan(
+                            source,
+                            &dep_ranges[i].start,
+                            &dep_ranges[i].end,
+                            Some(&next),
+                            LOCAL_PAGE,
+                        )
+                        .await
+                        .map_err(|_| storage_failed())?;
+                }
                 None => break,
             }
         }
@@ -1001,16 +1181,30 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
     }
 
     // Children no consumed pack's frame table holds must be repository members.
+    // The first child page of every owing pack arrives in one call.
+    let owners: Vec<&Consumed<'_>> = packs.iter().filter(|c| c.job.owed > 0).copied().collect();
+    let child_ranges: Vec<RangeScan> = owners
+        .iter()
+        .map(|owner| {
+            let (start, end) =
+                keys::verify_range(&repo.name, &owner.ticket.pack_id, Some(keys::VC_CHILD));
+            RangeScan {
+                start,
+                end,
+                after: None,
+                limit: LOCAL_PAGE,
+            }
+        })
+        .collect();
     let mut open: Option<&Consumed<'_>> = None;
-    for owner in packs.iter().filter(|c| c.job.owed > 0) {
-        let (start, end) =
-            keys::verify_range(&repo.name, &owner.ticket.pack_id, Some(keys::VC_CHILD));
-        let (mut cursor, mut seen) = (None::<Cursor>, 0);
+    for (i, (owner, mut page)) in owners
+        .iter()
+        .copied()
+        .zip(first_pages(store, source, &child_ranges).await?)
+        .enumerate()
+    {
+        let mut seen = 0;
         loop {
-            let page = store
-                .scan(source, &start, &end, cursor.as_ref(), LOCAL_PAGE)
-                .await
-                .map_err(|_| storage_failed())?;
             let ids: Vec<Hash> = page
                 .entries
                 .iter()
@@ -1069,7 +1263,18 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
                 break;
             }
             match page.next {
-                Some(next) => cursor = Some(next),
+                Some(next) => {
+                    page = store
+                        .scan(
+                            source,
+                            &child_ranges[i].start,
+                            &child_ranges[i].end,
+                            Some(&next),
+                            LOCAL_PAGE,
+                        )
+                        .await
+                        .map_err(|_| storage_failed())?;
+                }
                 None => break,
             }
         }
@@ -1091,28 +1296,36 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
     }
 
     // The head is a commit, remix or tag: in a consumed pack's frame table, or
-    // a member.
-    let mut head_type = None;
-    for held in &packs {
-        let key = keys::verify_row(
-            &repo.name,
-            &held.ticket.pack_id,
-            keys::VC_FRAME,
-            Some(&head),
-        );
-        if let Some(value) = store
-            .get(source, &key)
+    // a member. The frame rows of every consumed pack arrive in one call.
+    let frame_keys: Vec<Key> = packs
+        .iter()
+        .map(|held| {
+            keys::verify_row(
+                &repo.name,
+                &held.ticket.pack_id,
+                keys::VC_FRAME,
+                Some(&head),
+            )
+        })
+        .collect();
+    let found = if frame_keys.is_empty() {
+        Vec::new()
+    } else {
+        let found = store
+            .get_many(source, &frame_keys)
             .await
-            .map_err(|_| storage_failed())?
-        {
-            head_type = Some(
-                decode_frame(&head, &value)
-                    .map_err(|_| storage_failed())?
-                    .object_type,
-            );
-            break;
+            .map_err(|_| storage_failed())?;
+        if found.len() != frame_keys.len() {
+            return Err(storage_failed());
         }
-    }
+        found
+    };
+    let head_type = found
+        .iter()
+        .find_map(|row| row.as_ref())
+        .map(|value| decode_frame(&head, value).map(|frame| frame.object_type))
+        .transpose()
+        .map_err(|_| storage_failed())?;
     let created = tickets.iter().map(|t| t.created_at_ms).min().unwrap_or(now);
     match head_type {
         Some(t)

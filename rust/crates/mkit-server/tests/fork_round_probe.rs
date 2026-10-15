@@ -211,11 +211,12 @@ macro_rules! probe {
 //   3,000 files, denial on:  the same but Copy 117/117; fork_repo 352/190, cut
 //     at the request's one slice (unfinished)
 //
-// With denial off, 142 becomes 75 rounds and 219 becomes 81: the carried
-// plan skips the in-job Plan and the denial-off Walk, and copy index rows
-// issue in holder waves rather than serially. With denial on the job keeps
-// its Walk but copy still waves: 254 becomes 186 and 289 becomes 192, so
-// the 3,000-file fork now finishes inside the request's one slice.
+// With denial off, 142 becomes 101 rounds (the walk 13, the job's plan 15,
+// the pre-admission plan 3, publication 10) and 219 becomes 178. The job's
+// plan is gone with denial on too. Partition waves then collapse the copy
+// stage in both modes: six lanes read a page each under one reservation, and
+// larger pages cut the 3,000-file stage to 58 calls. Copy lands at 9 rounds
+// for 500 files and 15 for 3,000.
 probe!(
     files_500_denial_off,
     500,

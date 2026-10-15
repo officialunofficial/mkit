@@ -1645,13 +1645,13 @@ const EMBEDDER: [(Sharding, bool, FlowExpect); 8] = [
         FlowExpect {
             hold_ms: 0,
             warm: [
-                ("upload", 13, 6, 570),
+                ("upload", 7, 6, 390),
                 ("advance_pending", 5, 2, 210),
                 ("settle", 62, 1, 1890),
                 ("advance_commit", 9, 2, 330),
             ],
             cold: [
-                ("upload", 13, 6, 840),
+                ("upload", 7, 6, 660),
                 ("advance_pending", 5, 2, 210),
                 ("settle", 62, 1, 2160),
                 ("advance_commit", 9, 2, 330),
@@ -1664,13 +1664,13 @@ const EMBEDDER: [(Sharding, bool, FlowExpect); 8] = [
         FlowExpect {
             hold_ms: 0,
             warm: [
-                ("upload", 23, 12, 1050),
+                ("upload", 11, 12, 690),
                 ("advance_pending", 5, 4, 210),
                 ("settle", 90, 2, 2700),
                 ("advance_commit", 54, 4, 1320),
             ],
             cold: [
-                ("upload", 23, 12, 1320),
+                ("upload", 11, 12, 960),
                 ("advance_pending", 5, 4, 210),
                 ("settle", 90, 2, 3510),
                 ("advance_commit", 54, 4, 2400),
@@ -1683,13 +1683,13 @@ const EMBEDDER: [(Sharding, bool, FlowExpect); 8] = [
         FlowExpect {
             hold_ms: 0,
             warm: [
-                ("upload", 13, 6, 570),
+                ("upload", 7, 6, 390),
                 ("advance_pending", 5, 2, 210),
                 ("settle", 97, 1, 2940),
                 ("advance_commit", 9, 2, 330),
             ],
             cold: [
-                ("upload", 13, 6, 840),
+                ("upload", 7, 6, 660),
                 ("advance_pending", 5, 2, 210),
                 ("settle", 97, 1, 3750),
                 ("advance_commit", 9, 2, 330),
@@ -1702,13 +1702,13 @@ const EMBEDDER: [(Sharding, bool, FlowExpect); 8] = [
         FlowExpect {
             hold_ms: 0,
             warm: [
-                ("upload", 23, 12, 1050),
+                ("upload", 11, 12, 690),
                 ("advance_pending", 5, 4, 210),
                 ("settle", 123, 2, 3720),
                 ("advance_commit", 54, 4, 1320),
             ],
             cold: [
-                ("upload", 23, 12, 1320),
+                ("upload", 11, 12, 960),
                 ("advance_pending", 5, 4, 210),
                 ("settle", 123, 2, 5070),
                 ("advance_commit", 54, 4, 2400),
@@ -1721,16 +1721,16 @@ const EMBEDDER: [(Sharding, bool, FlowExpect); 8] = [
         FlowExpect {
             hold_ms: 1000,
             warm: [
-                ("upload", 13, 6, 570),
+                ("upload", 7, 6, 390),
                 ("advance_parked", 6, 2, 270),
                 ("settle", 62, 1, 1890),
-                ("advance_commit", 10, 2, 360),
+                ("advance_commit", 10, 0, 300),
             ],
             cold: [
-                ("upload", 13, 6, 840),
+                ("upload", 7, 6, 660),
                 ("advance_parked", 6, 2, 270),
                 ("settle", 62, 1, 2160),
-                ("advance_commit", 10, 2, 360),
+                ("advance_commit", 10, 0, 300),
             ],
         },
     ),
@@ -1740,16 +1740,16 @@ const EMBEDDER: [(Sharding, bool, FlowExpect); 8] = [
         FlowExpect {
             hold_ms: 1000,
             warm: [
-                ("upload", 23, 12, 1050),
+                ("upload", 11, 12, 690),
                 ("advance_parked", 6, 4, 270),
                 ("settle", 90, 2, 2700),
-                ("advance_commit", 55, 4, 1350),
+                ("advance_commit", 55, 0, 1290),
             ],
             cold: [
-                ("upload", 23, 12, 1320),
+                ("upload", 11, 12, 960),
                 ("advance_parked", 6, 4, 270),
                 ("settle", 90, 2, 3510),
-                ("advance_commit", 55, 4, 2430),
+                ("advance_commit", 55, 0, 2370),
             ],
         },
     ),
@@ -1759,16 +1759,16 @@ const EMBEDDER: [(Sharding, bool, FlowExpect); 8] = [
         FlowExpect {
             hold_ms: 1000,
             warm: [
-                ("upload", 13, 6, 570),
+                ("upload", 7, 6, 390),
                 ("advance_parked", 6, 2, 270),
                 ("settle", 97, 1, 2940),
-                ("advance_commit", 10, 2, 360),
+                ("advance_commit", 10, 0, 300),
             ],
             cold: [
-                ("upload", 13, 6, 840),
+                ("upload", 7, 6, 660),
                 ("advance_parked", 6, 2, 270),
                 ("settle", 97, 1, 3750),
-                ("advance_commit", 10, 2, 360),
+                ("advance_commit", 10, 0, 300),
             ],
         },
     ),
@@ -1778,16 +1778,16 @@ const EMBEDDER: [(Sharding, bool, FlowExpect); 8] = [
         FlowExpect {
             hold_ms: 1000,
             warm: [
-                ("upload", 23, 12, 1050),
+                ("upload", 11, 12, 690),
                 ("advance_parked", 6, 4, 270),
                 ("settle", 123, 2, 3720),
-                ("advance_commit", 55, 4, 1350),
+                ("advance_commit", 55, 0, 1290),
             ],
             cold: [
-                ("upload", 23, 12, 1320),
+                ("upload", 11, 12, 960),
                 ("advance_parked", 6, 4, 270),
                 ("settle", 123, 2, 5070),
-                ("advance_commit", 55, 4, 2430),
+                ("advance_commit", 55, 0, 2370),
             ],
         },
     ),

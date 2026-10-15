@@ -1276,8 +1276,9 @@ fn authority_completion_rechecks_after_backend_and_marker_awaits() {
             .unwrap(),
         );
         let namespace = NamespaceKey::deployment_default();
+        let mut fence = super::super::authority::TicketFence::new(namespace);
         let mut completion =
-            Box::pin(pipe.publish_verified_upload(&namespace, &claims, &plan, &parts));
+            Box::pin(pipe.publish_verified_upload(&mut fence, &claims, &plan, &parts));
         let waker = futures::task::noop_waker();
         let mut cx = Context::from_waker(&waker);
         assert!(
@@ -1359,7 +1360,7 @@ fn authority_staging_checks_before_and_after_coalesced_backend_write() {
         let mut session = PartUploadSession {
             pipe: &pipe,
             ticket: claims.ticket_id,
-            namespace: NamespaceKey::deployment_default(),
+            fence: super::super::authority::TicketFence::new(NamespaceKey::deployment_default()),
             generation: Some(0),
             index: 0,
             subtree: cv,
