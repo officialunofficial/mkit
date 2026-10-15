@@ -1505,6 +1505,13 @@ resulting-pair coverage under §10.2, denial under §14.2, or configured ref
 policy. Verification of every entry in the consumed packs, including entries
 outside the advanced head's closure, remains required.
 
+Informative: the scheduled verifier may run up to eight durably checkpointed
+Extract selection slices in one callback. Slices share the existing call
+allowance, two-second elapsed cutoff and physical callback deadline; each keeps
+its 16-step and batch-operation ceilings. Every boundary remains resumable and
+repeats source and denial checks. This scheduling choice changes neither the
+extraction threshold nor the conditions for Usable.
+
 ### 9.4 Repository-isolated membership checks
 
 A delta base MUST resolve only from an earlier entry in the same pack,

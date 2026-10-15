@@ -81,12 +81,23 @@ pub struct SliceLimits {
     /// Selection steps one Extract slice may run back to back before its
     /// one guarded commit; `1` runs one step per slice.
     pub extract_chain_steps: u32,
+    /// Consecutive durable Extract selection slices outside the tiny-pack path.
+    /// Capped at eight; tiny decoded packs use `tiny_chain_slices`.
+    pub extract_chain_slices: u32,
     /// Consecutive durably committed slices for a tiny decoded pack per handler.
     /// One retains single-slice scheduling; the implementation caps this at eight.
     pub tiny_chain_slices: u32,
 }
 
 impl SliceLimits {
+    /// Set consecutive durable Extract selection slices outside the tiny-pack path.
+    /// One retains single-slice scheduling; the implementation caps this at eight.
+    #[must_use]
+    pub const fn with_extract_chain_slices(mut self, slices: u32) -> Self {
+        self.extract_chain_slices = slices;
+        self
+    }
+
     /// Set the consecutive durable slice ceiling for tiny decoded packs.
     #[must_use]
     pub const fn with_tiny_chain_slices(mut self, slices: u32) -> Self {
@@ -117,6 +128,7 @@ impl Default for SliceLimits {
             max_subrequests: crate::limits::VERIFY_SLICE_CALLS,
             max_entries: checkpoint::DEFAULT_ENTRY_CAP,
             extract_chain_steps: 16,
+            extract_chain_slices: 8,
             tiny_chain_slices: 8,
         }
     }
@@ -295,7 +307,7 @@ where
         Some(self.metrics.as_ref())
     }
 
-    /// One handler per alarm; tiny slices share this handler's call allowance.
+    /// One handler per alarm; chained slices share this handler's call allowance.
     fn max_per_tick(&self) -> Option<u32> {
         Some(1)
     }
@@ -556,17 +568,40 @@ where
             .max(timer.due_at_ms.saturating_add(1))
     }
 
-    async fn slice(&self, timer: &DueTimer, local_closure: &mut bool) -> Result<Fired, StoreError> {
+    async fn slice(
+        &self,
+        timer: &DueTimer,
+        local_closure: &mut bool,
+        local_selection: &mut bool,
+        selection_only: bool,
+    ) -> Result<Fired, StoreError> {
+        #[cfg(test)]
+        tracing::trace!(event = "verification_probe_slice");
         let calls_before = self.budget.used();
         #[cfg(not(feature = "perf-metrics"))]
-        let fired = self.slice_inner(timer, calls_before, local_closure).await;
+        let fired = self
+            .slice_inner(
+                timer,
+                calls_before,
+                local_closure,
+                local_selection,
+                selection_only,
+            )
+            .await;
         #[cfg(feature = "perf-metrics")]
         let fired = {
             let scope =
                 crate::telemetry::slice_context::SliceScope::new(now_ms(self.h.clock.as_ref()));
             let mut result_fields = None;
             let result = scope
-                .scope(self.slice_inner(timer, calls_before, local_closure, &mut result_fields))
+                .scope(self.slice_inner(
+                    timer,
+                    calls_before,
+                    local_closure,
+                    local_selection,
+                    selection_only,
+                    &mut result_fields,
+                ))
                 .await;
             if let Some(fields) = result_fields {
                 let context = scope.snapshot();
@@ -610,6 +645,8 @@ where
         timer: &DueTimer,
         calls_before: u32,
         local_closure: &mut bool,
+        local_selection: &mut bool,
+        selection_only: bool,
         #[cfg(feature = "perf-metrics")] result_fields: &mut Option<SliceResultFields>,
     ) -> Result<Fired, StoreError> {
         let (job, state) =
@@ -617,6 +654,16 @@ where
         let Some((mut job, mut raw)) = job else {
             return self.cleanup(timer, None, None).await;
         };
+        *local_selection = job.phase == Phase::Extract
+            && job
+                .extraction
+                .as_ref()
+                .is_none_or(|x| extraction::chains(x.stage));
+        // A concurrent restart or advance can change the phase after the
+        // previous checkpoint committed. Continue only selection in this mode.
+        if selection_only && !*local_selection {
+            return Ok(self.reschedule(timer, 0, Batch::new()));
+        }
         #[cfg(feature = "perf-metrics")]
         let prior_job_attempts = job.attempts;
         tracing::info!(event = "verification_slice_start", now_ms = now_ms(self.h.clock.as_ref()),
@@ -1210,6 +1257,8 @@ where
         state: Option<&(VerificationV1, Value)>,
         held: &mut Option<Value>,
     ) -> Result<u64, Stop> {
+        #[cfg(test)]
+        tracing::trace!(event = "verification_probe_phase", phase = ?job.phase);
         match job.phase {
             Phase::Decode => self.decode(st, job, state, held).await,
             Phase::ClosureResolve => {
