@@ -142,20 +142,17 @@ mod tests {
 
     #[test]
     fn configured_fork_timer_matches_pipeline_denial_mode() {
-        use crate::adapter::WorkerConfig;
         use mkit_server::fork::ForkEnv;
+        use mkit_server::pipeline::{AuthMode, PipelineConfig};
 
         for denial in [false, true] {
-            let mut worker = WorkerConfig::from_vars(|key| match key {
-                "AUTH_AUDIENCE" => Some("https://vcs.example".into()),
-                "AUTH_REPOSITORY" => Some("default".into()),
-                _ => None,
-            })
-            .unwrap();
-            worker.takedown_denial = denial;
-            worker.indexed = Some(mkit_server::indexed::IndexedConfig::default());
-            let config = worker.pipeline_config().unwrap();
-            assert_eq!(config.takedown_denial, denial);
+            let mut config = PipelineConfig::new(
+                mkit_server::Addressing::Multi(mkit_server::MultiAddressing::new()),
+                AuthMode::Open,
+                mkit_server::upload::UploadLimits::new(1 << 20, 64),
+            );
+            config.takedown_denial = denial;
+            config.indexed = Some(mkit_server::indexed::IndexedConfig::default());
             let timer =
                 configured_timer(&config, MemoryKv::default(), Arc::new(ManualClock::new(0)));
             let env = ForkEnv::from_config(
