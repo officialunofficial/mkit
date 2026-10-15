@@ -1616,3 +1616,9 @@ fn denial_off_still_extracts_chunked_content_and_writes_holders_and_inventory() 
 
 #[path = "job_tests/extract_callbacks.rs"]
 mod extract_callbacks;
+
+#[path = "job_tests/phase_callbacks.rs"]
+mod phase_callbacks;
+
+#[path = "job_tests/emit_replay.rs"]
+mod emit_replay;

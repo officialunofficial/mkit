@@ -61,6 +61,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
 mod extraction;
+#[cfg(test)]
+mod probe;
 mod tiny;
 
 /// Fixed work units of one slice. A Worker fixes them for its plan.
@@ -84,12 +86,32 @@ pub struct SliceLimits {
     /// Consecutive durable Extract selection slices outside the tiny-pack path.
     /// Capped at eight; tiny decoded packs use `tiny_chain_slices`.
     pub extract_chain_slices: u32,
+    /// Consecutive durable `ClosureResolve` slices outside the tiny-pack path.
+    /// One retains single-slice scheduling; capped at eight.
+    pub closure_chain_slices: u32,
+    /// Consecutive durable `EmitIndex` slices outside the tiny-pack path.
+    /// One retains single-slice scheduling; capped at eight.
+    pub emit_chain_slices: u32,
     /// Consecutive durably committed slices for a tiny decoded pack per handler.
     /// One retains single-slice scheduling; the implementation caps this at eight.
     pub tiny_chain_slices: u32,
 }
 
 impl SliceLimits {
+    /// Set the consecutive durable `EmitIndex` slice ceiling.
+    #[must_use]
+    pub const fn with_emit_chain_slices(mut self, slices: u32) -> Self {
+        self.emit_chain_slices = slices;
+        self
+    }
+
+    /// Set the consecutive durable `ClosureResolve` slice ceiling.
+    #[must_use]
+    pub const fn with_closure_chain_slices(mut self, slices: u32) -> Self {
+        self.closure_chain_slices = slices;
+        self
+    }
+
     /// Set consecutive durable Extract selection slices outside the tiny-pack path.
     /// One retains single-slice scheduling; the implementation caps this at eight.
     #[must_use]
@@ -129,6 +151,8 @@ impl Default for SliceLimits {
             max_entries: checkpoint::DEFAULT_ENTRY_CAP,
             extract_chain_steps: 16,
             extract_chain_slices: 8,
+            closure_chain_slices: 8,
+            emit_chain_slices: 8,
             tiny_chain_slices: 8,
         }
     }
@@ -539,6 +563,8 @@ where
         st: &mut SliceState,
         io: impl std::future::Future<Output = Result<(), StoreError>>,
     ) -> Result<(), StoreError> {
+        #[cfg(test)]
+        let _probe_scope = probe::DecodeScope::new("inventory");
         let start = now_ms(self.h.clock.as_ref());
         st.staging_start_ms.get_or_insert(start);
         let calls = self.budget.used();
@@ -572,21 +598,15 @@ where
         &self,
         timer: &DueTimer,
         local_closure: &mut bool,
-        local_selection: &mut bool,
-        selection_only: bool,
+        local_chain: &mut Option<Phase>,
+        chain_only: Option<Phase>,
     ) -> Result<Fired, StoreError> {
         #[cfg(test)]
         tracing::trace!(event = "verification_probe_slice");
         let calls_before = self.budget.used();
         #[cfg(not(feature = "perf-metrics"))]
         let fired = self
-            .slice_inner(
-                timer,
-                calls_before,
-                local_closure,
-                local_selection,
-                selection_only,
-            )
+            .slice_inner(timer, calls_before, local_closure, local_chain, chain_only)
             .await;
         #[cfg(feature = "perf-metrics")]
         let fired = {
@@ -598,8 +618,8 @@ where
                     timer,
                     calls_before,
                     local_closure,
-                    local_selection,
-                    selection_only,
+                    local_chain,
+                    chain_only,
                     &mut result_fields,
                 ))
                 .await;
@@ -645,8 +665,8 @@ where
         timer: &DueTimer,
         calls_before: u32,
         local_closure: &mut bool,
-        local_selection: &mut bool,
-        selection_only: bool,
+        local_chain: &mut Option<Phase>,
+        chain_only: Option<Phase>,
         #[cfg(feature = "perf-metrics")] result_fields: &mut Option<SliceResultFields>,
     ) -> Result<Fired, StoreError> {
         let (job, state) =
@@ -654,14 +674,21 @@ where
         let Some((mut job, mut raw)) = job else {
             return self.cleanup(timer, None, None).await;
         };
-        *local_selection = job.phase == Phase::Extract
-            && job
-                .extraction
-                .as_ref()
-                .is_none_or(|x| extraction::chains(x.stage));
+        *local_chain = match job.phase {
+            Phase::ClosureResolve | Phase::EmitIndex => Some(job.phase),
+            Phase::Extract
+                if job
+                    .extraction
+                    .as_ref()
+                    .is_none_or(|x| extraction::chains(x.stage)) =>
+            {
+                Some(job.phase)
+            }
+            _ => None,
+        };
         // A concurrent restart or advance can change the phase after the
-        // previous checkpoint committed. Continue only selection in this mode.
-        if selection_only && !*local_selection {
+        // previous checkpoint committed. Continue only the selected phase.
+        if chain_only.is_some() && chain_only != *local_chain {
             return Ok(self.reschedule(timer, 0, Batch::new()));
         }
         #[cfg(feature = "perf-metrics")]
@@ -1012,6 +1039,8 @@ where
 
     /// Write out buffered idempotent rows.
     async fn flush(&self, st: &mut SliceState) -> Result<(), StoreError> {
+        #[cfg(test)]
+        let _probe_scope = probe::DecodeScope::new("writes");
         for chunk in std::mem::take(&mut st.writes).chunks(WRITE_BATCH) {
             let mut batch = Batch::new().require(Precondition::NotAfter(self.deadline()));
             if let Some(raw) = &st.job_guard {
@@ -1040,6 +1069,8 @@ where
         state: Option<&(VerificationV1, Value)>,
         held: Option<&Value>,
     ) -> Result<(), StoreError> {
+        #[cfg(test)]
+        let _probe_scope = probe::DecodeScope::new("checkpoint");
         // Earlier chunks are idempotent; the final chunk and cursor commit
         // together. Leave room for the job header/body and three guards.
         let started = now_ms(self.h.clock.as_ref());
@@ -1294,6 +1325,8 @@ where
         offset: u64,
         len: u64,
     ) -> Result<Window, Stop> {
+        #[cfg(test)]
+        let _probe_scope = probe::DecodeScope::new("frames");
         let started = now_ms(self.h.clock.as_ref());
         let window = self.read(job, offset, len).await;
         st.window_read_ms = st
@@ -1304,6 +1337,8 @@ where
 
     /// One bounded read of the pack, bound to the job's etag.
     async fn read(&self, job: &mut VerifyJobV1, offset: u64, len: u64) -> Result<Window, Stop> {
+        #[cfg(test)]
+        let _probe_scope = probe::DecodeScope::new("frames");
         let etag = super::etag::resolve(
             self.local,
             self.source,
@@ -1658,6 +1693,8 @@ where
     }
 
     async fn frame_row(&self, st: &mut SliceState, id: &Hash) -> Result<Option<FrameRow>, Stop> {
+        #[cfg(test)]
+        let _probe_scope = probe::DecodeScope::new("frames");
         if let Some(row) = st.frames.get(id) {
             return Ok(Some(*row));
         }
@@ -1674,6 +1711,8 @@ where
     }
 
     async fn base_depth(&self, st: &mut SliceState, id: &Hash) -> Result<u32, Stop> {
+        #[cfg(test)]
+        let _probe_scope = probe::DecodeScope::new("frames");
         if let Some(depth) = st.bases.get(id) {
             return Ok(*depth);
         }
@@ -1794,6 +1833,8 @@ where
         .await?;
         st.inventory_batches += 1;
         st.entries_staged += batch.len() as u64;
+        #[cfg(test)]
+        let _probe_scope = probe::DecodeScope::new("denial_holder");
         let started = now_ms(self.h.clock.as_ref());
         let calls = self.budget.used();
         #[cfg(not(feature = "perf-metrics"))]
@@ -1847,6 +1888,8 @@ where
         job: &mut VerifyJobV1,
         prepared: Prepared,
     ) -> Result<(), Stop> {
+        #[cfg(test)]
+        let _probe_scope = probe::DecodeScope::new("writes");
         let Prepared {
             frame,
             id,
@@ -2021,6 +2064,8 @@ where
         job: &mut VerifyJobV1,
         base: Hash,
     ) -> Result<(), Stop> {
+        #[cfg(test)]
+        let _probe_scope = probe::DecodeScope::new("denial_holder");
         // A base this slice already resolved is in the member cache: no call.
         if let Some((_, (bytes, _))) = st.memo.rows().find(|((id, ..), _)| *id == base) {
             st.cache.insert(base, Arc::from(bytes.to_vec()));

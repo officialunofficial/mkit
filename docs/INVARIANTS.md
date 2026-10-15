@@ -181,6 +181,30 @@ allowance.
 **Enforced by:** `indexed::job::tiny`, `timers::inline_relay`, and the tiny-slice
 fault, delivery, backlog, and physical-budget tests.
 
+## Closure and index callbacks preserve per-slice replay semantics
+
+**Always:** ClosureResolve and EmitIndex outside the tiny-pack path share one
+callback allowance across at most eight durable slices, with separate settings
+that accept one for single-slice scheduling. Every intermediate commit guards
+the original timer and job. Each continuation re-reads its phase before work.
+The physical deadline and two-second cutoff retain their original meanings.
+Closure deletions and satisfying-pack dependencies commit with the checkpoint.
+EmitIndex repeats its deadline, direct-batch denial checks, epoch-lease renewal,
+relay enqueue, and newest outbox-sequence read in every slice. Replay can append
+duplicate relay sequences; same-value index puts and target holder folding
+retain at-least-once delivery semantics. AwaitDelivery waits for the newest
+recorded sequence before verification advances.
+
+**Because:** a callback that continues after a durable checkpoint must have the
+same effects as the timer firing again immediately, including after lost replies.
+
+**If violated:** replay could skip a dependency, lose runnable work, bypass a
+fresh guard, exceed a call allowance, or publish before index delivery completes.
+
+**Enforced by:** the durable-slice driver, phase callback crash, budget, phase
+race and output-parity tests, EmitIndex relay replay tests, and the verification
+probe in both denial modes. No wire or stored-format change.
+
 ## Consecutive Extract selection slices preserve durable recovery
 
 **Always:** an Extract callback outside the tiny-pack path runs at most eight

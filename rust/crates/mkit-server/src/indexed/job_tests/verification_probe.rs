@@ -23,6 +23,7 @@ struct State {
     slice: u64,
     callback: u64,
     rows: BTreeMap<String, Row>,
+    decode_scopes: Vec<String>,
 }
 
 #[derive(Clone, Default)]
@@ -33,6 +34,15 @@ impl Trace {
         let mut state = self.0.lock().unwrap();
         let (slice, callback) = (state.slice, state.callback);
         let mut labels = vec![state.phase.clone()];
+        if state.phase == "Decode" {
+            labels.push(format!(
+                "Decode/{}",
+                state
+                    .decode_scopes
+                    .last()
+                    .map_or("checkpoint", String::as_str)
+            ));
+        }
         if let Some(substage) = &state.substage {
             labels.push(format!("Extract/{substage}"));
         }
@@ -57,6 +67,37 @@ impl Trace {
 
     fn committed(&self) {
         self.each(|row, _, _| row.applies += 1);
+    }
+
+    fn decode_report(&self) -> String {
+        let state = self.0.lock().unwrap();
+        let mut calls = 0;
+        let mut rounds = 0;
+        let rows = [
+            "inventory",
+            "denial_holder",
+            "frames",
+            "writes",
+            "checkpoint",
+        ]
+        .map(|category| {
+            let row = state
+                .rows
+                .get(&format!("Decode/{category}"))
+                .cloned()
+                .unwrap_or_default();
+            calls += row.calls;
+            rounds += row.rounds.len();
+            format!(
+                "{category}: calls={} rounds={}",
+                row.calls,
+                row.rounds.len()
+            )
+        });
+        let decode = &state.rows["Decode"];
+        assert_eq!(calls, decode.calls);
+        assert_eq!(rounds, decode.rounds.len());
+        rows.join("\n")
     }
 
     fn render(&self) -> String {
@@ -91,6 +132,7 @@ impl Trace {
         }
         rows
             .iter()
+            .filter(|(name, _)| !name.starts_with("Decode/"))
             .map(|(name, row)| {
                 format!(
                     "{name}: slices={} callbacks={} rearms={} calls={} rounds={} applies={} modeled_ms={} stops={:?}",
@@ -135,6 +177,17 @@ impl tracing::Subscriber for Trace {
         let mut fields = Fields::default();
         event.record(&mut fields);
         match fields.0.get("event").map(String::as_str) {
+            Some("verification_probe_decode_scope") => {
+                let mut state = self.0.lock().unwrap();
+                if fields.0["begin"] == "true" {
+                    state.decode_scopes.push(fields.0["category"].clone());
+                } else {
+                    assert_eq!(
+                        state.decode_scopes.pop().as_deref(),
+                        Some(fields.0["category"].as_str())
+                    );
+                }
+            }
             Some("verification_probe_slice") => {
                 let mut state = self.0.lock().unwrap();
                 state.substage = None;
@@ -341,17 +394,30 @@ impl BlobStore for Blobs {
     }
 }
 
+struct Measurement {
+    table: String,
+    durable: Snapshot,
+    extracted: Vec<Vec<u8>>,
+    index: String,
+    decode: String,
+    callback_calls: String,
+}
+
 #[allow(clippy::too_many_lines)] // Keep the measured fixture and its oracle together.
 async fn measure(
     files: u16,
     bytes: usize,
     slices: u32,
-) -> (String, Snapshot, Vec<Vec<u8>>, String) {
+    denial: bool,
+    pack: &[u8],
+    head: Hash,
+) -> Measurement {
     let mut rig = Rig::named("probe", Arc::new(D34Shards));
     rig.limits.extract_chain_steps = 16;
     rig.limits.extract_chain_slices = slices;
-    let (pack, head) = tree_pack(files, bytes);
-    let (ticket, id) = rig.add(&pack);
+    rig.limits.closure_chain_slices = slices;
+    rig.limits.emit_chain_slices = slices;
+    let (ticket, id) = rig.add(pack);
     assert!(rig.check(&[(&ticket, id)], head).is_err());
     let trace = Trace::default();
     let store = Store {
@@ -368,7 +434,7 @@ async fn measure(
         trace: trace.clone(),
     };
     let handler = VerifyTimer {
-        takedown_denial: true,
+        takedown_denial: denial,
         remote: remote.clone(),
         windows: BlobWindows(&blobs),
         blobs: blobs.clone(),
@@ -389,6 +455,7 @@ async fn measure(
             },
             budget: crate::relay::RelayBudget::default(),
         });
+    let mut callback_calls: BTreeMap<String, Vec<u32>> = BTreeMap::new();
     for callback in 1..=3_000 {
         if rig.job(&ticket.pack_id).unwrap().usable() {
             break;
@@ -399,6 +466,8 @@ async fn measure(
             state.substage = None;
             state.callback = callback;
         }
+        let phase = format!("{:?}", rig.job(&ticket.pack_id).unwrap().phase);
+        let slice_start = rig.recorder.slices.lock().unwrap().len();
         let _subscriber = tracing::subscriber::set_default(trace.clone());
         let now = u64::try_from(rig.clock.now_ms()).unwrap();
         let report = run_due(
@@ -412,6 +481,15 @@ async fn measure(
         .await
         .unwrap();
         assert_eq!(report.failed, 0);
+        let calls = rig.recorder.slices.lock().unwrap()[slice_start..]
+            .iter()
+            .sum::<f64>();
+        assert!(
+            calls <= f64::from(rig.limits.max_subrequests),
+            "one shared callback allowance: {phase} {calls}"
+        );
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        callback_calls.entry(phase).or_default().push(calls as u32);
         if !rig.job(&ticket.pack_id).unwrap().usable() {
             trace.each(|row, _, _| row.rearms += 1);
         }
@@ -449,75 +527,112 @@ async fn measure(
         assert!(rows.next.is_none());
         index.push((partition, rows.entries));
     }
-    (
-        trace.render(),
-        snapshot(&rig, &ticket.pack_id),
-        outputs,
-        format!("{index:?}"),
-    )
+    Measurement {
+        table: trace.render(),
+        durable: snapshot(&rig, &ticket.pack_id),
+        extracted: outputs,
+        index: format!("{index:?}"),
+        decode: trace.decode_report(),
+        callback_calls: callback_calls
+            .iter()
+            .map(|(phase, calls)| format!("{phase}: {calls:?}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
 }
 
 #[tokio::test(start_paused = true)]
 async fn verification_pipeline_round_probe() {
     let mut baselines = Vec::new();
     for (files, bytes) in [(500, 25), (3_000, 25), (3, 70_000)] {
-        let before = Box::pin(measure(files, bytes, 1)).await;
-        let after = Box::pin(measure(
-            files,
-            bytes,
-            SliceLimits::default().extract_chain_slices,
-        ))
-        .await;
-        println!(
-            "PROBE files={files} bytes={bytes} before\n{}\nafter\n{}",
-            before.0, after.0
-        );
-        assert_eq!(before.1, after.1, "durable verification output");
-        assert_eq!(before.2, after.2, "extracted bytes");
-        assert_eq!(before.3, after.3, "object index bytes across every shard");
-        let other_stages = |table: &str| {
-            table
-                .lines()
-                .filter(|line| !line.starts_with("Extract"))
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            other_stages(&before.0),
-            other_stages(&after.0),
-            "other verification stages"
-        );
-        let callbacks = |table: &str| {
-            table
-                .lines()
-                .find(|line| line.starts_with("Extract:"))
-                .unwrap()
-                .split_whitespace()
-                .find_map(|part| part.strip_prefix("callbacks="))
-                .unwrap()
-                .parse::<u64>()
-                .unwrap()
-        };
-        if files == 3_000 {
-            assert!(
-                callbacks(&after.0) * 4 <= callbacks(&before.0),
-                "Extract callbacks must fall at least fourfold"
+        let (pack, head) = tree_pack(files, bytes);
+        for denial in [true, false] {
+            let before = Box::pin(measure(files, bytes, 1, denial, &pack, head)).await;
+            let after = Box::pin(measure(
+                files,
+                bytes,
+                SliceLimits::default().extract_chain_slices,
+                denial,
+                &pack,
+                head,
+            ))
+            .await;
+            println!(
+                "PROBE files={files} bytes={bytes} denial={denial} before\n{}\nafter\n{}",
+                before.table, after.table
             );
-        } else {
-            assert!(
-                callbacks(&after.0) <= callbacks(&before.0),
-                "control callbacks must not regress"
+            println!("DECODE files={files} denial={denial}\n{}", before.decode);
+            println!(
+                "CALLS files={files} denial={denial} before\n{}\nafter\n{}",
+                before.callback_calls, after.callback_calls
             );
+            assert_eq!(before.decode, after.decode, "Decode attribution unchanged");
+            assert_eq!(before.durable, after.durable, "durable verification output");
+            assert_eq!(before.extracted, after.extracted, "extracted bytes");
+            assert_eq!(
+                before.index, after.index,
+                "object index bytes across every shard"
+            );
+            let other_stages = |table: &str| {
+                table
+                    .lines()
+                    .filter(|line| {
+                        !["Extract", "ClosureResolve", "EmitIndex", "AwaitDelivery"]
+                            .iter()
+                            .any(|phase| line.starts_with(phase))
+                    })
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                other_stages(&before.table),
+                other_stages(&after.table),
+                "other verification stages"
+            );
+            let callbacks = |table: &str, phase: &str| {
+                table
+                    .lines()
+                    .find(|line| line.starts_with(&format!("{phase}:")))
+                    .unwrap()
+                    .split_whitespace()
+                    .find_map(|part| part.strip_prefix("callbacks="))
+                    .unwrap()
+                    .parse::<u64>()
+                    .unwrap()
+            };
+            if files == 3_000 {
+                assert!(
+                    callbacks(&after.table, "Extract") * 4 <= callbacks(&before.table, "Extract"),
+                    "Extract callbacks must fall at least fourfold"
+                );
+                let combined = |m: &Measurement| {
+                    callbacks(&m.table, "ClosureResolve") + callbacks(&m.table, "EmitIndex")
+                };
+                assert!(
+                    combined(&after) * 4 <= combined(&before),
+                    "ClosureResolve plus EmitIndex callbacks must fall at least fourfold"
+                );
+            } else {
+                assert!(
+                    callbacks(&after.table, "Extract") <= callbacks(&before.table, "Extract"),
+                    "control callbacks must not regress"
+                );
+            }
+            baselines.push((files, denial, before.table));
         }
-        baselines.push((files, before.0));
     }
     // Runtime fixtures let probe numbers be refreshed without recompiling
     // this large test binary; every measured case prints before pin checks.
-    for (files, baseline) in baselines {
+    for (files, denial, baseline) in baselines {
         let name = if files == 3 {
             "control".into()
         } else {
             files.to_string()
+        };
+        let name = if denial {
+            name
+        } else {
+            format!("{name}-denial-off")
         };
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("src/indexed/job_tests/verification_probe_data")

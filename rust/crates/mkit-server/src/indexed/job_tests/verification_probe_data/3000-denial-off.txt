@@ -1,0 +1,20 @@
+AwaitDelivery: slices=2 callbacks=2 rearms=2 calls=23 rounds=2 applies=5 modeled_ms=260 stops={"slice:durable_boundary": 1, "slice:pending_or_error": 1}
+ClosureResolve: slices=34 callbacks=34 rearms=33 calls=270 rounds=0 applies=67 modeled_ms=3300 stops={"phase_boundary": 1, "slice:phase_incomplete": 33}
+Decode: slices=4 callbacks=4 rearms=4 calls=6480 rounds=407 applies=3246 modeled_ms=12610 stops={"slice:decode_boundary": 4}
+EmitIndex: slices=47 callbacks=47 rearms=46 calls=1051 rounds=124 applies=248 modeled_ms=8320 stops={"phase_boundary": 1, "slice:phase_incomplete": 46}
+Extract: slices=564 callbacks=564 rearms=563 calls=31023 rounds=0 applies=3612 modeled_ms=56300 stops={"chain:no_progress": 1, "chain:steps": 563, "phase_boundary": 1, "slice:phase_incomplete": 563}
+Extract/choose: slices=189 callbacks=189 rearms=188 calls=6381 rounds=0 applies=188 modeled_ms=18800 stops={"chain:no_progress": 1, "chain:steps": 188, "slice:phase_incomplete": 188, "step_boundary": 2814}
+Extract/closure: slices=1 callbacks=1 rearms=0 calls=1 rounds=0 applies=0 modeled_ms=0 stops={"step_boundary": 2}
+Extract/complete: slices=0 callbacks=0 rearms=0 calls=0 rounds=0 applies=0 modeled_ms=0 stops={}
+Extract/delivery: slices=0 callbacks=0 rearms=0 calls=0 rounds=0 applies=0 modeled_ms=0 stops={}
+Extract/dependencies: slices=1 callbacks=1 rearms=0 calls=1 rounds=0 applies=0 modeled_ms=0 stops={"step_boundary": 2}
+Extract/enqueue: slices=0 callbacks=0 rearms=0 calls=0 rounds=0 applies=0 modeled_ms=0 stops={}
+Extract/head: slices=1 callbacks=1 rearms=0 calls=1 rounds=0 applies=0 modeled_ms=0 stops={"step_boundary": 1}
+Extract/members: slices=2 callbacks=2 rearms=1 calls=3 rounds=0 applies=1 modeled_ms=100 stops={"chain:steps": 1, "slice:phase_incomplete": 1, "step_boundary": 1}
+Extract/offsets: slices=0 callbacks=0 rearms=0 calls=0 rounds=0 applies=0 modeled_ms=0 stops={}
+Extract/preflight: slices=0 callbacks=0 rearms=0 calls=0 rounds=0 applies=0 modeled_ms=0 stops={}
+Extract/scan: slices=188 callbacks=188 rearms=187 calls=12432 rounds=0 applies=3236 modeled_ms=18700 stops={"chain:steps": 187, "slice:phase_incomplete": 187, "step_boundary": 2816}
+Extract/select: slices=188 callbacks=188 rearms=187 calls=9383 rounds=0 applies=187 modeled_ms=18700 stops={"chain:steps": 187, "slice:phase_incomplete": 187, "step_boundary": 2816}
+Extract/start: slices=0 callbacks=0 rearms=0 calls=0 rounds=0 applies=0 modeled_ms=0 stops={}
+Extract/upload: slices=0 callbacks=0 rearms=0 calls=0 rounds=0 applies=0 modeled_ms=0 stops={}
+Verify: slices=1 callbacks=1 rearms=0 calls=5 rounds=2 applies=3 modeled_ms=60 stops={"slice:terminal": 1}
