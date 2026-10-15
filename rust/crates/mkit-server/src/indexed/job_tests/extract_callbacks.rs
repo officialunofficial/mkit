@@ -240,6 +240,61 @@ fn extract_callback_real_extraction_preserves_content_and_offsets_bytes() {
     assert_eq!(results[0], results[1]);
 }
 
+#[test]
+fn extract_callback_chunked_control_preserves_expected_content_and_offsets_bytes() {
+    let data = [vec![3; 70_000], vec![5; 9_000], vec![7; 1_500]];
+    let mut objects = data
+        .iter()
+        .map(|data| Object::Blob(Blob { data: data.clone() }))
+        .collect::<Vec<_>>();
+    let manifest = Object::ChunkedBlob(ChunkedBlob {
+        total_size: 80_500,
+        chunk_size: 0,
+        chunks: objects.iter().map(|object| object.id().unwrap()).collect(),
+    });
+    let id = manifest.id().unwrap();
+    let (tree, commit, head) = tree_head(&[id]);
+    objects.extend([manifest, tree, commit]);
+    let bytes = pack(&objects);
+    let expected_offsets = crate::indexed::extract::encode_offsets(&[0, 70_000, 79_000, 80_500]);
+    let mut results = Vec::new();
+    for slices in [1, 8] {
+        let mut rig = Rig::new();
+        rig.limits.extract_chain_slices = slices;
+        let (ticket, ticket_id) = rig.add(&bytes);
+        assert!(rig.check(&[(&ticket, ticket_id)], head).is_err());
+        let extension = TestExtraction::new(&rig);
+        let mut max_selection_slices = 0;
+        for _ in 0..3_000 {
+            if rig.finished(&ticket.pack_id) {
+                break;
+            }
+            let job = rig.job(&ticket.pack_id).unwrap();
+            let selection = job.phase == Phase::Extract && !job.tiny();
+            let before = rig.recorder.slices.lock().unwrap().len();
+            tick(&rig, &extension, rig.store.as_ref(), true);
+            if selection {
+                max_selection_slices =
+                    max_selection_slices.max(rig.recorder.slices.lock().unwrap().len() - before);
+            }
+            rig.clock.advance(1_000);
+        }
+        assert!(rig.finished(&ticket.pack_id));
+        assert_eq!(max_selection_slices > 1, slices > 1);
+        assert_holder(&rig, id);
+        let content = read_blob(&rig.blobs, &BlobKey::object(id)).unwrap();
+        let offsets = read_blob(&rig.blobs, &BlobKey::object_offsets(id)).unwrap();
+        assert_eq!(content, data.concat());
+        assert_eq!(offsets, expected_offsets);
+        results.push((
+            rig.check(&[(&ticket, ticket_id)], head).unwrap(),
+            content,
+            offsets,
+        ));
+    }
+    assert_eq!(results[0], results[1]);
+}
+
 struct RestartAfterCommit {
     inner: Checkpoints,
     repo: RepoName,
