@@ -283,19 +283,32 @@ fn validate_scan_reply(
     pages: &[ScanPage],
 ) -> Result<(), StoreError> {
     if pages.is_empty() || pages.len() > ranges.len() {
-        return Err(StoreError::Corrupt(
+        return Err(StoreError::MalformedReply(
             "invalid scan_many served prefix".into(),
         ));
     }
     for ((id, range), page) in ids.iter().zip(ranges).zip(pages) {
         if page.entries.len() > range.limit as usize {
-            return Err(StoreError::Corrupt(
+            return Err(StoreError::MalformedReply(
                 "object index scan exceeded limit".into(),
             ));
         }
-        if page.entries.iter().any(|(key, _)| !matches!(keys::parse(key),
-            Some(ParsedKey::ObjectIndex { repo: found, object, .. }) if found == repo.name && object == *id)) {
-            return Err(StoreError::Corrupt("malformed object index key".into()));
+        for (key, _) in &page.entries {
+            match keys::parse(key) {
+                Some(ParsedKey::ObjectIndex {
+                    repo: found,
+                    object,
+                    ..
+                }) if found == repo.name && object == *id => {}
+                Some(_) => {
+                    return Err(StoreError::MalformedReply(
+                        "object index key outside scanned range".into(),
+                    ));
+                }
+                None => {
+                    return Err(StoreError::Corrupt("malformed object index key".into()));
+                }
+            }
         }
     }
     Ok(())
@@ -456,7 +469,12 @@ async fn scan_all<S: NamespaceStore>(
                                 retained_bytes += size;
                                 scan.rows.push((pack_id, value));
                             }
-                            _ => {
+                            Some(_) => {
+                                return Err(StoreError::MalformedReply(
+                                    "object index key outside scanned range".into(),
+                                ));
+                            }
+                            None => {
                                 return Err(StoreError::Corrupt(
                                     "malformed object index key".into(),
                                 ));
@@ -557,7 +575,9 @@ pub async fn locate_many<S: NamespaceStore>(
         for ((_, ids, _), reply) in wave.iter().zip(replies) {
             let values = reply?;
             if values.len() != ids.len() {
-                return Err(StoreError::Corrupt("short membership get_many".into()));
+                return Err(StoreError::MalformedReply(
+                    "short membership get_many".into(),
+                ));
             }
             for (pack, value) in ids.iter().zip(values) {
                 if value.is_some() {

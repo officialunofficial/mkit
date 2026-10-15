@@ -202,17 +202,21 @@ async fn bounded_waves_reserve_exact_chunk_calls_and_preserve_duplicate_facts() 
 
 #[tokio::test]
 async fn chunk_validation_precedes_later_transport_even_when_reply_finishes_last() {
-    for invalid in [
-        Reply::Short,
-        Reply::MissingHead,
-        Reply::BadHead,
-        Reply::MissingEntry,
-        Reply::BadEntry,
-        Reply::BadMarker,
+    for (invalid, malformed) in [
+        (Reply::Short, true),
+        (Reply::MissingHead, false),
+        (Reply::BadHead, false),
+        (Reply::MissingEntry, false),
+        (Reply::BadEntry, false),
+        (Reply::BadMarker, false),
     ] {
         let (store, located) = fixture(vec![Reply::Good, invalid, Reply::Transport]).await;
         let error = located_entries(&store, &located).await.unwrap_err();
-        assert!(matches!(error, StoreError::Corrupt(_)), "{error}");
+        if malformed {
+            assert!(matches!(error, StoreError::MalformedReply(_)), "{error}");
+        } else {
+            assert!(matches!(error, StoreError::Corrupt(_)), "{error}");
+        }
         let (store, located) = fixture(vec![Reply::Transport, invalid, Reply::Good]).await;
         let error = located_entries(&store, &located).await.unwrap_err();
         assert!(matches!(error, StoreError::Unavailable(_)), "{error}");

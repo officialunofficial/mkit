@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use mkit_core::hash::{Hash, hash};
 
-use super::{ReadAccess, failure};
+use super::{ReadAccess, classify, corrupt, failure};
 use crate::ServerError;
 use crate::fork::{self, Failure, ForkJobV1, ForkResult, ForkSpec, Phase};
 use crate::replay::{ReplayState, StoredResult};
@@ -103,8 +103,9 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
     /// No rows are cached, and no raw keys or encoded values are returned.
     ///
     /// # Errors
-    /// Invalid fork specifications, storage failure, corrupt rows, or conflicting
-    /// retained bindings fail closed.
+    /// `invalid_argument` for an invalid specification; `internal` for a
+    /// corrupt row or retained bindings that conflict with it; `unavailable`
+    /// for a malformed reply or storage failure.
     pub async fn fork_job_status(
         &self,
         spec: &ForkSpec,
@@ -142,7 +143,8 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
     /// retries use `Pipeline::fork_repo`.
     ///
     /// # Errors
-    /// Conflicting, corrupt, or incomplete completion evidence fails closed.
+    /// `internal` for conflicting, corrupt, or incomplete completion evidence;
+    /// `unavailable` for a malformed reply or storage failure.
     pub async fn recover_completed_fork(
         &self,
         spec: &ForkSpec,
@@ -155,16 +157,19 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
             return Ok(None);
         }
         let result = validate_done(&job, spec)?;
-        let fence = job.fence.as_ref().ok_or_else(failure)?;
+        let fence = job
+            .fence
+            .as_ref()
+            .ok_or_else(|| corrupt("done fork job has no authority fence"))?;
         if fence.authority_generation.is_none() || fence.grant_epoch.is_some() {
-            return Err(failure());
+            return Err(corrupt("fork authority fence cannot support recovery"));
         }
         let creates_namespace = fence.create_namespace;
         let repository = identity(&spec.dest);
         let settle = validate_settlement(&job, original, &repository, result)?;
         let mut wanted = vec![
             keys::replay(&original.scope),
-            keys::reservation(&settle.rid).map_err(|_| failure())?,
+            keys::reservation(&settle.rid).map_err(|_| corrupt("invalid reservation id"))?,
         ];
         if creates_namespace {
             wanted.push(keys::namespace_record());
@@ -173,30 +178,35 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
             .store
             .get_many(&self.shards.coordinator(&spec.dest.namespace), &wanted)
             .await
-            .map_err(|_| failure())?;
+            .map_err(classify)?;
         // The Done job was committed atomically with both rows, so it is
         // authoritative. Outcome acknowledgement deletes the reservation and
         // the replay row is pruned after envelope expiry, so either may be
         // absent. A row that is present must still agree exactly.
         let (replay_row, reservation_row) = match rows.as_slice() {
             [replay, reservation] if !creates_namespace => (replay, reservation),
-            [replay, reservation, Some(namespace)] if creates_namespace => {
-                codec::decode_namespace_record(namespace).map_err(|_| failure())?;
+            [replay, reservation, namespace_row] if creates_namespace => {
+                codec::decode_namespace_record(
+                    namespace_row
+                        .as_ref()
+                        .ok_or_else(|| corrupt("missing namespace record"))?,
+                )
+                .map_err(corrupt)?;
                 (replay, reservation)
             }
             _ => return Err(failure()),
         };
         if let Some(replay_row) = replay_row {
-            let replay = codec::decode_replay_record(replay_row).map_err(|_| failure())?;
+            let replay = codec::decode_replay_record(replay_row).map_err(corrupt)?;
             if replay.fingerprint != original.fingerprint
                 || replay.expires_at_ms != original.expires_at_ms
                 || replay.state != ReplayState::Committed(StoredResult::Fork)
             {
-                return Err(failure());
+                return Err(corrupt("replay record contradicts the original identity"));
             }
         }
         if let Some(reservation_row) = reservation_row {
-            match codec::decode_reservation(reservation_row).map_err(|_| failure())? {
+            match codec::decode_reservation(reservation_row).map_err(corrupt)? {
                 codec::ReservationV1::Committed {
                     repository: committed_repo,
                     bytes_stored,
@@ -209,15 +219,19 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
                     && bytes_stored == result.pack_bytes
                     && new_to_repo == result.pack_bytes
                     && refs.is_empty() => {}
-                _ => return Err(failure()),
+                _ => return Err(corrupt("reservation contradicts the completed fork")),
             }
         }
         let status = status(&job);
         Ok(Some(RecoveredFork {
             result: result.clone(),
             packs: status.packs,
-            reservation: status.reservation.ok_or_else(failure)?,
-            authority: status.authority.ok_or_else(failure)?,
+            reservation: status
+                .reservation
+                .ok_or_else(|| corrupt("done fork job has no reservation"))?,
+            authority: status
+                .authority
+                .ok_or_else(|| corrupt("done fork job has no authority"))?,
         }))
     }
 
@@ -230,7 +244,7 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
         }
         let Some((job, _)) = fork::read_job(&self.store, self.shards, &spec.dest)
             .await
-            .map_err(|_| failure())?
+            .map_err(classify)?
         else {
             return Ok(None);
         };
@@ -246,7 +260,7 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
             || (job.phase != Phase::Failed && job.failure.is_some())
             || (job.phase == Phase::Failed && job.failure.is_none())
         {
-            return Err(failure());
+            return Err(corrupt("fork job contradicts the requested specification"));
         }
         Ok(Some(job))
     }
@@ -258,8 +272,14 @@ fn validate_settlement<'a>(
     repository: &str,
     result: &ForkResult,
 ) -> Result<&'a fork::SettleV1, ServerError> {
-    let settle = job.settle.as_ref().ok_or_else(failure)?;
-    let replay = settle.replay.as_ref().ok_or_else(failure)?;
+    let settle = job
+        .settle
+        .as_ref()
+        .ok_or_else(|| corrupt("done fork job has no settlement"))?;
+    let replay = settle
+        .replay
+        .as_ref()
+        .ok_or_else(|| corrupt("fork settlement has no replay identity"))?;
     if settle.rid.is_empty()
         || settle.rid.len() > 256
         || settle.pending.len() > 4096
@@ -271,16 +291,16 @@ fn validate_settlement<'a>(
         || !settle.charges.is_empty()
         || settle.namespace_cap.is_some()
     {
-        return Err(failure());
+        return Err(corrupt("fork settlement contradicts the original identity"));
     }
-    match codec::decode_reservation(&Value::new(settle.pending.clone())).map_err(|_| failure())? {
+    match codec::decode_reservation(&Value::new(settle.pending.clone())).map_err(corrupt)? {
         codec::ReservationV1::Pending {
             repository: pending_repo,
             procedure: codec::StoredProcedure::Fork,
             op: codec::PendingOp::Write,
             ..
         } if pending_repo == repository => {}
-        _ => return Err(failure()),
+        _ => return Err(corrupt("fork pending reservation contradicts the job")),
     }
     Ok(settle)
 }
@@ -331,7 +351,10 @@ fn status(job: &ForkJobV1) -> ForkJobStatus {
 }
 
 fn validate_done<'a>(job: &'a ForkJobV1, spec: &ForkSpec) -> Result<&'a ForkResult, ServerError> {
-    let result = job.result.as_ref().ok_or_else(failure)?;
+    let result = job
+        .result
+        .as_ref()
+        .ok_or_else(|| corrupt("done fork job has no result"))?;
     if job.failure.is_some()
         || result.source != identity(&spec.source)
         || result.source_ref != job.source_ref
@@ -350,17 +373,21 @@ fn validate_done<'a>(job: &'a ForkJobV1, spec: &ForkSpec) -> Result<&'a ForkResu
             .is_none_or(|pack| pack.id != job.packmap || !pack.node)
         || result.object_count != job.copied
     {
-        return Err(failure());
+        return Err(corrupt("fork result contradicts the job"));
     }
     let mut ids = BTreeSet::new();
     let mut bytes = 0u64;
     let mut objects = 0u64;
     for pack in &job.packs {
         if !ids.insert(pack.id) {
-            return Err(failure());
+            return Err(corrupt("duplicate fork pack"));
         }
-        bytes = bytes.checked_add(pack.len).ok_or_else(failure)?;
-        objects = objects.checked_add(pack.objects).ok_or_else(failure)?;
+        bytes = bytes
+            .checked_add(pack.len)
+            .ok_or_else(|| corrupt("fork pack totals overflow"))?;
+        objects = objects
+            .checked_add(pack.objects)
+            .ok_or_else(|| corrupt("fork pack totals overflow"))?;
     }
     let packed = ids
         .iter()
@@ -370,7 +397,7 @@ fn validate_done<'a>(job: &'a ForkJobV1, spec: &ForkSpec) -> Result<&'a ForkResu
         || result.object_count != objects
         || result.pack_set != hash(&packed)
     {
-        return Err(failure());
+        return Err(corrupt("fork result contradicts the pack inventory"));
     }
     Ok(result)
 }
@@ -538,7 +565,10 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                assert!(reads.fork_job_status(&spec).await.is_err());
+                assert_eq!(
+                    reads.fork_job_status(&spec).await.unwrap_err().code(),
+                    crate::Code::Internal
+                );
                 let mut job = job(&spec);
                 write_job(&store, shards, &spec, &job).await;
                 let status = reads.fork_job_status(&spec).await.unwrap().unwrap();
@@ -548,11 +578,17 @@ mod tests {
                 let completed = job.clone();
                 job.phase = Phase::Copy;
                 write_job(&store, shards, &spec, &job).await;
-                assert!(reads.fork_job_status(&spec).await.is_err());
+                assert_eq!(
+                    reads.fork_job_status(&spec).await.unwrap_err().code(),
+                    crate::Code::Internal
+                );
                 job = completed;
                 job.packs.push(job.packs[0]);
                 write_job(&store, shards, &spec, &job).await;
-                assert!(reads.fork_job_status(&spec).await.is_err());
+                assert_eq!(
+                    reads.fork_job_status(&spec).await.unwrap_err().code(),
+                    crate::Code::Internal
+                );
             }
         });
     }
@@ -596,7 +632,14 @@ mod tests {
                     fingerprint: [9; 32],
                     ..original.clone()
                 };
-                assert!(reads.recover_completed_fork(&spec, &wrong).await.is_err());
+                assert_eq!(
+                    reads
+                        .recover_completed_fork(&spec, &wrong)
+                        .await
+                        .unwrap_err()
+                        .code(),
+                    crate::Code::Internal
+                );
                 store
                     .apply(
                         &shards.coordinator(&spec.dest.namespace),
@@ -604,11 +647,13 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                assert!(
+                assert_eq!(
                     reads
                         .recover_completed_fork(&spec, &original)
                         .await
-                        .is_err()
+                        .unwrap_err()
+                        .code(),
+                    crate::Code::Internal
                 );
                 settle(&store, shards, &spec).await;
                 store
@@ -629,11 +674,13 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                assert!(
+                assert_eq!(
                     reads
                         .recover_completed_fork(&spec, &original)
                         .await
-                        .is_err()
+                        .unwrap_err()
+                        .code(),
+                    crate::Code::Internal
                 );
                 job.phase = Phase::Copy;
                 job.result = None;
@@ -688,12 +735,26 @@ mod tests {
                         scope: [8; 32],
                         ..original.clone()
                     };
-                    assert!(reads.recover_completed_fork(&spec, &other).await.is_err());
+                    assert_eq!(
+                        reads
+                            .recover_completed_fork(&spec, &other)
+                            .await
+                            .unwrap_err()
+                            .code(),
+                        crate::Code::Internal
+                    );
                     let wrong = ForkReplayIdentity {
                         fingerprint: [9; 32],
                         ..original.clone()
                     };
-                    assert!(reads.recover_completed_fork(&spec, &wrong).await.is_err());
+                    assert_eq!(
+                        reads
+                            .recover_completed_fork(&spec, &wrong)
+                            .await
+                            .unwrap_err()
+                            .code(),
+                        crate::Code::Internal
+                    );
                 }
                 // A present reservation that is not the committed settlement, or
                 // that names another rid's outcome, fails closed.
@@ -729,11 +790,13 @@ mod tests {
                         .await
                         .unwrap();
                     let reads = ReadAccess::new(&store, shards, RepoVisibility::Public, true);
-                    assert!(
+                    assert_eq!(
                         reads
                             .recover_completed_fork(&spec, &original)
                             .await
-                            .is_err()
+                            .unwrap_err()
+                            .code(),
+                        crate::Code::Internal
                     );
                 }
                 // A job whose settle identity differs from the caller's fails even
@@ -743,11 +806,13 @@ mod tests {
                 other.settle.as_mut().unwrap().rid = String::new();
                 write_job(&store, shards, &spec, &other).await;
                 let reads = ReadAccess::new(&store, shards, RepoVisibility::Public, true);
-                assert!(
+                assert_eq!(
                     reads
                         .recover_completed_fork(&spec, &original)
                         .await
-                        .is_err()
+                        .unwrap_err()
+                        .code(),
+                    crate::Code::Internal
                 );
                 // A non-empty rid with no rows is accepted and reported, so the
                 // caller must compare `reservation.id` with its retained evidence;
@@ -781,22 +846,26 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                assert!(
+                assert_eq!(
                     reads
                         .recover_completed_fork(&spec, &original)
                         .await
-                        .is_err()
+                        .unwrap_err()
+                        .code(),
+                    crate::Code::Internal
                 );
                 // Namespace-creating fork: both rows absent recovers; the namespace
                 // record is still required.
                 let store = MemoryKv::default();
                 write_job(&store, shards, &spec, &creating(&spec)).await;
                 let reads = ReadAccess::new(&store, shards, RepoVisibility::Public, true);
-                assert!(
+                assert_eq!(
                     reads
                         .recover_completed_fork(&spec, &original)
                         .await
-                        .is_err()
+                        .unwrap_err()
+                        .code(),
+                    crate::Code::Internal
                 );
                 put_namespace(&store, shards, &spec).await;
                 assert!(
@@ -847,12 +916,17 @@ mod tests {
             corrupt.binding = [0; 32];
             write_job(&store, &D34Shards, &spec, &corrupt).await;
             let reads = ReadAccess::new(&store, &D34Shards, RepoVisibility::Public, true);
-            assert!(reads.fork_job_status(&spec).await.is_err());
-            assert!(
+            assert_eq!(
+                reads.fork_job_status(&spec).await.unwrap_err().code(),
+                crate::Code::Internal
+            );
+            assert_eq!(
                 reads
                     .recover_completed_fork(&spec, &original())
                     .await
-                    .is_err()
+                    .unwrap_err()
+                    .code(),
+                crate::Code::Internal
             );
         });
     }
@@ -886,11 +960,13 @@ mod tests {
                         )
                         .await
                         .unwrap();
-                    assert!(
+                    assert_eq!(
                         reads
                             .recover_completed_fork(&spec, &original)
                             .await
-                            .is_err()
+                            .unwrap_err()
+                            .code(),
+                        crate::Code::Internal
                     );
                 }
                 let store = MemoryKv::default();
@@ -899,11 +975,13 @@ mod tests {
                 write_job(&store, shards, &spec, &corrupt).await;
                 settle(&store, shards, &spec).await;
                 let reads = ReadAccess::new(&store, shards, RepoVisibility::Public, true);
-                assert!(
+                assert_eq!(
                     reads
                         .recover_completed_fork(&spec, &original)
                         .await
-                        .is_err()
+                        .unwrap_err()
+                        .code(),
+                    crate::Code::Internal
                 );
             }
         });
@@ -936,12 +1014,17 @@ mod tests {
                     let mut corrupt = pending.clone();
                     mutate(&mut corrupt);
                     write_job(&store, shards, &spec, &corrupt).await;
-                    assert!(reads.fork_job_status(&spec).await.is_err());
-                    assert!(
+                    assert_eq!(
+                        reads.fork_job_status(&spec).await.unwrap_err().code(),
+                        crate::Code::Internal
+                    );
+                    assert_eq!(
                         reads
                             .recover_completed_fork(&spec, &original())
                             .await
-                            .is_err()
+                            .unwrap_err()
+                            .code(),
+                        crate::Code::Internal
                     );
                 }
                 pending.phase = Phase::Failed;
@@ -996,11 +1079,13 @@ mod tests {
                     settle(&store, shards, &spec).await;
                     if create {
                         // The namespace record is part of the evidence.
-                        assert!(
+                        assert_eq!(
                             reads
                                 .recover_completed_fork(&spec, &original())
                                 .await
-                                .is_err()
+                                .unwrap_err()
+                                .code(),
+                            crate::Code::Internal
                         );
                         store
                             .apply(
@@ -1009,11 +1094,13 @@ mod tests {
                             )
                             .await
                             .unwrap();
-                        assert!(
+                        assert_eq!(
                             reads
                                 .recover_completed_fork(&spec, &original())
                                 .await
-                                .is_err()
+                                .unwrap_err()
+                                .code(),
+                            crate::Code::Internal
                         );
                         put_namespace(&store, shards, &spec).await;
                     }
@@ -1067,11 +1154,13 @@ mod tests {
                     settle(&store, shards, &spec).await;
                     put_namespace(&store, shards, &spec).await;
                     let reads = ReadAccess::new(&store, shards, RepoVisibility::Public, true);
-                    assert!(
+                    assert_eq!(
                         reads
                             .recover_completed_fork(&spec, &original())
                             .await
-                            .is_err()
+                            .unwrap_err()
+                            .code(),
+                        crate::Code::Internal
                     );
                 }
                 // Reservation rows that disagree with the completed result.
@@ -1120,11 +1209,13 @@ mod tests {
                         .await
                         .unwrap();
                     let reads = ReadAccess::new(&store, shards, RepoVisibility::Public, true);
-                    assert!(
+                    assert_eq!(
                         reads
                             .recover_completed_fork(&spec, &original())
                             .await
-                            .is_err()
+                            .unwrap_err()
+                            .code(),
+                        crate::Code::Internal
                     );
                 }
                 // A missing replay or reservation row (acknowledged or expired) is accepted,
@@ -1180,11 +1271,13 @@ mod tests {
                         .await
                         .unwrap();
                     let reads = ReadAccess::new(&store, shards, RepoVisibility::Public, true);
-                    assert!(
+                    assert_eq!(
                         reads
                             .recover_completed_fork(&spec, &original())
                             .await
-                            .is_err()
+                            .unwrap_err()
+                            .code(),
+                        crate::Code::Internal
                     );
                 }
             }
@@ -1224,6 +1317,50 @@ mod tests {
                     // and for these fixtures it accepts exactly the ones it accepts.
                     assert_eq!(recovered, CompletedFork::check(&job, &spec).is_some());
                 }
+            }
+        });
+    }
+
+    #[test]
+    fn fork_reads_classify_faults_and_short_replies_as_retryable() {
+        use crate::reads::tests::{Fault, Faulty};
+        futures_executor::block_on(async {
+            for shards in [&SinglePartition as &dyn ShardMap, &D34Shards] {
+                for fault in [Fault::Store, Fault::Reply] {
+                    let spec = spec();
+                    let store = Faulty::new(fault);
+                    let reads = ReadAccess::new(&store, shards, RepoVisibility::Public, true);
+                    assert_eq!(
+                        reads.fork_job_status(&spec).await.unwrap_err().code(),
+                        crate::Code::Unavailable,
+                        "{fault:?}"
+                    );
+                    assert_eq!(
+                        reads
+                            .recover_completed_fork(&spec, &original())
+                            .await
+                            .unwrap_err()
+                            .code(),
+                        crate::Code::Unavailable,
+                        "{fault:?}"
+                    );
+                }
+                // A settlement batch one row short is a malformed reply, not
+                // corrupt evidence.
+                let spec = spec();
+                let inner = MemoryKv::default();
+                write_job(&inner, shards, &spec, &job(&spec)).await;
+                settle(&inner, shards, &spec).await;
+                let store = Faulty::wrapping(inner, Fault::ShortAll);
+                let reads = ReadAccess::new(&store, shards, RepoVisibility::Public, true);
+                assert_eq!(
+                    reads
+                        .recover_completed_fork(&spec, &original())
+                        .await
+                        .unwrap_err()
+                        .code(),
+                    crate::Code::Unavailable
+                );
             }
         });
     }

@@ -1,6 +1,7 @@
 use super::*;
 
 #[test]
+#[allow(clippy::too_many_lines)] // One fixture pins routing, ordering and frame bounds.
 fn exact_pack_indexes_route_order_absence_duplicates_and_frame_bounds() {
     for shards in maps() {
         let store = MemoryKv::default();
@@ -72,7 +73,12 @@ fn exact_pack_indexes_route_order_absence_duplicates_and_frame_bounds() {
         let index_partition = shards.object_index(&repo, &object);
         let key = keys::object_index(&repo.name, &object, &packs[2].id);
         put(&store, &index_partition, key.clone(), Value::new(vec![255]));
-        assert!(block_on(reads.object_index_in_packs(&repo, &object, &packs)).is_err());
+        assert_eq!(
+            code(block_on(
+                reads.object_index_in_packs(&repo, &object, &packs)
+            )),
+            crate::Code::Internal
+        );
         // Overflowing frame ends cannot become valid even for a maximal pack.
         let mut raw = codec::encode_object_index(
             &object,
@@ -91,16 +97,16 @@ fn exact_pack_indexes_route_order_absence_duplicates_and_frame_bounds() {
         // Encode a valid row, then corrupt its frame offset through the codec's fixed width.
         raw[1..9].copy_from_slice(&u64::MAX.to_be_bytes());
         put(&store, &index_partition, key, Value::new(raw));
-        assert!(
-            block_on(reads.object_index_in_packs(
+        assert_eq!(
+            code(block_on(reads.object_index_in_packs(
                 &repo,
                 &object,
                 &[PackRef {
                     id: packs[2].id,
                     len: u64::MAX
                 }]
-            ))
-            .is_err()
+            ))),
+            crate::Code::Internal
         );
     }
 }
@@ -163,6 +169,7 @@ fn exact_pack_indexes_batch_caps_and_shared_call_budget() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One fixture pins witness parity across views.
 fn pack_witness_routes_presence_decoding_and_visibility_parity() {
     for shards in maps() {
         for member in [false, true] {
@@ -239,7 +246,10 @@ fn pack_witness_routes_presence_decoding_and_visibility_parity() {
                 keys::published_member(&repo.name, &pack)
             };
             put(&store, &p, bad.clone(), Value::new(vec![255]));
-            assert!(block_on(reads.pack_witness(&repo, &pack)).is_err());
+            assert_eq!(
+                code(block_on(reads.pack_witness(&repo, &pack))),
+                crate::Code::Internal
+            );
             put(&store, &p, bad.clone(), Value::default());
             assert!(block_on(reads.pack_witness(&repo, &pack)).is_ok());
             let partner = if bad_member {
@@ -261,7 +271,10 @@ fn pack_witness_routes_presence_decoding_and_visibility_parity() {
                 .encode(),
             );
             put(&store, &p, bad, Value::new(vec![255]));
-            assert!(block_on(reads.pack_witness(&repo, &pack)).is_err());
+            assert_eq!(
+                code(block_on(reads.pack_witness(&repo, &pack))),
+                crate::Code::Internal
+            );
         }
     }
 }
@@ -364,6 +377,13 @@ fn exact_evidence_batch_geometry_and_malformed_replies() {
                 &vec![pack; MAX_OBJECT_INDEX_PACKS],
             ));
             assert_eq!(result.is_ok(), extra_rows == 0);
+            if extra_rows != 0 {
+                assert_eq!(
+                    result.map(|_| ()).unwrap_err().code(),
+                    crate::Code::Unavailable,
+                    "malformed replies stay retryable"
+                );
+            }
             let batches = store.batches.lock().unwrap().clone();
             assert_eq!(batches.len(), if extra_rows == 0 { 8 } else { 1 });
             assert!(
@@ -373,10 +393,15 @@ fn exact_evidence_batch_geometry_and_malformed_replies() {
                         && *len == OBJECT_INDEX_BATCH_SIZE)
             );
             store.batches.lock().unwrap().clear();
-            assert_eq!(
-                block_on(reads.pack_witness(&repo, &pack.id)).is_ok(),
-                extra_rows == 0
-            );
+            let witness = block_on(reads.pack_witness(&repo, &pack.id));
+            assert_eq!(witness.is_ok(), extra_rows == 0);
+            if extra_rows != 0 {
+                assert_eq!(
+                    witness.map(|_| ()).unwrap_err().code(),
+                    crate::Code::Unavailable,
+                    "malformed replies stay retryable"
+                );
+            }
             assert_eq!(
                 *store.batches.lock().unwrap(),
                 vec![(shards.membership(&repo, &BlobKey::pack(pack.id)), 2)]
@@ -398,7 +423,12 @@ fn exact_evidence_batch_geometry_and_malformed_replies() {
         let mut packs = vec![pack; OBJECT_INDEX_BATCH_SIZE];
         packs.push(bad);
         let reads = ReadAccess::new(&store, shards.as_ref(), RepoVisibility::Public, true);
-        assert!(block_on(reads.object_index_in_packs(&repo, &object, &packs)).is_err());
+        assert_eq!(
+            code(block_on(
+                reads.object_index_in_packs(&repo, &object, &packs)
+            )),
+            crate::Code::Internal
+        );
     }
 }
 

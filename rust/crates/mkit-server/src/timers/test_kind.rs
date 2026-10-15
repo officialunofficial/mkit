@@ -51,7 +51,9 @@ impl<S: NamespaceStore> TimerHandler<S> for TestTimer {
             ];
             let rows = ctx.store.get_many(ctx.partition, &wanted).await?;
             if rows.len() != wanted.len() {
-                return Err(StoreError::Corrupt("short test deletion read".into()));
+                return Err(StoreError::MalformedReply(
+                    "short test deletion read".into(),
+                ));
             }
             let mut batch = Batch::new().require(crate::Precondition::NotAfter(
                 ctx.now_ms.saturating_add(10_000),

@@ -59,7 +59,10 @@ pub(crate) async fn list_refs<S: NamespaceStore>(
         .iter()
         .map(|(key, value)| match keys::parse(key) {
             Some(ParsedKey::Ref { name, .. }) => Ok((name, codec::decode_ref_id(value)?)),
-            _ => Err(StoreError::Corrupt("malformed ref key".into())),
+            Some(_) => Err(StoreError::MalformedReply(
+                "ref key outside scanned range".into(),
+            )),
+            None => Err(StoreError::Corrupt("malformed ref key".into())),
         })
         .collect::<Result<_, _>>()?;
     Ok(RefPage {
@@ -115,7 +118,9 @@ pub(crate) async fn members_many<S: NamespaceStore>(
         .collect();
     let local = store.get_many(ref_shard, &keys).await?;
     if local.len() != packs.len() {
-        return Err(StoreError::Corrupt("short local membership read".into()));
+        return Err(StoreError::MalformedReply(
+            "short local membership read".into(),
+        ));
     }
     let mut found: Vec<_> = local.into_iter().map(|value| value.is_some()).collect();
     let mut grouped: BTreeMap<Partition, Vec<usize>> = BTreeMap::new();
@@ -131,7 +136,9 @@ pub(crate) async fn members_many<S: NamespaceStore>(
         let wanted: Vec<_> = indices.iter().map(|i| keys[*i].clone()).collect();
         let values = store.get_many(&partition, &wanted).await?;
         if values.len() != indices.len() {
-            return Err(StoreError::Corrupt("short membership index read".into()));
+            return Err(StoreError::MalformedReply(
+                "short membership index read".into(),
+            ));
         }
         for (i, value) in indices.into_iter().zip(values) {
             found[i] = value.is_some();
@@ -199,7 +206,10 @@ pub(crate) async fn expired_replay_keys<S: NamespaceStore>(
         .into_iter()
         .map(|(index, _)| match keys::parse(&index) {
             Some(ParsedKey::ReplayExpiry { scope, .. }) => Ok((index, keys::replay(&scope))),
-            _ => Err(StoreError::Corrupt("malformed replay expiry key".into())),
+            Some(_) => Err(StoreError::MalformedReply(
+                "replay expiry key outside scanned range".into(),
+            )),
+            None => Err(StoreError::Corrupt("malformed replay expiry key".into())),
         })
         .collect()
 }

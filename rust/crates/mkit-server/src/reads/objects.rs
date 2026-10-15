@@ -1,5 +1,5 @@
 //! Repository membership queries and bounded canonical decoding.
-use super::{ReadAccess, failure};
+use super::{ReadAccess, classify, corrupt, failure};
 use crate::indexed::resolve::{MemberCache, ResolveFailure, member_object};
 use crate::store::{BlobStore, NamespaceStore, index};
 use crate::{RepoId, ServerError};
@@ -68,13 +68,21 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
         }
         let answers = index::locate_many(&self.store, self.shards, repo, ids)
             .await
-            .map_err(|_| failure())?;
+            .map_err(classify)?;
         if answers.len() != ids.len() {
             return Err(failure());
         }
         answers
             .into_iter()
-            .map(|answer| answer.map_err(|_| failure()))
+            .map(|answer| {
+                answer.map_err(|lookup| match lookup {
+                    index::LookupError::TooManyRows => {
+                        ServerError::internal("object index row cap exceeded", lookup)
+                    }
+                    index::LookupError::TooManyPages
+                    | index::LookupError::TooManyMembershipReads => failure(),
+                })
+            })
             .collect()
     }
 
@@ -86,14 +94,23 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
         Ok(self.locations(repo, &[*id]).await?.pop().flatten())
     }
 
+    /// Fresh denial for `id`, classified like every other typed read.
+    async fn object_denied(&self, id: &Hash) -> Result<bool, ServerError> {
+        crate::store::ContentIndex::new(crate::store::BorrowedStore(&self.store))
+            .blocked(id)
+            .await
+            .map(|entry| entry.is_some())
+            .map_err(classify)
+    }
+
     async fn describe(
         &self,
         id: &Hash,
         located: index::LocatedObject,
     ) -> Result<MemberObject, ServerError> {
         // Do not short-circuit: a corrupt pack denial row is still a fault.
-        let object_denied = crate::takedown::denial::denied(&self.store, id).await?;
-        let pack_denied = crate::takedown::denial::denied(&self.store, &located.pack).await?;
+        let object_denied = self.object_denied(id).await?;
+        let pack_denied = self.object_denied(&located.pack).await?;
         Ok(MemberObject {
             pack: located.pack,
             frame_offset: located.value.frame_offset,
@@ -112,8 +129,10 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
     /// No repository authorization or ref reachability check runs here.
     ///
     /// # Errors
-    /// `invalid_argument` above [`MAX_OBJECT_LOOKUP_IDS`]; `unavailable` for
-    /// corrupt rows, lookup caps, or failed reads. Any failed proof refuses the batch.
+    /// `invalid_argument` above [`MAX_OBJECT_LOOKUP_IDS`]; `internal` for
+    /// corrupt rows or a lookup cap that cannot change on retry;
+    /// `unavailable` for retryable lookup caps, malformed replies, or failed
+    /// reads. Any failed proof refuses the batch.
     pub async fn locate_objects(
         &self,
         repo: &RepoId,
@@ -137,7 +156,9 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
     /// No repository authorization or ref reachability check runs here.
     ///
     /// # Errors
-    /// `unavailable` for corrupt rows, lookup caps, or storage failures.
+    /// `internal` for a corrupt row or a lookup cap that cannot change on
+    /// retry; `unavailable` for retryable lookup caps, malformed replies, or
+    /// storage failures.
     pub async fn locate_object(
         &self,
         repo: &RepoId,
@@ -154,7 +175,9 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
     /// Denial does not hide immutable inventory from trusted policy code.
     ///
     /// # Errors
-    /// `unavailable` for corrupt rows, lookup caps, or storage failures.
+    /// `internal` for a corrupt or contradictory row or a lookup cap that
+    /// cannot change on retry; `unavailable` for retryable lookup caps,
+    /// malformed replies, or storage failures.
     pub async fn member_inventory(
         &self,
         repo: &RepoId,
@@ -165,7 +188,7 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
         };
         let Some(row) = crate::takedown::inventory::entry(&self.store, &located.pack, id)
             .await
-            .map_err(|_| failure())?
+            .map_err(classify)?
         else {
             return Ok(None);
         };
@@ -178,7 +201,7 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
             5 => Some(ObjectType::ChunkedBlob),
             6 => Some(ObjectType::Delta),
             7 => Some(ObjectType::Tag),
-            _ => return Err(failure()),
+            _ => return Err(corrupt("invalid inventory object kind")),
         };
         Ok(Some(MemberInventory {
             kind,
@@ -196,8 +219,10 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
     /// authorizing the repository; content endpoints keep their final guards.
     ///
     /// # Errors
-    /// Resolver errors for denied objects, corrupt frames, or exhausted decode
-    /// bounds; `unavailable` for lookup caps or failed storage reads.
+    /// Resolver errors for denied objects or exhausted decode bounds;
+    /// `internal` for a corrupt frame or row or a lookup cap that cannot
+    /// change on retry; `unavailable` for retryable lookup caps, malformed
+    /// replies, or failed storage reads.
     pub async fn read_member_canonical<B: BlobStore>(
         &self,
         blobs: &B,
@@ -224,7 +249,9 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
         )
         .await
         .map_err(|error| match error {
-            ResolveFailure::Other(error) | ResolveFailure::Corrupt(error) => error,
+            ResolveFailure::Store(error) => classify(error),
+            ResolveFailure::Other(error) => error,
+            ResolveFailure::Corrupt(error) => corrupt(error),
             ResolveFailure::Missing | ResolveFailure::Capped => failure(),
         })?;
         Ok(Some(CanonicalMember {

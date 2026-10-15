@@ -11,6 +11,7 @@ No accessor returns storage keys, encoded rows, or codec types.
 | Question | Accessor | Answer |
 | --- | --- | --- |
 | Does a repository exist, and what visibility is stored? | `repository_visibility` | Visibility and an opaque equality revision, or absence |
+| What visibility was declared, even before the repository record exists? | `declared_visibility` | The stored declaration and an opaque equality revision, or absence when no declaration exists |
 | Which branch pair is published? | `published_branch` | Head, packmap, last applied sequence, published sequence, and membership generation |
 | Which member pack holds an object, and is it denied now? | `locate_object` or `locate_objects` | Pack, frame location, decode metadata, and live object-or-pack denial |
 | Which of these packs index an object? | `object_index_in_packs` | Exact pack IDs and validated frame/decode metadata, in supplied order |
@@ -55,11 +56,31 @@ A false `denied` observation never replaces a final serving guard.
 Trusted policy code can inspect denied membership and immutable inventory.
 
 Absence never consults global blob existence.
-`repository_visibility` returns absence for a missing repository record.
+`repository_visibility` returns absence for a missing repository record;
+use `declared_visibility` to read a declaration that precedes the record,
+for example a private-origin lock taken ahead of a fork.
 Membership queries report only the requested repository's member evidence.
-Corrupt consulted rows and exhausted lookup caps fail closed with an error.
+Corrupt consulted rows and a lookup cap that cannot change on retry fail
+closed with an error.
 A missing publication ledger does not fall back to live heads or projections.
 The applied sequence can exceed the published sequence when advances await clearance.
+
+## Error classes
+
+Every accessor reports one of three error classes.
+`invalid_argument` means your call is wrong, such as a non-branch ref name or
+a lookup above the documented cap.
+A corrupt or undecodable stored row, or stored rows that contradict each
+other, is permanent: `internal`. A retry cannot fix stored data; repair or
+remove the row first. An object-index row cap (`TooManyRows`) is also
+permanent, since the stored row count cannot shrink on retry.
+A store or I/O failure, a malformed reply such as a wrong row count, and a
+page or membership lookup cap are retryable: `unavailable`.
+Each accessor's `# Errors` section lists the classes it can return.
+
+You decide which errors reach your own clients. The wire answers of the
+pipeline are unchanged: storage failures still collapse to the uniform
+retryable or absent outcomes clients already see.
 
 ## Pack visibility witnesses
 
@@ -84,6 +105,9 @@ Read visibility before and after a metadata read. Require matching `revision` va
 Treat absence, a changed revision, or an error as an unusable observation.
 The token includes repository identity and both stored rows.
 A missing visibility row uses the configured deployment default.
+`declared_visibility` brackets the declaration alone: it never substitutes the
+default, and its revision covers the declaration and repository identity only.
+Revisions never compare across the two accessors.
 
 The revision is an equality token, not a monotonic journal counter or a lock.
 If you maintain a policy journal, also bracket these reads with your journal observations.
@@ -99,6 +123,7 @@ Recheck policy at the final disclosure boundary.
 | Previous import or path | Need | Replacement |
 | --- | --- | --- |
 | `adapter_spi::codec::{RepoRecord, RepoVisibilityV1, StoredVisibility}` and their decoders | Repository existence, effective visibility, and a coherent observation | `repository_visibility`; keep caller journal brackets |
+| `adapter_spi::keys::repo_visibility` read directly, for a declaration taken before the record | Pre-record visibility, such as a private-origin lock | `declared_visibility` |
 | `adapter_spi::keys::{repo_record, repo_visibility}` and coordinator construction | Route repository metadata without knowing keys | `repository_visibility` through the configured `ReadAccess` |
 | `adapter_spi::publication::read` and ref-shard construction | Published head and packmap, sequence, and generation | `published_branch` |
 | `adapter_spi::index::{locate_many, LocatedObject}` | Repository membership and pack location | `locate_objects` for batches, or `locate_object` for one ID |

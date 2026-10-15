@@ -15,6 +15,14 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Added
 
+- `ReadAccess::declared_visibility` reads the stored visibility declaration
+  whether or not the repository record exists, for private-origin locks and
+  similar flows that declare visibility ahead of the record. It returns `None`
+  when no declaration exists and never substitutes the configured default;
+  its opaque revision brackets the declaration like `repository_visibility`'s.
+  `StoreError::MalformedReply` marks backend replies that violate the storage
+  contract, such as short or oversized batch results, apart from corrupt
+  stored rows. Additive APIs; no wire or stored-format change; no wipe.
 - Typed embedding reads now include exact object-index lookups within supplied
   packs, with validated frame bounds and ordered results, plus fresh membership
   and published-member witnesses with the internal clearance rule.
@@ -49,6 +57,13 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Changed
 
+- [embedder: breaking API] Typed embedding reads now classify errors. Corrupt
+  or contradictory stored rows fail as permanent `internal`; malformed replies
+  and backend faults stay retryable `unavailable`, and `invalid_argument` is
+  unchanged. Callers that retried every `unavailable` now see `internal` only
+  when stored data itself is corrupt: treat `internal` as permanent and keep
+  retrying `unavailable` only. Wire RPC error mapping and absence semantics
+  are unchanged.
 - Small pushes, including the commit right after a fork, no longer repeat
   identical backend reads inside one request. Each upload session now latches
   its unfenced authority-activation probe instead of re-reading the fence pair

@@ -132,7 +132,7 @@ fn borrowed_batch_propagates_backend_error_and_denial_fails_closed() {
         let result = block_on(ContentIndex::new(BorrowedStore(&store)).blocked(&[7; 32]));
         if short {
             assert!(
-                matches!(result, Err(StoreError::Corrupt(message)) if message == "short denial read")
+                matches!(result, Err(StoreError::MalformedReply(message)) if message == "short denial read")
             );
         } else {
             assert!(

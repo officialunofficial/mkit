@@ -642,7 +642,10 @@ impl<S: NamespaceStore> ContentIndex<S> {
             .iter()
             .map(|(key, _)| match keys::parse(key) {
                 Some(ParsedKey::Holder { ns, repo, .. }) => Ok(Holder { ns, repo }),
-                _ => Err(StoreError::Corrupt("malformed holder key".into())),
+                Some(_) => Err(StoreError::MalformedReply(
+                    "holder key outside scanned range".into(),
+                )),
+                None => Err(StoreError::Corrupt("malformed holder key".into())),
             })
             .collect::<Result<_, _>>()?;
         Ok(HolderPage {
@@ -774,7 +777,7 @@ impl<S: NamespaceStore> ContentIndex<S> {
             )
             .await?;
         if rows.len() != 2 {
-            return Err(StoreError::Corrupt("short denial read".into()));
+            return Err(StoreError::MalformedReply("short denial read".into()));
         }
         let legacy = rows[0]
             .as_ref()
@@ -808,6 +811,9 @@ impl<S: NamespaceStore> ContentIndex<S> {
         let state_key = keys::object_state(object);
         let read = [keys::layout_version(), state_key.clone()];
         let values = self.store.get_many(&p, &read).await?;
+        if values.len() != 2 {
+            return Err(StoreError::MalformedReply("short object-state read".into()));
+        }
         let (v, raw) = (values[0].as_ref(), values[1].as_ref());
         let state = raw
             .map(codec::decode_object_state)
@@ -919,7 +925,7 @@ impl<S: NamespaceStore> ContentIndex<S> {
         for _ in 0..MAX_ATTEMPTS {
             let values = self.store.get_many(&p, &read).await?;
             if values.len() != read.len() {
-                return Err(StoreError::Corrupt("short content read".into()));
+                return Err(StoreError::MalformedReply("short content read".into()));
             }
             let mut values = values.into_iter();
             let (v, old, blocked) = (values.next(), values.next(), values.next());

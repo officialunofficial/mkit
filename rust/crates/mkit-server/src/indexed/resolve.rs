@@ -8,7 +8,9 @@ use crate::store::{
     keys,
 };
 use crate::telemetry::{METRIC_INDEX_LOOKUP_CAPPED, Metrics};
-use crate::{BlobBody, BlobKey, BlobStore, BoxFuture, ByteRange, NamespaceStore, ServerError};
+use crate::{
+    BlobBody, BlobKey, BlobStore, BoxFuture, ByteRange, NamespaceStore, ServerError, StoreError,
+};
 use futures::StreamExt as _;
 use mkit_core::hash::Hash;
 use mkit_core::pack::{DeltaBaseSource, PackError, decode_frame_with, peek_delta_header};
@@ -34,12 +36,21 @@ pub enum ResolveFailure {
     Capped,
     /// A selected member frame failed decoding or canonical id verification.
     Corrupt(ServerError),
+    /// A store or blob backend failure or malformed reply, still classified
+    /// for typed reads; every other caller sees the historical `unavailable`.
+    Store(StoreError),
     Other(ServerError),
 }
 
 impl From<ServerError> for ResolveFailure {
     fn from(error: ServerError) -> Self {
         Self::Other(error)
+    }
+}
+
+impl From<StoreError> for ResolveFailure {
+    fn from(error: StoreError) -> Self {
+        Self::Store(error)
     }
 }
 
@@ -51,6 +62,7 @@ impl ResolveFailure {
             Self::Capped => {
                 ServerError::failed_precondition("delta base not available in this repository")
             }
+            Self::Store(_) => unavailable(),
             Self::Other(error) | Self::Corrupt(error) => error,
         }
     }
@@ -90,7 +102,9 @@ pub async fn locate_split<S: NamespaceStore>(
     ids: &[Hash],
     metrics: &dyn Metrics,
 ) -> Result<BTreeMap<Hash, ObjectLookup>, ServerError> {
-    locate_split_inner(store, shards, repo, ids, Some(metrics)).await
+    locate_split_inner(store, shards, repo, ids, Some(metrics))
+        .await
+        .map_err(split_error)
 }
 
 /// Speculatively locate syntactic bases in 256-id batches. The caller reports
@@ -101,7 +115,17 @@ pub async fn locate_split_quiet<S: NamespaceStore>(
     repo: &RepoId,
     ids: &[Hash],
 ) -> Result<BTreeMap<Hash, ObjectLookup>, ServerError> {
-    locate_split_inner(store, shards, repo, ids, None).await
+    locate_split_inner(store, shards, repo, ids, None)
+        .await
+        .map_err(split_error)
+}
+
+/// `locate_split*` hides the store class behind the historical `unavailable`.
+fn split_error(failure: ResolveFailure) -> ServerError {
+    match failure {
+        ResolveFailure::Other(error) | ResolveFailure::Corrupt(error) => error,
+        _ => unavailable(),
+    }
 }
 
 async fn locate_split_inner<S: NamespaceStore>(
@@ -110,16 +134,14 @@ async fn locate_split_inner<S: NamespaceStore>(
     repo: &RepoId,
     ids: &[Hash],
     metrics: Option<&dyn Metrics>,
-) -> Result<BTreeMap<Hash, ObjectLookup>, ServerError> {
+) -> Result<BTreeMap<Hash, ObjectLookup>, ResolveFailure> {
     let mut todo: Vec<Vec<Hash>> = ids
         .chunks(index::MAX_LOOKUP_IDS)
         .map(<[Hash]>::to_vec)
         .collect();
     let mut found = BTreeMap::new();
     while let Some(chunk) = todo.pop() {
-        let answers = index::locate_many(store, shards, repo, &chunk)
-            .await
-            .map_err(|_| unavailable())?;
+        let answers = index::locate_many(store, shards, repo, &chunk).await?;
         let split = chunk.len() > 1
             && answers.iter().any(|answer| {
                 matches!(
@@ -156,12 +178,12 @@ pub(super) async fn frame_bytes<B: BlobStore>(
     offset: u64,
     length: u64,
     budget: u64,
-) -> Result<Vec<u8>, ServerError> {
+) -> Result<Vec<u8>, ResolveFailure> {
     if length == 0 {
-        return Err(ServerError::invalid_argument("object hash mismatch"));
+        return Err(ServerError::invalid_argument("object hash mismatch").into());
     }
     if length > budget {
-        return Err(budget_exceeded());
+        return Err(budget_exceeded().into());
     }
     let end = offset.checked_add(length - 1).ok_or_else(unavailable)?;
     let body = blobs
@@ -172,8 +194,7 @@ pub(super) async fn frame_bytes<B: BlobStore>(
                 end_inclusive: end,
             }),
         )
-        .await
-        .map_err(|_| unavailable())?
+        .await?
         .ok_or_else(unavailable)?;
     let mut bytes = Vec::new();
     bytes
@@ -182,22 +203,22 @@ pub(super) async fn frame_bytes<B: BlobStore>(
     match body {
         BlobBody::Bytes(value) => {
             if value.len() as u64 != length {
-                return Err(unavailable());
+                return Err(unavailable().into());
             }
             bytes.extend_from_slice(&value);
         }
         BlobBody::Stream { mut stream, .. } => {
             while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|_| unavailable())?;
+                let chunk = chunk?;
                 if (bytes.len() as u64).saturating_add(chunk.len() as u64) > length {
-                    return Err(unavailable());
+                    return Err(unavailable().into());
                 }
                 bytes.extend_from_slice(&chunk);
             }
         }
     }
     if bytes.len() as u64 != length {
-        return Err(unavailable());
+        return Err(unavailable().into());
     }
     Ok(bytes)
 }
@@ -210,7 +231,7 @@ async fn raw_member_reads<B: BlobStore>(
     (offset, length): (u64, u64),
     prefix_budget: u64,
     frame_budget: u64,
-) -> Result<(Vec<u8>, Vec<u8>), ServerError> {
+) -> Result<(Vec<u8>, Vec<u8>), ResolveFailure> {
     let (prefix, frame) = futures::future::join(
         frame_bytes(blobs, pack, 0, 8, prefix_budget),
         frame_bytes(blobs, pack, offset, length, frame_budget),
@@ -513,7 +534,7 @@ async fn selected_frame<S: NamespaceStore>(
     selection: Option<&(crate::Partition, crate::Key)>,
     level: usize,
     id: Hash,
-) -> Result<Option<LocatedObject>, ServerError> {
+) -> Result<Option<LocatedObject>, ResolveFailure> {
     let Some((root, prefix)) = selection else {
         return Ok(None);
     };
@@ -526,15 +547,10 @@ async fn selected_frame<S: NamespaceStore>(
         ]
         .concat(),
     );
-    let raw = store
-        .get(root, &key)
-        .await
-        .map_err(|_| unavailable())?
-        .ok_or_else(unavailable)?;
-    let (found, selected) =
-        crate::takedown::source::decode_frame(&raw).map_err(|_| unavailable())?;
+    let raw = store.get(root, &key).await?.ok_or_else(unavailable)?;
+    let (found, selected) = crate::takedown::source::decode_frame(&raw)?;
     if found != id {
-        return Err(unavailable());
+        return Err(StoreError::Corrupt("selected frame binds another object".into()).into());
     }
     Ok(Some(selected))
 }
@@ -554,16 +570,13 @@ async fn member_base<S: NamespaceStore>(
     }
     let partition = shards.object_index(repo, &base);
     let key = keys::object_index(&repo.name, &base, &located.pack);
-    let same = store
-        .get_many(&partition, &[key])
-        .await
-        .map_err(|_| unavailable())?;
+    let same = store.get_many(&partition, &[key]).await?;
     if same.len() != 1 {
         return Err(unavailable().into());
     }
     let same = same.into_iter().next().flatten();
     let next = if let Some(value) = same {
-        let value = codec::decode_object_index(&base, &value).map_err(|_| unavailable())?;
+        let value = codec::decode_object_index(&base, &value)?;
         (value.frame_offset < located.value.frame_offset).then_some(LocatedObject {
             pack: located.pack,
             value,
@@ -573,7 +586,7 @@ async fn member_base<S: NamespaceStore>(
     };
     Ok(match next {
         Some(next) => next,
-        None => match locate_split(store, shards, repo, &[base], metrics)
+        None => match locate_split_inner(store, shards, repo, &[base], Some(metrics))
             .await?
             .remove(&base)
         {
@@ -626,6 +639,7 @@ pub(crate) async fn member_dependencies_clear<S: NamespaceStore>(
             Ok(next) => next,
             Err(ResolveFailure::Missing) => return Ok(false),
             Err(ResolveFailure::Capped) => return dependency_cap(caps),
+            Err(ResolveFailure::Store(_)) => return Err(unavailable()),
             Err(ResolveFailure::Other(error) | ResolveFailure::Corrupt(error)) => {
                 return Err(error);
             }
@@ -677,25 +691,34 @@ fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
                     return Err(budget_exceeded().into());
                 }
                 if enforce_denial {
-                    #[cfg(feature = "perf-metrics")]
-                    if let Some((clock, counts)) = observations.as_mut() {
-                        crate::takedown::denial::require_clear_observed(store, &id, *clock, counts)
-                            .await?;
-                        crate::takedown::denial::require_clear_observed(
-                            store,
-                            &located.pack,
-                            *clock,
-                            counts,
-                        )
-                        .await?;
-                    } else {
-                        crate::takedown::denial::require_clear(store, &id).await?;
-                        crate::takedown::denial::require_clear(store, &located.pack).await?;
-                    }
-                    #[cfg(not(feature = "perf-metrics"))]
-                    {
-                        crate::takedown::denial::require_clear(store, &id).await?;
-                        crate::takedown::denial::require_clear(store, &located.pack).await?;
+                    let denied = {
+                        #[cfg(feature = "perf-metrics")]
+                        if let Some((clock, counts)) = observations.as_mut() {
+                            crate::takedown::denial::denied_store_observed(
+                                store, &id, *clock, counts,
+                            )
+                            .await?
+                                || crate::takedown::denial::denied_store_observed(
+                                    store,
+                                    &located.pack,
+                                    *clock,
+                                    counts,
+                                )
+                                .await?
+                        } else {
+                            crate::takedown::denial::denied_store(store, &id).await?
+                                || crate::takedown::denial::denied_store(store, &located.pack)
+                                    .await?
+                        }
+                        #[cfg(not(feature = "perf-metrics"))]
+                        {
+                            crate::takedown::denial::denied_store(store, &id).await?
+                                || crate::takedown::denial::denied_store(store, &located.pack)
+                                    .await?
+                        }
+                    };
+                    if denied {
+                        return Err(ServerError::permission_denied("object blocked").into());
                     }
                 }
                 source_limits = Some(source_limits.unwrap_or(MemberSourceLimits::new(
@@ -713,15 +736,17 @@ fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
                     selected_frame(store, memo.selection.as_ref(), visiting.len(), id).await?
                 {
                     if selected != located {
-                        return Err(unavailable().into());
+                        return Err(StoreError::Corrupt(
+                            "selected frame differs from the located member".into(),
+                        )
+                        .into());
                     }
                     if !store
                         .has(
                             &shards.membership(repo, &BlobKey::pack(located.pack)),
                             &keys::membership(&repo.name, &located.pack),
                         )
-                        .await
-                        .map_err(|_| unavailable())?
+                        .await?
                     {
                         return Err(ResolveFailure::Missing);
                     }

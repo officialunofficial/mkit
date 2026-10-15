@@ -1049,6 +1049,60 @@ fn no_inspector_real_advance_reader_and_writer_views_are_identical() {
 }
 
 #[test]
+fn pack_exists_keeps_malformed_denial_replies_retryable() {
+    let owner = key(7);
+    let namespace = Namespace::Ed25519(*owner.verifying_key().as_bytes());
+    let identity = format!("{namespace}/{REPO}");
+    let mut config = cfg(authv2());
+    config.addressing = Addressing::Multi(
+        MultiAddressing::new()
+            .with_namespace_policy(NamespacePolicy::Allowlist([namespace].into())),
+    );
+    config.write_policy = WritePolicy::Owner;
+    config.ticket_keys =
+        Some(crate::upload::token::TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap());
+    config.indexed = Some(crate::indexed::IndexedConfig::default());
+    config.takedown_denial = true;
+    let clock = clock();
+    let mut env = build(config, Spy::new(store(&clock)), Hooks::new(), clock);
+    let (_, pack_id) = pack();
+    let repo = RepoId {
+        namespace: NamespaceKey::from_namespace(&namespace),
+        name: RepoName::new(REPO).unwrap(),
+    };
+    // The repository exists and the pack is a member and published member;
+    // its denial check replies one row short. The wire answer stays the
+    // uniform retryable failure a corrupt reply produced.
+    block_on(env.pipe.meta.apply(
+        &env.pipe.shards.coordinator(&repo.namespace),
+        Batch::new().put(
+            keys::repo_record(&repo.name),
+            codec::encode_repo_record(&codec::RepoRecord { created_at_ms: 1 }),
+        ),
+    ))
+    .unwrap();
+    block_on(
+        env.pipe.meta.apply(
+            &env.pipe.shards.membership(&repo, &BlobKey::pack(pack_id)),
+            Batch::new()
+                .put(keys::membership(&repo.name, &pack_id), Value::default())
+                .put(
+                    keys::published_member(&repo.name, &pack_id),
+                    Value::default(),
+                ),
+        ),
+    )
+    .unwrap();
+    env.pipe.meta.short_denial_replies = true;
+    let reader = env
+        .auth(&signed(&owner, &identity, Procedure::PackExists, 9050))
+        .unwrap();
+    let error = block_on(env.pipe.pack_exists(&reader, PackKey(pack_id))).unwrap_err();
+    assert_eq!(error.code(), Code::Unavailable);
+    assert_eq!(error.public_message(), "object storage request failed");
+}
+
+#[test]
 #[allow(clippy::too_many_lines)] // One real advance exercises both caller views and both byte RPCs.
 fn inspection_pending_is_writer_visible_but_held_bytes_are_absent_for_everyone() {
     let (mut env, owner, identity) = environment();

@@ -1,5 +1,5 @@
 //! Exact pack evidence without index scans or storage-layout imports.
-use super::{ReadAccess, failure};
+use super::{ReadAccess, classify, corrupt, failure};
 use crate::store::{BlobKey, NamespaceStore, codec, keys, publication};
 use crate::{RepoId, ServerError};
 use mkit_core::hash::Hash;
@@ -97,8 +97,9 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
     /// At most eight sequential 128-key reads run through the caller's store.
     ///
     /// # Errors
-    /// `invalid_argument` above [`MAX_OBJECT_INDEX_PACKS`]; `unavailable` for
-    /// corrupt rows, out-of-bounds frames, malformed replies, or failed reads.
+    /// `invalid_argument` above [`MAX_OBJECT_INDEX_PACKS`]; `internal` for a
+    /// corrupt row or a frame contradicting the supplied length;
+    /// `unavailable` for malformed replies or failed reads.
     /// Any error refuses the entire result, including earlier successful batches.
     pub async fn object_index_in_packs(
         &self,
@@ -120,19 +121,19 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
                 .store
                 .get_many(&partition, &keys)
                 .await
-                .map_err(|_| failure())?;
+                .map_err(classify)?;
             if rows.len() != batch.len() {
                 return Err(failure());
             }
             for (pack, row) in batch.iter().zip(rows) {
                 let Some(row) = row else { continue };
-                let value = codec::decode_object_index(object, &row).map_err(|_| failure())?;
+                let value = codec::decode_object_index(object, &row).map_err(corrupt)?;
                 if value
                     .frame_offset
                     .checked_add(value.frame_length)
                     .is_none_or(|end| end > pack.len)
                 {
-                    return Err(failure());
+                    return Err(corrupt("object index frame exceeds pack length"));
                 }
                 result.push((
                     pack.id,
@@ -156,7 +157,8 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
     /// Serving policy, reachability and live denial remain caller boundaries.
     ///
     /// # Errors
-    /// `unavailable` for either corrupt row, malformed replies or failed reads.
+    /// `internal` for either corrupt row; `unavailable` for malformed replies
+    /// or failed reads.
     pub async fn pack_witness(
         &self,
         repo: &RepoId,
@@ -172,7 +174,7 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
                 ],
             )
             .await
-            .map_err(|_| failure())?;
+            .map_err(classify)?;
         let [member, published]: [Option<crate::Value>; 2] =
             rows.try_into().map_err(|_| failure())?;
         let decode = |row: Option<crate::Value>| {
@@ -180,7 +182,7 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
                 .map(publication::Witness::decode)
                 .transpose()
                 .map(|w| w.map(VisibilityWitness::from_witness))
-                .map_err(|_| failure())
+                .map_err(corrupt)
         };
         Ok(PackWitness {
             member: decode(member)?,

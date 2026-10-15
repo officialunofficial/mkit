@@ -393,7 +393,7 @@ async fn read_lease_rows<L: NamespaceStore, M: NamespaceStore>(
     };
     let reported = match watermark {
         Ok(value) => value,
-        Err(StoreError::Corrupt(reason)) => {
+        Err(StoreError::Corrupt(reason) | StoreError::MalformedReply(reason)) => {
             tracing::warn!(shard = ?p, %reason, "renewal cannot decode relay outbox; reporting zero");
             0
         }

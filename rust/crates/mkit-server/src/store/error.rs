@@ -49,6 +49,12 @@ pub enum StoreError {
     /// A stored value failed to decode (unknown codec version, wrong length).
     #[error("corrupt stored value: {0}")]
     Corrupt(Cow<'static, str>),
+    /// The store's reply broke the storage contract: a short or oversized
+    /// `get_many`/`scan` result, a key outside its requested range, or a
+    /// reply that contradicts the request. A backend or adapter fault, not a
+    /// corrupt stored row; the same read may succeed on retry.
+    #[error("malformed store reply: {0}")]
+    MalformedReply(Cow<'static, str>),
     /// The partition is at its storage cap and rejects writes that add
     /// data. Reads and delete-only batches keep working, so pruning still
     /// runs (Durable Objects and `SQLite` report `SQLITE_FULL`; see

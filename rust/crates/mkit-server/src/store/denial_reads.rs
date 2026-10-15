@@ -98,7 +98,7 @@ impl<S: NamespaceStore> NamespaceStore for DenialReads<S> {
             self.store.get_many(partition, &kept).await?
         };
         if values.len() != kept.len() {
-            return Err(StoreError::Corrupt("short denial-mode read".into()));
+            return Err(StoreError::MalformedReply("short denial-mode read".into()));
         }
         let mut values = values.into_iter();
         Ok(keys
@@ -184,7 +184,7 @@ impl<S: NamespaceStore> NamespaceStore for DenialReads<S> {
             BatchOutcome::PreconditionFailed { index, observed } => {
                 Ok(BatchOutcome::PreconditionFailed {
                     index: *original.get(index).ok_or_else(|| {
-                        StoreError::Corrupt("invalid filtered precondition index".into())
+                        StoreError::MalformedReply("invalid filtered precondition index".into())
                     })?,
                     observed,
                 })

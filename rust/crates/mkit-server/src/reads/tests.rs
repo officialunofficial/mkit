@@ -1,7 +1,8 @@
 use super::*;
 use crate::pipeline::{D34Shards, SinglePartition};
 use crate::store::{
-    Batch, BatchOutcome, BlobKey, BlobStore, PackSink, Value, codec, index, keys, publication,
+    Batch, BatchOutcome, BlobKey, BlobStore, Cursor, Key, PackSink, PartitionStats, ScanPage,
+    StoreCapabilities, Value, codec, index, keys, publication,
 };
 use crate::{MemoryBlobStore, MemoryKv, NamespaceKey, RepoName};
 use futures_executor::block_on;
@@ -39,6 +40,119 @@ fn visibility(private: bool, time: u64) -> Value {
         last_statement_id: None,
         changed_ms: time,
     })
+}
+
+/// A store fault a typed read must classify.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Fault {
+    /// Every read reports a backend failure.
+    Store,
+    /// Every read reports a malformed reply.
+    Reply,
+    /// Every `get_many` replies one row short.
+    ShortAll,
+    /// `get_many` over denial (`b\0`) keys replies one row short.
+    ShortDenial,
+    /// `get_many` over inventory (`b\0...\0inventory`) keys replies one row short.
+    ShortInventory,
+}
+
+/// A [`MemoryKv`] whose reads fail or truncate on demand.
+pub(crate) struct Faulty {
+    pub(crate) inner: MemoryKv,
+    fault: Fault,
+}
+
+impl Faulty {
+    /// A fresh empty store that fails reads per `fault`.
+    pub(crate) fn new(fault: Fault) -> Self {
+        Self {
+            inner: MemoryKv::default(),
+            fault,
+        }
+    }
+
+    /// Wrap a seeded store.
+    pub(crate) fn wrapping(inner: MemoryKv, fault: Fault) -> Self {
+        Self { inner, fault }
+    }
+
+    fn error(&self) -> StoreError {
+        match self.fault {
+            Fault::Store => StoreError::unavailable("injected store failure"),
+            Fault::Reply => StoreError::MalformedReply("injected malformed reply".into()),
+            _ => unreachable!("short replies do not fail reads"),
+        }
+    }
+}
+
+impl NamespaceStore for Faulty {
+    fn capabilities(&self) -> StoreCapabilities {
+        self.inner.capabilities()
+    }
+    async fn get(&self, p: &crate::Partition, key: &Key) -> Result<Option<Value>, StoreError> {
+        match self.fault {
+            Fault::Store | Fault::Reply => Err(self.error()),
+            _ => self.inner.get(p, key).await,
+        }
+    }
+    async fn get_many(
+        &self,
+        p: &crate::Partition,
+        keys: &[Key],
+    ) -> Result<Vec<Option<Value>>, StoreError> {
+        match self.fault {
+            Fault::Store | Fault::Reply => Err(self.error()),
+            _ => {
+                let mut rows = self.inner.get_many(p, keys).await?;
+                let short = match self.fault {
+                    Fault::ShortAll => !keys.is_empty(),
+                    Fault::ShortDenial => {
+                        !keys.is_empty()
+                            && keys.iter().all(|key| key.as_bytes().starts_with(b"b\0"))
+                    }
+                    Fault::ShortInventory => {
+                        !keys.is_empty()
+                            && keys.iter().all(|key| {
+                                key.as_bytes().starts_with(b"b\0")
+                                    && key.as_bytes().windows(10).any(|w| w == b"\0inventory")
+                            })
+                    }
+                    _ => false,
+                };
+                if short {
+                    rows.pop();
+                }
+                Ok(rows)
+            }
+        }
+    }
+    async fn scan(
+        &self,
+        p: &crate::Partition,
+        start: &Key,
+        end: &Key,
+        after: Option<&Cursor>,
+        limit: u32,
+    ) -> Result<ScanPage, StoreError> {
+        match self.fault {
+            Fault::Store | Fault::Reply => Err(self.error()),
+            _ => self.inner.scan(p, start, end, after, limit).await,
+        }
+    }
+    async fn apply(&self, p: &crate::Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+        self.inner.apply(p, batch).await
+    }
+    async fn stats(&self, p: &crate::Partition) -> Result<PartitionStats, StoreError> {
+        self.inner.stats(p).await
+    }
+    async fn probe(&self) -> Result<(), StoreError> {
+        self.inner.probe().await
+    }
+}
+
+fn code<T>(result: Result<T, ServerError>) -> crate::Code {
+    result.map(|_| ()).unwrap_err().code()
 }
 
 #[test]
@@ -81,7 +195,10 @@ fn visibility_single_and_d34_absence_defaults_and_corruption() {
             keys::repo_visibility(&repo.name),
             Value::new(vec![255]),
         );
-        assert!(block_on(reads.repository_visibility(&repo)).is_err());
+        assert_eq!(
+            code(block_on(reads.repository_visibility(&repo))),
+            crate::Code::Internal
+        );
         put(
             &store,
             &p,
@@ -94,7 +211,78 @@ fn visibility_single_and_d34_absence_defaults_and_corruption() {
             keys::repo_record(&repo.name),
             Value::new(vec![255]),
         );
-        assert!(block_on(reads.repository_visibility(&repo)).is_err());
+        assert_eq!(
+            code(block_on(reads.repository_visibility(&repo))),
+            crate::Code::Internal
+        );
+    }
+}
+
+#[test]
+fn declared_visibility_single_and_d34_record_independence_and_revision() {
+    for shards in maps() {
+        let store = MemoryKv::with_clock(std::sync::Arc::new(crate::ManualClock::new(1)));
+        let repo = repo();
+        let reads = ReadAccess::new(&store, shards.as_ref(), RepoVisibility::Public, true);
+        let p = shards.coordinator(&repo.namespace);
+        let record = || codec::encode_repo_record(&codec::RepoRecord { created_at_ms: 1 });
+        // No declaration row: absent whether or not the record exists.
+        assert_eq!(block_on(reads.declared_visibility(&repo)).unwrap(), None);
+        put(&store, &p, keys::repo_record(&repo.name), record());
+        assert_eq!(block_on(reads.declared_visibility(&repo)).unwrap(), None);
+        assert_eq!(
+            block_on(store.apply(&p, Batch::new().delete(keys::repo_record(&repo.name)))).unwrap(),
+            BatchOutcome::Committed
+        );
+        // A declaration ahead of its repository record is observable here,
+        // while repository_visibility still reports the record absent.
+        put(
+            &store,
+            &p,
+            keys::repo_visibility(&repo.name),
+            visibility(true, 2),
+        );
+        assert_eq!(block_on(reads.repository_visibility(&repo)).unwrap(), None);
+        let private = block_on(reads.declared_visibility(&repo)).unwrap().unwrap();
+        assert_eq!(private.visibility, RepoVisibility::Private);
+        assert_eq!(
+            private,
+            block_on(reads.declared_visibility(&repo)).unwrap().unwrap()
+        );
+        // The record's arrival changes repository_visibility, not this read.
+        put(&store, &p, keys::repo_record(&repo.name), record());
+        assert_eq!(
+            block_on(reads.repository_visibility(&repo))
+                .unwrap()
+                .unwrap()
+                .visibility,
+            RepoVisibility::Private
+        );
+        assert_eq!(
+            block_on(reads.declared_visibility(&repo)).unwrap(),
+            Some(private)
+        );
+        // A redeclared row carries a new revision.
+        put(
+            &store,
+            &p,
+            keys::repo_visibility(&repo.name),
+            visibility(false, 3),
+        );
+        let public = block_on(reads.declared_visibility(&repo)).unwrap().unwrap();
+        assert_eq!(public.visibility, RepoVisibility::Public);
+        assert_ne!(private.revision, public.revision);
+        // A corrupt row never implies a declaration.
+        put(
+            &store,
+            &p,
+            keys::repo_visibility(&repo.name),
+            Value::new(vec![255]),
+        );
+        assert_eq!(
+            code(block_on(reads.declared_visibility(&repo))),
+            crate::Code::Internal
+        );
     }
 }
 
@@ -202,7 +390,10 @@ fn published_branch_single_and_d34_absence_pair_and_corruption() {
             None
         );
         put(&store, &p, key, Value::new(vec![255]));
-        assert!(block_on(reads.published_branch(&repo, branch)).is_err());
+        assert_eq!(
+            code(block_on(reads.published_branch(&repo, branch))),
+            crate::Code::Internal
+        );
     }
 }
 
@@ -301,14 +492,20 @@ fn member_location_single_and_d34_absence_fresh_denial_and_corruption() {
             keys::block(&pack),
             Value::new(vec![255]),
         );
-        assert!(block_on(reads.locate_object(&repo, &id)).is_err());
+        assert_eq!(
+            code(block_on(reads.locate_object(&repo, &id))),
+            crate::Code::Internal
+        );
         put(
             &store,
             &shards.object_index(&repo, &id),
             keys::object_index(&repo.name, &id, &pack),
             Value::new(vec![255]),
         );
-        assert!(block_on(reads.locate_object(&repo, &id)).is_err());
+        assert_eq!(
+            code(block_on(reads.locate_object(&repo, &id))),
+            crate::Code::Internal
+        );
     }
 }
 
@@ -425,14 +622,75 @@ fn inventory_and_canonical_single_and_d34_absence_corruption_and_bounds() {
             crate::takedown::inventory::entry_key(&pack, &id),
             Value::new(vec![255]),
         );
-        assert!(block_on(reads.member_inventory(&repo, &id)).is_err());
+        assert_eq!(
+            code(block_on(reads.member_inventory(&repo, &id))),
+            crate::Code::Internal
+        );
         put(
             &store,
             &shards.object_index(&repo, &id),
             keys::object_index(&repo.name, &id, &pack),
             Value::new(vec![255]),
         );
-        assert!(block_on(reads.read_member_canonical(&blobs, &repo, id, limits)).is_err());
+        assert_eq!(
+            code(block_on(
+                reads.read_member_canonical(&blobs, &repo, id, limits)
+            )),
+            crate::Code::Internal
+        );
+    }
+}
+
+#[test]
+fn member_canonical_classifies_denial_corruption_permanent_and_blob_faults_retryable() {
+    for shards in maps() {
+        let store = MemoryKv::with_clock(std::sync::Arc::new(crate::ManualClock::new(1)));
+        let repo = repo();
+        let reads = ReadAccess::new(&store, shards.as_ref(), RepoVisibility::Public, true);
+        let object = Object::Blob(Blob {
+            data: b"example".to_vec(),
+        });
+        let id = object.id().unwrap();
+        let bytes = mkit_core::serialize::serialize(&object).unwrap();
+        let mut writer = PackWriter::new_raw_only();
+        writer.push_raw(id, &bytes).unwrap();
+        let pack_bytes = writer.finish().unwrap();
+        let pack = mkit_core::hash::hash(&pack_bytes);
+        let blobs = MemoryBlobStore::new("reads");
+        let limits = MemberReadLimits {
+            max_delta_depth: 32,
+            max_decode_bytes: 1024,
+        };
+        upload(&blobs, pack, &pack_bytes);
+        seed_member(&store, shards.as_ref(), &repo, id, pack, bytes.len() as u64);
+        assert!(
+            block_on(reads.read_member_canonical(&blobs, &repo, id, limits))
+                .unwrap()
+                .is_some()
+        );
+        let blobs = blobs.with_fault(crate::MemoryFault::BlobGet);
+        assert_eq!(
+            code(block_on(
+                reads.read_member_canonical(&blobs, &repo, id, limits)
+            )),
+            crate::Code::Unavailable
+        );
+        put(
+            &store,
+            &crate::store::content_shard(&id),
+            keys::block(&id),
+            Value::new(vec![255]),
+        );
+        assert_eq!(
+            code(block_on(reads.locate_object(&repo, &id))),
+            crate::Code::Internal
+        );
+        assert_eq!(
+            code(block_on(
+                reads.read_member_canonical(&blobs, &repo, id, limits)
+            )),
+            crate::Code::Internal
+        );
     }
 }
 
@@ -467,7 +725,115 @@ fn batched_locations_route_order_absence_duplicates_bounds_and_corruption() {
             keys::object_index(&repo.name, &ids[2], &[16; 32]),
             Value::new(vec![255]),
         );
-        assert!(block_on(reads.locate_objects(&repo, &ids)).is_err());
+        assert_eq!(
+            code(block_on(reads.locate_objects(&repo, &ids))),
+            crate::Code::Internal
+        );
+    }
+}
+
+/// Call a typed read by name so one matrix can drive every accessor.
+fn read_code(
+    name: &str,
+    reads: &ReadAccess<'_, Faulty>,
+    blobs: &MemoryBlobStore,
+    repo: &RepoId,
+    id: Hash,
+    pack: Hash,
+    pack_len: u64,
+) -> crate::Code {
+    let limits = MemberReadLimits {
+        max_delta_depth: 32,
+        max_decode_bytes: 1024,
+    };
+    match name {
+        "repository_visibility" => code(block_on(reads.repository_visibility(repo))),
+        "declared_visibility" => code(block_on(reads.declared_visibility(repo))),
+        "published_branch" => code(block_on(reads.published_branch(repo, "refs/heads/main"))),
+        "locate_object" => code(block_on(reads.locate_object(repo, &id))),
+        "locate_objects" => code(block_on(reads.locate_objects(repo, &[id]))),
+        "member_inventory" => code(block_on(reads.member_inventory(repo, &id))),
+        "read_member_canonical" => code(block_on(
+            reads.read_member_canonical(blobs, repo, id, limits),
+        )),
+        "object_index_in_packs" => code(block_on(reads.object_index_in_packs(
+            repo,
+            &id,
+            &[PackRef {
+                id: pack,
+                len: pack_len,
+            }],
+        ))),
+        "pack_witness" => code(block_on(reads.pack_witness(repo, &pack))),
+        _ => unreachable!("unknown read {name}"),
+    }
+}
+
+/// Store faults and malformed replies are retryable on every typed read; the
+/// short-reply modes exercise the retagged shape checks end to end.
+#[test]
+fn typed_reads_classify_backend_faults_and_malformed_replies_as_retryable() {
+    const ALL: &[&str] = &[
+        "repository_visibility",
+        "declared_visibility",
+        "published_branch",
+        "locate_object",
+        "locate_objects",
+        "member_inventory",
+        "read_member_canonical",
+        "object_index_in_packs",
+        "pack_witness",
+    ];
+    // `get_many`-backed reads observe a short reply; `get`-only reads pass.
+    const SHORT_ALL: &[&str] = &[
+        "repository_visibility",
+        "locate_object",
+        "locate_objects",
+        "member_inventory",
+        "read_member_canonical",
+        "object_index_in_packs",
+        "pack_witness",
+    ];
+    // Short replies on `b\0` keys hit the denial and inventory checks.
+    const SHORT_DENIAL: &[&str] = &["locate_object", "read_member_canonical"];
+    const SHORT_INVENTORY: &[&str] = &["member_inventory"];
+    for shards in maps() {
+        let repo = repo();
+        let object = Object::Blob(Blob {
+            data: b"classified".to_vec(),
+        });
+        let id = object.id().unwrap();
+        let bytes = mkit_core::serialize::serialize(&object).unwrap();
+        let mut writer = PackWriter::new_raw_only();
+        writer.push_raw(id, &bytes).unwrap();
+        let pack_bytes = writer.finish().unwrap();
+        let pack = mkit_core::hash::hash(&pack_bytes);
+        let blobs = MemoryBlobStore::new("typed-reads");
+        upload(&blobs, pack, &pack_bytes);
+        let pack_len = pack_bytes.len() as u64;
+        for (fault, names) in [
+            (Fault::Store, ALL),
+            (Fault::Reply, ALL),
+            (Fault::ShortAll, SHORT_ALL),
+            (Fault::ShortDenial, SHORT_DENIAL),
+            (Fault::ShortInventory, SHORT_INVENTORY),
+        ] {
+            let inner = MemoryKv::with_clock(std::sync::Arc::new(crate::ManualClock::new(1)));
+            seed_member(&inner, shards.as_ref(), &repo, id, pack, bytes.len() as u64);
+            block_on(crate::takedown::inventory::stage(
+                &inner, &pack, pack_len, &id, &object, None, 1,
+            ))
+            .unwrap();
+            let store = Faulty::wrapping(inner, fault);
+            let reads = ReadAccess::new(&store, shards.as_ref(), RepoVisibility::Public, true);
+            for name in names {
+                assert_eq!(
+                    read_code(name, &reads, &blobs, &repo, id, pack, pack_len),
+                    crate::Code::Unavailable,
+                    "{name} must classify {fault:?} as retryable"
+                );
+            }
+        }
     }
 }
 

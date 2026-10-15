@@ -121,7 +121,7 @@ impl<S: NamespaceStore> NamespaceStore for ViewStore<'_, S> {
         let selected = keys.iter().map(|key| self.key(p, key)).collect::<Vec<_>>();
         let values = self.store.get_many(p, &selected).await?;
         if values.len() != keys.len() {
-            return Err(StoreError::Corrupt("short view read".into()));
+            return Err(StoreError::MalformedReply("short view read".into()));
         }
         keys.iter()
             .zip(values)
@@ -145,7 +145,7 @@ impl<S: NamespaceStore> NamespaceStore for ViewStore<'_, S> {
         let mut pages = self.scan_many(p, &ranges).await?;
         pages
             .pop()
-            .ok_or_else(|| StoreError::Corrupt("short view scan".into()))
+            .ok_or_else(|| StoreError::MalformedReply("short view scan".into()))
     }
     async fn scan_many(
         &self,
@@ -166,7 +166,7 @@ impl<S: NamespaceStore> NamespaceStore for ViewStore<'_, S> {
             .collect::<Vec<_>>();
         let pages = self.store.scan_many(p, &selected).await?;
         if pages.is_empty() || pages.len() > selected.len() {
-            return Err(StoreError::Corrupt("short view scan".into()));
+            return Err(StoreError::MalformedReply("short view scan".into()));
         }
         // Return the backend's served prefix. The caller admits continuation
         // rounds; a view must not hide extra dispatches inside one paid call.

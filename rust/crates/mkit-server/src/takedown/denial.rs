@@ -322,11 +322,17 @@ pub fn representative(raw: Option<&Value>) -> Result<Option<BlockEntry>, StoreEr
         .map(|a| BlockEntry::new(&a.action.reason, a.action.blocked_at_ms)))
 }
 pub async fn denied<S: NamespaceStore>(store: &S, id: &Hash) -> Result<bool, ServerError> {
+    denied_store(store, id).await.map_err(|_| unavailable())
+}
+/// `denied` for callers that classify the store error themselves.
+pub(crate) async fn denied_store<S: NamespaceStore>(
+    store: &S,
+    id: &Hash,
+) -> Result<bool, StoreError> {
     ContentIndex::new(BorrowedStore(store))
         .blocked(id)
         .await
         .map(|entry| entry.is_some())
-        .map_err(|_| unavailable())
 }
 pub async fn require_clear<S: NamespaceStore>(store: &S, id: &Hash) -> Result<(), ServerError> {
     if denied(store, id).await? {
@@ -964,7 +970,9 @@ pub async fn require_pack_clear_sealed<S: NamespaceStore>(
     // inconsistent, not transient: it is refused like a blocked pack.
     match super::inventory::has_seal(&remote, pack).await {
         Ok(true) => {}
-        Ok(false) | Err(StoreError::Corrupt(_)) => return Err(blocked()),
+        Ok(false) | Err(StoreError::Corrupt(_) | StoreError::MalformedReply(_)) => {
+            return Err(blocked());
+        }
         Err(_) => return Err(unavailable()),
     }
     let start = Key::new(INDEX_PREFIX.to_vec());
@@ -2028,6 +2036,19 @@ pub(crate) async fn require_clear_observed<S: NamespaceStore>(
 ) -> Result<(), ServerError> {
     let started = clock.now_ms();
     let result = require_clear(store, id).await;
+    counts.record(crate::telemetry::performance::elapsed(clock, started));
+    result
+}
+/// `denied_store` timed like [`require_clear_observed`].
+#[cfg(feature = "perf-metrics")]
+pub(crate) async fn denied_store_observed<S: NamespaceStore>(
+    store: &S,
+    id: &Hash,
+    clock: &dyn crate::Clock,
+    counts: &mut crate::telemetry::performance::Denials,
+) -> Result<bool, StoreError> {
+    let started = clock.now_ms();
+    let result = denied_store(store, id).await;
     counts.record(crate::telemetry::performance::elapsed(clock, started));
     result
 }

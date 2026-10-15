@@ -26,7 +26,7 @@ pub struct QuotaRollup<T, M = NoopMetrics> {
 
 fn rollup_error<M: Metrics>(metrics: &M, error: &StoreError) {
     let reason = match error {
-        StoreError::Corrupt(_) => "corrupt",
+        StoreError::Corrupt(_) | StoreError::MalformedReply(_) => "corrupt",
         StoreError::Invalid(_) => "contention",
         _ => "storage",
     };
