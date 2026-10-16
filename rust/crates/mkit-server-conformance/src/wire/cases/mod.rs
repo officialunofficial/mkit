@@ -340,7 +340,7 @@ cases! {
     "indexed.async_verification_commits" => indexed::async_verification_commits, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2, TestFaults], [];
     "indexed.small_pack_verification_commits" => indexed::small_pack_verification_commits, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2], [];
     "indexed.from_published" => indexed::from_published, M4, [IndexedMode, AtomicAdvance, MultiRepo, Tickets, AuthV2], [];
-    "fork.driver_probe" => fork::driver_probe, M4, [IndexedMode, MultiRepo, Tickets, AuthV2, TestFaults, Timers], [];
+    "fork.driver_probe" => fork::driver_probe, M4, [Fork, IndexedMode, MultiRepo, Tickets, AuthV2, TestFaults, Timers], [];
     "launch.takedown_nine_mib_publish" => indexed::takedown_nine_mib_publish, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2], [TestFaults];
     "launch.takedown_chunked_publish" => indexed::takedown_chunked_publish, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2], [TestFaults];
     "launch.indexed_verification_commits" => indexed::launch_verification_commits, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2], [TestFaults];

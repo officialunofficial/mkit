@@ -932,6 +932,28 @@ fn guard_consistent(
     Ok(())
 }
 
+async fn complete_authority_setter(
+    control: &ControlClient,
+    body: Vec<u8>,
+) -> Result<mkit_transport_connect::generated::SetAuthorityGenerationResponse, Failure> {
+    use crate::wire::client::{UNARY_PROTO, decode_unary};
+    tokio::time::timeout(Duration::from_secs(45), async {
+        loop {
+            let reply = control.0.post(Rpc::SetAuthorityGeneration.procedure(), UNARY_PROTO, &[], body.clone()).await?;
+            let result = decode_unary(&reply)?;
+            if !matches!(&result, Err(error) if error.code == "unavailable" && error.http_status == 503) {
+                return want_ok(result, "enabled setter");
+            }
+            let delay = reply.headers.get(http::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or_else(|| Failure::Fail("pending authority setter requires Retry-After delay-seconds".into()))?;
+            tokio::time::sleep(Duration::from_secs(delay).max(Duration::from_millis(10))).await;
+        }
+    }).await.map_err(|_| Failure::Fail("authority setter did not complete within 45 seconds".into()))?
+}
+
 async fn authority_setter(control: &ControlClient, enabled: bool) -> Result<(), Failure> {
     use buffa::Message as _;
     use mkit_transport_connect::generated::{
@@ -969,14 +991,6 @@ async fn authority_setter(control: &ControlClient, enabled: bool) -> Result<(), 
         }),
         ..Default::default()
     };
-    let result = control
-        .0
-        .unary::<SetAuthorityGenerationResponse>(
-            Rpc::SetAuthorityGeneration,
-            set.encode_to_vec(),
-            &[],
-        )
-        .await?;
     if let Some(fixture) = fixture {
         let before = want_ok(before, "enabled getter")?
             .generation
@@ -989,7 +1003,7 @@ async fn authority_setter(control: &ControlClient, enabled: bool) -> Result<(), 
                 "setter fixture must increase generation".into(),
             ));
         }
-        let set = want_ok(result, "enabled setter")?;
+        let set = complete_authority_setter(control, set.encode_to_vec()).await?;
         let after = want_ok(
             control
                 .0
@@ -1007,6 +1021,14 @@ async fn authority_setter(control: &ControlClient, enabled: bool) -> Result<(), 
             ));
         }
     } else {
+        let result = control
+            .0
+            .unary::<SetAuthorityGenerationResponse>(
+                Rpc::SetAuthorityGeneration,
+                set.encode_to_vec(),
+                &[],
+            )
+            .await?;
         for error in [
             want_code(before, "unimplemented", "disabled getter")?,
             want_code(result, "unimplemented", "disabled setter")?,

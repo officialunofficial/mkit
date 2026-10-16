@@ -177,7 +177,7 @@
 //! | `timers.directive_fires_due` | `test-faults` | a future timer remains; a skewed tick deletes only the due ref |
 //! | `timers.fire_on_schedule` | `test-faults`, `timers` | the driver deletes the ref within 20 s without a manual tick |
 //! | `timers.redelivery_is_idempotent` | `test-faults` | repeated ticks succeed with no further effects |
-//! | `fork.driver_probe` | `indexed-mode`, `multi-repo`, `tickets`, `auth-v2`, `test-faults`, `timers` | env-sized forks drive to `Done` across request and kind-16 alarm steps; wall time and poll attempts are reported |
+//! | `fork.driver_probe` | `fork`, `indexed-mode`, `multi-repo`, `tickets`, `auth-v2`, `test-faults`, `timers` | env-sized forks drive to `Done` across request and kind-16 alarm steps; wall time and poll attempts are reported |
 //! | `refs.read_missing` | | an absent ref reads `exists = false`, empty id |
 //! | `refs.update_any_then_read` | | `ANY` creates, then clobbers |
 //! | `refs.update_missing_conflict_failed_precondition` | | `MISSING` on an existing ref; ref unchanged |
@@ -712,6 +712,28 @@ mod tests {
                 .unwrap()
                 .contains("test-faults")
         );
+    }
+
+    #[test]
+    fn fork_probe_requires_a_declared_fork_feature() {
+        let mut profile = Profile::new(WireAuth::None);
+        profile.milestone = Milestone::M4;
+        profile.features.extend([
+            Feature::IndexedMode,
+            Feature::MultiRepo,
+            Feature::Tickets,
+            Feature::AuthV2,
+            Feature::TestFaults,
+            Feature::Timers,
+        ]);
+        let case = CASES
+            .iter()
+            .find(|case| case.name == "fork.driver_probe")
+            .unwrap();
+        assert!(matches!(applicability(case, &profile),
+            Some(Verdict::NotApplicable(reason)) if reason.contains("fork")));
+        profile.features.insert(Feature::Fork);
+        assert!(applicability(case, &profile).is_none());
     }
 
     #[test]

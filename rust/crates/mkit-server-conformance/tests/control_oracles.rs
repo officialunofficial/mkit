@@ -16,6 +16,9 @@ enum Fault {
     RollbackOnRestart,
     ChargeOnRefusal,
     CommitOnRefusal,
+    SetterPending,
+    SetterDenied,
+    SetterMissingDelay,
 }
 
 #[derive(Default)]
@@ -25,6 +28,7 @@ struct Model {
     authority_changed: bool,
     replay_repairs: usize,
     mutations: usize,
+    setter_requests: Vec<Vec<u8>>,
 }
 
 struct ProxyState {
@@ -79,11 +83,52 @@ impl Drop for FaultProxy {
     }
 }
 
+fn setter_refusal(state: &ProxyState, body: &[u8]) -> Option<Response> {
+    if !matches!(
+        state.fault,
+        Fault::SetterPending | Fault::SetterDenied | Fault::SetterMissingDelay
+    ) {
+        return None;
+    }
+    let mut model = state.model.lock().expect("isolated setter oracle");
+    model.setter_requests.push(body.to_vec());
+    if model.setter_requests.len() > 1 {
+        return None;
+    }
+    let denied = matches!(state.fault, Fault::SetterDenied);
+    let mut response = Response::new(Body::from(if denied {
+        r#"{"code":"permission_denied","message":"fixture refusal"}"#
+    } else {
+        r#"{"code":"unavailable","message":"authority barrier pending"}"#
+    }));
+    *response.status_mut() = if denied {
+        http::StatusCode::FORBIDDEN
+    } else {
+        http::StatusCode::SERVICE_UNAVAILABLE
+    };
+    response.headers_mut().insert(
+        http::header::CONTENT_TYPE,
+        http::HeaderValue::from_static("application/json"),
+    );
+    if !matches!(state.fault, Fault::SetterMissingDelay) {
+        response.headers_mut().insert(
+            http::header::RETRY_AFTER,
+            http::HeaderValue::from_static("0"),
+        );
+    }
+    Some(response)
+}
+
 async fn forward(State(state): State<Arc<ProxyState>>, request: Request) -> Response {
     let (parts, body) = request.into_parts();
     let body = to_bytes(body, 16 * 1024 * 1024)
         .await
         .expect("valid isolated fault-proxy fixture");
+    if parts.uri.path().ends_with("/SetAuthorityGeneration")
+        && let Some(response) = setter_refusal(&state, &body)
+    {
+        return response;
+    }
     let operation = (parts.uri.path() == control::CONTROL_PATH).then(|| {
         serde_json::from_slice::<Value>(&body).expect("valid isolated fault-proxy fixture")
     });
@@ -230,6 +275,9 @@ async fn run_mutant(fault: Fault, filter: &str) -> usize {
         Fault::RollbackOnRestart => "recovery lost or changed accepted state",
         Fault::ChargeOnRefusal => "guard failure changed quota charge",
         Fault::CommitOnRefusal => "exactly one aborted ref reservation",
+        Fault::SetterPending | Fault::SetterDenied | Fault::SetterMissingDelay => {
+            unreachable!("separate setter oracle")
+        }
     };
     assert!(
         matches!(&report.cases[0].verdict, mkit_server_conformance::wire::Verdict::Fail(reason) if reason.contains(expected)),
@@ -282,4 +330,41 @@ async fn pending_reservation_loss_is_detected_before_replay_can_replace_it() {
         .await,
         0
     );
+}
+
+#[tokio::test]
+async fn authority_setter_retries_only_a_valid_pending_response() {
+    for (fault, passes, requests) in [
+        (Fault::SetterPending, true, 2),
+        (Fault::SetterDenied, false, 1),
+        (Fault::SetterMissingDelay, false, 1),
+    ] {
+        let host = ControlledHost::start(profile())
+            .await
+            .expect("isolated setter host");
+        let proxy = FaultProxy::start(host.base_url(), fault).await;
+        let target = WireTarget {
+            base_url: proxy.base_url.parse().expect("isolated setter URL"),
+            profile: host.profile().clone(),
+        };
+        let report = mkit_server_conformance::controlled::run(
+            &target,
+            &BTreeMap::new(),
+            Some("authority.setter_enabled"),
+        )
+        .await;
+        assert_eq!(!report.failed(), passes, "{}", report.tap());
+        {
+            let model = proxy.state.model.lock().expect("isolated setter oracle");
+            assert_eq!(model.setter_requests.len(), requests, "{}", report.tap());
+            assert!(
+                model
+                    .setter_requests
+                    .windows(2)
+                    .all(|pair| pair[0] == pair[1]),
+                "setter retry changed its signed statement"
+            );
+        }
+        host.shutdown().await;
+    }
 }
