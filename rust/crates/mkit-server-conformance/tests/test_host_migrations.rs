@@ -138,6 +138,8 @@ async fn run_driven<O: OutcomeSink + Clone + 'static>(
             // drives its expiration after the wire case restores the sink.
             if !host.profile().has(Feature::IndexedAsync)
                 && filter != "outcomes.backpressure_hook_down"
+                // Multi grant/epoch fixtures synchronize at each request.
+                && !(host.profile().has(Feature::MultiRepo) && host.profile().has(Feature::Grants))
             {
                 let signed_at = mkit_server::SystemClock.now_ms();
                 host.clock().set(host.clock().now_ms().max(signed_at));
@@ -524,7 +526,7 @@ async fn native_sharded_wire_profile() {
     native_profile(true).await;
 }
 
-async fn multi_cases(prefixes: &[&str]) {
+fn multi_profile() -> Profile {
     let mut p = profile();
     p.milestone = Milestone::M2;
     p.sharding_d34 = true;
@@ -536,7 +538,49 @@ async fn multi_cases(prefixes: &[&str]) {
         Feature::Timers,
         Feature::EpochLeases,
     ]);
-    let host = TestHost::start(p).await.expect("valid native fixture");
+    p
+}
+
+// These grant/epoch contracts sign statements against SystemClock, including
+// a statement that expired one millisecond ago. Synchronize at the request
+// boundary instead of racing a periodic timer driver; preserve explicit
+// forward advances used by lease tests.
+async fn start_multi_wall_clock_host() -> TestHost {
+    let clock_slot = Arc::new(OnceLock::<Arc<mkit_server::ManualClock>>::new());
+    let for_factory = clock_slot.clone();
+    TestHost::start_with_test_layers(
+        multi_profile(),
+        move |_, clock| {
+            for_factory
+                .set(clock)
+                .map_err(|_| "fixture clock initialized twice".to_owned())?;
+            Ok(Hooks::new())
+        },
+        |_| {},
+        move |app| {
+            let clock = Arc::new(std::sync::Mutex::new(
+                clock_slot.get().expect("fixture clock initialized").clone(),
+            ));
+            app.layer(axum::middleware::from_fn(
+                move |request: axum::extract::Request, next: axum::middleware::Next| {
+                    let clock = clock.clone();
+                    async move {
+                        {
+                            let clock = clock.lock().expect("request clock mutex");
+                            clock.set(clock.now_ms().max(mkit_server::SystemClock.now_ms()));
+                        }
+                        next.run(request).await
+                    }
+                },
+            ))
+        },
+    )
+    .await
+    .expect("valid native fixture")
+}
+
+async fn multi_cases(prefixes: &[&str]) {
+    let host = start_multi_wall_clock_host().await;
     for case in CASES.iter().filter(|case| {
         prefixes.iter().any(|prefix| case.name.starts_with(prefix))
             && case.skip_reason(host.profile()).is_none()
@@ -555,6 +599,20 @@ async fn multi_cases(prefixes: &[&str]) {
             run_driven(&host, case.name, NoOutcomes, None).await
         };
         judge(&report);
+    }
+    host.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn native_epoch_expiration_uses_request_clock_without_background_ticks() {
+    let host = start_multi_wall_clock_host().await;
+    let target = WireTarget {
+        base_url: host.base_url().parse().expect("valid native fixture"),
+        profile: host.profile().clone(),
+    };
+    for _ in 0..5 {
+        host.clock().set(mkit_server::SystemClock.now_ms() - 1_000);
+        judge(&run(&target, Some("epochs.expired")).await);
     }
     host.shutdown().await;
 }
