@@ -31,6 +31,10 @@ use mkit_server::{
 
 use crate::wire::{Feature, Profile, WireAuth};
 
+#[path = "test_host_control.rs"]
+mod control_host;
+pub use control_host::ControlledHost;
+
 /// HTTP channel for the conformance crate's signed loopback hook stub.
 ///
 /// It refuses non-loopback origins, disables redirects and reads at most one

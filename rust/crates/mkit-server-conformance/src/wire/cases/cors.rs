@@ -44,7 +44,12 @@ pub(super) async fn expose_admission_headers(ctx: Ctx) -> CaseResult {
         .get("access-control-expose-headers")
         .and_then(|v| v.to_str().ok())
         .ok_or("missing exposed headers")?;
-    for name in mkit_server::pipeline::ADMISSION_EXPOSE_HEADERS {
+    for name in [
+        "WWW-Authenticate",
+        "PAYMENT-REQUIRED",
+        "Payment-Receipt",
+        "PAYMENT-RESPONSE",
+    ] {
         ensure!(
             exposed
                 .split(',')

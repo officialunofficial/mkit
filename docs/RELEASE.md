@@ -273,13 +273,19 @@ in `rust/Cargo.toml` at the tagged tree).
 
 | Publishes to crates.io | Stays off crates.io (`publish = false`) |
 |---|---|
-| the library crates (`mkit-core`, `mkit-rpc`, `mkit-client`, `mkit-sync`, `mkit-attest`, `mkit-keystore`, `mkit-git-bridge`, `mkit-server`, `mkit-transport-{file,http,memory,s3,ssh,enc,connect}`) plus `mkit-cli` (so `cargo install mkit-cli` works) | `mkit-server-worker` (the Cloudflare Workers adapter, consumed by git revision), `mkit-server-conformance`, `mkit-wasm` (npm-only), `mkit-repo-client`, `mkit-test-util`, `mkit-core-wasm-check`, `mkit-formal-conformance`, `fuzz`, `benches`. The contrib signers are a separate workspace under `contrib/signers/` (not workspace members at all). |
+| the library crates (`mkit-core`, `mkit-rpc`, `mkit-client`, `mkit-sync`, `mkit-attest`, `mkit-keystore`, `mkit-git-bridge`, `mkit-server`, `mkit-server-conformance`, `mkit-transport-{file,http,memory,s3,ssh,enc,connect}`) plus `mkit-cli` (so `cargo install mkit-cli` works) | `mkit-server-worker` (the Cloudflare Workers adapter, consumed by git revision), `mkit-wasm` (npm-only), `mkit-repo-client`, `mkit-test-util`, `mkit-core-wasm-check`, `mkit-formal-conformance`, `fuzz`, `benches`. The contrib signers are a separate workspace under `contrib/signers/` (not workspace members at all). |
 
 The published crates depend only on each other, forming a closed,
 dependency-ordered set; `cargo publish --workspace` computes that order and
 skips any `publish = false` member.
 
 Notes on the published set:
+
+- **`mkit-server-conformance`** &mdash; the protocol conformance library and
+  runner join the next lockstep release. Package with default features;
+  `test-host` remains debug-only test support. Before tagging, check its package
+  contents and install the runner from the release candidate. Do not publish
+  this crate separately from the dependency train.
 
 - **`mkit-server`** &mdash; the runtime-agnostic server core, first published at
   0.5.0. `mkit-cli` depends on it (features `ssh` and `fs`, for the stdio

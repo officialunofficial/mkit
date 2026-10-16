@@ -369,7 +369,7 @@ pub struct PartitionStats {
 /// that can do an atomic conditional multi-key write per partition and an
 /// ordered range read can implement it: SQL is not required.
 ///
-/// # Normative rules
+/// # Reference-server behavior: storage SPI requirements
 ///
 /// 1. **Declarative batch.** [`Self::apply`] is the only write. A backend
 ///    never evaluates CAS, quota or replay logic: the pipeline plans every
@@ -382,18 +382,25 @@ pub struct PartitionStats {
 ///    one partition run concurrently, and nothing may hold a lock across an
 ///    `.await` waiting for another `apply`. The pipeline handles contention
 ///    with an optimistic re-plan loop.
-/// 4. **Cancellation safety.** Dropping an `apply` future at any `.await`
-///    leaves the partition fully before or fully after the batch, and the
-///    store usable: check-and-write runs in one non-yielding step (a
-///    synchronous transaction that runs to completion even if the future is
-///    dropped, a Durable Object `transactionSync`, a mutex held without
-///    awaits). The dropped batch may still commit later (a blocking task
-///    keeps running): every later observation is exactly the state before
-///    or after it, never torn, and once the after state has been observed
-///    the before state never reappears. A poisoned lock is recovered, never
-///    propagated.
-/// 5. **Durability.** `Committed` means durable to the level the backend
-///    documents.
+/// 4. **Cancellation safety.** Dropping an `apply` future leaves the
+///    partition fully before or fully after the batch, and the store usable.
+///    Check-and-write is one isolated, cancellation-independent atomic
+///    transaction. It may await internally only if partial state cannot
+///    escape, command ownership survives caller cancellation, and rules 5
+///    and 8 still hold. A synchronous transaction, a Durable Object
+///    `transactionSync`, or a mutex held without awaits is sufficient.
+///    The dropped batch may still commit later; every observation is before
+///    or after it, never torn, and an observed after state never rolls back.
+///    A poisoned lock is recovered, never propagated.
+/// 5. **Durability.** `Committed` acknowledges a linearized atomic batch
+///    recoverable under the backend's declared durability profile before
+///    the future returns. Document process, host, and storage/failover
+///    guarantees separately. Several batches may share a durable sync, but
+///    no success or dependent observation may precede its durable position
+///    and required earlier dependencies. Restart recovers a dependency-closed
+///    prefix containing every acknowledged commit. Uncertain I/O outcomes
+///    are not definite guard failures or rollbacks. A volatile backend must
+///    identify itself and cannot certify persistent conformance.
 /// 6. **Atomicity scope.** One batch is one partition; nothing needs
 ///    atomicity across partitions. Cross-partition effects are ordered by
 ///    the pipeline or carried by outbox rows a core-owned relay delivers at
@@ -409,8 +416,10 @@ pub struct PartitionStats {
 /// 8. **Commit deadline.** [`Precondition::NotAfter`] is evaluated against
 ///    the **backend's own clock** (the `SQLite` host's, the Durable
 ///    Object's, an injected one in memory), read once inside the same
-///    non-yielding check-and-write step as the key checks, never the
-///    caller's clock; an invalid reading fails closed. A late batch
+///    final atomic acceptance step as the key checks, never the
+///    caller's clock; an invalid reading fails closed. Queue admission is
+///    not acceptance; internal awaits cannot extend the deadline or permit
+///    later unchecked acceptance. A late batch
 ///    therefore cannot commit after its deadline, whenever it arrives.
 ///    A miss is [`BatchOutcome::DeadlinePassed`]: the pipeline answers a
 ///    retryable `unavailable`, never `aborted`, `deadline_exceeded` or

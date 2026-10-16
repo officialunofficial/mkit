@@ -65,11 +65,20 @@ async fn admin(
         digest,
         to_hex_bytes(&signature.to_bytes()),
     ];
-    let headers: Vec<_> = mkit_server::admin::HEADER_NAMES
-        .into_iter()
-        .zip(values)
-        .map(|(name, value)| (name.into(), value))
-        .collect();
+    let headers: Vec<_> = [
+        "x-mkit-admin-version",
+        "x-mkit-admin-key-id",
+        "x-mkit-admin-audience",
+        "x-mkit-admin-created-at",
+        "x-mkit-admin-expires-at",
+        "x-mkit-admin-nonce",
+        "x-mkit-admin-digest",
+        "x-mkit-admin-signature",
+    ]
+    .into_iter()
+    .zip(values)
+    .map(|(name, value)| (name.into(), value))
+    .collect();
     let reply = ctx.client().post(&path, UNARY_JSON, &headers, body).await?;
     ensure!(
         reply.status == 200,
@@ -215,7 +224,7 @@ async fn published_token(ctx: &Ctx, repository: &str, object: Hash) -> Result<St
                 &mint,
             );
             match ctx.send::<IssueObjectUrlResponse>(&signed).await? {
-                Ok(response) => Ok(Some(mkit_server::Redacted::new(
+                Ok(response) => Ok(Some(crate::wire::Secret::new(
                     response.token.ok_or("missing takedown token")?,
                 ))),
                 Err(error) if error.code == "not_found" => Ok(None),

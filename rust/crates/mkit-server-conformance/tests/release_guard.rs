@@ -10,6 +10,8 @@ fn release_guard_rejects_stubs_and_worker_test_vars() {
     for (features, marker, allowed) in [
         (vec![], "release", true),
         (vec!["stubs"], "release", false),
+        (vec!["test-host"], "release", false),
+        (vec![], "/__mkit_test/v1/control", false),
         (vec![], "/__stub/mode", false),
         (vec![], "TEST_OUTBOX_BACKLOG_ROWS", false),
         (vec![], "TEST_TICKET_TTL_MS", false),

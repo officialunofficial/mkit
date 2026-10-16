@@ -203,3 +203,48 @@ pub(super) async fn expired_retry_rejected(ctx: Ctx) -> CaseResult {
     want_code(got, "unauthenticated", "a replay past its expiry")?;
     ctx.expect_ref(&ctx.head("main"), Some(&A)).await
 }
+
+/// A read-observed acceptance must have a stable saved result. With no other
+/// writers in this fixture, the paired reads also assert failed paired-CAS
+/// immunity. They do not purport to be a concurrent atomic snapshot.
+pub(super) async fn observed_pair_has_saved_result(ctx: Ctx) -> CaseResult {
+    let signer = ctx.v2_signer("main")?;
+    let (head, packmap) = (ctx.head("main"), ctx.packmap("main"));
+    let first = signed(
+        &signer,
+        Rpc::AdvanceRefs,
+        &advance_req((&head, Exp::Missing, &A), (&packmap, Exp::Missing, &B)),
+    );
+    let accepted: AdvanceRefsResponse = want_ok(ctx.send(&first).await?, "first pair")?;
+    ensure!(
+        accepted.outcome == Some(AdvanceOutcome::ADVANCE_OUTCOME_COMMITTED.into()),
+        "first pair was not committed"
+    );
+    ctx.expect_ref(&head, Some(&A)).await?;
+    ctx.expect_ref(&packmap, Some(&B)).await?;
+    let conflict = signed(
+        &signer,
+        Rpc::AdvanceRefs,
+        &advance_req((&head, Exp::Match(&A), &C), (&packmap, Exp::Match(&C), &C)),
+    );
+    let refused: AdvanceRefsResponse = want_ok(ctx.send(&conflict).await?, "stale packmap")?;
+    ensure!(
+        refused.outcome == Some(AdvanceOutcome::ADVANCE_OUTCOME_PACKMAP_CONFLICT.into()),
+        "stale packmap must refuse the whole pair"
+    );
+    ctx.expect_ref(&head, Some(&A)).await?;
+    ctx.expect_ref(&packmap, Some(&B)).await?;
+    let later = signed(
+        &signer,
+        Rpc::AdvanceRefs,
+        &advance_req((&head, Exp::Match(&A), &C), (&packmap, Exp::Match(&B), &C)),
+    );
+    let _: AdvanceRefsResponse = want_ok(ctx.send(&later).await?, "later pair")?;
+    let replayed: AdvanceRefsResponse = want_ok(ctx.send(&first).await?, "observed pair replay")?;
+    ensure!(
+        replayed == accepted,
+        "replay differs from original accepted result"
+    );
+    ctx.expect_ref(&head, Some(&C)).await?;
+    ctx.expect_ref(&packmap, Some(&C)).await
+}

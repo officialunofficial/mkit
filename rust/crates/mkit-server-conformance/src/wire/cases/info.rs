@@ -34,10 +34,7 @@ pub(super) async fn shape_and_policy(ctx: Ctx) -> CaseResult {
     );
     ensure!(info.spec_version == Some(2), "incorrect spec_version");
     if let Some(limit) = info.inspection_max_objects {
-        ensure!(
-            (1..=10_000).contains(&limit),
-            "invalid inspection_max_objects: {limit}"
-        );
+        ensure!(limit > 0, "invalid inspection_max_objects: {limit}");
         ensure!(
             info.indexed_mode == Some(true),
             "inspection requires indexed mode"
@@ -47,8 +44,8 @@ pub(super) async fn shape_and_policy(ctx: Ctx) -> CaseResult {
             "inspection must require BeginUpload"
         );
         ensure!(
-            info.async_inspection == Some(false),
-            "launch inspection must be synchronous"
+            info.async_inspection.is_some(),
+            "missing inspection scheduling advertisement"
         );
     }
     let part_size = info.part_size.ok_or("missing part_size")?;
@@ -70,7 +67,7 @@ pub(super) async fn shape_and_policy(ctx: Ctx) -> CaseResult {
         (1..=10_000).contains(&page_size),
         "invalid page size: {page_size}"
     );
-    ensure!(info.index_fanout == Some(16), "incorrect index_fanout");
+    ensure!(info.index_fanout.is_some(), "missing advisory index_fanout");
     let depth = info
         .max_delta_chain_depth
         .ok_or("missing max_delta_chain_depth")?;

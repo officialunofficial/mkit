@@ -7,6 +7,74 @@ profile; storage-only groundwork is labeled explicitly. The
 [SPEC-SERVER profile map](specs/SPEC-SERVER.md#1-scope-and-relation-to-spec-transport-connect)
 distinguishes current enforcement from future integration.
 
+## Conformance distinguishes absent features from implementation gaps
+
+**Always:** cases for undeclared protocol features report not applicable with
+feature names. A known gap in an offered feature needs a declared skip with a
+reason. Tier-2 cases use the normative HTTP test-control binding, independently
+of the server's language, layout, or orchestration.
+
+**Because:** an optional feature is not an unimplemented requirement, and an
+in-process API would prevent black-box conformance across implementations.
+
+**If violated:** reports can hide protocol violations or require reference
+orchestration from an independent server.
+
+**Enforcement:** the conformance profile, report, and controlled-host tests pin
+feature applicability, stale skip rejection, and enabled/disabled authority RPCs.
+The native conformance CI job exercises both protocol tiers over loopback HTTP.
+
+## Acceptance retains replay and terminal responsibility
+
+**Always:** an accepted signed ref write retains its live effects, replay result,
+applicable charge, ticket closure and repository membership additions, plus one
+terminal responsibility per reservation, in its authoritative atomic unit.
+Replaying its original identity does not repeat those effects. Cancellation and
+response loss do not prove abort.
+
+**Because:** another request can observe acceptance before its response arrives.
+Recovery must resolve that same decision and settlement identity.
+
+**If violated:** a retry could duplicate settlement or expose a ref whose
+acceptance cannot be recovered.
+
+**Enforcement:** SPEC-SERVER §3.1–§3.2 define the protocol requirement. The
+conformance crate's two tiers cover wire replay and controlled acceptance
+snapshots/restarts. The retained-memory reference test host declares process
+kill recovery unsupported; persistent guarantees require a persistent host.
+
+## Fork acceptance gates destination activation
+
+**Protocol requirement:** a server offering fork stages membership without a
+ref and records guarded acceptance, replay, and terminal outcome responsibility
+in one atomic unit. Its destination is neither reader-visible nor writable
+before that acceptance. Failure leaves the destination inert. With authority
+fencing enabled, every advancing commit and acceptance compare the recorded
+authority facts. Acceptance requires a final source proof after all destination
+membership staging and before acceptance commits: the admitted published pair
+and membership generation still match, and every inherited pack is published,
+readable by the forking principal and not denied. The fork is ordered at that
+proof; earlier source changes refuse uniformly as a missing source, and later
+source changes do not invalidate acceptance.
+
+**Because:** construction may survive a crash or continue after revocation;
+partial construction must not grant repository access.
+
+**Known reference-server gap:** current construction publishes membership before
+terminal acceptance and lacks the destination write gate and fence comparison
+at every advancing commit and acceptance. The conformance runner declares the
+destination-gate and authority-fence cases skipped with those reasons. Existing
+fork construction tests establish resumability, not those missing guarantees.
+The reference implementation also lacks the final source proof at the required
+boundary; per-pack checks do not establish it. Source-change cases are declared
+skips, including the visibility race that currently returns a retryable error
+instead of uniform absence.
+
+**Enforcement:** [SPEC-SERVER §9.9](specs/SPEC-SERVER.md#99-fork) defines the
+conditional protocol requirements. The
+[conformance coverage table](../rust/crates/mkit-server-conformance/README.md)
+records the declared gaps; it must not report them as passing.
+
 ## Typed pack evidence retains exact keys and live witness semantics
 
 **Always:** exact pack index reads use only supplied packs, preserve present input

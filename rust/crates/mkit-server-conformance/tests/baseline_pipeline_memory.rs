@@ -34,6 +34,14 @@ use mkit_server_conformance::wire::{
     Feature, Milestone, Profile, QuotaLimits, Verdict, WireAuth, WireTarget, run,
 };
 
+#[derive(Debug)]
+struct FixtureClock(Arc<dyn mkit_server_conformance::wire::TestClock>);
+impl mkit_server::Clock for FixtureClock {
+    fn now_ms(&self) -> i64 {
+        self.0.now_ms()
+    }
+}
+
 const REPOSITORY: &str = "default";
 const TOKEN: &str = "conformance-bearer-token";
 const MAX_PACK: u64 = 4 << 20;
@@ -276,7 +284,7 @@ async fn serve_observed_sharding(
     // A profile that carries a manual server clock drives the server with it,
     // so a case can step a window edge without waiting on the wall clock.
     let clock: Arc<dyn mkit_server::Clock> = match multi.and_then(|p| p.server_clock.clone()) {
-        Some(manual) => manual,
+        Some(manual) => Arc::new(FixtureClock(manual)),
         None => Arc::new(SystemClock),
     };
     let kv = Arc::new(MemoryKv::with_clock(clock.clone()));

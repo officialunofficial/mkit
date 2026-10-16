@@ -1,10 +1,9 @@
 # Request read rounds
 
-The sequential-round probe uses a paused clock and the shared six-call read
-admission. Each storage call costs one virtual latency unit. Round counts
-measure dependencies, not elapsed production latency. The baseline is commit
-`2e25d163`; later main commits do not change these probe shapes. The probe retains the existing shape ceilings and records every
-row's before/after rounds and metadata-call delta.
+**Reference-server behavior.** These fixture measurements describe the
+reference server at the named commits. They are not protocol limits or
+production latency claims. Rounds measure dependent virtual latency; metadata
+calls measure API invocations. They are different units.
 
 Run from **rust/**:
 
@@ -13,12 +12,18 @@ cargo test -p mkit-server --features http-objects --lib embedder_read_shapes -- 
 cargo test -p mkit-server --all-features --lib first_parent_ -- --nocapture
 ```
 
-## Round and call deltas
+## Historical snapshot: original baseline
+
+The table below is the original snapshot introduced at
+`05c0bc49eb044a98171eee8a87aa19ae3e9c0103`, measured against baseline
+`2e25d163a2fc7d28227b78a7dd06bd3c9c432a85`. It is historical evidence,
+not a statement of current results.
 
 Nested reads use one commit, eight files, and a nested directory. Flat reads
 use four commits and six files. The longer history contains 52 commits and two
-files, with one new pack per commit. Every ranged blob read still costs the
-same conservative two call units; the table counts actual blob GETs separately.
+files, with one new pack per commit. This historical model charged a ranged blob read two call
+units; the table counts actual blob GETs separately. The current default models
+one GET; `MKIT_BENCH_RANGED_HEAD=1` opts into HEAD plus GET.
 Page1(10) activates the missing visibility revision on the first anonymous,
 denial-off run. Subsequent page measurements reuse that durable revision.
 
@@ -85,6 +90,30 @@ Inventory waves preserve partition/chunk validation order. Fresh dependency
 reads deduplicate IDs in first-seen order and use reserved waves; phase-cached
 guards retain scalar accounting so cache hits do not consume backend call units.
 Delta members stay serial between contiguous raw runs.
+
+## Current snapshot
+
+Source: `2cccd133ebe5871a738415a021c189894c4337c5`. Fixture: 52 linear
+commits, two root files, file 0 changed and a fresh pack per commit, with
+reference branch-bucketed metadata addressing. Features: `mkit-server/http-objects`, default probe configuration.
+Denial: off. Counting model: paused Tokio time, six-way read admission, 30 ms
+virtual latency per call; rounds equal virtual elapsed time divided by that
+latency. Metadata calls exclude blob calls. Ranged reads use one GET by default.
+The selected and canonical probes follow first parents; ordinary Log uses the
+history-walk API. Their counts are not interchangeable.
+
+| View | API / shape | Dependent rounds | Metadata calls | Blob GETs |
+| --- | --- | ---: | ---: | ---: |
+| Anonymous | Selected-ref canonical reads, Log(10) | 43 | 33 | 20 |
+| Owner | Selected-ref canonical reads, Log(10) | 44 | 34 | 20 |
+| Anonymous | Canonical object reads, Log(10) | 43 | 46 | 20 |
+| Owner | Canonical object reads, Log(10) | 44 | 47 | 20 |
+| Anonymous | History walk, Log(10) | 66 | 64 | 20 |
+| Owner | History walk, Log(10) | 67 | 65 | 20 |
+
+The probe `embedder_read_shapes_report_rounds` prints these measured counters
+separately from its retained historical constants. Re-run it at the source SHA
+and retain the same environment and fixture when comparing results.
 
 ## Ordering and budgets
 
