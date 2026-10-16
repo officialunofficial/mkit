@@ -43,18 +43,18 @@ struct Node {
 #[derive(Clone, Default)]
 struct View(BTreeMap<Hash, Node>);
 impl View {
-    fn real(&mut self, object: Object) -> Hash {
-        let manifest = match &object {
+    fn real(&mut self, object: &Object) -> Hash {
+        let manifest = match object {
             Object::ChunkedBlob(value) => Some(ChunkedBlobSummary {
                 total_size: value.total_size,
                 chunks: value.chunks.len() as u64,
             }),
             _ => None,
         };
-        let bytes = mkit_core::serialize::serialize(&object).unwrap();
-        let object_id = mkit_core::object::id_from_object(&object, &bytes);
-        let edges = (0..edge_count(&object))
-            .map(|i| edge_at(&object, i).unwrap())
+        let bytes = mkit_core::serialize::serialize(object).unwrap();
+        let object_id = mkit_core::object::id_from_object(object, &bytes);
+        let edges = (0..edge_count(object))
+            .map(|i| edge_at(object, i).unwrap())
             .collect();
         self.0.insert(
             object_id,
@@ -102,17 +102,23 @@ impl InPackObjectView for View {
     fn object_set_root(&self) -> Hash {
         id(200)
     }
+    fn retained_bytes(&self) -> u64 {
+        self.0
+            .values()
+            .map(|node| 256 + node.edges.capacity() as u64 * 128 + node.bytes.capacity() as u64)
+            .sum()
+    }
     fn object_count(&self) -> u64 {
         self.0.len() as u64
     }
     fn object(&self, key: &Hash) -> Result<Option<InPackObject>, Failure> {
-        Ok(self.0.get(key).map(|n| n.meta.clone()))
+        Ok(self.0.get(key).map(|n| n.meta))
     }
     fn object_at(&self, ordinal: u64) -> Result<Option<InPackObject>, Failure> {
         Ok(usize::try_from(ordinal)
             .ok()
             .and_then(|i| self.0.values().nth(i))
-            .map(|n| n.meta.clone()))
+            .map(|n| n.meta))
     }
     fn chunked_blob(&self, key: &Hash) -> Result<Option<ChunkedBlobSummary>, Failure> {
         Ok(self.0.get(key).and_then(|node| node.manifest))
@@ -218,7 +224,7 @@ impl Host {
                 PageDecodeCfg {
                     max_bytes: 65536,
                     max_reasons: 1000,
-                    max_work: 100000,
+                    max_work: 100_000,
                 },
             )
             .unwrap();
@@ -296,12 +302,12 @@ fn run(view: View, heads: &[Hash], limits: ClosureLimits) -> Result<ResultSummar
     host.finish(&mut machine)
 }
 fn blob(view: &mut View, data: &[u8]) -> Hash {
-    view.real(Object::Blob(Blob {
+    view.real(&Object::Blob(Blob {
         data: data.to_vec(),
     }))
 }
 fn tree(view: &mut View, child: Hash, mode: EntryMode) -> Hash {
-    view.real(Object::Tree(Tree {
+    view.real(&Object::Tree(Tree {
         entries: vec![TreeEntry {
             name: b"child".to_vec(),
             mode,
@@ -328,7 +334,9 @@ fn independent_seeded_bfs_oracle_matches_complete_missing_sets() {
         for n in 1..=12u8 {
             let mut targets = Vec::new();
             for _ in 0..3 {
-                random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+                random = random
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
                 targets.push(id(1 + ((random >> 32) % 18) as u8));
             }
             view.graph(id(n), &targets);
@@ -383,7 +391,7 @@ fn tree_and_tag_kind_mismatches_are_only_diagnostics() {
     let mut view = View::default();
     let child = blob(&mut view, b"data");
     tree(&mut view, child, EntryMode::Tree);
-    let head = view.real(Object::Tag(Tag {
+    let head = view.real(&Object::Tag(Tag {
         target: child,
         target_type: ObjectType::Tree,
         name: b"test".to_vec(),
@@ -403,7 +411,7 @@ fn surplus_manifest_checks_each_repeated_chunk_occurrence_and_only_total_length(
     for chunk_size in [0, 7] {
         let mut view = View::default();
         let chunk = blob(&mut view, b"abc");
-        view.real(Object::ChunkedBlob(ChunkedBlob {
+        view.real(&Object::ChunkedBlob(ChunkedBlob {
             total_size: 6,
             chunk_size,
             chunks: vec![chunk, chunk],
@@ -418,7 +426,7 @@ fn surplus_manifest_checks_each_repeated_chunk_occurrence_and_only_total_length(
     for total_size in [2, 7] {
         let mut view = View::default();
         let chunk = blob(&mut view, b"abc");
-        view.real(Object::ChunkedBlob(ChunkedBlob {
+        view.real(&Object::ChunkedBlob(ChunkedBlob {
             total_size,
             chunk_size: 3,
             chunks: vec![chunk, chunk],
@@ -429,10 +437,10 @@ fn surplus_manifest_checks_each_repeated_chunk_occurrence_and_only_total_length(
         );
     }
     let mut view = View::default();
-    let child = view.real(Object::Tree(Tree {
+    let child = view.real(&Object::Tree(Tree {
         entries: Vec::new(),
     }));
-    view.real(Object::ChunkedBlob(ChunkedBlob {
+    view.real(&Object::ChunkedBlob(ChunkedBlob {
         total_size: 0,
         chunk_size: 0,
         chunks: vec![child],
@@ -448,7 +456,7 @@ fn external_chunk_bytes_and_duplicate_lengths_are_checked() {
     let mut external = View::default();
     let chunk = blob(&mut external, b"abc");
     let mut view = View::default();
-    view.real(Object::ChunkedBlob(ChunkedBlob {
+    view.real(&Object::ChunkedBlob(ChunkedBlob {
         total_size: 6,
         chunk_size: 3,
         chunks: vec![chunk, chunk],
@@ -566,7 +574,7 @@ fn resource_caps_never_report_a_truncated_complete_set() {
     let mut external = View::default();
     let chunk = blob(&mut external, b"abc");
     let mut view = View::default();
-    view.real(Object::ChunkedBlob(ChunkedBlob {
+    view.real(&Object::ChunkedBlob(ChunkedBlob {
         total_size: 3,
         chunk_size: 0,
         chunks: vec![chunk],
@@ -709,7 +717,7 @@ fn configured_large_frontier_is_batched_at_4096_and_4097() {
         let mut machine = walker(view, &[], ClosureLimits::indexed(), 1).unwrap();
         let result = host.finish(&mut machine).unwrap();
         let mut expected = targets;
-        expected.sort();
+        expected.sort_unstable();
         assert_eq!(result.missing, expected);
         assert_eq!(
             host.batches.iter().map(Vec::len).collect::<Vec<_>>(),
@@ -718,6 +726,230 @@ fn configured_large_frontier_is_batched_at_4096_and_4097() {
             } else {
                 vec![4096, 1]
             }
+        );
+    }
+}
+
+#[test]
+fn canonical_answers_bind_exact_source_and_distinguish_integrity_from_loss() {
+    let mut external = View::default();
+    let chunk = blob(&mut external, b"abc");
+    let bytes = external.0[&chunk].bytes.clone();
+    for mutation in 0..10 {
+        let mut view = View::default();
+        view.real(&Object::ChunkedBlob(ChunkedBlob {
+            total_size: 3,
+            chunk_size: 0,
+            chunks: vec![chunk],
+        }));
+        let mut host = Host::with_view(&view);
+        host.external
+            .insert(chunk, member(chunk, ObjectType::Blob, bytes.len() as u64));
+        let mut machine = walker(view, &[], ClosureLimits::indexed(), 1).unwrap();
+        let (mut request, mut source) = loop {
+            match host.next_request(&mut machine) {
+                ClosureRequest::Canonical { request, source } => break (request, source),
+                other => host.supply(&mut machine, other).unwrap(),
+            }
+        };
+        let mut changed = bytes.clone();
+        let expected = match mutation {
+            0 => {
+                changed.pop();
+                FailureCode::InvalidResponse
+            }
+            1 => {
+                changed[10] ^= 1;
+                FailureCode::ObjectHashMismatch
+            }
+            2 => {
+                changed[0] = ObjectType::Tree as u8;
+                FailureCode::NonCanonicalObject
+            }
+            3 => {
+                let CanonicalSource::Member(fact) = &mut source;
+                fact.canonical_binding.0[0] ^= 1;
+                FailureCode::InvalidResponse
+            }
+            4 => {
+                request.generation += 1;
+                FailureCode::InvalidResponse
+            }
+            5 | 6 => FailureCode::UnavailableInput,
+            7 => {
+                let CanonicalSource::Member(fact) = &mut source;
+                fact.supplier.binding.0[0] ^= 1;
+                FailureCode::InvalidResponse
+            }
+            8 => {
+                changed[6] ^= 1;
+                FailureCode::NonCanonicalObject
+            }
+            _ => {
+                let CanonicalSource::Member(fact) = &mut source;
+                fact.revision.0[0] ^= 1;
+                FailureCode::InvalidResponse
+            }
+        };
+        let value = match mutation {
+            5 => Acquisition::Absent,
+            6 => Acquisition::Unavailable,
+            _ => Acquisition::Present(changed.as_slice()),
+        };
+        assert_eq!(
+            machine
+                .answer(ClosureResponse::Canonical {
+                    request,
+                    source,
+                    value
+                })
+                .unwrap_err()
+                .code,
+            expected
+        );
+        assert_eq!(
+            machine.step().unwrap_err().code,
+            FailureCode::InvalidResponse
+        );
+    }
+}
+
+#[test]
+fn manifest_summary_and_edge_ordinal_are_required_view_bindings() {
+    let mut base = View::default();
+    let chunk = blob(&mut base, b"abc");
+    let manifest = base.real(&Object::ChunkedBlob(ChunkedBlob {
+        total_size: 3,
+        chunk_size: 0,
+        chunks: vec![chunk],
+    }));
+    for mutation in 0..3 {
+        let mut view = base.clone();
+        let node = view.0.get_mut(&manifest).unwrap();
+        match mutation {
+            0 => node.manifest = None,
+            1 => node.manifest.as_mut().unwrap().chunks += 1,
+            _ => node.edges[0].ordinal += 1,
+        }
+        assert_eq!(
+            run(view, &[], ClosureLimits::indexed()).unwrap_err().code,
+            FailureCode::InvalidResponse
+        );
+    }
+}
+
+#[test]
+fn changing_view_root_count_or_retained_memory_never_seals_old_work() {
+    use std::{cell::Cell, rc::Rc};
+    struct MutableView {
+        root: Rc<Cell<Hash>>,
+        count: Rc<Cell<u64>>,
+        memory: Rc<Cell<u64>>,
+    }
+    impl InPackObjectView for MutableView {
+        fn object_set_root(&self) -> Hash {
+            self.root.get()
+        }
+        fn retained_bytes(&self) -> u64 {
+            self.memory.get()
+        }
+        fn object_count(&self) -> u64 {
+            self.count.get()
+        }
+        fn object(&self, _: &Hash) -> Result<Option<InPackObject>, Failure> {
+            Ok(None)
+        }
+        fn edge(&self, _: &Hash, _: u64) -> Result<Option<ObjectEdge>, Failure> {
+            Ok(None)
+        }
+        fn object_at(&self, _: u64) -> Result<Option<InPackObject>, Failure> {
+            Ok(None)
+        }
+    }
+    for mutation in 0..3 {
+        let root = Rc::new(Cell::new(id(1)));
+        let count = Rc::new(Cell::new(0));
+        let memory = Rc::new(Cell::new(256));
+        let view = MutableView {
+            root: Rc::clone(&root),
+            count: Rc::clone(&count),
+            memory: Rc::clone(&memory),
+        };
+        let mut machine =
+            ClosureWalker::new(view, &[], REPO, VIEW, rules(), ClosureLimits::indexed(), 1)
+                .unwrap();
+        assert!(matches!(machine.step().unwrap(), ClosureStep::Progress));
+        match mutation {
+            0 => root.set(id(2)),
+            1 => count.set(1),
+            _ => memory.set(1 << 30),
+        }
+        assert_eq!(
+            machine.step().unwrap_err().code,
+            if mutation == 2 {
+                FailureCode::ResourceLimit
+            } else {
+                FailureCode::SourceChanged
+            }
+        );
+        assert_eq!(
+            machine.step().unwrap_err().code,
+            FailureCode::InvalidResponse
+        );
+    }
+}
+
+#[test]
+fn content_failure_context_preserves_distinct_host_refusal_boundaries() {
+    let mut host = Host::default();
+    host.external
+        .insert(id(1), member(id(1), ObjectType::Tree, 10));
+    let mut machine = walker(View::default(), &[id(1)], ClosureLimits::indexed(), 1).unwrap();
+    assert_eq!(
+        host.finish(&mut machine).unwrap_err().code,
+        FailureCode::WrongKind
+    );
+    assert_eq!(
+        machine.failure_context(),
+        Some(ClosureFailureContext {
+            object: id(1),
+            check: ClosureCheck::Head
+        })
+    );
+
+    for wrong_kind in [false, true] {
+        let mut view = View::default();
+        let child = if wrong_kind {
+            view.real(&Object::Tree(Tree {
+                entries: Vec::new(),
+            }))
+        } else {
+            blob(&mut view, b"abc")
+        };
+        let manifest = view.real(&Object::ChunkedBlob(ChunkedBlob {
+            total_size: 7,
+            chunk_size: 0,
+            chunks: vec![child],
+        }));
+        let mut host = Host::with_view(&view);
+        let mut machine = walker(view, &[], ClosureLimits::indexed(), 1).unwrap();
+        assert!(host.finish(&mut machine).is_err());
+        assert_eq!(
+            machine.failure_context(),
+            Some(if wrong_kind {
+                ClosureFailureContext {
+                    object: child,
+                    check: ClosureCheck::Chunk {
+                        manifest,
+                        ordinal: 0,
+                    },
+                }
+            } else {
+                ClosureFailureContext {
+                    object: manifest,
+                    check: ClosureCheck::Manifest,
+                }
+            })
         );
     }
 }

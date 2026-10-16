@@ -30,7 +30,7 @@ pub fn edge_count(object: &Object) -> u64 {
 /// Each call takes constant time and allocates nothing. Commit and remix trees
 /// precede their parents; other edges retain their canonical occurrence order.
 /// Kind hints for tree entries and tags are diagnostic under the baseline
-/// profile. File entry modes admit Blob or ChunkedBlob, so they have no single
+/// profile. File entry modes admit Blob or `ChunkedBlob`, so they have no single
 /// expected kind. No edge has an individual expected length: manifest totals
 /// must be checked separately, counting every chunk occurrence.
 #[must_use]
@@ -85,11 +85,11 @@ mod tests {
     };
     use mkit_core::ops::graph::{ClosureMode, children};
 
-    fn assert_edges(object: Object, expected: &[(u8, EdgeKind, Option<ObjectType>)]) {
-        assert_eq!(edge_count(&object), expected.len() as u64);
+    fn assert_edges(object: &Object, expected: &[(u8, EdgeKind, Option<ObjectType>)]) {
+        assert_eq!(edge_count(object), expected.len() as u64);
         let mut targets = Vec::new();
         for (ordinal, (target, kind, expected_kind)) in expected.iter().enumerate() {
-            let edge = edge_at(&object, ordinal as u64);
+            let edge = edge_at(object, ordinal as u64);
             assert_eq!(
                 edge,
                 Some(ObjectEdge {
@@ -102,15 +102,15 @@ mod tests {
             );
             targets.push([*target; 32]);
         }
-        assert_eq!(targets, children(&object, ClosureMode::History));
-        assert_eq!(edge_at(&object, expected.len() as u64), None);
-        assert_eq!(edge_at(&object, u64::MAX), None);
+        assert_eq!(targets, children(object, ClosureMode::History));
+        assert_eq!(edge_at(object, expected.len() as u64), None);
+        assert_eq!(edge_at(object, u64::MAX), None);
     }
 
     #[test]
     fn commit_and_remix_include_parents_but_exclude_foreign_sources() {
         assert_edges(
-            Object::Commit(Commit::new_unannotated(
+            &Object::Commit(Commit::new_unannotated(
                 [1; 32],
                 vec![[2; 32], [2; 32]],
                 Identity::ed25519([0; 32]),
@@ -126,7 +126,7 @@ mod tests {
             ],
         );
         assert_edges(
-            Object::Remix(Remix {
+            &Object::Remix(Remix {
                 tree_hash: [1; 32],
                 parents: vec![[2; 32]],
                 sources: vec![RemixSource {
@@ -157,13 +157,13 @@ mod tests {
         .into_iter()
         .enumerate()
         .map(|(index, mode)| TreeEntry {
-            name: vec![b'a' + index as u8],
+            name: vec![b'a' + u8::try_from(index).unwrap()],
             mode,
             object_hash: [1; 32],
         })
         .collect();
         assert_edges(
-            Object::Tree(Tree { entries }),
+            &Object::Tree(Tree { entries }),
             &[
                 (1, EdgeKind::TreeEntry, None),
                 (1, EdgeKind::TreeEntry, Some(ObjectType::Tree)),
@@ -172,7 +172,7 @@ mod tests {
             ],
         );
         assert_edges(
-            Object::Tree(Tree {
+            &Object::Tree(Tree {
                 entries: Vec::new(),
             }),
             &[],
@@ -183,7 +183,7 @@ mod tests {
     fn chunk_occurrences_have_no_inferred_individual_length() {
         for chunk_size in [0, 7] {
             assert_edges(
-                Object::ChunkedBlob(ChunkedBlob {
+                &Object::ChunkedBlob(ChunkedBlob {
                     total_size: 9,
                     chunk_size,
                     chunks: vec![[1; 32], [1; 32], [2; 32]],
@@ -200,7 +200,7 @@ mod tests {
     #[test]
     fn tag_declared_kind_is_diagnostic_and_leaves_have_no_edges() {
         assert_edges(
-            Object::Tag(Tag {
+            &Object::Tag(Tag {
                 target: [1; 32],
                 target_type: ObjectType::Tree,
                 name: b"tag".to_vec(),
@@ -212,9 +212,9 @@ mod tests {
             }),
             &[(1, EdgeKind::TagTarget, Some(ObjectType::Tree))],
         );
-        assert_edges(Object::Blob(Blob { data: vec![1] }), &[]);
+        assert_edges(&Object::Blob(Blob { data: vec![1] }), &[]);
         assert_edges(
-            Object::Delta(Delta {
+            &Object::Delta(Delta {
                 base_hash: [1; 32],
                 result_size: 0,
                 instructions: Vec::new(),

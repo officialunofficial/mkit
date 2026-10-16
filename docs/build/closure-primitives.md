@@ -10,7 +10,10 @@ repository identity and incarnation, ruleset binding, finite `ClosureLimits`,
 and a run generation. The view must derive its metadata, edge occurrences,
 and chunk manifest summaries from canonical verified objects. Its root must
 match the sealed verification artifact used by acceptance. An implementation
-of the view must only inspect already supplied immutable data.
+of the view must only inspect already supplied immutable data. Its
+`retained_bytes` includes retained metadata and owned or borrowed page buffers.
+The machine checks the frozen object root/count and rejects source changes;
+newly resident view buffers must fit the shared resident allowance.
 
 Poll `step` until it requests acquisition, retention, or returns a terminal
 result. `Progress` is one finite internal transition. Polling an outstanding
@@ -69,6 +72,9 @@ The algorithm preserves existence-only tree/tag child closure, excludes remix
 sources, and checks Blob integrity and ordered summed lengths for every consumed
 chunk manifest, including surplus manifests. It adds no fixed-size chunk rule,
 cycle content refusal, graph-depth content rule, or server refusal mapping.
+`failure_context` distinguishes advanced-head, chunk-occurrence and manifest
+checks so an adapter can preserve its existing refusal mapping and precedence.
+Ancestry policy follows parents separately; closure is not a fast-forward test.
 See [the server edge and evidence contracts](../specs/SPEC-SERVER.md#direct-child-closure-edges).
 
 Local page formats are current-version-only. Unsupported or lost local evidence

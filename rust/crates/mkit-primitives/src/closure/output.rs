@@ -233,11 +233,12 @@ pub fn decode_missing(
     {
         return Err(resource());
     }
-    let count = usize::try_from(count).map_err(|_| resource())?;
-    // Each reason needs at least a source tag, an edge tag and an ordinal.
-    if count > (bytes.len() - input.position) / 10 {
+    // Check the minimum wire extent before a platform-sized conversion so a
+    // forged count has the same refusal on 32-bit and 64-bit hosts.
+    if count > ((bytes.len() - input.position) / 10) as u64 {
         return Err(invalid());
     }
+    let count = usize::try_from(count).map_err(|_| resource())?;
     let mut reasons = Vec::new();
     reasons.try_reserve_exact(count).map_err(|_| resource())?;
     for _ in 0..count {

@@ -1,15 +1,56 @@
 //! Graph traversal transitions and bounded frontier scheduling.
 use super::{
-    Acquisition, CanonicalSource, ClosureRequest, ClosureWalker, Failure, FailureCode, Frame,
-    InPackObject, InPackObjectView, MembershipRequest, MissingObject, MissingReason, ObjectType,
-    Phase, Record, Retention, State, Visit, charge, check_kind, encode_missing, encode_witness,
-    failure,
+    Acquisition, CanonicalSource, ClosureCheck, ClosureFailureContext, ClosureRequest,
+    ClosureWalker, Failure, FailureCode, Frame, InPackObject, InPackObjectView, Lookup,
+    MembershipRequest, MissingObject, MissingReason, ObjectType, Phase, Record, Retention, State,
+    Visit, charge, check_kind, encode_missing, encode_witness, failure,
 };
 use crate::closure::EdgeKind;
 
 impl<V: InPackObjectView> ClosureWalker<V> {
     pub(super) fn advance(&mut self) -> Result<(), Failure> {
-        self.charge(1)?;
+        self.context = match self.phase {
+            Phase::Visit(visit) => Some(ClosureFailureContext {
+                object: visit.id,
+                check: if visit.head {
+                    ClosureCheck::Head
+                } else if visit.chunk {
+                    let reason = visit
+                        .reason
+                        .ok_or_else(|| failure(FailureCode::InvalidResponse))?;
+                    ClosureCheck::Chunk {
+                        manifest: reason
+                            .source
+                            .ok_or_else(|| failure(FailureCode::InvalidResponse))?,
+                        ordinal: reason.ordinal,
+                    }
+                } else {
+                    ClosureCheck::Reference
+                },
+            }),
+            Phase::FinishFrame => self.frames.last().and_then(|frame| {
+                frame.object.map(|object| ClosureFailureContext {
+                    object: object.object,
+                    check: if frame.total.is_some() {
+                        ClosureCheck::Manifest
+                    } else {
+                        ClosureCheck::Reference
+                    },
+                })
+            }),
+            _ => None,
+        };
+        self.charge(3)?;
+        if self.view.object_set_root() != self.object_set_root
+            || self.view.object_count() != self.object_count
+        {
+            return Err(failure(FailureCode::SourceChanged));
+        }
+        let resident = self.view.retained_bytes();
+        if resident > self.view_bytes {
+            self.resident(resident - self.view_bytes)?;
+        }
+        self.view_bytes = resident;
         match self.phase {
             Phase::Fill => self.fill(),
             Phase::Prefetch => self.prefetch(),
@@ -76,6 +117,9 @@ impl<V: InPackObjectView> ClosureWalker<V> {
                 .and_then(|f| f.object.as_ref())
                 .ok_or_else(|| failure(FailureCode::InvalidResponse))?;
             match self.view.edge(&object.object, cursor)? {
+                Some(edge) if edge.ordinal != cursor => {
+                    return Err(failure(FailureCode::InvalidResponse));
+                }
                 Some(edge) => Some(Visit {
                     id: edge.target,
                     head: false,
@@ -108,7 +152,7 @@ impl<V: InPackObjectView> ClosureWalker<V> {
                     .checked_sub(self.heads.len() as u64)
                     .ok_or_else(|| failure(FailureCode::InvalidResponse))?;
                 let object = self.view.object_at(ordinal)?;
-                if (ordinal < self.view.object_count()) != object.is_some() {
+                if (ordinal < self.object_count) != object.is_some() {
                     return Err(failure(FailureCode::InvalidResponse));
                 }
                 object.map(|object| Visit {
@@ -172,7 +216,7 @@ impl<V: InPackObjectView> ClosureWalker<V> {
         };
         self.charge(1)?;
         if self.view.object(&visit.id)?.is_none() {
-            let Some(record) = self.lookup(&visit.id)? else {
+            let Lookup::Found(record) = self.lookup(&visit.id)? else {
                 return Ok(());
             };
             if record.is_none() {
@@ -199,7 +243,7 @@ impl<V: InPackObjectView> ClosureWalker<V> {
         };
         let (record, present) = match &answer.value {
             Acquisition::Present(fact) => (
-                Record {
+                &Record {
                     kind: fact.kind,
                     canonical_len: fact.canonical_len,
                     state: State::Member(fact.clone()),
@@ -208,7 +252,7 @@ impl<V: InPackObjectView> ClosureWalker<V> {
                 true,
             ),
             Acquisition::Absent => (
-                Record {
+                &Record {
                     kind: ObjectType::Blob,
                     canonical_len: 0,
                     state: State::Absent,
@@ -229,7 +273,7 @@ impl<V: InPackObjectView> ClosureWalker<V> {
     }
     pub(super) fn visit(&mut self, visit: Visit) -> Result<(), Failure> {
         let metadata = self.view.object(&visit.id)?;
-        let Some(record) = self.lookup(&visit.id)? else {
+        let Lookup::Found(record) = self.lookup(&visit.id)? else {
             return Ok(());
         };
         if let Some(object) = &metadata {
@@ -266,13 +310,13 @@ impl<V: InPackObjectView> ClosureWalker<V> {
                     .chunked_blob(&object.object)?
                     .ok_or_else(|| failure(FailureCode::InvalidResponse))?;
                 self.enter(
-                    object.clone(),
+                    *object,
                     visit.depth,
                     Some(summary.total_size),
                     Some(summary.chunks),
                 )
             } else {
-                self.enter(object.clone(), visit.depth, None, None)
+                self.enter(*object, visit.depth, None, None)
             }
         } else {
             let Some(record) = record else {
@@ -322,11 +366,11 @@ impl<V: InPackObjectView> ClosureWalker<V> {
             .try_reserve_exact(1)
             .map_err(|_| failure(FailureCode::ResourceLimit))?;
         self.frames
-            .push(Frame::object(object.clone(), depth, total, chunks));
+            .push(Frame::object(object, depth, total, chunks));
         self.phase = Phase::Fill;
         self.put(
             object.object,
-            Record {
+            &Record {
                 kind: object.kind,
                 canonical_len: object.canonical_len,
                 state: State::Gray,
@@ -419,7 +463,7 @@ impl<V: InPackObjectView> ClosureWalker<V> {
                 .processed += 1;
             self.put(
                 object.object,
-                Record {
+                &Record {
                     kind: object.kind,
                     canonical_len: object.canonical_len,
                     state: State::Black,

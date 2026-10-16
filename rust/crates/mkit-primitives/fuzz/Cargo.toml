@@ -14,15 +14,33 @@ categories = ["development-tools::testing"]
 [lints]
 workspace = true
 
-[dependencies]
-mkit-primitives = { path = "..", default-features = false }
-libfuzzer-sys = { version = "0.4", optional = true }
-
 [package.metadata]
 cargo-fuzz = true
 
+[dependencies]
+mkit-primitives = { path = "..", default-features = false }
+mkit-core = { path = "../../mkit-core", default-features = false }
+libfuzzer-sys = { version = "0.4", optional = true }
+
 [features]
+default = []
 libfuzzer = ["dep:libfuzzer-sys"]
+
+[[bin]]
+name = "closure_steps"
+path = "fuzz_targets/closure_steps.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "closure_pages"
+path = "fuzz_targets/closure_pages.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
 
 [[bin]]
 name = "fork_acceptance"

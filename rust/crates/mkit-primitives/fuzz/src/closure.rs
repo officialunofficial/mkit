@@ -76,6 +76,9 @@ impl InPackObjectView for Graph {
         }
         hash(&bytes)
     }
+    fn retained_bytes(&self) -> u64 {
+        std::mem::size_of_val(self) as u64
+    }
     fn object_count(&self) -> u64 {
         4
     }
@@ -148,7 +151,7 @@ struct Counts {
     supplied_bytes: u64,
 }
 
-fn refused(walker: &mut ClosureWalker<Graph>, failure: Failure) -> Outcome {
+fn refused(walker: &mut ClosureWalker<Graph>, failure: &Failure) -> Outcome {
     // A refusal poisons the run; polling cannot resurrect a proof.
     assert!(matches!(walker.step(), Err(error) if error.code == FailureCode::InvalidResponse));
     Outcome::Refused(failure.code)
@@ -192,7 +195,7 @@ fn run(data: &[u8]) -> (Outcome, Counts) {
         counts.transitions += 1;
         let step = match walker.step() {
             Ok(step) => step,
-            Err(error) => return (refused(&mut walker, error), counts),
+            Err(error) => return (refused(&mut walker, &error), counts),
         };
         match step {
             ClosureStep::Progress => {}
@@ -244,7 +247,7 @@ fn run(data: &[u8]) -> (Outcome, Counts) {
                     pages.insert(page.digest, bytes);
                 }
                 if let Err(error) = walker.acknowledge(request, page) {
-                    return (refused(&mut walker, error), counts);
+                    return (refused(&mut walker, &error), counts);
                 }
                 assert!(
                     !unsafe_completion,
@@ -359,7 +362,7 @@ fn run(data: &[u8]) -> (Outcome, Counts) {
                                 if let Some(other) =
                                     pages.iter().find(|(key, _)| **key != page.digest)
                                 {
-                                    bytes = other.1.clone();
+                                    bytes.clone_from(other.1);
                                 } else {
                                     bytes.clear();
                                 }
@@ -387,7 +390,7 @@ fn run(data: &[u8]) -> (Outcome, Counts) {
                     }
                 };
                 if let Err(error) = result {
-                    return (refused(&mut walker, error), counts);
+                    return (refused(&mut walker, &error), counts);
                 }
                 assert!(
                     !unsafe_completion,

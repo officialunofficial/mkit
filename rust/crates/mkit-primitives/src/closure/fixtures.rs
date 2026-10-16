@@ -20,6 +20,8 @@ const GRAY: &[u8] = include_bytes!("../../fixtures/closure/state-gray.bin");
 const BLACK: &[u8] = include_bytes!("../../fixtures/closure/state-black.bin");
 const ABSENT: &[u8] = include_bytes!("../../fixtures/closure/state-absent.bin");
 const MEMBER: &[u8] = include_bytes!("../../fixtures/closure/state-member.bin");
+const FIRST_WITNESS: &[u8] = include_bytes!("../../fixtures/closure/witness-first.bin");
+const HEAD_MISSING: &[u8] = include_bytes!("../../fixtures/closure/missing-head.bin");
 const WITNESS: &[u8] = include_bytes!("../../fixtures/closure/witness-member.bin");
 const MISSING: &[u8] = include_bytes!("../../fixtures/closure/missing-all-reasons.bin");
 const CFG: PageDecodeCfg = PageDecodeCfg {
@@ -133,11 +135,11 @@ fn frozen_state_bytes_match_all_states_and_optional_fields() {
     ] {
         let mut journal = Journal::new();
         if prepend {
-            let (page, encoded) = journal.put([17; 32], gray()).unwrap();
+            let (page, encoded) = journal.put([17; 32], &gray()).unwrap();
             assert_eq!(encoded, GRAY);
             journal.acknowledge(page).unwrap();
         }
-        let (page, encoded) = journal.put([17; 32], record.clone()).unwrap();
+        let (page, encoded) = journal.put([17; 32], &record).unwrap();
         assert_eq!(encoded, bytes);
         assert_eq!(page, commitment(b"mkit-closure-state:v1", bytes));
         journal.acknowledge(page).unwrap();
@@ -165,6 +167,31 @@ fn frozen_witness_and_missing_bytes_preserve_all_fields() {
     let decoded = decode_missing(page, MISSING, CFG).unwrap();
     assert_eq!(decoded.previous, Some(previous()));
     assert_eq!(decoded.missing, missing());
+}
+
+#[test]
+fn frozen_first_output_pages_have_no_previous_link() {
+    let (page, encoded) = encode_witness(None, &fact()).unwrap();
+    assert_eq!(encoded, FIRST_WITNESS);
+    assert_eq!(page, commitment(b"mkit-closure-witness:v1", FIRST_WITNESS));
+    let decoded = decode_witness(page, FIRST_WITNESS, CFG).unwrap();
+    assert_eq!(decoded.previous, None);
+    assert_eq!(decoded.fact, fact());
+
+    let head = MissingObject {
+        object: [0x31; 32],
+        reasons: vec![MissingReason {
+            source: None,
+            kind: None,
+            ordinal: 0,
+        }],
+    };
+    let (page, encoded) = encode_missing(None, &head).unwrap();
+    assert_eq!(encoded, HEAD_MISSING);
+    assert_eq!(page, commitment(b"mkit-closure-missing:v1", HEAD_MISSING));
+    let decoded = decode_missing(page, HEAD_MISSING, CFG).unwrap();
+    assert_eq!(decoded.previous, None);
+    assert_eq!(decoded.missing, head);
 }
 
 #[test]

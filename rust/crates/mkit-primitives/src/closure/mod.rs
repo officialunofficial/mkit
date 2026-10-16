@@ -49,7 +49,7 @@ pub struct ObjectEdge {
     pub expected_len: Option<u64>,
 }
 /// In-pack object metadata without a forged verification artifact.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InPackObject {
     /// Canonical object identity.
     pub object: Hash,
@@ -74,6 +74,10 @@ pub struct ChunkedBlobSummary {
 pub trait InPackObjectView {
     /// Commitment binding this view to its full supplied object set.
     fn object_set_root(&self) -> Hash;
+    /// Bytes retained by this supplied view, including inline metadata and all
+    /// owned or borrowed retained buffers. A paged view reports resident pages,
+    /// not the size of the host's external storage. This is a trusted host fact.
+    fn retained_bytes(&self) -> u64;
     /// Exact number of distinct objects.
     fn object_count(&self) -> u64;
     /// Bounded metadata lookup. Missing retained data is an error, not absence.
@@ -209,8 +213,8 @@ pub mod limits;
 pub mod output;
 mod walker;
 pub use walker::{
-    CanonicalSource, ClosureDiagnostics, ClosurePage, ClosureRequest, ClosureResponse, ClosureStep,
-    ClosureWalker,
+    CanonicalSource, ClosureCheck, ClosureDiagnostics, ClosureFailureContext, ClosurePage,
+    ClosureRequest, ClosureResponse, ClosureStep, ClosureWalker,
 };
 
 #[cfg(test)]
@@ -218,3 +222,6 @@ mod tests;
 
 #[cfg(test)]
 mod fixtures;
+
+#[cfg(test)]
+mod semantic_fixture;

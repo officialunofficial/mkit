@@ -180,6 +180,39 @@ decode_config = "max_bytes=1024"
 expected = "InvalidResponse"
 spec = "SPEC-SERVER.md#local-closure-evidence-pages"
 
+[[fixtures]]
+type = "closure-witness"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/witness-first.bin"
+semantic = "closure/witness-first.txt"
+decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
+expected = "ok"
+spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+
+[[fixtures]]
+type = "closure-missing"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/missing-head.bin"
+semantic = "closure/missing-head.txt"
+decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
+expected = "ok"
+spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+
+[[fixtures]]
+type = "closure-semantics"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/direct-children.case"
+semantic = "closure/direct-children.txt"
+decode_config = "items=16,edges=16,batch=4,work=100000"
+expected = "missing"
+spec = "SPEC-SERVER.md#direct-child-closure-edges"
+
 # decision
 # auth
 # replay

@@ -98,6 +98,31 @@ pub struct ClosureDiagnostics {
     /// Tree/tag kind hints that disagree with known kinds.
     pub kind_mismatches: u64,
 }
+/// Semantic check active at a failure, allowing a host to preserve its refusal mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClosureCheck {
+    /// Advanced-head kind or membership obligation.
+    Head,
+    /// Ordinary direct-child availability.
+    Reference,
+    /// Canonical Blob integrity for one manifest occurrence.
+    Chunk {
+        /// Manifest requiring the chunk.
+        manifest: Hash,
+        /// Occurrence ordinal, including repeated IDs.
+        ordinal: u64,
+    },
+    /// Ordered cumulative and final manifest length.
+    Manifest,
+}
+/// Fixed-size semantic attribution. It carries no byte buffers or public refusal text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClosureFailureContext {
+    /// Object checked when the failure occurred.
+    pub object: Hash,
+    /// Exact semantic obligation; transport mapping remains host policy.
+    pub check: ClosureCheck,
+}
 /// Pull-machine outcome. Only terminal results establish complete checks.
 #[derive(Debug)]
 #[must_use]
@@ -122,6 +147,7 @@ struct Visit {
     expected: Option<ObjectType>,
     chunk: bool,
 }
+#[derive(Debug)]
 struct Frame {
     object: Option<InPackObject>,
     depth: u64,
@@ -176,6 +202,7 @@ enum Retention {
     Witness,
     Missing,
 }
+#[derive(Debug)]
 struct PendingPage {
     request: RequestId,
     page: PageCommitment,
@@ -197,6 +224,7 @@ struct PendingPage {
 /// struct Empty;
 /// impl InPackObjectView for Empty {
 ///     fn object_set_root(&self) -> [u8;32] { [0;32] }
+///     fn retained_bytes(&self) -> u64 { 0 }
 ///     fn object_count(&self) -> u64 { 0 }
 ///     fn object(&self, _: &[u8;32]) -> Result<Option<InPackObject>,Failure> { Ok(None) }
 ///     fn edge(&self, _: &[u8;32], _:u64) -> Result<Option<ObjectEdge>,Failure> { Ok(None) }
@@ -215,9 +243,13 @@ struct PendingPage {
 /// assert_eq!(proof.coverage(),Coverage::DirectChildren);
 /// # Ok::<(),Box<dyn std::error::Error>>(())
 /// ```
+#[derive(Debug)]
 #[must_use]
 pub struct ClosureWalker<V> {
     view: V,
+    view_bytes: u64,
+    object_set_root: Hash,
+    object_count: u64,
     repository: RepositoryId,
     revision: Revision,
     ruleset: RulesetBinding,
@@ -245,6 +277,7 @@ pub struct ClosureWalker<V> {
     evidence_bytes: u64,
     evidence_pages: u64,
     diagnostics: ClosureDiagnostics,
+    context: Option<ClosureFailureContext>,
     failed: bool,
     finished: bool,
 }
@@ -262,18 +295,24 @@ impl<V: InPackObjectView> ClosureWalker<V> {
         limits: ClosureLimits,
         generation: u64,
     ) -> Result<Self, Failure> {
+        let object_count = view.object_count();
+        let object_set_root = view.object_set_root();
         if limits.items > 10_000_000
             || limits.membership_batch == 0
-            || view.object_count() > limits.items
+            || object_count > limits.items
             || heads.len() as u64 > limits.items
         {
             return Err(failure(FailureCode::ResourceLimit));
         }
+        let view_bytes = view.retained_bytes();
         let startup = 128 * 1024u64
             + heads.len() as u64 * 32
             + u64::from(limits.membership_batch) * 2048
             + 512;
         let startup_work = heads.len() as u64 * 32 + 32;
+        let startup = startup
+            .checked_add(view_bytes)
+            .ok_or_else(|| failure(FailureCode::ResourceLimit))?;
         if startup > limits.resident_bytes || startup_work > limits.work {
             return Err(failure(FailureCode::ResourceLimit));
         }
@@ -286,7 +325,11 @@ impl<V: InPackObjectView> ClosureWalker<V> {
         let mut digest = Hasher::new();
         let domain = b"mkit-closure-heads:v1";
         digest
-            .update(&(domain.len() as u16).to_le_bytes())
+            .update(
+                &u16::try_from(domain.len())
+                    .map_err(|_| failure(FailureCode::ResourceLimit))?
+                    .to_le_bytes(),
+            )
             .update(domain)
             .update(&(heads.len() as u64).to_le_bytes());
         for head in heads {
@@ -299,6 +342,9 @@ impl<V: InPackObjectView> ClosureWalker<V> {
         frames.push(Frame::seeds());
         let mut result = Self {
             view,
+            view_bytes,
+            object_count,
+            object_set_root,
             repository,
             revision,
             ruleset,
@@ -326,6 +372,7 @@ impl<V: InPackObjectView> ClosureWalker<V> {
             evidence_bytes: 0,
             evidence_pages: 0,
             diagnostics: ClosureDiagnostics::default(),
+            context: None,
             failed: false,
             finished: false,
         };
@@ -336,6 +383,13 @@ impl<V: InPackObjectView> ClosureWalker<V> {
     #[must_use]
     pub const fn diagnostics(&self) -> ClosureDiagnostics {
         self.diagnostics
+    }
+    /// Semantic attribution after failure, if a content obligation was active.
+    /// Acquisition/protocol failures can have no content context. This does not
+    /// prescribe refusal codes or precedence for the host.
+    #[must_use]
+    pub const fn failure_context(&self) -> Option<ClosureFailureContext> {
+        if self.failed { self.context } else { None }
     }
     /// Poll once. Internal transitions have finite work; acquisition and retention repeat.
     ///
@@ -376,7 +430,7 @@ impl<V: InPackObjectView> ClosureWalker<V> {
                 view: self.revision,
                 ruleset: self.ruleset,
                 coverage: Coverage::DirectChildren,
-                object_set_root: self.view.object_set_root(),
+                object_set_root: self.object_set_root,
                 heads_root: self.heads_root,
                 witness_page: self.witnesses,
                 external_witnesses: EvidenceSequence {
@@ -450,7 +504,9 @@ impl<V: InPackObjectView> ClosureWalker<V> {
         // Conservative reservations include vector capacity and the maximum
         // complete membership response, journal decode, and canonical scratch.
         self.charge(self.frames.len() as u64 + self.missing.len() as u64 + 1)?;
-        let mut bytes = 128 * 1024u64;
+        let mut bytes = (128 * 1024u64)
+            .checked_add(self.view_bytes)
+            .ok_or_else(|| failure(FailureCode::ResourceLimit))?;
         bytes = bytes
             .checked_add(self.heads.capacity() as u64 * 32)
             .ok_or_else(|| failure(FailureCode::ResourceLimit))?;
@@ -463,7 +519,7 @@ impl<V: InPackObjectView> ClosureWalker<V> {
                 .ok_or_else(|| failure(FailureCode::ResourceLimit))?;
         }
         bytes = bytes
-            .checked_add(self.limits.membership_batch as u64 * 2048)
+            .checked_add(u64::from(self.limits.membership_batch) * 2048)
             .ok_or_else(|| failure(FailureCode::ResourceLimit))?;
         bytes = bytes
             .checked_add(self.missing.capacity() as u64 * 128)
@@ -503,20 +559,20 @@ impl<V: InPackObjectView> ClosureWalker<V> {
         });
         Ok(())
     }
-    fn put(&mut self, id: Hash, record: Record) -> Result<(), Failure> {
+    fn put(&mut self, id: Hash, record: &Record) -> Result<(), Failure> {
         let (page, bytes) = self.journal.put(id, record)?;
         self.retain(page, bytes, Retention::Journal)
     }
-    fn lookup(&mut self, id: &Hash) -> Result<Option<Option<Record>>, Failure> {
+    fn lookup(&mut self, id: &Hash) -> Result<Lookup, Failure> {
         self.charge(1)?;
         match self.journal.lookup(id)? {
-            Lookup::Found(record) => Ok(Some(record)),
+            Lookup::Found(record) => Ok(Lookup::Found(record)),
             Lookup::NeedPage(page) => {
                 self.request = Some(ClosureRequest::Page {
                     request: self.id()?,
                     page,
                 });
-                Ok(None)
+                Ok(Lookup::NeedPage(page))
             }
         }
     }

@@ -70,11 +70,11 @@ pub(super) struct Journal {
 }
 
 impl Journal {
-    pub fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self::from_roots(Roots([None; 256]))
     }
 
-    pub fn from_roots(roots: Roots) -> Self {
+    pub(super) fn from_roots(roots: Roots) -> Self {
         Self {
             roots,
             pending: None,
@@ -82,12 +82,12 @@ impl Journal {
     }
 
     #[cfg(test)]
-    pub fn roots(&self) -> Roots {
+    pub(super) fn roots(&self) -> Roots {
         self.roots.clone()
     }
 
     /// Starts or advances the same lookup. Found releases the outstanding slot.
-    pub fn lookup(&mut self, id: &Hash) -> Result<Lookup, Failure> {
+    pub(super) fn lookup(&mut self, id: &Hash) -> Result<Lookup, Failure> {
         if self.pending.is_none() {
             self.pending = Some(Pending::Lookup {
                 id: *id,
@@ -114,7 +114,7 @@ impl Journal {
     }
 
     /// Authenticates precisely the currently requested page before parsing it.
-    pub fn supply(&mut self, bytes: &[u8]) -> Result<(), Failure> {
+    pub(super) fn supply(&mut self, bytes: &[u8]) -> Result<(), Failure> {
         let (id, expected) = match &self.pending {
             Some(Pending::Lookup {
                 id,
@@ -152,7 +152,7 @@ impl Journal {
 
     /// A lost page is acquisition failure; it never advances toward absence.
     #[cfg(test)]
-    pub fn unavailable(&self) -> Result<(), Failure> {
+    pub(super) fn unavailable(&self) -> Result<(), Failure> {
         match self.pending {
             Some(Pending::Lookup {
                 cursor: Some(_), ..
@@ -162,13 +162,17 @@ impl Journal {
     }
 
     /// Produces one immutable page. Only acknowledgement publishes its root.
-    pub fn put(&mut self, id: Hash, record: Record) -> Result<(PageCommitment, Vec<u8>), Failure> {
+    pub(super) fn put(
+        &mut self,
+        id: Hash,
+        record: &Record,
+    ) -> Result<(PageCommitment, Vec<u8>), Failure> {
         if self.pending.is_some() {
             return Err(failure(FailureCode::InvalidResponse));
         }
-        validate_record(&id, &record)?;
+        validate_record(&id, record)?;
         let bucket = usize::from(id[0]);
-        let bytes = encode(self.roots.0[bucket], id, &record)?;
+        let bytes = encode(self.roots.0[bucket], id, record)?;
         let page = PageCommitment {
             digest: domain_digest(DOMAIN, &bytes),
             kind: PageKind::Closure,
@@ -179,7 +183,7 @@ impl Journal {
         Ok((page, bytes))
     }
 
-    pub fn acknowledge(&mut self, commitment: PageCommitment) -> Result<(), Failure> {
+    pub(super) fn acknowledge(&mut self, commitment: PageCommitment) -> Result<(), Failure> {
         match &self.pending {
             Some(Pending::Put { bucket, page }) if *page == commitment => {
                 self.roots.0[*bucket] = Some(*page);
@@ -407,7 +411,7 @@ mod tests {
             blob_payload_len: Some(9),
         }
     }
-    fn store(journal: &mut Journal, id: Hash, record: Record) -> (PageCommitment, Vec<u8>) {
+    fn store(journal: &mut Journal, id: Hash, record: &Record) -> (PageCommitment, Vec<u8>) {
         let (page, bytes) = journal.put(id, record).unwrap();
         journal.acknowledge(page).unwrap();
         (page, bytes)
@@ -423,8 +427,8 @@ mod tests {
         let mut second = first;
         second[1] = 4;
         assert_eq!(journal.lookup(&first).unwrap(), Lookup::Found(None));
-        let (old, old_bytes) = store(&mut journal, first, record(State::Gray));
-        let (other, other_bytes) = store(&mut journal, second, record(State::Black));
+        let (old, old_bytes) = store(&mut journal, first, &record(State::Gray));
+        let (other, other_bytes) = store(&mut journal, second, &record(State::Black));
         need(&mut journal, &first, other);
         journal.supply(&other_bytes).unwrap();
         need(&mut journal, &first, old);
@@ -433,7 +437,7 @@ mod tests {
             journal.lookup(&first).unwrap(),
             Lookup::Found(Some(record(State::Gray)))
         );
-        let (updated, updated_bytes) = store(&mut journal, first, record(State::Black));
+        let (updated, updated_bytes) = store(&mut journal, first, &record(State::Black));
         need(&mut journal, &first, updated);
         journal.supply(&updated_bytes).unwrap();
         assert_eq!(
@@ -446,7 +450,7 @@ mod tests {
     fn roots_exclude_unacknowledged_put_and_clone_preserves_pending_write() {
         let mut journal = Journal::new();
         let id = [7; 32];
-        let (page, bytes) = journal.put(id, record(State::Gray)).unwrap();
+        let (page, bytes) = journal.put(id, &record(State::Gray)).unwrap();
         let mut restarted = Journal::from_roots(journal.roots());
         assert_eq!(restarted.lookup(&id).unwrap(), Lookup::Found(None));
         let mut resumed = journal.clone();
@@ -464,7 +468,7 @@ mod tests {
     fn wrong_and_lost_pages_never_prove_absence() {
         let mut journal = Journal::new();
         let id = [8; 32];
-        let (page, bytes) = store(&mut journal, id, record(State::Black));
+        let (page, bytes) = store(&mut journal, id, &record(State::Black));
         need(&mut journal, &id, page);
         assert_eq!(
             journal.unavailable().unwrap_err().code,
@@ -489,13 +493,13 @@ mod tests {
         let mut journal = Journal::new();
         let id = [9; 32];
         let other = [10; 32];
-        let (page, bytes) = journal.put(id, record(State::Gray)).unwrap();
+        let (page, bytes) = journal.put(id, &record(State::Gray)).unwrap();
         assert_eq!(
             journal.lookup(&id).unwrap_err().code,
             FailureCode::InvalidResponse
         );
         assert_eq!(
-            journal.put(other, record(State::Gray)).unwrap_err().code,
+            journal.put(other, &record(State::Gray)).unwrap_err().code,
             FailureCode::InvalidResponse
         );
         let mut wrong = page;
@@ -511,7 +515,7 @@ mod tests {
             FailureCode::InvalidResponse
         );
         assert_eq!(
-            journal.put(other, record(State::Gray)).unwrap_err().code,
+            journal.put(other, &record(State::Gray)).unwrap_err().code,
             FailureCode::InvalidResponse
         );
         journal.supply(&bytes).unwrap();
@@ -546,7 +550,7 @@ mod tests {
         assert_eq!(decode(&bytes).unwrap(), (None, id, value.clone()));
         let mut journal = Journal::new();
         assert_eq!(
-            journal.put([12; 32], value).unwrap_err().code,
+            journal.put([12; 32], &value).unwrap_err().code,
             FailureCode::InvalidResponse
         );
     }

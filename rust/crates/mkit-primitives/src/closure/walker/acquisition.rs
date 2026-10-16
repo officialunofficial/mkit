@@ -53,6 +53,9 @@ impl<V: InPackObjectView> ClosureWalker<V> {
                 },
             ) if *expected == request && *commitment == page => {
                 let bytes = present(value)?;
+                if bytes.len() as u64 != page.len {
+                    return Err(failure(FailureCode::InvalidResponse));
+                }
                 self.charge(bytes.len() as u64)?;
                 self.journal.supply(bytes)?;
                 self.request = None;
@@ -80,18 +83,7 @@ impl<V: InPackObjectView> ClosureWalker<V> {
                 )?;
                 self.charge(bytes.len() as u64)?;
                 let CanonicalSource::Member(fact) = source;
-                let len = bytes
-                    .len()
-                    .checked_sub(10)
-                    .ok_or_else(|| failure(FailureCode::NonCanonicalObject))?;
-                let prologue = mkit_core::serialize::blob_prologue(len)
-                    .map_err(|_| failure(FailureCode::NonCanonicalObject))?;
-                if bytes.get(..10) != Some(prologue.as_slice()) {
-                    return Err(failure(FailureCode::NonCanonicalObject));
-                }
-                if mkit_core::hash::hash(bytes) != fact.object {
-                    return Err(failure(FailureCode::ObjectHashMismatch));
-                }
+                let len = verify_blob(fact.object, bytes)?;
                 if !matches!(self.phase, Phase::Visit(_)) {
                     return Err(failure(FailureCode::InvalidResponse));
                 }
@@ -100,7 +92,7 @@ impl<V: InPackObjectView> ClosureWalker<V> {
                 self.complete_visit();
                 self.put(
                     fact.object,
-                    Record {
+                    &Record {
                         kind: fact.kind,
                         canonical_len: fact.canonical_len,
                         state: State::Member(fact),
@@ -111,4 +103,20 @@ impl<V: InPackObjectView> ClosureWalker<V> {
             _ => Err(failure(FailureCode::InvalidResponse)),
         }
     }
+}
+
+fn verify_blob(expected: super::Hash, bytes: &[u8]) -> Result<usize, Failure> {
+    let len = bytes
+        .len()
+        .checked_sub(10)
+        .ok_or_else(|| failure(FailureCode::NonCanonicalObject))?;
+    let prologue = mkit_core::serialize::blob_prologue(len)
+        .map_err(|_| failure(FailureCode::NonCanonicalObject))?;
+    if bytes.get(..10) != Some(prologue.as_slice()) {
+        return Err(failure(FailureCode::NonCanonicalObject));
+    }
+    if mkit_core::hash::hash(bytes) != expected {
+        return Err(failure(FailureCode::ObjectHashMismatch));
+    }
+    Ok(len)
 }
