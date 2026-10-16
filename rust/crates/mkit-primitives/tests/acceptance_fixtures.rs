@@ -63,7 +63,10 @@ fn assert_heads(evidence: &AcceptanceEvidence, semantic: &Value) {
             hash::to_hex(&head.object_id),
             expected["object_id"].as_str().unwrap()
         );
-        assert_eq!(u64::from(head.kind), expected["kind"].as_u64().unwrap());
+        assert_eq!(
+            u64::from(head.kind as u8),
+            expected["kind"].as_u64().unwrap()
+        );
         assert_eq!(
             hash::to_hex(&head.signer),
             expected["signer"].as_str().unwrap()

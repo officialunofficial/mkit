@@ -206,11 +206,11 @@ fn signed_commit_remix_and_tag_roundtrip_and_recheck() {
     assert_eq!(heads.len(), 3);
     for (decoded, expected) in heads.iter().zip(&input.heads) {
         assert_eq!(decoded.object_id, expected.id);
-        assert_eq!(decoded.kind, expected.kind);
+        assert_eq!(decoded.kind as u8, expected.kind);
         assert_eq!(decoded.signer, expected.signer);
         assert_eq!(decoded.canonical_bytes, expected.bytes);
     }
-    let mut kinds: Vec<_> = heads.iter().map(|h| h.kind).collect();
+    let mut kinds: Vec<_> = heads.iter().map(|h| h.kind as u8).collect();
     kinds.sort_unstable();
     assert_eq!(kinds, [3, 4, 7]);
     assert_eq!(AcceptanceEvidence::decode(e.encode(), &cfg()).unwrap(), e);

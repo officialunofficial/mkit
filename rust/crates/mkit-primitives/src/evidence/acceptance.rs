@@ -5,7 +5,10 @@
 
 use super::{RepositoryId, RulesetId};
 use crate::error::{BoundedDetail, Failure, FailureCode, Location};
-use mkit_core::{hash, object::Object};
+use mkit_core::{
+    hash,
+    object::{Object, ObjectType},
+};
 
 /// Evidence format version, independent of crate and ruleset versions.
 pub const FORMAT_VERSION: u16 = 1;
@@ -69,8 +72,8 @@ pub enum SignatureResult {
 pub struct HeadFact<'a> {
     /// Canonical object id.
     pub object_id: hash::Hash,
-    /// Core object kind byte: commit (3), remix (4), or tag (7).
-    pub kind: u8,
+    /// Core object kind: commit, remix, or tag.
+    pub kind: ObjectType,
     /// Embedded Ed25519 signer key.
     pub signer: [u8; 32],
     /// Recorded individual signature result.
@@ -315,9 +318,9 @@ impl AcceptanceEvidence {
             let object = mkit_core::serialize::deserialize(head.canonical_bytes)
                 .map_err(|_| failure(FailureCode::EvidenceHeadMismatch))?;
             let (kind, signer) = match &object {
-                Object::Commit(c) => (3, c.signer),
-                Object::Remix(c) => (4, c.signer),
-                Object::Tag(c) => (7, c.signer),
+                Object::Commit(c) => (ObjectType::Commit, c.signer),
+                Object::Remix(c) => (ObjectType::Remix, c.signer),
+                Object::Tag(c) => (ObjectType::Tag, c.signer),
                 _ => return Err(failure(FailureCode::EvidenceHeadMismatch)),
             };
             if kind != head.kind
@@ -452,17 +455,19 @@ impl<'a> Cursor<'a> {
     }
     fn head(&mut self, max: u32) -> Result<HeadFact<'a>> {
         let object_id = self.fixed()?;
-        let kind = self.take(1)?[0];
-        if !matches!(kind, 3 | 4 | 7) {
-            return Err(failure(FailureCode::NonCanonicalEvidence));
-        }
+        let kind = match self.take(1)?[0] {
+            3 => ObjectType::Commit,
+            4 => ObjectType::Remix,
+            7 => ObjectType::Tag,
+            _ => return Err(failure(FailureCode::NonCanonicalEvidence)),
+        };
         let signer = self.fixed()?;
         if self.take(1)? != [1] {
             return Err(failure(FailureCode::NonCanonicalEvidence));
         }
         let range = self.variable_range(max)?;
         let canonical_bytes = &self.bytes[range];
-        if canonical_bytes.first() != Some(&kind) {
+        if canonical_bytes.first().copied() != Some(kind as u8) {
             return Err(failure(FailureCode::NonCanonicalEvidence));
         }
         Ok(HeadFact {
