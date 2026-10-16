@@ -1,0 +1,9 @@
+schema_version = 1
+# No encoded types or decoders exist in the skeleton. Owners append entries
+# under their module section when the implementation and fixtures land.
+# evidence
+# pack_verify
+# closure
+# decision
+# auth
+# replay

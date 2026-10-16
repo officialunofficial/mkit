@@ -56,6 +56,47 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
+  primitives:
+    name: Primitives contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: '3'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: wasm32-unknown-unknown
+          components: clippy
+          protoc: "false"
+          cache-prefix: primitives
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2
+        with:
+          tool: cargo-nextest,cargo-hack,just,sccache
+      - name: Native feature contracts
+        working-directory: rust
+        run: |
+          cargo clippy --locked -p mkit-primitives -p mkit-primitives-fuzz --all-targets --all-features -- -D warnings
+          cargo nextest run --locked -p mkit-primitives -p mkit-primitives-fuzz -j 3
+          cargo nextest run --locked -p mkit-primitives --no-default-features --features pack-zstd -j 3
+          cargo hack check --locked -p mkit-primitives --lib --feature-powerset
+          cargo test --locked -p mkit-primitives --doc
+          cargo test --locked -p mkit-primitives --no-default-features --doc
+      - name: Wasm contracts
+        working-directory: rust
+        run: |
+          cargo check --locked -p mkit-primitives --target wasm32-unknown-unknown
+          cargo check --locked -p mkit-primitives --no-default-features --target wasm32-unknown-unknown
+      - name: Graph, fixtures, and stability
+        run: |
+          python3 scripts/fmt-primitives.py --check
+          python3 scripts/check-primitives-graph.py
+          python3 scripts/check-primitives-fixtures.py
+          python3 scripts/test-primitives-infrastructure.py
+          just check-primitives-stability
+
   server-feature-clippy:
     name: Server feature combinations (${{ matrix.crate }})
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -473,12 +514,13 @@ jobs:
   ci-gate:
     name: Rust CI gate
     if: always()
-    needs: [build-and-test, keystore-backends, server-feature-clippy, server-semver, client-wasm, sync-native-deps]
+    needs: [primitives, build-and-test, keystore-backends, server-feature-clippy, server-semver, client-wasm, sync-native-deps]
     runs-on: ubuntu-latest
     steps:
       - name: Verify no critical job failed
         shell: bash
         env:
+          PRIMITIVES: ${{ needs.primitives.result }}
           BUILD_AND_TEST: ${{ needs.build-and-test.result }}
           KEYSTORE_BACKENDS: ${{ needs.keystore-backends.result }}
           SERVER_FEATURE_CLIPPY: ${{ needs.server-feature-clippy.result }}
@@ -492,6 +534,11 @@ jobs:
           echo "keystore-backends:  ${KEYSTORE_BACKENDS}"
 
           fail=0
+
+          if [ "${PRIMITIVES}" != success ]; then
+            echo "::error::Primitives contract gates did not succeed"
+            fail=1
+          fi
 
           for result in "${SERVER_FEATURE_CLIPPY}" "${SERVER_SEMVER}" "${CLIENT_WASM}" "${SYNC_NATIVE_DEPS}"; do
             case "${result}" in

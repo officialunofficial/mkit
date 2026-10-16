@@ -1,0 +1,217 @@
+//! Stable refusal codes and bounded diagnostics.
+
+/// Stable refusal category. Display text is diagnostic; match the code instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum FailureCode {
+    // pack_verify
+    /// Pack magic mismatch.
+    #[error("InvalidMagic")]
+    InvalidMagic,
+    /// Unsupported pack format.
+    #[error("UnsupportedPackVersion")]
+    UnsupportedPackVersion,
+    /// Truncated input.
+    #[error("UnexpectedEof")]
+    UnexpectedEof,
+    /// Unknown frame tag.
+    #[error("InvalidEntryType")]
+    InvalidEntryType,
+    /// Protocol entry ceiling exceeded.
+    #[error("TooManyObjects")]
+    TooManyObjects,
+    /// Protocol wire-byte ceiling exceeded.
+    #[error("PackfileTooLarge")]
+    PackfileTooLarge,
+    /// Pack integrity mismatch.
+    #[error("PackfileCorrupted")]
+    PackfileCorrupted,
+    /// Compressed-entry header truncated.
+    #[error("ZstdEntryTruncated")]
+    ZstdEntryTruncated,
+    /// Delta base prefix truncated.
+    #[error("DeltaEntryTruncated")]
+    DeltaEntryTruncated,
+    /// Nonstorable delta object used as a canonical object.
+    #[error("NonStorableObject")]
+    NonStorableObject,
+    /// Data follows the declared entry sequence.
+    #[error("TrailingData")]
+    TrailingData,
+    /// Invalid compressed stream.
+    #[error("DecompressionFailed")]
+    DecompressionFailed,
+    /// Compressed output length mismatch.
+    #[error("DecompressedSizeMismatch")]
+    DecompressedSizeMismatch,
+    /// Compressed output exceeds its ceiling.
+    #[error("DecompressionLimitExceeded")]
+    DecompressionLimitExceeded,
+    /// Invalid delta instructions.
+    #[error("InvalidDelta")]
+    InvalidDelta,
+    /// Delta base identity mismatch.
+    #[error("DeltaBaseMismatch")]
+    DeltaBaseMismatch,
+    /// Delta target length mismatch.
+    #[error("DeltaSizeMismatch")]
+    DeltaSizeMismatch,
+    /// Noncanonical object encoding.
+    #[error("NonCanonicalObject")]
+    NonCanonicalObject,
+    /// Type-dependent object identity mismatch.
+    #[error("ObjectHashMismatch")]
+    ObjectHashMismatch,
+    /// Invalid individual signature.
+    #[error("BadSignature")]
+    BadSignature,
+    /// Effective delta depth exceeds the profile.
+    #[error("DeltaChainTooDeep")]
+    DeltaChainTooDeep,
+    /// Authoritative repository base absence.
+    #[error("ExternalBaseAbsent")]
+    ExternalBaseAbsent,
+    // closure
+    /// Required child absence.
+    #[error("MissingClosure")]
+    MissingClosure,
+    /// Required object kind mismatch.
+    #[error("WrongKind")]
+    WrongKind,
+    // infrastructure
+    /// Caller execution budget exhausted.
+    #[error("ResourceLimit")]
+    ResourceLimit,
+    /// Input acquisition unavailable.
+    #[error("UnavailableInput")]
+    UnavailableInput,
+    /// Reply violates the request contract.
+    #[error("InvalidResponse")]
+    InvalidResponse,
+    /// Invalid or unsupported resume state.
+    #[error("InvalidCheckpoint")]
+    InvalidCheckpoint,
+    /// Immutable source binding changed.
+    #[error("SourceChanged")]
+    SourceChanged,
+    /// Build lacks the required decoder.
+    #[error("UnsupportedCapability")]
+    UnsupportedCapability,
+    // decision
+    // auth
+    // replay
+    // evidence
+}
+impl FailureCode {
+    /// Stable machine-readable string. Diagnostic Display text is not a parser API.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidMagic => "InvalidMagic",
+            Self::UnsupportedPackVersion => "UnsupportedPackVersion",
+            Self::UnexpectedEof => "UnexpectedEof",
+            Self::InvalidEntryType => "InvalidEntryType",
+            Self::TooManyObjects => "TooManyObjects",
+            Self::PackfileTooLarge => "PackfileTooLarge",
+            Self::PackfileCorrupted => "PackfileCorrupted",
+            Self::ZstdEntryTruncated => "ZstdEntryTruncated",
+            Self::DeltaEntryTruncated => "DeltaEntryTruncated",
+            Self::NonStorableObject => "NonStorableObject",
+            Self::TrailingData => "TrailingData",
+            Self::DecompressionFailed => "DecompressionFailed",
+            Self::DecompressedSizeMismatch => "DecompressedSizeMismatch",
+            Self::DecompressionLimitExceeded => "DecompressionLimitExceeded",
+            Self::InvalidDelta => "InvalidDelta",
+            Self::DeltaBaseMismatch => "DeltaBaseMismatch",
+            Self::DeltaSizeMismatch => "DeltaSizeMismatch",
+            Self::NonCanonicalObject => "NonCanonicalObject",
+            Self::ObjectHashMismatch => "ObjectHashMismatch",
+            Self::BadSignature => "BadSignature",
+            Self::DeltaChainTooDeep => "DeltaChainTooDeep",
+            Self::ExternalBaseAbsent => "ExternalBaseAbsent",
+            Self::MissingClosure => "MissingClosure",
+            Self::WrongKind => "WrongKind",
+            Self::ResourceLimit => "ResourceLimit",
+            Self::UnavailableInput => "UnavailableInput",
+            Self::InvalidResponse => "InvalidResponse",
+            Self::InvalidCheckpoint => "InvalidCheckpoint",
+            Self::SourceChanged => "SourceChanged",
+            Self::UnsupportedCapability => "UnsupportedCapability",
+        }
+    }
+}
+/// Bounded failure attribution, with no object bytes or credentials.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Location {
+    /// Frame ordinal when known.
+    pub ordinal: Option<u64>,
+    /// Pack byte offset when known.
+    pub offset: Option<u64>,
+}
+/// Fixed-size diagnostic context; no caller-controlled strings are retained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BoundedDetail {
+    /// No additional context.
+    None,
+    /// Expected and actual numeric bounds.
+    Bounds {
+        /// Expected bound or value.
+        expected: u64,
+        /// Observed value.
+        actual: u64,
+    },
+}
+/// A refusal with stable code and bounded attribution.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{code} at {location:?}: {detail:?}")]
+pub struct Failure {
+    /// Stable classification.
+    pub code: FailureCode,
+    /// Frame and offset attribution.
+    pub location: Location,
+    /// Bounded diagnostic values.
+    pub detail: BoundedDetail,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FailureCode;
+    #[test]
+    fn stable_codes_are_unique() {
+        let codes = [
+            FailureCode::InvalidMagic.as_str(),
+            FailureCode::UnsupportedPackVersion.as_str(),
+            FailureCode::UnexpectedEof.as_str(),
+            FailureCode::InvalidEntryType.as_str(),
+            FailureCode::TooManyObjects.as_str(),
+            FailureCode::PackfileTooLarge.as_str(),
+            FailureCode::PackfileCorrupted.as_str(),
+            FailureCode::ZstdEntryTruncated.as_str(),
+            FailureCode::DeltaEntryTruncated.as_str(),
+            FailureCode::NonStorableObject.as_str(),
+            FailureCode::TrailingData.as_str(),
+            FailureCode::DecompressionFailed.as_str(),
+            FailureCode::DecompressedSizeMismatch.as_str(),
+            FailureCode::DecompressionLimitExceeded.as_str(),
+            FailureCode::InvalidDelta.as_str(),
+            FailureCode::DeltaBaseMismatch.as_str(),
+            FailureCode::DeltaSizeMismatch.as_str(),
+            FailureCode::NonCanonicalObject.as_str(),
+            FailureCode::ObjectHashMismatch.as_str(),
+            FailureCode::BadSignature.as_str(),
+            FailureCode::DeltaChainTooDeep.as_str(),
+            FailureCode::ExternalBaseAbsent.as_str(),
+            FailureCode::MissingClosure.as_str(),
+            FailureCode::WrongKind.as_str(),
+            FailureCode::ResourceLimit.as_str(),
+            FailureCode::UnavailableInput.as_str(),
+            FailureCode::InvalidResponse.as_str(),
+            FailureCode::InvalidCheckpoint.as_str(),
+            FailureCode::SourceChanged.as_str(),
+            FailureCode::UnsupportedCapability.as_str(),
+        ];
+        let unique: std::collections::BTreeSet<_> = codes.into_iter().collect();
+        assert_eq!(unique.len(), codes.len());
+    }
+}

@@ -3443,6 +3443,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mkit-primitives"
+version = "0.1.0"
+dependencies = [
+ "commonware-macros",
+ "mkit-core",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "mkit-primitives-fuzz"
+version = "0.0.0"
+
+[[package]]
 name = "mkit-repo-client"
 version = "0.1.0"
 dependencies = [

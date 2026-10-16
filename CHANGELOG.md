@@ -30,6 +30,10 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Added
 
+- Add the independently versioned `mkit-primitives` ALPHA contract skeleton.
+  It defines opaque verification, closure, and guarded-decision types without
+  changing existing runtime paths or wire formats. No migration or store reset.
+
 - Protocol acceptance and recovery requirements now distinguish portable
   guarantees from reference-server mechanisms. Fork acceptance requires a final
   source proof after membership staging, with uniform source-race refusal and

@@ -1,0 +1,32 @@
+[package]
+name = "mkit-primitives"
+version = "0.1.0"
+description = "Sans-IO verification and guarded protocol decisions for mkit"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "README.md"
+keywords = ["mkit", "protocol", "verification", "sans-io"]
+categories = ["data-structures", "encoding", "cryptography"]
+
+[lints]
+workspace = true
+
+[features]
+default = ["pack-ruzstd"]
+pack-ruzstd = ["mkit-core/pack-ruzstd"]
+pack-zstd = ["mkit-core/pack-zstd"]
+
+[dependencies]
+mkit-core = { path = "../mkit-core", version = "0.5", default-features = false }
+commonware-macros.workspace = true
+thiserror = "2"
+
+[lib]
+bench = false
+
+[package.metadata.docs.rs]
+no-default-features = true
+features = ["pack-ruzstd"]

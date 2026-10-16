@@ -7,6 +7,24 @@ profile; storage-only groundwork is labeled explicitly. The
 [SPEC-SERVER profile map](specs/SPEC-SERVER.md#1-scope-and-relation-to-spec-transport-connect)
 distinguishes current enforcement from future integration.
 
+## Primitive contracts keep trusted construction private
+
+**Always:** only the owning primitive module can construct `VerifiedPack`,
+`ClosureProof`, or `Guarded<D>`. Caller-supplied membership facts retain exact
+repository, incarnation, source, supplier, and revision bindings. Missing input
+is separate from authoritative absence. Source pre-apply fences remain separate
+from destination atomic guards.
+
+**Because:** type-safe composition must not promote unverified bytes or missing
+facts into acceptance evidence.
+
+**If violated:** callers could bypass verification, cross repository boundaries,
+or apply effects without every required live comparison.
+
+**Enforcement status:** the initial ALPHA skeleton has private fields and
+compile-fail doctests. No verification or decision entry point exists yet;
+semantic validation and bounded state-machine tests land with their owners.
+
 ## Conformance distinguishes absent features from implementation gaps
 
 **Always:** cases for undeclared protocol features report not applicable with
