@@ -330,6 +330,17 @@ filter = 'binary(=test_host_migrations) and (test(=native_async_verification) or
 threads-required = "num-test-threads"
 slow-timeout = { period = "240s", terminate-after = 1 }
 
+# The unchanged 10,000-ref HTTP listing has its own test window so broad
+# Single-profile cases do not consume that window first. Reserve threads;
+# retain each profile's existing timeout instead of extending the deadline.
+[[profile.default.overrides]]
+filter = 'binary(=test_host_migrations) and test(=native_single_large_listing)'
+threads-required = "num-test-threads"
+
+[[profile.ci.overrides]]
+filter = 'binary(=test_host_migrations) and test(=native_single_large_listing)'
+threads-required = "num-test-threads"
+
 # Memory-bounding tests. multipart_bounded_heap / multipart_buffered_heap
 # (mkit-server-conformance's fs and memory binaries) meter the allocator
 # over a window and assert a peak.

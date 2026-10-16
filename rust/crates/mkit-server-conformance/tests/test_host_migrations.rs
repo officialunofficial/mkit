@@ -482,9 +482,7 @@ async fn timer_and_ticket_pruning_wire_cases_run_against_the_host() {
     }
 }
 
-// Run every compatible case selected by the former release/fault profiles.
-// Configuration-dependent cases have dedicated tests below or in test_host.rs.
-async fn native_profile(sharding_d34: bool) {
+fn native_wire_profile(sharding_d34: bool) -> Profile {
     let mut p = profile();
     p.milestone = Milestone::M1;
     p.max_pack_bytes = 1 << 30;
@@ -500,13 +498,25 @@ async fn native_profile(sharding_d34: bool) {
     if sharding_d34 {
         p.features.insert(Feature::EpochLeases);
     }
-    let host = TestHost::start(p).await.expect("valid native fixture");
+    p
+}
+
+// Run every compatible case selected by the former release/fault profiles.
+// Configuration-dependent cases have dedicated tests below or in test_host.rs.
+async fn native_profile(sharding_d34: bool) {
+    let host = TestHost::start(native_wire_profile(sharding_d34))
+        .await
+        .expect("valid native fixture");
     for case in CASES
         .iter()
         .filter(|case| case.skip_reason(host.profile()).is_none())
     {
         if case.name == "list.merge_paging_over_32_mib"
-            || (!sharding_d34 && case.name == "lag.list_refs_window")
+            || (!sharding_d34
+                && matches!(
+                    case.name,
+                    "lag.list_refs_window" | "list.large_response_within_limit"
+                ))
         {
             continue;
         }
@@ -519,6 +529,17 @@ async fn native_profile(sharding_d34: bool) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn native_single_wire_profile() {
     native_profile(false).await;
+}
+
+// Keep the full 10,000-ref Single fixture in its own default timeout window.
+// Nextest reserves the run's threads so it does not compete with other suites.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn native_single_large_listing() {
+    let host = TestHost::start(native_wire_profile(false))
+        .await
+        .expect("valid native fixture");
+    judge(&run_driven(&host, "list.large_response_within_limit", NoOutcomes, None).await);
+    host.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
