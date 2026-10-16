@@ -13,3 +13,21 @@ categories = ["development-tools::testing"]
 
 [lints]
 workspace = true
+
+[dependencies]
+mkit-primitives = { path = "..", default-features = false }
+libfuzzer-sys = { version = "0.4", optional = true }
+
+[package.metadata]
+cargo-fuzz = true
+
+[features]
+libfuzzer = ["dep:libfuzzer-sys"]
+
+[[bin]]
+name = "fork_acceptance"
+path = "fuzz_targets/fork_acceptance.rs"
+required-features = ["libfuzzer"]
+test = false
+doc = false
+bench = false

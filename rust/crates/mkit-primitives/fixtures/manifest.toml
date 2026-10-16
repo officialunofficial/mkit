@@ -7,3 +7,15 @@ schema_version = 1
 # decision
 # auth
 # replay
+
+# fork
+[[fixtures]]
+type = "fork.acceptance"
+format_version = 0
+ruleset = "SPEC-SERVER-9.9"
+profile = "indexed"
+path = "fork/acceptance.txt"
+semantic = "fork/acceptance.md"
+decode_config = "semantic; packs=3; edges=4; branch_bytes=128; index_entries=30; inherited_bytes=300; work=4096"
+expected = "per-case decision or stable code"
+spec = "SPEC-SERVER §9.9"

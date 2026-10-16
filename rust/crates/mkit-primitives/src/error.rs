@@ -98,6 +98,31 @@ pub enum FailureCode {
     #[error("UnsupportedCapability")]
     UnsupportedCapability,
     // decision
+    // fork
+    /// Uniform source absence at the final fork proof.
+    #[error("ForkSourceNotFound")]
+    ForkSourceNotFound,
+    /// Foreign or visible destination state prevents acceptance.
+    #[error("ForkDestinationNotEmpty")]
+    ForkDestinationNotEmpty,
+    /// Fork authorization or authority facts no longer match.
+    #[error("ForkPermissionDenied")]
+    ForkPermissionDenied,
+    /// Declared and requested destination visibility differ.
+    #[error("ForkVisibilityMismatch")]
+    ForkVisibilityMismatch,
+    /// Fork reservation is no longer pending.
+    #[error("ForkReservationSettled")]
+    ForkReservationSettled,
+    /// Fork request or durable protection expired.
+    #[error("ForkExpired")]
+    ForkExpired,
+    /// Fork admission debit or applicable quota does not match.
+    #[error("ForkQuotaExceeded")]
+    ForkQuotaExceeded,
+    /// Fork job or replay belongs to another binding.
+    #[error("ForkBindingMismatch")]
+    ForkBindingMismatch,
     // auth
     // replay
     // evidence
@@ -137,6 +162,15 @@ impl FailureCode {
             Self::InvalidCheckpoint => "InvalidCheckpoint",
             Self::SourceChanged => "SourceChanged",
             Self::UnsupportedCapability => "UnsupportedCapability",
+            // fork
+            Self::ForkSourceNotFound => "ForkSourceNotFound",
+            Self::ForkDestinationNotEmpty => "ForkDestinationNotEmpty",
+            Self::ForkPermissionDenied => "ForkPermissionDenied",
+            Self::ForkVisibilityMismatch => "ForkVisibilityMismatch",
+            Self::ForkReservationSettled => "ForkReservationSettled",
+            Self::ForkExpired => "ForkExpired",
+            Self::ForkQuotaExceeded => "ForkQuotaExceeded",
+            Self::ForkBindingMismatch => "ForkBindingMismatch",
         }
     }
 }
@@ -210,6 +244,14 @@ mod tests {
             FailureCode::InvalidCheckpoint.as_str(),
             FailureCode::SourceChanged.as_str(),
             FailureCode::UnsupportedCapability.as_str(),
+            FailureCode::ForkSourceNotFound.as_str(),
+            FailureCode::ForkDestinationNotEmpty.as_str(),
+            FailureCode::ForkPermissionDenied.as_str(),
+            FailureCode::ForkVisibilityMismatch.as_str(),
+            FailureCode::ForkReservationSettled.as_str(),
+            FailureCode::ForkExpired.as_str(),
+            FailureCode::ForkQuotaExceeded.as_str(),
+            FailureCode::ForkBindingMismatch.as_str(),
         ];
         let unique: std::collections::BTreeSet<_> = codes.into_iter().collect();
         assert_eq!(unique.len(), codes.len());
