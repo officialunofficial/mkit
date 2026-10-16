@@ -24,7 +24,7 @@ def check(root):
             if key == "path" and name in registered:
                 raise ValueError(f"duplicate fixture: {name}")
             registered.add(name)
-    actual = {str(p.relative_to(root)) for p in root.rglob("*") if p.is_file() and p.name != "manifest.toml"}
+    actual = {str(p.relative_to(root)) for p in root.rglob("*") if p.is_file() and p != root / "manifest.toml"}
     if actual != registered:
         raise ValueError(f"orphan or missing fixtures: {sorted(actual ^ registered)}")
     return len(manifest.get("fixtures", []))

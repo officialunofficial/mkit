@@ -41,6 +41,16 @@ semantic = "missing.toml"
             with self.assertRaisesRegex(ValueError, "missing fixture"):
                 fixtures.check(root)
 
+    def test_nested_manifest_is_not_exempt_from_inventory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "manifest.toml").write_text("schema_version = 1\nfixtures = []\n")
+            nested = root / "semantic"
+            nested.mkdir()
+            (nested / "manifest.toml").write_text("orphan = true\n")
+            with self.assertRaisesRegex(ValueError, "orphan"):
+                fixtures.check(root)
+
     def test_wrapper_only_marks_primitives(self):
         wrapper = HERE / "primitives-stability-rustc.py"
         environment = dict(os.environ, MKIT_PRIMITIVES_MIN_STABILITY="GAMMA")
