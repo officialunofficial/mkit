@@ -25,6 +25,34 @@ BASE = dict(ruleset_id=1, profile_limits_digest='11' * 32,
             removal_version=0, denial_version=0)
 
 
+# Fixed public signed-object seeds; individual verification is checked in Rust.
+VALID_HEADS = json.loads(r'''
+[
+  {
+    "canonical_bytes": "044d4b54310101010101010101010101010101010101010101010101010101010101010101010000000001000000020202020202020202020202020202020202020202020202020202020202020203030303030303030303030303030303030303030303030303030303030303030120002152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db120500000072656d697865000000000000002152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12bbfa68f592f2c8745efc3571b3932d2b7f1e9984a73ee138c0f8b18b633e401b94d640f3da6fa59eb8a4c799fbd4d93c6ad8ac7fe9eda718cb21e443265a810e",
+    "kind": 4,
+    "object_id": "55b9787fb80307accbe1e4ec4e2ca8dfa6f97a731e15499d369b4050c183ed0e",
+    "signature_result": 1,
+    "signer": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"
+  },
+  {
+    "canonical_bytes": "074d4b5431010303030303030303030303030303030303030303030303030303030303030303030600000076312e302e300120002152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db120300000074616766000000000000002152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12db5f94db7b9268a4a2769656f3d85f68d83e1c7ee4e3f297a5643aea3286a2a9aff9de48adcff3d21f55db1283f3ab2055bfcf7e4626e99527d010458986ef04",
+    "kind": 7,
+    "object_id": "79f93595ed733c808d54a29198cffafb4cfbd892395c91f2a8b1ae47a3a99cf1",
+    "signature_result": 1,
+    "signer": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"
+  },
+  {
+    "canonical_bytes": "034d4b5431010101010101010101010101010101010101010101010101010101010101010101000000000120002152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db1206000000636f6d6d697464000000000000002152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db1200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000f3f99f5ccf31a7751c495188666a8d7b816dda5dc955c8ef65fbf9d72a1983ebdfb599c1d9bcfa13442ae37c525c3b354c2ce953a61d27051a968ad17c29eb08",
+    "kind": 3,
+    "object_id": "adbbec0c318adb5759e9bfbe9a8a75d0c2f2567f5f66ef8745c0266111db8540",
+    "signature_result": 1,
+    "signer": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"
+  }
+]
+''')
+
+
 def u32(n):
     return struct.pack('<I', n)
 
@@ -59,7 +87,7 @@ def encode(s):
             + u64(s['denial_version']))
 
 
-def emit(name, description, semantic=None, cfg=None, failure=None, raw=None):
+def emit(name, description, semantic=None, cfg=None, failure=None, raw=None, recheck=None):
     s = copy.deepcopy(BASE if semantic is None else semantic)
     b = encode(s) if raw is None else raw
     config = copy.deepcopy(CFG if cfg is None else cfg)
@@ -67,7 +95,8 @@ def emit(name, description, semantic=None, cfg=None, failure=None, raw=None):
     if not failure:
         expected['digest'] = blake3.blake3(
             b'mkit-acceptance-evidence:v1\0' + b).hexdigest()
-        expected['recheck_heads'] = ('EvidenceHeadMismatch' if s['heads'] else 'ok')
+        expected['recheck_heads'] = (recheck if recheck is not None else
+                                    ('EvidenceHeadMismatch' if s['heads'] else 'ok'))
     metadata = dict(description=description, cfg=config, expected=expected,
                     encoded_len=len(b), semantic=s)
     (OUT / f'{name}.bin').write_bytes(b)
@@ -82,11 +111,13 @@ def case(**changes):
 
 emit('minimal', 'Empty operation, no heads or dependencies, zero counters.')
 representative = case(operation=b'job'.hex(), epoch=8,
-                      heads=[head(1, 3), head(2, 4), head(3, 7)],
+                      heads=copy.deepcopy(VALID_HEADS),
                       external_dependencies=['66' * 32, '77' * 32],
                       membership_generation=9, removal_version=10, denial_version=11)
 representative['pack'].update(len=4096, object_count=12, delta_count=4)
-emit('representative', 'All supported head kinds; synthetic object bytes exercise only the codec.', representative)
+emit('representative', 'Individually signed canonical Commit, Remix, and Tag heads.',
+     representative, cfg=dict(CFG, max_head_bytes=1024, max_total_head_bytes=3072),
+     recheck='ok')
 boundary = case(epoch=U64, heads=[head(1)], operation='ff' * 32,
                 membership_generation=U64, removal_version=U64, denial_version=U64)
 boundary['pack'].update(len=U64, object_count=U64, delta_count=U64)
