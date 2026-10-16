@@ -680,6 +680,12 @@ impl NamespaceStore for RelayTimers<'_> {
         limit: u32,
     ) -> Result<mkit_server::ScanPage, mkit_server::StoreError> {
         use std::sync::atomic::Ordering;
+        // Only timer enumeration consumes the physical scan allowance. Relay
+        // outbox pages must retain their true EOF/cursor semantics; the core
+        // RelayBudget already bounds those reads and deliveries.
+        if !start.as_bytes().starts_with(b"w\0") {
+            return self.store.scan(p, start, end, after, limit).await;
+        }
         let allowed = self
             .scan_rows
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
@@ -1265,4 +1271,116 @@ async fn stats(kv: Arc<MemoryKv>) -> axum::Json<serde_json::Value> {
     let partition = Partition::Namespace(NamespaceKey::deployment_default());
     let stats = kv.stats(&partition).await.expect("memory store stats");
     axum::Json(serde_json::json!({ "bytes": stats.bytes, "keys": stats.keys }))
+}
+
+#[cfg(test)]
+mod relay_tick_tests {
+    use super::*;
+    use mkit_server::store::adapter_spi::codec;
+
+    async fn seed_relay_pages(store: &MemoryKv, source: &Partition, target: &Partition) {
+        // More than one outbox page, and more than one default relay fire.
+        // With the old shared scan cap, the second page became false EOF.
+        for sequence in 1_u64..=300 {
+            let row = codec::RelayV1 {
+                at_ms: 100,
+                target: target.clone(),
+                puts: vec![(
+                    mkit_server::Key::new(sequence.to_be_bytes().to_vec()),
+                    Value::default(),
+                )],
+                deletes: Vec::new(),
+            };
+            assert_eq!(
+                store
+                    .apply(
+                        source,
+                        Batch::new().put(keys::relay(sequence), codec::encode_relay(&row).unwrap())
+                    )
+                    .await
+                    .unwrap(),
+                mkit_server::BatchOutcome::Committed
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn exhausted_timer_scan_keeps_relay_pages_and_other_timer_kinds_intact() {
+        let clock = Arc::new(ManualClock::new(100));
+        let store = MemoryKv::with_clock(clock.clone());
+        let source = Partition::Namespace(NamespaceKey::deployment_default());
+        let target = Partition::ContentShard(0);
+        seed_relay_pages(&store, &source, &target).await;
+        let other_timer = keys::timer(100, 7, b"untouched");
+        let other_value = Value::new(b"verifier-state".as_slice());
+        store
+            .apply(
+                &source,
+                Batch::new()
+                    .put(keys::outbox_sequence(), codec::encode_u64(300))
+                    .put(keys::timer(100, 3, b""), Value::default())
+                    .put(other_timer.clone(), other_value.clone()),
+            )
+            .await
+            .unwrap();
+        let registry = TimerRegistry::new().register(mkit_server::relay::RelayHandler {
+            target: &store,
+            hook: mkit_server::relay::NoHook,
+            budget: mkit_server::relay::RelayBudget::default(),
+        });
+        let (timer_start, timer_end) = keys::class_range(keys::TAG_TIMER);
+        let (relay_start, relay_end) = keys::class_range(keys::TAG_RELAY);
+        for tick in 0..10 {
+            clock.set(100 + tick);
+            // One timer page consumes this allowance completely. It must
+            // neither truncate the handler's outbox nor modify kind seven.
+            let view = RelayTimers {
+                store: &store,
+                scan_rows: std::sync::atomic::AtomicU32::new(64),
+            };
+            run_due(
+                &view,
+                &source,
+                &registry,
+                clock.as_ref(),
+                u64::try_from(clock.now_ms()).unwrap(),
+                &TickBudget::default(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                store.get(&source, &other_timer).await.unwrap(),
+                Some(other_value.clone())
+            );
+            let remaining = store
+                .scan(&source, &relay_start, &relay_end, None, 512)
+                .await
+                .unwrap();
+            if remaining.entries.is_empty() {
+                break;
+            }
+            assert!(tick < 9, "relay work was stranded");
+            assert!(
+                store
+                    .scan(&source, &timer_start, &timer_end, None, 64)
+                    .await
+                    .unwrap()
+                    .entries
+                    .iter()
+                    .any(|(key, _)| matches!(
+                        keys::parse(key),
+                        Some(keys::ParsedKey::Timer { kind: 3, .. })
+                    ))
+            );
+        }
+        assert_eq!(store.stats(&target).await.unwrap().keys, Some(301)); // 300 puts plus relay watermark.
+        assert!(
+            store
+                .scan(&source, &relay_start, &relay_end, None, 1)
+                .await
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+    }
 }

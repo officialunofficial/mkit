@@ -120,7 +120,7 @@ jobs:
           python3 scripts/check-launch-feature-graph.py
       - name: Native TestHost contracts over HTTP
         working-directory: rust
-        run: cargo nextest run --locked -p mkit-server-conformance --features test-host --test test_host --test test_host_migrations --test test_host_regressions -j 3 --success-output immediate --failure-output immediate
+        run: cargo nextest run --locked -p mkit-server-conformance --features test-host --lib --test test_host --test test_host_migrations --test test_host_regressions -j 3 --success-output immediate --failure-output immediate
       - name: Bounded decoder on wasm32
         run: bash scripts/wasm-ruzstd-check.sh
 

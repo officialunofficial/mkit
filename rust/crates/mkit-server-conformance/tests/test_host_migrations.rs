@@ -127,12 +127,18 @@ async fn run_driven<O: OutcomeSink + Clone + 'static>(
             .build()
             .expect("hook control client");
         let mut first_verifier = None;
+        let mut saw_outcome_outage = false;
         let mut known_partitions = std::collections::BTreeSet::new();
         if host.profile().has(Feature::IndexedMode) {
             known_partitions.extend(mkit_server::store::content_shards());
         }
         loop {
-            if !host.profile().has(Feature::IndexedAsync) {
+            // Keep the one-second short ticket alive during backlog setup,
+            // even on slow CI machines. The recovery phase below explicitly
+            // drives its expiration after the wire case restores the sink.
+            if !host.profile().has(Feature::IndexedAsync)
+                && filter != "outcomes.backpressure_hook_down"
+            {
                 let signed_at = mkit_server::SystemClock.now_ms();
                 host.clock().set(host.clock().now_ms().max(signed_at));
             }
@@ -173,7 +179,15 @@ async fn run_driven<O: OutcomeSink + Clone + 'static>(
                 )
                 .await
                 .expect("drain core timers");
-                advance_due_work(host, &partition, filter, stub, &client).await;
+                advance_due_work(
+                    host,
+                    &partition,
+                    filter,
+                    stub,
+                    &client,
+                    &mut saw_outcome_outage,
+                )
+                .await;
             }
             if filter == "timers.fire_on_schedule" || filter.starts_with("growth.") {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -212,6 +226,7 @@ async fn advance_due_work(
     filter: &str,
     stub: Option<&MppStub>,
     client: &reqwest::Client,
+    saw_outcome_outage: &mut bool,
 ) {
     let (start, end) = keys::class_range(keys::TAG_TIMER);
     let page = host
@@ -220,6 +235,24 @@ async fn advance_due_work(
         .await
         .expect("scan persisted timers");
     let now = u64::try_from(host.clock().now_ms()).expect("nonnegative clock");
+    let recovery = if let Some(stub) = stub {
+        let bytes = client
+            .get(format!("{}/__stub/mode", stub.origin()))
+            .send()
+            .await
+            .expect("read hook mode")
+            .bytes()
+            .await
+            .expect("read hook response");
+        let settings: Settings = serde_json::from_slice(&bytes).expect("valid hook mode");
+        if settings.outcome == Some(Mode::Down) {
+            *saw_outcome_outage = true;
+        }
+        settings.outcome == Some(Mode::Normal)
+            && (filter != "outcomes.backpressure_hook_down" || *saw_outcome_outage)
+    } else {
+        false
+    };
     for (key, _) in page.entries {
         let Some(keys::ParsedKey::Timer {
             due_at_ms, kind, ..
@@ -230,31 +263,28 @@ async fn advance_due_work(
         if due_at_ms <= now {
             continue;
         }
-        let expire = filter == "outcomes.expired_ticket" && kind == kinds::TICKET_EXPIRY.get();
-        let retry = if kind == kinds::OUTCOME_DELIVERY.get() {
-            if let Some(stub) = stub {
-                let bytes = client
-                    .get(format!("{}/__stub/mode", stub.origin()))
-                    .send()
-                    .await
-                    .expect("read hook mode")
-                    .bytes()
-                    .await
-                    .expect("read hook control response");
-                let settings: Settings = serde_json::from_slice(&bytes).expect("valid hook mode");
-                settings.outcome == Some(Mode::Normal)
-            } else {
-                false
-            }
-        } else {
-            false
-        };
+        let expire = kind == kinds::TICKET_EXPIRY.get() && filter == "outcomes.expired_ticket";
+        let retry = kind == kinds::OUTCOME_DELIVERY.get() && recovery;
         if expire || retry {
             host.clock()
                 .set(i64::try_from(due_at_ms).expect("timer within clock range"));
             return;
         }
     }
+}
+
+// Make backlog setup take longer than the unchanged one-second ticket TTL.
+// The explicit outage/recovery clock must keep this contract independent of
+// the speed of the machine serving the HTTP requests.
+fn slow_backlog_writes(app: axum::Router) -> axum::Router {
+    app.layer(axum::middleware::from_fn(
+        |request: axum::extract::Request, next: axum::middleware::Next| async move {
+            if request.uri().path().ends_with("/UpdateRef") {
+                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            }
+            next.run(request).await
+        },
+    ))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -288,29 +318,41 @@ async fn admission_and_outcome_failures_run_the_existing_wire_cases() {
         let client = Arc::new(OnceLock::new());
         let for_factory = client.clone();
         let stub_for_factory = stub.clone();
-        let host = TestHost::start_with_hooks_factory(profile, move |origin, clock| {
-            let channel = LoopbackHookChannel::new(&stub_for_factory.origin())?;
-            let client = Arc::new(
-                mkit_server::hooks::HookClient::new(
-                    channel,
-                    origin,
-                    Some(signer),
-                    clock,
-                    Arc::new(mkit_server::ManualSleep::new()),
-                )
-                .map_err(|error| error.to_string())?,
-            );
-            for_factory
-                .set(client.clone())
-                .map_err(|_| "hook client initialized twice".to_owned())?;
-            Ok(Hooks {
-                authorizer: mkit_server::pipeline::OpenAuthorizer,
-                admission: mkit_server::hooks::RemoteAdmission::new(client.clone()),
-                pre_receive: mkit_server::pipeline::NoPreReceive,
-                receipts: mkit_server::pipeline::NoReceipts,
-                outcomes: mkit_server::hooks::RemoteOutcomes::new(client),
-            })
-        })
+        let slow_backlog = case.name == "outcomes.backpressure_hook_down";
+        let host = TestHost::start_with_test_layers(
+            profile,
+            move |origin, clock| {
+                let channel = LoopbackHookChannel::new(&stub_for_factory.origin())?;
+                let client = Arc::new(
+                    mkit_server::hooks::HookClient::new(
+                        channel,
+                        origin,
+                        Some(signer),
+                        clock,
+                        Arc::new(mkit_server::ManualSleep::new()),
+                    )
+                    .map_err(|error| error.to_string())?,
+                );
+                for_factory
+                    .set(client.clone())
+                    .map_err(|_| "hook client initialized twice".to_owned())?;
+                Ok(Hooks {
+                    authorizer: mkit_server::pipeline::OpenAuthorizer,
+                    admission: mkit_server::hooks::RemoteAdmission::new(client.clone()),
+                    pre_receive: mkit_server::pipeline::NoPreReceive,
+                    receipts: mkit_server::pipeline::NoReceipts,
+                    outcomes: mkit_server::hooks::RemoteOutcomes::new(client),
+                })
+            },
+            |_| {},
+            move |app| {
+                if slow_backlog {
+                    slow_backlog_writes(app)
+                } else {
+                    app
+                }
+            },
+        )
         .await
         .expect("valid native fixture");
         let sink = mkit_server::hooks::RemoteOutcomes::new(

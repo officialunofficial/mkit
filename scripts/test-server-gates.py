@@ -55,7 +55,7 @@ class ServerGates(unittest.TestCase):
         self.assertIn("runs-on: ubuntu-latest", native)
         self.assertNotIn("if:", native)
         self.assertNotIn("continue-on-error", native)
-        self.assertIn("--features test-host --test test_host --test test_host_migrations --test test_host_regressions -j 3 --success-output immediate --failure-output immediate", native)
+        self.assertIn("--features test-host --lib --test test_host --test test_host_migrations --test test_host_regressions -j 3 --success-output immediate --failure-output immediate", native)
         self.assertIn("python3 scripts/check-launch-feature-graph.py", native)
         self.assertIn("bash scripts/wasm-ruzstd-check.sh", native)
         self.assertIn("python3 scripts/test-server-gates.py --hosted-only", native)
