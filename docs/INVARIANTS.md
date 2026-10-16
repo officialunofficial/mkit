@@ -2855,6 +2855,47 @@ resend an acknowledged part or advance refs without its upload commitment.
 **Enforced by:** request-policy seam tests and both-backend native push tests,
 including multipart interruption and receipt reuse across fresh instances.
 
+## Fork acceptance precedes membership installation
+
+**Always:** the fork's durable pack list stages the complete inherited set,
+including external-base suppliers. No membership witness is installed until
+`Accept` records the accepted result with its replay and reservation outcome.
+The same row binds the operation, destination, requested visibility, source pair,
+membership generation, pack lengths, byte charge, and exact authority rows.
+The final source pair, policy, and inherited-pack proofs follow preparation.
+Activation repeats destination denial checks and never changes or settles the
+saved result. An accepted job remains recoverable beyond the construction expiry.
+
+**Because:** preparation is not permission to serve content, and a committed
+receipt must survive interrupted clearance and later source changes.
+
+**If violated:** readers could observe an unaccepted fork, an accepted result
+could change after a lost reply, or a reservation could settle twice.
+
+**Enforced by:** `fork::job`, `fork::accept`, `fork::publish`, and the fork engine
+acceptance, settlement, membership-order, source-change, and lost-reply tests.
+
+## Fork registration arbitrates with destination writers
+
+**Always:** registration atomically requires the destination repository record
+and fork barrier to be absent and installs both. Ordinary coordinator mutations
+and lease grants guard barrier absence in their existing atomic batches. A usable
+ref-shard lease implies an already registered repository: the coordinator commits
+that record with the lease grant before the shard can install the lease. Since
+repository registration is never deleted, a previously granted lease makes fork
+registration refuse. Completion removes the barrier atomically with `Done`;
+a failed registered destination retains it permanently.
+
+**Because:** a preflight check alone cannot stop a writer that already captured
+its snapshot, and delaying registration alone permits implicit creation.
+
+**If violated:** a concurrent writer could change the destination during
+construction or an unfinished fork could accept unrelated writes.
+
+**Enforced by:** coordinator creation and lease-grant guards, the direct upload
+planner, and the lease/registration and upload/claim race tests. The extra keys
+join existing batch reads; ordinary writes add no storage round trip.
+
 ## A fork without denial builds no cleared set and carries its plan
 
 **Always:** a fork on a deployment without pack-level takedown denial skips the
@@ -2864,10 +2905,11 @@ no sets to load: if denial is enabled later, the first publication walk visits
 every object and its advance-time proof covers every pack it reaches. A plan
 computed before admission is carried into the job only when it fits one slice
 and the source still publishes the same packmap head and membership generation;
-otherwise the job plans for itself. Per-pack proofs run before and after every
-membership write, the authority fence and reservation are re-checked at every
-advance, and the packmap head's membership rows are written after every other
-member's.
+otherwise the job plans for itself. Source pack proofs run after preparation
+and before acceptance. Activation repeats destination denial proofs around each
+membership write, and the packmap head's rows are written after every other
+member's. Every advancing coordinator commit guards the recorded authority facts;
+pre-acceptance progress also guards the exact pending reservation.
 
 **Because:** nothing reads a cleared set without denial, and the set's walk cost
 repeats inside a request; the plan's result is a function of the pair it read,
@@ -2890,7 +2932,8 @@ pair check, the plan fallback, the publication stage order and the round probe.
 **Always:** after a publication absent guard fails, the driver reads both rows
 again and accepts only the exact pair of witness bytes it intended to write.
 Any foreign value refuses the fork; partial or missing identical rows remain
-retryable. Proofs, the fresh source pair, and all write guards stay in place.
+retryable. The accepted binding, live destination proofs, and local write guards
+stay in place.
 
 **Because:** request and timer drivers can publish the same unit concurrently.
 

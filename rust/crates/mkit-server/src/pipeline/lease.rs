@@ -247,6 +247,7 @@ fn grant_batch(
         },
     };
     let mut batch = Batch::new()
+        .require(Precondition::Absent(keys::fork_barrier(repo)))
         .require(if creation.namespace {
             Precondition::Absent(nr_key.clone())
         } else {
@@ -358,6 +359,7 @@ async fn read_lease_rows<L: NamespaceStore, M: NamespaceStore>(
         wanted.push(keys::quota_total(window));
     }
     wanted.push(keys::repo_visibility(&repo_id.name));
+    wanted.push(keys::fork_barrier(&repo_id.name));
     // Consume the watermark first, including its fail-safe corrupt => zero
     // rule, even when the coordinator read completes first.
     let source_reservation = source.reserve_read_calls(1).map_err(meta_error)?;
@@ -414,6 +416,9 @@ async fn read_lease_rows<L: NamespaceStore, M: NamespaceStore>(
     .map_err(meta_error)?;
     if rows.len() != wanted.len() {
         return Err(internal("lease get_many returned the wrong row count"));
+    }
+    if rows.last().is_some_and(Option::is_some) {
+        return Err(ServerError::unavailable("fork activation pending; retry"));
     }
     let [namespace, repo, epoch, shard, recovery] = &rows[..5] else {
         return Err(internal("lease get_many returned the wrong row count"));
@@ -474,7 +479,7 @@ async fn read_lease_rows<L: NamespaceStore, M: NamespaceStore>(
     let read = CoordinatorLease {
         namespace: namespace.clone(),
         repo: repo.clone(),
-        visibility: rows.last().cloned().flatten(),
+        visibility: rows[rows.len() - 2].clone(),
         epoch: epoch.clone(),
         authority: authority.clone(),
         authority_generation: if authority_fence {
@@ -815,3 +820,88 @@ mod model_tests;
 #[cfg(test)]
 #[path = "lease_read_tests.rs"]
 mod read_tests;
+
+#[cfg(test)]
+mod fork_barrier_tests {
+    use super::*;
+    use crate::memory::MemoryKv;
+    use crate::pipeline::D34Shards;
+    use crate::rt::ManualClock;
+    use futures_executor::block_on;
+    use std::sync::Arc;
+
+    #[test]
+    fn fork_registration_and_lease_grant_have_one_winner() {
+        let repo = RepoId {
+            namespace: crate::repo::NamespaceKey::deployment_default(),
+            name: RepoName::new("destination").unwrap(),
+        };
+        let shards = D34Shards;
+        let coordinator = shards.coordinator(&repo.namespace);
+        let partition = shards.ref_shard(&repo, "refs/heads/main");
+        for lease_first in [false, true] {
+            let clock = Arc::new(ManualClock::new(1_000));
+            let store = MemoryKv::with_clock(clock.clone());
+            let read = block_on(read_lease_rows(
+                &store,
+                &store,
+                &shards,
+                clock.as_ref(),
+                &repo,
+                &partition,
+                None,
+                None,
+                false,
+            ))
+            .unwrap();
+            let lease = grant_batch(
+                &read,
+                &repo.name,
+                &partition,
+                1_000,
+                1_000,
+                &LeaseParams::default(),
+            )
+            .unwrap();
+            // A lease creates the repository before it can be installed in a
+            // ref shard. A fork claims only an unregistered destination.
+            let registration = Batch::new()
+                .require(Precondition::Absent(keys::repo_record(&repo.name)))
+                .put(keys::fork_barrier(&repo.name), Value::default());
+            let (first, second) = if lease_first {
+                (lease.batch, registration)
+            } else {
+                (registration, lease.batch)
+            };
+            assert_eq!(
+                block_on(store.apply(&coordinator, first)).unwrap(),
+                BatchOutcome::Committed
+            );
+            assert!(matches!(
+                block_on(store.apply(&coordinator, second)).unwrap(),
+                BatchOutcome::PreconditionFailed { .. }
+            ));
+            let barrier =
+                block_on(store.get(&coordinator, &keys::fork_barrier(&repo.name))).unwrap();
+            let record = block_on(store.get(&coordinator, &keys::repo_record(&repo.name))).unwrap();
+            assert_eq!(record.is_some(), lease_first);
+            assert_eq!(barrier.is_some(), !lease_first);
+            if !lease_first {
+                let result = block_on(read_lease_rows(
+                    &store,
+                    &store,
+                    &shards,
+                    clock.as_ref(),
+                    &repo,
+                    &partition,
+                    None,
+                    None,
+                    false,
+                ));
+                assert!(
+                    matches!(result, Err(error) if error.code() == crate::error::Code::Unavailable)
+                );
+            }
+        }
+    }
+}

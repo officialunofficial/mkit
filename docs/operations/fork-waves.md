@@ -102,8 +102,8 @@ and the files are small, so no holder is copied.
 
 Without pack-level denial a pack's unit is a few fixed calls: planning reads the
 pack's member row, its proof and its sealed head (at most eight calls); a
-publication write reads the source pair, proves the pack, reads the
-destination's two rows and applies the guarded write (at most eight calls).
+publication write proves destination denial, reads the destination's two rows,
+and applies the guarded write (at most eight calls).
 Both overlap up to six packs. The width is chosen before dispatch from the
 store's known read allowance and the slice's remaining calls at
 `2 * layers + 1` debits per call, the same conservative rule as the loops
@@ -138,8 +138,10 @@ The request and timer can drive the same job. If a publication guard loses,
 the losing driver re-reads both destination rows. It continues only when both
 are exactly the witness it intended to write. A foreign value gives
 `destination not empty`, a terminal refusal. A partial identical pair or missing
-rows requires another attempt. The source-pair re-read, proofs before and after
-the write, absent guards, and apply deadline remain in force.
+rows requires another attempt. Acceptance proves the source after preparation.
+Activation repeats destination denial proofs before and after each write and
+retains absent guards and the apply deadline. A refusal after acceptance leaves
+the saved result intact and clearance pending.
 
 Every `ForkError::Unavailable` returned by a request's job step carries
 `Retry-After: 1`. The Connect code stays `unavailable` and its default HTTP
@@ -255,3 +257,48 @@ concurrency benefit.
 Closure expansion stays serial: budget exhaustion mid-wave would change
 first-error precedence. Revisit with a validated reference-page bound if fork
 closure time matters.
+
+## Acceptance, settlement, and destination write protection
+
+Preparation copies index entries and holder evidence and counts the inherited
+packs. The durable job's complete pack list is staged membership; preparation
+installs neither local membership nor published-member witnesses. `Accept`
+proves the source packs after preparation, then compares the exact published
+pair, generation, publication sequence, visibility declaration, and visibility
+revision. Visibility setters retain a monotonic revision under sharded storage,
+including without history tokens, so changes away and back remain detectable.
+A changed source answers uniform absence.
+
+The acceptance commit retains the accepted result with the complete pack set,
+operation binding, destination, visibility, membership incarnation, byte charge,
+and recorded authority observations. It atomically commits replay and the
+reservation outcome. Publication uses this binding and current destination
+denial checks. Later source changes do not revoke the accepted result. An
+interruption or denial at clearance leaves that result intact and redrives the
+job; it never charges or settles again.
+
+The `fb` coordinator row blocks ordinary destination mutations from registration
+through clearance. Each ordinary coordinator write and lease grant guards its
+absence in the same apply. These keys join existing batched reads, adding no
+round trip for repositories without forks. A usable old shard lease cannot
+escape the barrier: its grant already committed the repository record, which
+makes registration's absence guard lose. Registration wins only while no such
+lease exists. `Done` atomically removes the barrier after every accepted member
+has been installed; a failed registered fork retains the barrier permanently.
+
+| Coordinator commit | Before | After |
+|---|---|---|
+| Launch | Job absent, quota guards, deadline | Also recorded authority rows and exact pending reservation |
+| Plan, trees, walk | Job CAS and deadline | Also recorded authority rows and exact pending reservation |
+| Register | Registry/visibility/authority guards, job CAS, deadline | Also barrier absence and exact pending reservation; installs the barrier atomically |
+| Copy and count progress | Job CAS and deadline | Also recorded authority rows and exact pending reservation |
+| Acceptance | No separate decision | Final source proof, barrier ownership, recorded authority rows, job CAS, pending reservation, replay absence, outcome guards, deadline |
+| Activation progress | Job CAS and deadline | Also recorded authority rows; projects only the accepted binding |
+| Done | Job CAS, deadline, replay and reservation settlement | Recorded authority rows, job CAS, barrier ownership, deadline; removes barrier and retains the saved result |
+| Pre-acceptance refusal | Job CAS, reservation/outbox guards, deadline | Same terminal-abort path; registered failures retain their barrier |
+
+The job, authority generation, grant epoch, barrier, replay, and reservation live
+in the destination coordinator. Progress reads the job and both fence rows in
+one `get_many`; authority guards add no storage call. After a precondition loss,
+the next read observes the job and fence together: a moved fence aborts an
+unaccepted attempt, while an unchanged fence retains normal CAS retry handling.

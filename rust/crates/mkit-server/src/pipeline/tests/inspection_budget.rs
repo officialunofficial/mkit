@@ -110,6 +110,7 @@ fn inspection_pair_budget_includes_dependency_visibility_before_hooks() {
         let write = WriteRequest {
             denial_ids: None,
             denial_packs: &[],
+            fork_barrier: false,
             authority_store: AuthorityStore::Guarded,
             authority_generation: None,
             repo: &repo.name,

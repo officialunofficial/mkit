@@ -3350,6 +3350,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             wanted.push(keys::repo_known(&op.repo.name));
         }
         if self.cfg.sharding == Sharding::D34 {
+            if matches!(p, Partition::Coordinator(_)) {
+                wanted.push(keys::fork_barrier(&op.repo.name));
+            }
             wanted.push(keys::epoch_lease());
             if !refs.is_empty() {
                 wanted.push(keys::outbox_sequence());
@@ -3772,6 +3775,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let mut req = WriteRequest {
             denial_ids: Some(denial_ids),
             denial_packs,
+            fork_barrier: false,
             authority_store: plan::AuthorityStore::from_capabilities(self.meta.capabilities()),
             authority_generation: op.authz.authority_generation,
             repo: &op.repo.name,

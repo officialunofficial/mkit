@@ -1151,6 +1151,17 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Breaking (toward 0.6)
 
+- [embedder: breaking API] [embedder: stored-format change]
+  [embedder: store reset required] Fork jobs retain the authorized source policy,
+  exact authority observations, and accepted result. `Phase::Accept` separates
+  guarded acceptance from published clearance. Acceptance atomically saves replay
+  and settles the reservation; activation never settles it again. Destination
+  writes stay blocked until clearance completes, and failed destinations stay
+  inert. Migration: use `start`, `start_with`, or `start_planned` rather than job
+  literals, handle the new phase in exhaustive matches, and reset pre-production
+  stores before using this format. Source changes after admission use uniform
+  `not_found` instead of the former visibility-change retry response.
+
 - Unstable CLI library API: `remote_dispatch::open_trusted` returns `Remote`
   instead of `Arc<dyn Transport>`. Migration: use `Remote::with_source` to lend
   the configured source for a complete repository operation. Existing public

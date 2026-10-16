@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 /// The authority the request was authorized under must still hold, as it must
 /// for any write that registers a repository. Returns the guards that keep it
 /// holding until the registration batch applies.
-fn fence_guards(
+pub(super) fn fence_guards(
     fence: &super::FenceV1,
     (ag, authority): (crate::store::Key, Option<&crate::store::Value>),
     (ge, epoch): (crate::store::Key, Option<&crate::store::Value>),
@@ -85,7 +85,12 @@ pub(crate) async fn register<S: NamespaceStore>(
         return Err(ForkError::NotEmpty);
     }
     let now = env.now();
-    let mut batch = Batch::new();
+    let mut batch = Batch::new()
+        .require(Precondition::Absent(keys::fork_barrier(&dest.name)))
+        .put(
+            keys::fork_barrier(&dest.name),
+            crate::Value::new(job.binding.to_vec()),
+        );
     let fence = job.fence.clone().unwrap_or(super::FenceV1 {
         authority_generation: None,
         grant_epoch: None,
@@ -875,6 +880,9 @@ mod tests {
             failure: None,
             settle: None,
             fence,
+            fence_rows: crate::fork::FenceRowsV1::default(),
+            source_access: crate::fork::SourceAccessV1::default(),
+            accepted: None,
             result: None,
         }
     }

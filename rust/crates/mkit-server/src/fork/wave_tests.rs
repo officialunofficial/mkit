@@ -267,6 +267,9 @@ fn job() -> ForkJobV1 {
         failure: None,
         settle: None,
         fence: None,
+        fence_rows: crate::fork::FenceRowsV1::default(),
+        source_access: crate::fork::SourceAccessV1::default(),
+        accepted: None,
         result: None,
     }
 }

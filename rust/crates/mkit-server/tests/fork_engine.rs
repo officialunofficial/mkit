@@ -598,37 +598,40 @@ async fn every_unclearable_source_is_the_same_not_found_and_leaves_nothing() {
 }
 
 #[tokio::test]
-async fn a_takedown_between_the_proof_and_the_membership_write_is_caught_and_visible() {
+async fn a_takedown_during_activation_withholds_clearance_without_changing_acceptance() {
+    use mkit_server::fork::ForkError;
     let source = Source::build_with("source", 6, denial).await;
-    let env = env(&source);
-    mkit_server::fork::start(&env, &spec(&source, "forked"), None)
+    let fork_env = env(&source);
+    let id = dest(&source, "forked");
+    let settle = settlement::admit(&source, &id).await;
+    mkit_server::fork::start(&fork_env, &spec(&source, "forked"), Some(settle))
         .await
         .unwrap();
-    // The block lands just before the first membership write commits.
-    *source.store.trigger.lock().unwrap() = Some(("pm", block_hook(&source, blob(2, 8).0)));
-    let job = run(&source, "forked").await;
-    assert_eq!(job.phase, Phase::Failed);
-    assert_eq!(
-        job.failure.unwrap().error().public_message(),
-        "source not found"
-    );
-    // The member that was written stays, and is registered: a takedown sweep
-    // that enumerates the registry reaches it.
-    let dest_id = dest(&source, "forked");
-    let state = dest_state(&source, &dest_id).await;
-    assert!(state.keys().any(|(_, k)| k.starts_with(b"m\0")));
-    assert!(
-        source
-            .store
-            .inner
-            .get(
-                &source.shards.coordinator(&dest_id.namespace),
-                &keys::repo_record(&dest_id.name)
-            )
-            .await
-            .unwrap()
-            .is_some()
-    );
+    stop_at_fork_phase(&source, &fork_env, &id, Phase::Publish).await;
+    let accepted = job_of(&source, &id).await.accepted.unwrap();
+    let outcome = settlement::outcome(&source, &id).await;
+    let blocked = blob(2, 8).0;
+    // The block lands after the live proof but before the membership commit.
+    *source.store.trigger.lock().unwrap() = Some(("pm", block_hook(&source, blocked)));
+    assert!(matches!(
+        drive(&fork_env, &id).await,
+        Err(ForkError::Unavailable("fork clearance pending"))
+    ));
+    let pending = job_of(&source, &id).await;
+    assert_eq!(pending.phase, Phase::Publish);
+    assert_eq!(pending.accepted, Some(accepted.clone()));
+    assert!(pending.result.is_none());
+    assert_eq!(settlement::outcome(&source, &id).await, outcome);
+    assert!(member(&source, &id, source.packmap).await.is_none());
+    // A later clearance driver resumes the same acceptance after denial ends.
+    ContentIndex::new(source.store.inner.clone())
+        .unblock(&blocked, u64::try_from(source.clock.now_ms()).unwrap())
+        .await
+        .unwrap();
+    let done = drive(&fork_env, &id).await.unwrap();
+    assert_eq!(done.phase, Phase::Done);
+    assert_eq!(done.result, Some(accepted));
+    assert_eq!(settlement::outcome(&source, &id).await, outcome);
 }
 
 #[tokio::test]
@@ -984,7 +987,7 @@ mod settlement {
 }
 
 #[tokio::test]
-async fn the_final_batch_commits_outcome_replay_and_quota_together() {
+async fn acceptance_commits_outcome_and_replay_before_clearance_and_never_resettles() {
     use mkit_server::store::adapter_spi::codec::{self, ReservationV1, StoredProcedure};
     let source = Source::build("source", 6).await;
     let env = env(&source);
@@ -993,13 +996,24 @@ async fn the_final_batch_commits_outcome_replay_and_quota_together() {
     mkit_server::fork::start(&env, &spec(&source, "forked"), Some(settle))
         .await
         .unwrap();
-    // Until the last step the reservation is still pending and nothing is
-    // settled; the replay record and the charge appear with the outcome.
+    // Stop before acceptance, then lose each advancing reply until the saved
+    // result and terminal settlement exist while membership is still absent.
+    stop_at_fork_phase(&source, &env, &dest_id, Phase::Accept).await;
+    assert!(matches!(
+        settlement::outcome(&source, &dest_id).await,
+        ReservationV1::Pending { .. }
+    ));
+    stop_at_fork_phase(&source, &env, &dest_id, Phase::Publish).await;
+    let accepted = job_of(&source, &dest_id).await;
+    assert!(accepted.result.is_none());
+    assert!(accepted.accepted.is_some());
+    for pack in accepted.packs.iter().map(|pack| pack.id) {
+        assert!(member(&source, &dest_id, pack).await.is_none());
+    }
     let coordinator = source.shards.coordinator(&dest_id.namespace);
     let replay_key = keys::replay(&[3; 32]);
     let scope = mkit_server::quota::QuotaScope::for_signer(&dest_id.namespace, &[1; 32]);
-    let job = run(&source, "forked").await;
-    assert_eq!(job.phase, Phase::Done);
+    let outcome_at_acceptance = settlement::outcome(&source, &dest_id).await;
     let ReservationV1::Committed {
         procedure,
         bytes_stored,
@@ -1010,7 +1024,7 @@ async fn the_final_batch_commits_outcome_replay_and_quota_together() {
         panic!("expected a committed outcome")
     };
     assert_eq!(procedure, StoredProcedure::Fork);
-    assert_eq!(bytes_stored, job.result.unwrap().pack_bytes);
+    assert_eq!(bytes_stored, accepted.accepted.clone().unwrap().pack_bytes);
     assert!(refs.is_empty());
     let replay = source
         .store
@@ -1031,6 +1045,31 @@ async fn the_final_batch_commits_outcome_replay_and_quota_together() {
         .unwrap()
         .unwrap();
     assert_eq!(codec::decode_quota_state(&quota).unwrap().ops, 1);
+    let job = run(&source, "forked").await;
+    assert_eq!(job.phase, Phase::Done);
+    assert_eq!(job.result, accepted.accepted);
+    assert_eq!(
+        settlement::outcome(&source, &dest_id).await,
+        outcome_at_acceptance
+    );
+    assert_eq!(
+        source
+            .store
+            .inner
+            .get(&coordinator, &replay_key)
+            .await
+            .unwrap(),
+        Some(replay)
+    );
+    assert_eq!(
+        source
+            .store
+            .inner
+            .get(&coordinator, &keys::quota(&scope))
+            .await
+            .unwrap(),
+        Some(quota)
+    );
 }
 
 #[tokio::test]
@@ -2234,12 +2273,38 @@ async fn a_pack_set_larger_than_the_admitted_bytes_fails_the_fork_before_registr
 #[tokio::test]
 async fn the_authority_a_request_was_authorized_under_is_checked_when_the_destination_registers() {
     use mkit_server::fork::FenceV1;
+    use mkit_server::store::adapter_spi::codec;
     let run_with = |fence: FenceV1, dest_name: &'static str| async move {
         let source = Source::build("source", 4).await;
         let env = env(&source);
-        mkit_server::fork::start_with(&env, &spec(&source, dest_name), None, Some(fence))
-            .await
-            .unwrap();
+        mkit_server::fork::start_with(
+            &env,
+            &spec(&source, dest_name),
+            None,
+            Some(FenceV1 {
+                authority_generation: Some(0),
+                grant_epoch: Some(0),
+                create_namespace: true,
+            }),
+        )
+        .await
+        .unwrap();
+        for (key, generation) in [
+            (keys::authority_generation(), fence.authority_generation),
+            (keys::grant_epoch(), fence.grant_epoch),
+        ] {
+            if let Some(generation) = generation.filter(|generation| *generation != 0) {
+                source
+                    .store
+                    .inner
+                    .apply(
+                        &source.shards.coordinator(&source.repo.namespace),
+                        mkit_server::Batch::new().put(key, codec::encode_u64(generation)),
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
         let job = run(&source, dest_name).await;
         let registered = source
             .store
@@ -2495,12 +2560,12 @@ async fn registration_follows_the_fence_for_namespaces_and_never_replaces_a_decl
 #[tokio::test]
 async fn a_moved_authority_aborts_the_reservation_with_the_epoch_mismatch_reason() {
     use mkit_server::fork::FenceV1;
-    use mkit_server::store::adapter_spi::codec::{AbortReason, ReservationV1};
+    use mkit_server::store::adapter_spi::codec::{self, AbortReason, ReservationV1};
     let source = Source::build("source", 4).await;
     let dest_id = dest(&source, "forked");
     let settle = settlement::admit(&source, &dest_id).await;
     let fence = FenceV1 {
-        authority_generation: Some(9),
+        authority_generation: Some(0),
         grant_epoch: None,
         create_namespace: true,
     };
@@ -2512,6 +2577,15 @@ async fn a_moved_authority_aborts_the_reservation_with_the_epoch_mismatch_reason
     )
     .await
     .unwrap();
+    source
+        .store
+        .inner
+        .apply(
+            &source.shards.coordinator(&dest_id.namespace),
+            mkit_server::Batch::new().put(keys::authority_generation(), codec::encode_u64(9)),
+        )
+        .await
+        .unwrap();
     assert_eq!(run(&source, "forked").await.phase, Phase::Failed);
     let ReservationV1::Aborted { reason, .. } = settlement::outcome(&source, &dest_id).await else {
         panic!("a moved authority aborts the reservation")
@@ -3036,7 +3110,8 @@ async fn publish_waves_end_where_the_serial_publish_does_and_write_the_head_last
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_publish_wave_reports_its_first_failure_in_input_order_and_never_writes_the_head() {
+async fn acceptance_reports_its_first_source_failure_in_input_order_without_installing_membership()
+{
     use std::sync::atomic::Ordering;
     for missing_first in [true, false] {
         let source = long_source(4, no_denial).await;
@@ -3045,23 +3120,20 @@ async fn a_publish_wave_reports_its_first_failure_in_input_order_and_never_write
         let env = env_denial(&source, false);
         let spec = spec(&source, "forked");
         let planned = mkit_server::fork::plan_fork(&env, &spec).await.unwrap();
-        // The pair is planned. Nothing reads a source member again until the
-        // Publish phase, so what changes now is found there, in one wave.
+        // Preparation finishes before the final source proofs are disturbed.
         mkit_server::fork::start_planned(&env, &spec, None, None, planned)
             .await
             .unwrap();
         let dest_id = dest(&source, "forked");
-        let mut order: Vec<Hash> = job_of(&source, &dest_id)
+        stop_at_fork_phase(&source, &env, &dest_id, Phase::Accept).await;
+        let order: Vec<Hash> = job_of(&source, &dest_id)
             .await
             .packs
             .iter()
             .map(|p| p.id)
-            .filter(|id| *id != source.packmap)
             .collect();
-        order.sort_unstable();
-        // One member is gone from the source (a fork-ending refusal); a later
-        // or an earlier one fails to read (a retryable error that completes
-        // first, since it skips the modeled latency).
+        // A missing member and a transient error retain the complete inherited
+        // set's deterministic proof order.
         let (gone, flaky) = if missing_first {
             (order[1], order[3])
         } else {
@@ -3093,14 +3165,14 @@ async fn a_publish_wave_reports_its_first_failure_in_input_order_and_never_write
                 "{outcome:?}"
             );
             let job = job_of(&source, &dest_id).await;
-            assert_eq!(job.phase, Phase::Publish);
+            assert_eq!(job.phase, Phase::Accept);
             // A retryable failure commits nothing of its slice: the units
-            // before it are repeated, and find their rows.
+            // before it are repeated without installing membership.
             assert_eq!(job.cursor, 0);
         }
         assert!(
             member(&source, &dest_id, source.packmap).await.is_none(),
-            "the head is written after every other member"
+            "unaccepted membership is never installed"
         );
         // The retryable failure ends once the read works.
         if !missing_first {
@@ -3121,7 +3193,11 @@ async fn a_slice_cut_inside_a_publish_wave_resumes_with_any_driver() {
     let whole = fork_to_end(&source, &env, "whole", true).await;
     assert_eq!(whole.phase, Phase::Done, "{:?}", whole.failure);
     let mut seen = std::collections::BTreeSet::new();
-    for (n, slice) in (70_u32..300).step_by(3).enumerate() {
+    for (n, slice) in [65_u32]
+        .into_iter()
+        .chain((70_u32..300).step_by(3))
+        .enumerate()
+    {
         for serial_after_cut in [false, true] {
             source.store.waves.store(true, Ordering::SeqCst);
             let name = format!("cut-{n}-{serial_after_cut}");
@@ -3131,6 +3207,9 @@ async fn a_slice_cut_inside_a_publish_wave_resumes_with_any_driver() {
                 .await
                 .unwrap();
             let id = dest(&source, &name);
+            // Begin each allowance at the same durable activation boundary,
+            // so preparation cost cannot hide a cut inside its check wave.
+            stop_at_fork_phase(&source, &env, &id, Phase::Publish).await;
             let mut steps = 0;
             let job = loop {
                 steps += 1;
@@ -3170,8 +3249,8 @@ async fn a_slice_cut_inside_a_publish_wave_resumes_with_any_driver() {
 }
 
 #[tokio::test]
-async fn a_takedown_in_the_gap_between_the_plan_and_the_publish_fails_the_fork_there() {
-    // The carried plan proves no pack again until Publish, so a member that
+async fn a_takedown_in_the_gap_between_the_plan_and_acceptance_refuses_before_visibility() {
+    // The carried plan proves no pack again until acceptance, so a member that
     // leaves the source after the plan fails the fork after registration (the
     // destination stays registered, as for any later refusal). A job that
     // plans itself finds the same change in its Plan phase, before anything
@@ -3409,7 +3488,7 @@ async fn a_publish_guard_loser_continues_after_the_other_driver_finishes_once() 
 
 #[tokio::test]
 async fn a_publish_guard_loss_refuses_foreign_rows_and_retries_partial_witnesses() {
-    use mkit_server::fork::{Failure, ForkError};
+    use mkit_server::fork::ForkError;
     for (published, foreign) in [(false, true), (true, true), (false, false), (true, false)] {
         let source = Source::build("source", 4).await;
         let fork_env = env(&source);
@@ -3449,39 +3528,41 @@ async fn a_publish_guard_loss_refuses_foreign_rows_and_retries_partial_witnesses
         ));
         let result = drive(&fork_env, &id).await;
         if foreign {
-            assert_eq!(result.unwrap().failure, Some(Failure::Changed));
+            assert_eq!(
+                result.unwrap_err(),
+                ForkError::Unavailable("fork clearance pending")
+            );
         } else {
             assert!(
                 matches!(result, Err(ForkError::Unavailable("fork publish raced"))),
                 "{result:?}"
             );
         }
+        let job = job_of(&source, &id).await;
+        assert_eq!(job.phase, Phase::Publish);
+        assert!(job.accepted.is_some());
+        assert!(job.result.is_none());
     }
 }
 
 #[tokio::test(start_paused = true)]
-async fn publish_wave_deadline_keeps_input_order_against_a_missing_source_member() {
-    use mkit_server::fork::{Failure, ForkError};
+async fn an_activation_deadline_keeps_acceptance_and_redrives_without_publishing_the_head() {
+    use mkit_server::fork::ForkError;
     use std::sync::atomic::Ordering;
-    for deadline_first in [true, false] {
+    for waves in [true, false] {
         let source = long_source(2, no_denial).await;
-        let env = env_denial(&source, false);
-        let spec = spec(&source, "forked");
-        let planned = mkit_server::fork::plan_fork(&env, &spec).await.unwrap();
-        mkit_server::fork::start_planned(&env, &spec, None, None, planned)
+        let fork_env = env_denial(&source, false);
+        let request = spec(&source, "forked");
+        let planned = mkit_server::fork::plan_fork(&fork_env, &request)
+            .await
+            .unwrap();
+        mkit_server::fork::start_planned(&fork_env, &request, None, None, planned)
             .await
             .unwrap();
         let id = dest(&source, "forked");
-        let mut order: Vec<Hash> = job_of(&source, &id)
-            .await
-            .packs
-            .into_iter()
-            .map(|p| p.id)
-            .filter(|p| *p != source.packmap)
-            .collect();
-        order.sort_unstable();
-        drop_source_member(&source, order[usize::from(deadline_first)]).await;
-        source.store.waves.store(true, Ordering::SeqCst);
+        stop_at_fork_phase(&source, &fork_env, &id, Phase::Publish).await;
+        let accepted = job_of(&source, &id).await.accepted.unwrap();
+        source.store.waves.store(waves, Ordering::SeqCst);
         source.store.sleep_ms.store(10, Ordering::SeqCst);
         let clock = source.clock.clone();
         *source.store.trigger.lock().unwrap() = Some((
@@ -3493,18 +3574,414 @@ async fn publish_wave_deadline_keeps_input_order_against_a_missing_source_member
                 })
             }),
         ));
-        let outcome = drive(&env, &id).await;
-        if deadline_first {
-            assert!(
-                matches!(
-                    outcome,
-                    Err(ForkError::Unavailable("fork publish deadline"))
-                ),
-                "{outcome:?}"
-            );
-        } else {
-            assert_eq!(outcome.unwrap().failure, Some(Failure::NotFound));
-        }
+        let outcome = drive(&fork_env, &id).await;
+        assert!(
+            matches!(
+                outcome,
+                Err(ForkError::Unavailable("fork publish deadline"))
+            ),
+            "{outcome:?}"
+        );
         assert!(member(&source, &id, source.packmap).await.is_none());
+        let pending = job_of(&source, &id).await;
+        assert_eq!(pending.accepted, Some(accepted.clone()));
+        assert!(pending.result.is_none());
+        let done = drive(&fork_env, &id).await.unwrap();
+        assert_eq!(done.result, Some(accepted));
+    }
+}
+
+/// Stop on a committed phase boundary, including when its reply is lost.
+async fn stop_at_fork_phase(
+    source: &Source,
+    fork_env: &ForkEnv<'_, Counting>,
+    id: &RepoId,
+    phase: Phase,
+) {
+    for _ in 0..100 {
+        let job = job_of(source, id).await;
+        if job.phase == phase {
+            return;
+        }
+        assert!(!job.finished(), "fork ended before {phase:?}: {job:?}");
+        let store = source.store.clone();
+        *source.store.trigger.lock().unwrap() = Some((
+            "fj",
+            Arc::new(move || {
+                let store = store.clone();
+                Box::pin(async move {
+                    store.crash_after(1, true);
+                })
+            }),
+        ));
+        let _ = mkit_server::fork::step(fork_env, id, &SliceBudget::new(600)).await;
+    }
+    panic!("fork did not reach {phase:?}");
+}
+
+#[tokio::test]
+async fn a_fence_move_after_registration_aborts_before_acceptance_even_when_it_races_a_commit() {
+    use mkit_server::fork::{Failure, FenceV1};
+    use mkit_server::store::adapter_spi::codec::{self, AbortReason, ReservationV1};
+    use std::sync::atomic::Ordering;
+    for phase in [Phase::Copy, Phase::Count, Phase::Accept] {
+        for authority in [true, false] {
+            for absent in [true, false] {
+                for race in [true, false] {
+                    let source = Source::build("source", 4).await;
+                    source.store.latency_ms.store(0, Ordering::SeqCst);
+                    let id = dest(&source, "forked");
+                    let coordinator = source.shards.coordinator(&id.namespace);
+                    let key = if authority {
+                        keys::authority_generation()
+                    } else {
+                        keys::grant_epoch()
+                    };
+                    let generation = if absent { 0 } else { 5 };
+                    if !absent {
+                        source
+                            .store
+                            .inner
+                            .apply(
+                                &coordinator,
+                                mkit_server::Batch::new()
+                                    .put(key.clone(), codec::encode_u64(generation)),
+                            )
+                            .await
+                            .unwrap();
+                    }
+                    let settle = settlement::admit(&source, &id).await;
+                    let fence = FenceV1 {
+                        authority_generation: Some(if authority { generation } else { 0 }),
+                        grant_epoch: Some(if authority { 0 } else { generation }),
+                        create_namespace: true,
+                    };
+                    mkit_server::fork::start_with(
+                        &env(&source),
+                        &spec(&source, "forked"),
+                        Some(settle),
+                        Some(fence),
+                    )
+                    .await
+                    .unwrap();
+                    stop_at_fork_phase(&source, &env(&source), &id, phase).await;
+                    let store = source.store.inner.clone();
+                    let hook: Hook = Arc::new(move || {
+                        let (store, coordinator, key) =
+                            (store.clone(), coordinator.clone(), key.clone());
+                        Box::pin(async move {
+                            store
+                                .apply(
+                                    &coordinator,
+                                    mkit_server::Batch::new()
+                                        .put(key, codec::encode_u64(generation + 1)),
+                                )
+                                .await
+                                .unwrap();
+                        })
+                    });
+                    if race {
+                        *source.store.trigger.lock().unwrap() = Some(("fj", hook));
+                    } else {
+                        hook().await;
+                    }
+                    let job = drive(&env(&source), &id).await.unwrap();
+                    assert_eq!(
+                        job.phase,
+                        Phase::Failed,
+                        "phase={phase:?} authority={authority} absent={absent} race={race}"
+                    );
+                    assert_eq!(
+                        job.failure,
+                        Some(if authority {
+                            Failure::AuthorityMoved
+                        } else {
+                            Failure::EpochMoved
+                        })
+                    );
+                    assert!(job.result.is_none());
+                    assert!(member(&source, &id, source.pack).await.is_none());
+                    assert!(matches!(
+                        settlement::outcome(&source, &id).await,
+                        ReservationV1::Aborted {
+                            reason: AbortReason::EpochMismatch,
+                            ..
+                        }
+                    ));
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn destination_membership_is_installed_only_after_a_durable_accepted_result() {
+    let source = Arc::new(Source::build("source", 4).await);
+    let id = dest(&source, "forked");
+    mkit_server::fork::start(&env(&source), &spec(&source, "forked"), None)
+        .await
+        .unwrap();
+    let observed = source.clone();
+    *source.store.trigger.lock().unwrap() = Some((
+        "m",
+        Arc::new(move || {
+            let observed = observed.clone();
+            Box::pin(async move {
+                let job = job_of(&observed, &dest(&observed, "forked")).await;
+                assert!(
+                    job.accepted.is_some(),
+                    "reader-visible membership preceded guarded acceptance: {job:?}"
+                );
+            })
+        }),
+    ));
+    assert_eq!(drive(&env(&source), &id).await.unwrap().phase, Phase::Done);
+}
+
+#[tokio::test]
+async fn a_source_pair_change_during_membership_preparation_is_uniform_absence() {
+    use mkit_server::store::adapter_spi::publication;
+    let source = Source::build("source", 4).await;
+    let id = dest(&source, "forked");
+    mkit_server::fork::start(&env(&source), &spec(&source, "forked"), None)
+        .await
+        .unwrap();
+    stop_at_fork_phase(&source, &env(&source), &id, Phase::Count).await;
+    let partition = source.shards.ref_shard(&source.repo, "refs/heads/main");
+    let sequence = publication::sequence_ref("refs/heads/main");
+    let key = keys::publication(&source.repo.name, &sequence);
+    let mut row = publication::read(
+        source.store.inner.as_ref(),
+        &partition,
+        &source.repo.name,
+        "refs/heads/main",
+    )
+    .await
+    .unwrap();
+    row.generation += 1;
+    let store = source.store.inner.clone();
+    let value = row.encode().unwrap();
+    *source.store.trigger.lock().unwrap() = Some((
+        "fj",
+        Arc::new(move || {
+            let (store, partition, key, value) =
+                (store.clone(), partition.clone(), key.clone(), value.clone());
+            Box::pin(async move {
+                store
+                    .apply(&partition, mkit_server::Batch::new().put(key, value))
+                    .await
+                    .unwrap();
+            })
+        }),
+    ));
+    let job = drive(&env(&source), &id).await.unwrap();
+    assert_eq!(job.phase, Phase::Failed);
+    assert_eq!(job.failure, Some(mkit_server::fork::Failure::NotFound));
+    assert!(job.result.is_none());
+    for pack in [source.pack, source.packmap] {
+        assert!(member(&source, &id, pack).await.is_none());
+    }
+}
+
+#[tokio::test]
+async fn a_source_change_after_acceptance_does_not_change_the_saved_result_or_clearance() {
+    let source = Source::build("source", 4).await;
+    let id = dest(&source, "forked");
+    let settle = settlement::admit(&source, &id).await;
+    mkit_server::fork::start(&env(&source), &spec(&source, "forked"), Some(settle))
+        .await
+        .unwrap();
+    stop_at_fork_phase(&source, &env(&source), &id, Phase::Publish).await;
+    let accepted = job_of(&source, &id).await.accepted.unwrap();
+    let outcome = settlement::outcome(&source, &id).await;
+    for pack in [source.pack, source.packmap] {
+        drop_source_member(&source, pack).await;
+    }
+    let done = drive(&env(&source), &id).await.unwrap();
+    assert_eq!(done.phase, Phase::Done);
+    assert_eq!(done.result, Some(accepted.clone()));
+    assert_eq!(done.accepted, Some(accepted));
+    assert_eq!(settlement::outcome(&source, &id).await, outcome);
+    for pack in [source.pack, source.packmap] {
+        assert!(member(&source, &id, pack).await.is_some());
+    }
+}
+
+#[tokio::test]
+async fn an_authority_move_at_the_physical_activation_commit_installs_no_member() {
+    use mkit_server::fork::{FenceV1, ForkError};
+    use mkit_server::store::adapter_spi::codec;
+    let source = Source::build("source", 4).await;
+    let id = dest(&source, "forked");
+    let settle = settlement::admit(&source, &id).await;
+    mkit_server::fork::start_with(
+        &env(&source),
+        &spec(&source, "forked"),
+        Some(settle),
+        Some(FenceV1 {
+            authority_generation: Some(0),
+            grant_epoch: Some(0),
+            create_namespace: true,
+        }),
+    )
+    .await
+    .unwrap();
+    stop_at_fork_phase(&source, &env(&source), &id, Phase::Publish).await;
+    let accepted = job_of(&source, &id).await.accepted.unwrap();
+    let outcome = settlement::outcome(&source, &id).await;
+    let store = source.store.inner.clone();
+    let coordinator = source.shards.coordinator(&id.namespace);
+    *source.store.trigger.lock().unwrap() = Some((
+        "m",
+        Arc::new(move || {
+            let (store, coordinator) = (store.clone(), coordinator.clone());
+            Box::pin(async move {
+                store
+                    .apply(
+                        &coordinator,
+                        mkit_server::Batch::new()
+                            .put(keys::authority_generation(), codec::encode_u64(1)),
+                    )
+                    .await
+                    .unwrap();
+            })
+        }),
+    ));
+    assert_eq!(
+        drive(&env(&source), &id).await.unwrap_err(),
+        ForkError::Moved("authority")
+    );
+    assert_eq!(job_of(&source, &id).await.accepted, Some(accepted));
+    assert_eq!(settlement::outcome(&source, &id).await, outcome);
+    for pack in [source.pack, source.packmap] {
+        assert!(
+            member(&source, &id, pack).await.is_none(),
+            "an activation membership write committed after the authority moved"
+        );
+    }
+}
+
+#[tokio::test]
+async fn every_coordinator_progress_commit_compares_the_recorded_authority_rows() {
+    use mkit_server::fork::FenceV1;
+    use mkit_server::store::adapter_spi::codec;
+    use mkit_server::{Precondition, Write};
+    use std::sync::atomic::Ordering;
+    for absent in [true, false] {
+        let source = Source::build("source", 4).await;
+        let id = dest(&source, "forked");
+        let coordinator = source.shards.coordinator(&id.namespace);
+        let expected = codec::encode_u64(5);
+        if !absent {
+            source
+                .store
+                .inner
+                .apply(
+                    &coordinator,
+                    mkit_server::Batch::new()
+                        .put(keys::authority_generation(), expected.clone())
+                        .put(keys::grant_epoch(), expected.clone()),
+                )
+                .await
+                .unwrap();
+        }
+        let generation = if absent { 0 } else { 5 };
+        mkit_server::fork::start_with(
+            &env(&source),
+            &spec(&source, "forked"),
+            None,
+            Some(FenceV1 {
+                authority_generation: Some(generation),
+                grant_epoch: Some(generation),
+                create_namespace: true,
+            }),
+        )
+        .await
+        .unwrap();
+        source.store.record.store(true, Ordering::SeqCst);
+        assert_eq!(drive(&env(&source), &id).await.unwrap().phase, Phase::Done);
+        let mut phases = Vec::new();
+        for (partition, batch) in source.store.committed.lock().unwrap().iter() {
+            let advancing = batch.writes.iter().find_map(|write| match write {
+                Write::Put(key, value) if *key == keys::fork_job(&id.name) => {
+                    Some(mkit_server::fork::decode_job(value).unwrap())
+                }
+                _ => None,
+            });
+            let Some(job) = advancing else {
+                continue;
+            };
+            assert_eq!(partition, &coordinator);
+            phases.push(job.phase);
+            for key in [keys::authority_generation(), keys::grant_epoch()] {
+                let guard = if absent {
+                    Precondition::Absent(key)
+                } else {
+                    Precondition::Equals(key, expected.clone())
+                };
+                assert!(
+                    batch.preconditions.contains(&guard),
+                    "missing {guard:?} at {:?}",
+                    job.phase
+                );
+            }
+        }
+        for phase in [
+            Phase::Trees,
+            Phase::Walk,
+            Phase::Register,
+            Phase::Copy,
+            Phase::Count,
+            Phase::Accept,
+            Phase::Publish,
+            Phase::Done,
+        ] {
+            assert!(phases.contains(&phase), "unobserved {phase:?}: {phases:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_source_policy_change_before_acceptance_is_uniform_absence() {
+    use mkit_server::store::adapter_spi::codec::{self, RepoVisibilityV1, StoredVisibility};
+    for visibility in [true, false] {
+        let source = Source::build("source", 4).await;
+        let id = dest(&source, "forked");
+        mkit_server::fork::start(&env(&source), &spec(&source, "forked"), None)
+            .await
+            .unwrap();
+        stop_at_fork_phase(&source, &env(&source), &id, Phase::Accept).await;
+        let (key, value) = if visibility {
+            (
+                keys::repo_visibility(&source.repo.name),
+                codec::encode_repo_visibility(&RepoVisibilityV1 {
+                    visibility: StoredVisibility::Private,
+                    last_created_ms: u64::try_from(source.clock.now_ms()).unwrap(),
+                    last_statement_id: Some("ab".repeat(32)),
+                    changed_ms: u64::try_from(source.clock.now_ms()).unwrap(),
+                }),
+            )
+        } else {
+            (
+                keys::repo_visibility_revision(&source.repo.name),
+                codec::encode_u64(1),
+            )
+        };
+        source
+            .store
+            .inner
+            .apply(
+                &source.shards.coordinator(&source.repo.namespace),
+                mkit_server::Batch::new().put(key, value),
+            )
+            .await
+            .unwrap();
+        let job = drive(&env(&source), &id).await.unwrap();
+        assert_eq!(job.phase, Phase::Failed);
+        assert_eq!(job.failure, Some(mkit_server::fork::Failure::NotFound));
+        assert!(job.accepted.is_none());
+        for pack in [source.pack, source.packmap] {
+            assert!(member(&source, &id, pack).await.is_none());
+        }
     }
 }

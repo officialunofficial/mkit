@@ -97,6 +97,7 @@ fn run_proved_ticket(
     let mut req = WriteRequest {
         denial_ids: Some(&ids),
         denial_packs: &[],
+        fork_barrier: false,
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
         repo: &repo.name,

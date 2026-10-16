@@ -1,13 +1,13 @@
 //! The job driver: start, step and the kind-16 timer.
 
 use super::{
-    CONTENT_WINDOW, Failure, FenceV1, ForkEnv, ForkError, ForkJobV1, ForkResult, ForkSpec,
-    JOB_TTL_MS, PackRow, Phase, SLICE_CALLS, SettleV1, binding, closure, copy, decode_job,
-    encode_job, plan, publish, set, sets, settle,
+    CONTENT_WINDOW, Failure, FenceV1, ForkEnv, ForkError, ForkJobV1, ForkSpec, JOB_TTL_MS, PackRow,
+    Phase, SLICE_CALLS, SettleV1, accept, binding, closure, copy, decode_job, encode_job, plan,
+    publish, set, sets, settle,
 };
 use crate::budget::SliceBudget;
 use crate::indexed::budget::Budgeted;
-use crate::repo::{NamespaceKey, RepoId, RepoName};
+use crate::repo::RepoId;
 use crate::store::{
     Batch, BatchOutcome, NamespaceStore, Partition, Precondition, StoreError, Value, keys,
 };
@@ -55,8 +55,8 @@ pub async fn start<S: NamespaceStore>(
 }
 
 /// [`start`] with the authority facts the request was authorized under: the
-/// job re-checks them when it registers the destination, however long after
-/// the request that is.
+/// job compares their exact observations at every advancing coordinator
+/// commit, however long after the request that is.
 ///
 /// # Errors
 /// [`ForkError`].
@@ -87,6 +87,17 @@ pub async fn start_planned<S: NamespaceStore>(
     fence: Option<FenceV1>,
     planned: Option<ForkPlan>,
 ) -> Result<StartOutcome, ForkError> {
+    start_authorized(env, spec, settle, fence, planned, None).await
+}
+
+pub(crate) async fn start_authorized<S: NamespaceStore>(
+    env: &ForkEnv<'_, S>,
+    spec: &ForkSpec,
+    settle: Option<SettleV1>,
+    fence: Option<FenceV1>,
+    planned: Option<ForkPlan>,
+    source_access: Option<super::SourceAccessV1>,
+) -> Result<StartOutcome, ForkError> {
     // A map that cannot list its index shards cannot be forked from or into.
     if env.shards.object_index_partitions(&spec.source).is_empty()
         || env.shards.object_index_partitions(&spec.dest).is_empty()
@@ -111,11 +122,45 @@ pub async fn start_planned<S: NamespaceStore>(
         &spec.source_ref,
         &spec.expected_tip,
     )
-    .await?;
+    .await
+    .map_err(|error| {
+        if source_access.is_some() && error == ForkError::TipChanged {
+            ForkError::NotFound
+        } else {
+            error
+        }
+    })?;
     require_empty(env, &spec.dest, true).await?;
     require_unregistered(env, &spec.dest).await?;
     let now = env.now();
     check_request(env, &p, now, settle.as_ref(), fence.as_ref()).await?;
+    let authority_rows = env
+        .store
+        .get_many(&p, &[keys::authority_generation(), keys::grant_epoch()])
+        .await?;
+    let [authority, epoch]: [_; 2] = authority_rows
+        .try_into()
+        .map_err(|_| ForkError::Unavailable("fork fence read"))?;
+    let mut checked_fence = fence.clone().unwrap_or(super::FenceV1 {
+        authority_generation: None,
+        grant_epoch: None,
+        create_namespace: false,
+    });
+    // Namespace creation permission is still decided at registration; this
+    // snapshot only validates the authority facts retained by the launch.
+    checked_fence.create_namespace = true;
+    copy::fence_guards(
+        &checked_fence,
+        (keys::authority_generation(), authority.as_ref()),
+        (keys::grant_epoch(), epoch.as_ref()),
+    )?;
+    let current_access = super::SourceAccessV1::read(env.store, env.shards, &spec.source).await?;
+    if source_access
+        .as_ref()
+        .is_some_and(|access| *access != current_access)
+    {
+        return Err(ForkError::NotFound);
+    }
     let mut job = new_job(
         spec,
         &view,
@@ -128,8 +173,19 @@ pub async fn start_planned<S: NamespaceStore>(
         }),
         fence,
     );
+    job.fence_rows = super::FenceRowsV1 {
+        authority: authority.map(|v| v.as_bytes().to_vec()),
+        epoch: epoch.map(|v| v.as_bytes().to_vec()),
+    };
+    job.source_access = current_access;
     if let Some(planned) = planned {
-        planned.carry(&view, &mut job)?;
+        planned.carry(&view, &mut job).map_err(|error| {
+            if source_access.is_some() && error == ForkError::TipChanged {
+                ForkError::NotFound
+            } else {
+                error
+            }
+        })?;
     }
     launch(env, &p, job, settle.as_ref()).await
 }
@@ -174,6 +230,9 @@ fn new_job(
         failure: None,
         settle,
         fence,
+        fence_rows: crate::fork::FenceRowsV1::default(),
+        source_access: crate::fork::SourceAccessV1::default(),
+        accepted: None,
         result: None,
     }
 }
@@ -286,6 +345,13 @@ async fn launch<S: NamespaceStore>(
         };
         let mut batch = Batch::new();
         batch.preconditions.extend(pre);
+        batch.preconditions.extend(job.fence_rows.guards(&job));
+        if let Some(settle) = job.settle.as_ref().filter(|s| !s.rid.is_empty()) {
+            batch.preconditions.push(Precondition::Equals(
+                keys::reservation(&settle.rid)?,
+                Value::new(settle.pending.clone()),
+            ));
+        }
         batch.writes.extend(writes);
         let batch = batch
             .require(Precondition::NotAfter(
@@ -338,11 +404,22 @@ async fn create<S: NamespaceStore>(
     match applied {
         BatchOutcome::Committed => Ok(StartOutcome::Started(Box::new(job))),
         BatchOutcome::PreconditionFailed { .. } => {
-            let raw = env
+            let rows = env
                 .store
-                .get(p, key)
-                .await?
-                .ok_or(ForkError::Unavailable(CONTENDED))?;
+                .get_many(
+                    p,
+                    &[
+                        key.clone(),
+                        keys::authority_generation(),
+                        keys::grant_epoch(),
+                    ],
+                )
+                .await?;
+            let [raw, authority, epoch]: [_; 3] = rows
+                .try_into()
+                .map_err(|_| ForkError::Unavailable("fork creation race read"))?;
+            job.fence_rows.check(&job, &[authority, epoch])?;
+            let raw = raw.ok_or(ForkError::Unavailable(CONTENDED))?;
             let existing = decode_job(&raw)?;
             if existing.binding == job.binding {
                 Ok(StartOutcome::Existing(Box::new(existing)))
@@ -515,22 +592,35 @@ pub(super) async fn step_inner<S: NamespaceStore>(
         // A spent allowance reads the job once more outside the budget, only
         // to report it.
         let spent = budget.remaining() < STEP_RESERVE;
-        let raw = if spent {
-            env.store.get(&p, &key).await?
+        let wanted = [
+            key.clone(),
+            keys::authority_generation(),
+            keys::grant_epoch(),
+        ];
+        let rows = if spent {
+            env.store.get_many(&p, &wanted).await?
         } else {
-            store.get(&p, &key).await?
-        }
-        .ok_or(ForkError::Unavailable("fork job missing"))?;
+            store.get_many(&p, &wanted).await?
+        };
+        let [raw, authority, epoch]: [_; 3] = rows
+            .try_into()
+            .map_err(|_| ForkError::Unavailable("fork progress read"))?;
+        let raw = raw.ok_or(ForkError::Unavailable("fork job missing"))?;
+        let fence_rows = [authority, epoch];
         let mut job = decode_job(&raw).map_err(|_| ForkError::Unavailable("fork job corrupt"))?;
         #[cfg(feature = "perf-metrics")]
         trace.note_job(job.phase, job.binding);
-        if job.finished() || spent {
+        let fence_check = job.fence_rows.check(&job, &fence_rows);
+        if job.finished() || (spent && forced.is_none() && fence_check.is_ok()) {
             return Ok(StepReport { job, progressed });
         }
         let before = job.clone();
         let mut outcome = match forced.take() {
             Some(error) => Err(error),
-            None => advance(env, &mut job, budget).await,
+            None => match fence_check {
+                Err(error) => Err(error),
+                Ok(()) => advance(env, &mut job, budget).await,
+            },
         };
         let mut encoded = None;
         if outcome.is_ok() {
@@ -550,9 +640,7 @@ pub(super) async fn step_inner<S: NamespaceStore>(
                 });
             }
             Err(error) => {
-                let Some(failure) = Failure::of(&error) else {
-                    return Err(error);
-                };
+                let failure = terminal_failure(&before, &error)?;
                 job = before.clone();
                 terminate(env, &mut job, &error, failure).await?
             }
@@ -563,6 +651,7 @@ pub(super) async fn step_inner<S: NamespaceStore>(
                 return Ok(StepReport { job, progressed });
             }
         }
+        let effects = progress_guards(effects, &before, &job)?;
         let batch = effects
             .require(Precondition::NotAfter(
                 env.now().saturating_add(CONTENT_WINDOW),
@@ -592,20 +681,53 @@ pub(super) async fn step_inner<S: NamespaceStore>(
                 }
             }
             BatchOutcome::PreconditionFailed { .. } => {
-                // Another driver advanced the job; its state is the truth.
-                // Only committed state is reported.
-                if budget.remaining() < STEP_RESERVE {
-                    return Ok(StepReport {
-                        job: before,
-                        progressed,
-                    });
-                }
+                // Re-read the fence and job together even when the slice was
+                // spent. A moved fence terminates an unaccepted attempt;
+                // otherwise the next iteration retains ordinary CAS handling.
             }
             BatchOutcome::DeadlinePassed { .. } => {
                 return Err(ForkError::Unavailable("fork commit deadline"));
             }
         }
     }
+}
+
+/// Acceptance is terminal; a clearance refusal never rewrites its receipt.
+fn terminal_failure(job: &ForkJobV1, error: &ForkError) -> Result<Failure, ForkError> {
+    if job.accepted.is_some() {
+        return Err(match error {
+            ForkError::Moved(_) | ForkError::Unavailable(_) => error.clone(),
+            _ => ForkError::Unavailable("fork clearance pending"),
+        });
+    }
+    Failure::of(error).ok_or_else(|| error.clone())
+}
+
+/// Recorded authority and reservation facts join the existing coordinator CAS.
+fn progress_guards(
+    mut effects: Batch,
+    before: &ForkJobV1,
+    job: &ForkJobV1,
+) -> Result<Batch, ForkError> {
+    if job.phase != Phase::Failed {
+        effects.preconditions.extend(job.fence_rows.guards(job));
+        if before.accepted.is_none()
+            && let Some(settle) = before.settle.as_ref().filter(|s| !s.rid.is_empty())
+        {
+            let reservation = keys::reservation(&settle.rid)?;
+            if !effects
+                .preconditions
+                .iter()
+                .any(|guard| matches!(guard, Precondition::Equals(key, _) if *key == reservation))
+            {
+                effects.preconditions.push(Precondition::Equals(
+                    reservation,
+                    Value::new(settle.pending.clone()),
+                ));
+            }
+        }
+    }
+    Ok(effects)
 }
 
 /// End the job on a terminal refusal: abort its reservation, drop the scratch
@@ -656,7 +778,7 @@ async fn advance<S: NamespaceStore>(
     budget: &SliceBudget,
 ) -> Result<Batch, ForkError> {
     let now = env.now();
-    if now > job.expires_ms || !settle::current(env, job).await? {
+    if job.accepted.is_none() && (now > job.expires_ms || !settle::current(env, job).await?) {
         return Err(ForkError::Expired);
     }
     match job.phase {
@@ -722,13 +844,14 @@ async fn advance<S: NamespaceStore>(
         Phase::Count => {
             let batch = copy::count(env, job, budget).await?;
             if job.cursor as usize >= job.packs.len() {
-                job.phase = Phase::Publish;
+                job.phase = Phase::Accept;
                 job.cursor = 0;
                 job.part = 0;
                 job.after = None;
             }
             Ok(batch)
         }
+        Phase::Accept => accept::commit(env, job, budget, now).await,
         Phase::Publish => {
             if job.cursor == 0 {
                 // Members are written under guards of their own; a ref that a
@@ -738,25 +861,16 @@ async fn advance<S: NamespaceStore>(
             if !publish::slice(env, job, budget).await? {
                 return Ok(Batch::new());
             }
-            job.result = Some(ForkResult {
-                source: crate::store::repo_storage::identity(
-                    &NamespaceKey::from_stored(job.source_ns.clone()),
-                    &RepoName::new(job.source_repo.clone()).map_err(|_| ForkError::NotFound)?,
-                ),
-                source_ref: job.source_ref.clone(),
-                tip: job.tip,
-                source_sequence: job.source_sequence,
-                packmap: job.packmap,
-                pack_count: job.packs.len() as u64,
-                pack_bytes: job.pack_bytes(),
-                object_count: job.copied,
-                pack_set: job.pack_set(),
-                membership_generation: super::MEMBERSHIP_GENERATION,
-            });
+            job.result.clone_from(&job.accepted);
             job.phase = Phase::Done;
             // The walk's scratch sets go; the cleared set and the inherited
             // base packs stay as the boundary.
-            let committed = settle::commit(env, job, now).await?;
+            let committed = Batch::new()
+                .require(Precondition::Equals(
+                    keys::fork_barrier(&job.dest()?.name),
+                    Value::new(job.binding.to_vec()),
+                ))
+                .delete(keys::fork_barrier(&job.dest()?.name));
             Ok(sets::discard(
                 committed,
                 &job.dest()?.name,
