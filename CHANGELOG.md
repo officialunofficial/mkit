@@ -15,6 +15,14 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Breaking (toward 0.6)
 
+- The conformance profile adds `combined-publication`, `gc`, and
+  `async-inspection`, with feature-gated publication and removal-race cases.
+  Test-control messages add typed publication and reliance observations.
+  Migration: exhaustive `Feature` and control-message matches must handle the
+  new variants; declare only implemented optional features. New optional result
+  fields are omitted when absent. No production wire or stored-format change;
+  no wipe.
+
 - Conformance profiles declare transport writes, authority RPCs, authority
   fencing, fork, and the relay-lag bound. Results distinguish `NotApplicable`
   from declared `Skip`. Migration: declare offered features and handle the new
@@ -33,6 +41,16 @@ collect the applicable entries between their old and new immutable pins.
 - Add the independently versioned `mkit-primitives` ALPHA contract skeleton.
   It defines opaque verification, closure, and guarded-decision types without
   changing existing runtime paths or wire formats. No migration or store reset.
+
+- Published-clearance requirements now state the acceptance boundary,
+  atomic membership and prefix publication, configured Event responsibility,
+  and protection against duplicate settlement. Combined acceptance and
+  clearance are permitted with all clearance guards. Draft embedding
+  composition declares atomic domains without requiring a Rust API.
+  GC reliance fences permit per-member mark clearing or a repository reliance
+  version; membership witnesses enumerate removal invalidation and retain
+  independent policy checks. No production wire, runtime, or stored-format
+  change; no wipe.
 
 - Protocol acceptance and recovery requirements now distinguish portable
   guarantees from reference-server mechanisms. Fork acceptance requires a final
@@ -1091,6 +1109,14 @@ collect the applicable entries between their old and new immutable pins.
   URL-token reads, supplied hooks, cold outcome retry and injected slice recovery.
 
 ### Breaking (toward 0.6)
+
+- The conformance profile adds `combined-publication`, `gc`, and
+  `async-inspection`, with feature-gated publication and removal-race cases.
+  Test-control messages add typed publication and reliance observations.
+  Migration: exhaustive `Feature` and control-message matches must handle the
+  new variants; declare only implemented optional features. New optional result
+  fields are omitted when absent. No production wire or stored-format change;
+  no wipe.
 
 - Unstable CLI library API: `remote_dispatch::open_trusted` returns `Remote`
   instead of `Arc<dyn Transport>`. Migration: use `Remote::with_source` to lend

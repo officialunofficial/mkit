@@ -61,6 +61,47 @@ conformance crate's two tiers cover wire replay and controlled acceptance
 snapshots/restarts. The retained-memory reference test host declares process
 kill recovery unsupported; persistent guarantees require a persistent host.
 
+## Published clearance preserves acceptance and the eligible prefix
+
+**Protocol requirement:** clearance atomically publishes eligible added
+membership and the greatest contiguous eligible ref prefix, preserving the
+head/packmap pair and deletion boundary. A configured publication Event and its
+durable delivery responsibility belong to that pointer-changing unit. Clearance
+never repeats acceptance charges, ticket consumption, terminal outcomes, or
+settlement. Combined acceptance and clearance carry all guards of both decisions.
+
+**Because:** readers may observe publication after acceptance and after restart.
+A delayed verdict must not resurrect a deleted ref or create a second payment.
+
+**If violated:** fail clearance or re-plan without exposing the ineligible
+prefix; preserve the original acceptance and its settlement responsibility.
+
+**Enforcement:** SPEC-SERVER §10.2 and the conformance coverage table define
+portable snapshot, restart, prefix, deletion, and combined-race cases. Reference
+publication storage and recheck tests enforce the implemented membership and
+prefix rules. Configured lifecycle Events and asynchronous inspection holds
+remain conditional requirements pending their integration.
+
+## Membership witnesses pair removal invalidation with a reliance fence
+
+**Protocol requirement:** a generation/removal-version witness guards retained
+usable membership only when every removal or inspection serving stop invalidates
+it atomically. Repository lease deletion invalidates the generation; per-ref
+deletion preserves shared membership. Independent authorization, lease, and
+denial checks retain their own freshness. New reliance defeats a stale GC drop
+through per-member mark clearing or a guarded repository reliance version.
+
+**Because:** unchanged membership records alone do not prove usable membership,
+and a new ref may rely on a member without modifying that member's record.
+
+**If violated:** reject or re-plan the stale acceptance or removal proposal;
+never retain an accepted ref whose required member was removed by that race.
+
+**Enforcement:** SPEC-SERVER §13.3 enumerates removal events and both reliance
+mechanisms. The reference design uses per-member mark clearing. Portable GC and
+inspection races are conditional on the server offering those features; retained
+inspection storage groundwork alone does not implement them.
+
 ## Fork acceptance gates destination activation
 
 **Protocol requirement:** a server offering fork stages membership without a

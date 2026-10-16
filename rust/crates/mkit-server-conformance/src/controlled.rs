@@ -79,7 +79,7 @@ impl ControlClient {
         serde_json::from_slice(&reply.body).map_err(|e| e.to_string())
     }
 
-    async fn observe(&self, query: &ObservationQuery) -> Result<Observation, String> {
+    pub(crate) async fn observe(&self, query: &ObservationQuery) -> Result<Observation, String> {
         self.command(&Request::Observe {
             query: query.clone(),
         })
@@ -144,8 +144,146 @@ const FORK: &[Feature] = &[
     Feature::MultiRepo,
 ];
 
+const PUBLICATION: &[Feature] = &[
+    Feature::TransportWrites,
+    Feature::AuthV2,
+    Feature::Replay,
+    Feature::AtomicAdvance,
+    Feature::Tickets,
+    Feature::IndexedMode,
+];
+
+const COMBINED_PUBLICATION: &[Feature] = &[
+    Feature::TransportWrites,
+    Feature::AuthV2,
+    Feature::Replay,
+    Feature::AtomicAdvance,
+    Feature::Tickets,
+    Feature::IndexedMode,
+    Feature::CombinedPublication,
+];
+
+const GC_RELIANCE: &[Feature] = &[
+    Feature::TransportWrites,
+    Feature::AuthV2,
+    Feature::Replay,
+    Feature::AtomicAdvance,
+    Feature::Tickets,
+    Feature::IndexedMode,
+    Feature::Gc,
+];
+
+const INSPECTION_RELIANCE: &[Feature] = &[
+    Feature::TransportWrites,
+    Feature::AuthV2,
+    Feature::Replay,
+    Feature::AtomicAdvance,
+    Feature::Tickets,
+    Feature::IndexedMode,
+    Feature::AsyncInspection,
+];
+
 /// Tier-2 registry. Composition cases are planned until its seam exists.
 pub const CASES: &[Case] = &[
+    Case {
+        name: "publication.deferred_restart_no_resettlement",
+        controls: &[
+            "observe.publication",
+            "publication.eligibility",
+            "publication.drive",
+            "fixture.indexed_refs",
+            "fixture.ref_reservation",
+            "restart.graceful",
+            "pause.before_published_clearance",
+            "clock.advance",
+        ],
+        features: PUBLICATION,
+    },
+    Case {
+        name: "publication.out_of_order_prefix",
+        controls: &[
+            "observe.publication",
+            "publication.eligibility",
+            "publication.drive",
+            "fixture.indexed_refs",
+            "fixture.ref_reservation",
+            "clock.advance",
+        ],
+        features: PUBLICATION,
+    },
+    Case {
+        name: "publication.deletion_boundary",
+        controls: &[
+            "observe.publication",
+            "publication.eligibility",
+            "publication.drive",
+            "fixture.indexed_refs",
+            "fixture.ref_reservation",
+            "clock.advance",
+        ],
+        features: PUBLICATION,
+    },
+    Case {
+        name: "publication.combined_acceptance",
+        controls: &[
+            "observe.publication",
+            "publication.eligibility",
+            "publication.drive",
+            "fixture.indexed_refs",
+            "fixture.ref_reservation",
+        ],
+        features: COMBINED_PUBLICATION,
+    },
+    Case {
+        name: "publication.combined_deletion_race",
+        controls: &[
+            "observe.publication",
+            "publication.eligibility",
+            "publication.drive",
+            "fixture.indexed_refs",
+            "fixture.ref_reservation",
+            "pause.before_acceptance",
+        ],
+        features: COMBINED_PUBLICATION,
+    },
+    Case {
+        name: "reliance.gc_drop_before_acceptance",
+        controls: &[
+            "observe",
+            "reliance.fixture",
+            "reliance.observe",
+            "fixture.ref_reservation",
+            "pause.before_acceptance",
+            "gc.prepare_drop",
+            "gc.commit_drop",
+        ],
+        features: GC_RELIANCE,
+    },
+    Case {
+        name: "reliance.gc_drop_after_acceptance",
+        controls: &[
+            "observe",
+            "reliance.fixture",
+            "reliance.observe",
+            "fixture.ref_reservation",
+            "pause.before_acceptance",
+            "gc.prepare_drop",
+            "gc.commit_drop",
+        ],
+        features: GC_RELIANCE,
+    },
+    Case {
+        name: "reliance.verdict_hide_delta_base",
+        controls: &[
+            "observe",
+            "reliance.fixture",
+            "reliance.observe",
+            "fixture.ref_reservation",
+            "pause.before_acceptance",
+            "inspection.hide_member",
+        ],
+        features: INSPECTION_RELIANCE,
+    },
     Case {
         name: "authority.setter_disabled",
         controls: &[],
@@ -1046,6 +1184,12 @@ async fn authority_setter(control: &ControlClient, enabled: bool) -> Result<(), 
 
 async fn execute_case(name: &str, ctx: Ctx, control: &ControlClient) -> Result<(), Failure> {
     match name {
+        name if name.starts_with("publication.") => {
+            crate::controlled_publication::run(name, ctx, control).await
+        }
+        name if name.starts_with("reliance.") => {
+            crate::controlled_reliance::run(name, ctx, control).await
+        }
         "authority.setter_disabled" => authority_setter(control, false).await,
         "authority.setter_enabled" => authority_setter(control, true).await,
         "acceptance.before_acceptance_restart" => {

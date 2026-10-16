@@ -15,6 +15,8 @@
 pub mod control;
 pub mod controlled;
 mod controlled_fork;
+mod controlled_publication;
+mod controlled_reliance;
 #[cfg(feature = "storage-spi")]
 mod reference_support;
 #[cfg(feature = "storage-spi")]

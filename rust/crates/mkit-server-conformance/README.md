@@ -86,6 +86,14 @@ The `operation` discriminator and fields are:
 | `resume` | none | Release the barrier, including after failure. |
 | `restart` | `mode` | `graceful` drains accepted commands or preserves recovery responsibility; `kill` terminates the hosted process where supported. Capabilities `restart.graceful` and `restart.kill` are separate. Origin, store identity, configuration, and replay identities survive within the declared durability profile. |
 | `observe` | `query` | One atomic authoritative acceptance snapshot; `observe`. |
+| `observe_publication` | `query: { acceptance: ObservationQuery }` | Atomically observe acceptance, live and published sequences, published pair, deletion boundary, and published memberships; `observe.publication`. |
+| `set_publication_eligibility` | `repository`, `head`, `eligible` | Hold or release eligibility of future decisions on this branch; `publication.eligibility`. This does not claim an integrated asynchronous inspector. |
+| `drive_publication` | `repository`, `head` | Drive outstanding real clearance without replaying acceptance; `publication.drive`. |
+| `prepare_reliance` | `query: { repository, head, signer }` | Establish a valid accepted unique base and return unpublished dependent candidate bytes; `reliance.fixture`. |
+| `prepare_gc_drop` | `repository`, `pack` | Capture the genuine recheck proof without removing the member; `gc.prepare_drop`. |
+| `commit_gc_drop` | `repository`, `pack` | Attempt that original guarded drop; `gc.commit_drop`. Return `gc_drop_result: committed` or `conflict`, never a case verdict. |
+| `hide_member` | `repository`, `pack` | Commit an inspection verdict or hold preventing reliance; `inspection.hide_member`. |
+| `observe_reliance` | `query: ObservationQuery` | Atomically observe acceptance and each selected member's usability for delta bases and closure; `reliance.observe`. |
 | `prepare_fork` | `query` | Seed a valid published source without creating or starting the destination; `fork.fixture`. |
 | `observe_fork` | `query` | One atomic authoritative fork snapshot; `fork.observe`. |
 | `change_fork_source` | `query`, `change` | Commit a source change for a prepared fork; `fork.source_change.<change>`. Never modify the destination. |
@@ -93,7 +101,9 @@ The `operation` discriminator and fields are:
 Success is HTTP 200 with `control::Response` JSON. Unsupported controls return
 HTTP 501 without mutation. Rejected requests return a 4xx response without mutation.
 The response has optional `authority_namespace`, `authority_statement`, `observation`, `now_ms`, `generation`, `fork_fixture`,
-and `fork_observation`, plus `paused`. Clock controls do not advance monotonic
+`fork_observation`, `publication_observation`, `reliance_fixture`,
+`reliance_observation`, and `gc_drop_result`, plus `paused`. New optional fields
+are omitted when absent. Clock controls do not advance monotonic
 execution budgets or simulate durability.
 
 The four boundaries come from [SPEC-SERVER §18.1](../../../docs/specs/SPEC-SERVER.md#181-protocol-conformance-tiers):
@@ -155,8 +165,9 @@ rejection classes. A replay fingerprint binds the original signed request.
 The acceptance fixture uses opaque packs and arbitrary ref targets, advertised
 as `fixture.opaque_refs`. An indexed-only test configuration cannot advertise
 that fixture; its missing capability is a visible coverage gap. The reference
-control host uses unsharded opaque mode. Ordinary indexed wire cases remain in
-Tier 1; publication-control fixtures are tracked separately.
+control host supports unsharded opaque and indexed modes. Indexed profiles use
+real signed uploads and advances for publication-control fixtures. Ordinary
+indexed wire cases remain in Tier 1.
 
 A fork fixture query contains `destination`, `signer`, and `source_head`.
 `prepare_fork` returns `fork_fixture` with the source repository and head,
@@ -200,6 +211,32 @@ The bridge calls the server's ordinary authenticated fork path. Fixture setup
 and snapshots do not replace the cases' destination read/write probes. This
 bridge is outside the public transport, like the other controls.
 
+Publication observations include the original acceptance snapshot plus
+`published_head`, `published_packmap`, `live_sequence`, `published_sequence`,
+`deletion_boundary`, and `published_memberships` in query order. These values
+MUST coexist at one authoritative observation point. The snapshot reports
+published membership itself, rather than an eventually consistent projection.
+Eligibility controls affect future prepares; clearance driving only releases
+outstanding work for the selected branch. A server can use separate clearance
+and leave `combined-publication` undeclared.
+
+The reliance fixture MUST seed its base through a valid accepted operation and
+keep the candidate branch absent. Before the race, the base has no live or
+retained publication root, ticket pin, or hold that independently forbids its
+prepared GC drop; its accepted membership remains usable. The fixture may
+delete its seeding ref through a valid operation to establish this state.
+Its returned `pack` contains an external delta
+base available only in `base_pack`; `head` identifies the candidate object.
+`packmap_pack` is an independent canonical packlist containing the candidate and
+base, with ID `packmap`. The runner uploads and accepts the candidate through
+signed wire requests. Removal controls never supply an acceptance result. The
+prepared GC attempt retains its original recheck proof across the competing
+acceptance; a later fresh recheck is outside this race. Hiding the unique base
+supplies no replacement and does not change the repository generation. Fixture
+bytes are bounded to 1 MiB each. `gc` declares repository membership GC;
+`async-inspection` declares verdicts or holds that can hide relied-on members.
+Neither is inferred from the unrelated lease or synchronous-inspector flags.
+
 A case requiring an unsupported control is a **declared skip** only when its
 stable case name appears with a nonempty reason in the runner's expected-skip
 map. An undeclared skip fails; a declared case that passes also fails, so stale
@@ -214,8 +251,13 @@ local authority fencing. It supports the first two boundaries for
 the pipeline and cancels old request futures on restart. It declares
 `restart.kill` unsupported because retained memory does not prove process,
 disk, host, or zone recovery. It also declares `pause.after_response` unsupported
-because the client observes receipt, and `pause.before_published_clearance`
-unsupported because its opaque fixture has no deferred publication decision.
+because the client observes receipt. Indexed profiles support
+`pause.before_published_clearance`, publication observations, eligibility, and
+scoped real clearance driving. Opaque profiles declare these controls
+unsupported. Indexed profiles advertise `combined-publication` because eligible
+acceptance already includes publication. Repository GC and asynchronous
+inspection are not integrated in this host: `gc` and `async-inspection` remain
+undeclared, and their removal controls return HTTP 501 without mutation.
 The original `TestHost` remains available without these control routes.
 
 The reference control host declares fork fixture, invocation, and observation
@@ -291,13 +333,17 @@ apply when a server offers the feature.
 | Source denial after acceptance does not invalidate its result, replay or terminal responsibility (§9.9) | Protocol requirement when fork is offered | **Declared skip:** `fork.source_denied_after_acceptance`; the reference final-proof/guarded-acceptance boundary is unavailable. |
 | Source proof retains admitted membership generation and ordering for changes between proof and acceptance (§9.9) | Protocol requirement when fork is offered | **Planned:** dedicated generation-only mutation and post-proof/pre-commit race cases; source move/unpublication/read-revocation/pack-denial cases cover the decided before-proof and after-acceptance boundaries. |
 | Fork source authorization, source visibility consistency, admission bounds, isolation, and recovery remain guarded (§9.9) | Protocol requirement when fork is offered | **Planned:** independent initial authorization, pre-construction visibility-race refusal, admission/join, discarded-attempt re-admission and charge accounting, reservation expiry, destination takedown, and retained-evidence cases. The existing `fork.driver_probe` measures construction and does not establish these guarantees. |
-| Published clearance atomically establishes eligible membership and the largest eligible prefix, preserving the pair/deletion boundary and configured event, without settling acceptance again (§10.2) | Protocol requirement | **Planned for the second conformance PR:** hold, accept, restart, clear, event, and no-second-settlement cases using `before_published_clearance`. Current reference publication audits are supporting evidence only. |
-| Namespaced embedding guards, evidence, and durable responsibilities commit with acceptance or clearance within a declared atomic domain | Protocol requirement in the draft composition profile, pending architecture review | **Planned for the second conformance PR and composition seam:** independent commit/abort and declared-domain cases. Composition is planned, not a declared skip; no existing binding claims support. |
+| Published clearance atomically establishes eligible membership and the largest eligible prefix, preserves the pair and deletion boundary, and never settles acceptance again (§10.2) | Protocol requirement | **Cases:** `publication.deferred_restart_no_resettlement`, `publication.out_of_order_prefix`, and `publication.deletion_boundary`; real wire acceptance, restart before replay, atomic snapshots, paused clearance, repeated driving, and original replay. Negative HTTP proxies reject torn publication and duplicate terminal responsibility. |
+| Configured publication Events share the pointer-changing clearance unit and identify the resulting prefix; membership-only clearance emits none (§§10.2, 12.4) | Protocol requirement when configured | **Planned:** authoritative configured-Event snapshot and interrupted delivery cases. The reference server has no configured lifecycle Event sink; the binding never fabricates Event evidence. |
+| Acceptance may include eligible clearance with every clearance fact guarded (§10.2) | Protocol permission when combined publication is offered | **Cases:** `publication.combined_acceptance` and `publication.combined_deletion_race`, gated on `combined-publication`. A real delete and recreation changes the deletion boundary before the candidate applies. |
+| Namespaced embedding guards, evidence, and durable responsibilities commit with acceptance or clearance within a declared atomic domain (§10.4) | Protocol requirement in the draft composition profile, pending architecture review | **Planned:** independent commit/abort, failed guard, declared-domain, replay short circuit, and clearance-without-acceptance-resettlement cases once a composition seam exists. Composition is planned, not a declared skip; no existing binding claims support. |
 | Every reader applies the published view, current visibility, repository membership, and denial; hidden state answers uniformly absent (§§9.4, 10.1, 10.3) | Protocol requirement | **Case:** Tier 1 `reads.private_not_found_byte_identical`, private owner/grant cases, repository isolation, and public/private file readback. **Planned:** independent publication/denial changes across every read surface and retained-history continuation. |
 | Inspection and private scanner retrieval preserve current ticket, membership, generation, denial, and publication guards (§11) | Protocol requirement when inspection is offered | **Case:** existing Tier 1 inspection refusal cases cover ordinary answers. **Planned:** independent scanner-capability, backend-await, resolution, replay, cancellation, and stale-evidence races. |
 | Inspection inputs and fail-closed launch configuration obey the advertised bounds; deferred full-profile batching does not weaken guards (§§11.1–11.3, 18) | Protocol requirement for the selected inspection profile | **Case:** Tier 1 `launch.inspection_rejects_advance` covers configured refusal. **Planned:** independent complete inspected-set, input-bound, scanner startup, asynchronous resolution, and deferred full-profile batching cases. |
 | Lease-change completion prevents later use of stale cached terms or authority (§12) | Protocol requirement when storage leases are offered | **Planned:** independent cache/lease staleness and bounded-completion tests. Namespace epoch-lease wire cases cover a different feature. |
 | GC retains every live, published, uncleared, ticket, hold, replacement, and preservation root; incomplete discovery fails closed (§13) | Protocol requirement when GC is offered | **Planned:** portable root snapshots, concurrent acquisition/removal, membership drop, global deletion, and restart/recovery cases. Reference key/mark/holder audits remain supporting evidence only. |
+| A newly relying acceptance defeats an earlier GC drop proposal through mark clearing or a repository reliance version (§13.3) | Protocol requirement when GC is offered | **Cases:** `reliance.gc_drop_before_acceptance` and `reliance.gc_drop_after_acceptance`, gated on `gc`. They force both orders of a prepared drop and a real signed dependent acceptance. The reference profile does not offer integrated GC; cases are not applicable. |
+| Membership generation and removal version guard every relied-on member's continued usability, paired with the reliance fence (§13.3.1) | Protocol requirement when this witness is used | **Case:** `reliance.verdict_hide_delta_base`, gated on `async-inspection`; a real verdict races a signed external-delta acceptance. **Audit:** removal inventory includes §§11.2–11.3, 12.2, 13.3–13.4, and 14.4; per-ref deletion changes neither version. Independent denial, lease, and authorization guards remain required. The reference profile does not offer asynchronous member hiding. |
 | Takedown discovers all affected members, including inherited and external-base dependencies, and preserves current denial during rewrite/substitution (§14) | Protocol requirement when takedown is offered | **Case:** Tier 1 `takedown.contract` and `takedown.persisted_denial` cover immediate and persisted denial. **Planned:** independent discovery completeness, rewrite, preservation, replacement, and recovery races. |
 | Restore/recovery preserves authoritative fences, unresolved work, replay, and denial (§§6.2.1, 14.9, 17) | Protocol requirement for the offered recovery profile | **Planned:** independent import/restore and interrupted-recovery cases; reference layout export/import audits do not certify protocol recovery. |
 | Admin replay completes the original operation and audit responsibility survives interruption (§16) | Protocol requirement when admin is offered | **Case:** the takedown contract checks restricted admin status. **Planned:** independent interrupted admin acceptance, operation replay, audit completion, and recovery cases. |

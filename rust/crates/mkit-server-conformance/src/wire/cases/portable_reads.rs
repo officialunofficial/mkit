@@ -463,7 +463,7 @@ pub(super) async fn byte_names(ctx: Ctx) -> CaseResult {
     roundtrip(&ctx, &files, true).await
 }
 
-pub(super) fn single_file_pack(path: &[u8], data: &[u8]) -> Result<(Vec<u8>, Hash, Hash), Failure> {
+pub(crate) fn single_file_pack(path: &[u8], data: &[u8]) -> Result<(Vec<u8>, Hash, Hash), Failure> {
     let fixture = Fixture::new(&[(vec![path.to_vec()], data.to_vec())])?;
     let id = fixture.lookup(&[path.to_vec()])?;
     Ok((

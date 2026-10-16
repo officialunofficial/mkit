@@ -257,6 +257,76 @@ pub struct ForkObservation {
     pub outcome: Option<ReservationView>,
 }
 
+/// Select a published-clearance observation using protocol identities.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublicationQuery {
+    /// Acceptance state and packs whose reader-visible membership is asserted.
+    pub acceptance: ObservationQuery,
+}
+
+/// Acceptance and publication values that coexisted at one observation point.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublicationObservation {
+    /// Original acceptance evidence, unaffected by later clearance.
+    pub acceptance: Observation,
+    /// Reader-visible head object ID, or absent.
+    pub published_head: Option<String>,
+    /// Reader-visible paired packmap ID, or absent.
+    pub published_packmap: Option<String>,
+    /// Accepted branch sequence.
+    pub live_sequence: u64,
+    /// Largest eligible reader-visible prefix.
+    pub published_sequence: u64,
+    /// Latest accepted deletion boundary.
+    pub deletion_boundary: u64,
+    /// Published memberships in the acceptance query's pack order.
+    pub published_memberships: Vec<bool>,
+}
+
+/// Request an accepted base and a new, unpublished external-delta candidate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelianceFixtureQuery {
+    /// Fresh repository identity owned by the fixture signer.
+    pub repository: String,
+    /// Candidate branch, initially absent.
+    pub head: String,
+    /// Candidate signing public key in envelope spelling.
+    pub signer: String,
+}
+
+/// Canonical candidate bytes relying on exactly one accepted external base.
+/// The binding establishes the base through a valid accepted operation; it
+/// MUST NOT accept the candidate or create the candidate branch. The base
+/// remains usable but has no independent root, pin, or hold forbidding the
+/// prepared GC drop; a real deletion may remove its original seeding ref.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelianceFixture {
+    /// Accepted, usable base pack, lowercase hex.
+    pub base_pack: String,
+    /// Candidate canonical pack bytes with an external delta base in `base_pack`.
+    pub pack: Vec<u8>,
+    /// Candidate head object ID, lowercase hex.
+    pub head: String,
+    /// Canonical candidate packmap bytes.
+    pub packmap_pack: Vec<u8>,
+    /// Candidate packmap ID, lowercase hex.
+    pub packmap: String,
+}
+
+/// Acceptance and usable-membership evidence from one authoritative snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelianceObservation {
+    /// Candidate acceptance evidence.
+    pub acceptance: Observation,
+    /// Usability for delta-base and closure reliance, in query pack order.
+    pub usable_memberships: Vec<bool>,
+}
+
 /// Commands operate only on an isolated test fixture. Unsupported commands
 /// return HTTP 501 and mutate nothing. Successful commands return HTTP 200.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -297,6 +367,35 @@ pub enum Request {
     Restart { mode: String },
     /// Read one atomic, typed authoritative snapshot.
     Observe { query: ObservationQuery },
+    /// Observe acceptance and publication in one authoritative snapshot.
+    /// Requires `observe.publication`.
+    ObservePublication { query: PublicationQuery },
+    /// Control publication eligibility for future decisions on this branch.
+    /// This does not assert integration of asynchronous inspection holds.
+    /// Requires `publication.eligibility`.
+    SetPublicationEligibility {
+        repository: String,
+        head: String,
+        eligible: bool,
+    },
+    /// Drive outstanding clearance for this branch without replaying acceptance.
+    /// Requires `publication.drive`.
+    DrivePublication { repository: String, head: String },
+    /// Establish an accepted base and return an unpublished dependent candidate.
+    /// Requires `reliance.fixture`.
+    PrepareReliance { query: RelianceFixtureQuery },
+    /// Capture the genuine GC recheck proof, without dropping the member.
+    /// Requires `gc.prepare_drop`.
+    PrepareGcDrop { repository: String, pack: String },
+    /// Attempt that prepared GC drop with its original reliance fence.
+    /// Requires `gc.commit_drop`; returns `committed` or `conflict`.
+    CommitGcDrop { repository: String, pack: String },
+    /// Commit a real inspection verdict or hold that prevents member reliance.
+    /// Requires `inspection.hide_member`.
+    HideMember { repository: String, pack: String },
+    /// Observe acceptance and membership usability atomically.
+    /// Requires `reliance.observe`.
+    ObserveReliance { query: ObservationQuery },
     /// Seed a deterministic valid source without creating the destination.
     PrepareFork { query: ForkFixtureQuery },
     /// Read one atomic, layout-independent fork snapshot.
@@ -319,6 +418,18 @@ pub struct Response {
     pub authority_statement: Option<String>,
     /// Observation, only for `observe`.
     pub observation: Option<Observation>,
+    /// Atomic publication snapshot, only for `observe_publication`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication_observation: Option<PublicationObservation>,
+    /// External-delta fixture, only for `prepare_reliance`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reliance_fixture: Option<RelianceFixture>,
+    /// Actual prepared GC drop result: `committed` or `conflict`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gc_drop_result: Option<String>,
+    /// Atomic reliance snapshot, only for `observe_reliance`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reliance_observation: Option<RelianceObservation>,
     /// True once an armed operation is held at the named step.
     pub paused: bool,
     /// Current clock, for clock commands.
