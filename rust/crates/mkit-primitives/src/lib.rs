@@ -26,6 +26,8 @@ commonware_macros::stability_mod!(ALPHA, pub mod pack_verify);
 commonware_macros::stability_mod!(ALPHA, pub mod closure);
 // decision
 commonware_macros::stability_mod!(ALPHA, pub mod decision);
+// auth
+// replay
 // Private shared decode infrastructure, activated by encoded implementations.
 #[cfg(any(
     test,
