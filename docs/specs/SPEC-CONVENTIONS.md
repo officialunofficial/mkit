@@ -15,7 +15,8 @@ those documents lean on so each one doesn't have to restate them.
 Scope: RFC 2119/8174 keyword usage (§1), the frontmatter status
 vocabulary and versioning posture (§2), shared wire-encoding notation
 (§3), domain-separator/namespace naming (§4), golden-vector citation
-conventions (§5), and the no-vendor-references rule (§6).
+conventions (§5), the no-vendor-references rule (§6), and requirement
+classification (§7).
 
 ---
 
@@ -132,3 +133,40 @@ spec's normative text. This keeps a spec usable by an independent,
 non-Rust implementation and keeps it from silently going stale the
 moment mkit's own internal factoring changes without the contract
 changing.
+
+## 7. Requirement classification
+
+**Protocol requirement.** Classify a rule by who relies on it. A rule is a
+protocol requirement when a client, verifier, or another conforming server
+relies on it regardless of the operator's product choices. An optional feature
+creates a conditional requirement: "a server that offers X MUST ...".
+Protocol requirements apply to every conforming server offering that feature.
+They do not prescribe the reference server's implementation.
+
+Protocol requirements MUST be layout-independent and orchestration-independent.
+They specify observable decisions, atomicity, durability, ordering, and refusal
+classes that any conforming implementation can test. They MUST NOT require
+shards, partitions, coordinators, internal key classes, work slices, phases,
+timers, call budgets, or chain limits. A published wire field that advertises
+an implementation limit remains a protocol field; the implementation's chosen
+limit and mechanism remain reference-server behavior. Optional-feature
+requirements MUST state the feature condition rather than assume a particular
+server orchestration. Other servers need only the protocol specifications,
+conformance tiers 1 and 2, and pure protocol primitives; they do not depend on
+mkit-server.
+
+**Reference-server behavior.** A mechanism, storage layout, or implementation
+limit of mkit-server is reference-server behavior. It does not become a
+protocol requirement merely because the reference server implements it.
+Reference details MUST NOT substitute for an observable safety requirement.
+For example, atomic acceptance is a protocol requirement; implementing it with
+one storage transaction is a reference mechanism. A reference mechanism's
+source documentation supplies internal layouts and APIs (§6).
+
+**Protocol requirement.** Authors MUST mark new or revised behavioral sections with
+`**Protocol requirement.**` or `**Reference-server behavior.**` at the start.
+A marker covers the following paragraphs until the next marker or heading.
+Mixed sections MUST mark each scope separately. A draft protocol requirement
+also carries its draft status; draft maturity does not make a reference
+mechanism normative. Existing unmarked sections retain their documented
+status pending classification when revised.

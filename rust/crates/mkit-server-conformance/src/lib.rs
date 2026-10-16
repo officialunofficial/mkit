@@ -1,74 +1,23 @@
 #![forbid(unsafe_code)]
 // Cases take their harness by value so every case future is `'static`.
 #![allow(clippy::needless_pass_by_value)]
-//! Conformance suites for `mkit-server` storage backends and for
-//! `mkit.transport.v1` servers (PRD §5.1, §5.3).
+//! Portable conformance for any implementation of the mkit protocol.
 //!
-//! [`wire`] is the black-box wire suite: it drives any server over HTTP
-//! from a base URL and a profile, and ships as the
-//! `mkit-server-conformance wire` binary. The rest of this page is about
-//! the storage suite.
+//! [`wire`] is Tier 1 (ordinary HTTP); [`controlled`] is Tier 2 (versioned
+//! test controls and typed atomic observations). Neither surface requires
+//! reference-server types. Both run against a base URL and wire profile.
 //!
-//! [`storage`] holds generic cases for the key-level
-//! [`NamespaceStore`](mkit_server::NamespaceStore) contract (its eight
-//! normative rules, including the `NotAfter` commit deadline), the
-//! [`BlobStore`](mkit_server::BlobStore) contract, the
-//! [`ContentIndex`](mkit_server::ContentIndex) layer, cancellation and
-//! crash/restart atomicity, and the portable export/import.
-//!
-//! **This suite is the gate for third-party backends** (PRD §5.3): SQL
-//! stores, Durable Objects, and non-SQL single-writer key-value stores such
-//! as qmdb alike. A backend passes iff every case that is not skipped
-//! passes and every skip is declared. A case skips only when the backend's
-//! [`StoreCapabilities`](mkit_server::StoreCapabilities) exclude what it
-//! tests, and before skipping it checks that the excluded operation returns
-//! [`StoreError::Unsupported`](mkit_server::StoreError::Unsupported) and
-//! writes nothing; or when the harness cannot build the store the case needs
-//! (an injectable clock, a capacity cap, a persistent reopen), which it
-//! reports with a reason. The harness declares its skips
-//! ([`storage::KvHarness::expected_skips`]): an undeclared skip fails, and
-//! so does a declared case that passes.
-//!
-//! A backend implements [`storage::KvHarness`] (and passes any
-//! `Fn() -> impl BlobStore` as a blob harness), then invokes
-//! [`storage_suite!`] from its `tests/` directory. Each case becomes its
-//! own `#[test]`, named `<module>::<case>`, so a failure names the case.
-//! A runner that cannot use the macro iterates [`storage::kv_cases()`] and
-//! [`storage::blob_cases`] instead, on any executor (the case futures need
-//! no particular runtime), and judges each with [`storage::verdict`].
-//!
-//! ```
-//! use std::sync::Arc;
-//!
-//! use mkit_server::{Clock, MemoryBlobStore, MemoryKv};
-//! use mkit_server_conformance::storage::KvHarness;
-//!
-//! struct Memory;
-//!
-//! impl KvHarness for Memory {
-//!     type Store = MemoryKv;
-//!
-//!     fn store(&self) -> MemoryKv {
-//!         MemoryKv::default()
-//!     }
-//!
-//!     fn store_with_clock(&self, clock: Arc<dyn Clock>) -> Option<MemoryKv> {
-//!         Some(MemoryKv::with_clock(clock))
-//!     }
-//!
-//!     // No capacity cap and no persistent reopen: those cases skip.
-//!     fn expected_skips(&self) -> &'static [&'static str] {
-//!         &[
-//!             "kv_full_store_rejects_writes_but_serves_reads_and_deletes",
-//!             "dur_crash_restart_atomic_at_last_commit",
-//!         ]
-//!     }
-//! }
-//!
-//! mkit_server_conformance::storage_suite!(memory, kv = Memory, blob = MemoryBlobStore::default);
-//! # fn main() {}
-//! ```
+//! Enable `storage-spi` for the optional reference storage adapter suite,
+//! `storage_suite!` macro, and its declared-skip harness. Other server
+//! implementations do not need that feature or a dependency on mkit-server.
+//! `test-host` adds a debug-only reference host; production builds reject it.
 
+pub mod control;
+pub mod controlled;
+mod controlled_fork;
+#[cfg(feature = "storage-spi")]
+mod reference_support;
+#[cfg(feature = "storage-spi")]
 pub mod storage;
 #[cfg(feature = "stubs")]
 pub mod stubs;
@@ -82,6 +31,7 @@ pub mod wire;
 compile_error!("mkit-server-conformance's test-host feature is unavailable in release builds");
 
 #[doc(hidden)]
+#[cfg(feature = "storage-spi")]
 pub mod __private {
     use core::future::Future;
 

@@ -106,7 +106,7 @@ if not features:
     err("no compiler-artifact messages: was the build run with --message-format=json*?")
 
 for name, feats in sorted(features.items()):
-    for seam in ("__test-faults", "test-faults", "stubs"):
+    for seam in ("__test-faults", "test-faults", "stubs", "test-host"):
         if seam in feats:
             err(f"{name} was compiled with the `{seam}` test seam")
 
@@ -174,6 +174,7 @@ scan() {
 scan 'sqlite3_' 'SQLite linked into mkit'
 scan 'x-mkit-test-' 'test-faults seam compiled in'
 scan '/__stub/' 'MPP stub control plane compiled in'
+scan '/__mkit_test/' 'test-control routes compiled in'
 scan 'TEST_OUTBOX_BACKLOG_ROWS' 'test-only Worker backlog var compiled in'
 scan 'TEST_TICKET_TTL_MS' 'test-only Worker ticket var compiled in'
 

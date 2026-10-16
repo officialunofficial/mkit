@@ -29,6 +29,14 @@ struct Cli {
 enum Command {
     /// Run the black-box wire suite against a `mkit.transport.v1` server.
     Wire(WireArgs),
+    /// Run Tier-2 cases against a disposable server's test-control binding.
+    Controlled {
+        #[command(flatten)]
+        wire: WireArgs,
+        /// JSON object mapping every expected skipped case to its reason.
+        #[arg(long)]
+        declared_skips: Option<std::path::PathBuf>,
+    },
     /// Run the loopback MPP hook fixture (never a release feature).
     #[cfg(feature = "stubs")]
     StubHook {
@@ -176,6 +184,7 @@ impl WireArgs {
             quota_window_ms: self.quota_window_ms,
             milestone: self.milestone.clone(),
             features: self.features.clone(),
+            relay_lag_bound_ms: None,
             run_id: self.run_id.clone(),
             list_refs: self.list_refs,
             list_parallel: self.list_parallel,
@@ -209,9 +218,19 @@ fn build_profile(args: &WireArgs) -> Result<mkit_server_conformance::wire::Profi
     file.merge(args.spec()).build(|var| std::env::var(var).ok())
 }
 
-fn wire(args: &WireArgs) -> Result<bool, String> {
+fn wire(
+    args: &WireArgs,
+    controlled: bool,
+    declared_skips: Option<&std::path::Path>,
+) -> Result<bool, String> {
     if args.list_cases {
-        list_cases();
+        if controlled {
+            for case in mkit_server_conformance::controlled::CASES {
+                println!("{} {:?}", case.name, case.controls);
+            }
+        } else {
+            list_cases();
+        }
         return Ok(true);
     }
     let base_url = args.base_url.clone().ok_or("--base-url is required")?;
@@ -227,7 +246,23 @@ fn wire(args: &WireArgs) -> Result<bool, String> {
         .enable_all()
         .build()
         .map_err(|e| format!("tokio runtime: {e}"))?;
-    let report = runtime.block_on(run(&target, args.filter.as_deref()));
+    let report = if controlled {
+        let skips = declared_skips
+            .map(std::fs::read_to_string)
+            .transpose()
+            .map_err(|e| format!("declared skips: {e}"))?
+            .map(|s| serde_json::from_str(&s))
+            .transpose()
+            .map_err(|e| format!("declared skips JSON: {e}"))?
+            .unwrap_or_default();
+        runtime.block_on(mkit_server_conformance::controlled::run(
+            &target,
+            &skips,
+            args.filter.as_deref(),
+        ))
+    } else {
+        runtime.block_on(run(&target, args.filter.as_deref()))
+    };
     print!("{}", report.tap());
     Ok(!report.failed())
 }
@@ -269,7 +304,18 @@ fn main() -> ExitCode {
             std::thread::park();
             ExitCode::SUCCESS
         }
-        Command::Wire(args) => match wire(&args) {
+        Command::Controlled {
+            wire: args,
+            declared_skips,
+        } => match wire(&args, true, declared_skips.as_deref()) {
+            Ok(true) => ExitCode::SUCCESS,
+            Ok(false) => ExitCode::FAILURE,
+            Err(e) => {
+                eprintln!("mkit-server-conformance: {e}");
+                ExitCode::from(2)
+            }
+        },
+        Command::Wire(args) => match wire(&args, false, None) {
             Ok(true) => ExitCode::SUCCESS,
             Ok(false) => ExitCode::FAILURE,
             Err(e) => {

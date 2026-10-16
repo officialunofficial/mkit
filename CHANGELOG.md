@@ -13,11 +13,35 @@ Combine tags when applicable; every breaking API entry states a replacement and
 every stored-format entry states whether a store reset is required. Embedders
 collect the applicable entries between their old and new immutable pins.
 
+### Breaking (toward 0.6)
+
+- Conformance profiles declare transport writes, authority RPCs, authority
+  fencing, fork, and the relay-lag bound. Results distinguish `NotApplicable`
+  from declared `Skip`. Migration: declare offered features and handle the new
+  verdict; remove skip entries for absent features. No stored-format change
+  or wipe.
+
+- The conformance crate's storage suite is now optional under `storage-spi`;
+  the default wire and server-control library does not depend on mkit-server.
+  Migration: enable `storage-spi` when invoking the storage macros.
+  `Profile::server_clock` accepts the independent `wire::TestClock` trait;
+  reference `ManualClock` remains supported when `storage-spi` is enabled.
+  No protocol bytes or stored state change; no wipe.
+
 ### Added
 
 - Add the independently versioned `mkit-primitives` ALPHA contract skeleton.
   It defines opaque verification, closure, and guarded-decision types without
   changing existing runtime paths or wire formats. No migration or store reset.
+
+- Protocol acceptance and recovery requirements now distinguish portable
+  guarantees from reference-server mechanisms. Fork acceptance requires a final
+  source proof after membership staging, with uniform source-race refusal and
+  ordering at the proof; the reference gaps have declared Tier-2 skips. The
+  conformance library and
+  runner are prepared for the next lockstep crates.io release, with a
+  versioned test-only control binding and declared server-control coverage.
+  No production wire, runtime, or stored-format change; no wipe.
 
 - `ReadAccess::declared_visibility` reads the stored visibility declaration
   whether or not the repository record exists, for private-origin locks and

@@ -4,7 +4,6 @@
 use buffa::Message;
 use mkit_attest::grant::Capabilities;
 use mkit_core::hash::{hash, to_hex};
-use mkit_server::url_token::{Binding, UrlTarget, UrlTokenConfig, UrlTokenKeys};
 use mkit_transport_connect::generated::__buffa::oneof::issue_object_url_request::Target;
 use mkit_transport_connect::generated::{
     DownloadPackRequest, DownloadPackResponse, IssueObjectUrlRequest, IssueObjectUrlResponse,
@@ -16,11 +15,12 @@ use super::{
     A, CaseResult, Ctx, Exp, Failure, Signed, ensure, grants, sign_unary, update_req, want_code,
     want_ok,
 };
+use crate::wire::URL_TOKEN_TTL_MS;
 use crate::wire::client::{
     Reply, Rpc, STREAM_PROTO, UNARY_PROTO, decode_stream, decode_unary, frame,
 };
 use crate::wire::sign::{Signer, body_commitment, now_ms};
-use crate::wire::{URL_TOKEN_SEED, URL_TOKEN_TTL_MS};
+use crate::wire::url_token_fixture::verify_object_token;
 
 /// This case's `repository-a` owner and its repository.
 pub(super) fn owned(ctx: &Ctx) -> Result<(Signer, String), Failure> {
@@ -234,13 +234,6 @@ async fn mint(
         ctx.send::<IssueObjectUrlResponse>(&call).await?,
         "IssueObjectUrl",
     )
-}
-
-/// The URL-token verification key set this suite's servers run with.
-fn token_config() -> UrlTokenConfig {
-    let keys = UrlTokenKeys::parse_key_file(&format!("active {URL_TOKEN_SEED}"))
-        .expect("the suite's fixed token seed is valid");
-    UrlTokenConfig::with_ttl_ms(keys, URL_TOKEN_TTL_MS).expect("the suite's token ttl is valid")
 }
 
 /// A bad signature is rejected at stage 0 — before the repository is read —
@@ -603,8 +596,8 @@ pub(super) async fn private_not_found_byte_identical(ctx: Ctx) -> CaseResult {
     Ok(())
 }
 
-/// The owner mints a URL token that `precheck`, `check_binding` and
-/// `check_epoch` all accept at the stored epoch.
+/// The owner mints a canonical, signed URL token bound to the deployment,
+/// repository, object and stored epoch.
 pub(super) async fn url_token_mint_ok(ctx: Ctx) -> CaseResult {
     let (owner, repo) = owned(&ctx)?;
     seeded_repo(&ctx, &owner, &repo, false).await?;
@@ -620,24 +613,10 @@ pub(super) async fn url_token_mint_ok(ctx: Ctx) -> CaseResult {
         .ok_or_else(|| Failure::Fail("IssueObjectUrl omitted the token".into()))?;
     let audience = audience(&ctx)?;
     let now = now_ms();
-    let bound = token_config()
-        .precheck(&token, now)
-        .and_then(|pre| {
-            pre.check_binding(
-                &Binding {
-                    audience: &audience,
-                    repository: &repo,
-                    target: &UrlTarget::Object(A),
-                },
-                now,
-                URL_TOKEN_TTL_MS,
-            )
-        })
+    let token_epoch = verify_object_token(&token, &audience, &repo, &A, now)
         .map_err(|_| Failure::Fail("minted token failed verification".into()))?;
     let epoch = super::epochs::current(&ctx, &grants::ed_owner(&ctx)?).await?;
-    bound
-        .check_epoch(epoch)
-        .map_err(|_| Failure::Fail("minted token's epoch is stale".into()))?;
+    ensure!(token_epoch == epoch, "minted token's epoch is stale");
     Ok(())
 }
 

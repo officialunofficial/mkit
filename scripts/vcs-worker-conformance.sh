@@ -733,7 +733,7 @@ if [ "${indexed}" -eq 1 ]; then
         capture "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
             --repository "${REPOSITORY}" --signer-seed-hex "${indexed_seed}" \
             --run-id "${indexed_run_id}" --atomic-advance --fresh-target --milestone M4 \
-            --max-pack-bytes "${MAX_PACK_BYTES}" --features "${held_features}" \
+            --max-pack-bytes "${MAX_PACK_BYTES}" --features "${held_features},fork" \
             --sharding d34 --filter fork.driver_probe \
             ${runner_args[@]+"${runner_args[@]}"}
         if [ "${status}" -ne 0 ]; then

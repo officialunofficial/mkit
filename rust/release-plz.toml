@@ -111,6 +111,7 @@ changelog_include = [
   "mkit-transport-connect",
   "mkit-git-bridge",
   "mkit-sync",
+  "mkit-server-conformance",
 ]
 
 # Every other crate: shares the lockstep version_group, never tags/releases.
@@ -166,6 +167,10 @@ version_group = "mkit"
 [[package]]
 name = "mkit-primitives"
 release = false
+
+[[package]]
+name = "mkit-server-conformance"
+version_group = "mkit"
 
 # Changelog grouping, aligned to the Conventional Commit types the
 # commit-lint / PR-title gate already enforces. Noise types are dropped from

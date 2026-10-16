@@ -177,7 +177,7 @@
 //! | `timers.directive_fires_due` | `test-faults` | a future timer remains; a skewed tick deletes only the due ref |
 //! | `timers.fire_on_schedule` | `test-faults`, `timers` | the driver deletes the ref within 20 s without a manual tick |
 //! | `timers.redelivery_is_idempotent` | `test-faults` | repeated ticks succeed with no further effects |
-//! | `fork.driver_probe` | `indexed-mode`, `multi-repo`, `tickets`, `auth-v2`, `test-faults`, `timers` | env-sized forks drive to `Done` across request and kind-16 alarm steps; wall time and poll attempts are reported |
+//! | `fork.driver_probe` | `fork`, `indexed-mode`, `multi-repo`, `tickets`, `auth-v2`, `test-faults`, `timers` | env-sized forks drive to `Done` across request and kind-16 alarm steps; wall time and poll attempts are reported |
 //! | `refs.read_missing` | | an absent ref reads `exists = false`, empty id |
 //! | `refs.update_any_then_read` | | `ANY` creates, then clobbers |
 //! | `refs.update_missing_conflict_failed_precondition` | | `MISSING` on an existing ref; ref unchanged |
@@ -238,6 +238,7 @@
 //! | `auth.v2_pack_commitment_mismatch` | `auth-v2` | length, id or kind differs from the upload header: any error (no code in the spec yet), nothing stored |
 //! | `auth.v2_gzip_signed_fails_closed` | `auth-v2`, `strict-gzip-auth` | opt-in until the M2 spec decides §9.2: a signature over gzip bytes is rejected and writes nothing |
 //! | `auth.v2_reads_unsigned_ok` | `auth-v2` | M0 reads need no signature |
+//! | `replay.observed_pair_has_saved_result` | `auth-v2`, `replay`, `atomic-advance` | Observed paired acceptance replays after a later pair move, without restoring old refs. |
 //! | `replay.same_op_returns_saved_result_after_ref_moved` | `auth-v2`, `replay` | the `auth_v2.mjs` a, b, a sequence |
 //! | `replay.concurrent_duplicates_all_succeed` | `auth-v2`, `replay` | 16 parallel duplicates, one effect |
 //! | `replay.nonce_reuse_different_op_invalid_argument` | `auth-v2`, `replay` | |
@@ -355,7 +356,38 @@
 // Planned (receipts): `receipts.*`.
 // Planned (admin): `admin.*`.
 
-mod cases;
+mod url_token_fixture;
+
+/// Optional in-process fixture clock, independent of any server runtime.
+/// Live HTTP runners normally use wall time or pin clocks through Tier 2.
+pub trait TestClock: std::fmt::Debug + Send + Sync {
+    /// Current business time, Unix milliseconds.
+    fn now_ms(&self) -> i64;
+    /// Advance business time for a controlled in-process fixture.
+    fn advance(&self, delta_ms: i64);
+}
+
+/// Bounded fixture wait; a runner policy, not a server layout requirement.
+pub(crate) const VISIBILITY_WAIT_MS: u64 = 60_000;
+
+/// Keeps tokens out of fixture diagnostics.
+#[derive(Clone)]
+pub(crate) struct Secret(String);
+impl Secret {
+    pub(crate) fn new(value: String) -> Self {
+        Self(value)
+    }
+    pub(crate) fn expose(&self) -> &str {
+        &self.0
+    }
+}
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[redacted]")
+    }
+}
+
+pub(crate) mod cases;
 pub(crate) mod challenges;
 pub mod client;
 pub mod profile;
@@ -502,15 +534,8 @@ pub async fn run(target: &WireTarget, filter: Option<&str>) -> Report {
         .iter()
         .filter(|c| filter.is_none_or(|f| c.name.contains(f)))
     {
-        let verdict = match case.skip_reason(&profile) {
-            Some(reason)
-                if profile.has(Feature::Takedown) && case.requires.contains(&Feature::Takedown) =>
-            {
-                Verdict::Fail(format!(
-                    "enabled takedown contract is misconfigured: {reason}"
-                ))
-            }
-            Some(reason) => Verdict::Skip(reason),
+        let verdict = match applicability(case, &profile) {
+            Some(verdict) => verdict,
             None => run_case(case, Ctx::new(client.clone(), profile.clone(), case.name)).await,
         };
         report.cases.push(CaseReport {
@@ -519,6 +544,78 @@ pub async fn run(target: &WireTarget, filter: Option<&str>) -> Report {
         });
     }
     report
+}
+
+/// Resolve profile applicability before a case makes any requests.
+pub(crate) fn applicability(case: &Case, profile: &Profile) -> Option<Verdict> {
+    // Declaring takedown promises the complete contract, including its
+    // prerequisites. A partial declaration is a configuration failure.
+    let skip = case.skip_reason(profile);
+    if profile.has(Feature::Takedown) && case.requires.contains(&Feature::Takedown) {
+        if let Some(reason) = &skip {
+            return Some(Verdict::Fail(format!(
+                "enabled takedown contract is misconfigured: {reason}"
+            )));
+        }
+        if !profile.has(Feature::TransportWrites) {
+            return Some(Verdict::Fail(
+                "enabled takedown contract is misconfigured: requires feature transport-writes"
+                    .into(),
+            ));
+        }
+    }
+    // Milestone selection is a runner choice, independent of capability.
+    if case.milestone > profile.milestone {
+        return skip.map(Verdict::Skip);
+    }
+    let mut missing: Vec<_> = case
+        .requires
+        .iter()
+        .filter(|feature| !profile.has(**feature))
+        .map(|feature| feature.as_str())
+        .collect();
+    if !profile.has(Feature::TransportWrites) && requires_transport_writes(case) {
+        missing.push(Feature::TransportWrites.as_str());
+    }
+    if !missing.is_empty() {
+        return Some(Verdict::NotApplicable(format!(
+            "requires feature {}",
+            missing.join(", ")
+        )));
+    }
+    let excluded: Vec<_> = case
+        .excludes
+        .iter()
+        .filter(|f| profile.has(**f))
+        .map(|f| f.as_str())
+        .collect();
+    if !excluded.is_empty() {
+        return Some(Verdict::NotApplicable(format!(
+            "excluded by feature {}",
+            excluded.join(", ")
+        )));
+    }
+    skip.map(Verdict::Skip)
+}
+
+// Most wire cases create their own fixtures, even when their assertions
+// concern reads. Only these cases avoid all transport write RPCs. Keep the
+// default conservative so a new fixture cannot mutate a read-only target.
+fn requires_transport_writes(case: &Case) -> bool {
+    !case.name.starts_with("health.")
+        && !matches!(
+            case.name,
+            "cors.preflight_payment_headers"
+                | "cors.expose_admission_headers"
+                | "refs.read_missing"
+                | "refs.list_invalid_prefix_invalid_argument"
+                | "packs.pack_id_wrong_length_invalid_argument"
+                | "download.not_found_before_any_message"
+                | "repo.read_missing_repo_not_found"
+                | "epochs.get_unsigned_zero"
+                | "epochs.get_ignores_auth_headers"
+                | "epochs.get_bad_namespace_invalid_argument"
+        )
 }
 
 async fn run_case(case: &Case, ctx: Ctx) -> Verdict {
@@ -551,8 +648,8 @@ fn preamble(target: &WireTarget) -> Vec<String> {
     vec![
         format!("target {}", target.base_url),
         format!(
-            "profile auth={:?} milestone={:?} max_pack_bytes={} quota={:?} sharding_d34={}",
-            p.auth, p.milestone, p.max_pack_bytes, p.quota, p.sharding_d34
+            "profile auth={:?} milestone={:?} max_pack_bytes={} quota={:?} sharding_d34={} relay_lag_bound_ms={}",
+            p.auth, p.milestone, p.max_pack_bytes, p.quota, p.sharding_d34, p.relay_lag_bound_ms
         ),
         format!("features [{}]", features.join(", ")),
         format!(
@@ -614,6 +711,61 @@ mod tests {
                 .skip_reason(&profile)
                 .unwrap()
                 .contains("test-faults")
+        );
+    }
+
+    #[test]
+    fn fork_probe_requires_a_declared_fork_feature() {
+        let mut profile = Profile::new(WireAuth::None);
+        profile.milestone = Milestone::M4;
+        profile.features.extend([
+            Feature::IndexedMode,
+            Feature::MultiRepo,
+            Feature::Tickets,
+            Feature::AuthV2,
+            Feature::TestFaults,
+            Feature::Timers,
+        ]);
+        let case = CASES
+            .iter()
+            .find(|case| case.name == "fork.driver_probe")
+            .unwrap();
+        assert!(matches!(applicability(case, &profile),
+            Some(Verdict::NotApplicable(reason)) if reason.contains("fork")));
+        profile.features.insert(Feature::Fork);
+        assert!(applicability(case, &profile).is_none());
+    }
+
+    #[test]
+    fn feature_applicability_is_distinct_from_runner_skips() {
+        let mut profile = Profile::new(WireAuth::None);
+        let case = |name| CASES.iter().find(|c| c.name == name).unwrap();
+        assert!(matches!(applicability(case("health.serving"), &profile),
+            Some(Verdict::NotApplicable(reason)) if reason.contains("health")));
+        assert!(
+            matches!(applicability(case("repo.isolation_refs"), &profile),
+            Some(Verdict::Skip(reason)) if reason.contains("milestone"))
+        );
+        profile.features.remove(&Feature::TransportWrites);
+        for name in [
+            "refs.update_any_then_read",
+            "download.chunks_contiguous_ending_last",
+            "auth.v2_reads_unsigned_ok",
+        ] {
+            assert!(
+                matches!(applicability(case(name), &profile),
+                Some(Verdict::NotApplicable(reason)) if reason.contains("transport-writes")),
+                "{name}"
+            );
+        }
+        assert!(applicability(case("refs.read_missing"), &profile).is_none());
+        profile.features.insert(Feature::Health);
+        assert!(applicability(case("health.serving"), &profile).is_none());
+        profile.features.insert(Feature::TransportWrites);
+        profile.features.insert(Feature::AtomicAdvance);
+        assert!(
+            matches!(applicability(case("advance.nonatomic_packmap_first"), &profile),
+            Some(Verdict::NotApplicable(reason)) if reason.contains("atomic-advance"))
         );
     }
 
@@ -720,6 +872,7 @@ mod tests {
     #[tokio::test]
     async fn enabled_takedown_contract_cannot_skip_missing_prerequisites() {
         let mut profile = Profile::new(WireAuth::None);
+        profile.milestone = Milestone::M5;
         let mut target = WireTarget {
             base_url: "http://127.0.0.1:1".parse().unwrap(),
             profile: profile.clone(),
@@ -727,7 +880,7 @@ mod tests {
         let disabled = run(&target, Some("takedown.contract")).await;
         assert!(matches!(
             disabled.verdict("takedown.contract"),
-            Some(Verdict::Skip(_))
+            Some(Verdict::NotApplicable(reason)) if reason.contains("takedown")
         ));
         profile.features.insert(Feature::Takedown);
         for milestone in [Milestone::M4, Milestone::M5] {
