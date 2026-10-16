@@ -1410,6 +1410,12 @@ stored shapes instead of upgrading or downgrading them.
 
 ### Removed
 
+- Remove `mkit-server-worker`, `apps/vcs-worker`, and `apps/embedded-worker`,
+  along with their deployment guides, runtime probes, and build and CI wiring.
+  `mkit-server` remains the reference implementation with its existing features
+  and wasm32 support. Native HTTP wire conformance runs through the in-process
+  `TestHost`. Embedders can host the reference server through its library API.
+
 - [embedder: breaking API] The Workers-only `published-view` optimization (ref snapshots in R2, its
   timer, `PublishedViewConfig`, `fetch_configured`, `ns_object_configured`,
   the `PUBLISHED_SNAPSHOTS` binding) and the `mkit-server` `published-view`

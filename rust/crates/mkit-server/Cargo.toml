@@ -2,8 +2,8 @@
 # owns the vocabulary every adapter shares: repo and namespace identifiers,
 # principals, the typed `Operation` model, the transport-neutral
 # `ServerError`, the async/runtime model (`MaybeSend`, `Clock`, `Spawner`,
-# `send_wrap`) and the metrics facade. The Workers adapter
-# (`mkit-server-worker`) and the conformance host build on it, so it must
+# `send_wrap`) and the metrics facade. Runtime adapters and the
+# conformance host build on it, so it must
 # compile for both the host and `wasm32-unknown-unknown` (enforced by
 # scripts/check-wasm-dep-graph.sh and `just ci-scripts`).
 #
@@ -87,7 +87,7 @@ perf-metrics = []
 default = ["connect"]
 # The `mkit.transport.v1` Connect binding (`connect`): vendored codegen,
 # `TransportService` and `grpc.health.v1.Health` over the pipeline, and the
-# auth interceptor. wasm-clean; embedders such as the Workers adapter
+# auth interceptor. wasm-clean; runtime embedders
 # mount it unchanged.
 connect = [
     "dep:connectrpc",
@@ -128,7 +128,7 @@ remote-hooks = [
 
 # Runtime-agnostic HTTP object serving (`Pipeline::serve_http_object`,
 # SPEC-HTTP-OBJECTS). No new dependencies, wasm-clean. Off by default;
-# embedders and the Workers launch opt in through their adapters.
+# embedders opt in through their adapters.
 # Requires `PipelineConfig::http_objects` and indexed mode.
 http-objects = []
 

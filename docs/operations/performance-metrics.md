@@ -1,108 +1,20 @@
 # Performance measurements
 
-Enable the `perf-metrics` Cargo feature on `mkit-server-worker` to collect
-bounded storage and verification measurements. It forwards the same feature
-to the generic `mkit-server` core. From the reference Worker's directory,
-build and enable runtime alarm metadata forwarding:
+Enable the `perf-metrics` Cargo feature on `mkit-server` to collect bounded
+verification and fork measurements. Embedders provide a metrics sink and an
+INFO tracing subscriber through their runtime setup.
 
-```sh
-rm -f build/worker/alarm-base.mjs
-worker-build --features launch,perf-metrics
-python3 ../../scripts/enable-worker-alarm-info.py build/worker/shim.mjs
-```
-
-The explicit post-build step preserves the SDK's default and named exports.
-It replaces only the five classes' `alarm(info)` methods, forwarding to the
-feature's additive `alarmWithInfo` export. Class identity, constructor, fetch,
-WebSocket, connect, and other methods and static exports remain with the SDK. Repeat the step after every
-fresh build and include both generated modules when packaging the Worker. The wire harness does this only for its feature-enabled matrix.
-Default builds retain the original shim. Other embedders can use the same
-helper on their generated shim or explicitly forward metadata to
-`NsObject::alarm_with_info`.
-
-Default builds omit the collectors, timers, header metadata, and new events.
+Default builds omit the optional collectors, timers, metadata, and events.
 The feature changes no storage query, page boundary, budget, retry hint,
 authorization check, checkpoint, or public response body. It requires no store
-reset. Enable it for a measurement window, then rebuild without it. Worker
-factories install the existing console subscriber, including the embedding
-pipeline when this feature is enabled. Native core embedders provide a metrics
-sink and an INFO tracing subscriber through their existing setup.
+reset. Enable it for a measurement window, then rebuild without it.
 
 ## Clocks and CPU
 
-Every custom duration is elapsed wall time, including waits. The Worker clock
-has an additional limitation: Cloudflare freezes `Date.now()` and
-`performance.now()` during synchronous execution. Decode CPU, SQL stepping,
-base64, and JSON work can report zero despite consuming CPU. The `clock` field
-on RPC summaries is `workers_io` on Workers and `monotonic` in native tests.
-Never interpret these values as CPU time or subtract them to estimate CPU.
-Caller-minus-inside time also includes any CPU tail hidden by the object clock;
-it is not a pure network or activation estimate. Use platform trace durations
-for the complete in-object span.
-See [Cloudflare performance and timers](https://developers.cloudflare.com/workers/runtime-apis/performance/).
-
-Use the platform invocation fields `$workers.cpuTimeMs` and
-`$workers.wallTimeMs` for whole-invocation measurements. An alarm can run
-several stages, so its CPU is not necessarily Decode CPU. Use a local workerd
-CPU profile to isolate Decode and SQL; Cloudflare also supports capturing
-production profiles. See [profiling CPU usage](https://developers.cloudflare.com/workers/observability/dev-tools/cpu-usage/).
-
-The native scan harness separates SQL execution, cursor stepping, row
-materialization, request decoding, reply encoding, and caller reply decoding.
-It measures the same SQL and page driver over SQLite, but its timing is not a
-prediction of the Workers JavaScript bridge. A later scan optimization needs a
-local workerd profile showing SQL consumes more than roughly 40% of in-object
-CPU. Production `sql_query_ms = 0` cannot establish that gate.
-
-## Storage RPC summaries
-
-Each `StubTransport` factory owns one collector shared by its clones. Request
-clients flush the tail when their last clone is dropped. Long-lived alarm
-clients flush every 100 completed or dropped call futures, then retain only
-the next bounded window. This is a transport lifetime window, not necessarily
-one HTTP request for an embedder that retains its pipeline.
-
-One JSON row has `event = storage_rpc_summary`, `sample_window = 100`, `clock`,
-and the `summary` object below. Every call contributes to counts and buckets;
-only its four slowest calls retain detail. Ties retain the earlier calls.
-This top-four selection is biased toward slow calls and is not a random sample.
-
-| Field | Meaning |
-|---|---|
-| `summary.calls` | Call futures completed or dropped in this window |
-| `summary.incomplete` | Futures canceled or failing before a successful transport response/body EOF; typed storage errors in an HTTP 200 reply count as complete |
-| `summary.caller_ms` | Sum of caller transport wall times, from stub lookup through response-body EOF; concurrent durations overlap |
-| `summary.caller_ms_buckets` | Eight disjoint count buckets: at most 1, 10, 50, 100, 250, 500, 1000 ms, then greater than 1000 ms |
-| `summary.slowest` | At most four call objects, ordered by descending `caller_ms` |
-| `slowest[].prefix` | Logical partition kind: `ri:`, `x:`, `ci:`, `r:`, `c:`, or `n:`; unsupported direct transport calls use `other` |
-| `slowest[].op` | Storage operation, including `get_many`, `scan_many`, and `apply` |
-| `slowest[].count` | Requested keys for `get_many`, ranges for `scan_many`, writes for `apply`; one for `get`, `scan`, or `export`, zero for scalar operations |
-| `slowest[].caller_ms` | This call's transport wall time; excludes outer request serialization and caller reply JSON decoding |
-| `slowest[].complete` | Whether a successful transport response reached body EOF |
-| `slowest[].inside_ms` | In-object wall time from handler entry through reply construction, including request body read, activation repair, store initialization, and alarm maintenance |
-| `slowest[].cold` | First HTTP request served by this object instance since construction; an earlier alarm does not consume this flag |
-| `slowest[].decode_ms` | In-object request JSON/base64 and partition decode wall time |
-| `slowest[].encode_ms` | In-object reply JSON/base64 encode wall time |
-| `slowest[].sql_query_ms` | SQL query execution, cursor stepping and materialization wall time, excluding wire encode/decode |
-| `slowest[].sql_statements` | Queries attempted, including failed queries; excludes non-query statements |
-| `slowest[].rows` | Returned scan rows or present get values; excludes SQL lookahead rows; zero for scalar replies and errors |
-| `slowest[].sql_rows` | SQL rows materialized by successful queries, including lookahead rows |
-
-`ri:` names the repository-index kind; its existing routing name starts with
-`i:`. Only the kind is logged, never that routing name. Missing reply metadata
-is `null`, including transport failures and a build without the feature.
-Repository-index activation hints use `op = ping`, their partition prefix, and
-`count = 0`. Filter these calls separately from ordinary storage operations.
-They share the same summary windows and top-four retention; no extra row is
-emitted for a warm-up. A warm-up can consume the first-HTTP-request cold flag.
-
-
-The internal request header `x-mkit-perf: 1` asks the object for numeric reply
-metadata. The response header carries, in order, inside milliseconds, cold
-(0 or 1), decode milliseconds, encode milliseconds, query milliseconds, query
-count, materialized row count, returned row count, and schema marker 1. Bodies remain identical;
-invalid or absent metadata never changes an RPC result. The object emits no
-new per-query or per-RPC log rows.
+Durations measure elapsed wall time, including waits. They do not measure CPU.
+The host supplies the clock and timer context; timer metadata is available only
+when that host records it. Unknown scheduling or failure evidence remains
+unknown. Use a profiler to isolate synchronous CPU work.
 
 ## Verification events and metrics
 
@@ -145,10 +57,8 @@ the existing stop conditions; no extra work runs to obtain a reason.
 | `mkit_server_verification_extract_chain_stops_total` | `reason`; one chain stop |
 | `mkit_server_verification_await_hint_ms` | No labels; returned hint in milliseconds |
 
-Metrics use the existing envelope: `metric`, `labels`, and `value`. The console
-sink samples duration observations on its existing isolate-wide cadence; use
-the unsampled aggregate events for complete histograms and stage totals.
-Counters are unsampled. Duration metric values saturate at `u32::MAX`
+Metrics use the existing envelope: `metric`, `labels`, and `value`. Embedders provide a metrics sink and choose their sampling policy. Use
+aggregate events for complete histograms and stage totals. Duration metric values saturate at `u32::MAX`
 milliseconds; structured stage durations retain the full integer value.
 Bucket fields are disjoint, not cumulative: sum each
 bucket across events before computing a distribution. Hint values describe
@@ -200,11 +110,9 @@ alarm scheduling is remembered only in memory; telemetry does not read storage
 to reconstruct it. Logical timer lag remains available after a cold start. Consecutive tiny slices
 retain the same durable timer key, so their timer lag includes earlier inline
 slices; it does not mean that another physical alarm was scheduled.
-Runtime retry metadata requires the explicit post-build forwarding step above.
-The unmodified SDK bridge and direct Rust calls to `NsObject::alarm` continue
-to work, with unknown runtime retry fields and physical scheduling delay.
+Runtime retry and physical schedule metadata depend on the host forwarding
+those observations. Without them, the corresponding fields remain unknown.
 The last-armed hint alone is never treated as a retry's physical schedule.
-See [Durable Object alarms](https://developers.cloudflare.com/durable-objects/api/alarms/).
 
 For a gap, first compare physical alarm delay with logical timer delay. A large
 physical delay points to alarm scheduling. A small physical delay and large
@@ -212,8 +120,8 @@ timer delay points to earlier work in the same callback. Group by cold flag
 and retry evidence, then inspect the slowest partition call and stop reason.
 For runtime retries, inspect adjacent platform error entries for a failure
 cause; the retry metadata alone cannot establish a disconnect. Unknown
-scheduling or failure fields cannot establish a cause. The Workers
-clock limitation still applies to synchronous work within the slice.
+scheduling or failure fields cannot establish a cause. The host clock
+semantics still apply to synchronous work within the slice.
 
 ## Fork step events
 
@@ -241,81 +149,7 @@ that fires while the request's slices run the job appears as interleaved
 `request`/`alarm` rows for one `job`, and each `PreconditionFailed` apply is
 a lost slice's commit.
 
-## Query Workers observability
-
-Enable JSON log collection in the deployment's Wrangler configuration:
-
-```jsonc
-{
-  "observability": {
-    "enabled": true,
-    "head_sampling_rate": 1
-  }
-}
-```
-
-Open **Workers and Pages**, select the Worker, then **Observability** and
-**Query Builder**. Filter the custom `event` field by one of the event names
-above, choose the measurement time range, and inspect an event to confirm the
-parsed field paths. Add Sum, Average, or a percentile calculation for a numeric
-field, and group by a constant stage or component. Save each query for the next
-before/after run. Platform sampling applies to the entire invocation; compare
-runs using the same settings. See [Query Builder](https://developers.cloudflare.com/workers/observability/query-builder/)
-and [Workers Logs](https://developers.cloudflare.com/workers/observability/logs/workers-logs/).
-The console uses JSON strings, matching the [structured logging example](https://developers.cloudflare.com/workers/best-practices/workers-best-practices/#observability).
-
-Useful saved queries:
-
-- Filter `event = storage_rpc_summary`; sum `summary.calls` and each caller
-  bucket. Inspect the slowest call objects by prefix, operation, and cold flag.
-  Compare caller and inside wall time to investigate activation or transport
-  delay; nested top-call arrays are details, not population percentiles.
-- Filter `event = verification_denial_histogram`; group by `stage`, sum `calls`
-  and all nine bucket fields. Compare denial distributions across Decode,
-  EmitIndex, and inline verification without changing denial checks.
-- Filter `event = verification_emit_components`; sum its six fields to separate
-  scan, denial, direct writes, relay commit, and outbox lookup waits.
-- Filter `event = verification_extract_chain`; group by `stop_reason` and
-  `stage`, then count events and average `steps`. A high `calls` or `ops` share
-  indicates a different limit from `steps` or `elapsed`.
-- Filter `event = verification_slice_result` and `old_phase = Extract`; compare
-  `alarm_delay_ms` and `timer_delay_ms`, group by `cold_first_slice`,
-  `runtime_is_retry`, and `slice_stop_reason`, and inspect `slowest_rpc_prefix`
-  and `slowest_rpc_ms` for slices around a gap.
-- Filter `event = verification_await_hint_histogram`; sum the hint bucket counts and
-  inspect `hint_ms` to compare client advice with observed delivery waits.
-- Select invocation logs; calculate CPU and wall-time percentiles with
-  `$workers.cpuTimeMs` and `$workers.wallTimeMs`. Profile synchronous work
-  locally before deciding to change SQL stepping or Decode checkpointing.
-
-## Bounds, privacy, and regression checks
-
-RPC accounting uses eight bucket counters and at most four fixed-shape call
-records, flushing one row per 100 calls plus one lifetime tail. SQL accounting
-uses five numeric totals with no statement logs. Denial aggregates use nine
-counters per active stage. Emit aggregates use six duration totals. Slice
-context retains fixed metadata and one slowest call; it restores context at
-every future poll so interleaved tasks cannot share measurements.
-No new performance field accepts a repository name, namespace, key bytes,
-object ID, credential, SQL text, value, cursor, or error message. The deferred
-slice row carries only the identifiers already present in that existing event.
-
-Run the heavy scan harness and the log-bound/privacy tests:
-
-```sh
-just cargo-cached test -p mkit-server-worker --features perf-metrics \
-  --lib telemetry::perf_ -- --nocapture --test-threads=3
-```
-
-The harness returns the same scan reply bytes across baseline, unmeasured,
-and measured SQL paths. Its fixture is eight ranges of 100 rows with 240-byte
-values. Each scan attempts 56 queries and materializes 848 rows, including
-lookahead, while returning 800 rows. Set `MKIT_PERF_COST_MODE` to `baseline`,
-`disabled`, or `enabled` and profile the already-built test binary with
-`/usr/bin/time` to compare process CPU without including compilation. Repeat
-runs under comparable load; no noisy latency threshold is an assertion.
-
-### Compare verification overhead
+## Compare verification overhead
 
 The verification harness runs 50 fresh jobs over an 18-entry pack. Profile
 the same test binary configuration with and without `perf-metrics`, using
@@ -331,9 +165,3 @@ system), range, row and byte totals, matching call counts, and final snapshot
 digest in the change's validation report. Startup, fixture construction, and
 JSON formatting are included. These native debug-build observations are not
 production estimates or regression thresholds.
-
-Apply the same alternating-run method to the three scan modes above. The
-collector-disabled mode exercises an unmeasured wrapper in a feature-enabled
-binary; default production builds omit both wrapper and collectors. Report
-wire identity, query and materialized-row counts, summary bytes, and CPU.
-Use a Workers profile to establish SQL CPU share or platform overhead.

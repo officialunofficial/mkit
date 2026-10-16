@@ -296,7 +296,7 @@ fn bumped(mut state: ObjectState, now_ms: u64) -> ObjectState {
     state
 }
 
-/// A store borrowed for one call, without cloning a Worker adapter or
+/// A store borrowed for one call, without cloning an adapter or
 /// changing its partition routing: the relay's target, and the store a
 /// [`ContentIndex`] runs over during extraction.
 pub(crate) struct BorrowedStore<'a, S>(pub(crate) &'a S);

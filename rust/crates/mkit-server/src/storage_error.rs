@@ -6,10 +6,8 @@
 //! [`StorageOp`] family. The mapping is exhaustive, so a new operation must
 //! be given a public message explicitly.
 //!
-//! The canonical copy of vcs-worker's former `storage_error.rs` (removed in
-//! WP-M0-17), with the operations generalized from R2 and the ref-store
-//! Durable Object to any blob or metadata store. `apps/repo-worker` keeps
-//! its own copy (planner decision Q11).
+//! The mapping applies to any blob or metadata store.
+//! `apps/repo-worker` keeps its own service integration.
 
 use std::fmt;
 
@@ -140,8 +138,7 @@ mod tests {
     use super::*;
     use crate::error::Code;
 
-    // Ported from apps/vcs-worker/src/storage_error.rs, with the fourth
-    // message added for `FsIo`.
+    // Include the generic message for `FsIo`.
     #[test]
     fn every_op_maps_to_one_of_the_fixed_generic_messages() {
         const ALLOWED: &[&str] = &[
@@ -159,8 +156,7 @@ mod tests {
         }
     }
 
-    // Ported from apps/vcs-worker/src/storage_error.rs: the regression test
-    // for issue #794.
+    // Raw backend details never reach the client.
     #[test]
     fn simulated_storage_failure_is_logged_but_never_reaches_the_client() {
         let raw_detail = "R2Error: bucket 'mkit-prod-packs-9c1e' access denied \

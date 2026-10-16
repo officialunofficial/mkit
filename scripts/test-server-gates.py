@@ -49,63 +49,26 @@ class ServerGates(unittest.TestCase):
         self.assertIn("entrypoint: python3", guard)
         self.assertIn("args: [scripts/test-server-gates.py, --hosted-only]", guard)
 
-    def test_workers_paid_executor_and_gate(self):
-        yaml = (ROOT / ".github/workflows/workers.yml").read_text()
-        paid = section(yaml, "paid-acceptance:")
-        self.assertIn("runs-on: ubuntu-latest", paid)
-        self.assertIn("timeout-minutes: 30", paid)
-        self.assertIn("github.event_name == 'push' || needs.changes.outputs.workers == 'true'", paid)
-        for command in ("python3 scripts/test-server-gates.py --hosted-only", "time python3 scripts/check-launch-feature-graph.py",
-                        "time bash scripts/wasm-ruzstd-check.sh", "python3 scripts/paid-worker-acceptance.py",
-                        "cargo build --locked --release --target wasm32-unknown-unknown"):
-            self.assertRegex(paid, rf"(?m)^(?:        run: |          ){re.escape(command)}$")
-        self.assertIn("working-directory: apps/embedded-worker/tests/embedding-conformance", paid)
-        self.assertNotIn("__test-faults", paid)
-        self.assertNotIn("continue-on-error", paid)
-        self.assertEqual(paid.count("if:"), 2, "only path selection and failure artifacts may be conditional")
-        gate = section(yaml, "workers-gate:")
-        self.assertIn("needs: [ci, workspace, vcs-worker-conformance, paid-acceptance]", gate)
-        self.assertIn('"${PAID}"', gate)
-        conformance = section(yaml, "vcs-worker-conformance:")
-        self.assertEqual(conformance.count("if:"), 3, "only path selection, summary and artifacts may be conditional")
-        summary = section(conformance, "- name: Summarize connection losses and retries")
-        self.assertIn("if: always()", summary)
-        self.assertIn('scripts/workers-wire-diagnostics.py', summary)
-        self.assertIn('python3 scripts/test-workers-wire-diagnostics.py', summary)
-        upload = section(conformance, "- name: Upload Wrangler and Miniflare diagnostics")
-        self.assertIn("if: always() && (failure() || steps.wire-diagnostics.outputs.keep == 'true')", upload)
-        self.assertNotIn("continue-on-error", conformance)
-        signer_tool = "cargo install b3sum --locked --version 1.8.5"
-        deadline_test = "python3 scripts/connect-deadline-runtime.py"
-        self.assertIn(signer_tool, conformance)
-        self.assertIn(deadline_test, conformance)
-        self.assertLess(conformance.index(signer_tool), conformance.index(deadline_test))
-        self.assertIn("timeout-minutes: 20", section(conformance, "- name: Paid indexed verification, hold off/on and same-shard concurrency"))
-        self.assertIn("run: scripts/vcs-worker-conformance.sh --indexed-only", conformance)
-        self.assertIn("run: scripts/vcs-worker-conformance.sh --test-faults --sharding single", conformance)
-        self.assertIn("path: ${{ runner.temp }}/wire-logs/**", conformance)
-        runtime = (ROOT / "scripts/workers-wire-runtime.cjs").read_text()
-        self.assertIn("unsafeDirectSockets:", runtime)
-        self.assertIn("unsafeGetDirectURL", runtime)
-        for script in ("vcs-worker-conformance.sh", "connect-deadline-runtime.py"):
-            self.assertIn("scripts/workers-wire-runtime.cjs", (ROOT / "scripts" / script).read_text())
-            self.assertIn("MKIT_CONFORMANCE_HTTP_CONNECTION_CLOSE", (ROOT / "scripts" / script).read_text())
-        for command in ("run: scripts/vcs-worker-conformance.sh", "run: scripts/vcs-worker-conformance.sh --test-faults --multi",
-                        "run: python3 scripts/connect-deadline-runtime.py --portable"):
-            self.assertIn(command + "\n", conformance)
-        self.assertNotIn("--no-build", conformance)
-        for path in ("apps/embedded-worker/**", "rust/vendor/ruzstd/**", "scripts/paid-worker-acceptance.py",
-                     "scripts/embedded-worker-hooks.py", "scripts/vcs-worker-launch-runtime.py",
-                     "scripts/check-launch-feature-graph.py", "scripts/wasm-ruzstd-check.sh",
-                     "rust/crates/mkit-core-wasm-check/**", "rust/tests/golden/pack-v2/**",
-                     "apps/workspace-worker/package-lock.json", "cloudbuild/ci.yaml", "scripts/workers-wire-runtime.cjs"):
-            self.assertEqual(yaml.count(f"- '{path}'"), 2, path)
+    def test_native_wire_executor_and_gate(self):
+        yaml = (ROOT / ".github/workflows/rust.yml").read_text()
+        native = section(yaml, "native-wire-conformance:")
+        self.assertIn("runs-on: ubuntu-latest", native)
+        self.assertNotIn("if:", native)
+        self.assertNotIn("continue-on-error", native)
+        self.assertIn("--features test-host --test test_host --test test_host_migrations --test test_host_regressions -j 3 --success-output immediate --failure-output immediate", native)
+        self.assertIn("python3 scripts/check-launch-feature-graph.py", native)
+        self.assertIn("bash scripts/wasm-ruzstd-check.sh", native)
+        self.assertIn("python3 scripts/test-server-gates.py --hosted-only", native)
+        gate = section(yaml, "ci-gate:")
+        self.assertIn("native-wire-conformance]", gate)
+        self.assertIn("needs.native-wire-conformance.result", gate)
+        self.assertIn('"${NATIVE_WIRE}"', gate)
 
 
 if __name__ == "__main__":
     if "--hosted-only" in sys.argv:
         suite = unittest.defaultTestLoader.loadTestsFromNames([
-            "test_cloud_linux_allocator_executor", "test_workers_paid_executor_and_gate"], ServerGates)
+            "test_cloud_linux_allocator_executor", "test_native_wire_executor_and_gate"], ServerGates)
         result = unittest.TextTestRunner().run(suite)
         sys.exit(not result.wasSuccessful())
     unittest.main()

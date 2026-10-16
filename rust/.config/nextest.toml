@@ -299,11 +299,11 @@ slow-timeout = { period = "150s", terminate-after = 1 }
 # waits this interval twice (~160s) to settle before calibration and prune
 # after loading tickets. Not a hang.
 [[profile.default.overrides]]
-filter = '(binary(baseline_pipeline_memory) and (test(=pipeline_auth_v2_test_faults) or test(/_fails_growth$/))) or test(=timer_and_ticket_pruning_wire_cases_run_against_the_host)'
+filter = '(binary(baseline_pipeline_memory) and (test(=pipeline_auth_v2_test_faults) or test(/_fails_growth$/))) or test(=timer_and_ticket_pruning_wire_cases_run_against_the_host) or test(=native_replay_and_quota_pruning)'
 slow-timeout = { period = "180s", terminate-after = 1 }
 
 [[profile.ci.overrides]]
-filter = '(binary(baseline_pipeline_memory) and (test(=pipeline_auth_v2_test_faults) or test(/_fails_growth$/))) or test(=timer_and_ticket_pruning_wire_cases_run_against_the_host)'
+filter = '(binary(baseline_pipeline_memory) and (test(=pipeline_auth_v2_test_faults) or test(/_fails_growth$/))) or test(=timer_and_ticket_pruning_wire_cases_run_against_the_host) or test(=native_replay_and_quota_pruning)'
 slow-timeout = { period = "180s", terminate-after = 1 }
 
 # This pack residency regression expands several 128 MiB delta targets.
@@ -317,9 +317,22 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 filter = 'test(=pack::tests::compressed_delta_bomb_releases_targets_and_checks_cap_before_allocation)'
 slow-timeout = { period = "300s", terminate-after = 1 }
 
+# The unchanged async wire fixture hashes 720 entries across three raw windows.
+# Its new native debug host takes about 77 seconds. Keep both hold settings,
+# the full fixture and the wire case's 240-poll window; reserve the test threads.
+[[profile.default.overrides]]
+filter = 'binary(=test_host_migrations) and (test(=native_async_verification) or test(=native_async_verification_with_hold))'
+threads-required = "num-test-threads"
+slow-timeout = { period = "240s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = 'binary(=test_host_migrations) and (test(=native_async_verification) or test(=native_async_verification_with_hold))'
+threads-required = "num-test-threads"
+slow-timeout = { period = "240s", terminate-after = 1 }
+
 # Memory-bounding tests. multipart_bounded_heap / multipart_buffered_heap
-# (mkit-server-conformance's fs and memory binaries, mkit-server-worker's
-# conformance binary) meter the allocator over a window and assert a peak.
+# (mkit-server-conformance's fs and memory binaries) meter the allocator
+# over a window and assert a peak.
 # They failed under parallel load and passed alone (#1210, #1212, #1218), so
 # the group runs one at a time across the whole run. The meter stays
 # process-global (the store work runs on runtime threads, so it can't be
@@ -328,11 +341,11 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 heap-bounds = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = 'test(/multipart_(bounded|buffered)_heap$/) | test(=sixteen_maximum_bodies_and_rows_fit_in_two_mib_of_heap) | test(=corrupt_zstd_frames_bound_heap) | test(=scheduled_ruzstd_slice_retains_at_most_48_mib_requested_heap) | test(=aggregate_index_lookup_has_bounded_peak_and_smaller_batches_work) | binary(=takedown_acquisition_bounds)'
+filter = 'test(/multipart_(bounded|buffered)_heap$/) | test(=corrupt_zstd_frames_bound_heap) | test(=scheduled_ruzstd_slice_retains_at_most_48_mib_requested_heap) | binary(=takedown_acquisition_bounds)'
 test-group = 'heap-bounds'
 
 [[profile.ci.overrides]]
-filter = 'test(/multipart_(bounded|buffered)_heap$/) | test(=sixteen_maximum_bodies_and_rows_fit_in_two_mib_of_heap) | test(=corrupt_zstd_frames_bound_heap) | test(=scheduled_ruzstd_slice_retains_at_most_48_mib_requested_heap) | test(=aggregate_index_lookup_has_bounded_peak_and_smaller_batches_work) | binary(=takedown_acquisition_bounds)'
+filter = 'test(/multipart_(bounded|buffered)_heap$/) | test(=corrupt_zstd_frames_bound_heap) | test(=scheduled_ruzstd_slice_retains_at_most_48_mib_requested_heap) | binary(=takedown_acquisition_bounds)'
 test-group = 'heap-bounds'
 
 [profile.ignored-lane]

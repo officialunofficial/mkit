@@ -6,9 +6,8 @@
 // Router. Gated out of host builds (the macros emit `#[wasm_bindgen]`).
 //
 // The CORS handling, body-size cap, and worker::Request<->http::Request
-// fetch-adapter skeleton are shared with apps/vcs-worker via
-// `mkit-worker-common` (mkit#797) — this module wires those generic pieces
-// together with repo-worker's OWN business logic (the auth interceptor,
+// fetch-adapter skeleton come from `mkit-worker-common`; this module wires
+// those generic pieces together with repo-worker's business logic (the auth interceptor,
 // the RefStore DO, the RepoService/HealthServer registration, and the
 // streamed response bridge WatchRefs needs), which stays here.
 

@@ -220,10 +220,8 @@ steps:
         # ── mkit-server (server exit gate; `just ci-server`) ──
         # The workspace nextest above runs the memory storage suite and
         # wire suite over the memory-backed in-process host. These
-        # add what it cannot: the runtime-agnostic core and the Workers
-        # adapter must build for wasm32 (a native-only dependency breaks the
-        # Workers deployment, not the host build), the wasm32 graphs must
-        # stay free of C-toolchain crates, and the default `mkit` CLI must
+        # add what it cannot: the runtime-agnostic core must build for wasm32,
+        # the wasm32 graphs must stay free of C-toolchain crates, and the default `mkit` CLI must
         # stay server-free (docs/INVARIANTS.md). The triggers run on main
         # and PRs to main only (cloudbuild/README.md).
         ( cd rust
@@ -233,8 +231,7 @@ steps:
           cargo check --locked -p mkit-server --features remote-hooks --target wasm32-unknown-unknown
           cargo check --locked -p mkit-server --features http-objects --target wasm32-unknown-unknown
           cargo check --locked -p mkit-server --no-default-features --features test-support --target wasm32-unknown-unknown
-          cargo build --locked -p mkit-server-worker --target wasm32-unknown-unknown
-          cargo clippy --locked -p mkit-server -p mkit-server-worker --target wasm32-unknown-unknown -- -D warnings
+          cargo clippy --locked -p mkit-server --target wasm32-unknown-unknown -- -D warnings
         )
         bash scripts/check-wasm-dep-graph.sh
         bash scripts/check-cli-baseline.sh

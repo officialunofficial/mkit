@@ -295,7 +295,7 @@ fn gzip(data: &[u8]) -> Result<Vec<u8>, Failure> {
 
 /// Opt-in (`strict-gzip-auth`): a signature over the compressed body bytes,
 /// sent with `Content-Encoding: gzip`, fails closed (rejected, nothing
-/// written), as mkit-server and vcs-worker do today. SPEC-WRITE-GRANTS §9.2
+/// written), as mkit-server does. SPEC-WRITE-GRANTS §9.2
 /// ("exact HTTP request body bytes") leaves open whether `body:` covers the
 /// encoded or the decoded bytes; the M2 spec pass (WP-2.6/2.9) decides, so
 /// any error code passes.

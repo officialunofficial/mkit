@@ -13,7 +13,7 @@ Usage: mkit serve [OPTIONS] [PATH]
 
 For more information, try '--help'.
 hint: `mkit serve` no longer takes `--http`; it only speaks the ssh-frame protocol on stdin/stdout.
-      Use SSH (`mkit serve`) or a Connect server such as vcs-worker.
+      Use SSH (`mkit serve`) or a Connect server using mkit-server.
       The mkit+enc:// transport is deprecated: no maintained server.
 
 ```
@@ -29,7 +29,7 @@ Usage: mkit serve <PATH>
 
 For more information, try '--help'.
 hint: `mkit serve` no longer takes `--listen-enc`; it only speaks the ssh-frame protocol on stdin/stdout.
-      Use SSH (`mkit serve`) or a Connect server such as vcs-worker.
+      Use SSH (`mkit serve`) or a Connect server using mkit-server.
       The mkit+enc:// transport is deprecated: no maintained server.
 
 ```

@@ -1,42 +1,41 @@
 #!/usr/bin/env python3
-"""Keep both independent launch graphs on the server's bounded decoder path."""
-import json
+"""Keep the server's wasm decoder graph on the bounded pure-Rust backend."""
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def check(manifest, features=()):
-    command = ["cargo", "metadata", "--locked", "--format-version", "1",
-               "--filter-platform", "wasm32-unknown-unknown",
-               "--manifest-path", str(ROOT / manifest)]
-    if features:
-        command += ["--features", ",".join(features)]
-    metadata = json.loads(subprocess.check_output(command))
-    decoder = [p for p in metadata["packages"] if p["name"] == "ruzstd"]
-    expected = (ROOT / "rust/vendor/ruzstd/Cargo.toml").resolve()
-    if len(decoder) != 1 or Path(decoder[0]["manifest_path"]).resolve() != expected or decoder[0]["source"] is not None:
-        raise SystemExit(f"{manifest}: launch must resolve the patched vendored decoder")
-    packages = {p["id"]: p["name"] for p in metadata["packages"]}
-    resolved = {packages[node["id"]]: set(node["features"])
-                for node in metadata["resolve"]["nodes"]}
-    for name in ("mkit-server-worker", "mkit-server", "mkit-core"):
-        if "pack-ruzstd" not in resolved[name]:
-            raise SystemExit(f"{manifest}: missing {name}/pack-ruzstd")
-    for name in ("mkit-server", "mkit-server-worker"):
-        if "__test-faults" in resolved[name]:
-            raise SystemExit(f"{manifest}: launch enables internal fault injection")
-    if "test-support" in resolved["mkit-server"]:
-        raise SystemExit(f"{manifest}: launch enables test fixture writes")
-    if "sql" in resolved["mkit-server"]:
-        raise SystemExit(f"{manifest}: SQL belongs in the Workers adapter")
+def check():
+    # Select the server's normal graph. Workspace-wide metadata also unifies
+    # native CLI and test dependencies, which intentionally use the C decoder.
+    tree = subprocess.check_output([
+        "cargo", "tree", "--locked", "--manifest-path", str(ROOT / "rust/Cargo.toml"),
+        "-p", "mkit-server", "--target", "wasm32-unknown-unknown",
+        "--no-default-features", "--features", "pack-ruzstd", "--edges", "normal",
+        "--prefix", "none", "--format", "{p}|{f}",
+    ], text=True)
+    resolved = {}
+    decoder = set()
+    for line in tree.splitlines():
+        package, features = line.removesuffix(" (*)").split("|", 1)
+        name = package.split()[0]
+        resolved.setdefault(name, set()).update(features.split(","))
+        if name == "ruzstd":
+            decoder.add(package)
+    expected = ROOT / "rust/vendor/ruzstd"
+    if len(decoder) != 1 or f"({expected})" not in next(iter(decoder)):
+        raise SystemExit("server must resolve the patched vendored decoder")
+    for name in ("mkit-server", "mkit-core"):
+        if "pack-ruzstd" not in resolved.get(name, set()):
+            raise SystemExit(f"missing {name}/pack-ruzstd")
+    forbidden = {"__test-faults", "test-support", "sql"} & resolved["mkit-server"]
+    if forbidden:
+        raise SystemExit(f"wasm decoder graph enables unexpected server features: {sorted(forbidden)}")
     if "pack-zstd" in resolved["mkit-core"]:
-        raise SystemExit(f"{manifest}: launch must use the pure-Rust decoder")
-    print(f"PASS {manifest}: Worker -> server -> core pack-ruzstd")
+        raise SystemExit("wasm decoder graph must use the pure-Rust decoder")
+    print("PASS server -> core pack-ruzstd: vendored decoder, no native/test features")
 
 
 if __name__ == "__main__":
-    check("apps/vcs-worker/Cargo.toml", ("launch",))
-    check("apps/vcs-worker/Cargo.toml", ("launch", "perf-metrics"))
-    check("apps/embedded-worker/tests/embedding-conformance/Cargo.toml")
+    check()

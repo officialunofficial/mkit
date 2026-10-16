@@ -157,6 +157,109 @@ const TICKET_KEY: &str = "dev 11111111111111111111111111111111111111111111111111
 // Bound even a handler that never wakes, without relying on wall-clock sleeps.
 const MAX_TIMER_DRAIN_POLLS: usize = 100_000;
 
+// Native storage callbacks for the same scheduled extraction state machine.
+#[derive(Debug, Clone)]
+struct MemoryExtraction(MemoryBlobStore);
+
+impl mkit_server::indexed::job::SliceExtension for MemoryExtraction {
+    fn needs_extraction(
+        &self,
+        object: &mkit_core::object::Object,
+        cfg: &mkit_server::indexed::IndexedConfig,
+    ) -> bool {
+        mkit_server::indexed::job::FailClosedExtraction.needs_extraction(object, cfg)
+    }
+
+    fn extraction_enabled(&self) -> bool {
+        true
+    }
+
+    fn begin_object<'a>(
+        &'a self,
+        key: BlobKey,
+        plan: &'a mkit_core::upload_parts::PartPlan,
+        _root: mkit_core::hash::Hash,
+        _cvs: &'a [mkit_core::hash::Hash],
+        _operation: mkit_core::hash::Hash,
+        budget: &'a mkit_server::indexed::budget::SliceBudget,
+    ) -> mkit_server::BoxFuture<'a, Result<Option<Vec<u8>>, mkit_server::StoreError>> {
+        use mkit_server::MultipartBlobStore;
+        Box::pin(async move {
+            budget.charge()?;
+            self.0
+                .begin_multipart(key, plan.total(), plan.part_size())
+                .await
+                .map(Some)
+        })
+    }
+
+    fn put_object_part<'a>(
+        &'a self,
+        key: BlobKey,
+        session: &'a [u8],
+        plan: &'a mkit_core::upload_parts::PartPlan,
+        index: u32,
+        cv: mkit_core::hash::Hash,
+        bytes: Vec<u8>,
+        budget: &'a mkit_server::indexed::budget::SliceBudget,
+    ) -> mkit_server::BoxFuture<'a, Result<Option<Vec<u8>>, mkit_server::StoreError>> {
+        use mkit_server::{MultipartBlobStore, PartSink};
+        Box::pin(async move {
+            budget.charge()?;
+            let mut sink = self.0.begin_part(key, session, plan, index, cv).await?;
+            budget.charge()?;
+            sink.write(bytes.into()).await?;
+            budget.charge()?;
+            sink.commit().await.map(Some)
+        })
+    }
+
+    fn complete_object<'a>(
+        &'a self,
+        key: BlobKey,
+        session: &'a [u8],
+        plan: &'a mkit_core::upload_parts::PartPlan,
+        parts: Vec<mkit_server::PartRef>,
+        root: mkit_core::hash::Hash,
+        budget: &'a mkit_server::indexed::budget::SliceBudget,
+    ) -> mkit_server::BoxFuture<
+        'a,
+        Result<Option<mkit_server::CommitOutcome>, mkit_server::StoreError>,
+    > {
+        use mkit_server::MultipartBlobStore;
+        Box::pin(async move {
+            budget.charge()?;
+            self.0
+                .complete_with_root(key, session, plan, &parts, root)
+                .await
+                .map(Some)
+        })
+    }
+
+    fn abort_object<'a>(
+        &'a self,
+        key: BlobKey,
+        session: &'a [u8],
+        _plan: &'a mkit_core::upload_parts::PartPlan,
+        budget: &'a mkit_server::indexed::budget::SliceBudget,
+    ) -> mkit_server::BoxFuture<'a, Result<(), mkit_server::StoreError>> {
+        use mkit_server::MultipartBlobStore;
+        Box::pin(async move {
+            budget.charge()?;
+            self.0.abort(key, session).await
+        })
+    }
+}
+
+#[derive(Debug)]
+struct NativeSleep;
+
+impl mkit_server::Sleep for NativeSleep {
+    fn sleep(&self, duration: std::time::Duration) -> mkit_server::BoxFuture<'static, ()> {
+        Box::pin(tokio::time::sleep(duration))
+    }
+}
+
 /// Isolated in-process Connect server with a canonical loopback origin.
 ///
 /// Construct with [`TestHost::start`] or [`TestHost::start_with_hooks`].
@@ -269,17 +372,25 @@ impl TestHost {
             plant_membership(&blobs, &kv, &config.addressing, config.sharding, &profile).await?;
             profile.planted_membership = true;
         }
-        let pipeline = Arc::new(
-            Pipeline::new(
-                blobs.clone(),
-                kv.clone(),
-                hooks,
-                config,
-                clock.clone(),
-                Arc::new(NoopMetrics),
-            )
-            .map_err(|error| error.to_string())?,
+        let pipeline = Pipeline::new(
+            blobs.clone(),
+            kv.clone(),
+            hooks,
+            config,
+            clock.clone(),
+            Arc::new(NoopMetrics),
+        )
+        .map_err(|error| error.to_string())?
+        .with_pending_advance_hold(
+            if profile.has(Feature::AdvanceHold) {
+                std::time::Duration::from_secs(2)
+            } else {
+                std::time::Duration::ZERO
+            },
+            Arc::new(NativeSleep),
+            u64::MAX,
         );
+        let pipeline = Arc::new(pipeline);
         let app = mount_app(
             &profile,
             &base_url,
@@ -457,7 +568,9 @@ impl TestHost {
             ))
             .register(mkit_server::relay::RelayHandler {
                 target: target.clone(),
-                hook: mkit_server::relay::NoHook,
+                hook: mkit_server::relay::HolderRelayHook {
+                    clock: self.clock.clone(),
+                },
                 budget: mkit_server::relay::RelayBudget::default(),
             })
             .register(
@@ -480,6 +593,28 @@ impl TestHost {
                 coordinator: target.clone(),
                 metrics: NoopMetrics,
             });
+        let windows = mkit_server::indexed::budget::BlobWindows(&self.blobs);
+        let registry = if self.profile.has(Feature::IndexedAsync) {
+            registry.register(mkit_server::indexed::job::VerifyTimer {
+                takedown_denial: self.profile.has(Feature::Takedown),
+                remote: target.clone(),
+                blobs: self.blobs.clone(),
+                windows,
+                shards: if self.profile.sharding_d34 {
+                    Arc::new(mkit_server::pipeline::D34Shards)
+                } else {
+                    Arc::new(mkit_server::pipeline::SinglePartition)
+                },
+                cfg: mkit_server::indexed::IndexedConfig::scheduled(self.profile.max_pack_bytes),
+                limits: mkit_server::indexed::job::SliceLimits::default(),
+                lease: mkit_server::pipeline::LeaseParams::default(),
+                clock: self.clock.clone(),
+                metrics: Arc::new(NoopMetrics),
+                extension: MemoryExtraction(self.blobs.clone()),
+            })
+        } else {
+            registry
+        };
         // Kind 16 (a fork job) exists only where indexed mode runs on leased
         // sharding; its handler's settings must equal the pipeline's.
         let registry = if self.profile.sharding_d34 && self.profile.has(Feature::IndexedMode) {
@@ -509,6 +644,165 @@ impl TestHost {
     }
 }
 
+// A relay tick must leave other alarm kinds untouched. Filtering the timer
+// scan preserves its bounded pages and cursors while all guarded writes still
+// go through the original store.
+#[derive(Debug)]
+struct RelayTimers<'a> {
+    store: &'a MemoryKv,
+    scan_rows: std::sync::atomic::AtomicU32,
+}
+
+impl NamespaceStore for RelayTimers<'_> {
+    fn capabilities(&self) -> mkit_server::StoreCapabilities {
+        self.store.capabilities()
+    }
+    async fn get(
+        &self,
+        p: &Partition,
+        key: &mkit_server::Key,
+    ) -> Result<Option<Value>, mkit_server::StoreError> {
+        self.store.get(p, key).await
+    }
+    async fn get_many(
+        &self,
+        p: &Partition,
+        keys: &[mkit_server::Key],
+    ) -> Result<Vec<Option<Value>>, mkit_server::StoreError> {
+        self.store.get_many(p, keys).await
+    }
+    async fn scan(
+        &self,
+        p: &Partition,
+        start: &mkit_server::Key,
+        end: &mkit_server::Key,
+        after: Option<&mkit_server::Cursor>,
+        limit: u32,
+    ) -> Result<mkit_server::ScanPage, mkit_server::StoreError> {
+        use std::sync::atomic::Ordering;
+        let allowed = self
+            .scan_rows
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                Some(remaining.saturating_sub(limit))
+            })
+            .unwrap_or(0)
+            .min(limit);
+        if allowed == 0 {
+            return Ok(mkit_server::ScanPage::default());
+        }
+        let mut page = self.store.scan(p, start, end, after, allowed).await?;
+        page.entries.retain(|(key, _)| !matches!(keys::parse(key), Some(keys::ParsedKey::Timer {kind, ..}) if kind != mkit_server::timers::registry::kinds::RELAY.get()));
+        Ok(page)
+    }
+    async fn apply(
+        &self,
+        p: &Partition,
+        batch: Batch,
+    ) -> Result<mkit_server::BatchOutcome, mkit_server::StoreError> {
+        self.store.apply(p, batch).await
+    }
+    async fn stats(
+        &self,
+        p: &Partition,
+    ) -> Result<mkit_server::PartitionStats, mkit_server::StoreError> {
+        self.store.stats(p).await
+    }
+    async fn probe(&self) -> Result<(), mkit_server::StoreError> {
+        self.store.probe().await
+    }
+}
+
+// The native listener can complete successive requests before the background
+// scheduler wakes. Flush due relay work after an async advance, using the same
+// bounded core handler; do not run verification or advance the business clock.
+async fn advance_relay_tick(
+    kv: &Arc<MemoryKv>,
+    clock: &Arc<ManualClock>,
+    namespace: NamespaceKey,
+) -> Result<(), String> {
+    let registry = TimerRegistry::new().register(mkit_server::relay::RelayHandler {
+        target: kv.clone(),
+        hook: mkit_server::relay::HolderRelayHook {
+            clock: clock.clone(),
+        },
+        budget: mkit_server::relay::RelayBudget::default(),
+    });
+    let coordinator = Partition::Coordinator(namespace);
+    let mut state = mkit_server::timers::TickState::new(clock.as_ref(), TickBudget::default());
+    let relay_store = RelayTimers {
+        store: kv.as_ref(),
+        scan_rows: std::sync::atomic::AtomicU32::new(256),
+    };
+    {
+        let page = mkit_server::store::adapter_spi::watermark::active_shards(
+            kv.as_ref(),
+            &coordinator,
+            None,
+            256,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        for partition in page.shards {
+            mkit_server::timers::run_due_with_state(
+                &relay_store,
+                &partition,
+                &registry,
+                clock.as_ref(),
+                u64::try_from(clock.now_ms()).unwrap_or(0),
+                &mut state,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+fn with_advance_relay_tick(
+    app: axum::Router,
+    profile: &Profile,
+    kv: &Arc<MemoryKv>,
+    clock: &Arc<ManualClock>,
+) -> axum::Router {
+    if profile.has(Feature::IndexedAsync) && profile.sharding_d34 {
+        let relay_kv = kv.clone();
+        let relay_clock = clock.clone();
+        app.layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let kv = relay_kv.clone();
+                let clock = relay_clock.clone();
+                async move {
+                    let namespace = request
+                        .uri()
+                        .path()
+                        .ends_with("/AdvanceRefs")
+                        .then(|| {
+                            request
+                                .headers()
+                                .get("x-repository")
+                                .and_then(|value| value.to_str().ok())
+                                .and_then(|identity| identity.split_once('/'))
+                                .and_then(|(namespace, _)| {
+                                    mkit_core::repo_identity::Namespace::parse(namespace).ok()
+                                })
+                                .map(|namespace| NamespaceKey::from_namespace(&namespace))
+                        })
+                        .flatten();
+                    let response = next.run(request).await;
+                    if let Some(namespace) = namespace.filter(|_| response.status().is_success()) {
+                        advance_relay_tick(&kv, &clock, namespace)
+                            .await
+                            .expect("native advance relay tick");
+                    }
+                    response
+                }
+            },
+        ))
+    } else {
+        app
+    }
+}
+
 fn mount_app<H: HookSet + 'static>(
     profile: &Profile,
     origin: &str,
@@ -522,6 +816,31 @@ fn mount_app<H: HookSet + 'static>(
     let app = axum::Router::new()
         .fallback_service(mkit_server::connect::service(pipeline.clone()))
         .layer(connect_cors());
+    let app = with_advance_relay_tick(app, profile, &kv, &clock);
+    let app = if profile.has(Feature::TestFaults) && profile.has(Feature::IndexedMode) {
+        let fork_pipeline = pipeline.clone();
+        app.route("/__mkit_test/fork", axum::routing::post(
+            move |headers: http::HeaderMap, body: bytes::Bytes| {
+                let pipeline = fork_pipeline.clone();
+                async move {
+                    use axum::response::IntoResponse;
+                    let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok()).map(str::to_owned);
+                    match pipeline.dispatch_fork(&header, &body, &mkit_server::pipeline::NoGate).await {
+                        Ok((result, _)) => axum::Json(serde_json::json!({
+                            "tip": mkit_core::hash::to_hex(&result.tip),
+                            "pack_count": result.pack_count,
+                        })).into_response(),
+                        Err(error) => (
+                            http::StatusCode::from_u16(error.http_status().unwrap_or(500)).unwrap(),
+                            axum::Json(serde_json::json!({"code": error.code().as_str(), "message": error.public_message()})),
+                        ).into_response(),
+                    }
+                }
+            }
+        ))
+    } else {
+        app
+    };
     #[cfg(feature = "http-objects")]
     let app = app.layer(axum::middleware::from_fn(move |request, next| {
         let pipeline = pipeline.clone();
@@ -681,7 +1000,11 @@ fn configure_profile_features(
         );
     }
     if profile.has(Feature::IndexedMode) || profile.has(Feature::HttpObjects) {
-        let mut indexed = mkit_server::indexed::IndexedConfig::default();
+        let mut indexed = if profile.has(Feature::IndexedAsync) {
+            mkit_server::indexed::IndexedConfig::scheduled(profile.max_pack_bytes)
+        } else {
+            mkit_server::indexed::IndexedConfig::default()
+        };
         indexed.max_pack_bytes = profile.max_pack_bytes;
         indexed.decode_budget = indexed.decode_budget.max(profile.max_pack_bytes);
         config.indexed = Some(indexed);

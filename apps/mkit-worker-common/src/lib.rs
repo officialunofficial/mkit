@@ -1,14 +1,11 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //
-// Shared CF Worker request/response glue extracted out of
-// apps/repo-worker and apps/vcs-worker's `worker_impl.rs` (mkit#797): the
-// three genuinely-identical pieces both Workers duplicated near-verbatim —
-// CORS preflight handling, the Content-Length body-size cap, and the
-// `worker::Request` <-> `http::Request` fetch-adapter skeleton (including
+// Shared CF Worker request/response glue: CORS preflight handling, the
+// Content-Length body-size cap, and the `worker::Request` <-> `http::Request` fetch-adapter skeleton (including
 // the `SendFuture`-wrapped `tower::Service` dispatch).
 //
 // The replay module also shares the explicit transactionSync bridge and
-// durable nonce/result ledger across repo, VCS and keys Workers. Each service
+// durable nonce/result ledger across repo and keys Workers. Each service
 // still owns its quota policy and effects; the pure auth v2 contract lives in
 // mkit-core::write_auth.
 //
@@ -19,7 +16,7 @@
 // real Workers/JS runtime — verified directly: constructing a
 // `worker::Response` under a plain `cargo test` panics with "cannot call
 // wasm-bindgen imported functions on non-wasm targets". That's the exact
-// reason apps/repo-worker's and apps/vcs-worker's `worker_impl` module is
+// reason apps/repo-worker's `worker_impl` module is
 // `#[cfg(target_arch = "wasm32")]`-gated and carries zero unit tests today.
 // The glue here is verified the same way theirs is: the wasm32 build, each
 // Worker's own integration tests (against fakes, not real `worker::` I/O),

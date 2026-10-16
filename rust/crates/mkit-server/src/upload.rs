@@ -8,13 +8,9 @@
 //! verifies BLAKE3 before the pack becomes visible, and hashing here too
 //! would double the CPU cost of a 4 GiB upload.
 //!
-//! The canonical copy of `mkit serve`'s `UploadDrain`,
-//! `mkit-transport-connect` 0.4's `drain_upload` and the chunk loop of
-//! `vcs-worker`'s `upload_pack`. Each [`UploadError`] keeps today's text for
-//! both wire families: [`UploadError::ssh_message`] is `mkit serve`'s and
-//! [`UploadError::connect_message`] is `mkit-transport-connect`'s (the server
-//! it had until WP-M0-15, behind `mkit serve --http`). The old copies are
-//! gone: `mkit serve`'s in WP-M0-13, `vcs-worker`'s in WP-M0-17.
+//! Shared by the SSH and Connect server bindings. Each [`UploadError`]
+//! retains the binding-specific text through [`UploadError::ssh_message`]
+//! and [`UploadError::connect_message`].
 
 use std::borrow::Cow;
 
@@ -23,9 +19,8 @@ use mkit_core::protocol::PackKey;
 use crate::error::{Code, ServerError};
 
 /// Caps a binding applies to one upload. Each binding supplies its own:
-/// the native Connect server uses `PACK_BODY_LIMIT` and no chunk cap,
-/// `mkit serve` its per-connection byte and frame caps, and the Workers
-/// server its 64 MiB buffer cap.
+/// Connect hosts choose their body and chunk limits, while `mkit serve`
+/// applies its per-connection byte and frame caps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct UploadLimits {

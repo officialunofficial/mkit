@@ -1,4 +1,4 @@
-//! Read-only mount policy shared by the native and Workers adapters.
+//! Read-only mount policy for runtime adapters.
 use super::{HttpBody, HttpObjectResponse};
 use crate::pipeline::ADMISSION_EXPOSE_HEADERS;
 use crate::url_token::{UrlTokenConfig, UrlTokenConfigError};

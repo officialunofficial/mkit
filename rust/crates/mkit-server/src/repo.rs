@@ -14,9 +14,7 @@ pub(crate) const MAX_REPO_NAME_BYTES: usize = 255;
 
 /// The namespace a single-repository deployment uses: a reserved sentinel.
 /// SPEC-TRANSPORT-CONNECT §7.4 namespaces are always `ed25519-<64 hex>` or
-/// `0x<40 hex>`, so no request can ever select `root`. It matches the
-/// `vcs-worker` `RefStore` instance name, so M0 needs no Durable Object
-/// migration (planner default Q13).
+/// `0x<40 hex>`, so those namespace forms cannot select `root`.
 const DEPLOYMENT_DEFAULT_NAMESPACE: &str = "root";
 
 /// A repository name: 1..=255 bytes of printable ASCII with no whitespace

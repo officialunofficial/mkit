@@ -28,10 +28,9 @@ pub fn with_cors(resp: Response) -> Response {
 }
 
 /// Build the 204 CORS-preflight response. `allow_headers`/`allow_methods`
-/// are caller-supplied because the two Workers expose slightly different
-/// header sets (repo-worker's `x-admin-token` has no vcs-worker
-/// equivalent) — this crate only owns the response SHAPE, not the header
-/// list.
+/// are caller-supplied to accommodate service-specific headers such as
+/// repo-worker's `x-admin-token`. This crate owns the response shape; callers
+/// choose the allowed header list.
 pub fn cors_preflight_response(allow_headers: &str, allow_methods: &str) -> Result<Response> {
     let headers = Headers::new();
     let _ = headers.set("Access-Control-Allow-Origin", "*");

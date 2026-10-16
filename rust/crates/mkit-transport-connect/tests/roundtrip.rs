@@ -2,13 +2,9 @@
 //! <-> [`ConnectTransport`] client, driving every `Transport` trait verb
 //! through the actual generated codebase.
 //!
-//! This is the regression gate SPEC-TRANSPORT-CONNECT's testing decisions
-//! call for (mkit#701's "Testing Decisions"): a real server implementing
-//! the generated `TransportService` trait, not a mock standing in for one.
-//! The server here is memory-backed (`mkit-transport-memory::MemoryTransport`)
-//! rather than the production R2/DO-backed reference Worker (a separate,
-//! sibling issue, mkit#699) — but the wire path (real HTTP, real protobuf
-//! framing, real Connect streaming) is identical.
+//! This regression gate uses a real server implementing the generated
+//! `TransportService` trait over `mkit-transport-memory::MemoryTransport`.
+//! It exercises real HTTP, protobuf framing, and Connect streaming.
 
 use std::sync::Arc;
 use std::sync::mpsc;

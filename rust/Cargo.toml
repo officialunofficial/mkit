@@ -28,9 +28,6 @@ members = [
     "crates/mkit-server",
     # The storage-backend conformance suite (publish = false).
     "crates/mkit-server-conformance",
-    # The Cloudflare Workers adapter: R2 blobs, Durable Object metadata
-    # (publish = false).
-    "crates/mkit-server-worker",
     "benches",
     # Dev-only test helpers shared across crates' test suites
     # (publish = false — never a normal dependency, see the crate's

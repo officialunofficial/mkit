@@ -157,7 +157,7 @@ impl BodyCapture {
     }
 }
 
-/// A bounded raw Connect response, shared by the native and Workers adapters.
+/// A bounded raw Connect response for runtime adapters.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Response {
     /// HTTP status, including the Connect error mapping.

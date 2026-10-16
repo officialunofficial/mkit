@@ -1,4 +1,4 @@
-//! Actual Worker D34 authority fence probe; run by vcs-worker-authority.sh --authority.
+//! External D34 authority fence probe for a disposable server and hook stub.
 #![allow(clippy::unwrap_used)]
 use base64::{
     Engine as _,
@@ -19,7 +19,7 @@ fn statement(audience: &str, generation: u64) -> String {
     let bytes = format!(
         "mkit-authority-generation:v1\ndeployment\n{NS}\n{generation}\n{audience}\n{now}\n{}\n{}",
         now + 60000,
-        to_hex(&hash(b"worker-authority"))
+        to_hex(&hash(b"external-authority"))
     );
     let signature = SigningKey::from_bytes(&[7; 32]).sign(&hash(bytes.as_bytes()));
     format!(
@@ -28,10 +28,10 @@ fn statement(audience: &str, generation: u64) -> String {
         URL_SAFE_NO_PAD.encode(signature.to_bytes())
     )
 }
-#[allow(clippy::too_many_lines)] // One serial Worker scenario keeps its barrier and ticket state together.
+#[allow(clippy::too_many_lines)] // One serial server scenario keeps its barrier and ticket state together.
 #[tokio::test]
-#[ignore = "requires disposable local Worker D34 and the hook stub"]
-async fn worker_d34_authority_barrier_rejects_stale_facts_and_ticket_staging() {
+#[ignore = "requires disposable local server D34 and the hook stub"]
+async fn external_d34_authority_barrier_rejects_stale_facts_and_ticket_staging() {
     let origin = std::env::var("MKIT_AUTHORITY_PROBE_URL").unwrap();
     let client = Client::new(&Url::parse(&origin).unwrap()).unwrap();
     let stub =
