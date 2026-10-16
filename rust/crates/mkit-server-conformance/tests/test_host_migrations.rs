@@ -723,6 +723,9 @@ async fn scheduled_case(case: &str, hold: bool) {
     if case == "indexed.async_verification_commits" || case == "fork.driver_probe" {
         p.features.insert(Feature::TestFaults);
     }
+    if case == "fork.driver_probe" {
+        p.features.insert(Feature::Fork);
+    }
     if hold {
         p.features.insert(Feature::AdvanceHold);
     }
