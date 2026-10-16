@@ -20,18 +20,18 @@
     "profile_limits_digest": "1111111111111111111111111111111111111111111111111111111111111111",
     "repository": "2222222222222222222222222222222222222222222222222222222222222222",
     "operation": "abababab",
-    "epoch": 0,
+    "epoch": "0",
     "pack": {
       "id": "3333333333333333333333333333333333333333333333333333333333333333",
-      "len": 0,
-      "object_count": 0,
-      "delta_count": 0,
+      "len": "0",
+      "object_count": "0",
+      "delta_count": "0",
       "object_set_root": "4444444444444444444444444444444444444444444444444444444444444444"
     },
     "heads": [],
     "external_dependencies": [],
-    "membership_generation": 0,
-    "removal_version": 0,
-    "denial_version": 0
+    "membership_generation": "0",
+    "removal_version": "0",
+    "denial_version": "0"
   }
 }

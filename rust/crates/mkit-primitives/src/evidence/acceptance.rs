@@ -414,15 +414,19 @@ impl<'a> Cursor<'a> {
         Self { bytes, pos: 0 }
     }
     fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        let end = self
+        // Check available bytes before adding offsets, so a missing u32::MAX
+        // body has the same EOF classification on 32-bit and 64-bit targets.
+        let remaining = self
+            .bytes
+            .get(self.pos..)
+            .ok_or(failure(FailureCode::UnexpectedEof))?;
+        let b = remaining
+            .get(..n)
+            .ok_or(failure(FailureCode::UnexpectedEof))?;
+        self.pos = self
             .pos
             .checked_add(n)
             .ok_or(failure(FailureCode::ResourceLimit))?;
-        let b = self
-            .bytes
-            .get(self.pos..end)
-            .ok_or(failure(FailureCode::UnexpectedEof))?;
-        self.pos = end;
         Ok(b)
     }
     fn fixed<const N: usize>(&mut self) -> Result<[u8; N]> {

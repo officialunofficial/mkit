@@ -97,8 +97,15 @@ def emit(name, description, semantic=None, cfg=None, failure=None, raw=None, rec
             b'mkit-acceptance-evidence:v1\0' + b).hexdigest()
         expected['recheck_heads'] = (recheck if recheck is not None else
                                     ('EvidenceHeadMismatch' if s['heads'] else 'ok'))
+    # Decimal strings preserve every u64 exactly in JSON implementations that
+    # otherwise round numbers through IEEE-754 doubles.
+    semantic = copy.deepcopy(s)
+    for field in ('epoch', 'membership_generation', 'removal_version', 'denial_version'):
+        semantic[field] = str(semantic[field])
+    for field in ('len', 'object_count', 'delta_count'):
+        semantic['pack'][field] = str(semantic['pack'][field])
     metadata = dict(description=description, cfg=config, expected=expected,
-                    encoded_len=len(b), semantic=s)
+                    encoded_len=len(b), semantic=semantic)
     (OUT / f'{name}.bin').write_bytes(b)
     (OUT / f'{name}.json').write_text(json.dumps(metadata, indent=2) + '\n')
 

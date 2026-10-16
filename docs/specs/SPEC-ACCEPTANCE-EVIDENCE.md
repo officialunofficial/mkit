@@ -138,5 +138,7 @@ No existing object or pack bytes change.
 
 Portable fixtures under **rust/crates/mkit-primitives/fixtures/acceptance/** pin
 canonical bytes, decode configurations, refusal codes, and digest vectors. The
-fixture manifest registers each case. Fixture regeneration is an explicit reviewed
+fixture manifest registers each case. Semantic JSON descriptions encode u64
+values as decimal strings, preserving exact values in every language; configured
+u32 bounds remain JSON numbers. Fixture regeneration is an explicit reviewed
 operation; CI only reads them.
