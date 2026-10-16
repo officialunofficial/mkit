@@ -10,13 +10,15 @@ mod guards;
 
 pub use effects::{
     AcceptanceEffects, AccountingEffect, DurableOutcome, MembershipEffect, PublicationEffect,
-    RefEffect, ReplayTransition, ReservationOutcome, TicketTransition,
+    RefEffect, ReplayTransition, ReservationOutcome, ReservationTransition, TicketTransition,
 };
 pub use facts::{
     AccountingFact, AdmissionFact, AuthorityFact, AuthorityMode, DenialFact, GrantFact,
-    LifecycleFact, LifecycleState, NamespaceId, Observed, OperationId, PermanentCode, PolicyFact,
-    PresenceDelta, PublicationFact, RefFact, RefName, RefValue, ReplayFact, ReplayScope,
-    ReplayState, ReservationFact, ReservationId, Snapshot, TerminalResult, TicketFact, TicketId,
+    LifecycleFact, LifecycleState, MembershipObservation, NamespaceId, Observed, OperationId,
+    PermanentCode, PermanentRefusal, PolicyFact, PresenceDelta, PublicationFact, RefFact, RefName,
+    RefValue, ReplayFact, ReplayScope, ReplayState, ReservationAbortReason, ReservationAccounting,
+    ReservationFact, ReservationId, ReservationTerminal, ReservationTerminalKind, Snapshot,
+    TerminalResult, TicketFact, TicketId,
 };
 pub use guards::{GuardKind, RequiredGuard, RequiredSourceFence};
 
@@ -49,7 +51,7 @@ pub enum WriteDecision {
     /// Guard and record a permanent refusal.
     Reject {
         /// Permanent refusal class.
-        refusal: PermanentCode,
+        refusal: PermanentRefusal,
         /// Optional durable rejection.
         terminal: Option<TerminalResult>,
         /// Optional reservation settlement.

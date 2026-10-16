@@ -63,3 +63,14 @@ pub struct IndexedProfile {
     /// Advertised effective delta depth.
     pub delta_depth: u32,
 }
+
+/// Explicit finite decision output budget; no unlimited default.
+///
+/// The decision owner charges exact public refusal messages cumulatively before
+/// guarded construction. Exhaustion is an execution failure, never truncation
+/// or a new invalid-content rule. Entry points land with that owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecisionLimits {
+    /// Maximum cumulative owned public refusal-message bytes.
+    pub public_message_bytes: u32,
+}

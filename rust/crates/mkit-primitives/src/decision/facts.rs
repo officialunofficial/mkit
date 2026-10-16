@@ -207,6 +207,20 @@ pub enum PermanentCode {
     /// Unimplemented.
     Unimplemented,
 }
+/// Exact replayable refusal, with no challenge or transient details.
+///
+/// The owning decision path must charge and bound `public_message` with
+/// `DecisionLimits::public_message_bytes` before producing a guarded result.
+/// It preserves the exact public message; it never truncates or regenerates it.
+/// This skeleton has no decision entry point accepting untrusted records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermanentRefusal {
+    /// Only a permanent replayable transport class.
+    pub code: PermanentCode,
+    /// Exact original public refusal message, bounded by the decision budget.
+    pub public_message: String,
+}
+
 /// Normalized ref response component.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefValue {
@@ -224,7 +238,7 @@ pub enum TerminalResult {
     /// Exact conflict ref response.
     Conflict(Vec<RefValue>),
     /// Permanent refusal.
-    Rejected(PermanentCode),
+    Rejected(PermanentRefusal),
 }
 /// Durable replay state.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,6 +262,67 @@ pub struct ReplayFact {
     /// Exact replay state.
     pub state: ReplayState,
 }
+/// Stable semantic reservation abort reasons, separate from replay codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ReservationAbortReason {
+    /// Policy or pre-apply refusal without a more specific reason.
+    Unspecified,
+    /// A guarded ref expectation failed; tickets remain usable.
+    RefConflict,
+    /// Original authorization epoch changed.
+    EpochMismatch,
+    /// A required ticket pack is missing.
+    PackMissing,
+    /// A concurrent request won the exact replay reservation.
+    ReplayRace,
+    /// An internal failure prevented the apply.
+    Internal,
+    /// Reconciliation found an abandoned pending reservation.
+    Abandoned,
+}
+/// Accounting observations carried by a committed reservation outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReservationAccounting {
+    /// Stored bytes attributed to the operation.
+    pub bytes_stored: u64,
+    /// Pack bytes observed as new to this repository, not an accounting authority.
+    pub new_to_repository: u64,
+    /// Bytes new to the backing store.
+    pub new_to_store: u64,
+}
+/// Reservation terminal payload, independent of client replay responses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ReservationTerminalKind {
+    /// Committed reservation with its exact ref changes and accounting facts.
+    Committed {
+        /// Ref changes; `None` values denote deletion.
+        refs: Vec<RefValue>,
+        /// Exact byte observations.
+        accounting: ReservationAccounting,
+    },
+    /// Aborted reservation, including transient pre-apply failure reasons.
+    Aborted {
+        /// Stable settlement reason.
+        reason: ReservationAbortReason,
+        /// Safe detail, at most 512 UTF-8 bytes under the server specification;
+        /// the owning decision path enforces this before guarded construction.
+        detail: String,
+    },
+    /// An unconsumed ticket expired.
+    Expired,
+}
+/// Exact terminal reservation state shared by settlement and durable delivery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReservationTerminal {
+    /// Repository bound to the original reservation.
+    pub repository: RepositoryId,
+    /// Explicit business-clock occurrence instant.
+    pub occurred_ms: u64,
+    /// Exact terminal payload, never a client replay result.
+    pub kind: ReservationTerminalKind,
+}
 /// Reservation lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -263,12 +338,19 @@ pub enum ReservationFact {
         /// Expiry instant.
         expires_ms: u64,
     },
-    /// Bound to a ticket.
+    /// Bound to a ticket, without terminal settlement or outcome delivery.
     Ticketed(TicketId),
-    /// Settled by a durable accepted result.
-    Committed(TerminalResult),
-    /// Permanently aborted.
-    Aborted(PermanentCode),
+    /// Terminal state with exact settlement payload.
+    Terminal(ReservationTerminal),
+}
+/// Keyed repository membership observation, including authoritative absence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MembershipObservation {
+    /// Exact object key, retained even when the observation is absent.
+    pub object: Hash,
+    /// Exact present member or authoritative absence revision.
+    /// The decision owner checks present object/repository equality with keys.
+    pub observed: Observed<MemberFact>,
 }
 /// Acquired facts for a pure decision; all unacquired categories stay None.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -290,7 +372,7 @@ pub struct Snapshot {
     /// Repository lifecycle.
     pub lifecycle: Option<Observed<LifecycleFact>>,
     /// Exact repository-scoped members.
-    pub members: Vec<Observed<MemberFact>>,
+    pub members: Vec<MembershipObservation>,
     /// Applicable denial and inspection facts.
     pub denial: Option<Observed<DenialFact>>,
     /// Applicable policy.

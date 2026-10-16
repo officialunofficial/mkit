@@ -1,7 +1,7 @@
 //! Semantic atomic effect groups, with no physical routing.
 use super::facts::{
     OperationId, PublicationFact, RefName, ReplayFact, ReplayScope, ReservationFact, ReservationId,
-    TerminalResult, TicketFact, TicketId,
+    ReservationTerminal, TicketFact, TicketId,
 };
 use crate::evidence::{PackSource, RepositoryId};
 use mkit_core::hash::Hash;
@@ -34,7 +34,15 @@ pub struct TicketTransition {
 pub struct ReservationOutcome {
     /// Exact reservation.
     pub id: ReservationId,
-    /// Exact next state.
+    /// Exact terminal settlement shared with the durable outcome obligation.
+    pub terminal: ReservationTerminal,
+}
+/// Nonterminal reservation transition, such as binding an upload ticket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReservationTransition {
+    /// Exact reservation identity.
+    pub id: ReservationId,
+    /// Next observed lifecycle state; terminal settlement uses `ReservationOutcome`.
     pub next: ReservationFact,
 }
 /// Atomic replay record replacement.
@@ -68,8 +76,10 @@ pub struct AccountingEffect {
 pub struct DurableOutcome {
     /// Authenticated operation.
     pub operation: OperationId,
-    /// Exact terminal result.
-    pub result: TerminalResult,
+    /// Delivery idempotency key; each consumed ticket has its own reservation.
+    pub reservation: ReservationId,
+    /// Exact reservation terminal payload; never a client replay result.
+    pub terminal: ReservationTerminal,
 }
 /// Semantic effects; no physical keys, routing, or write batches.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,8 +90,10 @@ pub struct AcceptanceEffects {
     pub membership: Vec<MembershipEffect>,
     /// Ticket transitions.
     pub tickets: Vec<TicketTransition>,
-    /// Reservation settlement.
+    /// Terminal reservation settlement, matching its durable outcome by ID/payload.
     pub reservations: Vec<ReservationOutcome>,
+    /// Nonterminal reservation transitions; no durable terminal delivery implied.
+    pub reservation_transitions: Vec<ReservationTransition>,
     /// Replay replacement.
     pub replay: Option<ReplayTransition>,
     /// Publication transitions.

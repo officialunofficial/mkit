@@ -81,7 +81,7 @@ impl<'a, 'b> Cursor<'a, 'b> {
         if self.offset == self.bytes.len() {
             Ok(())
         } else {
-            Err(failure(FailureCode::InvalidResponse))
+            Err(failure(FailureCode::TrailingData))
         }
     }
     /// Fallible copy after bounds and shared ownership/work charges.
@@ -128,7 +128,10 @@ mod tests {
         );
         assert!(Cursor::new(&[], &mut budget).take(u64::MAX).is_err());
         assert!(Cursor::new(&[1, 2], &mut budget).owned(2, 1).is_err());
-        assert!(Cursor::new(&[1], &mut budget).finish().is_err());
+        assert_eq!(
+            Cursor::new(&[1], &mut budget).finish().unwrap_err().code,
+            FailureCode::TrailingData
+        );
         let mut cursor = Cursor::new(&[1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0], &mut budget);
         assert_eq!(cursor.u32().unwrap(), 1);
         assert_eq!(cursor.u64().unwrap(), 2);

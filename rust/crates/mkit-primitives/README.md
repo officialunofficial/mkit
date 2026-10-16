@@ -47,6 +47,12 @@ variants, associated items, trait members, and re-exports.
 | `decision` | Observations/snapshots, exact guard variants, source fences, semantic effects, decisions, opaque `Guarded<D>` accessors |
 
 `evidence::acceptance` reserves the envelope module without defining a schema.
+Membership observations retain their object key even for absence. Terminal
+replay refusals retain the exact public message under an explicit finite
+`DecisionLimits` byte budget. Reservation settlements and durable delivery use
+the same reservation-terminal payload, keyed by reservation identity rather
+than only operation identity. Nonterminal ticket binding is a separate effect.
+
 The private cursor and budget are infrastructure for future bounded decoders.
 There are zero decoder entry points and zero registered encoded types in this
 skeleton. Checkpoints, authenticated pages, framing vectors, and their fixtures

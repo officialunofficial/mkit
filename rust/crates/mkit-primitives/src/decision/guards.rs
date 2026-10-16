@@ -109,6 +109,8 @@ pub enum RequiredGuard {
     Membership {
         /// Exact logical scope.
         repository: RepositoryId,
+        /// Exact object key, including authoritative absence.
+        object: Hash,
         /// Exact required observation, including authoritative absence.
         expected: Observed<MemberFact>,
     },
