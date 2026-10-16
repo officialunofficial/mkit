@@ -3165,3 +3165,30 @@ failed unit publishes partial progress.
 
 **Enforced by:** the fork wave regressions and existing crash, resume, lifecycle,
 and denial-gate tests. See [bounds and latency model](operations/fork-waves.md).
+
+## Primitive fork acceptance separates terminal settlement from visibility
+
+**Always:** `mkit-primitives::fork::decide_fork_acceptance` emits acceptance only
+for a complete bounded full-inventory plan, an exactly bound protected
+reservation and admission debit when granted/applicable, authoritative absence
+otherwise, phantom-safe destination emptiness, and a final
+source proof ordered after the last staged membership effect and before the
+current acceptance attempt. Every relied-on destination fact and revision is
+returned for one atomic comparison. Acceptance records terminal response,
+replay, and outcome responsibility and settles the optional exact reservation
+together.
+It emits no visible membership, destination ref, or permission to write.
+
+**Because:** construction, terminal acceptance, and published clearance have
+different responsibilities. A sampled absence cannot exclude phantom additions;
+a per-pack proof before the last staged effect cannot fence the full source.
+A lost response or a later source move must not repeat a charge or outcome.
+
+**If violated:** an unaccepted fork could become readable, an unauthorized or
+changed plan could be accepted, or retries could settle another reservation.
+
+**Enforced by:** the primitive's semantic fixtures, all-observation mutation
+checks, phantom-addition and transitive-supplier tests, bounded hostile-fact
+replay, and once-only terminal replay tests. This primitive is not yet adopted
+by the reference server; its existing conformance gaps remain declared until
+the activation integration passes the independent conformance suite.

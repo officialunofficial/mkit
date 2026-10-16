@@ -30,6 +30,12 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Added
 
+- Add guarded fork acceptance to `mkit-primitives`: bounded full-inventory plans,
+  authoritative destination emptiness, final source-proof ordering, exact
+  authority and admission guards, terminal reservation settlement, and saved
+  result replay. Acceptance creates no visible membership or destination refs.
+  Additive ALPHA API; no wire or stored-format change; no store reset.
+
 - Add the independently versioned `mkit-primitives` ALPHA contract skeleton.
   It defines opaque verification, closure, and guarded-decision types without
   changing existing runtime paths or wire formats. No migration or store reset.

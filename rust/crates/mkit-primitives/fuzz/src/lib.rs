@@ -1,6 +1,9 @@
 //! Stable seed replay shared by decoder and transition harnesses.
 #![forbid(unsafe_code)]
 
+#[path = "../../tests/support/fork.rs"]
+pub mod fork;
+
 /// Largest input admitted by a fuzz body before applying its own tighter limits.
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
 

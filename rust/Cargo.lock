@@ -3454,6 +3454,10 @@ dependencies = [
 [[package]]
 name = "mkit-primitives-fuzz"
 version = "0.0.0"
+dependencies = [
+ "libfuzzer-sys",
+ "mkit-primitives",
+]
 
 [[package]]
 name = "mkit-repo-client"
