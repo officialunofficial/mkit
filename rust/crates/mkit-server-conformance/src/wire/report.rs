@@ -9,7 +9,9 @@ pub enum Verdict {
     Pass(Option<String>),
     /// Failed, with the reason.
     Fail(String),
-    /// Not run, with the reason (a missing feature or a later milestone).
+    /// Outside the declared feature set, with the feature name.
+    NotApplicable(String),
+    /// Not run because of a declared gap or runner selection.
     Skip(String),
 }
 
@@ -42,6 +44,12 @@ impl Report {
     #[must_use]
     pub fn skips(&self) -> Vec<&'static str> {
         self.names(|v| matches!(v, Verdict::Skip(_)))
+    }
+
+    /// Names of cases outside the declared feature set.
+    #[must_use]
+    pub fn not_applicable(&self) -> Vec<&'static str> {
+        self.names(|v| matches!(v, Verdict::NotApplicable(_)))
     }
 
     /// Names of passed cases.
@@ -88,6 +96,9 @@ impl Report {
             let _ = match &case.verdict {
                 Verdict::Pass(None) => writeln!(out, "ok {n} - {name}"),
                 Verdict::Pass(Some(note)) => writeln!(out, "ok {n} - {name} # {note}"),
+                Verdict::NotApplicable(why) => {
+                    writeln!(out, "ok {n} - {name} # SKIP not applicable: {why}")
+                }
                 Verdict::Skip(why) => writeln!(out, "ok {n} - {name} # SKIP {why}"),
                 Verdict::Fail(why) => {
                     let why = why.replace('\n', "\n  # ");
@@ -97,10 +108,11 @@ impl Report {
         }
         let _ = writeln!(
             out,
-            "# pass {} fail {} skip {}",
+            "# pass {} fail {} skip {} not-applicable {}",
             self.passes().len(),
             self.failures().len(),
-            self.skips().len()
+            self.skips().len(),
+            self.not_applicable().len()
         );
         out
     }
@@ -125,15 +137,22 @@ mod tests {
                 },
                 CaseReport {
                     name: "c.skip",
-                    verdict: Verdict::Skip("requires feature quota".into()),
+                    verdict: Verdict::Skip("known gap".into()),
+                },
+                CaseReport {
+                    name: "d.not_applicable",
+                    verdict: Verdict::NotApplicable("quota".into()),
                 },
             ],
         };
         let tap = report.tap();
-        assert!(tap.contains("# profile none\n1..3\nok 1 - a.pass\nnot ok 2 - b.fail\n"));
+        assert!(tap.contains("# profile none\n1..4\nok 1 - a.pass\nnot ok 2 - b.fail\n"));
         assert!(tap.contains("  # got ok\n  # wanted invalid_argument\n"));
-        assert!(tap.contains("ok 3 - c.skip # SKIP requires feature quota\n"));
-        assert!(tap.ends_with("# pass 1 fail 1 skip 1\n"));
+        assert!(tap.contains("ok 3 - c.skip # SKIP known gap\n"));
+        assert!(tap.ends_with("# pass 1 fail 1 skip 1 not-applicable 1\n"));
+        assert!(tap.contains("ok 4 - d.not_applicable # SKIP not applicable: quota\n"));
+        assert_eq!(report.not_applicable(), ["d.not_applicable"]);
+        assert_eq!(report.skips(), ["c.skip"]);
         assert!(report.failed());
         assert_eq!(report.failures(), ["b.fail"]);
     }

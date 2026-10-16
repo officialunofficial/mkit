@@ -184,6 +184,7 @@ impl WireArgs {
             quota_window_ms: self.quota_window_ms,
             milestone: self.milestone.clone(),
             features: self.features.clone(),
+            relay_lag_bound_ms: None,
             run_id: self.run_id.clone(),
             list_refs: self.list_refs,
             list_parallel: self.list_parallel,

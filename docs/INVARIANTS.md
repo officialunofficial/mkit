@@ -7,6 +7,23 @@ profile; storage-only groundwork is labeled explicitly. The
 [SPEC-SERVER profile map](specs/SPEC-SERVER.md#1-scope-and-relation-to-spec-transport-connect)
 distinguishes current enforcement from future integration.
 
+## Conformance distinguishes absent features from implementation gaps
+
+**Always:** cases for undeclared protocol features report not applicable with
+feature names. A known gap in an offered feature needs a declared skip with a
+reason. Tier-2 cases use the normative HTTP test-control binding, independently
+of the server's language, layout, or orchestration.
+
+**Because:** an optional feature is not an unimplemented requirement, and an
+in-process API would prevent black-box conformance across implementations.
+
+**If violated:** reports can hide protocol violations or require reference
+orchestration from an independent server.
+
+**Enforcement:** the conformance profile, report, and controlled-host tests pin
+feature applicability, stale skip rejection, and enabled/disabled authority RPCs.
+The native conformance CI job exercises both protocol tiers over loopback HTTP.
+
 ## Acceptance retains replay and terminal responsibility
 
 **Always:** an accepted signed ref write retains its live effects, replay result,

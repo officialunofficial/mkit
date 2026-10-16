@@ -239,6 +239,13 @@ recorded replay result and terminal-outcome responsibility. Permitted replay
 expiry and acknowledged-outcome pruning do not invalidate an earlier acceptance.
 The earlier pending reservation does not itself establish acceptance.
 
+Verification, decision, and acceptance MAY run in separate components within
+one server's trust domain. Acceptance MUST bind to the exact verified frozen
+bytes by pack ID and length. Every mutable fact relied on by verification or
+the decision MUST be a guard in the atomic acceptance unit, including external
+delta-base membership read under §9.4. Component placement does not relax that
+unit or original-identity resolution of uncertain outcomes (§3.2).
+
 ### 3.2 Replay, durability, and recovery
 
 **Protocol requirement.** A committed replay MUST answer with its saved result
@@ -592,10 +599,17 @@ to denials from all three hooks.
 
 **Protocol requirement.**
 
-A deployment MAY enable an independent, monotonically increasing unsigned
-64-bit authority generation per namespace. It MUST be disabled by default,
-require the Authority authorizer role and transactional storage, and MUST NOT
-reuse grant epochs or make them apply to external-authority writes.
+A server MAY implement authority fencing with an independent, monotonically
+increasing unsigned 64-bit generation per namespace. After it acknowledges a
+generation change, no acceptance relying on an older generation may commit.
+Acceptance and every commit advancing a fork MUST compare the recorded authority
+facts with the current generation. Fencing MUST NOT reuse grant epochs or make
+them apply to external-authority writes.
+
+**Reference-server behavior.** Fencing is disabled by default and requires the
+Authority authorizer role and transactional storage.
+
+**Protocol requirement.** The following rules apply when authority fencing is offered.
 
 When enabled, every Authority allowance for a write MUST carry
 `authority_generation`, including zero. Missing or invalid facts MUST fail
@@ -607,17 +621,24 @@ reservation. This covers ref advances/deletes, ticketless upload acceptance,
 reserved `BeginUpload`, and authority envelope visibility writes. Upload tickets
 MUST bind the generation; ticket-only uploads and multipart operations MUST
 reject stale generations before staging additional bytes and before completion.
-Client-frame validation MUST remain independent of storage-write checkpoints.
-Private buffering does not establish accepted upload state. Every actual
-backend staging write MUST retain generation checks before and after its await.
-Completion, authenticated part receipts, and verification markers retain their
-independent final checks. A revoked stream MUST stage no subsequent write or
-succeed at completion; an already in-flight write may leave unaccepted shared
-bytes.
+Private buffering does not establish accepted upload state. Completion,
+authenticated part receipts, and verification markers MUST retain current
+authority guards. A revoked stream MUST stage no subsequent write or succeed at
+completion; an already in-flight write may leave unaccepted shared bytes.
 Already accepted inspection/publication work is not cancelled by this fence.
 
+**Reference-server behavior.** Client-frame validation is independent of
+storage-write checkpoints. Each backend staging write checks the generation
+before and after its await. These checkpoint counts and runtime scheduling
+are implementation mechanisms, not a required orchestration.
+
+**Protocol requirement.** The following wire rules apply when the authority RPCs are offered.
 `GetAuthorityGeneration` and `SetAuthorityGeneration` are namespace-level RPCs
-outside auth-v2 envelopes. Disabled deployments MUST reject them. The setter
+outside auth-v2 envelopes. A server whose authority shares its acceptance store
+MAY omit these RPCs while implementing fencing. A server not offering them MUST
+reject both with `unimplemented`, as a disabled deployment does. The
+`mkit-authority-generation:v1` statement below authorizes only the wire setter;
+it is not required for in-store authority changes. The setter
 MUST authorize a bounded canonical statement using a configured, dedicated
 Ed25519 deployment-authority key with explicit permission for the namespace;
 a namespace-owner key alone MUST NOT authorize it. Keys MUST differ from hook,
@@ -666,6 +687,7 @@ Under `namespace_policy = any`, `GetAuthorityGeneration` and
 key signs each statement, so a statement MAY precede the namespace's first
 write. Under an allowlist the namespace MUST be listed.
 
+**Protocol requirement.** The following rules apply when authority fencing is offered.
 Namespace or repository creation MUST compare the same current authority
 facts as other acceptance. A stale generation MUST create neither.
 
@@ -696,9 +718,9 @@ it MUST establish the generation-change barrier, including previously issued
 authority evidence. Activation MAY return `unavailable` with `Retry-After: 1`
 while pending. An executor with fencing disabled MUST refuse persisted fenced
 state, including generation zero; it MUST NOT reinterpret it as unfenced.
-Unfenced tickets MUST NOT become usable as fenced tickets. Ticket-only staging
-and completion MUST revalidate current authority after backend awaits. Shared
-bytes or retained proof evidence MUST NOT let a stale ticket create membership.
+Unfenced tickets MUST NOT become usable as fenced tickets. Ticket-only staging and completion MUST retain current authority guards across
+backend work. Shared bytes or retained proof evidence MUST NOT let a stale ticket
+create membership.
 
 Recovery and portable restore MUST preserve authority mode and generation,
 invalidate incomplete barrier observations, and refuse reconstruction or
@@ -5109,11 +5131,19 @@ client-visible error contract.
 
 **Protocol requirement.** Conformance applies to any server offering the
 specified feature. Tier 1 uses only ordinary transport requests. Tier 2 uses
-an explicitly test-only control interface to reach fault and recovery boundaries
+a versioned, test-only wire control interface to reach fault and recovery boundaries
 and obtain typed, layout-independent atomic observations. The
 [conformance runner and coverage table](../../rust/crates/mkit-server-conformance/README.md)
 specify version 1 capability negotiation, HTTP binding, case names, and declared
-skip semantics. The protocol-defined pause boundaries are:
+skip semantics. Its HTTP binding is normative for black-box runs: servers under
+test MUST implement the specified routes, and runners MUST drive them over HTTP.
+An in-process trait MAY supplement that binding; no case may require the trait.
+The conformance profile MUST declare optional features (transport writes, wire
+authority getter/setter, authority fencing, fork, and the relay-lag bound) as well
+as supported controls. Cases for an undeclared feature report `not applicable`
+with its name. A declared skip instead records a known coverage gap in a declared
+feature. Generation-race cases use the test-control authority bump, not the wire
+setter. The protocol-defined pause boundaries are:
 
 - `before_acceptance`: before the final guarded acceptance decision;
 - `after_durable_acceptance_before_response`: after the complete accepted unit

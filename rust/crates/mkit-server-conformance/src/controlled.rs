@@ -114,15 +114,48 @@ pub struct Case {
 }
 
 const ACCEPT: &[Feature] = &[
+    Feature::TransportWrites,
     Feature::AuthV2,
     Feature::Replay,
     Feature::AtomicAdvance,
     Feature::Tickets,
 ];
-const FORK: &[Feature] = &[Feature::AuthV2, Feature::Replay, Feature::MultiRepo];
+const FENCED_ACCEPT: &[Feature] = &[
+    Feature::TransportWrites,
+    Feature::AuthV2,
+    Feature::Replay,
+    Feature::AtomicAdvance,
+    Feature::Tickets,
+    Feature::AuthorityFencing,
+];
+const FENCED_FORK: &[Feature] = &[
+    Feature::TransportWrites,
+    Feature::Fork,
+    Feature::AuthV2,
+    Feature::Replay,
+    Feature::MultiRepo,
+    Feature::AuthorityFencing,
+];
+const FORK: &[Feature] = &[
+    Feature::TransportWrites,
+    Feature::Fork,
+    Feature::AuthV2,
+    Feature::Replay,
+    Feature::MultiRepo,
+];
 
 /// Tier-2 registry. Composition cases are planned until its seam exists.
 pub const CASES: &[Case] = &[
+    Case {
+        name: "authority.setter_disabled",
+        controls: &[],
+        features: &[],
+    },
+    Case {
+        name: "authority.setter_enabled",
+        controls: &["authority.setter_fixture"],
+        features: &[Feature::AuthoritySetter],
+    },
     Case {
         name: "acceptance.before_acceptance_restart",
         controls: &[
@@ -185,7 +218,7 @@ pub const CASES: &[Case] = &[
             "authority.bump",
             "pause.before_acceptance",
         ],
-        features: ACCEPT,
+        features: FENCED_ACCEPT,
     },
     Case {
         name: "replay.moves_and_generation",
@@ -195,7 +228,7 @@ pub const CASES: &[Case] = &[
             "authority.bump",
             "fixture.ref_reservation",
         ],
-        features: ACCEPT,
+        features: FENCED_ACCEPT,
     },
     Case {
         name: "fork.destination_gate_before_acceptance",
@@ -221,7 +254,7 @@ pub const CASES: &[Case] = &[
             "pause.before_acceptance",
             "decision.fork_acceptance",
         ],
-        features: FORK,
+        features: FENCED_FORK,
     },
     Case {
         name: "fork.acceptance_result_replay_outcome_atomic",
@@ -245,7 +278,7 @@ pub const CASES: &[Case] = &[
             "pause.before_acceptance",
             "decision.fork_acceptance",
         ],
-        features: FORK,
+        features: FENCED_FORK,
     },
     Case {
         name: "fork.authority_each_progress_commit",
@@ -258,7 +291,7 @@ pub const CASES: &[Case] = &[
             "pause.before_acceptance",
             "decision.fork_progress",
         ],
-        features: FORK,
+        features: FENCED_FORK,
     },
     Case {
         name: "fork.source_moved_before_acceptance",
@@ -899,8 +932,100 @@ fn guard_consistent(
     Ok(())
 }
 
+async fn authority_setter(control: &ControlClient, enabled: bool) -> Result<(), Failure> {
+    use buffa::Message as _;
+    use mkit_transport_connect::generated::{
+        GetAuthorityGenerationRequest, GetAuthorityGenerationResponse,
+        SetAuthorityGenerationRequest, SetAuthorityGenerationResponse,
+    };
+    let fixture = if enabled {
+        Some(control.command(&Request::PrepareAuthoritySetter).await?)
+    } else {
+        None
+    };
+    let namespace = fixture
+        .as_ref()
+        .and_then(|f| f.authority_namespace.clone())
+        .unwrap_or_else(|| format!("ed25519-{}", "11".repeat(32)));
+    let get = GetAuthorityGenerationRequest {
+        namespace: Some(namespace),
+        ..Default::default()
+    };
+    let before = control
+        .0
+        .unary::<GetAuthorityGenerationResponse>(
+            Rpc::GetAuthorityGeneration,
+            get.encode_to_vec(),
+            &[],
+        )
+        .await?;
+    let set = SetAuthorityGenerationRequest {
+        signed_statement: Some(if let Some(f) = &fixture {
+            f.authority_statement
+                .clone()
+                .ok_or_else(|| Failure::Fail("setter fixture omitted statement".into()))?
+        } else {
+            "disabled".into()
+        }),
+        ..Default::default()
+    };
+    let result = control
+        .0
+        .unary::<SetAuthorityGenerationResponse>(
+            Rpc::SetAuthorityGeneration,
+            set.encode_to_vec(),
+            &[],
+        )
+        .await?;
+    if let Some(fixture) = fixture {
+        let before = want_ok(before, "enabled getter")?
+            .generation
+            .ok_or_else(|| Failure::Fail("getter omitted generation".into()))?;
+        let expected = fixture
+            .generation
+            .ok_or_else(|| Failure::Fail("setter fixture omitted generation".into()))?;
+        if expected <= before {
+            return Err(Failure::Fail(
+                "setter fixture must increase generation".into(),
+            ));
+        }
+        let set = want_ok(result, "enabled setter")?;
+        let after = want_ok(
+            control
+                .0
+                .unary::<GetAuthorityGenerationResponse>(
+                    Rpc::GetAuthorityGeneration,
+                    get.encode_to_vec(),
+                    &[],
+                )
+                .await?,
+            "getter after setter",
+        )?;
+        if set.generation != Some(expected) || after.generation != Some(expected) {
+            return Err(Failure::Fail(
+                "setter/getter did not retain the requested generation".into(),
+            ));
+        }
+    } else {
+        for error in [
+            want_code(before, "unimplemented", "disabled getter")?,
+            want_code(result, "unimplemented", "disabled setter")?,
+        ] {
+            if error.http_status != 501 {
+                return Err(Failure::Fail(format!(
+                    "disabled authority RPC returned HTTP {}",
+                    error.http_status
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn execute_case(name: &str, ctx: Ctx, control: &ControlClient) -> Result<(), Failure> {
     match name {
+        "authority.setter_disabled" => authority_setter(control, false).await,
+        "authority.setter_enabled" => authority_setter(control, true).await,
         "acceptance.before_acceptance_restart" => {
             acceptance(ctx, control, Some("before_acceptance"), "graceful").await
         }
@@ -996,6 +1121,29 @@ pub async fn run(
         Err(e) => Err(e.clone()),
     };
     for case in selected {
+        let mut missing_features: Vec<_> = case
+            .features
+            .iter()
+            .filter(|f| !target.profile.has(**f))
+            .map(|f| f.as_str())
+            .collect();
+        if case.name == "authority.setter_disabled" && target.profile.has(Feature::AuthoritySetter)
+        {
+            missing_features.push("authority-setter=off");
+        }
+        if !missing_features.is_empty() && caps.is_ok() {
+            report.cases.push(CaseReport {
+                name: case.name,
+                verdict: if expected_skips.contains_key(case.name) {
+                    Verdict::Fail(format!(
+                        "declared skip for non-applicable feature {missing_features:?}"
+                    ))
+                } else {
+                    Verdict::NotApplicable(format!("features {missing_features:?}"))
+                },
+            });
+            continue;
+        }
         let result = match (&client, &caps) {
             (Ok(control), Ok(caps)) => {
                 let missing: Vec<_> = case
@@ -1003,17 +1151,7 @@ pub async fn run(
                     .iter()
                     .filter(|n| !caps.controls.iter().any(|s| s == **n))
                     .collect();
-                let missing_features: Vec<_> = case
-                    .features
-                    .iter()
-                    .filter(|f| !target.profile.has(**f))
-                    .collect();
-                if !missing.is_empty() || !missing_features.is_empty() {
-                    Err(Failure::Skip(format!(
-                        "requires controls {missing:?}, features {missing_features:?}; declared unsupported {:?}",
-                        caps.unsupported
-                    )))
-                } else {
+                if missing.is_empty() {
                     let ctx = Ctx::new(
                         control.0.clone(),
                         Arc::new(target.profile.clone()),
@@ -1027,6 +1165,11 @@ pub async fn run(
                     // Always release one-shot holds, including on a failed assertion.
                     let _ = control.command(&Request::Resume).await;
                     result
+                } else {
+                    Err(Failure::Skip(format!(
+                        "requires controls {missing:?}; declared unsupported {:?}",
+                        caps.unsupported
+                    )))
                 }
             }
             (_, Err(e)) | (Err(e), _) => Err(Failure::Fail(e.clone())),

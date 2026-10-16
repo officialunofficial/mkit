@@ -79,6 +79,7 @@ The `operation` discriminator and fields are:
 | --- | --- | --- |
 | `pin_clock` | `now_ms` | Pin business time in Unix milliseconds; `clock.pin`. |
 | `advance_clock` | `delta_ms` | Advance business time by a nonnegative duration; `clock.advance`. |
+| `prepare_authority_setter` | none | Return `authority_namespace`, a valid `authority_statement`, and a strictly newer `generation`, without changing authority; `authority.setter_fixture`. Uses a dedicated test deployment key, never key material in the response. |
 | `bump_authority` | `namespace` | Install a strictly newer authority generation, including the local acceptance fence; `authority.bump`. |
 | `pause` | `step`, `repository`, `head`; optional `decision_class`, `occurrence`, `on_resume` | Arm a one-shot protocol boundary for the selected decision. Capabilities are `pause.<step>` and, for a non-default decision class, `decision.<decision_class>`. |
 | `barrier_status` | none | Return `paused` once the operation reaches its armed boundary. |
@@ -91,7 +92,7 @@ The `operation` discriminator and fields are:
 
 Success is HTTP 200 with `control::Response` JSON. Unsupported controls return
 HTTP 501 without mutation. Rejected requests return a 4xx response without mutation.
-The response has optional `observation`, `now_ms`, `generation`, `fork_fixture`,
+The response has optional `authority_namespace`, `authority_statement`, `observation`, `now_ms`, `generation`, `fork_fixture`,
 and `fork_observation`, plus `paused`. Clock controls do not advance monotonic
 execution budgets or simulate durability.
 
@@ -202,7 +203,7 @@ bridge is outside the public transport, like the other controls.
 A case requiring an unsupported control is a **declared skip** only when its
 stable case name appears with a nonempty reason in the runner's expected-skip
 map. An undeclared skip fails; a declared case that passes also fails, so stale
-gaps must be removed. Missing wire features follow the same rule in Tier 2.
+gaps must be removed. Missing wire features report not applicable instead of a declared skip.
 A known gap is never a conformance certificate. CI profiles that require a
 capability reject skips for it.
 
@@ -226,6 +227,20 @@ than uniform source absence. The thirteen executable fork cases remain
 available to other servers. The reference profile declares each case skipped with its concrete
 reason below; it never treats these gaps as passing assertions.
 
+The HTTP binding above is normative for black-box Tier-2 runs. Every case
+uses these routes; an optional in-process trait cannot be required by a case.
+
+The profile declares optional features using `features`: `transport-writes`
+(enabled by default; use `-transport-writes` for a read-only target),
+`authority-setter` (both wire getter and setter), `authority-fencing`, and `fork`.
+Absent feature names mean the feature is not offered. `relay_lag_bound_ms`
+declares the membership visibility bound, defaulting to zero. Immediate
+membership visibility is conforming; a zero-bound target never returns
+`MembershipNotVisible`. Controls and their gaps are negotiated separately.
+A missing feature reports **not applicable** with its name, distinct from a
+**declared skip** for a known gap in an offered feature. A declared skip for a
+non-applicable case fails rather than hiding a stale declaration.
+
 ## Protocol coverage and remaining work
 
 Classification applies to the rule, not to reference mechanisms used to test it.
@@ -240,6 +255,9 @@ apply when a server offers the feature.
 
 | Rule | Classification | Coverage |
 | --- | --- | --- |
+| Verification, decision, and acceptance may use separate trusted components, bound to frozen pack ID/length and every relied-on mutable fact, including external delta bases (§3.1) | Protocol requirement | Covered by the acceptance atomicity and guard-matrix cases; topology is not observable. Independent external-delta-base race coverage is planned. |
+| Optional wire authority getter/setter is either disabled or accepts a valid deployment-authority statement (§6.2.1) | Protocol requirement when RPCs are offered; disabled rejection otherwise | **Case:** Tier 2 `authority.setter_disabled` requires HTTP 501 / `unimplemented` from both RPCs; `authority.setter_enabled` sets a strictly newer generation and checks the getter. Generation races use `bump_authority`, not the wire setter. |
+| Eventual membership visibility is permitted, including a zero relay-lag bound (STC §7.9) | Protocol requirement | Existing successful membership wire cases accept immediate visibility. Zero-bound profiles do not require `MembershipNotVisible`; a forced-lag reference fixture is a separate mechanism test. |
 | Signed acceptance commits the live pair, replay, applicable quotas, local membership responsibility, ticket closure, and terminal responsibilities together (§3.1; STC §7.7) | Protocol requirement | **Case:** Tier 2 `acceptance.before_acceptance_restart`, `acceptance.after_durable_acceptance_restart`, `acceptance.after_response_restart`; each consumes two tickets and a separate ref reservation, with quota assertions when configured. |
 | Failed paired CAS changes neither ref; an observed acceptance has a saved result (§3.1) | Protocol requirement | **Case:** Tier 1 `advance.atomic_both_untouched`, typed-conflict cases, `advance.concurrent_one_committed`, `replay.observed_pair_has_saved_result`. Separate reads do not certify concurrent snapshot atomicity. |
 | Replay repeats no acceptance, charge, ticket consumption, or terminal outcome (§3.2) | Protocol requirement | **Case:** Tier 1 `replay.same_op_returns_saved_result_after_ref_moved`, `replay.advance_replay_equals_first_result`, `quota.replay_not_charged`; Tier 2 `replay.moves_and_generation` compares authoritative state. |

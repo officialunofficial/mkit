@@ -15,6 +15,12 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Breaking (toward 0.6)
 
+- Conformance profiles declare transport writes, authority RPCs, authority
+  fencing, fork, and the relay-lag bound. Results distinguish `NotApplicable`
+  from declared `Skip`. Migration: declare offered features and handle the new
+  verdict; remove skip entries for absent features. No stored-format change
+  or wipe.
+
 - The conformance crate's storage suite is now optional under `storage-spi`;
   the default wire and server-control library does not depend on mkit-server.
   Migration: enable `storage-spi` when invoking the storage macros.

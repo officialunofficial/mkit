@@ -262,6 +262,9 @@ pub struct ForkObservation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
+    /// Obtain a valid test-only wire setter statement without changing authority.
+    /// Requires `authority.setter_fixture`; never returns signing key material.
+    PrepareAuthoritySetter,
     /// Pin the test server's business clock (Unix milliseconds).
     PinClock { now_ms: i64 },
     /// Advance that clock by a nonnegative duration.
@@ -310,6 +313,10 @@ pub enum Request {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Response {
+    /// Dedicated test namespace, only for `prepare_authority_setter`.
+    pub authority_namespace: Option<String>,
+    /// Valid signed setter statement for a strictly newer generation.
+    pub authority_statement: Option<String>,
     /// Observation, only for `observe`.
     pub observation: Option<Observation>,
     /// True once an armed operation is held at the named step.

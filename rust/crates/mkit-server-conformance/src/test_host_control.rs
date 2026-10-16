@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::response::IntoResponse;
+use base64::Engine as _;
+use ed25519_dalek::Signer as _;
 use mkit_core::hash::{Hash, from_hex, hash, to_hex};
 use mkit_server::pipeline::{
     Admission, AdmissionDecision, AdmissionInput, Authorizer, Hooks, NoOutcomes, NoPreReceive,
@@ -77,25 +79,7 @@ impl ControlledHost {
         profile.derive_features();
         let mut config = super::profile_config(&profile, &base_url)?;
         let store = ControlStore::new(clock.clone());
-        let authority = profile.has(Feature::MultiRepo) && profile.has(Feature::AuthV2);
-        if authority {
-            config.addressing = Addressing::Multi(MultiAddressing::new().with_namespace_policy(
-                mkit_server::policy::NamespacePolicy::Any {
-                    unsafe_without_admission: false,
-                },
-            ));
-            config.authorizer_role = AuthorizerRole::Authority;
-            let dedicated = ed25519_dalek::SigningKey::from_bytes(&[0x59; 32]);
-            let owner = ed25519_dalek::SigningKey::from_bytes(&[0x58; 32]);
-            config.authority_fence = Some(
-                mkit_server::authority::AuthorityFence::parse(&format!(
-                    "test-authority {} ed25519-{}",
-                    to_hex(dedicated.verifying_key().as_bytes()),
-                    to_hex(owner.verifying_key().as_bytes()),
-                ))
-                .map_err(|e| e.to_string())?,
-            );
-        }
+        let authority = configure_authority(&mut profile, &mut config)?;
         let blobs = MemoryBlobStore::default();
         let core = build_core(&store, &blobs, &clock, &config)?;
         let state = Arc::new(HostState {
@@ -104,6 +88,7 @@ impl ControlledHost {
             clock,
             config,
             authority,
+            audience: base_url.clone(),
             core: RwLock::new(core),
             reset: Notify::new(),
         });
@@ -184,6 +169,38 @@ impl Drop for ControlledHost {
     }
 }
 
+fn configure_authority(profile: &mut Profile, config: &mut PipelineConfig) -> Result<bool, String> {
+    let authority = profile.has(Feature::MultiRepo) && profile.has(Feature::AuthV2);
+    if authority {
+        config.addressing = Addressing::Multi(MultiAddressing::new().with_namespace_policy(
+            mkit_server::policy::NamespacePolicy::Any {
+                unsafe_without_admission: false,
+            },
+        ));
+        config.authorizer_role = AuthorizerRole::Authority;
+        let dedicated = ed25519_dalek::SigningKey::from_bytes(&[0x59; 32]);
+        let owner = ed25519_dalek::SigningKey::from_bytes(&[0x58; 32]);
+        config.authority_fence = Some(
+            mkit_server::authority::AuthorityFence::parse(&format!(
+                "test-authority {} ed25519-{}",
+                to_hex(dedicated.verifying_key().as_bytes()),
+                to_hex(owner.verifying_key().as_bytes()),
+            ))
+            .map_err(|e| e.to_string())?,
+        );
+    }
+    profile.features.insert(Feature::Fork);
+    if authority {
+        profile
+            .features
+            .extend([Feature::AuthorityFencing, Feature::AuthoritySetter]);
+    } else {
+        profile.features.remove(&Feature::AuthorityFencing);
+        profile.features.remove(&Feature::AuthoritySetter);
+    }
+    Ok(authority)
+}
+
 fn build_core(
     store: &ControlStore,
     blobs: &MemoryBlobStore,
@@ -215,6 +232,7 @@ struct HostState {
     clock: Arc<ManualClock>,
     config: PipelineConfig,
     authority: bool,
+    audience: String,
     core: RwLock<Arc<Core>>,
     reset: Notify,
 }
@@ -266,6 +284,7 @@ impl HostState {
         }
         if self.authority {
             controls.push("authority.bump".into());
+            controls.push("authority.setter_fixture".into());
         } else {
             unsupported.insert(
                 "authority.bump".into(),
@@ -290,10 +309,53 @@ impl HostState {
         }
     }
 
+    async fn authority_setter_fixture(&self) -> Result<Response, (http::StatusCode, String)> {
+        let bad = |message: String| (http::StatusCode::BAD_REQUEST, message);
+        let mut reply = Response::default();
+        if !self.authority {
+            return Err((
+                http::StatusCode::NOT_IMPLEMENTED,
+                "authority setter fixture disabled".into(),
+            ));
+        }
+        let owner = ed25519_dalek::SigningKey::from_bytes(&[0x58; 32]);
+        let namespace = format!("ed25519-{}", to_hex(owner.verifying_key().as_bytes()));
+        let generation = self
+            .core
+            .read()
+            .await
+            .get_authority_generation(&namespace)
+            .await
+            .map_err(|e| bad(e.to_string()))?
+            .checked_add(1)
+            .ok_or_else(|| bad("authority overflow".into()))?;
+        let now = self.clock.now_ms();
+        let expiry = now
+            .checked_add(60_000)
+            .ok_or_else(|| bad("clock overflow".into()))?;
+        let text = format!(
+            "mkit-authority-generation:v1\ntest-authority\n{namespace}\n{generation}\n{}\n{now}\n{expiry}\n{}",
+            self.audience,
+            "61".repeat(32)
+        );
+        let key = ed25519_dalek::SigningKey::from_bytes(&[0x59; 32]);
+        let signature = key.sign(&hash(text.as_bytes()));
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        reply.authority_namespace = Some(namespace);
+        reply.authority_statement = Some(format!(
+            "{}.{}",
+            b64.encode(text.as_bytes()),
+            b64.encode(signature.to_bytes())
+        ));
+        reply.generation = Some(generation);
+        Ok(reply)
+    }
+
     async fn execute(&self, request: Request) -> Result<Response, (http::StatusCode, String)> {
         let bad = |message: String| (http::StatusCode::BAD_REQUEST, message);
         let mut reply = Response::default();
         match request {
+            Request::PrepareAuthoritySetter => return self.authority_setter_fixture().await,
             Request::PinClock { now_ms } => {
                 self.clock.set(now_ms);
                 reply.now_ms = Some(now_ms);

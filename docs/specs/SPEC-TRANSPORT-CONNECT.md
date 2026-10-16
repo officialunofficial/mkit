@@ -1716,7 +1716,10 @@ ref's strongly consistent state
 
 **Eventual.** `ListRefs` and pack membership (`PackExists`,
 `DownloadPack`, and `AlreadyPresent` from `BeginUpload`) are eventually
-consistent. They may lag a write by seconds. A lag MUST only cause one
+consistent. This permits eventual visibility; it does not require lag. A server
+with a relay-lag bound of zero never returns `MembershipNotVisible`, and
+conformance MUST accept immediate membership visibility. They may otherwise lag
+a write by seconds. A lag MUST only cause one
 of these:
 
 - a re-upload, because `AlreadyPresent` was not returned;

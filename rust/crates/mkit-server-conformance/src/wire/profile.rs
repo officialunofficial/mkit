@@ -99,6 +99,14 @@ impl FromStr for Milestone {
 /// `GetServerInfo` features is a follow-up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Feature {
+    /// Transport RPC writes are enabled.
+    TransportWrites,
+    /// Wire authority-generation reads and writes are enabled.
+    AuthoritySetter,
+    /// Authority generations fence writes.
+    AuthorityFencing,
+    /// Fork RPCs are enabled.
+    Fork,
     /// Bearer-token authentication (from `--auth bearer`).
     Bearer,
     /// Auth v2 signed writes (from `--auth auth-v2`).
@@ -175,7 +183,11 @@ pub enum Feature {
     Admin,
 }
 
-const FEATURE_NAMES: [(Feature, &str); 31] = [
+const FEATURE_NAMES: [(Feature, &str); 35] = [
+    (Feature::TransportWrites, "transport-writes"),
+    (Feature::AuthoritySetter, "authority-setter"),
+    (Feature::AuthorityFencing, "authority-fencing"),
+    (Feature::Fork, "fork"),
     (Feature::Bearer, "bearer"),
     (Feature::AuthV2, "auth-v2"),
     (Feature::AtomicAdvance, "atomic-advance"),
@@ -285,6 +297,8 @@ pub struct Profile {
     /// What the server offers; a case runs only if it has every feature it
     /// requires.
     pub features: BTreeSet<Feature>,
+    /// Maximum declared relay visibility lag in milliseconds; zero means synchronous.
+    pub relay_lag_bound_ms: u64,
     /// Refs `list.large_response_within_limit` creates.
     pub list_refs: u32,
     /// How many of those creates are in flight at once. Default 8, which
@@ -336,7 +350,8 @@ impl Profile {
             quota: None,
             run_id: random_hex::<8>(),
             milestone: Milestone::M0,
-            features: BTreeSet::new(),
+            features: BTreeSet::from([Feature::TransportWrites]),
+            relay_lag_bound_ms: 0,
             list_refs: DEFAULT_LIST_REFS,
             list_parallel: 8,
             replay_prune_grace_ms: DEFAULT_REPLAY_PRUNE_GRACE_MS,
@@ -453,6 +468,8 @@ pub struct ProfileSpec {
     pub milestone: Option<String>,
     /// Features added to the derived set (`-name` removes one).
     pub features: Option<Vec<String>>,
+    /// See [`Profile::relay_lag_bound_ms`].
+    pub relay_lag_bound_ms: Option<u64>,
     /// Fixed run id (default random).
     pub run_id: Option<String>,
     /// Refs the large-listing case creates.
@@ -516,6 +533,7 @@ impl ProfileSpec {
             quota_window_ms: over.quota_window_ms.or(self.quota_window_ms),
             milestone: over.milestone.or(self.milestone),
             features: over.features.or(self.features),
+            relay_lag_bound_ms: over.relay_lag_bound_ms.or(self.relay_lag_bound_ms),
             run_id: over.run_id.or(self.run_id),
             list_refs: over.list_refs.or(self.list_refs),
             list_parallel: over.list_parallel.or(self.list_parallel),
@@ -618,6 +636,7 @@ impl ProfileSpec {
         if let Some(ms) = self.duplicate_retry_ms {
             profile.duplicate_retry_ms = ms;
         }
+        profile.relay_lag_bound_ms = self.relay_lag_bound_ms.unwrap_or(0);
         profile.sign_reads = self.sign_reads.unwrap_or(false);
         profile.fresh_target = self.fresh_target.unwrap_or(false);
         configure_hooks(&mut profile, self.hook_stub, self.backlog_cap)?;
@@ -668,6 +687,38 @@ fn configure_hooks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn optional_features_and_relay_bound_round_trip_and_override() {
+        let default = ProfileSpec::default().build(|_| None).unwrap();
+        assert!(default.has(Feature::TransportWrites));
+        assert_eq!(default.relay_lag_bound_ms, 0);
+        for feature in [
+            Feature::TransportWrites,
+            Feature::AuthoritySetter,
+            Feature::AuthorityFencing,
+            Feature::Fork,
+        ] {
+            assert_eq!(feature.as_str().parse::<Feature>().unwrap(), feature);
+        }
+        let file = ProfileSpec::from_toml(
+            "features = [\"-transport-writes\", \"authority-setter\", \"authority-fencing\", \"fork\"]\nrelay_lag_bound_ms = 25"
+        ).unwrap();
+        let profile = file.clone().build(|_| None).unwrap();
+        assert!(!profile.has(Feature::TransportWrites));
+        assert!(profile.has(Feature::AuthoritySetter));
+        assert!(profile.has(Feature::AuthorityFencing));
+        assert!(profile.has(Feature::Fork));
+        assert_eq!(profile.relay_lag_bound_ms, 25);
+        let over = ProfileSpec {
+            relay_lag_bound_ms: Some(0),
+            ..ProfileSpec::default()
+        };
+        assert_eq!(
+            file.merge(over).build(|_| None).unwrap().relay_lag_bound_ms,
+            0
+        );
+    }
 
     #[test]
     fn sharding_profile_defaults_validates_and_overrides() {

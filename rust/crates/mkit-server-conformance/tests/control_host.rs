@@ -245,7 +245,7 @@ async fn controlled_reference_host_runs_the_two_tier_acceptance_cases() {
                 mkit_server_conformance::wire::Verdict::Pass(_)
             ))
             .count(),
-        6
+        7
     );
     assert_eq!(
         report
@@ -262,5 +262,81 @@ async fn controlled_reference_host_runs_the_two_tier_acceptance_cases() {
         report.cases.len(),
         mkit_server_conformance::controlled::CASES.len()
     );
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn authority_setter_off_rejects_both_wire_rpcs() {
+    let host = ControlledHost::start(profile()).await.unwrap();
+    let target = mkit_server_conformance::wire::WireTarget {
+        base_url: host.base_url().parse().unwrap(),
+        profile: host.profile().clone(),
+    };
+    let report = mkit_server_conformance::controlled::run(
+        &target,
+        &std::collections::BTreeMap::default(),
+        Some("authority.setter"),
+    )
+    .await;
+    assert!(!report.failed(), "{}", report.tap());
+    assert!(matches!(
+        report.verdict("authority.setter_disabled"),
+        Some(mkit_server_conformance::wire::Verdict::Pass(_))
+    ));
+    assert!(matches!(
+        report.verdict("authority.setter_enabled"),
+        Some(mkit_server_conformance::wire::Verdict::NotApplicable(_))
+    ));
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn undeclared_features_are_not_applicable_and_cannot_be_declared_skips() {
+    let host = ControlledHost::start(profile()).await.unwrap();
+    let target = mkit_server_conformance::wire::WireTarget {
+        base_url: host.base_url().parse().unwrap(),
+        profile: host.profile().clone(),
+    };
+    let report = mkit_server_conformance::controlled::run(
+        &target,
+        &std::collections::BTreeMap::default(),
+        Some("guard.authority_final_boundary"),
+    )
+    .await;
+    assert!(
+        matches!(report.verdict("guard.authority_final_boundary"), Some(mkit_server_conformance::wire::Verdict::NotApplicable(reason)) if reason.contains("authority-fencing"))
+    );
+    let skips = std::collections::BTreeMap::from([(
+        "guard.authority_final_boundary".into(),
+        "absent feature".into(),
+    )]);
+    let report = mkit_server_conformance::controlled::run(
+        &target,
+        &skips,
+        Some("guard.authority_final_boundary"),
+    )
+    .await;
+    assert!(report.failed(), "{}", report.tap());
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn authority_setter_disabled_case_detects_an_enabled_wire_setter() {
+    let mut profile = profile();
+    profile.features.insert(Feature::MultiRepo);
+    let host = ControlledHost::start(profile).await.unwrap();
+    let mut declared = host.profile().clone();
+    declared.features.remove(&Feature::AuthoritySetter);
+    let target = mkit_server_conformance::wire::WireTarget {
+        base_url: host.base_url().parse().unwrap(),
+        profile: declared,
+    };
+    let report = mkit_server_conformance::controlled::run(
+        &target,
+        &std::collections::BTreeMap::default(),
+        Some("authority.setter_disabled"),
+    )
+    .await;
+    assert!(report.failed(), "{}", report.tap());
     host.shutdown().await;
 }
