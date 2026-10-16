@@ -100,6 +100,25 @@ canonical bytes, differing facts, and invalid signatures. Implementations SHOULD
 process one head at a time so temporary decoding and signature inputs depend
 on the per-head cap rather than aggregate bytes. Rechecking never parses a pack.
 
+Decoder refusal codes are stable within this format and ruleset:
+
+| Condition | Code |
+|---|---|
+| Configured cap or fallible allocation exhausted | `ResourceLimit` |
+| Required bytes unavailable | `UnexpectedEof` |
+| Evidence version differs from 1 | `UnsupportedEvidenceVersion` |
+| Ruleset or profile/limits differs from configuration | `EvidenceProfileMismatch` |
+| Magic, ordering, duplicates, tags, contradictory counts, or trailing data | `NonCanonicalEvidence` |
+| Frozen pack or replay binding differs | `EvidenceBindingMismatch` |
+| Canonical head grammar, id, kind, or signer differs | `EvidenceHeadMismatch` |
+| Head's individual signature fails | `BadSignature` |
+
+Decode checks the envelope cap first, then reads fields in wire order. It checks
+each configured count or length cap before consuming that field's body. The
+ruleset/profile comparison precedes operation and pack parsing. The trailing-byte
+check follows all witness fields. Head rechecks proceed in envelope order, with
+canonical grammar and metadata checks before individual signature verification.
+
 ## 4. Digest domain
 
 The permanent domain is ASCII `mkit-acceptance-evidence:v1`. The digest is
