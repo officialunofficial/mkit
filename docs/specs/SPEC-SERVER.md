@@ -2091,8 +2091,10 @@ around individual destination publication writes. These per-pack checks and
 write ordering are reference mechanisms, not protocol requirements. They do
 not provide the required final source proof after the last membership effect
 is staged and before terminal acceptance. Its pre-construction source visibility
-revision check currently returns `unavailable` and `source changed; retry`,
-rather than the required uniform missing-source answer.
+revision check currently returns `unavailable` and `source changed; retry`.
+A tip change detected during construction can still return
+`failed_precondition` and `source tip changed`. These are reference gaps in
+the required uniform missing-source answer for changes after admission.
 
 When denial is enabled, the reference server retains a cleared structural set
 and external-base evidence. Its witness flag enables later structural reuse;

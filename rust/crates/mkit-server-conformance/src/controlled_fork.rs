@@ -164,7 +164,17 @@ fn refusal(reply: &Reply) -> Result<String, Failure> {
 async fn drive(ctx: Ctx, op: ForkOperation) -> Result<Reply, Failure> {
     loop {
         let reply = invoke(&ctx, &op).await?;
-        if reply.status == 200 || !matches!(refusal(&reply)?.as_str(), "aborted" | "unavailable") {
+        if reply.status == 200 {
+            return Ok(reply);
+        }
+        let error: serde_json::Value = serde_json::from_slice(&reply.body)
+            .map_err(|e| format!("fork refusal is not JSON: {e}"))?;
+        // Only the specified pending answer permits another request. Retrying
+        // other refusals could hide an incorrect code behind a later answer.
+        if reply.status != 503
+            || error.get("code").and_then(serde_json::Value::as_str) != Some("unavailable")
+            || error.get("message").and_then(serde_json::Value::as_str) != Some("fork in progress")
+        {
             return Ok(reply);
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -780,8 +790,8 @@ mod tests {
                         async move {
                             started.store(true, Ordering::SeqCst);
                             (
-                                http::StatusCode::CONFLICT,
-                                Json(serde_json::json!({"code":"aborted"})),
+                                http::StatusCode::SERVICE_UNAVAILABLE,
+                                Json(serde_json::json!({"code":"unavailable", "message":"fork in progress"})),
                             )
                         }
                     }),
@@ -825,6 +835,7 @@ mod tests {
         None,
         StaleProof,
         LastPackOnlyProof,
+        RetryableRefusalThenNotFound,
         WrongRefusalCode,
         WrongRefusalMessage,
         PartialStaging,
@@ -839,6 +850,7 @@ mod tests {
         resumed: bool,
         changed: Option<ForkSourceChange>,
         changes: Vec<(ForkSourceChange, Vec<String>)>,
+        terminal_attempts: usize,
         defect: SourceDefect,
     }
 
@@ -937,6 +949,7 @@ mod tests {
                     self.started = false;
                     self.resumed = false;
                     self.changed = None;
+                    self.terminal_attempts = 0;
                     response.fork_fixture = Some(fixture);
                 }
                 Request::Pause {
@@ -971,7 +984,18 @@ mod tests {
             if !self.resumed {
                 return (
                     http::StatusCode::SERVICE_UNAVAILABLE,
-                    Json(serde_json::json!({"code":"unavailable"})),
+                    Json(serde_json::json!({"code":"unavailable", "message":"fork in progress"})),
+                );
+            }
+            self.terminal_attempts += 1;
+            if self.defect == SourceDefect::RetryableRefusalThenNotFound
+                && self.terminal_attempts == 1
+            {
+                return (
+                    http::StatusCode::SERVICE_UNAVAILABLE,
+                    Json(
+                        serde_json::json!({"code":"unavailable", "message":"source changed; retry"}),
+                    ),
                 );
             }
             if let Some(result) = self.snapshot().result {
@@ -1023,6 +1047,7 @@ mod tests {
                 resumed: false,
                 changed: None,
                 changes: vec![],
+                terminal_attempts: 0,
                 defect,
             }));
             let app = Router::new()
@@ -1127,6 +1152,26 @@ mod tests {
                 "bad final proof escaped the executable case: {result:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn source_case_rejects_retryable_refusal_before_uniform_terminal_reply() {
+        let host = SourceHost::start(SourceDefect::RetryableRefusalThenNotFound).await;
+        let result = source_change_before_acceptance(
+            host.ctx.clone(),
+            &host.control,
+            ForkSourceChange::Moved,
+        )
+        .await;
+        let attempts = host.state.lock().unwrap().terminal_attempts;
+        assert!(
+            matches!(result, Err(Failure::Fail(_))),
+            "retryable source refusal was hidden by a later terminal answer: result={result:?}, terminal_attempts={attempts}"
+        );
+        assert_eq!(
+            attempts, 1,
+            "source refusal must fail before another terminal request"
+        );
     }
 
     #[tokio::test]
