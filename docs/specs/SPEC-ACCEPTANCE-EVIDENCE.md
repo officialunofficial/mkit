@@ -5,7 +5,15 @@ status: stable-normative
 audience: implementers of verifier and acceptance hosts
 ---
 
-# Acceptance evidence
+# SPEC-ACCEPTANCE-EVIDENCE &mdash; cross-process acceptance facts
+
+Status: **Normative** for acceptance evidence format 1.
+Scope: the bounded library byte contract between a trusted verifier and an
+acceptance writer, including binding, digest framing, and host obligations.
+Endianness: **little-endian** throughout.
+
+External implementations MUST be able to produce and consume this envelope
+from this document and its referenced object and signing specifications.
 
 ## 1. Scope and trust boundary
 
@@ -136,9 +144,25 @@ schema MUST use a new evidence version and a separately specified digest domain;
 unknown evidence requires rejection and fresh verification rather than fallback.
 No existing object or pack bytes change.
 
+| Evidence version | Change |
+|---|---|
+| 1 | Initial bounded trusted-host envelope. |
+
 Portable fixtures under **rust/crates/mkit-primitives/fixtures/acceptance/** pin
 canonical bytes, decode configurations, refusal codes, and digest vectors. The
 fixture manifest registers each case. Semantic JSON descriptions encode u64
 values as decimal strings, preserving exact values in every language; configured
 u32 bounds remain JSON numbers. Fixture regeneration is an explicit reviewed
 operation; CI only reads them.
+
+## 6. Invariants
+
+| Invariant | Enforcement |
+|---|---|
+| Decoding does not confer verification or acceptance authority | Authenticated host origin and atomic live guards, §1 |
+| Evidence binds the writer's exact frozen operation | Pack id/length, repository, operation, and epoch comparison, §1 |
+| Every accepted envelope has one canonical representation | Exact field order, tags, sorted unique records, and no trailing bytes, §2 |
+| Size and work depend on heads and dependencies, not object count | Explicit finite byte/count caps and cumulative head-byte checks, §3 |
+| Head rechecks preserve individual object/signature rules | Canonical id, kind, signer, and individual signature validation, §3 |
+| Every encoded field contributes to the digest | Fixed domain, explicit NUL, and the entire canonical encoding, §4 |
+| Format, ruleset, profile, and API compatibility remain separate | Explicit version rejection and profile equality, §5 |
