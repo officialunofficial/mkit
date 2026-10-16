@@ -75,3 +75,6 @@ ordered fence after the final staged membership effect and before this apply
 attempt. A later source change cannot invalidate acceptance or a saved result.
 See the [guard matrix and host contract](docs/fork.md) for exact requirements,
 resource bounds, replay rules, and verification scope.
+
+Run `cargo run -p mkit-primitives --example fork_acceptance` for a complete
+plan-sealing and acceptance example using deterministic host observations.

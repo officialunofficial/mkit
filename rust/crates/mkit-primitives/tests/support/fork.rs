@@ -90,7 +90,7 @@ pub fn binding() -> ForkBinding {
 pub fn attempt(id: u8) -> ForkAttempt {
     ForkAttempt {
         operation: OperationId([id; 32]),
-        reservation: ReservationId([id; 32]),
+        reservation: Some(ReservationId([id; 32])),
         replay: ReplayScope([id; 32]),
         fingerprint: [id; 32],
         expires_ms: 100,
@@ -149,7 +149,7 @@ pub fn facts<'a>(plan: &'a ForkPlan, request: &'a ForkAttempt) -> ForkFacts<'a> 
             reservation: request.reservation.clone(),
             declared_bytes: 300,
             new_to_repo_bytes: 300,
-            charge: REV,
+            charge: Some(REV),
         }),
         quota: observed(ForkQuota {
             operation: request.operation.clone(),
@@ -160,11 +160,15 @@ pub fn facts<'a>(plan: &'a ForkPlan, request: &'a ForkAttempt) -> ForkFacts<'a> 
             used_operations: 1,
             operation_limit: 1,
         }),
-        reservation: observed(ForkReservation::Pending {
-            operation: request.operation.clone(),
-            destination: plan.binding().destination,
-            expires_ms: 90,
-        }),
+        reservation: if request.reservation.is_some() {
+            observed(ForkReservation::Pending {
+                operation: request.operation.clone(),
+                destination: plan.binding().destination,
+                expires_ms: 90,
+            })
+        } else {
+            Some(Observed::Absent(REV))
+        },
         replay: observed(ForkReplay::InFlight {
             operation: request.operation.clone(),
             fingerprint: request.fingerprint,
@@ -275,8 +279,24 @@ pub fn fuzz_fork_acceptance(data: &[u8]) {
     }
     let sealed = ForkPlan::seal(binding, packs, LIMITS);
     if let Ok(plan) = sealed {
-        let request = attempt(1);
+        let mut request = attempt(1);
+        if data.get(2).is_some_and(|byte| byte & 1 != 0) {
+            request.reservation = None;
+        }
         let mut facts = facts(&plan, &request);
+        if data.get(3).is_some_and(|byte| byte & 1 != 0) {
+            if let Some(Observed::Present { value, .. }) = &mut facts.admission {
+                value.charge = None;
+            }
+            facts.quota = Some(Observed::Absent(REV));
+        }
+        if data.get(4).is_some_and(|byte| byte & 1 != 0) {
+            let mut result = plan.result().clone();
+            result.branch.0 = "x".repeat(LIMITS.branch_bytes as usize + 1);
+            facts.reservation = observed(ForkReservation::Settled(
+                mkit_primitives::fork::ForkTerminal::Accepted(Box::new(result)),
+            ));
+        }
         let mut proof = proof(&plan);
         for (i, byte) in data.iter().take(32).enumerate() {
             let _ = mutate_guard(&mut facts, usize::from(*byte) % 16);

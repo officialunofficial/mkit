@@ -57,8 +57,8 @@ pub struct ForkBinding {
 pub struct ForkAttempt {
     /// Exact operation identity.
     pub operation: OperationId,
-    /// Exact reservation identity.
-    pub reservation: ReservationId,
+    /// Exact external reservation, or no reservation for default admission.
+    pub reservation: Option<ReservationId>,
     /// Authenticated replay scope.
     pub replay: ReplayScope,
     /// Signed request fingerprint.
@@ -191,14 +191,14 @@ pub struct ForkAdmission<'a> {
     pub plan: &'a ForkPlan,
     /// Operation that owns this admission.
     pub operation: OperationId,
-    /// Exact unsettled reservation.
-    pub reservation: ReservationId,
+    /// Exact external reservation, if admission granted one.
+    pub reservation: Option<ReservationId>,
     /// Exact inherited-byte charge supplied to admission.
     pub declared_bytes: u64,
     /// Admission's exact new-to-repository byte count.
     pub new_to_repo_bytes: u64,
-    /// Identity of the already applied quota debit.
-    pub charge: Revision,
+    /// Identity of the already applied quota debit, or no applicable debit.
+    pub charge: Option<Revision>,
 }
 
 /// Authoritative receipt for the admission debit and applicable quota window.

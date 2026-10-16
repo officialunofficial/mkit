@@ -20,8 +20,11 @@ execution exhaustion produces `ResourceLimit` without partial success.
 
 The acceptance unit records the exact plan and terminal response, saves the
 replay response, records durable terminal outcome responsibility, and settles
-the exact pending reservation. The already applied admission debit is retained;
-acceptance never debits quota again. It adds no visible member or destination
+the exact pending reservation when admission granted one. Default admission
+records authoritative absence instead of inventing a reservation. An applicable
+already applied admission debit is retained;
+acceptance never debits quota again. A charge-free allowance uses authoritative
+quota absence; missing observations remain unavailable. It adds no visible member or destination
 ref and does not enable writes. The later activation is published clearance;
 it cannot repeat terminal settlement or replace the saved result.
 
@@ -31,6 +34,10 @@ precedes acceptance. The host reacquires it for each retried apply attempt.
 Every inherited pack is checked at that fence. Source changes ordered after
 the fence do not invalidate acceptance: source facts are a separate ordering
 requirement, not cross-owner atomic comparisons.
+
+Run the packaged end-to-end example with
+`cargo run -p mkit-primitives --example fork_acceptance`. It seals a plan and
+calls the acceptance entry point with deterministic typed host observations.
 
 ## Guard matrix
 
@@ -76,6 +83,15 @@ It does not require a new source proof. Authoritative absence after replay or
 reservation pruning does not re-create outcome responsibility. An externally
 settled reservation prevents any further construction or acceptance.
 
+Completed replay resolves consistent terminal evidence before any advancement
+authority or grant check. It does not re-authorize the completed operation.
+A fresh exact pending joining reservation settles as a replay race even when
+the response was already cached.
+
+`JoinIdentical` authorizes no durable construction progress. Its guards cover
+joining and any joining settlement only. Reacquire the original owner facts and
+redecide before each advancing commit; do not reuse joining guards to advance.
+
 The caller validates the signed envelope at ingress. Its expiry is retained as
 replay metadata; the primitive does not introduce a new commit-time envelope
 expiry rule. Durable construction is protected by its job and reservation
@@ -93,7 +109,8 @@ sorted-pack digest streams through core's BLAKE3 implementation.
 Decisions borrow observations, proofs, and the sealed response. Plan sealing
 reserves one response branch string fallibly, bounded by the branch limit.
 Host input memory and host-restored terminal records belong to the caller. Full-plan equality, branch comparisons, and proof checks have
-an explicit finite work allowance. Output contains one decision, at most one
+an explicit finite work allowance. Every retained plan and terminal branch
+is charged before returning a guarded decision, including refusal snapshots. Output contains one decision, at most one
 acceptance or joining settlement, and the fixed-shape borrowed guard snapshot.
 There is no hidden I/O, traversal callback, clock read, or runtime fan-out.
 

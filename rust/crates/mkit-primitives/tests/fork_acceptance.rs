@@ -45,13 +45,20 @@ fn semantic_fixtures_pin_decisions_and_stable_codes() {
         }
         let (case, expected) = line.split_once('|').expect("valid deterministic fixture");
         let p = plan();
-        let request = attempt(1);
+        let mut request = attempt(1);
+        if matches!(case, "no_reservation" | "no_reservation_no_charge") {
+            request.reservation = None;
+        }
         let mut f = facts(&p, &request);
         let mut s = proof(&p);
         let mut now = 1;
         let mut source = true;
         match case {
-            "accept" => {}
+            "accept" | "no_reservation" => {}
+            "no_charge" | "no_reservation_no_charge" => {
+                value(&mut f.admission).charge = None;
+                f.quota = Some(Observed::Absent(REV));
+            }
             "partial" => {
                 if let ForkJobState::Staged { packs, .. } = &mut value(&mut f.job).state {
                     *packs = 2;
@@ -86,7 +93,13 @@ fn semantic_fixtures_pin_decisions_and_stable_codes() {
                     ForkRefusal::Expired,
                 )));
             }
-            "wrong_reservation" => value(&mut f.admission).reservation.0 = [9; 32],
+            "wrong_reservation" => {
+                value(&mut f.admission)
+                    .reservation
+                    .as_mut()
+                    .expect("reserved fixture")
+                    .0 = [9; 32];
+            }
             "admission_charge" => value(&mut f.admission).declared_bytes -= 1,
             "admission_new_bytes" => value(&mut f.admission).new_to_repo_bytes -= 1,
             "quota_receipt" => value(&mut f.quota).charge = Revision([9; 32]),
@@ -601,8 +614,248 @@ fn full_staging_digest_and_admission_plan_cannot_be_substituted() {
 }
 
 #[test]
+fn review_terminal_replay_precedes_advancement_authority_and_grant_checks() {
+    let p = plan();
+    let request = attempt(1);
+    for terminal in [
+        ForkTerminal::Accepted(Box::new(p.result().clone())),
+        ForkTerminal::Refused(ForkRefusal::SourceNotFound),
+    ] {
+        for pruned in [false, true] {
+            let mut f = facts(&p, &request);
+            value(&mut f.job).state = ForkJobState::Terminal(terminal.clone());
+            f.replay = if pruned {
+                Some(Observed::Absent(REV))
+            } else {
+                observed(ForkReplay::Recorded {
+                    fingerprint: request.fingerprint,
+                    result: terminal.clone(),
+                })
+            };
+            f.reservation = if pruned {
+                Some(Observed::Absent(REV))
+            } else {
+                observed(ForkReservation::Settled(terminal.clone()))
+            };
+            value(&mut f.authority).generation = Revision([9; 32]);
+            value(&mut f.authority).ready = false;
+            f.grant = observed(GrantFact {
+                grant: [9; 32],
+                epoch: Revision([9; 32]),
+                presence: None,
+            });
+            assert_eq!(
+                outcome(decide_fork_acceptance(
+                    &p, &request, &f, None, 1_000, LIMITS
+                )),
+                "ReturnRecorded"
+            );
+            f.authority = None;
+            f.grant = None;
+            assert_eq!(
+                outcome(decide_fork_acceptance(
+                    &p, &request, &f, None, 1_000, LIMITS
+                )),
+                "ReturnRecorded"
+            );
+        }
+    }
+}
+
+#[test]
+fn review_cached_result_settles_only_the_fresh_joining_reservation_once() {
+    let p = plan();
+    let original = attempt(1);
+    let joining = attempt(2);
+    let mut f = facts(&p, &joining);
+    value(&mut f.job).attempt = original.clone();
+    let result = ForkTerminal::Accepted(Box::new(p.result().clone()));
+    value(&mut f.job).state = ForkJobState::Terminal(result.clone());
+    f.replay = observed(ForkReplay::Recorded {
+        fingerprint: joining.fingerprint,
+        result,
+    });
+    let guarded =
+        decide_fork_acceptance(&p, &joining, &f, None, 1, LIMITS).expect("valid cached join");
+    let ForkDecision::ReturnRecorded {
+        replay_race: Some(race),
+        ..
+    } = guarded.decision()
+    else {
+        panic!("joining settlement required")
+    };
+    assert_eq!(race.joining.reservation, joining.reservation);
+    assert_ne!(race.joining.reservation, original.reservation);
+    f.reservation = observed(ForkReservation::ReplayRace {
+        owner: original.operation,
+    });
+    let replay =
+        decide_fork_acceptance(&p, &joining, &f, None, 1, LIMITS).expect("settled join replay");
+    assert!(matches!(
+        replay.decision(),
+        ForkDecision::ReturnRecorded {
+            replay_race: None,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn review_every_retained_terminal_branch_is_bounded_before_guarding_a_refusal() {
+    let p = plan();
+    let request = attempt(1);
+    for target in 0..3 {
+        let mut f = facts(&p, &request);
+        let mut result = p.result().clone();
+        result.branch.0 = "x".repeat(LIMITS.branch_bytes as usize + 1);
+        let terminal = ForkTerminal::Accepted(Box::new(result));
+        match target {
+            0 => f.reservation = observed(ForkReservation::Settled(terminal)),
+            1 => {
+                f.replay = observed(ForkReplay::Recorded {
+                    fingerprint: request.fingerprint,
+                    result: terminal,
+                });
+            }
+            2 => value(&mut f.job).state = ForkJobState::Terminal(terminal),
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            outcome(decide_fork_acceptance(&p, &request, &f, None, 1, LIMITS)),
+            "ResourceLimit"
+        );
+    }
+}
+
+#[test]
+fn default_and_charge_free_admissions_accept_join_and_replay_without_fabricated_facts() {
+    let p = plan();
+    for reserved in [false, true] {
+        for charged in [false, true] {
+            let mut original = attempt(1);
+            if !reserved {
+                original.reservation = None;
+            }
+            let mut f = facts(&p, &original);
+            if !reserved {
+                f.reservation = Some(Observed::Absent(REV));
+            }
+            if !charged {
+                value(&mut f.admission).charge = None;
+                f.quota = Some(Observed::Absent(REV));
+            }
+            let source = proof(&p);
+            let accepted = decide_fork_acceptance(&p, &original, &f, Some(&source), 1, LIMITS)
+                .expect("optional admission");
+            assert!(
+                matches!(accepted.decision(), ForkDecision::AcceptFork(effects) if effects.attempt().reservation.is_some() == reserved)
+            );
+            assert_eq!(
+                outcome(decide_fork_acceptance(
+                    &p,
+                    &original,
+                    &f,
+                    Some(&source),
+                    91,
+                    LIMITS
+                )),
+                "ForkExpired"
+            );
+            let mut joining = attempt(2);
+            if !reserved {
+                joining.reservation = None;
+            }
+            let mut join = facts(&p, &joining);
+            join.job = f.job.clone();
+            join.emptiness = f.emptiness.clone();
+            if !reserved {
+                join.reservation = Some(Observed::Absent(REV));
+            }
+            if !charged {
+                value(&mut join.admission).charge = None;
+                join.quota = Some(Observed::Absent(REV));
+            }
+            let pending = decide_fork_acceptance(&p, &joining, &join, None, 1, LIMITS)
+                .expect("optional joining admission");
+            assert!(
+                matches!(pending.decision(), ForkDecision::JoinIdentical { replay_race, .. } if replay_race.is_some() == reserved)
+            );
+            let result = ForkTerminal::Accepted(Box::new(p.result().clone()));
+            value(&mut join.job).state = ForkJobState::Terminal(result.clone());
+            join.replay = observed(ForkReplay::Recorded {
+                fingerprint: joining.fingerprint,
+                result,
+            });
+            let terminal = decide_fork_acceptance(&p, &joining, &join, None, 1, LIMITS)
+                .expect("optional cached join");
+            assert!(
+                matches!(terminal.decision(), ForkDecision::ReturnRecorded { replay_race, .. } if replay_race.is_some() == reserved)
+            );
+        }
+    }
+}
+
+#[test]
+fn absent_reservation_and_quota_are_distinct_from_missing_or_contradictory_facts() {
+    let p = plan();
+    let mut request = attempt(1);
+    request.reservation = None;
+    let mut f = facts(&p, &request);
+    let source = proof(&p);
+    f.reservation = Some(Observed::Absent(REV));
+    value(&mut f.admission).charge = None;
+    f.quota = Some(Observed::Absent(REV));
+    f.reservation = None;
+    assert_eq!(
+        outcome(decide_fork_acceptance(
+            &p,
+            &request,
+            &f,
+            Some(&source),
+            1,
+            LIMITS
+        )),
+        "UnavailableInput"
+    );
+    f.reservation = Some(Observed::Absent(REV));
+    f.quota = None;
+    assert_eq!(
+        outcome(decide_fork_acceptance(
+            &p,
+            &request,
+            &f,
+            Some(&source),
+            1,
+            LIMITS
+        )),
+        "UnavailableInput"
+    );
+    f.quota = Some(Observed::Absent(REV));
+    value(&mut f.admission).charge = Some(REV);
+    assert_eq!(
+        outcome(decide_fork_acceptance(
+            &p,
+            &request,
+            &f,
+            Some(&source),
+            1,
+            LIMITS
+        )),
+        "InvalidResponse"
+    );
+}
+
+#[test]
 fn stable_and_seeded_hostile_fact_fuzz_replay() {
     fuzz_fork_acceptance(&[]);
+    for seed in [
+        &[0, 1, 1, 0][..],
+        &[0, 1, 1, 1],
+        &[0, 1, 0, 1],
+        &[0, 1, 0, 0, 1],
+    ] {
+        fuzz_fork_acceptance(seed);
+    }
     for len in [1, 2, 8, 32, 64, 256] {
         fuzz_fork_acceptance(&vec![0; len]);
         fuzz_fork_acceptance(&vec![255; len]);

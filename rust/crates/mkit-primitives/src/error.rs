@@ -114,7 +114,7 @@ pub enum FailureCode {
     /// Fork reservation is no longer pending.
     #[error("ForkReservationSettled")]
     ForkReservationSettled,
-    /// Fork request or durable protection expired.
+    /// Fork durable protection expired.
     #[error("ForkExpired")]
     ForkExpired,
     /// Fork admission debit or applicable quota does not match.

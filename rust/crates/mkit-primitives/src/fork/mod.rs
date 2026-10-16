@@ -81,7 +81,8 @@ pub struct ForkReplayRace<'a> {
 ///
 /// The host records the accepted plan, terminal response, saved replay response,
 /// and terminal outcome responsibility together, and settles `attempt`'s exact
-/// pending reservation. Its admission debit is already charged. This unit adds
+/// pending reservation when admission granted one. An applicable admission debit
+/// is already charged. This unit adds
 /// no ref or visible member and never enables writes. The terminal response includes the
 /// complete admitted branch and publication identity.
 #[derive(Debug)]
@@ -115,7 +116,9 @@ impl<'a> AcceptFork<'a> {
 pub enum ForkDecision<'a> {
     /// Atomically accept and settle the construction, without publishing it.
     AcceptFork(AcceptFork<'a>),
-    /// Resume the identical durable construction, with no repeated quota charge.
+    /// Join the identical durable construction, with no repeated quota charge.
+    /// This authorizes no construction progress. Reacquire the original owner
+    /// facts and decide an advancing commit separately before any progress.
     JoinIdentical {
         /// Original durable construction owner.
         owner: &'a ForkAttempt,
@@ -183,6 +186,9 @@ impl<'a> GuardedFork<'a> {
 
 /// Decide fork acceptance over a sealed bounded plan and exact supplied facts.
 ///
+/// The host validates the current signed envelope at ingress, including its
+/// authentication requirements, before calling this entry point. Completed
+/// replay does not repeat the completed operation's authority/grant checks.
 /// The host has already authorized the initial source read and expected-tip
 /// comparison before admission. At this stage every source change has the
 /// uniform missing-source class. Source facts are frozen at the final fence;
@@ -251,13 +257,6 @@ fn classify<'a>(
     if facts.repository != plan.binding.destination || facts.request != request {
         return Err(invalid().into());
     }
-    let authority = present(facts.authority.as_ref())?;
-    if request.authority_fencing && !authority.ready {
-        return Err(failure(FailureCode::UnsupportedCapability).into());
-    }
-    if authority != &request.authority || !grant_matches(facts.grant.as_ref(), request)? {
-        return Err(ForkRefusal::PermissionDenied.into());
-    }
     let job = present(facts.job.as_ref())?;
     if job.plan != plan {
         return Err(ForkRefusal::BindingMismatch.into());
@@ -265,7 +264,7 @@ fn classify<'a>(
     let same_owner = request.operation == job.attempt.operation;
     if (same_owner && request != &job.attempt)
         || (!same_owner
-            && (request.reservation == job.attempt.reservation
+            && ((request.reservation.is_some() && request.reservation == job.attempt.reservation)
                 || request.replay == job.attempt.replay))
     {
         return Err(ForkRefusal::BindingMismatch.into());
@@ -290,6 +289,13 @@ fn classify<'a>(
             Some(expiry),
             None,
         ));
+    }
+    let authority = present(facts.authority.as_ref())?;
+    if request.authority_fencing && !authority.ready {
+        return Err(failure(FailureCode::UnsupportedCapability).into());
+    }
+    if authority != &request.authority || !grant_matches(facts.grant.as_ref(), request)? {
+        return Err(ForkRefusal::PermissionDenied.into());
     }
     if !already_joined {
         check_admission(plan, request, facts)?;
@@ -349,18 +355,22 @@ fn recorded<'a>(
                 if !matches!(&job.state, ForkJobState::Terminal(saved) if saved == result) {
                     return Err(invalid().into());
                 }
-                if !settled_for(
+                if settled_for(
                     acquired(facts.reservation.as_ref())?,
                     job,
                     result,
                     same_owner,
                 ) {
+                    return Ok(Some(ForkDecision::ReturnRecorded {
+                        result,
+                        replay_race: None,
+                    }));
+                }
+                if same_owner {
                     return Err(invalid().into());
                 }
-                return Ok(Some(ForkDecision::ReturnRecorded {
-                    result,
-                    replay_race: None,
-                }));
+                // A fresh exact pending joining reservation still needs its
+                // replay-race settlement; protection validates it below.
             }
             _ => return Err(ForkRefusal::BindingMismatch.into()),
         }
@@ -407,20 +417,40 @@ fn protection(
     same_owner: bool,
     now_ms: u64,
 ) -> Check<(u64, bool)> {
-    let (reservation_expiry, already_joined) = match present(facts.reservation.as_ref())? {
-        ForkReservation::Pending {
-            operation,
-            destination,
-            expires_ms,
-        } if operation == &request.operation && destination == &facts.repository => {
+    let (reservation_expiry, already_joined) = match (
+        request.reservation.as_ref(),
+        acquired(facts.reservation.as_ref())?,
+    ) {
+        (None, Observed::Absent(_)) => (job.expires_ms, !same_owner),
+        (
+            Some(_),
+            Observed::Present {
+                value:
+                    ForkReservation::Pending {
+                        operation,
+                        destination,
+                        expires_ms,
+                    },
+                ..
+            },
+        ) if operation == &request.operation && destination == &facts.repository => {
             (*expires_ms, false)
         }
-        ForkReservation::ReplayRace { owner } if !same_owner && owner == &job.attempt.operation => {
-            (job.expires_ms, true)
-        }
-        ForkReservation::Settled(_) | ForkReservation::ReplayRace { .. } => {
-            return Err(ForkRefusal::ReservationSettled.into());
-        }
+        (
+            Some(_),
+            Observed::Present {
+                value: ForkReservation::ReplayRace { owner },
+                ..
+            },
+        ) if !same_owner && owner == &job.attempt.operation => (job.expires_ms, true),
+        (
+            Some(_),
+            Observed::Absent(_)
+            | Observed::Present {
+                value: ForkReservation::Settled(_) | ForkReservation::ReplayRace { .. },
+                ..
+            },
+        ) => return Err(ForkRefusal::ReservationSettled.into()),
         _ => return Err(invalid().into()),
     };
     let expiry = if matches!(job.state, ForkJobState::Terminal(_)) {
@@ -436,25 +466,35 @@ fn protection(
 
 fn check_admission(plan: &ForkPlan, request: &ForkAttempt, facts: &ForkFacts<'_>) -> Check<()> {
     let admission = present(facts.admission.as_ref())?;
-    let quota = present(facts.quota.as_ref())?;
     if admission.plan != plan
         || admission.operation != request.operation
         || admission.reservation != request.reservation
-        || quota.operation != request.operation
-        || quota.charge != admission.charge
     {
         return Err(invalid().into());
     }
     if admission.declared_bytes != plan.result.bytes
         || admission.new_to_repo_bytes != plan.result.bytes
-        || quota.bytes != plan.result.bytes
-        || quota.used_bytes < quota.bytes
-        || quota.used_bytes > quota.byte_limit
-        || quota.used_operations == 0
-        || quota.used_operations > quota.operation_limit
     {
         return Err(ForkRefusal::QuotaExceeded.into());
     }
+    match (admission.charge, acquired(facts.quota.as_ref())?) {
+        (None, Observed::Absent(_)) => {}
+        (Some(charge), Observed::Present { value: quota, .. }) => {
+            if quota.operation != request.operation || quota.charge != charge {
+                return Err(invalid().into());
+            }
+            if quota.bytes != plan.result.bytes
+                || quota.used_bytes < quota.bytes
+                || quota.used_bytes > quota.byte_limit
+                || quota.used_operations == 0
+                || quota.used_operations > quota.operation_limit
+            {
+                return Err(ForkRefusal::QuotaExceeded.into());
+            }
+        }
+        _ => return Err(invalid().into()),
+    }
+
     Ok(())
 }
 
@@ -599,34 +639,92 @@ fn check_bounds(
     source: Option<&FinalForkSourceProof>,
     limits: ForkLimits,
 ) -> Result<(), Failure> {
-    if !plan.within(limits)
-        || source.is_some_and(|s| {
-            s.packs.len() as u64 > u64::from(limits.packs)
-                || s.branch.0.len() as u64 > u64::from(limits.branch_bytes)
-        })
+    let mut work = limits.work;
+    charge(&mut work, 512)?;
+    bound_plan(plan, limits, &mut work)?;
+    if let Some(Observed::Present { value, .. }) = &facts.job {
+        bound_plan(value.plan, limits, &mut work)?;
+        if let ForkJobState::Terminal(result) = &value.state {
+            bound_terminal(result, limits, &mut work)?;
+        }
+    }
+    if let Some(Observed::Present { value, .. }) = &facts.admission {
+        bound_plan(value.plan, limits, &mut work)?;
+    }
+    if let Some(Observed::Present {
+        value: ForkReservation::Settled(result),
+        ..
+    }) = &facts.reservation
     {
-        return Err(resource());
+        bound_terminal(result, limits, &mut work)?;
     }
-    if let Some(Observed::Present { value, .. }) = &facts.job
-        && !value.plan.within(limits)
+    if let Some(Observed::Present {
+        value: ForkReplay::Recorded { result, .. },
+        ..
+    }) = &facts.replay
     {
+        bound_terminal(result, limits, &mut work)?;
+    }
+    if let Some(source) = source {
+        if source.packs.len() as u64 > u64::from(limits.packs)
+            || source.branch.0.len() as u64 > u64::from(limits.branch_bytes)
+        {
+            return Err(resource());
+        }
+        charge(
+            &mut work,
+            (source.packs.len() as u64)
+                .checked_mul(32)
+                .ok_or_else(resource)?,
+        )?;
+        charge(
+            &mut work,
+            (source.branch.0.len() as u64)
+                .checked_mul(8)
+                .ok_or_else(resource)?,
+        )?;
+    }
+    Ok(())
+}
+fn bound_plan(plan: &ForkPlan, limits: ForkLimits, work: &mut u64) -> Result<(), Failure> {
+    if !plan.within(limits) {
         return Err(resource());
     }
-    if let Some(Observed::Present { value, .. }) = &facts.admission
-        && !value.plan.within(limits)
-    {
-        return Err(resource());
+    charge(
+        work,
+        (plan.packs.len() as u64)
+            .checked_mul(32)
+            .ok_or_else(resource)?,
+    )?;
+    charge(work, plan.edges.checked_mul(8).ok_or_else(resource)?)?;
+    // The plan owns both its binding branch and its result branch.
+    charge(
+        work,
+        (plan.binding.branch.0.len() as u64)
+            .checked_mul(16)
+            .ok_or_else(resource)?,
+    )
+}
+fn bound_terminal(
+    result: &ForkTerminal,
+    limits: ForkLimits,
+    work: &mut u64,
+) -> Result<(), Failure> {
+    if let ForkTerminal::Accepted(result) = result {
+        if result.branch.0.len() as u64 > u64::from(limits.branch_bytes) {
+            return Err(resource());
+        }
+        charge(
+            work,
+            (result.branch.0.len() as u64)
+                .checked_mul(8)
+                .ok_or_else(resource)?,
+        )?;
     }
-    // Covers full-plan equality, fixed-width facts, branch bytes, and source proofs.
-    let work = (plan.packs.len() as u64)
-        .checked_mul(32)
-        .and_then(|w| w.checked_add(plan.edges.checked_mul(8)?))
-        .and_then(|w| w.checked_add((plan.binding.branch.0.len() as u64).checked_mul(4)?))
-        .and_then(|w| w.checked_add(512))
-        .ok_or_else(resource)?;
-    if work > limits.work {
-        return Err(resource());
-    }
+    Ok(())
+}
+fn charge(work: &mut u64, amount: u64) -> Result<(), Failure> {
+    *work = work.checked_sub(amount).ok_or_else(resource)?;
     Ok(())
 }
 fn valid_branch(name: &str) -> bool {

@@ -26,3 +26,9 @@ pack proof, including the transitive supplier. Replay tests atomically save
 the accepted job, response, and reservation disposition, then lose the source
 proof. The saved result remains available without construction or a new debit.
 The reference digest is BLAKE3 over concatenated sorted pack IDs.
+
+The reservation-free, charge-free, and combined variants explicitly observe
+absence. They retain the durable job deadline and create no invented debit or
+external reservation. Separate recovery tests pin terminal replay after authority
+and grant movement and settlement of a fresh joining reservation beside a
+cached response. Every retained terminal branch is bounded before guard output.

@@ -152,6 +152,7 @@ impl ForkPlan {
         if queue.len() != packs.len() {
             return Err(invalid());
         }
+        work.charge(binding.branch.0.len() as u64)?;
         let mut branch = String::new();
         branch
             .try_reserve_exact(binding.branch.0.len())

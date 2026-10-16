@@ -50,3 +50,6 @@ job_expiry|ForkExpired
 request_expiry|ForkExpired
 wrong_replay|ForkBindingMismatch
 oversized_proof|ResourceLimit
+no_reservation|AcceptFork
+no_charge|AcceptFork
+no_reservation_no_charge|AcceptFork
