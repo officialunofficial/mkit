@@ -388,7 +388,7 @@ async fn large_listing_wire_cases_run_in_single_and_d34() {
 }
 
 // Keep the existing ignored-lane name so the shared CI lane continues running
-// this full-size HTTP proof after the native package is removed.
+// this full-size HTTP proof after deployment adapters are removed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "75,000 refs over HTTP: run by the ignored-lane profile"]
 async fn listing_over_32_mib_pages_under_d34() {

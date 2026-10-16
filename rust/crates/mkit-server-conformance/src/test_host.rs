@@ -154,7 +154,7 @@ impl mkit_server::hooks::HookChannel for LoopbackHookChannel {
 
 const REPOSITORY: &str = "default";
 const TICKET_KEY: &str = "dev 1111111111111111111111111111111111111111111111111111111111111111";
-// Bound even a handler that never wakes, without relying on wall-clock sleeps.
+// Bound a handler that repeatedly wakes itself without making progress.
 const MAX_TIMER_DRAIN_POLLS: usize = 100_000;
 
 // Native storage callbacks for the same scheduled extraction state machine.
@@ -496,12 +496,14 @@ impl TestHost {
 
     /// Fires due core timers for one partition. The caller supplies the
     /// registered core handlers so each test controls exactly which durable
-    /// work is drained; no background timer task or sleep is used.
-    /// A pending handler is cancelled after a finite number of executor polls.
+    /// work is drained. Pending work is polled when its waker signals progress.
+    /// The supplied tick's elapsed budget, capped at the default tick budget,
+    /// also bounds physical waiting. A repeatedly self-waking handler has a
+    /// separate finite poll allowance.
     ///
     /// # Errors
     /// Returns a store scan error or an unavailable error when a handler
-    /// exhausts the poll budget. Its uncommitted timer remains queued.
+    /// exhausts the poll or elapsed budget. Its uncommitted timer remains queued.
     pub async fn drain_timers(
         &self,
         partition: &Partition,
@@ -517,15 +519,21 @@ impl TestHost {
             now_ms,
             budget,
         ));
-        for _ in 0..MAX_TIMER_DRAIN_POLLS {
-            if let core::task::Poll::Ready(result) = futures::poll!(&mut drain) {
-                return result;
+        let mut polls = 0;
+        let driven = futures::future::poll_fn(|cx| {
+            polls += 1;
+            if polls > MAX_TIMER_DRAIN_POLLS {
+                return core::task::Poll::Ready(Err(mkit_server::StoreError::unavailable(
+                    "test host timer drain exhausted its poll budget; a timer handler did not complete",
+                )));
             }
-            tokio::task::yield_now().await;
-        }
-        Err(mkit_server::StoreError::unavailable(
-            "test host timer drain exhausted its poll budget; a timer handler did not complete",
-        ))
+            core::future::Future::poll(drain.as_mut(), cx)
+        });
+        tokio::time::timeout(core::time::Duration::from_millis(budget.max_elapsed_ms.min(TickBudget::default().max_elapsed_ms)), driven)
+            .await
+            .unwrap_or_else(|_| Err(mkit_server::StoreError::unavailable(
+                "test host timer drain exhausted its elapsed budget; a timer handler did not complete",
+            )))
     }
 
     /// Fires due core timers registered by the production adapters. The
