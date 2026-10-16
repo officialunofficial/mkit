@@ -12,8 +12,8 @@ use mkit_transport_connect::generated::{
 };
 
 use crate::control::{
-    ForkFixture, ForkFixtureQuery, ForkObservation, ForkQuery, ForkResultView, ReplayIdentity,
-    Request,
+    ForkFixture, ForkFixtureQuery, ForkObservation, ForkQuery, ForkResultView, ForkSourceChange,
+    ReplayIdentity, Request,
 };
 use crate::controlled::ControlClient;
 use crate::wire::Feature;
@@ -65,10 +65,7 @@ async fn fixture(ctx: &Ctx, control: &ControlClient, ordinal: u64) -> Result<Fix
         from_hex(id).map_err(|e| format!("invalid fork fixture object ID: {e}"))?;
     }
     ensure!(
-        source.source_repository != destination
-            && source.source_repository.split_once('/').map(|(ns, _)| ns)
-                == Some(namespace.as_str())
-            && source.source_head == ctx.head("source"),
+        source.source_repository != destination && source.source_head == ctx.head("source"),
         "fork fixture has the wrong source identity"
     );
     let body = format!(
@@ -523,10 +520,200 @@ pub(crate) async fn authority_each_progress_commit(
     Ok(())
 }
 
+fn source_not_found(reply: &Reply) -> CaseResult {
+    let value: serde_json::Value = serde_json::from_slice(&reply.body)
+        .map_err(|e| format!("fork source refusal is not JSON: {e}"))?;
+    ensure!(
+        reply.status == 404
+            && value.get("code").and_then(serde_json::Value::as_str) == Some("not_found")
+            && value.get("message").and_then(serde_json::Value::as_str) == Some("source not found"),
+        "fork source final proof must refuse uniformly with not_found/source not found: {reply:?}"
+    );
+    Ok(())
+}
+
+fn acceptance_unchanged(before: &ForkObservation, after: &ForkObservation) -> CaseResult {
+    ensure!(
+        before.result == after.result
+            && before.replay == after.replay
+            && before.outcome == after.outcome
+            && before.progress_commits == after.progress_commits,
+        "source change invalidated or repeated durable fork acceptance: before={before:?}, after={after:?}"
+    );
+    Ok(())
+}
+
+async fn source_change_before_fixture(
+    ctx: &Ctx,
+    control: &ControlClient,
+    fixture: &Fixture,
+    change: ForkSourceChange,
+    mutation_query: ForkQuery,
+) -> CaseResult {
+    pause(
+        control,
+        fixture,
+        "before_acceptance",
+        "fork_source_proof",
+        None,
+    )
+    .await?;
+    let pending = start(ctx, fixture);
+    control.wait_paused().await?;
+    let before = observe(control, fixture).await?;
+    inert(&before)?;
+    ensure!(
+        before.staged_memberships.iter().all(|staged| *staged),
+        "final source-proof barrier must follow every staged membership: {before:?}"
+    );
+    control
+        .command(&Request::ChangeForkSource {
+            query: mutation_query,
+            change,
+        })
+        .await?;
+    inert(&observe(control, fixture).await?)?;
+    control.command(&Request::Resume).await?;
+    source_not_found(&finish(pending).await?)?;
+    let after = observe(control, fixture).await?;
+    inert(&after)?;
+    ensure!(
+        after.failed && after.progress_commits == before.progress_commits,
+        "failed final source proof committed fork progress: before={before:?}, after={after:?}"
+    );
+    probe_inert(ctx, fixture).await?;
+    inert(&observe(control, fixture).await?)?;
+    Ok(())
+}
+
+async fn source_change_after_fixture(
+    ctx: &Ctx,
+    control: &ControlClient,
+    fixture: &Fixture,
+    change: ForkSourceChange,
+    mutation_query: ForkQuery,
+) -> CaseResult {
+    pause(
+        control,
+        fixture,
+        "after_durable_acceptance_before_response",
+        "fork_acceptance",
+        None,
+    )
+    .await?;
+    let pending = start(ctx, fixture);
+    control.wait_paused().await?;
+    let before = observe(control, fixture).await?;
+    accepted(&before, fixture)?;
+    control
+        .command(&Request::ChangeForkSource {
+            query: mutation_query,
+            change,
+        })
+        .await?;
+    // Assert recovery evidence before letting the original answer or replay run:
+    // a replay must not repair an acceptance invalidated by a later source change.
+    let changed = observe(control, fixture).await?;
+    accepted(&changed, fixture)?;
+    acceptance_unchanged(&before, &changed)?;
+    control.command(&Request::Resume).await?;
+    let original = finish(pending).await?;
+    success(&original, fixture)?;
+    let saved = before
+        .result
+        .as_ref()
+        .ok_or("accepted fork has no result")?;
+    wire_result_matches(&original, saved)?;
+    let replay = invoke(ctx, &fixture.op).await?;
+    success(&replay, fixture)?;
+    wire_result_matches(&replay, saved)?;
+    let after = observe(control, fixture).await?;
+    accepted(&after, fixture)?;
+    acceptance_unchanged(&before, &after)
+}
+
+async fn source_change_cases(
+    ctx: Ctx,
+    control: &ControlClient,
+    change: ForkSourceChange,
+    after_acceptance: bool,
+) -> CaseResult {
+    let mut expected_packs = None;
+    let mut ordinal = 0_usize;
+    loop {
+        let fixture = fixture(
+            &ctx,
+            control,
+            u64::try_from(ordinal).map_err(|e| e.to_string())?,
+        )
+        .await?;
+        let mut mutation_query = fixture.query.clone();
+        if change == ForkSourceChange::Denied {
+            let packs = expected_packs.get_or_insert_with(|| fixture.source.packs.clone());
+            ensure!(
+                *packs == fixture.source.packs,
+                "denial fixtures must preserve the deterministic imported pack set"
+            );
+            // Select each pack explicitly. A proof that checks only one special
+            // pack must not pass while another imported member is denied.
+            mutation_query.packs = vec![packs[ordinal].clone()];
+        }
+        if after_acceptance {
+            source_change_after_fixture(&ctx, control, &fixture, change, mutation_query).await?;
+        } else {
+            source_change_before_fixture(&ctx, control, &fixture, change, mutation_query).await?;
+        }
+        ordinal += 1;
+        if expected_packs
+            .as_ref()
+            .is_none_or(|packs| ordinal == packs.len())
+        {
+            return Ok(());
+        }
+    }
+}
+
+async fn source_change_before_acceptance(
+    ctx: Ctx,
+    control: &ControlClient,
+    change: ForkSourceChange,
+) -> CaseResult {
+    source_change_cases(ctx, control, change, false).await
+}
+
+async fn source_change_after_acceptance(
+    ctx: Ctx,
+    control: &ControlClient,
+    change: ForkSourceChange,
+) -> CaseResult {
+    source_change_cases(ctx, control, change, true).await
+}
+
+macro_rules! source_cases {
+    ($(($before:ident, $after:ident, $change:ident)),* $(,)?) => {
+        $(
+            pub(crate) async fn $before(ctx: Ctx, control: &ControlClient) -> CaseResult {
+                source_change_before_acceptance(ctx, control, ForkSourceChange::$change).await
+            }
+
+            pub(crate) async fn $after(ctx: Ctx, control: &ControlClient) -> CaseResult {
+                source_change_after_acceptance(ctx, control, ForkSourceChange::$change).await
+            }
+        )*
+    };
+}
+
+source_cases! {
+    (source_moved_before_acceptance, source_moved_after_acceptance, Moved),
+    (source_unpublished_before_acceptance, source_unpublished_after_acceptance, Unpublished),
+    (source_visibility_revoked_before_acceptance, source_visibility_revoked_after_acceptance, VisibilityRevoked),
+    (source_denied_before_acceptance, source_denied_after_acceptance, Denied),
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use axum::{Json, Router, routing::post};
 
@@ -631,5 +818,348 @@ mod tests {
                 "malformed fork snapshot escaped the gate case: {result:?}"
             );
         }
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum SourceDefect {
+        None,
+        StaleProof,
+        LastPackOnlyProof,
+        WrongRefusalCode,
+        WrongRefusalMessage,
+        PartialStaging,
+        EmptyStaging,
+        InvalidatedAcceptance,
+    }
+
+    struct SourceState {
+        fixture: Option<ForkFixture>,
+        after_acceptance: bool,
+        started: bool,
+        resumed: bool,
+        changed: Option<ForkSourceChange>,
+        changes: Vec<(ForkSourceChange, Vec<String>)>,
+        defect: SourceDefect,
+    }
+
+    impl SourceState {
+        fn accepted(&self) -> bool {
+            let misses_denial = self.defect == SourceDefect::LastPackOnlyProof
+                && self.changes.last().is_some_and(|(change, packs)| {
+                    *change == ForkSourceChange::Denied
+                        && packs.iter().any(|pack| {
+                            Some(pack)
+                                != self
+                                    .fixture
+                                    .as_ref()
+                                    .and_then(|fixture| fixture.packs.last())
+                        })
+                });
+            self.started
+                && ((self.after_acceptance
+                    && !(self.changed.is_some()
+                        && self.defect == SourceDefect::InvalidatedAcceptance))
+                    || (self.resumed && (self.defect == SourceDefect::StaleProof || misses_denial)))
+        }
+
+        fn snapshot(&self) -> ForkObservation {
+            let fixture = self.fixture.as_ref().expect("prepared source");
+            let accepted = self.accepted();
+            let failed = self.resumed && !accepted;
+            ForkObservation {
+                accepted,
+                failed,
+                writable: accepted,
+                head: None,
+                packmap: None,
+                staged_memberships: if self.defect == SourceDefect::EmptyStaging {
+                    vec![]
+                } else {
+                    vec![true, self.defect != SourceDefect::PartialStaging]
+                },
+                visible_memberships: vec![accepted; 2],
+                progress_commits: 1,
+                result: accepted.then(|| ForkResultView {
+                    source_repository: fixture.source_repository.clone(),
+                    source_head: fixture.source_head.clone(),
+                    tip: fixture.tip.clone(),
+                    source_sequence: 7,
+                    packmap: fixture.packmap.clone(),
+                    pack_count: 2,
+                    pack_bytes: 123,
+                    object_count: 4,
+                    pack_set_digest: to_hex(&[6; 32]),
+                    membership_generation: 0,
+                }),
+                replay: Some(crate::control::ReplayView {
+                    state: if accepted || failed {
+                        "committed"
+                    } else {
+                        "in_flight"
+                    }
+                    .into(),
+                    result: if accepted {
+                        Some("fork_committed".into())
+                    } else {
+                        None
+                    },
+                    fingerprint: Some("fixed request commitment".into()),
+                }),
+                outcome: Some(crate::control::ReservationView {
+                    state: if accepted {
+                        "committed"
+                    } else if failed {
+                        "aborted"
+                    } else {
+                        "pending"
+                    }
+                    .into(),
+                    terminal_count: u32::from(accepted || failed),
+                }),
+            }
+        }
+
+        fn command(&mut self, request: Request) -> Response {
+            let mut response = Response::default();
+            match request {
+                Request::PrepareFork { query } => {
+                    let fixture = ForkFixture {
+                        source_repository: format!("ed25519-{}/source", to_hex(&[8; 32])),
+                        source_head: query.source_head,
+                        tip: to_hex(&[1; 32]),
+                        packmap: to_hex(&[2; 32]),
+                        packs: vec![to_hex(&[3; 32]), to_hex(&[4; 32])],
+                        objects: vec![to_hex(&[5; 32]), to_hex(&[6; 32])],
+                        advancing_commits: 1,
+                    };
+                    self.fixture = Some(fixture.clone());
+                    self.after_acceptance = false;
+                    self.started = false;
+                    self.resumed = false;
+                    self.changed = None;
+                    response.fork_fixture = Some(fixture);
+                }
+                Request::Pause {
+                    step,
+                    decision_class,
+                    ..
+                } => {
+                    self.after_acceptance = step == "after_durable_acceptance_before_response";
+                    assert_eq!(
+                        decision_class.as_deref(),
+                        Some(if self.after_acceptance {
+                            "fork_acceptance"
+                        } else {
+                            "fork_source_proof"
+                        })
+                    );
+                }
+                Request::BarrierStatus => response.paused = self.started && !self.resumed,
+                Request::ObserveFork { .. } => response.fork_observation = Some(self.snapshot()),
+                Request::ChangeForkSource { change, query } => {
+                    self.changed = Some(change);
+                    self.changes.push((change, query.packs));
+                }
+                Request::Resume => self.resumed = true,
+                other => panic!("unexpected source test command: {other:?}"),
+            }
+            response
+        }
+
+        fn fork(&mut self) -> (http::StatusCode, Json<serde_json::Value>) {
+            self.started = true;
+            if !self.resumed {
+                return (
+                    http::StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({"code":"unavailable"})),
+                );
+            }
+            if let Some(result) = self.snapshot().result {
+                return (
+                    http::StatusCode::OK,
+                    Json(serde_json::json!({
+                        "tip":result.tip, "pack_count":result.pack_count, "pack_bytes":result.pack_bytes,
+                        "object_count":result.object_count, "source_sequence":result.source_sequence,
+                        "membership_generation":result.membership_generation,
+                    })),
+                );
+            }
+            let code = if self.defect == SourceDefect::WrongRefusalCode {
+                "failed_precondition"
+            } else {
+                "not_found"
+            };
+            let message = if self.defect == SourceDefect::WrongRefusalMessage {
+                "source tip changed"
+            } else {
+                "source not found"
+            };
+            (
+                http::StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"code":code,"message":message})),
+            )
+        }
+    }
+
+    struct SourceHost {
+        ctx: Ctx,
+        control: ControlClient,
+        state: Arc<Mutex<SourceState>>,
+        task: tokio::task::JoinHandle<std::io::Result<()>>,
+    }
+
+    impl Drop for SourceHost {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    impl SourceHost {
+        async fn start(defect: SourceDefect) -> Self {
+            let state = Arc::new(Mutex::new(SourceState {
+                fixture: None,
+                after_acceptance: false,
+                started: false,
+                resumed: false,
+                changed: None,
+                changes: vec![],
+                defect,
+            }));
+            let app = Router::new()
+                .route(CONTROL_PATH, post({
+                    let state = state.clone();
+                    move |Json(request): Json<Request>| {
+                        let state = state.clone();
+                        async move { Json(state.lock().unwrap().command(request)) }
+                    }
+                }))
+                .route(FORK_PATH, post({
+                    let state = state.clone();
+                    move || {
+                        let state = state.clone();
+                        async move { state.lock().unwrap().fork() }
+                    }
+                }))
+                .route(Rpc::PackExists.procedure(), post(|| async {
+                    ([ ("content-type", "application/proto") ],
+                    PackExistsResponse { exists: Some(false), ..Default::default() }.encode_to_vec())
+                }))
+                .route(Rpc::DownloadPack.procedure(), post(|| async {
+                    (http::StatusCode::NOT_FOUND, Json(serde_json::json!({"code":"not_found","message":"pack not found"})))
+                }))
+                .route(Rpc::AdvanceRefs.procedure(), post(|| async {
+                    (http::StatusCode::PRECONDITION_FAILED, Json(serde_json::json!({"code":"failed_precondition","message":"destination inactive"})))
+                }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base =
+                url::Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+            let task = tokio::spawn(async move { axum::serve(listener, app).await });
+            let profile = Profile::new(WireAuth::AuthV2 {
+                audience: base.as_str().trim_end_matches('/').into(),
+                repository: "default".into(),
+                seed: [5; 32],
+            });
+            Self {
+                ctx: Ctx::new(
+                    Client::new(&base).unwrap(),
+                    Arc::new(profile),
+                    "fork.source_eligibility",
+                ),
+                control: ControlClient::new(&base).unwrap(),
+                state,
+                task,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn source_cases_run_all_changes_before_and_after_acceptance() {
+        for change in [
+            ForkSourceChange::Moved,
+            ForkSourceChange::Unpublished,
+            ForkSourceChange::VisibilityRevoked,
+            ForkSourceChange::Denied,
+        ] {
+            for after in [false, true] {
+                let host = SourceHost::start(SourceDefect::None).await;
+                let result = if after {
+                    source_change_after_acceptance(host.ctx.clone(), &host.control, change).await
+                } else {
+                    source_change_before_acceptance(host.ctx.clone(), &host.control, change).await
+                };
+                assert!(result.is_ok(), "valid source case failed: {result:?}");
+                let state = host.state.lock().unwrap();
+                assert_eq!(state.changed, Some(change));
+                if change == ForkSourceChange::Denied {
+                    assert_eq!(
+                        state.changes,
+                        vec![
+                            (change, vec![to_hex(&[3; 32])]),
+                            (change, vec![to_hex(&[4; 32])]),
+                        ],
+                        "denial cases must select every imported pack in a fresh fixture"
+                    );
+                } else {
+                    assert_eq!(state.changes.len(), 1);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn source_cases_detect_stale_proof_refusal_leaks_and_partial_staging() {
+        for (defect, expected) in [
+            (SourceDefect::StaleProof, "fork source final proof"),
+            (SourceDefect::WrongRefusalCode, "fork source final proof"),
+            (SourceDefect::WrongRefusalMessage, "fork source final proof"),
+            (SourceDefect::PartialStaging, "every staged membership"),
+            (SourceDefect::EmptyStaging, "membership query order/length"),
+        ] {
+            let host = SourceHost::start(defect).await;
+            let result = source_change_before_acceptance(
+                host.ctx.clone(),
+                &host.control,
+                ForkSourceChange::Moved,
+            )
+            .await;
+            assert!(
+                matches!(result, Err(Failure::Fail(ref message)) if message.contains(expected)),
+                "bad final proof escaped the executable case: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn denial_case_rejects_a_proof_that_checks_only_the_last_pack() {
+        let host = SourceHost::start(SourceDefect::LastPackOnlyProof).await;
+        let result = source_change_before_acceptance(
+            host.ctx.clone(),
+            &host.control,
+            ForkSourceChange::Denied,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(Failure::Fail(ref message)) if message.contains("fork source final proof")),
+            "last-pack-only proof escaped the all-imported-packs oracle: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn source_change_must_preserve_acceptance_before_replay_can_repair_it() {
+        let host = SourceHost::start(SourceDefect::InvalidatedAcceptance).await;
+        let result = source_change_after_acceptance(
+            host.ctx.clone(),
+            &host.control,
+            ForkSourceChange::VisibilityRevoked,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(Failure::Fail(ref message)) if message.contains("fork acceptance lacks atomic")),
+            "source change invalidated acceptance without failing the case: {result:?}"
+        );
+        assert!(
+            !host.state.lock().unwrap().resumed,
+            "case checked acceptance only after replay"
+        );
     }
 }

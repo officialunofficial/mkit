@@ -254,7 +254,16 @@ impl HostState {
             ("fork.authority_fence".into(),"reference fork does not yet compare recorded authority facts at every advancing commit".into()),
             ("decision.fork_acceptance".into(),"gated fork test binding is not yet available".into()),
             ("decision.fork_progress".into(),"advancing fork authority-fence control is not yet available".into()),
+            ("decision.fork_source_proof".into(),"reference fork has no final source proof after all destination membership effects are staged".into()),
+            ("fork.final_source_proof".into(),"reference fork proves individual publication writes but does not prove the complete source after the last staged membership effect and before terminal acceptance".into()),
         ]);
+        for change in ["moved", "unpublished", "visibility_revoked", "denied"] {
+            unsupported.insert(
+                format!("fork.source_change.{change}"),
+                "source-change binding awaits final source proof and guarded fork acceptance"
+                    .into(),
+            );
+        }
         if self.authority {
             controls.push("authority.bump".into());
         } else {
@@ -317,7 +326,9 @@ impl HostState {
                     on_resume,
                 )?;
             }
-            Request::PrepareFork { .. } | Request::ObserveFork { .. } => {
+            Request::PrepareFork { .. }
+            | Request::ObserveFork { .. }
+            | Request::ChangeForkSource { .. } => {
                 return Err((http::StatusCode::NOT_IMPLEMENTED,
                     "reference fork destination gate and advancing-commit authority fence are not implemented".into()));
             }

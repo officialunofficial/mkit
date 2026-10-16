@@ -135,7 +135,7 @@ pub struct Observation {
 }
 
 /// Parameters for a deterministic, valid fork source. The binding seeds a
-/// public source owned by `signer`, including committed, readable membership.
+/// public source readable by `signer`, including committed membership.
 /// It MUST NOT create the destination or start its fork.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -170,6 +170,23 @@ pub struct ForkFixture {
     /// Number of durable preparatory commits advancing this fixture's fork.
     /// The acceptance itself is excluded. Must be nonzero for progress tests.
     pub advancing_commits: u64,
+}
+
+/// A committed change to the source used by an existing fork fixture.
+/// Visibility revocation makes the source unreadable to the forking principal;
+/// a fixture may use a distinct source owner to exercise this change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForkSourceChange {
+    /// Publish a different source head/packmap pair.
+    Moved,
+    /// Remove the admitted source publication.
+    Unpublished,
+    /// Commit a visibility change revoking the forking principal's read access.
+    VisibilityRevoked,
+    /// Deny every pack explicitly selected by the change query's nonempty
+    /// `packs` list. Other source facts remain unchanged.
+    Denied,
 }
 
 /// A semantic query of a fork's authoritative decision and destination gate.
@@ -281,6 +298,12 @@ pub enum Request {
     PrepareFork { query: ForkFixtureQuery },
     /// Read one atomic, layout-independent fork snapshot.
     ObserveFork { query: ForkQuery },
+    /// Commit a source change before returning; never modify the destination.
+    /// Requires the matching `fork.source_change.<change>` capability.
+    ChangeForkSource {
+        query: ForkQuery,
+        change: ForkSourceChange,
+    },
 }
 
 /// Command result. An absent optional field has no asserted meaning.

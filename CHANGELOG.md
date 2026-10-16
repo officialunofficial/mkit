@@ -25,7 +25,10 @@ collect the applicable entries between their old and new immutable pins.
 ### Added
 
 - Protocol acceptance and recovery requirements now distinguish portable
-  guarantees from reference-server mechanisms. The conformance library and
+  guarantees from reference-server mechanisms. Fork acceptance requires a final
+  source proof after membership staging, with uniform source-race refusal and
+  ordering at the proof; the reference gaps have declared Tier-2 skips. The
+  conformance library and
   runner are prepared for the next lockstep crates.io release, with a
   versioned test-only control binding and declared server-control coverage.
   No production wire, runtime, or stored-format change; no wipe.

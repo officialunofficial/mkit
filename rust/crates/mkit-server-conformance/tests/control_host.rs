@@ -222,6 +222,14 @@ async fn controlled_reference_host_runs_the_two_tier_acceptance_cases() {
     ] {
         skips.insert(case.into(), reason.into());
     }
+    for change in ["moved", "unpublished", "visibility_revoked", "denied"] {
+        for phase in ["before_acceptance", "after_acceptance"] {
+            skips.insert(
+                format!("fork.source_{change}_{phase}"),
+                "reference fork lacks a final source proof after all membership staging and before guarded acceptance".into(),
+            );
+        }
+    }
     let target = mkit_server_conformance::wire::WireTarget {
         base_url: host.base_url().parse().unwrap(),
         profile: host.profile().clone(),
@@ -248,7 +256,7 @@ async fn controlled_reference_host_runs_the_two_tier_acceptance_cases() {
                 mkit_server_conformance::wire::Verdict::Skip(_)
             ))
             .count(),
-        6
+        14
     );
     assert_eq!(
         report.cases.len(),

@@ -87,6 +87,7 @@ The `operation` discriminator and fields are:
 | `observe` | `query` | One atomic authoritative acceptance snapshot; `observe`. |
 | `prepare_fork` | `query` | Seed a valid published source without creating or starting the destination; `fork.fixture`. |
 | `observe_fork` | `query` | One atomic authoritative fork snapshot; `fork.observe`. |
+| `change_fork_source` | `query`, `change` | Commit a source change for a prepared fork; `fork.source_change.<change>`. Never modify the destination. |
 
 Success is HTTP 200 with `control::Response` JSON. Unsupported controls return
 HTTP 501 without mutation. Rejected requests return a 4xx response without mutation.
@@ -105,7 +106,12 @@ The four boundaries come from [SPEC-SERVER §18.1](../../../docs/specs/SPEC-SERV
 
 These names identify protocol decisions, not engine steps or storage layouts.
 A binding advertises only boundaries it can reach. The optional `decision_class`
-defaults to `ref_acceptance`; fork cases select `fork_acceptance` or `fork_progress`.
+defaults to `ref_acceptance`; fork cases select `fork_acceptance`, `fork_progress`,
+or `fork_source_proof`. For the latter, `before_acceptance` is after **all**
+destination membership effects are staged and before obtaining the final source
+proof. Its capability is `decision.fork_source_proof`; `fork.final_source_proof`
+asserts that the target implements that complete source proof, not merely
+per-pack checks. The boundary does not prescribe construction steps.
 The optional `occurrence` is one-based and defaults to the first occurrence in
 that operation's selected decision class. It permits fencing every advancing
 commit without prescribing a job's internal phases or number of commits.
@@ -154,8 +160,9 @@ Tier 1; publication-control fixtures are tracked separately.
 A fork fixture query contains `destination`, `signer`, and `source_head`.
 `prepare_fork` returns `fork_fixture` with the source repository and head,
 `tip`, `packmap`, ordered `packs` and one `objects` entry per pack, and
-`advancing_commits`. The source is public, readable, and owned by the fixture
-signer. Its tip/packmap pair must pass content validation once the destination
+`advancing_commits`. The source is public and readable by the fixture
+signer. It may have a distinct owner so a visibility change can revoke the
+forking principal's read access. Its tip/packmap pair must pass content validation once the destination
 activates. Repeated preparation for fresh destinations yields the same source
 contents and preparatory-commit count; acceptance is excluded from that count.
 The count selects observable commit occurrences and imposes no orchestration.
@@ -169,6 +176,22 @@ point. Internal staging may exist while the destination remains unreadable and
 unwritable. Fork itself creates no destination ref. A saved result includes the
 source identity, source publication sequence, tip/packmap, pack count and bytes,
 object count, sorted-pack-set digest, and membership generation.
+
+`change_fork_source` takes the same `query` as `observe_fork` and one `change`:
+`moved` publishes a different head/packmap pair; `unpublished` removes the
+admitted publication; `visibility_revoked` commits a visibility change that
+makes the source unreadable to the forking principal; `denied` denies
+each inherited pack explicitly selected by the nonempty `query.packs` list.
+Denial cases use fresh forks and target every imported pack separately, so
+checking only a final pack cannot establish conformance. The binding MUST
+commit the selected source change before returning success, and MUST NOT modify the destination. The final-proof cases
+pause after every queried membership is staged, commit that change, resume,
+and require `not_found` / `source not found` with an inert destination. The
+post-acceptance cases commit the same changes after durable acceptance and
+inspect accepted result, replay and terminal responsibility **before** a replay
+can repair or hide loss. They then require the original replay to preserve them.
+Source denial does not waive independently applicable destination denial;
+these cases assert acceptance stability, not immunity from later takedown.
 
 `fork.invoke` declares the test-only signed bridge at `POST /__mkit_test/fork`,
 which uses the canonical body and auth-v2 procedure described in SPEC-SERVER §9.9.
@@ -196,8 +219,11 @@ The original `TestHost` remains available without these control routes.
 
 The reference control host declares fork fixture, invocation, and observation
 controls unavailable while destination activation and advancing-commit fencing
-are incomplete. The five executable fork cases remain available to other
-servers. The reference profile declares each case skipped with its concrete
+are incomplete. It also lacks a complete final source proof after membership
+staging; its last post-write proof covers only the final packmap pack. The
+pre-construction visibility race returns the existing retryable refusal rather
+than uniform source absence. The thirteen executable fork cases remain
+available to other servers. The reference profile declares each case skipped with its concrete
 reason below; it never treats these gaps as passing assertions.
 
 ## Protocol coverage and remaining work
@@ -237,7 +263,16 @@ apply when a server offers the feature.
 | Fork terminal result, replay, and one terminal outcome share guarded acceptance; replay repeats no effects (§9.9) | Protocol requirement when fork is offered | **Declared skip:** `fork.acceptance_result_replay_outcome_atomic`; the reference gated fork test binding awaits destination activation and advancing-commit fencing. |
 | Fork acceptance compares recorded authority facts (§9.9) | Protocol requirement when fork and authority fencing are offered | **Declared skip:** `fork.authority_at_acceptance`; the reference guarded fork authority-fence binding is unavailable. |
 | Every commit advancing a fork compares recorded authority facts (§9.9) | Protocol requirement when fork and authority fencing are offered | **Declared skip:** `fork.authority_each_progress_commit`; the reference server does not yet compare those facts at every advancing commit. The executable case uses the fixture's commit count to test every occurrence. |
-| Fork source authorization, source visibility consistency, admission bounds, isolation, and recovery remain guarded (§9.9) | Protocol requirement when fork is offered | **Planned:** independent source-change, admission/join, discarded-attempt re-admission and charge accounting, reservation expiry, denial, and retained-evidence cases. The existing `fork.driver_probe` measures construction and does not establish these guarantees. |
+| Source movement before the final proof refuses uniformly as a missing source (§9.9) | Protocol requirement when fork is offered | **Declared skip:** `fork.source_moved_before_acceptance`; the reference server does not obtain a complete final source proof after all membership staging and before acceptance. |
+| Source movement after acceptance does not invalidate its result, replay or terminal responsibility (§9.9) | Protocol requirement when fork is offered | **Declared skip:** `fork.source_moved_after_acceptance`; the reference final-proof/guarded-acceptance boundary is unavailable. |
+| Source unpublication before the final proof refuses uniformly as a missing source (§9.9) | Protocol requirement when fork is offered | **Declared skip:** `fork.source_unpublished_before_acceptance`; the reference server does not obtain a complete final source proof after all membership staging and before acceptance. |
+| Source unpublication after acceptance does not invalidate its result, replay or terminal responsibility (§9.9) | Protocol requirement when fork is offered | **Declared skip:** `fork.source_unpublished_after_acceptance`; the reference final-proof/guarded-acceptance boundary is unavailable. |
+| Source visibility revocation before the final proof refuses uniformly as a missing source (§9.9) | Protocol requirement when fork is offered | **Declared skip:** `fork.source_visibility_revoked_before_acceptance`; the reference server does not obtain a complete final source proof after all membership staging and before acceptance. |
+| Source visibility revocation after acceptance does not invalidate its result, replay or terminal responsibility (§9.9) | Protocol requirement when fork is offered | **Declared skip:** `fork.source_visibility_revoked_after_acceptance`; the reference final-proof/guarded-acceptance boundary is unavailable. |
+| Source denial before the final proof refuses uniformly as a missing source (§9.9) | Protocol requirement when fork is offered | **Declared skip:** `fork.source_denied_before_acceptance`; the reference server does not obtain a complete final source proof after all membership staging and before acceptance. |
+| Source denial after acceptance does not invalidate its result, replay or terminal responsibility (§9.9) | Protocol requirement when fork is offered | **Declared skip:** `fork.source_denied_after_acceptance`; the reference final-proof/guarded-acceptance boundary is unavailable. |
+| Source proof retains admitted membership generation and ordering for changes between proof and acceptance (§9.9) | Protocol requirement when fork is offered | **Planned:** dedicated generation-only mutation and post-proof/pre-commit race cases; source move/unpublication/read-revocation/pack-denial cases cover the decided before-proof and after-acceptance boundaries. |
+| Fork source authorization, source visibility consistency, admission bounds, isolation, and recovery remain guarded (§9.9) | Protocol requirement when fork is offered | **Planned:** independent initial authorization, pre-construction visibility-race refusal, admission/join, discarded-attempt re-admission and charge accounting, reservation expiry, destination takedown, and retained-evidence cases. The existing `fork.driver_probe` measures construction and does not establish these guarantees. |
 | Published clearance atomically establishes eligible membership and the largest eligible prefix, preserving the pair/deletion boundary and configured event, without settling acceptance again (§10.2) | Protocol requirement | **Planned for the second conformance PR:** hold, accept, restart, clear, event, and no-second-settlement cases using `before_published_clearance`. Current reference publication audits are supporting evidence only. |
 | Namespaced embedding guards, evidence, and durable responsibilities commit with acceptance or clearance within a declared atomic domain | Protocol requirement in the draft composition profile, pending architecture review | **Planned for the second conformance PR and composition seam:** independent commit/abort and declared-domain cases. Composition is planned, not a declared skip; no existing binding claims support. |
 | Every reader applies the published view, current visibility, repository membership, and denial; hidden state answers uniformly absent (§§9.4, 10.1, 10.3) | Protocol requirement | **Case:** Tier 1 `reads.private_not_found_byte_identical`, private owner/grant cases, repository isolation, and public/private file readback. **Planned:** independent publication/denial changes across every read surface and retained-history continuation. |

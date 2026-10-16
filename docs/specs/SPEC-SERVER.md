@@ -1998,6 +1998,22 @@ its published clearance. Neither construction nor clearance creates a ref.
 A completed replay MUST return the saved result without repeating acceptance,
 charges, outcome creation, or construction effects (§3.2).
 
+**Protocol requirement.** For acceptance, the server MUST obtain a final source
+proof after the last destination membership effect has been staged and before
+the acceptance commits. That proof MUST establish that the source still
+publishes the exact admitted head/packmap pair and membership generation, and
+that every inherited pack remains published, readable by the forking principal,
+and not denied. A proof obtained before the last staged membership effect is
+insufficient.
+
+The fork is ordered at that proof. A source move, unpublication, visibility
+change, or denial committed before the proof MUST refuse the fork with the uniform missing-source answer:
+`not_found` and `source not found`. A source change committed after the proof
+is ordered after the fork and MUST NOT invalidate its acceptance. The source
+proof and destination acceptance cannot be one atomic decision across
+independent owners; this requirement bounds that consistency window at the
+proof. It does not prescribe the owners' storage layout or construction method.
+
 **Protocol requirement.** The source read MUST be authorized before revealing
 its published tip or a tip mismatch. An absent, unreadable, unpublished, blocked,
 superseded, or otherwise ineligible source MUST answer uniformly with
@@ -2011,9 +2027,10 @@ refs or members, or belong to the same fork binding; otherwise the answer is
 Destination write authorization MUST receive a consistent observation of the
 source visibility and visibility revision. The server MUST revalidate that
 observation after authorization and admission and before starting construction;
-a change answers `unavailable` and `source changed; retry`, releasing the
-reservation. The authorization profile decides whether source and destination
-visibility may differ. The requested destination visibility MUST agree with
+a change MUST answer `not_found` and `source not found`, releasing the
+reservation. The initial authorized `expected_tip` mismatch above remains
+distinct from a source change after admission. The authorization profile decides
+whether source and destination visibility may differ. The requested destination visibility MUST agree with
 any prior owner declaration for that name.
 
 Admission MUST see the inherited byte charge in both `declared_bytes` and
@@ -2069,6 +2086,14 @@ are reference-server limits, not protocol limits. Work uses 600-call slices and
 bounded concurrent waves. The operator guide describes scheduling and
 [resource bounds](../operations/fork-waves.md).
 
+The reference server re-reads source pack membership and obtains source proofs
+around individual destination publication writes. These per-pack checks and
+write ordering are reference mechanisms, not protocol requirements. They do
+not provide the required final source proof after the last membership effect
+is staged and before terminal acceptance. Its pre-construction source visibility
+revision check currently returns `unavailable` and `source changed; retry`,
+rather than the required uniform missing-source answer.
+
 When denial is enabled, the reference server retains a cleared structural set
 and external-base evidence. Its witness flag enables later structural reuse;
 current denial still applies. Without denial it omits that set, so a later
@@ -2080,10 +2105,13 @@ activation performs a fresh structural walk. Its `MAX_ADVANCE_ITEMS` limit of
 currently makes construction membership visible before terminal acceptance and
 does not gate destination writes on that acceptance. It also checks recorded
 authority facts at destination registration rather than at every advancing
-commit and terminal acceptance. The tier-2 destination-gate and authority-fence
-cases declare skips with these reasons until those safety mechanisms are
-implemented. These gaps do not weaken the protocol requirements above, and
-successful reference construction tests do not establish compliance with them.
+commit and terminal acceptance. It also lacks the final source proof at the
+required boundary, including the uniform-absence handling of source visibility
+changes described above. The tier-2 destination-gate, authority-fence, and
+source-change cases declare skips with these reasons until those safety
+mechanisms are implemented. These gaps do not weaken the protocol requirements
+above, and successful reference construction tests do not establish compliance
+with them.
 
 ## 10. Published view
 
@@ -3335,8 +3363,8 @@ A `PublicationTransition` uses Event kind field `publication = 7`. It has:
 | `packmap = 4` | Raw 32-byte paired published packmap; empty for a non-branch ref or deletion. |
 | `operation_id = 5` | Raw 32-byte logical write correlation, stable across retries; never credentials or a delivery nonce. |
 
-A publication transition MUST be recorded in the same authoritative RefShard
-commit that changes the published pointer when a publication Event sink is
+A publication transition MUST be recorded in the same atomic unit
+that changes the published pointer when a publication Event sink is
 configured. Its ref, advance sequence, pair and operation correlation MUST
 identify the resulting prefix value, including a deletion boundary. A pointer
 jump over several cleared advances reports its resulting prefix; membership
@@ -5094,9 +5122,16 @@ skip semantics. The protocol-defined pause boundaries are:
 
 Boundary names identify observable decisions, not implementation steps. A
 control binding MUST NOT claim support for a boundary it cannot reach. A control
-request MAY select a protocol decision class, including `fork_acceptance` or
-`fork_progress`, and an occurrence to select an advancing commit. This reaches
-each guarded decision without naming engine steps. The runner may request graceful restart or host-supported kill-style restart,
+request MAY select a protocol decision class, including `fork_acceptance`,
+`fork_progress`, or `fork_source_proof`, and an occurrence to select an advancing
+commit. For `fork_source_proof`, `before_acceptance` means after every
+destination membership effect is staged, before the final source proof is
+obtained. The binding MUST preserve that ordering when it advertises the
+capability. Source-change controls commit the selected source move,
+unpublication, read-access revocation, or pack denial before returning; they
+MUST NOT change the destination. This reaches each guarded decision without
+naming engine steps. The runner may request graceful restart or host-supported
+kill-style restart,
 authority-generation changes, clock pinning or advancement, pause/resume, and
 an atomic observation of typed protocol state. Unsupported operations require
 declared skips with reasons. These controls MUST be disabled in production

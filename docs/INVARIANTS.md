@@ -33,7 +33,12 @@ ref and records guarded acceptance, replay, and terminal outcome responsibility
 in one atomic unit. Its destination is neither reader-visible nor writable
 before that acceptance. Failure leaves the destination inert. With authority
 fencing enabled, every advancing commit and acceptance compare the recorded
-authority facts.
+authority facts. Acceptance requires a final source proof after all destination
+membership staging and before acceptance commits: the admitted published pair
+and membership generation still match, and every inherited pack is published,
+readable by the forking principal and not denied. The fork is ordered at that
+proof; earlier source changes refuse uniformly as a missing source, and later
+source changes do not invalidate acceptance.
 
 **Because:** construction may survive a crash or continue after revocation;
 partial construction must not grant repository access.
@@ -43,6 +48,10 @@ terminal acceptance and lacks the destination write gate and fence comparison
 at every advancing commit and acceptance. The conformance runner declares the
 destination-gate and authority-fence cases skipped with those reasons. Existing
 fork construction tests establish resumability, not those missing guarantees.
+The reference implementation also lacks the final source proof at the required
+boundary; per-pack checks do not establish it. Source-change cases are declared
+skips, including the visibility race that currently returns a retryable error
+instead of uniform absence.
 
 **Enforcement:** [SPEC-SERVER §9.9](specs/SPEC-SERVER.md#99-fork) defines the
 conditional protocol requirements. The

@@ -260,6 +260,110 @@ pub const CASES: &[Case] = &[
         ],
         features: FORK,
     },
+    Case {
+        name: "fork.source_moved_before_acceptance",
+        controls: &[
+            "fork.fixture",
+            "fork.observe",
+            "fork.invoke",
+            "fork.final_source_proof",
+            "fork.source_change.moved",
+            "pause.before_acceptance",
+            "decision.fork_source_proof",
+        ],
+        features: FORK,
+    },
+    Case {
+        name: "fork.source_moved_after_acceptance",
+        controls: &[
+            "fork.fixture",
+            "fork.observe",
+            "fork.invoke",
+            "fork.final_source_proof",
+            "fork.source_change.moved",
+            "pause.after_durable_acceptance_before_response",
+            "decision.fork_acceptance",
+        ],
+        features: FORK,
+    },
+    Case {
+        name: "fork.source_unpublished_before_acceptance",
+        controls: &[
+            "fork.fixture",
+            "fork.observe",
+            "fork.invoke",
+            "fork.final_source_proof",
+            "fork.source_change.unpublished",
+            "pause.before_acceptance",
+            "decision.fork_source_proof",
+        ],
+        features: FORK,
+    },
+    Case {
+        name: "fork.source_unpublished_after_acceptance",
+        controls: &[
+            "fork.fixture",
+            "fork.observe",
+            "fork.invoke",
+            "fork.final_source_proof",
+            "fork.source_change.unpublished",
+            "pause.after_durable_acceptance_before_response",
+            "decision.fork_acceptance",
+        ],
+        features: FORK,
+    },
+    Case {
+        name: "fork.source_visibility_revoked_before_acceptance",
+        controls: &[
+            "fork.fixture",
+            "fork.observe",
+            "fork.invoke",
+            "fork.final_source_proof",
+            "fork.source_change.visibility_revoked",
+            "pause.before_acceptance",
+            "decision.fork_source_proof",
+        ],
+        features: FORK,
+    },
+    Case {
+        name: "fork.source_visibility_revoked_after_acceptance",
+        controls: &[
+            "fork.fixture",
+            "fork.observe",
+            "fork.invoke",
+            "fork.final_source_proof",
+            "fork.source_change.visibility_revoked",
+            "pause.after_durable_acceptance_before_response",
+            "decision.fork_acceptance",
+        ],
+        features: FORK,
+    },
+    Case {
+        name: "fork.source_denied_before_acceptance",
+        controls: &[
+            "fork.fixture",
+            "fork.observe",
+            "fork.invoke",
+            "fork.final_source_proof",
+            "fork.source_change.denied",
+            "pause.before_acceptance",
+            "decision.fork_source_proof",
+        ],
+        features: FORK,
+    },
+    Case {
+        name: "fork.source_denied_after_acceptance",
+        controls: &[
+            "fork.fixture",
+            "fork.observe",
+            "fork.invoke",
+            "fork.final_source_proof",
+            "fork.source_change.denied",
+            "pause.after_durable_acceptance_before_response",
+            "decision.fork_acceptance",
+        ],
+        features: FORK,
+    },
 ];
 
 fn identity(op: &Signed) -> ReplayIdentity {
@@ -836,6 +940,30 @@ async fn execute_case(name: &str, ctx: Ctx, control: &ControlClient) -> Result<(
         }
         "fork.authority_each_progress_commit" => {
             crate::controlled_fork::authority_each_progress_commit(ctx, control).await
+        }
+        "fork.source_moved_before_acceptance" => {
+            crate::controlled_fork::source_moved_before_acceptance(ctx, control).await
+        }
+        "fork.source_moved_after_acceptance" => {
+            crate::controlled_fork::source_moved_after_acceptance(ctx, control).await
+        }
+        "fork.source_unpublished_before_acceptance" => {
+            crate::controlled_fork::source_unpublished_before_acceptance(ctx, control).await
+        }
+        "fork.source_unpublished_after_acceptance" => {
+            crate::controlled_fork::source_unpublished_after_acceptance(ctx, control).await
+        }
+        "fork.source_visibility_revoked_before_acceptance" => {
+            crate::controlled_fork::source_visibility_revoked_before_acceptance(ctx, control).await
+        }
+        "fork.source_visibility_revoked_after_acceptance" => {
+            crate::controlled_fork::source_visibility_revoked_after_acceptance(ctx, control).await
+        }
+        "fork.source_denied_before_acceptance" => {
+            crate::controlled_fork::source_denied_before_acceptance(ctx, control).await
+        }
+        "fork.source_denied_after_acceptance" => {
+            crate::controlled_fork::source_denied_after_acceptance(ctx, control).await
         }
         _ => unreachable!("registered case"),
     }
