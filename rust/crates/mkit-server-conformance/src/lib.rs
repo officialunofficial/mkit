@@ -10,27 +10,40 @@
 //! Enable `storage-spi` for the optional reference storage adapter suite,
 //! `storage_suite!` macro, and its declared-skip harness. Other server
 //! implementations do not need that feature or a dependency on mkit-server.
-//! `test-host` adds a debug-only reference host; production builds reject it.
+//! `test-host` adds a debug-only reference host. The standalone test utility
+//! additionally enables `reference-runner` for optimized installation.
 
 pub mod control;
 pub mod controlled;
 mod controlled_fork;
 mod controlled_publication;
 mod controlled_reliance;
+pub mod differential;
 #[cfg(feature = "storage-spi")]
 mod reference_support;
+pub mod runner;
 #[cfg(feature = "storage-spi")]
 pub mod storage;
 #[cfg(feature = "stubs")]
 pub mod stubs;
 /// A loopback host for external contract tests. Available only with the
-/// `test-host` feature and debug assertions (release builds reject it).
-#[cfg(all(feature = "test-host", debug_assertions))]
+/// `test-host` feature and debug assertions, or the explicit standalone
+/// `reference-runner` test utility feature.
+#[cfg(all(
+    feature = "test-host",
+    any(debug_assertions, feature = "reference-runner")
+))]
 pub mod test_host;
 pub mod wire;
 
-#[cfg(all(feature = "test-host", not(debug_assertions)))]
-compile_error!("mkit-server-conformance's test-host feature is unavailable in release builds");
+#[cfg(all(
+    feature = "test-host",
+    not(debug_assertions),
+    not(feature = "reference-runner")
+))]
+compile_error!(
+    "optimized test-host builds require the standalone reference-runner test utility feature"
+);
 
 #[doc(hidden)]
 #[cfg(feature = "storage-spi")]

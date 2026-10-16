@@ -1066,13 +1066,13 @@ fn guard_consistent(
 }
 
 async fn complete_authority_setter(
-    control: &ControlClient,
+    client: &Client,
     body: Vec<u8>,
 ) -> Result<mkit_transport_connect::generated::SetAuthorityGenerationResponse, Failure> {
     use crate::wire::client::{UNARY_PROTO, decode_unary};
     tokio::time::timeout(Duration::from_secs(45), async {
         loop {
-            let reply = control.0.post(Rpc::SetAuthorityGeneration.procedure(), UNARY_PROTO, &[], body.clone()).await?;
+            let reply = client.post(Rpc::SetAuthorityGeneration.procedure(), UNARY_PROTO, &[], body.clone()).await?;
             let result = decode_unary(&reply)?;
             if !matches!(&result, Err(error) if error.code == "unavailable" && error.http_status == 503) {
                 return want_ok(result, "enabled setter");
@@ -1087,7 +1087,11 @@ async fn complete_authority_setter(
     }).await.map_err(|_| Failure::Fail("authority setter did not complete within 45 seconds".into()))?
 }
 
-async fn authority_setter(control: &ControlClient, enabled: bool) -> Result<(), Failure> {
+async fn authority_setter(
+    control: &ControlClient,
+    client: &Client,
+    enabled: bool,
+) -> Result<(), Failure> {
     use buffa::Message as _;
     use mkit_transport_connect::generated::{
         GetAuthorityGenerationRequest, GetAuthorityGenerationResponse,
@@ -1106,8 +1110,7 @@ async fn authority_setter(control: &ControlClient, enabled: bool) -> Result<(), 
         namespace: Some(namespace),
         ..Default::default()
     };
-    let before = control
-        .0
+    let before = client
         .unary::<GetAuthorityGenerationResponse>(
             Rpc::GetAuthorityGeneration,
             get.encode_to_vec(),
@@ -1136,10 +1139,9 @@ async fn authority_setter(control: &ControlClient, enabled: bool) -> Result<(), 
                 "setter fixture must increase generation".into(),
             ));
         }
-        let set = complete_authority_setter(control, set.encode_to_vec()).await?;
+        let set = complete_authority_setter(client, set.encode_to_vec()).await?;
         let after = want_ok(
-            control
-                .0
+            client
                 .unary::<GetAuthorityGenerationResponse>(
                     Rpc::GetAuthorityGeneration,
                     get.encode_to_vec(),
@@ -1154,8 +1156,7 @@ async fn authority_setter(control: &ControlClient, enabled: bool) -> Result<(), 
             ));
         }
     } else {
-        let result = control
-            .0
+        let result = client
             .unary::<SetAuthorityGenerationResponse>(
                 Rpc::SetAuthorityGeneration,
                 set.encode_to_vec(),
@@ -1177,7 +1178,12 @@ async fn authority_setter(control: &ControlClient, enabled: bool) -> Result<(), 
     Ok(())
 }
 
-async fn execute_case(name: &str, ctx: Ctx, control: &ControlClient) -> Result<(), Failure> {
+async fn execute_case(
+    name: &str,
+    ctx: Ctx,
+    control: &ControlClient,
+    client: &Client,
+) -> Result<(), Failure> {
     match name {
         name if name.starts_with("publication.") => {
             crate::controlled_publication::run(name, ctx, control).await
@@ -1185,8 +1191,8 @@ async fn execute_case(name: &str, ctx: Ctx, control: &ControlClient) -> Result<(
         name if name.starts_with("reliance.") => {
             crate::controlled_reliance::run(name, ctx, control).await
         }
-        "authority.setter_disabled" => authority_setter(control, false).await,
-        "authority.setter_enabled" => authority_setter(control, true).await,
+        "authority.setter_disabled" => authority_setter(control, client, false).await,
+        "authority.setter_enabled" => authority_setter(control, client, true).await,
         "acceptance.before_acceptance_restart" => {
             acceptance(ctx, control, Some("before_acceptance"), "graceful").await
         }
@@ -1263,6 +1269,17 @@ pub async fn run(
     expected_skips: &BTreeMap<String, String>,
     filter: Option<&str>,
 ) -> Report {
+    run_with_control(target, &target.base_url, expected_skips, filter).await
+}
+
+/// Run Tier-2 cases with an explicit test-control HTTP origin. Transport RPCs
+/// still use `target.base_url`; the binding may run at a separate origin.
+pub async fn run_with_control(
+    target: &WireTarget,
+    control_url: &url::Url,
+    expected_skips: &BTreeMap<String, String>,
+    filter: Option<&str>,
+) -> Report {
     let mut report = Report::default();
     if let Some((name, _)) = expected_skips.iter().find(|(name, reason)| {
         reason.trim().is_empty() || !CASES.iter().any(|case| case.name == name.as_str())
@@ -1276,7 +1293,8 @@ pub async fn run(
     let selected = CASES
         .iter()
         .filter(|c| filter.is_none_or(|f| c.name.contains(f)));
-    let client = ControlClient::new(&target.base_url);
+    let client = ControlClient::new(control_url);
+    let wire_client = Client::new(&target.base_url);
     let caps = match &client {
         Ok(c) => c.capabilities().await,
         Err(e) => Err(e.clone()),
@@ -1313,13 +1331,23 @@ pub async fn run(
                     .filter(|n| !caps.controls.iter().any(|s| s == **n))
                     .collect();
                 if missing.is_empty() {
+                    let wire_client = match &wire_client {
+                        Ok(client) => client,
+                        Err(reason) => {
+                            report.cases.push(CaseReport {
+                                name: case.name,
+                                verdict: Verdict::Fail(reason.clone()),
+                            });
+                            continue;
+                        }
+                    };
                     let ctx = Ctx::new(
-                        control.0.clone(),
+                        wire_client.clone(),
                         Arc::new(target.profile.clone()),
                         case.name,
                     );
                     let result = tokio::time::timeout(Duration::from_mins(1), async {
-                        execute_case(case.name, ctx, control).await
+                        execute_case(case.name, ctx, control, wire_client).await
                     })
                     .await
                     .unwrap_or_else(|_| Err(Failure::Fail("server-control case timed out".into())));

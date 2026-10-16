@@ -1,6 +1,6 @@
-//! `mkit-server-conformance wire`: run the black-box wire suite against a
-//! server at a URL and print a TAP report. Exits 1 if any case fails, 2 on
-//! a usage error.
+//! Standalone wire, server-control, and differential conformance runner.
+//! `run` and `diff` emit versioned JSON; the original `wire` and `controlled`
+//! commands retain TAP. Exit codes: 0 passed, 1 failed, 2 setup or usage error.
 //!
 //! ```text
 //! mkit-server-conformance wire --base-url http://localhost:8791 \
@@ -10,7 +10,7 @@
 
 use std::process::ExitCode;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use mkit_server_conformance::wire::{
     CASES, ProfileSpec, WireAuth, WireTarget, grant_owner_allowlist_text, multi_allowlist_text, run,
 };
@@ -27,6 +27,10 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Run portable wire and server-control suites from a versioned profile.
+    Run(RunArgs),
+    /// Compare an embedded reference server with the target server.
+    Diff(TargetArgs),
     /// Run the black-box wire suite against a `mkit.transport.v1` server.
     Wire(WireArgs),
     /// Run Tier-2 cases against a disposable server's test-control binding.
@@ -37,7 +41,7 @@ enum Command {
         #[arg(long)]
         declared_skips: Option<std::path::PathBuf>,
     },
-    /// Run the loopback MPP hook fixture (never a release feature).
+    /// Run the test-only loopback MPP hook fixture.
     #[cfg(feature = "stubs")]
     StubHook {
         /// Loopback IP socket address.
@@ -55,6 +59,47 @@ enum Command {
     /// the same auth-v2 profile flags `wire` runs with (`--audience`,
     /// `--repository`, a signer seed and `--run-id`).
     Allowlist(WireArgs),
+}
+
+#[derive(Debug, Args)]
+struct TargetArgs {
+    /// Transport server base URL.
+    #[arg(long)]
+    base_url: url::Url,
+    /// Version 1 TOML runner profile.
+    #[arg(long)]
+    profile: std::path::PathBuf,
+    /// Override the profile's test-control origin.
+    #[arg(long)]
+    control_url: Option<url::Url>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum Tier {
+    All,
+    Wire,
+    Controlled,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum Format {
+    Json,
+    Tap,
+}
+
+#[derive(Debug, Args)]
+struct RunArgs {
+    #[command(flatten)]
+    target: TargetArgs,
+    /// Select both tiers or one tier.
+    #[arg(long, value_enum, default_value = "all")]
+    tier: Tier,
+    /// Machine-readable JSON or TAP.
+    #[arg(long, value_enum, default_value = "json")]
+    format: Format,
+    /// Select case names containing this substring.
+    #[arg(long)]
+    filter: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -267,8 +312,141 @@ fn wire(
     Ok(!report.failed())
 }
 
+fn load_target(
+    args: &TargetArgs,
+) -> Result<
+    (
+        WireTarget,
+        url::Url,
+        mkit_server_conformance::runner::ControlProfile,
+    ),
+    String,
+> {
+    use mkit_server_conformance::runner::{RunnerProfile, validate_url};
+    validate_url(&args.base_url)?;
+    let text =
+        std::fs::read_to_string(&args.profile).map_err(|_| "runner profile could not be read")?;
+    let file = RunnerProfile::from_toml(&text)?;
+    let profile = file
+        .wire
+        .build(|var| std::env::var(var).ok())
+        .map_err(|_| "invalid wire profile configuration")?;
+    let control_url = args
+        .control_url
+        .clone()
+        .or_else(|| file.control.url.clone())
+        .unwrap_or_else(|| args.base_url.clone());
+    validate_url(&control_url)?;
+    Ok((
+        WireTarget {
+            base_url: args.base_url.clone(),
+            profile,
+        },
+        control_url,
+        file.control,
+    ))
+}
+
+fn runtime() -> Result<tokio::runtime::Runtime, String> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(3)
+        .enable_all()
+        .build()
+        .map_err(|_| "runner runtime could not be created".into())
+}
+
+fn standalone_run(args: &RunArgs) -> Result<bool, String> {
+    let (target, control_url, control) = load_target(&args.target)?;
+    let report = runtime()?
+        .block_on(mkit_server_conformance::runner::run(
+            &target,
+            &control_url,
+            &control,
+            matches!(args.tier, Tier::All | Tier::Wire),
+            matches!(args.tier, Tier::All | Tier::Controlled),
+            args.filter.as_deref(),
+        ))
+        .map_err(|error| mkit_server_conformance::runner::redact(error, &target.profile.auth))?;
+    match args.format {
+        Format::Tap => print!(
+            "{}",
+            mkit_server_conformance::runner::redact(report.tap(), &target.profile.auth)
+        ),
+        Format::Json => println!(
+            "{}",
+            mkit_server_conformance::runner::redact(
+                serde_json::to_string_pretty(
+                    &mkit_server_conformance::runner::JsonReport::from_report(&report)
+                )
+                .map_err(|_| "JSON report serialization failed")?,
+                &target.profile.auth,
+            )
+        ),
+    }
+    Ok(!report.failed())
+}
+
+#[cfg(feature = "reference-runner")]
+fn standalone_diff(args: &TargetArgs) -> Result<bool, String> {
+    use mkit_server_conformance::{
+        differential::{self, DiffTarget},
+        test_host::ControlledHost,
+    };
+    let (target, control_url, control) = load_target(args)?;
+    let auth = target.profile.auth.clone();
+    runtime()?
+        .block_on(async {
+            mkit_server_conformance::runner::negotiate(&control_url, &control.controls).await?;
+            let host = ControlledHost::start(target.profile.clone()).await?;
+            let reference_url =
+                url::Url::parse(host.base_url()).map_err(|_| "invalid reference host URL")?;
+            let left = DiffTarget {
+                wire: WireTarget {
+                    base_url: reference_url.clone(),
+                    profile: host.profile().clone(),
+                },
+                control_url: reference_url,
+            };
+            let right = DiffTarget {
+                wire: target,
+                control_url,
+            };
+            let result = differential::run(&left, &right).await;
+            host.shutdown().await;
+            let report = result?;
+            println!(
+                "{}",
+                mkit_server_conformance::runner::redact(
+                    serde_json::to_string_pretty(&report)
+                        .map_err(|_| "JSON diff serialization failed")?,
+                    &auth,
+                )
+            );
+            Ok(!report.failed())
+        })
+        .map_err(|error| mkit_server_conformance::runner::redact(error, &auth))
+}
+
+#[cfg(not(feature = "reference-runner"))]
+fn standalone_diff(_args: &TargetArgs) -> Result<bool, String> {
+    Err("diff requires installation with --features reference-runner".into())
+}
+
+fn standalone_exit(result: Result<bool, String>) -> ExitCode {
+    match result {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::FAILURE,
+        Err(error) => {
+            eprintln!("mkit-server-conformance: {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
 fn main() -> ExitCode {
     match Cli::parse().command {
+        Command::Run(args) => standalone_exit(standalone_run(&args)),
+        Command::Diff(args) => standalone_exit(standalone_diff(&args)),
         #[cfg(feature = "stubs")]
         Command::StubHook {
             listen,

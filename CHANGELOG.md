@@ -58,6 +58,13 @@ collect the applicable entries between their old and new immutable pins.
   independent policy checks. No production wire, runtime, or stored-format
   change; no wipe.
 
+- The standalone conformance runner adds `run` for the wire and server-control
+  tiers, and `diff` for deterministic protocol decisions against an embedded
+  native reference host. Versioned profile files declare features and controls;
+  JSON reports and documented exit codes support CI. Enable `reference-runner`
+  when installing the optimized differential test utility. Production artifacts
+  do not enable test controls. No wire or stored-format change; no wipe.
+
 - Protocol acceptance and recovery requirements now distinguish portable
   guarantees from reference-server mechanisms. Fork acceptance requires a final
   source proof after membership staging, with uniform source-race refusal and
