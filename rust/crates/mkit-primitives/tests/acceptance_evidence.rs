@@ -5,7 +5,8 @@ use mkit_core::{
 use mkit_primitives::{
     error::FailureCode,
     evidence::{
-        RepositoryId, acceptance::AcceptanceEvidence, acceptance::AcceptanceEvidenceDecodeCfg,
+        RepositoryId, RulesetId, acceptance::AcceptanceEvidence,
+        acceptance::AcceptanceEvidenceDecodeCfg,
     },
 };
 
@@ -85,7 +86,7 @@ fn cfg() -> AcceptanceEvidenceDecodeCfg {
         max_head_bytes: 1024,
         max_total_head_bytes: 3072,
         max_external_dependencies: 4,
-        ruleset_id: 1,
+        ruleset_id: RulesetId(1),
         profile_limits_digest: [0x11; 32],
     }
 }
@@ -174,7 +175,7 @@ fn minimal_encoding_and_digest_are_pinned() {
     assert_eq!(e.encoded_len(), bytes.len());
     assert_eq!(e.repository(), RepositoryId([0x22; 32]));
     assert_eq!(e.profile_limits_digest(), [0x11; 32]);
-    assert_eq!(e.ruleset_id(), 1);
+    assert_eq!(e.ruleset_id(), RulesetId(1));
     assert_eq!(e.pack().object_set_root, [0x44; 32]);
     assert_eq!(e.pack().object_count, 0);
     assert_eq!(e.pack().delta_count, 0);

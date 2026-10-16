@@ -3,7 +3,7 @@
 //! These bytes are not an attestation and cannot construct verified packs,
 //! closure proofs, or guarded decisions. See SPEC-ACCEPTANCE-EVIDENCE.
 
-use super::RepositoryId;
+use super::{RepositoryId, RulesetId};
 use crate::error::{BoundedDetail, Failure, FailureCode, Location};
 use mkit_core::{hash, object::Object};
 
@@ -28,7 +28,7 @@ pub struct AcceptanceEvidenceDecodeCfg {
     /// Maximum number of unique relied-on member packs.
     pub max_external_dependencies: u32,
     /// Only this normative ruleset is accepted.
-    pub ruleset_id: u32,
+    pub ruleset_id: RulesetId,
     /// Only this profile and effective-limits digest is accepted.
     pub profile_limits_digest: hash::Hash,
 }
@@ -84,7 +84,7 @@ pub struct HeadFact<'a> {
 #[derive(PartialEq, Eq)]
 pub struct AcceptanceEvidence {
     bytes: Vec<u8>,
-    ruleset_id: u32,
+    ruleset_id: RulesetId,
     profile_limits_digest: hash::Hash,
     repository: RepositoryId,
     operation: std::ops::Range<usize>,
@@ -145,7 +145,7 @@ impl AcceptanceEvidence {
         if r.u16()? != FORMAT_VERSION {
             return Err(failure(FailureCode::UnsupportedEvidenceVersion));
         }
-        let ruleset_id = r.u32()?;
+        let ruleset_id = RulesetId(r.u32()?);
         let profile_limits_digest = r.fixed()?;
         if ruleset_id != cfg.ruleset_id || profile_limits_digest != cfg.profile_limits_digest {
             return Err(failure(FailureCode::EvidenceProfileMismatch));
@@ -232,13 +232,13 @@ impl AcceptanceEvidence {
     ///
     /// # Examples
     /// ```
-    /// use mkit_primitives::evidence::{RepositoryId, acceptance::{
+    /// use mkit_primitives::evidence::{RepositoryId, RulesetId, acceptance::{
     ///     AcceptanceEvidence, AcceptanceEvidenceDecodeCfg,
     /// }};
     /// let cfg = AcceptanceEvidenceDecodeCfg {
     ///     max_envelope_bytes: 206, max_operation_bytes: 0, max_heads: 0,
     ///     max_head_bytes: 0, max_total_head_bytes: 0,
-    ///     max_external_dependencies: 0, ruleset_id: 1,
+    ///     max_external_dependencies: 0, ruleset_id: RulesetId(1),
     ///     profile_limits_digest: [0; 32],
     /// };
     /// // Minimal envelope: empty operation, heads, and dependencies.
@@ -335,7 +335,7 @@ impl AcceptanceEvidence {
 
     /// Normative ruleset identifier.
     #[must_use]
-    pub const fn ruleset_id(&self) -> u32 {
+    pub const fn ruleset_id(&self) -> RulesetId {
         self.ruleset_id
     }
     /// Profile and effective-limits commitment.

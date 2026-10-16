@@ -1,9 +1,14 @@
 //! Bounded acceptance-evidence decoder fuzzing and stable seed replay.
 
+use mkit_primitives::evidence::RulesetId;
 use mkit_primitives::evidence::acceptance::{AcceptanceEvidence, AcceptanceEvidenceDecodeCfg};
 
 /// Replay one input with a fixed finite budget and a smaller hostile budget.
 /// Inputs over 64 KiB are outside this target's host acquisition budget.
+///
+/// # Panics
+/// Panics when decoding violates determinism, roundtrip, digest, or binding
+/// invariants, so fuzzing and stable replay report a regression.
 pub fn exercise(bytes: &[u8]) {
     if bytes.len() > 64 * 1024 {
         return;
@@ -15,7 +20,7 @@ pub fn exercise(bytes: &[u8]) {
         max_head_bytes: 4096,
         max_total_head_bytes: 32 * 1024,
         max_external_dependencies: 64,
-        ruleset_id: 1,
+        ruleset_id: RulesetId(1),
         profile_limits_digest: [0x11; 32],
     };
     for hostile in [false, true] {

@@ -1,6 +1,7 @@
 //! Portable fixture consumption; CI never regenerates bytes or expected digests.
 
 use mkit_core::hash;
+use mkit_primitives::evidence::RulesetId;
 use mkit_primitives::evidence::acceptance::{AcceptanceEvidence, AcceptanceEvidenceDecodeCfg};
 use serde_json::Value;
 
@@ -29,7 +30,7 @@ fn portable_acceptance_fixtures() {
             max_head_bytes: number(config, "max_head_bytes"),
             max_total_head_bytes: number(config, "max_total_head_bytes"),
             max_external_dependencies: number(config, "max_external_dependencies"),
-            ruleset_id: number(config, "ruleset_id"),
+            ruleset_id: RulesetId(number(config, "ruleset_id")),
             profile_limits_digest: hash::from_hex(
                 config["profile_limits_digest"].as_str().unwrap(),
             )
