@@ -31,6 +31,8 @@ its own immutable frozen record, and compare repository, operation, and epoch
 with the intended operation. Replay protection binds the tuple (repository,
 pack id, operation, epoch). The writer MUST run its pure acceptance decisions
 and atomically compare all resulting live guards when committing effects.
+Every mutable fact relied on by verification or decisions MUST be guarded in
+that atomic unit, as required by [SPEC-SERVER](SPEC-SERVER.md) §3.
 Membership and denial versions in this envelope are observations, not authority
 to skip live guards. Head rechecking does not establish closure or authorization.
 
