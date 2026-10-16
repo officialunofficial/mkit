@@ -3170,11 +3170,13 @@ and denial-gate tests. See [bounds and latency model](operations/fork-waves.md).
 
 **Always:** `mkit-primitives::fork::decide_fork_acceptance` emits acceptance only
 for a complete bounded full-inventory plan, an exactly bound protected
-reservation and admission debit, phantom-safe destination emptiness, and a final
+reservation and admission debit when granted/applicable, authoritative absence
+otherwise, phantom-safe destination emptiness, and a final
 source proof ordered after the last staged membership effect and before the
 current acceptance attempt. Every relied-on destination fact and revision is
 returned for one atomic comparison. Acceptance records terminal response,
-replay, and outcome responsibility and settles the exact reservation together.
+replay, and outcome responsibility and settles the optional exact reservation
+together.
 It emits no visible membership, destination ref, or permission to write.
 
 **Because:** construction, terminal acceptance, and published clearance have
