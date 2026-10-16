@@ -68,7 +68,8 @@ pub const MAX_SET_IDS: usize = 8_000;
 /// Storage calls one slice may use: the alarm allowance (1,000) minus the
 /// timer's own settlement and a margin.
 pub const SLICE_CALLS: u32 = 600;
-/// An unfinished job (and its admission reservation) expires after this long.
+/// An unaccepted construction and its admission reservation expire after this long.
+/// Accepted clearance remains durable until it completes.
 pub const JOB_TTL_MS: u64 = 24 * 3_600_000;
 /// Packs counted in one coordinator batch (one `RepoStorageChanged`).
 pub const COUNT_BATCH_PACKS: usize = 45;

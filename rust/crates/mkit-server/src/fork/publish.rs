@@ -246,8 +246,8 @@ async fn write_one<S: NamespaceStore>(
     Ok(())
 }
 
-/// The pack-level proof both the plan (to refuse before any write) and the
-/// publish step (immediately around the write) run.
+/// The source proof used by planning and repeated after preparation, before
+/// acceptance. Activation uses the accepted binding and destination checks.
 pub(super) async fn prove<S: NamespaceStore>(
     env: &ForkEnv<'_, S>,
     store: &Budgeted<'_, S>,

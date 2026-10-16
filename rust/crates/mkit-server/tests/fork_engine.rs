@@ -3193,14 +3193,15 @@ async fn a_slice_cut_inside_a_publish_wave_resumes_with_any_driver() {
     let whole = fork_to_end(&source, &env, "whole", true).await;
     assert_eq!(whole.phase, Phase::Done, "{:?}", whole.failure);
     let mut seen = std::collections::BTreeSet::new();
+    let mut switched = std::collections::BTreeSet::new();
     for (n, slice) in [65_u32]
         .into_iter()
         .chain((70_u32..300).step_by(3))
         .enumerate()
     {
-        for serial_after_cut in [false, true] {
+        for switch_stage in [0_u16, 2, 3] {
             source.store.waves.store(true, Ordering::SeqCst);
-            let name = format!("cut-{n}-{serial_after_cut}");
+            let name = format!("cut-{n}-{switch_stage}");
             let spec = spec(&source, &name);
             let planned = mkit_server::fork::plan_fork(&env, &spec).await.unwrap();
             mkit_server::fork::start_planned(&env, &spec, None, None, planned)
@@ -3222,8 +3223,9 @@ async fn a_slice_cut_inside_a_publish_wave_resumes_with_any_driver() {
                 }
                 if report.job.phase == Phase::Publish && report.job.part >= 2 {
                     seen.insert((report.job.part, report.job.cursor > 0));
-                    if serial_after_cut {
-                        // The driver that resumes cannot run waves.
+                    if report.job.part == switch_stage {
+                        // Resume either durable stage with a driver that cannot run waves.
+                        switched.insert(switch_stage);
                         source.store.waves.store(false, Ordering::SeqCst);
                     }
                 }
@@ -3243,9 +3245,13 @@ async fn a_slice_cut_inside_a_publish_wave_resumes_with_any_driver() {
             }
         }
     }
-    // Cuts landed inside the write stage and inside the check stage.
+    // Writes can checkpoint a partial wave. With denial disabled, activation
+    // checks consume no storage calls: final source proofs already ran before
+    // acceptance. Their resumable boundary is the start of the check stage.
     assert!(seen.contains(&(2, true)), "{seen:?}");
-    assert!(seen.contains(&(3, true)), "{seen:?}");
+    assert!(seen.contains(&(3, false)), "{seen:?}");
+    assert!(switched.contains(&2), "{switched:?}");
+    assert!(switched.contains(&3), "{switched:?}");
 }
 
 #[tokio::test]
@@ -3983,5 +3989,89 @@ async fn a_source_policy_change_before_acceptance_is_uniform_absence() {
         for pack in [source.pack, source.packmap] {
             assert!(member(&source, &id, pack).await.is_none());
         }
+    }
+}
+
+#[tokio::test]
+async fn accepted_clearance_outlives_construction_expiry_without_resettling() {
+    use mkit_server::store::adapter_spi::codec::ReservationV1;
+    let source = Source::build("source", 4).await;
+    let id = dest(&source, "forked");
+    let fork_env = env(&source);
+    let settle = settlement::admit(&source, &id).await;
+    mkit_server::fork::start(&fork_env, &spec(&source, "forked"), Some(settle))
+        .await
+        .unwrap();
+    stop_at_fork_phase(&source, &fork_env, &id, Phase::Publish).await;
+    let accepted = job_of(&source, &id).await;
+    let saved = accepted.accepted.as_ref().unwrap();
+    let result_bytes = serde_json::to_vec(saved).unwrap();
+    assert!(accepted.result.is_none());
+    assert!(matches!(
+        settlement::outcome(&source, &id).await,
+        ReservationV1::Committed { .. }
+    ));
+    for pack in accepted.packs.iter().map(|pack| pack.id) {
+        assert!(member(&source, &id, pack).await.is_none());
+    }
+    let coordinator = source.shards.coordinator(&id.namespace);
+    let barrier = keys::fork_barrier(&id.name);
+    assert_eq!(
+        source
+            .store
+            .inner
+            .get(&coordinator, &barrier)
+            .await
+            .unwrap(),
+        Some(mkit_server::Value::new(accepted.binding.to_vec()))
+    );
+    // Byte-for-byte settlement, replay, quota and outcome counters must survive
+    // clearance unchanged; another settlement would move at least one counter.
+    let scope = mkit_server::quota::QuotaScope::for_signer(&id.namespace, &[1; 32]);
+    let settled_keys = [
+        keys::reservation(settlement::RID).unwrap(),
+        keys::replay(&[3; 32]),
+        keys::quota(&scope),
+        keys::outbox_sequence(),
+        keys::outcome_backlog(),
+    ];
+    let settled = source
+        .store
+        .inner
+        .get_many(&coordinator, &settled_keys)
+        .await
+        .unwrap();
+    assert!(settled.iter().all(Option::is_some));
+    let expired_at = i64::try_from(accepted.expires_ms).unwrap() + 1;
+    source.clock.advance(expired_at - source.clock.now_ms());
+    assert!(u64::try_from(source.clock.now_ms()).unwrap() > accepted.expires_ms);
+    let done = drive(&fork_env, &id).await.unwrap();
+    assert_eq!(done.phase, Phase::Done);
+    assert_eq!(done.accepted.as_ref(), Some(saved));
+    assert_eq!(
+        serde_json::to_vec(done.result.as_ref().unwrap()).unwrap(),
+        result_bytes
+    );
+    assert_eq!(
+        source
+            .store
+            .inner
+            .get_many(&coordinator, &settled_keys)
+            .await
+            .unwrap(),
+        settled
+    );
+    assert!(
+        source
+            .store
+            .inner
+            .get(&coordinator, &barrier)
+            .await
+            .unwrap()
+            .is_none(),
+        "published clearance opens destination writes"
+    );
+    for pack in accepted.packs.iter().map(|pack| pack.id) {
+        assert!(member(&source, &id, pack).await.is_some());
     }
 }

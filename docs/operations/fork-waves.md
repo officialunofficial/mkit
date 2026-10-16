@@ -267,7 +267,11 @@ proves the source packs after preparation, then compares the exact published
 pair, generation, publication sequence, visibility declaration, and visibility
 revision. Visibility setters retain a monotonic revision under sharded storage,
 including without history tokens, so changes away and back remain detectable.
-A changed source answers uniform absence.
+Observed source changes answer uniform absence. The resumed pack-proof cursor
+currently has an unresolved ordering gap: pack eligibility can change between
+proof slices without a coherent eligible source point. The enabled
+`final_source_proof_cannot_resume_across_disjoint_pack_eligibility` regression
+demonstrates this case; it must be resolved before claiming conformance.
 
 The acceptance commit retains the accepted result with the complete pack set,
 operation binding, destination, visibility, membership incarnation, byte charge,
@@ -302,3 +306,10 @@ in the destination coordinator. Progress reads the job and both fence rows in
 one `get_many`; authority guards add no storage call. After a precondition loss,
 the next read observes the job and fence together: a moved fence aborts an
 unaccepted attempt, while an unchanged fence retains normal CAS retry handling.
+
+Physical membership installation has a separate unresolved authority race:
+its partition-local apply cannot compare the coordinator authority rows. The
+enabled `an_authority_move_at_the_physical_activation_commit_installs_no_member`
+regression demonstrates that a member can install before the coordinator
+checkpoint rejects stale authority. Coordinator fencing alone does not close
+this window.

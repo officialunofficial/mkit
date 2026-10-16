@@ -2874,6 +2874,8 @@ could change after a lost reply, or a reservation could settle twice.
 
 **Enforced by:** `fork::job`, `fork::accept`, `fork::publish`, and the fork engine
 acceptance, settlement, membership-order, source-change, and lost-reply tests.
+The stronger single-ordering-point source proof remains incomplete: the enabled
+disjoint-eligibility regression demonstrates an unresolved resumed-proof gap.
 
 ## Fork registration arbitrates with destination writers
 
