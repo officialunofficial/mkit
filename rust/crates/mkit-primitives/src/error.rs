@@ -132,6 +132,21 @@ pub enum FailureCode {
     ClaimsBindingMismatch,
     // replay
     // evidence
+    /// Unsupported acceptance-evidence format.
+    #[error("UnsupportedEvidenceVersion")]
+    UnsupportedEvidenceVersion,
+    /// Evidence ruleset or profile does not match the writer configuration.
+    #[error("EvidenceProfileMismatch")]
+    EvidenceProfileMismatch,
+    /// Noncanonical evidence framing, order, tags, or facts.
+    #[error("NonCanonicalEvidence")]
+    NonCanonicalEvidence,
+    /// Evidence does not match the frozen pack and operation.
+    #[error("EvidenceBindingMismatch")]
+    EvidenceBindingMismatch,
+    /// Head kind or signer metadata does not match the evidence.
+    #[error("EvidenceHeadMismatch")]
+    EvidenceHeadMismatch,
 }
 impl FailureCode {
     /// Stable machine-readable string. Diagnostic Display text is not a parser API.
@@ -180,6 +195,12 @@ impl FailureCode {
             // auth
             Self::InvalidEnvelope => "InvalidEnvelope",
             Self::ClaimsBindingMismatch => "ClaimsBindingMismatch",
+            // evidence
+            Self::UnsupportedEvidenceVersion => "UnsupportedEvidenceVersion",
+            Self::EvidenceProfileMismatch => "EvidenceProfileMismatch",
+            Self::NonCanonicalEvidence => "NonCanonicalEvidence",
+            Self::EvidenceBindingMismatch => "EvidenceBindingMismatch",
+            Self::EvidenceHeadMismatch => "EvidenceHeadMismatch",
         }
     }
 }
