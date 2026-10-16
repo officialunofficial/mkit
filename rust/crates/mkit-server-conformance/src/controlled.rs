@@ -168,8 +168,6 @@ const GC_RELIANCE: &[Feature] = &[
     Feature::AuthV2,
     Feature::Replay,
     Feature::AtomicAdvance,
-    Feature::Tickets,
-    Feature::IndexedMode,
     Feature::Gc,
 ];
 
@@ -228,7 +226,6 @@ pub const CASES: &[Case] = &[
         controls: &[
             "observe.publication",
             "publication.eligibility",
-            "publication.drive",
             "fixture.indexed_refs",
             "fixture.ref_reservation",
         ],
@@ -239,7 +236,6 @@ pub const CASES: &[Case] = &[
         controls: &[
             "observe.publication",
             "publication.eligibility",
-            "publication.drive",
             "fixture.indexed_refs",
             "fixture.ref_reservation",
             "pause.before_acceptance",
@@ -249,7 +245,6 @@ pub const CASES: &[Case] = &[
     Case {
         name: "reliance.gc_drop_before_acceptance",
         controls: &[
-            "observe",
             "reliance.fixture",
             "clock.pin",
             "reliance.observe",
@@ -263,12 +258,10 @@ pub const CASES: &[Case] = &[
     Case {
         name: "reliance.gc_drop_after_acceptance",
         controls: &[
-            "observe",
             "reliance.fixture",
             "clock.pin",
             "reliance.observe",
             "fixture.ref_reservation",
-            "pause.before_acceptance",
             "gc.prepare_drop",
             "gc.commit_drop",
         ],
@@ -277,7 +270,6 @@ pub const CASES: &[Case] = &[
     Case {
         name: "reliance.verdict_hide_delta_base",
         controls: &[
-            "observe",
             "reliance.fixture",
             "clock.pin",
             "reliance.observe",

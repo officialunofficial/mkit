@@ -223,13 +223,20 @@ and leave `combined-publication` undeclared.
 The reliance fixture MUST seed its base through a valid accepted operation and
 keep the candidate branch absent. Before the race, the base has no live or
 retained publication root, ticket pin, or hold that independently forbids its
-prepared GC drop; its accepted membership remains usable. The fixture may
+prepared GC drop; any required GC mark and wait have already completed at
+the pinned clock. Its accepted membership remains usable. Fixture setup may
+construct the required valid history before returning, but must restore the
+pinned clock and must not fabricate accepted state. The fixture may
 delete its seeding ref through a valid operation to establish this state.
 Its returned `pack` contains an external delta
 base available only in `base_pack`; `head` identifies the candidate object.
 `packmap_pack` is an independent canonical packlist containing the candidate and
-base, with ID `packmap`. The runner uploads and accepts the candidate through
-signed wire requests. Removal controls never supply an acceptance result. The
+base, with ID `packmap`. The verdict case uploads and accepts the candidate through signed wire
+requests. GC cases instead create a paired ref using the already accepted
+`base_head` and `base_packmap`, without tickets: a candidate ticket would itself
+root its external bases and prevent a genuine GC drop. Both original members
+remain unrooted before that ticketless attempt. Removal controls never supply
+an acceptance result. The
 runner pins the business clock throughout these races so ticket age and the
 declared membership-lag permission are deterministic. The prepared GC attempt
 retains its original recheck proof across the competing

@@ -301,12 +301,18 @@ pub struct RelianceFixtureQuery {
 /// The binding establishes the base through a valid accepted operation; it
 /// MUST NOT accept the candidate or create the candidate branch. The base
 /// remains usable but has no independent root, pin, or hold forbidding the
-/// prepared GC drop; a real deletion may remove its original seeding ref.
+/// prepared GC drop, with required mark/wait history complete at the pinned
+/// clock; a real deletion may remove its original seeding ref. Fixture setup
+/// restores that clock and never fabricates an accepted candidate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RelianceFixture {
     /// Accepted, usable base pack, lowercase hex.
     pub base_pack: String,
+    /// Accepted head object in the base pack, for a ticketless GC race.
+    pub base_head: String,
+    /// Accepted canonical packmap member naming the base, for that GC race.
+    pub base_packmap: String,
     /// Candidate canonical pack bytes with an external delta base in `base_pack`.
     pub pack: Vec<u8>,
     /// Candidate head object ID, lowercase hex.
