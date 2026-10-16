@@ -477,3 +477,15 @@ worktree-gc *args:
 check-local-build:
     python3 scripts/check-build-dir-authority.py
     bash scripts/tests/local-build.test.sh
+
+# Primitives-only maturity compilation (inventory sweep follows with encoded formats).
+check-primitives-stability:
+    bash scripts/check-primitives-stability.sh
+
+# Read-only portable evidence fixture inventory.
+check-primitives-fixtures:
+    python3 scripts/check-primitives-fixtures.py
+
+# Package-rooted normal target edges, excluding host proc macros.
+check-primitives-graph:
+    python3 scripts/check-primitives-graph.py

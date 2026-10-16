@@ -163,6 +163,10 @@ version_group = "mkit"
 name = "mkit-transport-connect"
 version_group = "mkit"
 
+[[package]]
+name = "mkit-primitives"
+release = false
+
 # Changelog grouping, aligned to the Conventional Commit types the
 # commit-lint / PR-title gate already enforces. Noise types are dropped from
 # the changelog body; breaking changes are always surfaced.

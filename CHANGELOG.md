@@ -15,6 +15,10 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Added
 
+- Add the independently versioned `mkit-primitives` ALPHA contract skeleton.
+  It defines opaque verification, closure, and guarded-decision types without
+  changing existing runtime paths or wire formats. No migration or store reset.
+
 - `ReadAccess::declared_visibility` reads the stored visibility declaration
   whether or not the repository record exists, for private-origin locks and
   similar flows that declare visibility ahead of the record. It returns `None`
