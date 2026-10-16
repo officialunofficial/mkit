@@ -7,6 +7,7 @@ front matter.
 [FORMAL.md](../FORMAL.md) maps spec clauses to the formal models and
 proofs that check them, with each result's bounds.
 
+- [SPEC-ACCEPTANCE-EVIDENCE](SPEC-ACCEPTANCE-EVIDENCE.md) &mdash; bounded trusted-host evidence between verification and acceptance.
 - [SPEC-ATTESTATIONS](SPEC-ATTESTATIONS.md) &mdash; native attestations: in-toto v1 statements in DSSE envelopes.
 - [SPEC-CONCURRENCY](SPEC-CONCURRENCY.md) &mdash; the total mkit lock order across worktree, ref-history, and CAS locks.
 - [SPEC-CONFIG-SECURITY](SPEC-CONFIG-SECURITY.md) &mdash; user-vs-repo config trust boundary and key classification rules.

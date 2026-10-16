@@ -1,0 +1,39 @@
+{
+  "description": "Envelope bytes at cap or one byte over cap.",
+  "cfg": {
+    "max_envelope_bytes": 206,
+    "max_operation_bytes": 32,
+    "max_heads": 4,
+    "max_head_bytes": 32,
+    "max_total_head_bytes": 96,
+    "max_external_dependencies": 4,
+    "ruleset_id": 1,
+    "profile_limits_digest": "1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "expected": {
+    "decode": "ok",
+    "failure_code": null,
+    "digest": "b35231ce8e02236728253f931e9635195ecf56223526f634b292d432ca2cb6da",
+    "recheck_heads": "ok"
+  },
+  "encoded_len": 206,
+  "semantic": {
+    "ruleset_id": 1,
+    "profile_limits_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+    "repository": "2222222222222222222222222222222222222222222222222222222222222222",
+    "operation": "",
+    "epoch": 0,
+    "pack": {
+      "id": "3333333333333333333333333333333333333333333333333333333333333333",
+      "len": 0,
+      "object_count": 0,
+      "delta_count": 0,
+      "object_set_root": "4444444444444444444444444444444444444444444444444444444444444444"
+    },
+    "heads": [],
+    "external_dependencies": [],
+    "membership_generation": 0,
+    "removal_version": 0,
+    "denial_version": 0
+  }
+}

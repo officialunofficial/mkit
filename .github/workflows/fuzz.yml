@@ -31,6 +31,9 @@ jobs:
       fail-fast: false
       matrix:
         target: [delta, pack, tree, software_key_record, rpc_decode, git_commit_parse, git_tag_parse, git_tree_parse, merkle_packlist, merkle_proof, sparse_verify, disclosure_decode, verify_disclosure, pack_entries, verify_closure, grant_parse, epoch_visibility_parse, span_decode, verify_span]
+        include:
+          - target: acceptance_decode
+            directory: rust/crates/mkit-primitives/fuzz
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -48,6 +51,7 @@ jobs:
           workspaces: |
             rust -> rust/target
             rust/fuzz -> rust/fuzz/target
+            rust/crates/mkit-primitives/fuzz -> rust/crates/mkit-primitives/fuzz/target
           prefix-key: "rust-fuzz-${{ matrix.target }}"
           cache-on-failure: false
 
@@ -55,7 +59,7 @@ jobs:
         run: cargo install cargo-fuzz --locked
 
       - name: Run fuzz target (${{ matrix.target }}, 60s)
-        working-directory: rust/fuzz
+        working-directory: ${{ matrix.directory || 'rust/fuzz' }}
         run: |
           # libfuzzer-sys is gated behind the `libfuzzer` feature (see
           # rust/fuzz/Cargo.toml) so a plain `cargo build`/`cargo test`
@@ -73,6 +77,7 @@ jobs:
           path: |
             rust/fuzz/fuzz/artifacts/**
             rust/fuzz/artifacts/**
+            rust/crates/mkit-primitives/fuzz/artifacts/**
           if-no-files-found: ignore
           retention-days: 14
 
