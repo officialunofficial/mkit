@@ -46,7 +46,11 @@ impl Envelope {
         b.extend(1_u32.to_le_bytes());
         b.extend([0x11; 32]);
         b.extend([0x22; 32]);
-        b.extend(u32::try_from(self.operation.len()).unwrap().to_le_bytes());
+        b.extend(
+            u32::try_from(self.operation.len())
+                .expect("valid deterministic fixture")
+                .to_le_bytes(),
+        );
         b.extend(&self.operation);
         b.extend(0_u64.to_le_bytes());
         b.extend([0x33; 32]);
@@ -54,18 +58,26 @@ impl Envelope {
         b.extend(self.object_count.to_le_bytes());
         b.extend(self.delta_count.to_le_bytes());
         b.extend([0x44; 32]);
-        b.extend(u32::try_from(self.heads.len()).unwrap().to_le_bytes());
+        b.extend(
+            u32::try_from(self.heads.len())
+                .expect("valid deterministic fixture")
+                .to_le_bytes(),
+        );
         for h in &self.heads {
             b.extend(h.id);
             b.push(h.kind);
             b.extend(h.signer);
             b.push(h.signature_tag);
-            b.extend(u32::try_from(h.bytes.len()).unwrap().to_le_bytes());
+            b.extend(
+                u32::try_from(h.bytes.len())
+                    .expect("valid deterministic fixture")
+                    .to_le_bytes(),
+            );
             b.extend(&h.bytes);
         }
         b.extend(
             u32::try_from(self.dependencies.len())
-                .unwrap()
+                .expect("valid deterministic fixture")
                 .to_le_bytes(),
         );
         for d in &self.dependencies {
@@ -93,7 +105,9 @@ fn cfg() -> AcceptanceEvidenceDecodeCfg {
 
 fn reject(bytes: &[u8], config: &AcceptanceEvidenceDecodeCfg, code: FailureCode) {
     assert_eq!(
-        AcceptanceEvidence::decode(bytes, config).unwrap_err().code,
+        AcceptanceEvidence::decode(bytes, config)
+            .expect_err("malformed evidence is rejected")
+            .code,
         code
     );
 }
@@ -109,7 +123,9 @@ fn signed_heads() -> Vec<Head> {
         100,
         [0; 64],
     );
-    commit.signature = sign::sign_commit(&commit, &kp).unwrap().0;
+    commit.signature = sign::sign_commit(&commit, &kp)
+        .expect("valid deterministic fixture")
+        .0;
     let mut remix = Remix {
         tree_hash: [1; 32],
         parents: vec![],
@@ -123,7 +139,9 @@ fn signed_heads() -> Vec<Head> {
         timestamp: 101,
         signature: [0; 64],
     };
-    remix.signature = sign::sign_remix(&remix, &kp).unwrap().0;
+    remix.signature = sign::sign_remix(&remix, &kp)
+        .expect("valid deterministic fixture")
+        .0;
     let mut tag = Tag {
         target: [3; 32],
         target_type: ObjectType::Commit,
@@ -134,7 +152,9 @@ fn signed_heads() -> Vec<Head> {
         timestamp: 102,
         signature: [0; 64],
     };
-    tag.signature = sign::sign_tag(&tag, &kp).unwrap().0;
+    tag.signature = sign::sign_tag(&tag, &kp)
+        .expect("valid deterministic fixture")
+        .0;
     let mut heads: Vec<_> = [
         Object::Commit(commit),
         Object::Remix(remix),
@@ -142,7 +162,7 @@ fn signed_heads() -> Vec<Head> {
     ]
     .into_iter()
     .map(|obj| {
-        let bytes = serialize::serialize(&obj).unwrap();
+        let bytes = serialize::serialize(&obj).expect("valid deterministic fixture");
         Head {
             id: object::id_from_object(&obj, &bytes),
             kind: bytes[0],

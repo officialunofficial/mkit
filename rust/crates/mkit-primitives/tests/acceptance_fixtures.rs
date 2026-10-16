@@ -6,42 +6,59 @@ use mkit_primitives::evidence::acceptance::{AcceptanceEvidence, AcceptanceEviden
 use serde_json::Value;
 
 fn wide(value: &Value) -> u64 {
-    value.as_str().unwrap().parse().unwrap()
+    value
+        .as_str()
+        .expect("fixture u64 is decimal text")
+        .parse()
+        .expect("fixture decimal fits u64")
 }
 
 fn number(cfg: &Value, name: &str) -> u32 {
-    u32::try_from(cfg[name].as_u64().unwrap()).unwrap()
+    u32::try_from(cfg[name].as_u64().expect("valid fixture semantic value"))
+        .expect("valid fixture semantic value")
 }
 
 fn assert_summary(evidence: &AcceptanceEvidence, semantic: &Value) {
     assert_eq!(
         u64::from(evidence.ruleset_id().0),
-        semantic["ruleset_id"].as_u64().unwrap()
+        semantic["ruleset_id"]
+            .as_u64()
+            .expect("valid fixture semantic value")
     );
     assert_eq!(
         hash::to_hex(&evidence.profile_limits_digest()),
-        semantic["profile_limits_digest"].as_str().unwrap()
+        semantic["profile_limits_digest"]
+            .as_str()
+            .expect("valid fixture semantic value")
     );
     assert_eq!(
         hash::to_hex(&evidence.repository().0),
-        semantic["repository"].as_str().unwrap()
+        semantic["repository"]
+            .as_str()
+            .expect("valid fixture semantic value")
     );
     assert_eq!(
         hash::to_hex_bytes(evidence.operation()),
-        semantic["operation"].as_str().unwrap()
+        semantic["operation"]
+            .as_str()
+            .expect("valid fixture semantic value")
     );
     assert_eq!(evidence.epoch(), wide(&semantic["epoch"]));
     let pack = evidence.pack();
     assert_eq!(
         hash::to_hex(&pack.id),
-        semantic["pack"]["id"].as_str().unwrap()
+        semantic["pack"]["id"]
+            .as_str()
+            .expect("valid fixture semantic value")
     );
     assert_eq!(pack.len, wide(&semantic["pack"]["len"]));
     assert_eq!(pack.object_count, wide(&semantic["pack"]["object_count"]));
     assert_eq!(pack.delta_count, wide(&semantic["pack"]["delta_count"]));
     assert_eq!(
         hash::to_hex(&pack.object_set_root),
-        semantic["pack"]["object_set_root"].as_str().unwrap()
+        semantic["pack"]["object_set_root"]
+            .as_str()
+            .expect("valid fixture semantic value")
     );
     assert_eq!(
         evidence.witness().generation,
@@ -56,25 +73,40 @@ fn assert_summary(evidence: &AcceptanceEvidence, semantic: &Value) {
 
 fn assert_heads(evidence: &AcceptanceEvidence, semantic: &Value) {
     let heads: Vec<_> = evidence.heads().collect();
-    let expected_heads = semantic["heads"].as_array().unwrap();
+    let expected_heads = semantic["heads"]
+        .as_array()
+        .expect("valid fixture semantic value");
     assert_eq!(heads.len(), expected_heads.len());
     for (head, expected) in heads.iter().zip(expected_heads) {
         assert_eq!(
             hash::to_hex(&head.object_id),
-            expected["object_id"].as_str().unwrap()
+            expected["object_id"]
+                .as_str()
+                .expect("valid fixture semantic value")
         );
         assert_eq!(
             u64::from(head.kind as u8),
-            expected["kind"].as_u64().unwrap()
+            expected["kind"]
+                .as_u64()
+                .expect("valid fixture semantic value")
         );
         assert_eq!(
             hash::to_hex(&head.signer),
-            expected["signer"].as_str().unwrap()
+            expected["signer"]
+                .as_str()
+                .expect("valid fixture semantic value")
         );
-        assert_eq!(expected["signature_result"].as_u64().unwrap(), 1);
+        assert_eq!(
+            expected["signature_result"]
+                .as_u64()
+                .expect("valid fixture semantic value"),
+            1
+        );
         assert_eq!(
             hash::to_hex_bytes(head.canonical_bytes),
-            expected["canonical_bytes"].as_str().unwrap()
+            expected["canonical_bytes"]
+                .as_str()
+                .expect("valid fixture semantic value")
         );
     }
     let dependencies: Vec<_> = evidence
@@ -83,9 +115,9 @@ fn assert_heads(evidence: &AcceptanceEvidence, semantic: &Value) {
         .collect();
     let expected_dependencies: Vec<_> = semantic["external_dependencies"]
         .as_array()
-        .unwrap()
+        .expect("valid fixture semantic value")
         .iter()
-        .map(|id| id.as_str().unwrap())
+        .map(|id| id.as_str().expect("valid fixture semantic value"))
         .collect();
     assert_eq!(dependencies, expected_dependencies);
 }
