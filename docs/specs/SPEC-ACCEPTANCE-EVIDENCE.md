@@ -19,7 +19,8 @@ from this document and its referenced object and signing specifications.
 
 An acceptance writer MAY delegate pack verification to a stateless verifier in
 the same trust domain. The verifier supplies the following bounded envelope.
-This is a library byte contract. It is not a remotely verifiable attestation.
+This is an optional library byte contract. Its requirements apply when this
+envelope is used. It is not a remotely verifiable attestation.
 Decoding or hashing the envelope MUST NOT construct a verified pack, closure
 proof, or guarded decision. The host MUST authenticate the complete envelope's
 origin and integrity before relying on its assertions. A digest alone does not
@@ -94,9 +95,10 @@ arithmetic overflow, duplicate or unordered records, contradictory delta counts,
 unknown tags or versions, profile mismatch, and trailing bytes. A valid envelope
 contains at least 206 bytes (empty operation and lists). Its exact length is
 `206 + operation_bytes + sum(70 + head_bytes) + 32 * dependency_count`.
-The input buffer is host-owned; the host accounts for it separately. Retained
-output requires one envelope copy and constant metadata. Decoder work is linear
-in envelope bytes and record counts. No nested or recursive envelope exists.
+The host accounts for its acquired input separately. Implementations MUST bound
+retained output and temporary decoding state using finite caller budgets.
+Decoder work is linear in envelope bytes and record counts. No nested or
+recursive envelope exists.
 
 Envelope decoding checks head framing and kind prefixes. It does not establish
 the truth of head metadata or validate the nested canonical object grammar;
@@ -104,9 +106,9 @@ those checks belong to head rechecking and the authenticated verifier.
 
 A head recheck MUST recompute each id from canonical bytes, confirm kind and
 embedded signer, and individually verify the signature. It MUST reject malformed
-canonical bytes, differing facts, and invalid signatures. Implementations SHOULD
-process one head at a time so temporary decoding and signature inputs depend
-on the per-head cap rather than aggregate bytes. Rechecking never parses a pack.
+canonical bytes, differing facts, and invalid signatures. Temporary object and
+signature inputs MUST remain within finite caller budgets in addition to the
+retained envelope. Rechecking never parses a pack.
 
 Decoder refusal codes are stable within this format and ruleset:
 
