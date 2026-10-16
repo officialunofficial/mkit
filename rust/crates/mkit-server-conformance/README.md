@@ -230,7 +230,9 @@ base available only in `base_pack`; `head` identifies the candidate object.
 `packmap_pack` is an independent canonical packlist containing the candidate and
 base, with ID `packmap`. The runner uploads and accepts the candidate through
 signed wire requests. Removal controls never supply an acceptance result. The
-prepared GC attempt retains its original recheck proof across the competing
+runner pins the business clock throughout these races so ticket age and the
+declared membership-lag permission are deterministic. The prepared GC attempt
+retains its original recheck proof across the competing
 acceptance; a later fresh recheck is outside this race. Hiding the unique base
 supplies no replacement and does not change the repository generation. Fixture
 bytes are bounded to 1 MiB each. `gc` declares repository membership GC;

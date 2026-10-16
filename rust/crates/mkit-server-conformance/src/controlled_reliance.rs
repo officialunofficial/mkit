@@ -13,7 +13,7 @@ use crate::controlled::ControlClient;
 use crate::wire::cases::{
     Ctx, Exp, Failure, Signed, advance_req, sign_unary, upload_msgs, want_ok,
 };
-use crate::wire::client::Rpc;
+use crate::wire::client::{Rpc, RpcError};
 
 struct Fixture {
     operation: Signed,
@@ -208,6 +208,29 @@ fn gc_result(result: Option<&str>, expected: &str) -> Result<(), Failure> {
     Ok(())
 }
 
+fn dependency_refusal(error: &RpcError, lag_window_open: bool) -> bool {
+    match error.code.as_str() {
+        "aborted" => true,
+        "failed_precondition" => error.message == "delta base not available in this repository",
+        "invalid_argument" => matches!(
+            error.message.as_str(),
+            "open closure" | "packlist lists a pack that is not in this repository"
+        ),
+        "unavailable" => {
+            lag_window_open
+                && error.message == "repository membership not yet visible"
+                && error.details.len() == 1
+                && matches!(
+                    error.details[0].0.as_str(),
+                    "mkit.transport.v1.MembershipNotVisible"
+                        | "type.googleapis.com/mkit.transport.v1.MembershipNotVisible"
+                )
+                && error.details[0].1.is_empty()
+        }
+        _ => false,
+    }
+}
+
 fn no_acceptance(before: &Observation, after: &Observation) -> Result<(), Failure> {
     if before.head != after.head
         || before.packmap != after.packmap
@@ -273,6 +296,12 @@ pub(crate) async fn run(name: &str, ctx: Ctx, control: &ControlClient) -> Result
     ) {
         return Err(format!("unknown reliance case {name}").into());
     }
+    // Keep ticket age deterministic while the competing protocol decisions run.
+    // Wall-clock scheduling cannot close a pinned business-clock lag window.
+    let now_ms = ctx.server_now_ms();
+    if control.command(&Request::PinClock { now_ms }).await?.now_ms != Some(now_ms) {
+        return Err("reliance fixture could not pin the business clock".into());
+    }
     let fixture = fixture(&ctx, control).await?;
     let before = observe(control, &fixture).await?;
     if before.usable_memberships != [false, true]
@@ -307,7 +336,16 @@ pub(crate) async fn run(name: &str, ctx: Ctx, control: &ControlClient) -> Result
     let pending = tokio::spawn({
         let ctx = ctx.clone();
         let operation = fixture.operation.clone();
-        async move { ctx.send::<AdvanceRefsResponse>(&operation).await }
+        async move {
+            ctx.client()
+                .post(
+                    operation.rpc.procedure(),
+                    "application/proto",
+                    &operation.headers,
+                    operation.body,
+                )
+                .await
+        }
     });
     control.wait_paused().await?;
     if name == "reliance.gc_drop_before_acceptance" {
@@ -328,13 +366,18 @@ pub(crate) async fn run(name: &str, ctx: Ctx, control: &ControlClient) -> Result
         return Err("removal control did not make the unique base unusable before resume".into());
     }
     control.command(&Request::Resume).await?;
-    let result = pending.await.map_err(|e| e.to_string())??;
+    let reply = pending.await.map_err(|e| e.to_string())??;
+    let result = crate::wire::client::decode_unary::<AdvanceRefsResponse>(&reply)?;
+    if result
+        .as_ref()
+        .is_err_and(|error| error.code == "unavailable")
+        && reply.headers.contains_key(http::header::RETRY_AFTER)
+    {
+        return Err("membership-lag refusal must not contain Retry-After".into());
+    }
+    let lag_window_open = ctx.profile().relay_lag_bound_ms > 0;
     match result {
-        Err(error)
-            if matches!(
-                error.code.as_str(),
-                "failed_precondition" | "not_found" | "aborted" | "permission_denied"
-            ) => {}
+        Err(error) if dependency_refusal(&error, lag_window_open) => {}
         other => {
             return Err(format!(
                 "removed unique external base did not cause a dependency refusal: {other:?}"
@@ -353,6 +396,65 @@ pub(crate) async fn run(name: &str, ctx: Ctx, control: &ControlClient) -> Result
 mod tests {
     use super::*;
     use crate::control::{QuotaView, ReplayView, ReservationView, TicketView};
+
+    fn error(code: &str, message: &str) -> RpcError {
+        RpcError {
+            code: code.into(),
+            message: message.into(),
+            http_status: 400,
+            details: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn dependency_refusal_requires_the_protocol_class_and_public_text() {
+        for (code, message) in [
+            ("aborted", "guard contention"),
+            (
+                "failed_precondition",
+                "delta base not available in this repository",
+            ),
+            ("invalid_argument", "open closure"),
+            (
+                "invalid_argument",
+                "packlist lists a pack that is not in this repository",
+            ),
+        ] {
+            assert!(dependency_refusal(&error(code, message), false));
+        }
+        for (code, message) in [
+            (
+                "permission_denied",
+                "delta base not available in this repository",
+            ),
+            ("not_found", "open closure"),
+            ("failed_precondition", "unrelated guard"),
+            ("invalid_argument", "malformed signature"),
+            ("unavailable", "pack verification pending"),
+        ] {
+            assert!(!dependency_refusal(&error(code, message), true));
+        }
+    }
+
+    #[test]
+    fn membership_lag_requires_an_open_window_and_one_empty_typed_detail() {
+        let mut lag = error("unavailable", "repository membership not yet visible");
+        assert!(!dependency_refusal(&lag, true));
+        lag.details.push((
+            "mkit.transport.v1.MembershipNotVisible".into(),
+            String::new(),
+        ));
+        assert!(dependency_refusal(&lag, true));
+        assert!(!dependency_refusal(&lag, false));
+        lag.details[0].1 = "AA==".into();
+        assert!(!dependency_refusal(&lag, true));
+        lag.details[0].1.clear();
+        lag.details.push(lag.details[0].clone());
+        assert!(!dependency_refusal(&lag, true));
+        lag.details.pop();
+        lag.details[0].0 = "other.Detail".into();
+        assert!(!dependency_refusal(&lag, true));
+    }
 
     #[test]
     fn candidate_requires_an_external_delta_not_plain_or_internal_content() {

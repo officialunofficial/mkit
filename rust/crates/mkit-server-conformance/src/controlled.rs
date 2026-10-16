@@ -251,6 +251,7 @@ pub const CASES: &[Case] = &[
         controls: &[
             "observe",
             "reliance.fixture",
+            "clock.pin",
             "reliance.observe",
             "fixture.ref_reservation",
             "pause.before_acceptance",
@@ -264,6 +265,7 @@ pub const CASES: &[Case] = &[
         controls: &[
             "observe",
             "reliance.fixture",
+            "clock.pin",
             "reliance.observe",
             "fixture.ref_reservation",
             "pause.before_acceptance",
@@ -277,6 +279,7 @@ pub const CASES: &[Case] = &[
         controls: &[
             "observe",
             "reliance.fixture",
+            "clock.pin",
             "reliance.observe",
             "fixture.ref_reservation",
             "pause.before_acceptance",
