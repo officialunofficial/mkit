@@ -122,8 +122,12 @@ pub struct MembershipResponse {
 /// Sealed closure evidence. Only the closure module can construct it.
 ///
 /// ```compile_fail
-/// use mkit_primitives::closure::ClosureProof;
-/// let forged = ClosureProof {};
+/// use mkit_primitives::{closure::*, evidence::*, pack_verify::EvidenceSequence};
+/// fn forge(repository: RepositoryId, view: Revision, ruleset: RulesetBinding,
+///          coverage: Coverage, external_witnesses: EvidenceSequence) -> ClosureProof {
+///     ClosureProof { repository, view, ruleset, coverage,
+///         object_set_root: [0; 32], heads_root: [0; 32], external_witnesses }
+/// }
 /// ```
 #[derive(Debug)]
 #[must_use]

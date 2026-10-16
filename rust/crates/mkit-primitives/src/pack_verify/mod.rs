@@ -206,8 +206,14 @@ pub struct EvidenceSequence {
 /// attestation and grants neither repository membership nor read permission.
 ///
 /// ```compile_fail
-/// use mkit_primitives::pack_verify::VerifiedPack;
-/// let forged = VerifiedPack {};
+/// use mkit_primitives::{pack_verify::*, evidence::*, limits::*};
+/// fn forge(source: PackSource, counts: PackCounts, ruleset: RulesetBinding,
+///          profile: IndexedProfile, limits: VerifyLimits,
+///          sequence: EvidenceSequence) -> VerifiedPack {
+///     VerifiedPack { source, counts, ruleset, profile, limits,
+///         object_set_root: [0; 32], occurrences: sequence,
+///         external_dependencies: sequence, heads: sequence }
+/// }
 /// ```
 #[derive(Debug)]
 #[must_use]
