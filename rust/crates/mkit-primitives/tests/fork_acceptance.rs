@@ -1,5 +1,5 @@
 //! Semantic fixtures, atomic mutation checks, and bounded hostile-fact replay.
-#[path = "../fuzz/src/fork.rs"]
+#[path = "support/fork.rs"]
 pub mod harness;
 use harness::{
     LIMITS, REV, attempt, binding, facts, fuzz_fork_acceptance, inventories, mutate_guard,
@@ -10,9 +10,8 @@ use mkit_primitives::{
     error::FailureCode,
     evidence::{RepositoryId, Revision},
     fork::{
-        FinalForkSourceProof, ForkDecision, ForkFacts, ForkJobState, ForkPlan, ForkRefusal,
-        ForkReplay, ForkReservation, ForkTerminal, ForkVisibility, GuardedFork,
-        decide_fork_acceptance,
+        FinalForkSourceProof, ForkDecision, ForkJobState, ForkPlan, ForkRefusal, ForkReplay,
+        ForkReservation, ForkTerminal, ForkVisibility, GuardedFork, decide_fork_acceptance,
     },
 };
 

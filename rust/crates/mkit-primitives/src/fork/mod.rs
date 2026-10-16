@@ -135,9 +135,9 @@ pub enum ForkDecision<'a> {
 
 /// Complete destination comparisons plus the separate source ordering fence.
 ///
-/// Requirements borrow the bounded typed snapshot. The accepted result owns
-/// no owned variable data; the sealed plan owns the bounded result branch. Compare every acquired observation and its revision in one
-/// atomic unit with all effects. Never implement emptiness as sampled row CAS.
+/// Requirements borrow the bounded typed snapshot. The sealed plan owns the
+/// bounded result branch. Compare every acquired observation and its revision
+/// in one atomic unit with all effects. Never implement emptiness as sampled row CAS.
 /// `apply_attempt` and `acceptance_point` bind that unit to this source fence.
 /// Guard loss requires fresh facts, a new attempt identity, and a new source
 /// proof. Source facts are intentionally absent from destination atomic CAS.
