@@ -297,10 +297,7 @@ impl<V: InPackObjectView> ClosureWalker<V> {
     ) -> Result<Self, Failure> {
         let object_count = view.object_count();
         let object_set_root = view.object_set_root();
-        if limits.items > 10_000_000
-            || limits.membership_batch == 0
-            || object_count > limits.items
-            || heads.len() as u64 > limits.items
+        if limits.items > 10_000_000 || limits.membership_batch == 0 || object_count > limits.items
         {
             return Err(failure(FailureCode::ResourceLimit));
         }
@@ -522,6 +519,9 @@ impl<V: InPackObjectView> ClosureWalker<V> {
             .checked_add(u64::from(self.limits.membership_batch) * 2048)
             .ok_or_else(|| failure(FailureCode::ResourceLimit))?;
         bytes = bytes
+            .checked_add(answer_bytes(self.answers.capacity())?)
+            .ok_or_else(|| failure(FailureCode::ResourceLimit))?;
+        bytes = bytes
             .checked_add(self.missing.capacity() as u64 * 128)
             .ok_or_else(|| failure(FailureCode::ResourceLimit))?;
         for missing in &self.missing {
@@ -607,6 +607,11 @@ fn present<T>(value: Acquisition<T>) -> Result<T, Failure> {
             Err(failure(FailureCode::UnavailableInput))
         }
     }
+}
+fn answer_bytes(capacity: usize) -> Result<u64, Failure> {
+    (capacity as u64)
+        .checked_mul(std::mem::size_of::<MembershipAnswer>() as u64)
+        .ok_or_else(|| failure(FailureCode::ResourceLimit))
 }
 fn charge(value: &mut u64, n: u64, max: u64) -> Result<(), Failure> {
     *value = value

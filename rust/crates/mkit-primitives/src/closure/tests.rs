@@ -499,6 +499,69 @@ fn batches_use_frontier_cap_and_cap_plus_one() {
 }
 
 #[test]
+fn repeated_heads_consume_one_distinct_item() {
+    let mut limits = ClosureLimits::indexed();
+    limits.items = 1;
+    let mut host = Host::default();
+    host.external
+        .insert(id(80), member(id(80), ObjectType::Tag, 64));
+    host.external
+        .insert(id(81), member(id(81), ObjectType::Tag, 64));
+    let mut machine = walker(View::default(), &[id(80), id(80)], limits, 1).unwrap();
+    assert_eq!(host.finish(&mut machine).unwrap().witnesses, 1);
+    assert_eq!(host.batches, vec![vec![id(80)]]);
+
+    let mut machine = walker(View::default(), &[id(80), id(81)], limits, 2).unwrap();
+    assert_eq!(
+        host.finish(&mut machine).unwrap_err().code,
+        FailureCode::ResourceLimit
+    );
+}
+
+#[test]
+fn membership_spare_capacity_is_bounded_memory_not_response_identity() {
+    for oversized in [false, true] {
+        let mut view = View::default();
+        let targets: Vec<_> = (80..85).map(id).collect();
+        view.graph(id(1), &targets);
+        let mut limits = ClosureLimits::indexed();
+        limits.membership_batch = 5;
+        limits.resident_bytes = 1 << 20;
+        let mut host = Host::with_view(&view);
+        let mut machine = walker(view, &[], limits, 1).unwrap();
+        let ClosureRequest::Membership(request) = host.next_request(&mut machine) else {
+            panic!("membership expected")
+        };
+        let mut response = host.response(&request);
+        let mut pushed = if oversized {
+            Vec::with_capacity(
+                usize::try_from(limits.resident_bytes).unwrap()
+                    / std::mem::size_of::<MembershipAnswer>()
+                    + 1,
+            )
+        } else {
+            Vec::new()
+        };
+        for answer in response.answers {
+            pushed.push(answer);
+        }
+        assert!(pushed.capacity() > pushed.len());
+        response.answers = pushed;
+        let result = machine.answer(ClosureResponse::Membership(response));
+        if oversized {
+            assert_eq!(result.unwrap_err().code, FailureCode::ResourceLimit);
+            assert_eq!(
+                machine.step().unwrap_err().code,
+                FailureCode::InvalidResponse
+            );
+        } else {
+            result.unwrap();
+            assert_eq!(host.finish(&mut machine).unwrap().missing, targets);
+        }
+    }
+}
+
+#[test]
 fn malformed_membership_answers_never_advance() {
     for mutation in 0..8 {
         let mut view = View::default();

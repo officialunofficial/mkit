@@ -1,7 +1,7 @@
 //! Exact request/answer validation; acquisition never implies acceptance.
 use super::{
     Acquisition, CanonicalSource, ClosureRequest, ClosureResponse, ClosureWalker, Failure,
-    FailureCode, InPackObjectView, Phase, Record, State, charge, failure, present,
+    FailureCode, InPackObjectView, Phase, Record, State, answer_bytes, charge, failure, present,
 };
 
 impl<V: InPackObjectView> ClosureWalker<V> {
@@ -12,7 +12,6 @@ impl<V: InPackObjectView> ClosureWalker<V> {
                     || expected.repository != response.repository
                     || expected.view != response.view
                     || expected.objects.len() != response.answers.len()
-                    || response.answers.capacity() > self.limits.membership_batch as usize
                 {
                     return Err(failure(FailureCode::InvalidResponse));
                 }
@@ -35,6 +34,9 @@ impl<V: InPackObjectView> ClosureWalker<V> {
                         }
                     }
                 }
+                // The incoming and previously retained vectors coexist until
+                // replacement; spare capacity is memory, not protocol identity.
+                self.resident(answer_bytes(response.answers.capacity())?)?;
                 self.charge(response.answers.len() as u64)?;
                 self.answers = response.answers;
                 self.request = None;
