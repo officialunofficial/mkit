@@ -44,6 +44,7 @@ layout.
 | `security.yaml` | `rust-security.yml` | `cargo audit` (both workspaces) and `cargo deny`. |
 | `docs.yaml` | retired from GitHub Actions, Cloud Build only | rustdoc `-D warnings`, both workspaces. |
 | `geiger.yaml` | retired from GitHub Actions, Cloud Build only | `scripts/check-geiger-baseline.sh`. |
+| `commonware-latest.yaml` | GitHub latest-release probe reproduction | Same bounded update/build/test script; automatic runs use the scheduled and path-filtered GitHub workflow to avoid duplicate PR builds. |
 | `coverage.yaml` | retired from GitHub Actions, Cloud Build only | llvm-cov → lcov → Codecov (main only, non-fatal). |
 
 ## Triggers
@@ -125,3 +126,32 @@ add the Cloud Build checks and remove the retired GitHub Actions checks
 (`rust-security`, `docs`, `geiger`, `coverage`, and the Linux Rust gate). Don't
 flip these until a real `/gcbrun` run has proven the Cloud Build side green &mdash;
 otherwise `main` loses its Rust gate in the gap.
+
+## Commonware release compatibility
+
+**CI: Commonware latest release** runs weekly, on manifest/lockfile PRs, and
+on manual dispatch. One Linux job has a 30-minute limit, three build workers,
+and three nextest workers. It updates every resolved `commonware-*` package
+to the newest compatible release, prints the versions, and builds and tests
+`mkit-core`, `mkit-attest`, and `mkit-transport-enc` with all features.
+It also includes `mkit-primitives` when that crate exists. Golden encoder
+assertions run in these tests and in ordinary crate test runs.
+
+A newer release that cannot build or changes pinned bytes fails the job.
+Report the incompatibility; do not silently restore an older dependency.
+The compatibility job's modified lockfile is disposable and is never committed.
+The baseline version audit remains a separate check of committed lockfiles.
+
+For a local sample run in a clean checkout:
+
+```sh
+MKIT_CARGO_CACHED=1 bash scripts/check-commonware-latest.sh
+```
+
+This command changes **rust/Cargo.lock**. Save and restore that file when
+returning to baseline tests. The optional Cloud Build reproduction uses the
+baked CI image, sccache, and the same script:
+
+```sh
+gcloud builds submit . --region=us-east4 --config=cloudbuild/commonware-latest.yaml
+```

@@ -904,6 +904,28 @@ fn transient_accept_error(e: &std::io::Error) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn peer_public_key_codec_bytes_are_pinned() {
+        use commonware_codec::DecodeExt as _;
+        use commonware_cryptography::Signer as _;
+
+        // RFC 8032 section 7.1, test 1 public key. Peer URLs and allowlists
+        // carry these raw bytes, with no codec prefix or length field.
+        let expected = [
+            0xd7, 0x5a, 0x98, 0x01, 0x82, 0xb1, 0x0a, 0xb7, 0xd5, 0x4b, 0xfe, 0xd3, 0xc9, 0x64,
+            0x07, 0x3a, 0x0e, 0xe1, 0x72, 0xf3, 0xda, 0xa6, 0x23, 0x25, 0xaf, 0x02, 0x1a, 0x68,
+            0xf7, 0x07, 0x51, 0x1a,
+        ];
+        let seed = [
+            0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec,
+            0x2c, 0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03,
+            0x1c, 0xae, 0x7f, 0x60,
+        ];
+        let peer = PrivateKey::decode(seed.as_slice()).unwrap().public_key();
+        assert_eq!(encode_pubkey(&peer), Some(expected));
+        assert_eq!(decode_peer_pubkey(&expected).unwrap(), peer);
+    }
+
     /// The executor's runtime must outlive a single `block_on` call:
     /// a task spawned during the first `block_on` must still be alive
     /// (not aborted) when the second `block_on` awaits it. If a future

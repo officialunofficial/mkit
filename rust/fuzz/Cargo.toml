@@ -55,7 +55,7 @@ libfuzzer-sys = { version = "0.4", optional = true }
 # the libfuzzer binaries never touch it. Pinned to the commonware
 # 2026.9.x train, same as the workspace-root commonware-* deps.
 [dev-dependencies]
-commonware-invariants = "=2026.9.0"
+commonware-invariants = "2026.9.0"
 
 [features]
 default = []

@@ -65,17 +65,11 @@ check_crate() {
 check_crate "ed25519-dalek"
 check_crate "sha2"
 
-# The commonware-* family ships as a single release train (see
-# docs/INVARIANTS.md, "Single commonware release train"): every
-# `commonware-<name>` dependency, in every manifest AND every
-# lockfile that pins one, must resolve to the exact same version
-# string (not just semver-compatible — an exact match, since every
-# manifest pin is itself exact, e.g. `=2026.9.0`). Unlike
-# `check_crate` above (which only compares compatibility channels)
-# this compares full version strings, and also checks Cargo.lock
-# files, because a manifest bump with a stale `cargo update` leaves
-# the lockfile pinned to the old train even though the manifest text
-# is already correct.
+# Audit the committed Commonware baseline: every caret minimum and every
+# committed lockfile selects the same release train. The latest-release
+# probe updates a disposable lockfile and does not run this baseline audit.
+# Caret requirements let downstream consumers choose a compatible release;
+# the committed lockfiles keep this repository's normal builds reproducible.
 check_commonware_family() {
   local manifest_versions
   manifest_versions=$(

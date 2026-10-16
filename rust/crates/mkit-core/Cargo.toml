@@ -34,7 +34,7 @@ bao = "0.13"
 # `bytes::{Buf, BufMut}` back the `commonware-codec` Read/Write buffer
 # traits used by the packlist node codec (transfer.rs). Pure, wasm-clean.
 bytes = "1"
-# commonware-* (pinned at workspace root to the 2026.9.x train).
+# commonware-* (compatible requirements at workspace root).
 #
 # `commonware-codec` is NON-optional: the transfer packlist node
 # (transfer.rs) is encoded with it (idiomatic Option/Vec + RangeCfg cap).
