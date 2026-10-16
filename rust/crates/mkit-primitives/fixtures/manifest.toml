@@ -4,6 +4,182 @@ schema_version = 1
 # evidence
 # pack_verify
 # closure
+[[fixtures]]
+type = "closure-missing"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/missing-all-reasons.bin"
+semantic = "closure/missing-all-reasons.txt"
+decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
+expected = "ok"
+spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+
+[[fixtures]]
+type = "closure-missing"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/missing-bad-edge.bin"
+semantic = "closure/missing-bad-edge.txt"
+decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
+expected = "InvalidResponse"
+spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+
+[[fixtures]]
+type = "closure-missing"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/missing-bad-version.bin"
+semantic = "closure/missing-bad-version.txt"
+decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
+expected = "InvalidResponse"
+spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+
+[[fixtures]]
+type = "closure-missing"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/missing-trailing.bin"
+semantic = "closure/missing-trailing.txt"
+decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
+expected = "InvalidResponse"
+spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+
+[[fixtures]]
+type = "closure-state"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/state-absent.bin"
+semantic = "closure/state-absent.txt"
+decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
+expected = "ok"
+spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+
+[[fixtures]]
+type = "closure-state"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/state-bad-kind.bin"
+semantic = "closure/state-bad-kind.txt"
+decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
+expected = "InvalidResponse"
+spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+
+[[fixtures]]
+type = "closure-state"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/state-bad-version.bin"
+semantic = "closure/state-bad-version.txt"
+decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
+expected = "InvalidResponse"
+spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+
+[[fixtures]]
+type = "closure-state"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/state-black.bin"
+semantic = "closure/state-black.txt"
+decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
+expected = "ok"
+spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+
+[[fixtures]]
+type = "closure-state"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/state-gray.bin"
+semantic = "closure/state-gray.txt"
+decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
+expected = "ok"
+spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+
+[[fixtures]]
+type = "closure-state"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/state-member.bin"
+semantic = "closure/state-member.txt"
+decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
+expected = "ok"
+spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+
+[[fixtures]]
+type = "closure-state"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/state-trailing.bin"
+semantic = "closure/state-trailing.txt"
+decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
+expected = "InvalidResponse"
+spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+
+[[fixtures]]
+type = "closure-witness"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/witness-bad-boolean.bin"
+semantic = "closure/witness-bad-boolean.txt"
+decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
+expected = "InvalidResponse"
+spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+
+[[fixtures]]
+type = "closure-witness"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/witness-bad-version.bin"
+semantic = "closure/witness-bad-version.txt"
+decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
+expected = "InvalidResponse"
+spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+
+[[fixtures]]
+type = "closure-witness"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/witness-member.bin"
+semantic = "closure/witness-member.txt"
+decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
+expected = "ok"
+spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+
+[[fixtures]]
+type = "closure-witness"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/witness-trailing.bin"
+semantic = "closure/witness-trailing.txt"
+decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
+expected = "InvalidResponse"
+spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+
+[[fixtures]]
+type = "closure-state"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/state-bad-payload.bin"
+semantic = "closure/state-bad-payload.txt"
+decode_config = "max_bytes=1024"
+expected = "InvalidResponse"
+spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+
 # decision
 # auth
 # replay

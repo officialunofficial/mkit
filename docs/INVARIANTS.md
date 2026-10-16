@@ -22,8 +22,27 @@ facts into acceptance evidence.
 or apply effects without every required live comparison.
 
 **Enforcement status:** the initial ALPHA skeleton has private fields and
-compile-fail doctests. No verification or decision entry point exists yet;
-semantic validation and bounded state-machine tests land with their owners.
+compile-fail doctests. The closure entry point enforces its semantic checks with bounded state-machine
+tests. Pack verification and decision entry points land with their owners.
+
+## Portable closure completion requires every occurrence and retained page
+
+**Always:** direct-child closure checks every supplied verified object and every
+advanced head. Membership batches use only the requested repository incarnation.
+Every chunk occurrence contributes its verified Blob payload length, including
+surplus manifests and repeated IDs. A later use cannot bypass a new obligation.
+Only acknowledged authenticated pages support visited-state and relied-on member
+proofs. Resource exhaustion and acquisition loss never yield a complete result.
+
+**Because:** head-only traversal misses surplus entries; ID deduplication alone
+can skip file-integrity obligations or erase a supplier dependency.
+
+**If violated:** an incomplete or corrupt consumed set could be accepted, or a
+caller could publish a truncated missing set as a complete diagnostic.
+
+**Enforced by:** `mkit_primitives::closure::ClosureWalker`, its independent seeded
+graph oracle, protocol/adversarial tests, and closure transition fuzz replay.
+Reference-server integration is separate; this primitive grants no visibility.
 
 ## Conformance distinguishes absent features from implementation gaps
 

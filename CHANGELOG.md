@@ -49,6 +49,13 @@ collect the applicable entries between their old and new immutable pins.
   versioned test-only control binding and declared server-control coverage.
   No production wire, runtime, or stored-format change; no wipe.
 
+- Sans-IO direct-child closure with bounded frontier membership batches, paged
+  visited state, complete missing-set evidence, and exact supplier witnesses.
+  Tree/tag child closure preserves existence-only semantics; chunk integrity
+  covers every consumed manifest. Hosts retain and acknowledge private evidence
+  pages, and replay verification after evidence loss. New local evidence format;
+  no transport change or repository store reset.
+
 - `ReadAccess::declared_visibility` reads the stored visibility declaration
   whether or not the repository record exists, for private-origin locks and
   similar flows that declare visibility ahead of the record. It returns `None`

@@ -1,0 +1,1 @@
+Authenticated witness-member page with held flag 2 instead of strict boolean 0/1 in its final byte. Expected InvalidResponse.

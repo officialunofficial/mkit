@@ -1,0 +1,1 @@
+Authenticated state page bytes with one trailing zero after the complete record. Expected InvalidResponse; suffixes are not ignored.
