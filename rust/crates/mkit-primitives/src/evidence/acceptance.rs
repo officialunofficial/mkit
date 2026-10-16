@@ -316,19 +316,18 @@ impl AcceptanceEvidence {
     pub fn recheck_heads(&self) -> Result<()> {
         for head in self.heads() {
             let object = mkit_core::serialize::deserialize(head.canonical_bytes)
-                .map_err(|_| failure(FailureCode::EvidenceHeadMismatch))?;
+                .map_err(|_| failure(FailureCode::NonCanonicalObject))?;
             let (kind, signer) = match &object {
                 Object::Commit(c) => (ObjectType::Commit, c.signer),
                 Object::Remix(c) => (ObjectType::Remix, c.signer),
                 Object::Tag(c) => (ObjectType::Tag, c.signer),
                 _ => return Err(failure(FailureCode::EvidenceHeadMismatch)),
             };
-            if kind != head.kind
-                || signer != head.signer
-                || mkit_core::object::id_from_object(&object, head.canonical_bytes)
-                    != head.object_id
-            {
+            if kind != head.kind || signer != head.signer {
                 return Err(failure(FailureCode::EvidenceHeadMismatch));
+            }
+            if mkit_core::object::id_from_object(&object, head.canonical_bytes) != head.object_id {
+                return Err(failure(FailureCode::ObjectHashMismatch));
             }
             mkit_core::sign::verify_object_signature(&object)
                 .map_err(|_| failure(FailureCode::BadSignature))?;

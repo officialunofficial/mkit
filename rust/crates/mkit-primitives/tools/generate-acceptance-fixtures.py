@@ -96,7 +96,7 @@ def emit(name, description, semantic=None, cfg=None, failure=None, raw=None, rec
         expected['digest'] = blake3.blake3(
             b'mkit-acceptance-evidence:v1\0' + b).hexdigest()
         expected['recheck_heads'] = (recheck if recheck is not None else
-                                    ('EvidenceHeadMismatch' if s['heads'] else 'ok'))
+                                    ('NonCanonicalObject' if s['heads'] else 'ok'))
     # Decimal strings preserve every u64 exactly in JSON implementations that
     # otherwise round numbers through IEEE-754 doubles.
     semantic = copy.deepcopy(s)

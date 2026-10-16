@@ -261,9 +261,9 @@ fn recheck_refuses_each_head_metadata_and_signature_attack() {
         malformed.bytes.truncate(1);
         for (head, code) in [
             (bad_signature, FailureCode::BadSignature),
-            (wrong_id, FailureCode::EvidenceHeadMismatch),
+            (wrong_id, FailureCode::ObjectHashMismatch),
             (wrong_signer, FailureCode::EvidenceHeadMismatch),
-            (malformed, FailureCode::EvidenceHeadMismatch),
+            (malformed, FailureCode::NonCanonicalObject),
         ] {
             let mut input = Envelope::empty();
             input.heads.push(head);

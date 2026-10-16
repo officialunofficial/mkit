@@ -118,7 +118,9 @@ Decoder refusal codes are stable within this format and ruleset:
 | Ruleset or profile/limits differs from configuration | `EvidenceProfileMismatch` |
 | Magic, ordering, duplicates, tags, contradictory counts, or trailing data | `NonCanonicalEvidence` |
 | Frozen pack or replay binding differs | `EvidenceBindingMismatch` |
-| Canonical head grammar, id, kind, or signer differs | `EvidenceHeadMismatch` |
+| Nested canonical head grammar is invalid | `NonCanonicalObject` |
+| Head object id differs | `ObjectHashMismatch` |
+| Head kind or signer metadata differs | `EvidenceHeadMismatch` |
 | Head's individual signature fails | `BadSignature` |
 
 Decode checks the envelope cap first, then reads fields in wire order. It checks

@@ -14,7 +14,7 @@
     "decode": "ok",
     "failure_code": null,
     "digest": "3e32c2a71963ad7f8b905d5349b3105709cfb4e43cd63b171c8f3f7c174e9e5f",
-    "recheck_heads": "EvidenceHeadMismatch"
+    "recheck_heads": "NonCanonicalObject"
   },
   "encoded_len": 419,
   "semantic": {
