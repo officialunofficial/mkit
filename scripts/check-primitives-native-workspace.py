@@ -43,11 +43,15 @@ def main():
             '#include <stdio.h>\n#include "zstd_decompress_internal.h"\n'
             'int main(void) { printf("%zu\\n", sizeof(ZSTD_DCtx)); return 0; }\n'
         )
+        # GCC may emit unused static header helpers at -O0. Link their
+        # resolved error-string implementation rather than rely on dead-code
+        # elimination; this does not change the measured context layout.
         subprocess.run(
             shlex.split(os.environ.get("CC", "cc"))
             + [f"-DZSTD_LEGACY_SUPPORT={legacy}", "-I", str(source),
-               str(program), "-o", str(binary)],
-            check=True, timeout=30, capture_output=True,
+               str(program), str(source.parent / "common/error_private.c"),
+               "-o", str(binary)],
+            check=True, timeout=30,
         )
         size = int(subprocess.check_output([str(binary)], text=True, timeout=10))
     if not 0 < size <= ALLOWANCE:
