@@ -530,6 +530,36 @@ fn refused_combination(
     recreated: &PublicationObservation,
     after: &PublicationObservation,
 ) -> CaseResult {
+    let baseline = &recreated.acceptance;
+    ensure!(
+        baseline.memberships == [false, false]
+            && recreated.published_memberships == [false, false]
+            && baseline
+                .replay
+                .as_ref()
+                .is_none_or(|r| r.result.as_deref() != Some("advance_committed"))
+            && baseline.tickets.len() == 2
+            && baseline
+                .tickets
+                .iter()
+                .all(|t| t.as_ref().is_some_and(|t| t.state == "live"))
+            && baseline.reservations.len() == 3
+            && baseline.reservations[..2].iter().all(|r| r
+                .as_ref()
+                .is_some_and(|r| r.state == "ticketed" && r.terminal_count == 0)),
+        "combined race baseline already has candidate acceptance effects: {recreated:?}"
+    );
+    let valid_ref = |reservation: &crate::control::ReservationView| {
+        matches!(
+            (reservation.state.as_str(), reservation.terminal_count),
+            ("pending", 0) | ("aborted" | "expired", 1)
+        )
+    };
+    let original_ref = baseline.reservations[2].as_ref();
+    ensure!(
+        original_ref.is_none_or(valid_ref),
+        "combined race baseline has invalid ref responsibility: {recreated:?}"
+    );
     ensure!(
         after.acceptance.head == recreated.acceptance.head
             && after.acceptance.packmap == recreated.acceptance.packmap
@@ -549,12 +579,13 @@ fn refused_combination(
                 .is_none_or(|r| r.result.as_deref() != Some("advance_committed"))
             && recreated.acceptance.reservations.len() == 3
             && after.acceptance.reservations.len() == 3
-            && after.acceptance.reservations[2].as_ref().is_none_or(|r| {
-                matches!(
-                    (r.state.as_str(), r.terminal_count),
-                    ("pending", 0) | ("aborted" | "expired", 1)
-                )
-            })
+            && match (original_ref, after.acceptance.reservations[2].as_ref()) {
+                (None, None) => true,
+                (Some(_), None) => false,
+                (None, Some(next)) => valid_ref(next),
+                (Some(prior), Some(next)) if prior.terminal_count == 1 => prior == next,
+                (Some(_), Some(next)) => valid_ref(next),
+            }
             && after.acceptance.reservations.iter().take(2).eq(recreated
                 .acceptance
                 .reservations
@@ -620,10 +651,86 @@ mod tests {
     }
 
     #[test]
+    fn refused_combination_rejects_lost_observed_ref_responsibility() {
+        let before = refused_snapshot();
+        let mut after = before.clone();
+        after.acceptance.reservations[2] = None;
+        assert!(refused_combination(&before, &after).is_err());
+    }
+
+    #[test]
+    fn refused_combination_rejects_changed_terminal_ref_responsibility() {
+        let mut before = refused_snapshot();
+        before.acceptance.reservations[2] = Some(ReservationView {
+            state: "aborted".into(),
+            terminal_count: 1,
+        });
+        let mut after = before.clone();
+        after.acceptance.reservations[2] = Some(ReservationView {
+            state: "expired".into(),
+            terminal_count: 1,
+        });
+        assert!(refused_combination(&before, &after).is_err());
+    }
+
+    #[test]
+    fn refused_combination_rejects_identically_consumed_ticket_baseline() {
+        let mut before = refused_snapshot();
+        before.acceptance.tickets[0] = Some(TicketView {
+            state: "consumed".into(),
+        });
+        assert!(refused_combination(&before, &before).is_err());
+    }
+
+    #[test]
+    fn refused_combination_rejects_identically_missing_ticket_baseline() {
+        let mut before = refused_snapshot();
+        before.acceptance.tickets[0] = None;
+        assert!(refused_combination(&before, &before).is_err());
+    }
+
+    #[test]
+    fn refused_combination_rejects_identically_missing_ticket_reservation_baseline() {
+        let mut before = refused_snapshot();
+        before.acceptance.reservations[0] = None;
+        assert!(refused_combination(&before, &before).is_err());
+    }
+
+    #[test]
+    fn refused_combination_rejects_identically_settled_ticket_reservation_baseline() {
+        let mut before = refused_snapshot();
+        before.acceptance.reservations[0] = Some(ReservationView {
+            state: "committed".into(),
+            terminal_count: 1,
+        });
+        assert!(refused_combination(&before, &before).is_err());
+    }
+
+    #[test]
+    fn refused_combination_rejects_premature_candidate_baseline() {
+        let mut before = refused_snapshot();
+        before.acceptance.memberships[0] = true;
+        let after = refused_snapshot();
+        assert!(refused_combination(&before, &after).is_err());
+        let mut before = refused_snapshot();
+        before.published_memberships[0] = true;
+        assert!(refused_combination(&before, &after).is_err());
+        let mut before = refused_snapshot();
+        before.acceptance.replay = Some(crate::control::ReplayView {
+            state: "committed".into(),
+            result: Some("advance_committed".into()),
+            fingerprint: Some("digest".into()),
+        });
+        assert!(refused_combination(&before, &after).is_err());
+    }
+
+    #[test]
     fn refused_combination_allows_only_uncommitted_ref_lifecycle() {
         let before = refused_snapshot();
+        let mut unobserved = before.clone();
+        unobserved.acceptance.reservations[2] = None;
+        assert!(refused_combination(&unobserved, &unobserved).is_ok());
         for reservation in [
-            None,
             Some(ReservationView {
                 state: "pending".into(),
                 terminal_count: 0,
@@ -640,6 +747,13 @@ mod tests {
             let mut after = before.clone();
             after.acceptance.reservations[2] = reservation;
             assert!(refused_combination(&before, &after).is_ok());
+            assert!(refused_combination(&unobserved, &after).is_ok());
+            if after.acceptance.reservations[2]
+                .as_ref()
+                .is_some_and(|r| r.terminal_count == 1)
+            {
+                assert!(refused_combination(&after, &after).is_ok());
+            }
         }
         for (state, terminal_count) in [
             ("pending", 1),
