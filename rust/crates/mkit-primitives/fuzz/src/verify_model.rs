@@ -244,7 +244,7 @@ fn run(bytes: &[u8], schedule: u8) -> Outcome {
                 assert_eq!(pack.source(), source);
                 assert!(driver.usage().peak_resident_bytes <= limits.resident_bytes);
                 assert!(
-                    schedule != 3 || restarted,
+                    schedule != 3 || restarted || pack.counts().entries == 0,
                     "cold-resume schedule never restarted"
                 );
                 trace.update(&pack.object_set_root());

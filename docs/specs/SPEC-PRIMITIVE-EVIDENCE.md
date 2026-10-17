@@ -336,10 +336,12 @@ begins with `record_version:u8 = 1`; any other version is invalid. Numeric
 fields are little-endian. A `kind` byte names a SPEC-OBJECTS type: 1 blob,
 2 tree, 3 commit, 4 remix, 5 chunked_blob, 7 tag. A boolean byte is `0` or
 `1`; any other value is invalid. `signature` is `0` none, `1` valid,
-`2` invalid; `domain` is `0` none, `1` commit, `2` remix, `3` tag. Domain
-`none` and signature `none` agree exactly: a record with one set and not the
-other is invalid. Unsigned records carry all-zero `signer` and
-`signing_digest`; any nonzero value under signature `none` is invalid.
+`2` invalid; `domain` is `0` none, `1` commit, `2` remix, `3` tag. `domain`
+MUST equal the signing domain implied by `kind` — commit→`1`, remix→`2`,
+tag→`3`, every other kind→`0` — and domain `none` and signature `none` agree
+exactly: a record with one set and not the other is invalid. Unsigned
+records carry all-zero `signer` and `signing_digest`; any nonzero value
+under signature `none` is invalid.
 
 The **object record** (120 bytes, kind `objects`) is written once per
 distinct object, at its first wire occurrence:

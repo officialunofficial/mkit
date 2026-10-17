@@ -1,5 +1,5 @@
 {
-  "cursor_bytes": 188,
+  "cursor_bytes": 157,
   "description": "Format version 2 checkpoint captured at an entry boundary during all-entry verification, carrying the verify-state section with six index checkpoints.",
   "encoded_bytes": 958,
   "expected": "Checkpoint",

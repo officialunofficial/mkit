@@ -905,3 +905,71 @@ fn record_fixtures_decode_canonically_and_version_bytes_refuse() {
         );
     }
 }
+
+#[test]
+fn record_domain_must_match_the_kind_signing_domain() {
+    let signed = ObjectRecord {
+        kind: ObjectType::Commit,
+        canonical_len: 42,
+        first_ordinal: 0,
+        delta_depth: 0,
+        signature: Signature::Valid,
+        domain: Domain::Commit,
+        signer: [7; 32],
+        signing_digest: [8; 32],
+        dep_start: 0,
+        dep_count: 0,
+        chunk_total: 0,
+        chunk_count: 0,
+    }
+    .to_bytes();
+    assert!(ObjectRecord::from_bytes(&signed).is_ok());
+    // A commit signature under a non-signed kind is rejected.
+    let mut wrong_kind = signed.clone();
+    wrong_kind[1] = 1;
+    assert_eq!(
+        ObjectRecord::from_bytes(&wrong_kind).unwrap_err().code,
+        FailureCode::InvalidEvidence
+    );
+    // A mismatched signing domain under a signed kind is rejected.
+    let mut wrong_domain = signed;
+    wrong_domain[23] = 2;
+    assert_eq!(
+        ObjectRecord::from_bytes(&wrong_domain).unwrap_err().code,
+        FailureCode::InvalidEvidence
+    );
+
+    let signed = OccurrenceRecord {
+        object: [9; 32],
+        kind: ObjectType::Tag,
+        canonical_len: 42,
+        frame_offset: 0,
+        frame_len: 10,
+        wire_type: 0,
+        from_delta: false,
+        delta_base: [0; 32],
+        delta_depth: 0,
+        signature: Signature::Valid,
+        first: true,
+        domain: Domain::Tag,
+        signer: [7; 32],
+        signing_digest: [8; 32],
+        ext_start: 0,
+        ext_count: 0,
+    }
+    .to_bytes();
+    assert!(OccurrenceRecord::from_bytes(&signed).is_ok());
+    // kind at offset 33, domain at offset 98.
+    let mut wrong_kind = signed.clone();
+    wrong_kind[33] = 2;
+    assert_eq!(
+        OccurrenceRecord::from_bytes(&wrong_kind).unwrap_err().code,
+        FailureCode::InvalidEvidence
+    );
+    let mut wrong_domain = signed;
+    wrong_domain[98] = 1;
+    assert_eq!(
+        OccurrenceRecord::from_bytes(&wrong_domain).unwrap_err().code,
+        FailureCode::InvalidEvidence
+    );
+}

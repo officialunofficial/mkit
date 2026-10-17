@@ -1166,7 +1166,8 @@ mod tests {
         assert_eq!(verify.edges, 0);
         assert_eq!(verify.external_lookups, 0);
         assert!(verify.signature_failure.is_none());
-        assert!(!state.cursor.is_empty());
+        // The serialized window cursor matches the semantic sidecar exactly.
+        assert_eq!(state.cursor.len(), 157);
     }
 
     #[cfg_attr(not(target_arch = "wasm32"), test)]
