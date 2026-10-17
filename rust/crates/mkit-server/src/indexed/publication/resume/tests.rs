@@ -831,6 +831,9 @@ fn lowered_delta_depth_becomes_durable_terminal_failure_across_timers() {
             );
             if retained.terminal.is_some() {
                 assert_eq!(retained.terminal, Some(TerminalFailure::DeltaDepth));
+                // Exactly 30 base hops were charged at one 11-byte canonical
+                // blob entry each; the cursor checkpoint starts mid-walk.
+                assert_eq!(retained.bytes, 30 * 11);
                 break;
             }
             assert!(rounds < 10);
@@ -1128,8 +1131,10 @@ fn limit_counter_counts_only_committed_capacity_stops_once() {
                 p.calls = TOTAL_CALLS;
             }
             if failure == Exhaustion::Traversal {
-                // A cleared set over the fork bound is retained-capacity
-                // exhaustion. The flagged witness makes the machine ask for it.
+                // A cleared-set supplier list over the retained-items bound
+                // exhausts at the completion merge — the one accumulating set
+                // that is not checkpointed, so the retained row stays small.
+                // The flagged witness makes the machine ask for it.
                 let flagged = crate::store::publication::Witness {
                     generation: 0,
                     sequence: 0,
@@ -1138,7 +1143,10 @@ fn limit_counter_counts_only_committed_capacity_stops_once() {
                     boundary: true,
                 }
                 .encode();
-                let big = vec![0u8; (crate::fork::MAX_SET_IDS + 1) * 32];
+                let mut bases = Vec::new();
+                for n in 0..=MAX_ADVANCE_ITEMS {
+                    bases.extend_from_slice(&hash(&n.to_be_bytes()));
+                }
                 kv.apply(
                     &SinglePartition.membership(&repo, &crate::BlobKey::pack(root)),
                     Batch::new().put(keys::membership(&repo.name, &root), flagged),
@@ -1147,7 +1155,7 @@ fn limit_counter_counts_only_committed_capacity_stops_once() {
                 .unwrap();
                 kv.apply(
                     &SinglePartition.coordinator(&repo.namespace),
-                    Batch::new().put(keys::fork_set(&repo.name, 0), Value::new(big)),
+                    Batch::new().put(keys::fork_set(&repo.name, 3), Value::new(bases)),
                 )
                 .await
                 .unwrap();
@@ -1223,6 +1231,7 @@ fn limit_counter_counts_only_committed_capacity_stops_once() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // Corrupt and retryable loads in one fixture.
 fn a_failing_cleared_set_load_is_charged_and_a_corrupt_one_ends_the_proof() {
     use crate::store::publication::Witness;
     block_on(async {
@@ -1253,6 +1262,14 @@ fn a_failing_cleared_set_load_is_charged_and_a_corrupt_one_ends_the_proof() {
                     kv.apply(
                         &SinglePartition.coordinator(&repo.namespace),
                         Batch::new().put(keys::fork_set(&repo.name, 0), Value::new(bytes)),
+                    )
+                    .await
+                    .unwrap();
+                } else {
+                    kv.apply(
+                        &SinglePartition.coordinator(&repo.namespace),
+                        Batch::new()
+                            .put(keys::fork_set(&repo.name, 3), Value::new([9; 32].to_vec())),
                     )
                     .await
                     .unwrap();
@@ -1323,7 +1340,9 @@ fn a_failing_cleared_set_load_is_charged_and_a_corrupt_one_ends_the_proof() {
         .unwrap();
         assert!(done.complete);
         assert!(done.calls > first.calls);
-        assert!(done.complete);
+        // The boundary answer was honored: its cleared supplier merged into
+        // the retained bases.
+        assert_eq!(done.bases, BTreeSet::from_iter([[9; 32]]));
     });
 }
 
@@ -1392,8 +1411,13 @@ fn a_cleared_tree_is_never_skipped_as_the_head_of_a_pair() {
         a.additions.clear();
         a.value.head = Some(id);
         let cfg = IndexedConfig::default();
+        let counter = CountGet {
+            store: &kv,
+            key: keys::fork_set(&repo.name, 0),
+            hits: std::sync::atomic::AtomicUsize::new(0),
+        };
         let _ = prepare(
-            &kv,
+            &counter,
             &source,
             &SinglePartition,
             &repo,
@@ -1418,9 +1442,12 @@ fn a_cleared_tree_is_never_skipped_as_the_head_of_a_pair() {
             .await
             .unwrap();
         }
-        // The set names the tree, yet the head's kind is still checked: a tree
-        // is not a commit, remix or tag.
-        assert!(progress.walk.is_some());
+        // The cleared set was actually loaded before the head was read and
+        // refused: requests are sequential, so a hit precedes the verdict.
+        assert!(
+            counter.hits.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            "the fork cleared set was loaded"
+        );
         assert_eq!(progress.terminal, Some(TerminalFailure::OpenClosure));
         assert!(!progress.complete);
     });
@@ -2395,6 +2422,42 @@ fn non_branch_pair_resumes_across_slices() {
     });
 }
 
+/// Counts gets against one key: proves a specific row was read.
+struct CountGet<'a> {
+    store: &'a MemoryKv,
+    key: crate::Key,
+    hits: std::sync::atomic::AtomicUsize,
+}
+impl NamespaceStore for CountGet<'_> {
+    fn capabilities(&self) -> crate::store::StoreCapabilities {
+        self.store.capabilities()
+    }
+    async fn get(&self, p: &Partition, k: &crate::Key) -> Result<Option<Value>, StoreError> {
+        if k == &self.key {
+            self.hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.store.get(p, k).await
+    }
+    async fn scan(
+        &self,
+        p: &Partition,
+        start: &crate::Key,
+        end: &crate::Key,
+        after: Option<&crate::Cursor>,
+        limit: u32,
+    ) -> Result<crate::ScanPage, StoreError> {
+        self.store.scan(p, start, end, after, limit).await
+    }
+    async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+        self.store.apply(p, batch).await
+    }
+    async fn stats(&self, p: &Partition) -> Result<crate::PartitionStats, StoreError> {
+        self.store.stats(p).await
+    }
+    async fn probe(&self) -> Result<(), StoreError> {
+        self.store.probe().await
+    }
+}
 /// Counts `denial::page` reads: every chunk-page get carries the
 /// `\0chunks\0` marker in its key bytes.
 struct CountPages<'a> {
