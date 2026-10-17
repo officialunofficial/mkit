@@ -263,8 +263,9 @@ the publish gate checks the server too, including that pinned baseline.
 
 crates.io publishing is **tag-driven**, owned by
 [`.github/workflows/crates-publish.yml`](../.github/workflows/crates-publish.yml).
-On a pushed `v*.*.*` tag it runs `cargo publish --workspace --locked`, which
-publishes every workspace member without `publish = false` to crates.io in
+On a pushed `v*.*.*` tag it first ensures the standalone `mkit-ruzstd` package
+is published, then runs `cargo publish --workspace --locked` to publish every
+workspace member without `publish = false` to crates.io in
 dependency order, waiting for each to index before the next. A guard refuses to
 publish if the tag does not match the workspace version (`mkit-core`'s version
 in `rust/Cargo.toml` at the tagged tree).
@@ -273,13 +274,37 @@ in `rust/Cargo.toml` at the tagged tree).
 
 | Publishes to crates.io | Stays off crates.io (`publish = false`) |
 |---|---|
-| the library crates (`mkit-core`, `mkit-rpc`, `mkit-client`, `mkit-sync`, `mkit-attest`, `mkit-keystore`, `mkit-git-bridge`, `mkit-server`, `mkit-server-conformance`, `mkit-transport-{file,http,memory,s3,ssh,enc,connect}`) plus `mkit-cli` (so `cargo install mkit-cli` works) | `mkit-wasm` (npm-only), `mkit-repo-client`, `mkit-test-util`, `mkit-core-wasm-check`, `mkit-formal-conformance`, `fuzz`, `benches`. The contrib signers are a separate workspace under `contrib/signers/` (not workspace members at all). |
+| `mkit-ruzstd` first, then the library crates (`mkit-core`, `mkit-rpc`, `mkit-client`, `mkit-sync`, `mkit-attest`, `mkit-keystore`, `mkit-git-bridge`, `mkit-server`, `mkit-server-conformance`, `mkit-transport-{file,http,memory,s3,ssh,enc,connect}`) plus `mkit-cli` (so `cargo install mkit-cli` works) | `mkit-wasm` (npm-only), `mkit-repo-client`, `mkit-test-util`, `mkit-core-wasm-check`, `mkit-formal-conformance`, `fuzz`, `benches`. The contrib signers are a separate workspace under `contrib/signers/` (not workspace members at all). |
 
 The published crates depend only on each other, forming a closed,
 dependency-ordered set; `cargo publish --workspace` computes that order and
 skips any `publish = false` member.
 
 Notes on the published set:
+
+- **`mkit-ruzstd`** &mdash; the MIT-licensed bounded decoder is a standalone
+  package under **rust/vendor/ruzstd/**. Its own version follows the fork's
+  dependency requirement, independently of the workspace tag version. The
+  release workflow runs **scripts/publish-bounded-decoder.py** before the
+  workspace publish, so `mkit-core/pack-ruzstd` resolves the named package.
+  The script runs `cargo package --locked --no-verify` and checks crates.io
+  for that exact version. An absent version is published, waiting for registry
+  indexing. For a present version, the script downloads the published `.crate`
+  and compares its extracted file list and every file byte with the local
+  package, excluding exactly the Cargo-generated `.cargo_vcs_info.json`.
+  Packaging and publication stay inside Git to preserve commit provenance.
+  The sole exclusion permits a later tag to reuse an unchanged fork. The
+  normalized **Cargo.toml**, **Cargo.toml.orig**, **Cargo.lock**, and all other
+  packaged files must match byte for byte. Identical contents skip the upload with an explicit message.
+  Different contents fail the release: the fork changed and needs a version
+  bump. No published version is overwritten. Archive ordering, timestamps,
+  and compression metadata do not affect the comparison; packaged files do.
+  Registry or download errors fail the release instead of skipping publication.
+  Local fixture tests in **scripts/test-publish-bounded-decoder.py** cover
+  absent, identical, and different packages without network access.
+  Validate the fork package with `cargo publish --dry-run --locked
+  --manifest-path vendor/ruzstd/Cargo.toml` from **rust/** before release.
+
 
 - **`mkit-server-conformance`** &mdash; the protocol conformance library and
   runner join the next lockstep release. Package with default features;

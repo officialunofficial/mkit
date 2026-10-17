@@ -123,6 +123,9 @@ pub enum FailureCode {
     /// Fork job or replay belongs to another binding.
     #[error("ForkBindingMismatch")]
     ForkBindingMismatch,
+    /// Destination lifecycle currently withholds accepted fork clearance.
+    #[error("ForkLifecycleUnavailable")]
+    ForkLifecycleUnavailable,
     // auth
     /// Malformed, mismatched, expired, or incorrectly signed auth envelope.
     #[error("InvalidEnvelope")]
@@ -192,6 +195,7 @@ impl FailureCode {
             Self::ForkExpired => "ForkExpired",
             Self::ForkQuotaExceeded => "ForkQuotaExceeded",
             Self::ForkBindingMismatch => "ForkBindingMismatch",
+            Self::ForkLifecycleUnavailable => "ForkLifecycleUnavailable",
             // auth
             Self::InvalidEnvelope => "InvalidEnvelope",
             Self::ClaimsBindingMismatch => "ClaimsBindingMismatch",
@@ -282,6 +286,7 @@ mod tests {
             FailureCode::ForkExpired.as_str(),
             FailureCode::ForkQuotaExceeded.as_str(),
             FailureCode::ForkBindingMismatch.as_str(),
+            FailureCode::ForkLifecycleUnavailable.as_str(),
             // auth
             FailureCode::InvalidEnvelope.as_str(),
             FailureCode::ClaimsBindingMismatch.as_str(),

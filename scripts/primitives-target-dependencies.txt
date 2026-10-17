@@ -35,7 +35,7 @@ r-efi
 rustc-hash
 rustc_version
 rustix
-ruzstd
+mkit-ruzstd
 semver
 sha2
 shlex

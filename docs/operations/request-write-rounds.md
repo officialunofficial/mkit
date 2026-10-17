@@ -160,8 +160,10 @@ Findings 2, 4 and 9 are fixed; the rest remain open.
    and 6 rounds per session.
    - Fixed by a request-scoped `TicketFence` (`pipeline/authority.rs`) owned
      by each `UploadSession`/`PartUploadSession`: the unfenced
-     activation probe runs once per request; fenced mode still reads the
-     generation row live on every check, and the apply keeps its
+     activation probe runs once per request and reads only the generation
+     and lease-recovery pair. The fork permit marker is not part of that
+     probe. Fenced mode still reads the generation row live on every check,
+     and the apply keeps its
      `authority_generation`/`lease_recovery` guards.
 
 3. **A pending advance is not free.** The first ticketed `AdvanceRefs` that

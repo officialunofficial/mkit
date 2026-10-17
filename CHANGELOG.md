@@ -15,6 +15,12 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Breaking (toward 0.6)
 
+- Native `pack-zstd` now enforces the same 8 MiB effective window and RFC 8878
+  block maximum as `pack-ruzstd`. Previously accepted oversized windows or
+  blocks return `ZstdDecompress`. Migration: re-encode such input with a window
+  no larger than 8 MiB and conforming block sizes. Output claims, cumulative
+  budgets, and stable error variants are unchanged; no store reset is required.
+
 - The conformance profile adds `combined-publication`, `gc`, and
   `async-inspection`, with feature-gated publication and removal-race cases.
   Test-control messages add typed publication and reliance observations.
@@ -28,6 +34,29 @@ collect the applicable entries between their old and new immutable pins.
   reset stores before adopting these formats; no legacy decoder is provided.
   Authority and epoch setters may return retryable unavailable while a drain
   finishes. Ordinary writes retain their existing storage round trips.
+
+- [embedder: breaking API] Low-level fork admission requires source
+  `RepoIndex` partitions, matching the existing sharded `ForkRepo` deployment
+  requirement. Migration: use the pipeline's sharded map for new forks;
+  completed receipts remain recoverable. No additional store reset.
+
+- [embedder: breaking API] [embedder: stored-format change]
+  [embedder: store reset required] Fork preparation now stages membership until
+  guarded acceptance, which atomically saves replay and settles its reservation.
+  Activation uses revocable local permits; generation/epoch moves invalidate them
+  before acknowledgement. Coherent source proofs retain mutation-version evidence
+  across slices. Migration: reset existing stores; no legacy decode is provided.
+  Configure low-level `ForkEnv` and `ForkTimer` with `with_publication_policy`
+  when using a custom pipeline policy. Implement `PublicationPolicy::fork_version`
+  with a durable, non-repeating version that changes atomically with fork
+  eligibility; the default refuses new and unaccepted forks.
+
+- [embedder: breaking API] Storage `Write::Increment(Key)` and `Batch::increment`
+  atomically advance checked big-endian u64 mutation stamps without another
+  writer round trip. Migration: implement this variant inside each backend's
+  existing atomic apply; absence starts at zero, and malformed values or overflow
+  reject the whole batch. Update exhaustive write matches. Existing stores must
+  be reset with the fork-format change above.
 
 - Conformance profiles declare transport writes, authority RPCs, authority
   fencing, fork, and the relay-lag bound. Results distinguish `NotApplicable`
@@ -47,6 +76,11 @@ collect the applicable entries between their old and new immutable pins.
 - `WindowCursor::metadata` returns validated, read-only pack identity and entry
   geometry for binding caller-owned checkpoints. Cursor fields remain private,
   and cursor encodings and reader verification behavior are unchanged.
+- Add pure fork progress, membership activation, and clearance completion
+  decisions to `mkit-primitives` and adopt them in the reference fork driver.
+  Recorded authority and exact pending reservation guards retain their commit
+  boundaries. Accepted clearance preserves its saved result and never repeats
+  settlement. Additive ALPHA API; no wire or stored-format change; no reset.
 
 - Add guarded fork acceptance to `mkit-primitives`: bounded full-inventory plans,
   authoritative destination emptiness, final source-proof ordering, exact
@@ -79,11 +113,18 @@ collect the applicable entries between their old and new immutable pins.
   independent policy checks. No production wire, runtime, or stored-format
   change; no wipe.
 
+- The standalone conformance runner adds `run` for the wire and server-control
+  tiers, and `diff` for deterministic protocol decisions against an embedded
+  native reference host. Versioned profile files declare features and controls;
+  JSON reports and documented exit codes support CI. Enable `reference-runner`
+  when installing the optimized differential test utility. Production artifacts
+  do not enable test controls. No wire or stored-format change; no wipe.
+
 - Protocol acceptance and recovery requirements now distinguish portable
   guarantees from reference-server mechanisms. Fork acceptance requires a final
   source proof after membership staging, with uniform source-race refusal and
-  ordering at the proof; the reference gaps have declared Tier-2 skips. The
-  conformance library and
+  ordering at the proof. Tier-2 assertions report implementation coverage
+  separately from declared skips. The conformance library and
   runner are prepared for the next lockstep crates.io release, with a
   versioned test-only control binding and declared server-control coverage.
   No production wire, runtime, or stored-format change; no wipe.
@@ -129,6 +170,12 @@ collect the applicable entries between their old and new immutable pins.
   (`invalid_argument` on multi, `unauthenticated` on single). Authentication
   codes, duplicate rejection, and verification order remain unchanged.
 
+- Unfenced multipart and stream writes no longer read the fork permit marker
+  during authority activation. That marker is consulted only when fencing is
+  enabled, inside the existing activation read. A full coordinator partition
+  during an epoch or authority move is again `unavailable` with
+  `storage partition full`, not fork unavailability. No API, wire, or
+  stored-format change; no store reset.
 - Use smaller test codegen units and serialize Cloud Build's workspace test
   compilation on the existing worker to bound compiler memory. All tests
   and their execution concurrency remain unchanged.
@@ -168,6 +215,12 @@ collect the applicable entries between their old and new immutable pins.
   public APIs, and wire formats are unchanged; no store reset is required.
 
 ### Changed
+
+- `pack-ruzstd` selects the MIT-licensed `mkit-ruzstd` package through a
+  versioned path dependency. Published consumers inherit the bounded decoder.
+  Embedders can remove their workspace `ruzstd` patch after updating to this
+  release. The release pipeline publishes the decoder before the workspace.
+  Wire bytes, object budgets, and stored formats are unchanged; no reset.
 
 - Windowed pack checkpoints reuse an incremental BLAKE3 prefix digest.
   Cold resumes authenticate and rebuild the current prefix once. Cursor bytes,

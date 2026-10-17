@@ -3346,7 +3346,7 @@ fn empty_pending_consume_plans_no_membership_work() {
             .writes
             .iter()
             .map(|w| match w {
-                Write::Put(k, _) | Write::Delete(k) => k.as_bytes()[0],
+                Write::Put(k, _) | Write::Delete(k) | Write::Increment(k) => k.as_bytes()[0],
             })
             .collect();
         tags.sort_unstable();
@@ -3413,7 +3413,8 @@ fn empty_pending_consume_plans_no_membership_work() {
     );
     assert!(
         !packmap_batch.writes.iter().any(|w| match w {
-            Write::Put(k, _) | Write::Delete(k) => k.as_bytes().starts_with(b"m\0"),
+            Write::Put(k, _) | Write::Delete(k) | Write::Increment(k) =>
+                k.as_bytes().starts_with(b"m\0"),
         }),
         "no membership puts: {batches:?}"
     );

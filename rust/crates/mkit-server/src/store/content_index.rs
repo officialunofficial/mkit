@@ -290,10 +290,13 @@ fn guard_state(key: &Key, old: Option<&Value>) -> Precondition {
 }
 
 /// The `c` row after a change at `now_ms`.
-fn bumped(mut state: ObjectState, now_ms: u64) -> ObjectState {
-    state.seq = state.seq.wrapping_add(1);
+fn bumped(mut state: ObjectState, now_ms: u64) -> Result<ObjectState, StoreError> {
+    state.seq = state
+        .seq
+        .checked_add(1)
+        .ok_or_else(|| StoreError::Invalid("content mutation version exhausted".into()))?;
     state.changed_at_ms = state.changed_at_ms.max(now_ms);
-    state
+    Ok(state)
 }
 
 /// A store borrowed for one call, without cloning an adapter or
@@ -549,7 +552,7 @@ impl<S: NamespaceStore> ContentIndex<S> {
             |seen, state| {
                 refuse_while_deleting(state)?;
                 if refuse_blocked && let Some(entry) = &seen.blocked {
-                    let record = HolderRecord::new(bumped(*state, now_ms).seq, *op_id);
+                    let record = HolderRecord::new(bumped(*state, now_ms)?.seq, *op_id);
                     let writes = release.clone().map(Write::Delete).into_iter().collect();
                     return Ok(Step::Commit(
                         writes,
@@ -576,7 +579,7 @@ impl<S: NamespaceStore> ContentIndex<S> {
                     state.holders += 1;
                 }
                 // The sequence this write stores: `mutate` bumps it once more.
-                let record = HolderRecord::new(bumped(*state, now_ms).seq, *op_id);
+                let record = HolderRecord::new(bumped(*state, now_ms)?.seq, *op_id);
                 let mut writes = vec![Write::Put(key.clone(), codec::encode_holder(&record))];
                 writes.extend(release.clone().map(Write::Delete));
                 let outcome = HolderOutcome {
@@ -861,7 +864,7 @@ impl<S: NamespaceStore> ContentIndex<S> {
         }
         let mut batch = guard_layout(Batch::new(), v)?.require(guard_state(&state_key, raw));
         batch.writes.extend(expired);
-        let mut next = bumped(state, now_ms);
+        let mut next = bumped(state, now_ms)?;
         next.deleting = true;
         let batch = batch.put(state_key, codec::encode_object_state(&next));
         Ok(Some(GcPlan {
@@ -979,7 +982,7 @@ impl<S: NamespaceStore> ContentIndex<S> {
             batch.writes.extend(writes);
             let batch = batch.put(
                 state_key.clone(),
-                codec::encode_object_state(&bumped(state, now_ms)),
+                codec::encode_object_state(&bumped(state, now_ms)?),
             );
             match self.store.apply(&p, batch).await? {
                 BatchOutcome::Committed => return Ok(out),
@@ -1029,6 +1032,59 @@ mod tests {
         block_on(idx.collectable(object, now, GRACE))
             .unwrap()
             .is_some()
+    }
+
+    #[test]
+    fn exhausted_content_sequence_refuses_mutation_and_collection() {
+        let idx = ContentIndex::new(kv());
+        let object = [0x6c; 32];
+        let key = keys::object_state(&object);
+        let raw = codec::encode_object_state(&ObjectState {
+            seq: u64::MAX,
+            ..ObjectState::default()
+        });
+        block_on(idx.store().apply(
+            &content_shard(&object),
+            Batch::new().put(key.clone(), raw.clone()),
+        ))
+        .unwrap();
+        assert!(block_on(idx.add_hold(&object, &[0x6d; 32], GRACE * 2, 1)).is_err());
+        assert!(block_on(idx.add_holder(&object, &holder("exhausted"), &OP, None, 1)).is_err());
+        assert!(block_on(idx.collectable(&object, GRACE, GRACE)).is_err());
+        assert_eq!(
+            block_on(idx.store().get(&content_shard(&object), &key)).unwrap(),
+            Some(raw)
+        );
+        assert!(
+            block_on(
+                idx.store()
+                    .get(&content_shard(&object), &keys::hold(&object, &[0x6d; 32]))
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn exhausted_content_sequence_cannot_finish_collection() {
+        let idx = ContentIndex::new(kv());
+        let object = [0x6e; 32];
+        let key = keys::object_state(&object);
+        let raw = codec::encode_object_state(&ObjectState {
+            seq: u64::MAX,
+            deleting: true,
+            ..ObjectState::default()
+        });
+        block_on(idx.store().apply(
+            &content_shard(&object),
+            Batch::new().put(key.clone(), raw.clone()),
+        ))
+        .unwrap();
+        assert!(block_on(idx.finish_collect(&object, GRACE)).is_err());
+        assert_eq!(
+            block_on(idx.store().get(&content_shard(&object), &key)).unwrap(),
+            Some(raw)
+        );
     }
 
     #[test]

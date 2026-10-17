@@ -4560,6 +4560,20 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
     }
 
+    /// Fork helpers collapse storage failures. A full partition stays the
+    /// shared capacity failure, including its counter.
+    async fn fork_storage_error(
+        &self,
+        p: &Partition,
+        error: crate::fork::ForkError,
+    ) -> ServerError {
+        if error.is_partition_full() {
+            self.partition_full(p, None).await
+        } else {
+            error.error()
+        }
+    }
+
     /// A full partition: count it, retry the prune alone (deletes still
     /// work) and fail closed with a retryable `unavailable`.
     async fn partition_full(&self, p: &Partition, prune: Option<Batch>) -> ServerError {

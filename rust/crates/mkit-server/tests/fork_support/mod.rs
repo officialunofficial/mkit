@@ -737,6 +737,7 @@ impl Source {
     /// The deployment's timers plus the fork job's.
     pub fn fork_registry(&self, takedown_denial: bool) -> TimerRegistry<'static, Counting> {
         self.registry().register(mkit_server::fork::ForkTimer {
+            publication_policy: None,
             store: self.store.clone(),
             shards: self.shards.clone(),
             clock: self.clock.clone(),

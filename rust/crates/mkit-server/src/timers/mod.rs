@@ -148,7 +148,7 @@ pub fn earliest_timer_put(batch: &Batch) -> Option<u64> {
                 Some(keys::ParsedKey::Timer { due_at_ms, .. }) => Some(due_at_ms),
                 _ => None,
             },
-            Write::Delete(_) => None,
+            Write::Delete(_) | Write::Increment(_) => None,
         })
         .min()
 }

@@ -62,6 +62,10 @@ impl PublicationPolicy for Eligibility {
     fn pack_available(&self, _: &RepoId, _: &Hash) -> bool {
         true
     }
+    fn fork_version(&self, _: &RepoId) -> Option<Hash> {
+        // Pack availability is constant; ref eligibility uses publication rows.
+        Some([0; 32])
+    }
 }
 
 /// Only the selected head's real recheck is allowed to advance during a drive.

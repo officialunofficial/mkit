@@ -456,7 +456,7 @@ fn seven_ticket_advance_plans_a_valid_real_batch() {
     assert_eq!(batch.writes.iter().filter(|w| matches!(w, Write::Put(k, _) if matches!(keys::parse(k), Some(keys::ParsedKey::Timer { kind: 3, .. })))).count(), 1);
     assert_eq!(batch.writes.iter().filter(|w| matches!(w, Write::Put(k, _) if matches!(keys::parse(k), Some(keys::ParsedKey::OutcomePending { .. })))).count(), 7);
     assert!(batch.writes.iter().all(|write| {
-        let (Write::Put(key, _) | Write::Delete(key)) = write;
+        let (Write::Put(key, _) | Write::Delete(key) | Write::Increment(key)) = write;
         !matches!(
             keys::parse(key),
             Some(
@@ -595,7 +595,7 @@ fn maximal_implicit_consume_plans_a_valid_batch() {
             .writes
             .iter()
             .filter(|w| {
-                let (Write::Put(k, _) | Write::Delete(k)) = w;
+                let (Write::Put(k, _) | Write::Delete(k) | Write::Increment(k)) = w;
                 keys::parse(k).is_some_and(|parsed| wanted(&parsed))
             })
             .count()
@@ -706,6 +706,9 @@ fn golden_two_ticket_advance_batch_keys() {
         match write {
             Write::Put(k, _) => writeln!(actual, "put {}", to_hex_bytes(k.as_bytes())).unwrap(),
             Write::Delete(k) => writeln!(actual, "delete {}", to_hex_bytes(k.as_bytes())).unwrap(),
+            Write::Increment(k) => {
+                writeln!(actual, "increment {}", to_hex_bytes(k.as_bytes())).unwrap();
+            }
         }
     }
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1092,7 +1095,7 @@ impl NamespaceStore for Spy {
             }
         }
         for write in &batch.writes {
-            let (Write::Put(k, _) | Write::Delete(k)) = write;
+            let (Write::Put(k, _) | Write::Delete(k) | Write::Increment(k)) = write;
             self.saw(k);
         }
         self.batches.lock().unwrap().push(batch.clone());
@@ -3644,7 +3647,7 @@ fn plan_conflict_writes_only_the_replay_record() {
         .writes
         .iter()
         .map(|w| match w {
-            Write::Put(k, _) | Write::Delete(k) => keys::parse(k),
+            Write::Put(k, _) | Write::Delete(k) | Write::Increment(k) => keys::parse(k),
         })
         .collect();
     assert!(matches!(

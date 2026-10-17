@@ -1125,3 +1125,56 @@ fn sweep_removes_only_old_upload_temp_files() {
 fn a_keyspace_cannot_alias_a_sibling_namespace() {
     let _ = FsBlobStore::with_keyspace("/nonexistent", "Object-Offsets.");
 }
+
+#[test]
+fn layout_counter_increments_preserve_row_and_ref_contracts() {
+    let dir = TempDir::new().unwrap();
+    let store = layout(dir.path());
+    let key = ref_key("counter");
+    let counter = |value: u64| Value::new(value.to_be_bytes().to_vec());
+    let read = || block_on(store.get(&part(), &key)).unwrap();
+    assert_eq!(
+        apply(&store, Batch::new().increment(key.clone())).unwrap(),
+        BatchOutcome::Committed
+    );
+    assert_eq!(read(), Some(counter(1)));
+    apply(&store, Batch::new().increment(key.clone())).unwrap();
+    assert_eq!(read(), Some(counter(2)));
+    apply(&store, Batch::new().delete(key.clone())).unwrap();
+    apply(&store, Batch::new().increment(key.clone())).unwrap();
+    assert_eq!(read(), Some(counter(1)));
+    for invalid in [
+        Value::new(vec![0]),
+        Value::new(vec![0; 9]),
+        counter(u64::MAX),
+    ] {
+        apply(&store, Batch::new().put(key.clone(), invalid.clone())).unwrap();
+        assert!(matches!(
+            apply(&store, Batch::new().increment(key.clone())),
+            Err(StoreError::Corrupt(_))
+        ));
+        assert_eq!(read(), Some(invalid));
+    }
+    apply(&store, Batch::new().put(key.clone(), counter(u64::MAX - 1))).unwrap();
+    apply(&store, Batch::new().increment(key.clone())).unwrap();
+    assert_eq!(read(), Some(counter(u64::MAX)));
+    // This backend's existing one-write cap still rejects ordered multi-write
+    // batches atomically; a counter does not expand its advertised capabilities.
+    assert!(matches!(
+        apply(
+            &store,
+            Batch::new().delete(key.clone()).increment(key.clone())
+        ),
+        Err(StoreError::Unsupported(_))
+    ));
+    assert_eq!(read(), Some(counter(u64::MAX)));
+    assert!(matches!(
+        apply(&store, Batch::new().increment(ref_key("refs/heads/main"))),
+        Err(StoreError::Invalid(_))
+    ));
+    assert!(
+        block_on(store.get(&part(), &ref_key("refs/heads/main")))
+            .unwrap()
+            .is_none()
+    );
+}

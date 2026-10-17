@@ -1062,3 +1062,120 @@ pub async fn kv_panic_in_check_and_write_recovers<H: KvHarness>(h: H) -> Outcome
     ensure_eq!(ok!(s.get(&p, &k(b"a")).await), Some(v(b"1")));
     Ok(Pass)
 }
+
+/// Increment is storage arithmetic: absence is zero, encoding is exactly eight
+/// big-endian bytes, and guards are evaluated before decoding the counter.
+pub async fn kv_increment_counter_and_preconditions<H: KvHarness>(h: H) -> Outcome {
+    let (s, p) = (h.store(), part("kv_increment_counter_and_preconditions"));
+    let a = k(b"counter");
+    let counter = |n: u64| Value::new(n.to_be_bytes().to_vec());
+    commit(&s, &p, Batch::new().increment(a.clone())).await?;
+    ensure_eq!(ok!(s.get(&p, &a).await), Some(counter(1)));
+    commit(&s, &p, Batch::new().increment(a.clone())).await?;
+    ensure_eq!(ok!(s.get(&p, &a).await), Some(counter(2)));
+    ensure_eq!(
+        outcome(
+            &s,
+            &p,
+            Batch::new().require(Absent(a.clone())).increment(a.clone())
+        )
+        .await?,
+        failed(0, Some(counter(2)))
+    );
+    ensure_eq!(ok!(s.get(&p, &a).await), Some(counter(2)));
+    for invalid in [Value::default(), v(&[0]), v(&[0; 9]), counter(u64::MAX)] {
+        commit(&s, &p, Batch::new().put(a.clone(), invalid.clone())).await?;
+        ensure_eq!(
+            outcome(
+                &s,
+                &p,
+                Batch::new().require(Absent(a.clone())).increment(a.clone())
+            )
+            .await?,
+            failed(0, Some(invalid.clone()))
+        );
+        ensure_err!(
+            s.apply(&p, Batch::new().increment(a.clone())).await,
+            StoreError::Corrupt(_)
+        );
+        ensure_eq!(ok!(s.get(&p, &a).await), Some(invalid));
+    }
+    commit(&s, &p, Batch::new().put(a.clone(), counter(u64::MAX - 1))).await?;
+    commit(&s, &p, Batch::new().increment(a.clone())).await?;
+    ensure_eq!(ok!(s.get(&p, &a).await), Some(counter(u64::MAX)));
+    commit(&s, &p, Batch::new().delete(a.clone())).await?;
+    commit(&s, &p, Batch::new().increment(a.clone())).await?;
+    ensure_eq!(ok!(s.get(&p, &a).await), Some(counter(1)));
+    Ok(Pass)
+}
+
+/// Ordered increments share the batch's atomic domain. Reduced-capability
+/// stores must reject unsupported multi-write batches before applying any part.
+pub async fn kv_increment_order_and_whole_batch_rollback<H: KvHarness>(h: H) -> Outcome {
+    let (s, p) = (
+        h.store(),
+        part("kv_increment_order_and_whole_batch_rollback"),
+    );
+    let (a, missing, bad) = (k(b"counter"), k(b"missing"), k(b"bad"));
+    let counter = |n: u64| Value::new(n.to_be_bytes().to_vec());
+    commit(&s, &p, Batch::new().put(a.clone(), counter(7))).await?;
+    let ordered = Batch::new()
+        .increment(a.clone())
+        .increment(a.clone())
+        .delete(a.clone())
+        .increment(a.clone())
+        .put(a.clone(), counter(11))
+        .increment(a.clone());
+    if !s.capabilities().atomic_multi_key {
+        ensure_err!(s.apply(&p, ordered).await, StoreError::Unsupported(_));
+        ensure_eq!(ok!(s.get(&p, &a).await), Some(counter(7)));
+        return Ok(Pass);
+    }
+    commit(&s, &p, ordered).await?;
+    ensure_eq!(ok!(s.get(&p, &a).await), Some(counter(12)));
+    for invalid in [v(&[0]), counter(u64::MAX)] {
+        commit(&s, &p, Batch::new().put(bad.clone(), invalid.clone())).await?;
+        let batch = Batch::new()
+            .delete(a.clone())
+            .increment(missing.clone())
+            .put(a.clone(), counter(80))
+            .increment(bad.clone());
+        ensure_err!(s.apply(&p, batch).await, StoreError::Corrupt(_));
+        ensure_eq!(ok!(s.get(&p, &a).await), Some(counter(12)));
+        ensure_eq!(ok!(s.get(&p, &bad).await), Some(invalid));
+        ensure_eq!(ok!(s.get(&p, &missing).await), None);
+    }
+    // A counter that becomes corrupt earlier in this very batch must abort too.
+    ensure_err!(
+        s.apply(
+            &p,
+            Batch::new()
+                .increment(missing.clone())
+                .put(a.clone(), v(&[0]))
+                .increment(a.clone())
+        )
+        .await,
+        StoreError::Corrupt(_)
+    );
+    ensure_eq!(ok!(s.get(&p, &a).await), Some(counter(12)));
+    ensure_eq!(ok!(s.get(&p, &missing).await), None);
+    Ok(Pass)
+}
+
+/// Concurrent unguarded increments cannot overwrite one another's arithmetic.
+pub async fn kv_concurrent_increments_keep_every_update<H: KvHarness>(h: H) -> Outcome {
+    let (s, p) = (
+        h.store(),
+        part("kv_concurrent_increments_keep_every_update"),
+    );
+    let a = k(b"counter");
+    let racers = (0..32).map(|_| s.apply(&p, Batch::new().increment(a.clone())));
+    for result in join_all(racers).await {
+        ensure_eq!(ok!(result), Committed);
+    }
+    ensure_eq!(
+        ok!(s.get(&p, &a).await),
+        Some(Value::new(32_u64.to_be_bytes().to_vec()))
+    );
+    Ok(Pass)
+}

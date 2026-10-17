@@ -106,7 +106,8 @@ test-support = []
 pack-ruzstd = ["mkit-core/pack-ruzstd"]
 # The pipeline's test seam: `FaultHooks` at five points and per-request
 # `TestDirectives` (`x-mkit-test-fault`, `x-mkit-test-clock-skew-ms`).
-# Never enabled by a release build or any binary's default features.
+# Never enabled by production artifacts or any binary's default features.
+# The standalone conformance utility may explicitly enable it when optimized.
 __test-faults = []
 # The `.mkit` on-disk layout stores (`fs::FsBlobStore`, `fs::FsLayoutStore`):
 # std-only, no async runtime, so the server-free `mkit serve` (ssh) can use

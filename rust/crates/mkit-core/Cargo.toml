@@ -95,7 +95,7 @@ zstd = { version = "0.14", optional = true }
 # `twox-hash` so frame content checksums are verified, not ignored. Pure
 # Rust, no C toolchain: `scripts/check-wasm-dep-graph.sh` proves the
 # `pack-ruzstd` graph stays free of `zstd-sys`.
-ruzstd = { version = "0.9", optional = true, default-features = false, features = ["std", "hash"] }
+ruzstd = { package = "mkit-ruzstd", path = "../../vendor/ruzstd", version = "0.9.1", optional = true, default-features = false, features = ["std", "hash"] }
 
 # POSIX uid + O_NOFOLLOW for the key file open path. Unix-only; the
 # Windows path uses default ACLs as documented in `docs/specs/SPEC-SIGNING.md`.

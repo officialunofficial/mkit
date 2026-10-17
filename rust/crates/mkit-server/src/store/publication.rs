@@ -380,7 +380,7 @@ fn project_members(
         };
         let key = keys::membership(&repo.name, pack);
         // Replace the live membership fragment rather than spending another per-ticket put.
-        writes.retain(|w| !matches!(w, Write::Put(k, _) | Write::Delete(k) if k == &key));
+        writes.retain(|w| !matches!(w, Write::Put(k, _) | Write::Delete(k) | Write::Increment(k) if k == &key));
         writes.push(Write::Put(key.clone(), witness.encode()));
         let target = shards.membership(repo, &BlobKey::pack(*pack));
         if target != *source {

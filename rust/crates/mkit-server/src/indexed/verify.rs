@@ -1192,13 +1192,14 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
             .await
             .map_err(|_| storage_failed())?;
         }
-        let plan = index::plan_index_rows_direct(
+        let plan = index::plan_index_rows_direct_with_capabilities(
             shards,
             repo,
             source,
             &pack.ticket.pack_id,
             &pack.entries,
             now,
+            &store.capabilities(),
         )
         .map_err(|_| storage_failed())?;
         for direct in plan.direct {
@@ -1221,9 +1222,15 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
                 &mut denial_counts.counts,
             )
             .await?;
+            if crate::store::proof_version::index_partition(&direct.target) {
+                batch = batch.increment(keys::fork_index_revision());
+            }
             for (key, value) in direct.puts {
                 batch = batch.put(key, value);
             }
+            batch
+                .validate(&store.capabilities())
+                .map_err(|_| storage_failed())?;
             if !matches!(
                 store.apply(&direct.target, batch).await,
                 Ok(BatchOutcome::Committed)

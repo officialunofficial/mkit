@@ -21,6 +21,17 @@ pub trait PublicationPolicy: MaybeSend + MaybeSync {
     /// Immediate serving stop, including containing packs and external delta sources.
     /// A configured inspector must install a coherent gate before applying a hold.
     fn pack_available(&self, repo: &RepoId, pack: &Hash) -> bool;
+    /// A coherent, durable version of this repository's fork eligibility.
+    ///
+    /// The version must change atomically with every change to any answer of
+    /// `pack_available`, never repeat, and retain that meaning across recovery
+    /// and policy replacement. Reading it must be strongly consistent with
+    /// those answers. Fork captures it before all source proofs and compares it
+    /// after all proofs. `None` refuses unaccepted fork work; the default makes
+    /// existing custom policies fail closed until they supply this capability.
+    fn fork_version(&self, _repo: &RepoId) -> Option<Hash> {
+        None
+    }
 }
 
 pub(crate) struct Immediate;
@@ -34,6 +45,9 @@ impl PublicationPolicy for Immediate {
     }
     fn pack_available(&self, _: &RepoId, _: &Hash) -> bool {
         true
+    }
+    fn fork_version(&self, _: &RepoId) -> Option<Hash> {
+        Some([0; 32])
     }
 }
 

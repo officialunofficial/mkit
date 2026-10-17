@@ -13,6 +13,7 @@
 # entry".
 
 set -euo pipefail
+export CARGO_BUILD_JOBS=3
 
 cd "$(dirname "$0")/.."
 
@@ -26,6 +27,8 @@ if ! rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unkno
   echo "error: wasm32-unknown-unknown target not installed. Run: rustup target add wasm32-unknown-unknown" >&2
   exit 1
 fi
+
+python3 scripts/check-named-ruzstd.py
 
 ( cd rust/crates/mkit-core-wasm-check && wasm-pack test --node )
 echo "ok: generic merge/revert/cherry-pick run over memory on wasm32; pack-ruzstd decodes every v2 fixture, and pack framing is overflow-free, on wasm32-unknown-unknown"

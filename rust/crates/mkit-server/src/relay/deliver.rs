@@ -8,7 +8,7 @@ use crate::store::{
     Batch, BatchOutcome, Key, NamespaceStore, Partition, Precondition, StoreCapabilities,
     StoreError, Value, Write,
     codec::{self, MAX_BLOCKED_TARGETS, RelayScanV1, RelayV1},
-    keys, repo_storage,
+    keys, proof_version, repo_storage,
 };
 use crate::telemetry::{
     METRIC_RELAY_BACKLOG_ROWS, METRIC_RELAY_LAG_EXCEEDED, METRIC_RELAY_STORAGE_COUNTER_MISSING,
@@ -469,6 +469,11 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
             Some(value) => Precondition::Equals(rh.clone(), value.clone()),
             None => Precondition::Absent(rh.clone()),
         });
+        let base = if proof_version::index_partition(target) {
+            proof_version::bump(base, &keys::fork_index_revision())
+        } else {
+            base
+        };
         let mut end = start + fitting_prefix(&base, rh, &rows[start..]);
         if end == start {
             tracing::warn!(
@@ -480,7 +485,12 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
         // A hook can use more space than the remaining headroom. Shrink a
         // combined group rather than stalling rows that fit individually.
         loop {
-            let mut batch = target_batch(rh, observed, &rows[start..end]);
+            let batch = target_batch(rh, observed, &rows[start..end]);
+            let mut batch = if proof_version::index_partition(target) {
+                proof_version::bump(batch, &keys::fork_index_revision())
+            } else {
+                batch
+            };
             // Stored-bytes counting is part of delivering to a coordinator,
             // not an embedder hook: markers applied uncounted could never be
             // counted afterwards.
@@ -774,7 +784,8 @@ fn fitting_prefix(base: &Batch, rh: &Key, rows: &[(u64, RelayV1)]) -> usize {
             .writes
             .extend(row.deletes.iter().cloned().map(Write::Delete));
         let sized = candidate.clone().put(rh.clone(), codec::encode_u64(*seq));
-        if candidate.writes.len() > crate::store::outbox::MAX_RELAY_PUTS
+        if candidate.writes.len().saturating_sub(base.writes.len())
+            > crate::store::outbox::MAX_RELAY_PUTS
             || sized.validate(&StoreCapabilities::full()).is_err()
         {
             return end;

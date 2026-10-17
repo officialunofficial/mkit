@@ -83,17 +83,29 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         register: bool,
     ) -> Result<Option<u64>, ServerError> {
         let p = self.shards.coordinator(ns);
-        let wanted = [
-            keys::authority_generation(),
-            keys::lease_recovery(),
+        // Unfenced writes have no authority move to drain. The permit marker
+        // stays out of that probe: the reference stores fan `get_many` out
+        // into one `get` per key, so including it would be an extra coordinator
+        // round trip on ordinary multipart and stream writes. Fenced activation
+        // still reads it in the same probe, where the drain may need it.
+        let fenced = self.cfg.authority_fence.is_some();
+        let generation_key = keys::authority_generation();
+        let recovery_key = keys::lease_recovery();
+        let fenced_keys = [
+            generation_key.clone(),
+            recovery_key.clone(),
             keys::fork_permits_seen(),
         ];
+        let open_keys = [generation_key, recovery_key];
+        let wanted: &[crate::store::Key] = if fenced { &fenced_keys } else { &open_keys };
         for _ in 0..1 {
-            let rows = self.meta.get_many(&p, &wanted).await.map_err(meta_error)?;
-            let [generation, raw_mode, permits_seen] = rows.as_slice() else {
+            let rows = self.meta.get_many(&p, wanted).await.map_err(meta_error)?;
+            if rows.len() != wanted.len() {
                 return Err(super::internal("authority activation row count"));
-            };
-            let mut generation = generation.clone();
+            }
+            let mut generation = rows[0].clone();
+            let raw_mode = &rows[1];
+            let permits_seen = rows.get(2).and_then(Option::as_ref);
             let current = generation
                 .as_ref()
                 .map(codec::decode_u64)
@@ -142,7 +154,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     &self.cfg,
                 );
                 let initial = codec::encode_u64(current);
-                if !crate::fork::permit::transition(
+                let drained = match crate::fork::permit::transition(
                     &env,
                     ns,
                     &wanted[0],
@@ -157,8 +169,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                         ),
                 )
                 .await
-                .map_err(|error| error.error())?
                 {
+                    Ok(done) => done,
+                    Err(error) => return Err(self.fork_storage_error(&p, error).await),
+                };
+                if !drained {
                     return Err(
                         ServerError::unavailable("authority activation pending; retry")
                             .with_header("Retry-After", "1"),

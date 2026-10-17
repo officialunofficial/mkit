@@ -181,11 +181,16 @@ fn adjust_counter(
         return Err(StoreError::Invalid("inconsistent counter snapshots".into()));
     }
     let position = writes.iter().rposition(|w| match w {
-        Write::Put(k, _) | Write::Delete(k) => k == &key,
+        Write::Put(k, _) | Write::Delete(k) | Write::Increment(k) => k == &key,
     });
     let current = match position.map(|i| &writes[i]) {
         Some(Write::Put(_, value)) => counter(Some(value))?,
         Some(Write::Delete(_)) => 0,
+        Some(Write::Increment(_)) => {
+            return Err(StoreError::Invalid(
+                "open counter has an unresolved increment".into(),
+            ));
+        }
         None => observed,
     };
     let next = if increment {
@@ -281,7 +286,7 @@ pub fn plan_ticket_open(
     // this ref in a composed batch rather than using stale cap snapshots.
     if writes
         .iter()
-        .any(|w| matches!(w, Write::Put(k, _) | Write::Delete(k) if k == &read_keys.per_ref))
+        .any(|w| matches!(w, Write::Put(k, _) | Write::Delete(k) | Write::Increment(k) if k == &read_keys.per_ref))
     {
         return Err(TicketPlanError::Invalid(
             "one ticket open per ref per batch",
@@ -538,10 +543,9 @@ pub fn plan_ticket_close(
     let indexed = ti_value.map(codec::decode_ref_id).transpose()?;
     let (mut staged_pre, mut staged_writes) = (pre.clone(), writes.clone());
     let key = layout::ticket(ticket_id);
-    if writes
-        .iter()
-        .any(|w| matches!(w, Write::Delete(k) | Write::Put(k, _) if k == &key))
-    {
+    if writes.iter().any(
+        |w| matches!(w, Write::Delete(k) | Write::Put(k, _) | Write::Increment(k) if k == &key),
+    ) {
         return Err(StoreError::Invalid(
             "ticket already planned in batch".into(),
         ));

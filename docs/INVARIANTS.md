@@ -44,6 +44,26 @@ caller could publish a truncated missing set as a complete diagnostic.
 graph oracle, protocol/adversarial tests, and closure transition fuzz replay.
 Reference-server integration is separate; this primitive grants no visibility.
 
+## Differential conformance compares validated protocol decisions
+
+**Always:** deterministic differential fixtures pin both servers' business clocks
+and use fixed signing keys, nonces, and timestamps. Each replay fingerprint is
+validated against its target's exact signed operation before normalization.
+Reports preserve query order, multiplicity, and terminal responsibility counts.
+Execution failures do not become passing equivalence results.
+
+**Because:** different server origins and allocated identifiers can represent the
+same protocol decision, while an invalid replay binding or repeated settlement
+is a protocol difference.
+
+**If violated:** normalization could hide corrupt replay records or duplicated
+acceptance effects, and two broken servers could appear conforming.
+
+**Enforcement:** the differential runner drives wire requests and typed HTTP
+observations. Native two-host and mutation regressions run in the Cloud Build
+workspace test gate. This checks decision equivalence; Tier 2 separately checks
+crash, recovery, and concurrency behavior.
+
 ## Conformance distinguishes absent features from implementation gaps
 
 **Always:** cases for undeclared protocol features report not applicable with
@@ -138,12 +158,20 @@ source changes do not invalidate acceptance.
 **Because:** construction may survive a crash or continue after revocation;
 partial construction must not grant repository access.
 
-**Reference enforcement:** acceptance, destination exclusion, coordinator fences,
-and drained membership permits enforce the destination boundary. The stronger
-single-point source proof across resumed slices remains incomplete. The
+**Reference mechanism:** the job stages the inherited pack set before guarded
+acceptance, settles its saved result once, and then activates membership.
+Physical activation compares a partition-local permit, or direct authority guards
+when colocated. A fence move freezes permit issuance and durably invalidates all
+issued permits before acknowledgement. Source proof captures mutation versions,
+proves every inherited pack, then validates those versions, so resumed slices
+share one coherent source point. Portable conformance results remain separate
+from this implementation description.
+
+**Enforcement:** [SPEC-SERVER §9.9](specs/SPEC-SERVER.md#99-fork) defines the
+conditional protocol requirements. The
 [conformance coverage table](../rust/crates/mkit-server-conformance/README.md)
-records the exercised assertions; passing those cases does not certify this
-remaining requirement.
+records exercised cases and remaining declared gaps; implementation alone does
+not establish a passing conformance result.
 
 ## Typed pack evidence retains exact keys and live witness semantics
 
@@ -1159,13 +1187,14 @@ bomb guards (claim ≤ `MAX_RAW_OBJECT_SIZE` before decoding, output bounded
 to the claim, exact length re-check). Both paths reserve output fallibly
 without zero-filling the claim; unpack charges the resident budget first.
 The pure-Rust path reads out at most `claim + 1` bytes and never grows the
-reserved output. Its decode window is capped at 8 MiB independently of the
-claim. Vendored ruzstd checks `min(Window_Size, 128 KiB)` before raw/RLE
-materialization and before executing any compressed sequences. The patch is
-tracked by the open [KillingSpark/zstd-rs #124, "Refuse blocks that decode past
-Block_Maximum_Size"](https://github.com/KillingSpark/zstd-rs/pull/124).
-Embedders must repeat `[patch.crates-io]` until a release includes the fix;
-this is vendored enforcement, not released upstream coverage. Its separate
+reserved output. Both decode windows are capped at 8 MiB independently of the
+claim. The shared allocation-free preflight checks frame windows and encoded
+block sizes before either decoder starts. The named `mkit-ruzstd` dependency
+checks `min(Window_Size, 128 KiB)` before raw/RLE materialization and before
+executing any compressed sequences. The fork is selected by a versioned path
+dependency, retaining the import name
+`ruzstd`. Published and independent-workspace consumers inherit the named
+package without `[patch]` tables. Its separate
 ring and block scratch have a fixed 28 MiB working allowance, including
 transient old/new ring allocations during growth, outside the owned-payload
 resident cap and the window reader's carry/output budget. Scheduled verification
@@ -1196,18 +1225,15 @@ The hand-written frame parsing assembles header fields in `u64`, never
 on the encoder frames covered by the differential proptest over
 `PackWriter` output and C-encoded fixtures, and on the curated adversarial
 table. On *malformed* frames they do not fully agree. Fail-closed on
-`pack-ruzstd` (it rejects, C accepts): frames declaring a window above
-8 MiB, and
-corrupt entropy-coded sections the C one-shot decoder tolerates. Fail-open
+`pack-ruzstd` (it rejects, C accepts): corrupt entropy-coded sections the C
+one-shot decoder tolerates. Fail-open
 (it accepts, C rejects) and both-accept-different-bytes cases also exist
 for a small share of corrupted frames, in Huffman/FSE table internals
 that no cheap check reaches; the reference `zstd` CLI rejects those
 frames too. Over 850k mutated frames: 134 accepted only by `pack-ruzstd`,
 2,580 accepted only by C, 4 accepted by both with different bytes, no
-panics. The WP-4.1 brief called the first class "not tolerable"; it is
-accepted as this documented residual because no consumer enables
-`pack-ruzstd` yet and object ids are content-derived. Integrity is
-unaffected: decoded bytes must parse as a canonical object and are stored
+panics. This decoder-level difference remains documented; object ids are
+content-derived. Integrity is unaffected: decoded bytes must parse as a canonical object and are stored
 under their own content id, so no runtime can accept wrong content under
 a given id. The divergence can only change which objects, if any, a
 crafted pack yields on each runtime.
@@ -2892,8 +2918,34 @@ could change after a lost reply, or a reservation could settle twice.
 
 **Enforced by:** `fork::job`, `fork::accept`, `fork::publish`, and the fork engine
 acceptance, settlement, membership-order, source-change, and lost-reply tests.
-The stronger single-ordering-point source proof remains incomplete: the enabled
-disjoint-eligibility regression demonstrates an unresolved resumed-proof gap.
+`fork::proof` captures source pair/policy rows, repository-index mutation
+versions, directory revisions and every registered subject's content-state
+version before proving packs. Validation follows the entire proof pass; a
+changed version refuses uniformly. Versions never repeat, including after
+removal and reinstallation. Custom publication policies must provide a coherent
+`fork_version`; its default refuses new and unaccepted forks. Accepted and
+retained failed jobs reclaim transient proof rows in bounded, restart-safe pages,
+including while activation is stalled. Exact job and evidence guards prevent
+stale capture checkpoints from resurrecting deleted rows.
+
+## Physical fork activation is fenced before acknowledged moves
+
+**Always:** membership installation atomically checks its recorded authority facts
+when they share its partition. Otherwise it compares an expiring local permit
+bound to the fork and recorded facts. Generation and epoch moves freeze issuance,
+drain registered permits into local revocation tombstones, and publish the move
+only after invalidation completes. Drain checkpoints survive interrupted work.
+
+**Because:** a coordinator checkpoint after a physical membership write cannot
+undo visibility granted by a stale write.
+
+**Enforced by:** `fork::permit`, local activation guards, and the authority/epoch
+transition paths. Repository-index mutations atomically increment `fv`; directory
+registration increments `dv`; content mutations increment their existing state
+sequence. `Write::Increment` adds these stamps without a writer snapshot or an
+extra round trip for default reference batches. Custom reserved-operation budgets
+at the batch cap can require another chunk; the ordinary verifier cost probe
+measures those boundaries.
 
 ## Fork registration arbitrates with destination writers
 
@@ -3070,3 +3122,25 @@ completed, despite a later coordinator CAS failure.
 
 **Enforced by:** local atomic permit guards, resumable transition drains,
 recovery holdoffs, and the physical activation race regression.
+
+## Fork clearance preserves the terminal acceptance
+
+**Always:** with authority fencing, every advancing fork commit compares its
+recorded authority facts. Before acceptance it also compares exact reservation
+protection. After acceptance,
+progress and membership activation retain the exact saved result and complete
+inherited inventory; construction expiry and pruned settlement evidence do not
+create a new terminal outcome. Destination writes remain blocked until complete
+clearance. Later source movement cannot rewrite the accepted source pair.
+
+**Because:** clearance may resume after the response, reservation acknowledgement,
+or a crash. An advancing checkpoint cannot manufacture authorization or repeat
+an accepted charge.
+
+**If violated:** defer clearance without replacing the saved result. Refuse
+foreign membership witnesses and retain a failed destination's inert state.
+
+**Enforced by:** the pure fork progress, activation, and completion decisions,
+full-snapshot mutation and hostile-fact tests, and reference fork driver lowering.
+The host retains current destination proof acquisition, exact storage CAS, and
+physical authority-permission enforcement.

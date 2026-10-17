@@ -2,7 +2,8 @@ name: "Release: crates.io"
 
 # Tag-driven crates.io publish. The signed `v{version}` tag is the single,
 # deliberate release trigger — same as release.yml's binaries and
-# mcp-release.yml's docs corpus. On a tag, `cargo publish --workspace` pushes
+# mcp-release.yml's docs corpus. The standalone bounded decoder publishes first.
+# Then `cargo publish --workspace` pushes
 # every publishable library crate to crates.io in dependency order, waiting for
 # each to index before the next. mkit-wasm (publish = false, npm-only) is
 # skipped automatically.
@@ -135,6 +136,13 @@ jobs:
             -p mkit-transport-connect \
             -p mkit-git-bridge
           cargo semver-checks -p mkit-server --all-features --baseline-version 0.5.0
+
+      # The bounded decoder is a standalone fork, deliberately excluded from
+      # the workspace. Publish and wait for its index entry before core's
+      # normalized package dependency can resolve it.
+      - name: Publish bounded decoder to crates.io
+        working-directory: rust
+        run: python3 ../scripts/publish-bounded-decoder.py
 
       # Publishes every member without `publish = false` in dependency order,
       # waiting for each to appear on the index. Tags are irrelevant to cargo,

@@ -39,7 +39,7 @@ http-objects = ["storage-spi", "mkit-server/http-objects"]
 # `stubs::hook` is a `mkit.server.hooks.v1` hook service that verifies every
 # SPEC-SERVER §7.1 signed request (with mkit-server's `HookVerifier`), answers from a script and records calls
 # (WP-3.8; WP-3.12 builds its payment stub on it). A test utility: never in a
-# release binary.
+# production artifact.
 stubs = [
     "storage-spi",
     "dep:axum",
@@ -49,7 +49,7 @@ stubs = [
     "mkit-rpc/hooks",
 ]
 # Test-only in-process server for contract consumers. It is deliberately
-# opt-in, and the API refuses to compile in release builds.
+# opt-in; optimized builds additionally require `reference-runner`.
 test-host = [
     "storage-spi",
     "__test-faults",
@@ -62,6 +62,10 @@ test-host = [
     "tokio/io-util",
     "tokio/net",
 ]
+
+# Explicit opt-in for the optimized standalone differential test utility.
+# This feature is never enabled by production binaries.
+reference-runner = ["test-host"]
 
 [dependencies]
 mkit-rpc = { version = "0.5", path = "../mkit-rpc" }

@@ -22,7 +22,7 @@ for target, features in rows:
         sys.exit(f"forbidden target dependencies: {violations}")
     if "pack-zstd" not in features and packages & {"zstd", "zstd-safe", "zstd-sys"}:
         sys.exit("native decoder enabled outside the native backend row")
-    if ("ruzstd" in packages) != ("pack-ruzstd" in features):
+    if ("mkit-ruzstd" in packages) != ("pack-ruzstd" in features):
         sys.exit("pure-Rust decoder feature propagation mismatch")
     if "mkit-core" not in packages:
         sys.exit("graph canary failed: mkit-core absent")

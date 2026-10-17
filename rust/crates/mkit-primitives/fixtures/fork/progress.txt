@@ -1,0 +1,14 @@
+# phase authority epoch reservation now expected
+preparing same same same 100 Advance
+preparing moved same same 100 AuthorityMoved
+preparing same moved same 100 EpochMoved
+preparing same same missing 100 ReservationSettled
+preparing same same same 101 Expired
+preparing moved moved missing 101 AuthorityMoved
+preparing same moved missing 101 EpochMoved
+preparing same same missing 101 Expired
+accepted same same missing 101 Advance
+accepted moved same missing 101 AuthorityMoved
+accepted same moved missing 101 EpochMoved
+complete moved moved missing 101 Terminal
+failed moved moved missing 101 Terminal

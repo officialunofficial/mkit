@@ -510,6 +510,7 @@ mod tests {
             }),
             fence_rows: crate::fork::FenceRowsV1::default(),
             source_access: crate::fork::SourceAccessV1::default(),
+            proof: crate::fork::ProofV1::default(),
             accepted: Some(result.clone()),
             result: Some(result),
         }

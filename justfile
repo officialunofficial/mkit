@@ -162,6 +162,7 @@ ci-scripts:
     python3 scripts/check-feature-names.py
     python3 scripts/check-launch-feature-graph.py
     python3 scripts/test-server-gates.py
+    python3 scripts/test-publish-bounded-decoder.py
     bash scripts/check-cli-baseline.sh
     bash scripts/check-sync-native-deps.sh
     if ! rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unknown$'; then

@@ -581,6 +581,9 @@ async fn write_wave<S: NamespaceStore>(
                 for (key, value) in chunk {
                     batch = batch.put(key.clone(), value.clone());
                 }
+                if crate::store::proof_version::index_partition(target) {
+                    batch = batch.increment(keys::fork_index_revision());
+                }
                 store.apply(target, batch).await
             }))
             .await;
@@ -841,6 +844,7 @@ pub(crate) async fn count<S: NamespaceStore>(
         batch = match write {
             Write::Put(k, v) => batch.put(k, v),
             Write::Delete(k) => batch.delete(k),
+            Write::Increment(k) => batch.increment(k),
         };
     }
     Ok(batch)
@@ -882,6 +886,7 @@ mod tests {
             fence,
             fence_rows: crate::fork::FenceRowsV1::default(),
             source_access: crate::fork::SourceAccessV1::default(),
+            proof: crate::fork::ProofV1::default(),
             accepted: None,
             result: None,
         }
@@ -910,6 +915,7 @@ mod tests {
 
     fn env<'a>(kv: &'a MemoryKv, clock: &'a ManualClock) -> ForkEnv<'a, MemoryKv> {
         ForkEnv {
+            publication_policy: None,
             store: kv,
             shards: &D34Shards,
             clock,

@@ -2188,28 +2188,42 @@ Its embedding dispatch authenticates, checks deployment compatibility, resolves
 completed replay evidence, and then runs the embedding server's dispatch policy.
 The public embedding guide and crate documentation define this API.
 
-The reference implementation constructs a durable job with bounded resumable
-work and a 24-hour lifetime. A failure before destination registration aborts
-its reservation and discards the job; a retry is a new admitted attempt, and
-the failed attempt's quota charge remains spent. A failure after registration
-retains its terminal failure for later callers. It registers the destination,
-copies index entries,
-counts packs, establishes holders, and writes membership incrementally. Its
-limits are 1,024 packs, 16,384 index rows, 8,000 working-set ids, 2,048 unresolved
-external-base ids (1,800 per pack), and 262,144 scanned source index rows. These
-are reference-server limits, not protocol limits. Work uses 600-call slices and
-bounded concurrent waves. The operator guide describes scheduling and
-[resource bounds](../operations/fork-waves.md).
+The reference fork driver lowers coordinator progress, accepted membership
+activation, and final clearance through pure `mkit-primitives::fork` decisions.
+The host retains proof acquisition, routing, atomic comparison, budgets, and
+scheduling. These in-memory decisions add no wire or stored format. Their
+required snapshots do not replace physical authority permissions or the final
+source proof required above.
 
-The reference server re-reads source pack membership and obtains source proofs
-around individual destination publication writes. These per-pack checks and
-write ordering are reference mechanisms, not protocol requirements. They do
-not provide the required final source proof after the last membership effect
-is staged and before terminal acceptance. Its pre-construction source visibility
-revision check currently returns `unavailable` and `source changed; retry`.
-A tip change detected during construction can still return
-`failed_precondition` and `source tip changed`. These are reference gaps in
-the required uniform missing-source answer for changes after admission.
+The reference implementation uses bounded resumable preparation with a 24-hour
+construction lifetime. Registration installs a destination write barrier;
+preparation copies indexes and holder evidence and stages the complete pack list
+without installing membership. Guarded acceptance saves the result, replay and
+terminal reservation responsibility together. Activation installs only accepted
+membership and removes the write barrier when complete; registered failures
+remain inert, while accepted work remains resumable without re-settlement.
+Its limits remain 1,024 packs, 16,384 index rows, 8,000 working-set ids, 2,048
+unresolved external-base ids (1,800 per pack), and 262,144 scanned source index
+rows, with 600-call slices and bounded concurrent waves. These are reference
+limits, not protocol limits; see the [operator guide](../operations/fork-waves.md).
+
+The reference source proof captures exact source pair/policy observations and
+monotonic eligibility versions before the complete inherited-pack proof pass,
+then validates all captures after that pass. The capture includes source indexes,
+the denial directory, and content-state versions for every registered subject.
+This provides a coherent source point across resumed slices; changes refuse
+uniformly as a missing source. A custom publication policy supplies a coherent,
+non-repeating fork-eligibility version; its default refuses unaccepted forks.
+Activation uses the retained accepted result and repeats current destination
+denial checks; later source changes do not alter that result.
+
+Every advancing coordinator commit compares recorded authority observations.
+Physical activation compares a bound local permit, or direct authority guards
+when colocated. Authority and epoch transitions freeze issuance and durably
+invalidate registered local permits before publishing and acknowledging a move.
+Index and directory mutation stamps use a backend-atomic checked increment in
+existing write batches, without another ordinary-write storage round trip.
+These are reference mechanisms, not additional protocol requirements.
 
 When denial is enabled, the reference server retains a cleared structural set
 and external-base evidence. Its witness flag enables later structural reuse;
@@ -2218,17 +2232,10 @@ activation performs a fresh structural walk. Its `MAX_ADVANCE_ITEMS` limit of
 4,096 can refuse that walk. Operators must follow the
 [activation runbook](../operations/fork-waves.md#enabling-takedown-denial-after-running-with-it-off).
 
-**Reference-server behavior. Known conformance gaps.** The reference server
-currently makes construction membership visible before terminal acceptance and
-does not gate destination writes on that acceptance. It also checks recorded
-authority facts at destination registration rather than at every advancing
-commit and terminal acceptance. It also lacks the final source proof at the
-required boundary, including the uniform-absence handling of source visibility
-changes described above. The tier-2 destination-gate, authority-fence, and
-source-change cases declare skips with these reasons until those safety
-mechanisms are implemented. These gaps do not weaken the protocol requirements
-above, and successful reference construction tests do not establish compliance
-with them.
+**Reference-server conformance evidence.** The destination gate, advancing fence,
+and final source proof have reference implementations. Their implementation does
+not itself certify conformance; the Tier-2 runner reports exercised assertions,
+remaining declared skips, and failures separately.
 
 ## 10. Published view
 

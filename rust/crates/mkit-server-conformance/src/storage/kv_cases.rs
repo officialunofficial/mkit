@@ -158,7 +158,7 @@ async fn snapshot<S: NamespaceStore>(
     let mut rows = BTreeMap::new();
     for write in &batch.writes {
         let key = match write {
-            Write::Put(key, _) | Write::Delete(key) => key,
+            Write::Put(key, _) | Write::Delete(key) | Write::Increment(key) => key,
         };
         rows.insert(key.clone(), ok!(s.get(p, key).await));
     }

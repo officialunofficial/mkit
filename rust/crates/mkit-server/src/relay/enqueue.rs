@@ -143,6 +143,7 @@ pub fn enqueue_relay_rows(
                 .map(|w| match w {
                     Write::Put(k, v) => k.as_bytes().len() + v.as_bytes().len(),
                     Write::Delete(k) => k.as_bytes().len(),
+                    Write::Increment(k) => k.as_bytes().len() + 8,
                 })
                 .sum::<usize>()
                 <= MAX_BATCH_BYTES

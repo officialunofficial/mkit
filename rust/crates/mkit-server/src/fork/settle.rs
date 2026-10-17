@@ -294,21 +294,14 @@ pub(crate) async fn abort<S: NamespaceStore>(
     Ok(batch)
 }
 
-/// Whether the pending reservation is still the one the job admitted.
-pub(crate) async fn current<S: NamespaceStore>(
+/// Acquire the original reservation once; progress decisions retain this exact observation.
+pub(super) async fn observe<S: NamespaceStore>(
     env: &ForkEnv<'_, S>,
     job: &ForkJobV1,
-) -> Result<bool, ForkError> {
+) -> Result<Option<Value>, ForkError> {
     let Some(settle) = job.settle.as_ref().filter(|s| !s.rid.is_empty()) else {
-        return Ok(true);
+        return Ok(None);
     };
     let p = env.shards.coordinator(&job.dest()?.namespace);
-    let row = env
-        .store
-        .get(
-            &p,
-            &keys::reservation(&settle.rid).map_err(ForkError::from)?,
-        )
-        .await?;
-    Ok(row.as_ref().map(Value::as_bytes) == Some(settle.pending.as_slice()))
+    Ok(env.store.get(&p, &keys::reservation(&settle.rid)?).await?)
 }

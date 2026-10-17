@@ -2278,7 +2278,9 @@ impl RecordOps {
     fn holds(batch: &Batch) -> bool {
         batch.writes.iter().any(|write| {
             let key = match write {
-                crate::store::Write::Put(key, _) | crate::store::Write::Delete(key) => key,
+                crate::store::Write::Put(key, _)
+                | crate::store::Write::Delete(key)
+                | crate::store::Write::Increment(key) => key,
             };
             key.as_bytes().starts_with(b"g")
         })

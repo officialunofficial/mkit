@@ -175,6 +175,7 @@ async fn the_policy_runs_for_a_fresh_fork_and_for_an_in_flight_fork() {
     // refusal stops it before it can advance the job.
     let other = source.at("second");
     let env = mkit_server::fork::ForkEnv {
+        publication_policy: None,
         store: &source.store,
         shards: source.shards.as_ref(),
         clock: source.clock.as_ref(),

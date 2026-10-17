@@ -1,8 +1,8 @@
 //! Test-only loopback host for contract tests that need a real HTTP boundary
 //! around the core Connect handlers.
 //!
-//! Enable the `test-host` feature in a debug/test dependency. The feature is
-//! rejected in release builds. Each host owns isolated memory stores and a
+//! Enable `test-host` in a debug/test dependency. Optimized standalone test
+//! utilities additionally opt into `reference-runner`. Each host owns isolated memory stores and a
 //! manual clock; callers advance time and explicitly drain core timers.
 
 #![forbid(unsafe_code)]
@@ -627,6 +627,7 @@ impl TestHost {
         // sharding; its handler's settings must equal the pipeline's.
         let registry = if self.profile.sharding_d34 && self.profile.has(Feature::IndexedMode) {
             registry.register(mkit_server::fork::ForkTimer {
+                publication_policy: None,
                 store: target,
                 shards: Arc::new(mkit_server::pipeline::D34Shards),
                 clock: self.clock.clone(),

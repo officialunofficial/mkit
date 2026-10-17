@@ -598,7 +598,7 @@ fn envelope_writes_rv_replay_and_expiry_index() {
         .iter()
         .filter_map(|w| match w {
             Write::Put(k, _) => Some(k),
-            Write::Delete(_) => None,
+            Write::Delete(_) | Write::Increment(_) => None,
         })
         .collect();
     let classes: Vec<_> = puts.iter().map(|k| keys::parse(k)).collect();
