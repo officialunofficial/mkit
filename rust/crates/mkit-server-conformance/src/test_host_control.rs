@@ -1462,7 +1462,16 @@ impl ControlStore {
             && let Some(raw) = self.inner.get(&target, &key).await?
         {
             let job = mkit_server::fork::decode_job(&raw)?;
-            if job.phase == mkit_server::fork::Phase::Accept && job.cursor == 0 {
+            // Capture checkpoints are preparation. Pause only after their
+            // final durable checkpoint, before the first eligibility proof.
+            let shape = serde_json::to_value(&job)
+                .map_err(|_| StoreError::Corrupt("invalid control fork job".into()))?;
+            let proof_ready = shape
+                .get("proof")
+                .and_then(|proof| proof.get("stage"))
+                .and_then(serde_json::Value::as_str)
+                == Some("Proving");
+            if job.phase == mkit_server::fork::Phase::Accept && proof_ready && job.cursor == 0 {
                 let source = RepoId {
                     namespace: parse_namespace(&job.source_ns).map_err(StoreError::unavailable)?,
                     name: RepoName::new(job.source_repo)
