@@ -65,3 +65,13 @@ The destination write barrier remains until the final activation checkpoint.
 Cleanup is scoped to the original binding and never removes another fork's
 holders. Transient evidence cleanup does not authorize publication or repeat a
 terminal outcome.
+
+## Reference profile boundary
+
+The current reference profile implements pack denial and sealed inventory
+checks. Storage leases, repository suspension, and lifecycle deletion remain
+future integration in SPEC-SERVER's profile map. Its authority shard leases are
+writer permissions, not storage lifecycle state. The adapter therefore creates
+no synthetic active-lifecycle observation. A host offering those additional
+features must discharge their lifecycle checks before supplying clearance proof
+and retain their required commit fences.
