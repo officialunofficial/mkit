@@ -15,9 +15,8 @@ use mkit_server::store::adapter_spi::{
     index::{IndexEntry, IndexValue},
     publication::{Pair, Publication, Witness},
 };
-use mkit_server::store::content_shard;
 use mkit_server::takedown::inventory;
-use mkit_server::{BlobKey, BlobStore, PackSink};
+use mkit_server::{BlobKey, BlobStore, ContentIndex, PackSink};
 
 #[derive(Clone)]
 struct SourceFixture {
@@ -47,7 +46,7 @@ impl ForkBinding {
             config.indexed = Some(mkit_server::indexed::IndexedConfig::scheduled(1024 * 1024));
         }
         config.write_quota = None;
-        config.takedown_denial = false;
+        config.takedown_denial = matches!(config.addressing, Addressing::Multi(_));
         Ok(Self {
             core: RwLock::new(build_core(store, blobs, clock, &config)?),
             config,
@@ -316,11 +315,8 @@ impl HostState {
         // A fresh fixture restores only its own content's denial state. The
         // portable denial cases intentionally repeat identical pack contents
         // while selecting a different pack for each independent attempt.
-        self.store
-            .apply(
-                &content_shard(&pack),
-                Batch::new().delete(keys::block(&pack)),
-            )
+        ContentIndex::new(self.store.clone())
+            .unblock(&pack, now)
             .await
             .map_err(|e| e.to_string())?;
         let mut sink = self
@@ -625,16 +621,16 @@ impl HostState {
                         return Err("pack is outside fork fixture".into());
                     }
                     let pack = parse_hash(&pack)?;
-                    self.store
-                        .apply(
-                            &content_shard(&pack),
-                            Batch::new().put(
-                                keys::block(&pack),
-                                codec::encode_block_entry(&mkit_server::store::BlockEntry::new(
-                                    "fork fixture denial",
-                                    now,
-                                )),
-                            ),
+                    let core = self.forks.core.read().await;
+                    let capability = core
+                        .denial_capability()
+                        .ok_or("fork fixture denial disabled")?;
+                    ContentIndex::new(self.store.clone())
+                        .block(
+                            &capability,
+                            &pack,
+                            &mkit_server::store::BlockEntry::new("fork fixture denial", now),
+                            now,
                         )
                         .await
                         .map_err(|e| e.to_string())?;
