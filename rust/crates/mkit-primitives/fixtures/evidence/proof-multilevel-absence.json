@@ -1,0 +1,18 @@
+{
+  "description": "Height-two object tree with separator key 06, leaf 03=alpha and leaf 07=omega.",
+  "encoded_bytes": 690,
+  "expected": "Absent",
+  "path_pages": 3,
+  "profile": "indexed",
+  "query": "0505050505050505050505050505050505050505050505050505050505050505",
+  "repository": "0909090909090909090909090909090909090909090909090909090909090909",
+  "root": "dd182955ff93c419f1af9e37e1d0aa3e926c397a0f54081ffaad9c5b3dcc99a8",
+  "root_height": 2,
+  "root_items": 2,
+  "root_len": 253,
+  "ruleset": 1,
+  "source_binding": "0707070707070707070707070707070707070707070707070707070707070707",
+  "source_id": "0cf2d3bf998aa37ed8c24823ffe760ae1842ec66d0e7e680c4b33414e7b405bb",
+  "source_len": 189,
+  "value": null
+}

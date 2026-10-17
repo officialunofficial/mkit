@@ -1,0 +1,50 @@
+{
+  "cursor_bytes": 0,
+  "description": "Completed first-pass source with both real subtree frontiers and both final roots.",
+  "encoded_bytes": 680,
+  "expected": "Checkpoint",
+  "format_version": 1,
+  "generation": 17,
+  "header": {
+    "count": 1,
+    "version": 1
+  },
+  "integrity": {
+    "offset": 16777260,
+    "trailer": "4aa74d6630f23122bda9787d37e6835405043c0b6c48fe9a626143c216f5dbe6",
+    "trailer_cvs": [
+      "3f7b7f9637d4d44cfa890eeb21ef805f3f6f895258aa9e73b45b511526e481fd",
+      "0f4223aa5e648dc3f15a2061108b78cc2aefbc9eb3ad9c866891c3553e9f40cf",
+      "b409f87061074c8a64fd01d2e731df50ecc7031b0f3d43345cd2ada7b7a74d89"
+    ],
+    "trailer_root": "4aa74d6630f23122bda9787d37e6835405043c0b6c48fe9a626143c216f5dbe6",
+    "trailer_used": 32,
+    "whole_cvs": [
+      "3f7b7f9637d4d44cfa890eeb21ef805f3f6f895258aa9e73b45b511526e481fd",
+      "0f4223aa5e648dc3f15a2061108b78cc2aefbc9eb3ad9c866891c3553e9f40cf",
+      "731fddaf0773a739cf4b49945229d5479f4e458d811c7ea306d7affa6b69fa0a"
+    ],
+    "whole_root": "71cbd67bbc221c0c7ac2a143a117a775370c7668317db48169e9fb5870f66b30"
+  },
+  "last_retained": null,
+  "ordinal": 0,
+  "payload_bytes": 0,
+  "phase": "integrity",
+  "profile": "indexed",
+  "repository": "0909090909090909090909090909090909090909090909090909090909090909",
+  "retention_count": 0,
+  "ruleset": 1,
+  "sequence": 9,
+  "source_binding": "0707070707070707070707070707070707070707070707070707070707070707",
+  "source_id": "71cbd67bbc221c0c7ac2a143a117a775370c7668317db48169e9fb5870f66b30",
+  "source_len": 16777260,
+  "source_recipe": "Fill source_len bytes with 0x03; overwrite the MKIT v1 one-entry header and raw frame prefix (payload length source_len - 49); overwrite the final 32 bytes with BLAKE3 of the preceding bytes. This source exercises integrity state; its oversized raw entry need not pass later decoding.",
+  "trailer": "0000000000000000000000000000000000000000000000000000000000000000",
+  "usage": {
+    "evidence_bytes": 0,
+    "evidence_pages": 0,
+    "peak_resident_bytes": 50000000,
+    "resident_bytes": 0,
+    "work": 2000000
+  }
+}

@@ -806,4 +806,156 @@ mod tests {
         });
         assert!(encode(&impossible, limits).is_err());
     }
+    fn decode_frozen(bytes: &[u8]) -> CheckpointState {
+        let limits = VerifyLimits::indexed();
+        let checkpoint = Checkpoint::from_bytes(bytes, limits).unwrap();
+        let state = checkpoint.decode(limits).unwrap();
+        let reencoded = encode(
+            &CheckpointView {
+                meta: state.meta,
+                integrity: state.integrity.as_ref().map(IntegrityState::view),
+                cursor: &state.cursor,
+            },
+            limits,
+        )
+        .unwrap();
+        assert_eq!(reencoded.bytes(), bytes);
+        assert_eq!(state.meta.repository, RepositoryId([9; 32]));
+        assert_eq!(state.meta.source.binding, SourceBinding([7; 32]));
+        assert_eq!(state.meta.generation, 17);
+        assert_eq!(state.meta.sequence, 9);
+        assert_eq!(state.meta.usage.resident_bytes, 0);
+        // Portable history is literal, independent of host pointer width and
+        // the driver's current struct layout.
+        assert_eq!(state.meta.usage.peak_resident_bytes, 50_000_000);
+        assert_eq!(state.meta.usage.work, 2_000_000);
+        state
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    fn frozen_integrity_frontiers_include_completed_cvs_and_both_final_roots() {
+        use mkit_core::upload_parts::{PartPlan, merge_to_root};
+        let state = decode_frozen(include_bytes!(
+            "../../fixtures/evidence/checkpoint-integrity-finished.bin"
+        ));
+        assert_eq!(state.meta.phase, CheckpointPhase::Integrity);
+        assert_eq!(state.meta.source.len, 16_777_260);
+        assert_eq!(state.meta.header, Some((1, 1)));
+        assert_eq!(state.meta.ordinal, 0);
+        assert_eq!(state.meta.usage.evidence_bytes, 0);
+        let f = state.integrity.unwrap();
+        assert_eq!(f.offset, 16_777_260);
+        assert_eq!(f.whole_cvs.len(), 3);
+        assert_eq!(f.trailer_cvs.len(), 3);
+        assert_eq!(f.trailer_used, 32);
+        let whole = PartPlan::new(16_777_260, 8_388_608, 518).unwrap();
+        let preceding = PartPlan::new(16_777_228, 8_388_608, 518).unwrap();
+        assert_eq!(
+            f.whole_root,
+            Some(merge_to_root(&whole, &f.whole_cvs).unwrap())
+        );
+        assert_eq!(f.whole_root, Some(state.meta.source.id));
+        assert_eq!(
+            f.trailer_root,
+            Some(merge_to_root(&preceding, &f.trailer_cvs).unwrap())
+        );
+        assert_eq!(f.trailer_root, Some(f.trailer));
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    fn frozen_integrity_partial_trailer_preserves_partial_bytes_and_optional_root() {
+        let state = decode_frozen(include_bytes!(
+            "../../fixtures/evidence/checkpoint-integrity-partial-trailer.bin"
+        ));
+        assert_eq!(state.meta.phase, CheckpointPhase::Integrity);
+        assert_eq!(state.meta.source.len, 8_388_624);
+        let f = state.integrity.unwrap();
+        assert_eq!(f.offset, 8_388_608);
+        assert_eq!(f.whole_cvs.len(), 1);
+        assert!(f.trailer_cvs.is_empty());
+        assert_eq!(f.whole_root, None);
+        assert_eq!(f.trailer_used, 16);
+        assert_eq!(&f.trailer[..16], &f.trailer_root.unwrap()[..16]);
+        assert_eq!(&f.trailer[16..], &[0; 16]);
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    fn frozen_decode_cursor_resumes_real_pack_after_first_acknowledged_frame() {
+        use mkit_core::pack::{
+            DecodeLimits,
+            window::{Step, WindowReader},
+        };
+        let state = decode_frozen(include_bytes!(
+            "../../fixtures/evidence/checkpoint-decode.bin"
+        ));
+        assert_eq!(state.meta.phase, CheckpointPhase::Decode);
+        assert_eq!(state.meta.header, Some((1, 3)));
+        assert_eq!(
+            (
+                state.meta.source.len,
+                state.meta.ordinal,
+                state.meta.payload
+            ),
+            (189, 1, 14)
+        );
+        assert_eq!(state.meta.retention_count, 1);
+        assert_eq!(state.meta.usage.evidence_bytes, 217);
+        assert_eq!(state.meta.last_retained.unwrap().items, 1);
+        let cursor = WindowCursor::from_bytes(&state.cursor).unwrap();
+        assert_eq!(cursor.to_bytes(), state.cursor);
+        let mut reader = WindowReader::resume(&cursor, DecodeLimits::default()).unwrap();
+        let pack = include_bytes!("../../fixtures/framing/earlier-delta-base.bin");
+        let mut remaining = 0;
+        loop {
+            match reader.step().unwrap() {
+                Step::NeedWindow(range) => {
+                    let start = usize::try_from(range.offset).unwrap();
+                    let end = usize::try_from(range.offset + range.len).unwrap();
+                    reader.feed(range.offset, &pack[start..end]).unwrap();
+                }
+                Step::Entry(_) => remaining += 1,
+                Step::Done(summary) => {
+                    assert_eq!(summary.entry_count, 3);
+                    assert_eq!(remaining, 2);
+                    break;
+                }
+                _ => panic!("unexpected core window transition"),
+            }
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    fn frozen_complete_preserves_retained_chain_and_cumulative_accounting() {
+        let state = decode_frozen(include_bytes!(
+            "../../fixtures/evidence/checkpoint-complete.bin"
+        ));
+        assert_eq!(state.meta.phase, CheckpointPhase::Complete);
+        assert_eq!(state.meta.header, Some((1, 3)));
+        assert_eq!(
+            (
+                state.meta.source.len,
+                state.meta.ordinal,
+                state.meta.payload
+            ),
+            (189, 3, 130)
+        );
+        assert_eq!(state.meta.retention_count, 3);
+        assert_eq!(state.meta.usage.evidence_pages, 3);
+        assert_eq!(state.meta.usage.evidence_bytes, 651);
+        let page = state.meta.last_retained.unwrap();
+        assert_eq!(
+            (page.kind, page.len, page.items),
+            (PageKind::Occurrences, 217, 1)
+        );
+        assert_eq!(
+            mkit_core::hash::to_hex(&page.digest),
+            "b7ae13e2167fe2d1089ad17ac4bfb389f88ee39bad3bb88895c9eba84b9a6fd3"
+        );
+        assert!(state.integrity.is_none());
+        assert!(state.cursor.is_empty());
+    }
 }

@@ -4,6 +4,9 @@
 #[path = "../../tests/support/fork.rs"]
 pub mod fork;
 
+mod framing_model;
+mod proof_model;
+
 /// Largest input admitted by a fuzz body before applying its own tighter limits.
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
 
@@ -12,101 +15,8 @@ pub const MAX_INPUT_BYTES: usize = 64 * 1024;
 /// # Panics
 /// Panics when a production decoder violates the fuzz target's invariant.
 pub fn framing(data: &[u8]) {
-    use mkit_core::hash;
-    use mkit_primitives::{
-        evidence::{PackSource, SourceBinding},
-        limits::{IndexedProfile, VerifyLimits},
-        pack_verify::{
-            Acquisition, Request, Response,
-            framing::{FramingDriver, FramingStep},
-        },
-    };
-    if data.len() > MAX_INPUT_BYTES {
-        return;
-    }
-    let limits = VerifyLimits {
-        work: 64 << 20,
-        ..VerifyLimits::indexed()
-    };
-    let source = PackSource {
-        id: hash::hash(data),
-        len: data.len() as u64,
-        binding: SourceBinding([4; 32]),
-    };
-    let profile = IndexedProfile {
-        pack_bytes: MAX_INPUT_BYTES as u64,
-        decoded_bytes: 4 << 20,
-        delta_depth: 50,
-    };
-    let Ok(mut driver) = FramingDriver::new(
-        source,
-        mkit_primitives::evidence::RepositoryId([9; 32]),
-        profile,
-        limits,
-        17,
-    ) else {
-        return;
-    };
-    for _ in 0..100 {
-        let Ok(step) = driver.step() else {
-            return;
-        };
-        match step {
-            FramingStep::Request(Request::Bytes {
-                request,
-                source,
-                range,
-            }) => {
-                let Ok(begin) = usize::try_from(range.offset) else {
-                    return;
-                };
-                let Some(end) = usize::try_from(range.len)
-                    .ok()
-                    .and_then(|len| begin.checked_add(len))
-                else {
-                    return;
-                };
-                let Some(bytes) = data.get(begin..end) else {
-                    return;
-                };
-                let stale = mkit_primitives::pack_verify::RequestId {
-                    generation: 16,
-                    ..request
-                };
-                assert!(
-                    driver
-                        .supply(Response::Bytes {
-                            request: stale,
-                            source,
-                            range,
-                            value: Acquisition::Present(bytes)
-                        })
-                        .is_err()
-                );
-                if driver
-                    .supply(Response::Bytes {
-                        request,
-                        source,
-                        range,
-                        value: Acquisition::Present(bytes),
-                    })
-                    .is_err()
-                {
-                    return;
-                }
-            }
-            FramingStep::RetainEvidence(page) => {
-                let commitment = page.commitment;
-                assert!(driver.acknowledge_retention(commitment).is_ok());
-            }
-            FramingStep::Complete(pack) => {
-                assert_eq!(pack.source().id, hash::hash(data));
-                assert!(driver.usage().peak_resident_bytes <= limits.resident_bytes);
-                return;
-            }
-            FramingStep::Progress | FramingStep::Frame(_) => {}
-            FramingStep::Request(_) => return,
-        }
+    if data.len() <= MAX_INPUT_BYTES {
+        framing_model::exercise(data);
     }
 }
 
@@ -178,6 +88,7 @@ pub fn proof(data: &[u8]) {
     if data.len() > MAX_INPUT_BYTES {
         return;
     }
+    proof_model::exercise(data);
     let limits = EvidenceLimits {
         page_bytes: MAX_INPUT_BYTES as u64,
         value_bytes: 4096,
@@ -301,11 +212,18 @@ mod tests {
             include_bytes!("../../fixtures/evidence/proof-version.bin").as_slice(),
             include_bytes!("../../fixtures/evidence/proof-wrong-query.bin").as_slice(),
             include_bytes!("../../fixtures/evidence/proof-missing-page.bin").as_slice(),
+            include_bytes!("../../fixtures/evidence/proof-multilevel-inclusion.bin").as_slice(),
+            include_bytes!("../../fixtures/evidence/proof-multilevel-absence.bin").as_slice(),
         ] {
             proof(bytes);
         }
         for bytes in [
             include_bytes!("../../fixtures/evidence/checkpoint-header.bin").as_slice(),
+            include_bytes!("../../fixtures/evidence/checkpoint-integrity-finished.bin").as_slice(),
+            include_bytes!("../../fixtures/evidence/checkpoint-integrity-partial-trailer.bin")
+                .as_slice(),
+            include_bytes!("../../fixtures/evidence/checkpoint-decode.bin").as_slice(),
+            include_bytes!("../../fixtures/evidence/checkpoint-complete.bin").as_slice(),
             include_bytes!("../../fixtures/evidence/checkpoint-version.bin").as_slice(),
             include_bytes!("../../fixtures/evidence/checkpoint-corrupt.bin").as_slice(),
         ] {

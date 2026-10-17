@@ -107,7 +107,7 @@ fn measured(bytes: &[u8], expected: Option<FailureCode>, expected_frames: u32) {
                 finished = true;
                 break;
             }
-            Ok(FramingStep::Request(_)) => panic!("unexpected fresh-run request"),
+            Ok(_) => panic!("unexpected fresh-run request"),
         }
         assert!(epoch.live() <= driver.usage().resident_bytes);
         assert!(epoch.peak() <= driver.usage().peak_resident_bytes);

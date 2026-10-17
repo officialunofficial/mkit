@@ -1,0 +1,38 @@
+{
+  "cursor_bytes": 0,
+  "description": "Three decoded frames with all occurrence pages acknowledged and their final chain commitment.",
+  "encoded_bytes": 426,
+  "expected": "Checkpoint",
+  "format_version": 1,
+  "generation": 17,
+  "header": {
+    "count": 3,
+    "version": 1
+  },
+  "integrity": null,
+  "last_retained": {
+    "digest": "b7ae13e2167fe2d1089ad17ac4bfb389f88ee39bad3bb88895c9eba84b9a6fd3",
+    "items": 1,
+    "kind": 1,
+    "len": 217
+  },
+  "ordinal": 3,
+  "payload_bytes": 130,
+  "phase": "complete",
+  "profile": "indexed",
+  "repository": "0909090909090909090909090909090909090909090909090909090909090909",
+  "retention_count": 3,
+  "ruleset": 1,
+  "sequence": 9,
+  "source_binding": "0707070707070707070707070707070707070707070707070707070707070707",
+  "source_id": "0cf2d3bf998aa37ed8c24823ffe760ae1842ec66d0e7e680c4b33414e7b405bb",
+  "source_len": 189,
+  "trailer": "9d112966b23f97561eb66f863ca76d1f91bbe5df965e9f98fdbb17842cab0527",
+  "usage": {
+    "evidence_bytes": 651,
+    "evidence_pages": 3,
+    "peak_resident_bytes": 50000000,
+    "resident_bytes": 0,
+    "work": 2000000
+  }
+}

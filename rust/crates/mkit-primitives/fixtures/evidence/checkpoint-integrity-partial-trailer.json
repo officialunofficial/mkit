@@ -1,0 +1,44 @@
+{
+  "cursor_bytes": 0,
+  "description": "Completed 8 MiB subtree with sixteen trailer bytes acquired and only the pre-trailer root finalized.",
+  "encoded_bytes": 488,
+  "expected": "Checkpoint",
+  "format_version": 1,
+  "generation": 17,
+  "header": {
+    "count": 1,
+    "version": 1
+  },
+  "integrity": {
+    "offset": 8388608,
+    "trailer": "2bbabdbc29a9bbc50325c1052702461400000000000000000000000000000000",
+    "trailer_cvs": [],
+    "trailer_root": "2bbabdbc29a9bbc50325c10527024614d5193a974c59ba98fa9fdde8b3daedeb",
+    "trailer_used": 16,
+    "whole_cvs": [
+      "d8d89f3f86b63f82921ac934872466e0db8fbec57fa0fef4e2717a214a383619"
+    ],
+    "whole_root": null
+  },
+  "last_retained": null,
+  "ordinal": 0,
+  "payload_bytes": 0,
+  "phase": "integrity",
+  "profile": "indexed",
+  "repository": "0909090909090909090909090909090909090909090909090909090909090909",
+  "retention_count": 0,
+  "ruleset": 1,
+  "sequence": 9,
+  "source_binding": "0707070707070707070707070707070707070707070707070707070707070707",
+  "source_id": "8a8ee70fcdc6b1c58368347c865cb0af5985376ac51eb7386228a626646d1faf",
+  "source_len": 8388624,
+  "source_recipe": "Fill source_len bytes with 0x03; overwrite the MKIT v1 one-entry header and raw frame prefix (payload length source_len - 49); overwrite the final 32 bytes with BLAKE3 of the preceding bytes. This source exercises integrity state; its oversized raw entry need not pass later decoding.",
+  "trailer": "0000000000000000000000000000000000000000000000000000000000000000",
+  "usage": {
+    "evidence_bytes": 0,
+    "evidence_pages": 0,
+    "peak_resident_bytes": 50000000,
+    "resident_bytes": 0,
+    "work": 2000000
+  }
+}
