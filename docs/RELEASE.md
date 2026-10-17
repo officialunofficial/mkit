@@ -291,7 +291,11 @@ Notes on the published set:
   for that exact version. An absent version is published, waiting for registry
   indexing. For a present version, the script downloads the published `.crate`
   and compares its extracted file list and every file byte with the local
-  package. Identical contents skip the upload with an explicit message.
+  package, excluding exactly the Cargo-generated `.cargo_vcs_info.json`.
+  Packaging and publication stay inside Git to preserve commit provenance.
+  The sole exclusion permits a later tag to reuse an unchanged fork. The
+  normalized **Cargo.toml**, **Cargo.toml.orig**, **Cargo.lock**, and all other
+  packaged files must match byte for byte. Identical contents skip the upload with an explicit message.
   Different contents fail the release: the fork changed and needs a version
   bump. No published version is overwritten. Archive ordering, timestamps,
   and compression metadata do not affect the comparison; packaged files do.

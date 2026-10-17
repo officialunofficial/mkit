@@ -167,11 +167,14 @@ jobs:
           python3 scripts/test-publish-bounded-decoder.py
           python3 scripts/test-server-gates.py --hosted-only
           python3 scripts/check-launch-feature-graph.py
+      - name: Native bounded decoder parity
+        working-directory: rust
+        run: cargo nextest run --locked -p mkit-core --all-features --lib -j 3 -E 'test(zstd_tests)' --failure-output immediate
+      - name: Bounded decoder on wasm32
+        run: bash scripts/wasm-ruzstd-check.sh
       - name: Native TestHost contracts over HTTP
         working-directory: rust
         run: cargo nextest run --locked -p mkit-server-conformance --features test-host --lib --test test_host --test test_host_migrations --test test_host_regressions -j 3 --success-output immediate --failure-output immediate --no-fail-fast
-      - name: Bounded decoder on wasm32
-        run: bash scripts/wasm-ruzstd-check.sh
 
   server-semver:
     name: Server patch API compatibility

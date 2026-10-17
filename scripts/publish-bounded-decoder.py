@@ -12,6 +12,9 @@ from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "rust/vendor/ruzstd/Cargo.toml"
+# Cargo records the release commit here. Preserve it in the published package,
+# but allow a later tag to reuse the same fork with different commit provenance.
+COMPARISON_EXCLUSIONS = frozenset({".cargo_vcs_info.json"})
 
 
 def archive_files(data):
@@ -30,7 +33,7 @@ def archive_files(data):
             if name in files:
                 raise ValueError("crate archive contains duplicate file names")
             files[name] = archive.extractfile(member).read()
-    return files
+    return {name: data for name, data in files.items() if name not in COMPARISON_EXCLUSIONS}
 
 
 def download(url):
@@ -63,7 +66,7 @@ def publish():
     if archive_files(local) != archive_files(published):
         raise ValueError(f"{name} {version}: the fork changed and needs a version bump; "
                          "published versions cannot be overwritten")
-    print(f"{name} {version}: packaged file list and bytes match; skipping publish")
+    print(f"{name} {version}: packaged files match (excluding .cargo_vcs_info.json); skipping publish")
 
 
 if __name__ == "__main__":
