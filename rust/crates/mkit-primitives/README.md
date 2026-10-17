@@ -1,73 +1,167 @@
 # mkit-primitives
 
-Pure protocol contracts for pack verification, repository closure, and guarded
-write decisions. Version **0.1.0** is independent of the workspace release train.
-The reference server depends on this crate; publish the required primitives
-version independently before publishing a workspace release that uses it.
-All public APIs are **ALPHA**. Auth-v2 validation and replay classification use
-the existing protocol rules. The crate also provides guarded fork acceptance
-and bounded direct-child closure with authenticated local evidence pages.
-It also defines the bounded acceptance-evidence byte envelope.
-Pack verification and other decision drivers currently expose contracts;
-their implementations land separately.
+Bounded sans-IO pack framing and evidence codecs, with shared contracts for
+all-entry verification, repository closure, and guarded write decisions.
+Version **0.1.0** is independent of the workspace release train. All public
+APIs are **ALPHA**. The crate also provides guarded fork acceptance and
+bounded direct-child closure with authenticated local evidence pages, auth-v2
+validation, replay classification, and acceptance-evidence envelopes. The reference
+server depends on this crate; publish its required version independently before
+publishing a workspace release that uses it.
 
-Callers own acquisition, immutable byte retention, clocks, execution, and atomic
-commits. The crate has no storage callbacks, runtime, HTTP client, or server
-dependency. It supports `std`, including `wasm32-unknown-unknown`, and forbids
-unsafe code. Core retains existing codecs, hashes, and individual signatures.
+Callers acquire immutable byte ranges, retain evidence, supply observations,
+and commit effects. The crate has no storage callbacks, runtime, HTTP client,
+or server dependency. It supports `std`, including `wasm32-unknown-unknown`,
+and forbids unsafe code. Core retains existing codecs, hashes, and signatures.
 
-`VerifiedPack` establishes pack validity, `ClosureProof` establishes closure in
-a repository view, and `Guarded<D>` carries every atomic comparison needed by
-a decision. Their construction is private to their owning modules. None can be
-deserialized or forged through a public testing helper. Host-supplied facts are
-trusted observations, not remote attestations. Only a successful host atomic
-comparison and commit accepts a write.
+## Frame an immutable source
 
-The default `pack-ruzstd` feature selects pure-Rust decoding. `pack-zstd` enables
-the native backend. Raw-only and both-backend builds are supported. Backend
-capability never substitutes for content verification.
-
-Crate API version, normative ruleset, evidence format version, and checkpoint
-format version are separate contracts. Closure state, witness, and missing-set pages use strict version-one formats.
-Acceptance evidence format 1 is separate from in-process artifacts.
-No serialized walker checkpoint is defined. Unsupported state versions and
-lost pages require verification restart; historical readers are not promised. Existing normative wire bytes remain unchanged.
+`FramingDriver` first checks the header, then authenticates the complete pack
+and trailer, and finally decodes frames in wire order. Its borrowed frame
+payloads remain provisional. `FramedPack` establishes integrity and framing;
+canonical objects, delta resolution, and signatures require all-entry
+verification.
 
 ```rust
-use mkit_primitives::evidence::{PackSource, SourceBinding};
-let source = PackSource { id: [1; 32], len: 128, binding: SourceBinding([2; 32]) };
-assert_eq!(source.len, 128);
+use mkit_primitives::{
+    evidence::{PackSource, RepositoryId, SourceBinding},
+    limits::{IndexedProfile, VerifyLimits},
+    pack_verify::framing::{FramingDriver, FramingStep},
+};
+
+let source = PackSource {
+    id: [1; 32],
+    len: 128,
+    binding: SourceBinding([2; 32]),
+};
+let profile = IndexedProfile {
+    pack_bytes: 4 << 30,
+    decoded_bytes: 4 << 30,
+    delta_depth: 32,
+};
+let mut driver = FramingDriver::new(
+    source, RepositoryId([3; 32]), profile, VerifyLimits::indexed(), 1,
+)?;
+assert!(matches!(driver.step()?, FramingStep::Request(_)));
+# Ok::<(), mkit_primitives::error::Failure>(())
 ```
 
-## Module inventory
+For `Request`, supply the exact requested range and bindings through `Response`.
+`Frame` borrows decoded bytes until the next mutable driver call. For
+`RetainEvidence`, retain the exact page bytes before calling
+`acknowledge_retention` with its commitment. Repeated steps return the same
+retention event until acknowledgment. `Progress` yields cooperatively;
+`Complete` returns framing-only evidence. Missing input never means success.
 
-Every item below inherits ALPHA from its enclosing module, including fields,
+`VerifyLimits` bounds acquisitions, simultaneous primitive-owned memory,
+checkpoint size, cumulative evidence, and work. `IndexedProfile` separately
+names content ceilings. Decoder reservations include window buffers, carried
+frames, decoded output, and scratch. Hosts budget their own source buffers and
+external retained-page storage separately.
+
+## Decode bounded evidence
+
+`encode_leaf` and `encode_internal` construct canonical pages; `BranchChild`
+names an internal separator and child commitment. Page decoding checks
+structure and exact context. A proof additionally checks
+each page against a trusted root and the routed query interval. A missing path
+cannot prove absence. Every nested page shares the proof's cumulative budget.
+
+```rust
+use mkit_primitives::{
+    evidence::{
+        PackSource, PageKind, ProfileId, RepositoryId, RulesetBinding, SourceBinding,
+        pages::{EvidenceBinding, INDEXED_RULESET, PageView, encode_leaf},
+    },
+    limits::EvidenceLimits,
+};
+
+let binding = EvidenceBinding {
+    source: PackSource { id: [1; 32], len: 44, binding: SourceBinding([2; 32]) },
+    repository: RepositoryId([3; 32]),
+    ruleset: RulesetBinding { ruleset: INDEXED_RULESET, profile: ProfileId::Indexed },
+};
+let limits = EvidenceLimits::indexed();
+let page = encode_leaf(binding, PageKind::Objects, &[], limits)?;
+let view = PageView::from_bytes(page.bytes(), binding, limits)?;
+assert_eq!(view.items(), 0);
+assert_eq!(view.commitment(), page.commitment());
+# Ok::<(), mkit_primitives::error::Failure>(())
+```
+
+`VerifiedPack`, `ClosureProof`, and `Guarded<D>` have private construction.
+Checkpoint and page decoders cannot create them. Host-supplied facts are trusted
+observations, not remote attestations. Only a successful host atomic comparison
+and effect commit accepts a write. The verifier, closure walker, and decision
+implementations have separate entry points. Framing completion establishes none
+of their object, closure, or acceptance checks.
+
+## Features and state formats
+
+The default `pack-ruzstd` feature selects pure-Rust decoding. `pack-zstd` enables
+the native backend. Raw-only and both-backend builds are supported. A raw-only
+build refuses compressed frames as an unsupported capability. Native decoding
+is not a wasm configuration.
+
+Crate API version, normative ruleset, semantic profile, and encoded format
+versions are separate contracts. The initial indexed ruleset is 1. Page,
+proof, checkpoint, and ordered framing-record formats each start at version 1.
+Unsupported disposable state versions require restart from the immutable
+source; historical readers are not promised. Existing pack and object bytes
+remain unchanged.
+
+`Checkpoint::from_bytes` checks envelope syntax and bounds. Its checksum detects
+corruption and does not authenticate hostile state or authorize resume. Hosts
+must trust retained checkpoints or authenticate the complete envelope and its
+bindings. Resume must validate expected context, cursor consistency, and
+retained evidence before advancing. Active decoder and hash-library memory is
+never a persisted checkpoint format.
+
+## Module and decoder inventory
+
+Every public item inherits ALPHA from its enclosing module, including fields,
 variants, associated items, trait members, and re-exports.
+
+`FailureCode::as_str` values stay stable within a ruleset. Existing codes must
+not be renamed, removed, or repurposed. The single semantic code registry pins
+the full set; diagnostic `Display` text is not a code parser.
 
 | Module | Contract |
 |---|---|
-| `error` | Stable `FailureCode::as_str`, `Failure`, numeric location and bounded detail |
-| `limits` | Finite `VerifyLimits::indexed` execution defaults and explicit `IndexedProfile` content ceilings |
-| `evidence` | Repository/source/revision/ruleset bindings, page/proof references, repository-scoped member facts |
-| `pack_verify` | Byte-range requests and bound responses, backpressure events, paged summaries, opaque `VerifiedPack` accessors |
-| `closure` | `ClosureWalker`, finite `ClosureLimits`, batched requests/replies, pure verified-object view and manifest summaries, opaque closure/missing results, bounded authenticated output page decoders |
-| `fork` | Bounded complete inventory plans, final source fences, guarded acceptance, exact replay and reservation settlement |
-| `decision` | Observations/snapshots, exact guard variants, source fences, semantic effects, decisions, opaque `Guarded<D>` accessors |
+| `error` | Stable `FailureCode::as_str`, `Failure`, numeric location, bounded detail |
+| `limits` | Finite execution and evidence budgets; explicit indexed content ceilings |
+| `evidence` | Repository/source/revision/ruleset bindings and repository-scoped facts |
+| `evidence::pages` | Canonical bounded leaves/internal pages and commitments |
+| `evidence::proof` | Authenticated inclusion and absence against an expected root |
+| `evidence::checkpoint` | Strict current-version untrusted checkpoint envelope |
+| `pack_verify` | Request/response contracts, resource usage, opaque `VerifiedPack` accessors |
+| `pack_verify::framing` | Two-pass pull driver, provisional frames, retention, `FramedPack` |
+| `closure` | `ClosureWalker`, finite `ClosureLimits`, batched facts, authenticated local pages and opaque closure/missing results |
+| `fork` | Bounded full-inventory plans, final source fences, guarded acceptance and exact terminal replay |
+| `auth` | Portable envelope verification and host-authenticated claims binding |
+| `replay` | Pure replay classification and exact saved results |
+| `evidence::acceptance` | Bounded canonical acceptance-evidence envelope |
+| `decision` | Snapshots, guards, source fences, effects, decisions, opaque `Guarded<D>` |
 
-`evidence::acceptance` reserves the envelope module without defining a schema.
-Membership observations retain their object key even for absence. Terminal
-replay refusals retain the exact public message under an explicit finite
-`DecisionLimits` byte budget. Reservation settlements and durable delivery use
-the same reservation-terminal payload, keyed by reservation identity rather
-than only operation identity. Nonterminal ticket binding is a separate effect.
+In-memory bindings and decision facts have no invented serializer. Acceptance
+evidence uses its own strict version-one envelope; closure pages retain their
+separate version-one formats.
 
-The private cursor and budget are infrastructure for future bounded decoders.
-Closure owns three local encoded page types and three validation/decoding entry
-points: `output::{validate_state_page, decode_witness, decode_missing}`. Every
-entry point takes a finite `PageDecodeCfg`; the internal journal additionally
-uses a fixed 1,024-byte state-page ceiling. Frozen positive and negative bytes
-are registered under the closure section of `fixtures/manifest.toml`.
-`closure_steps` and `closure_pages` share stable replay bodies with libFuzzer.
+| Encoded input | Decoder | Bounds |
+|---|---|---|
+| Pack frames | `FramingDriver::supply` and `step`, through core `WindowReader` | `VerifyLimits`, `IndexedProfile`, fixed frame/output caps |
+| Page v1 | `PageView::from_bytes` | `EvidenceLimits`, 16 items, 1 MiB format cap |
+| Proof v1 | `proof::verify_path` | One shared `EvidenceLimits` budget, at most 33 pages |
+| Framing record v1 | `FrameRecord::from_bytes` | Fixed 58 bytes, checked frame geometry, no allocation |
+| Closure state/witness/missing pages v1 | `closure::output::{validate_state_page, decode_witness, decode_missing}` | `PageDecodeCfg`, fixed 1,024-byte internal journal cap |
+| Acceptance evidence v1 | `AcceptanceEvidence::decode` and `from_trusted_host` | Explicit `AcceptanceEvidenceDecodeCfg` envelope, operation, head and dependency caps |
+| Checkpoint v1 | `Checkpoint::from_bytes` | `VerifyLimits`, 518 values per frontier, 4096-byte core cursor |
+
+The fixture manifest registers encoded formats, canonical bytes, semantic
+sidecars, expected outcomes, decoder names, and fuzz targets. Its read-only
+runner rejects missing and orphan files. Stable seed replay exercises the
+bounded fuzz entry points. The private cursor and cumulative budget provide
+checked reads and fallible allocation without a public generic codec trait.
 
 ## Fork acceptance
 

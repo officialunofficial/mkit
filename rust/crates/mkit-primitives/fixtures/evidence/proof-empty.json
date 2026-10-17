@@ -1,0 +1,6 @@
+{
+  "description": "Authenticated absence of key 05 repeated 32 times under the canonical empty root.",
+  "expected": "Absent",
+  "query": "0505050505050505050505050505050505050505050505050505050505050505",
+  "root": "bab0119533ac8840c83871019afc5b709c67893affd4689eb915be79de1c53d6"
+}

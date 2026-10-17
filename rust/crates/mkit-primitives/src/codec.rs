@@ -1,7 +1,7 @@
 //! Private bounded cursor and shared cumulative decode budget.
 use crate::error::{BoundedDetail, Failure, FailureCode, Location};
 
-fn failure(code: FailureCode) -> Failure {
+pub(crate) fn failure(code: FailureCode) -> Failure {
     Failure {
         code,
         location: Location::default(),
@@ -42,6 +42,9 @@ pub(crate) struct Cursor<'a, 'b> {
     budget: &'b mut Budget,
 }
 impl<'a, 'b> Cursor<'a, 'b> {
+    pub(crate) fn charge(&mut self, work: u64, owned: u64) -> Result<(), Failure> {
+        self.budget.charge(work, owned)
+    }
     pub(crate) const fn new(bytes: &'a [u8], budget: &'b mut Budget) -> Self {
         Self {
             bytes,
@@ -69,6 +72,17 @@ impl<'a, 'b> Cursor<'a, 'b> {
             .try_into()
             .map_err(|_| failure(FailureCode::UnexpectedEof))?;
         Ok(u32::from_le_bytes(bytes))
+    }
+    pub(crate) fn byte(&mut self) -> Result<u8, Failure> {
+        Ok(self.array::<1>()?[0])
+    }
+    pub(crate) fn u16(&mut self) -> Result<u16, Failure> {
+        Ok(u16::from_le_bytes(self.array()?))
+    }
+    pub(crate) fn array<const N: usize>(&mut self) -> Result<[u8; N], Failure> {
+        self.take(u64::try_from(N).map_err(|_| failure(FailureCode::ResourceLimit))?)?
+            .try_into()
+            .map_err(|_| failure(FailureCode::UnexpectedEof))
     }
     pub(crate) fn u64(&mut self) -> Result<u64, Failure> {
         let bytes: [u8; 8] = self

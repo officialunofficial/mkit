@@ -65,6 +65,13 @@ collect the applicable entries between their old and new immutable pins.
   independent head signature rechecking. This adds a library byte contract;
   existing server paths and stored formats are unchanged. No store reset.
 
+- Add bounded sans-IO pack framing, authenticated evidence pages and paths,
+  and a strict versioned checkpoint envelope to `mkit-primitives`. Framing
+  completion remains separate from canonical object and signature verification.
+  New reconstructible evidence/checkpoint formats start at version 1;
+  unsupported state requires restart. Existing pack and object bytes remain
+  unchanged. No existing caller migration or authoritative store reset.
+
 - Add the independently versioned `mkit-primitives` ALPHA contract skeleton.
   It defines opaque verification, closure, and guarded-decision types without
   changing existing runtime paths or wire formats. No migration or store reset.

@@ -1,0 +1,12 @@
+{
+  "description": "Canonical empty object-index root leaf.",
+  "height": 0,
+  "items": 0,
+  "kind": "objects",
+  "pack_id": "115769ad53d3d620942422bc750e94f4ee9c21c5594ed40db29d02808a9757c9",
+  "profile": "indexed",
+  "repository": "0909090909090909090909090909090909090909090909090909090909090909",
+  "ruleset": 1,
+  "source_binding": "0707070707070707070707070707070707070707070707070707070707070707",
+  "source_len": 44
+}

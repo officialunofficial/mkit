@@ -1,0 +1,15 @@
+{
+  "canonical_bytes": [
+    "014d4b5431010400000062617365",
+    "014d4b543101060000006d6964646c65",
+    "014d4b54310106000000746172676574"
+  ],
+  "description": "A reconstructed earlier delta result supplies the next delta base.",
+  "object_ids": [
+    "597432176ee048bb53c972133561a8b21fa8be2cd3b89ac9fcf51b0d9a423a6b",
+    "b14394bc7308449cd1dd524bd9e69384b73e99f87a103020448739648ebc18e5",
+    "d5dbb9aca40a24abdcb946b5f39672d818c62ab02eae9ecaf474d563dc701d6c"
+  ],
+  "pack_id": "0cf2d3bf998aa37ed8c24823ffe760ae1842ec66d0e7e680c4b33414e7b405bb",
+  "reference_expected": "Complete"
+}

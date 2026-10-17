@@ -52,8 +52,92 @@ options:
 timeout: 7200s
 
 steps:
+  # Run the required package gate before workspace compilation so an
+  # unrelated workspace failure cannot cancel primitives verification.
+  - name: ${_CI_IMAGE}
+    id: primitives
+    waitFor: ['-']
+    timeout: 2400s
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "CARGO_BUILD_JOBS=3"
+      - "CARGO_PROFILE_DEV_DEBUG=0"
+      - "CARGO_PROFILE_TEST_DEBUG=0"
+      - "MKIT_PRIMITIVES_CI=1"
+      - "RUSTC_WRAPPER=sccache"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=ci"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        # Keep the package gate's Cargo artifacts separate from the workspace
+        # step while sharing the existing sccache backend.
+        mkdir /tmp/mkit-primitives-ci
+        tar --exclude=.git --exclude=target -C /workspace -cf - . | tar -C /tmp/mkit-primitives-ci -xf -
+        cd /tmp/mkit-primitives-ci
+        python3 scripts/fmt-primitives.py --check
+        python3 scripts/test-primitives-infrastructure.py
+        python3 scripts/test-primitives-stability.py --compiler-tests
+        python3 scripts/check-primitives-fixtures.py
+        python3 scripts/check-primitives-graph.py
+        python3 scripts/check-primitives-native-workspace.py
+        ( cd rust
+          cargo clippy --locked -p mkit-primitives -p mkit-primitives-fuzz --all-targets --all-features -- -D warnings
+          cargo check --locked -p mkit-primitives-fuzz --features libfuzzer --bins
+          cargo nextest run --locked -p mkit-primitives -j 3
+          cargo nextest run --locked -p mkit-primitives-fuzz -j 3 --no-tests=fail
+          cargo nextest run --locked -p mkit-primitives --no-default-features --features pack-zstd -j 3
+          cargo check --locked -p mkit-primitives --no-default-features --all-targets
+          cargo check --locked -p mkit-primitives --all-features --all-targets
+          cargo nextest run --locked -p mkit-primitives --no-default-features --test framing_backends --test framing_vectors -j 3 --no-tests=fail
+          cargo nextest run --locked -p mkit-primitives --all-features --test framing_backends --test framing_vectors -j 3 --no-tests=fail
+          cargo test --locked -p mkit-primitives --doc
+          cargo test --locked -p mkit-primitives --no-default-features --doc
+          RUSTDOCFLAGS=-Dwarnings cargo doc --locked -p mkit-primitives --all-features --no-deps
+          cargo check --locked -p mkit-primitives --target wasm32-unknown-unknown
+          cargo check --locked -p mkit-primitives --no-default-features --target wasm32-unknown-unknown
+          # The existing image has cargo-binstall; one pinned prebuilt tool
+          # keeps the feature sweep bounded without rebuilding the CI image.
+          if ! cargo hack --version >/dev/null 2>&1; then
+            cargo binstall --no-confirm --force --version 0.6.45 --disable-strategies compile cargo-hack
+          fi
+          cargo hack check --locked -p mkit-primitives --lib --feature-powerset
+        )
+        # Execute the selected portable fixtures on a real wasm32 runtime.
+        # Neither runtime tool is guaranteed by the current baked image.
+        if ! command -v node >/dev/null 2>&1; then
+          # E2 uses x86_64; Node names that archive architecture x64.
+          [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]]
+          node_setup=$(mktemp -d)
+          mkdir /tmp/mkit-primitives-node
+          curl --fail --location --connect-timeout 20 --max-time 120 --retry 2 \
+            https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-x64.tar.gz \
+            -o "$node_setup/node-v22.14.0-linux-x64.tar.gz"
+          curl --fail --location --connect-timeout 20 --max-time 120 --retry 2 \
+            https://nodejs.org/dist/v22.14.0/SHASUMS256.txt -o "$node_setup/SHASUMS256.txt"
+          ( cd "$node_setup"
+            grep ' node-v22.14.0-linux-x64.tar.gz$' SHASUMS256.txt | sha256sum --check --strict
+            tar -xzf node-v22.14.0-linux-x64.tar.gz --strip-components=1 -C /tmp/mkit-primitives-node
+          )
+          rm -rf "$node_setup"
+          export PATH="/tmp/mkit-primitives-node/bin:$$PATH"
+        fi
+        if ! command -v wasm-pack >/dev/null 2>&1; then
+          timeout 180 cargo binstall --no-confirm --force --version 0.13.1 --disable-strategies compile wasm-pack
+        fi
+        node --version
+        wasm-pack --version
+        wasm-pack test --node rust/crates/mkit-core-wasm-check --test primitives_portable --locked
+        bash scripts/check-primitives-stability.sh
+        sccache --show-stats
+
   - name: ${_CI_IMAGE}
     id: check
+    waitFor: [primitives]
     timeout: 3600s
     entrypoint: bash
     env:

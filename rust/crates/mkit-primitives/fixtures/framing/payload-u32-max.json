@@ -1,0 +1,6 @@
+{
+  "declared_payload_len": 4294967295,
+  "description": "Unsigned payload length crosses the available pre-trailer tail.",
+  "pack_id": "69fff34343c83308456861154b2b12c5dd645377adbf6df07ac6a507adc1a4a2",
+  "reference_expected": "UnexpectedEof"
+}
