@@ -701,3 +701,316 @@ impl IntoObserved for StorageAccounting {
         }
     }
 }
+
+#[test]
+fn failed_inline_proof_aborts_only_the_exact_pending_reservation() {
+    let changes = pair();
+    let claims = [claim(0x42, UploadProof::Ready)];
+    let mut req = request(&changes, &claims);
+    let pending = pending_binding(9);
+    req.pending = Some(pending.clone());
+    req.verification = VerificationVerdict::Refused(decision::PermanentRefusal {
+        code: PermanentCode::InvalidArgument,
+        public_message: "invalid pack".into(),
+    });
+    let mut snap = snapshot(&changes, &[0x42]);
+    snap.reservations
+        .push((pending.reservation.clone(), pending.expected.clone()));
+    let decided = decide_ticketed_advance(&req, &snap, limits()).unwrap();
+    let WriteDecision::Reject {
+        terminal,
+        reservation: Some(abort),
+        ..
+    } = decided.decision()
+    else {
+        panic!("missing inline abort: {:?}", decided.decision());
+    };
+    assert!(terminal.is_none());
+    assert_eq!(abort.id, pending.reservation);
+    assert!(
+        matches!(&abort.terminal.kind, ReservationTerminalKind::Aborted {
+        reason: ReservationAbortReason::Internal, detail
+    } if detail.is_empty())
+    );
+    assert!(guards_match(&decided, &snap, NOW));
+    snap.reservations.last_mut().unwrap().1 = Observed::Absent(REV);
+    assert!(!guards_match(&decided, &snap, NOW));
+    assert!(matches!(
+        decide_ticketed_advance(&req, &snap, limits())
+            .unwrap()
+            .decision(),
+        WriteDecision::Retry(_)
+    ));
+}
+
+#[test]
+fn cleanup_claims_and_settlement_outputs_obey_limits() {
+    let changes = pair();
+    let claims = vec![claim(0x42, UploadProof::PackMissing); 8];
+    let snap = snapshot(&changes, &[0x42]);
+    let req = request(&changes, &claims);
+    assert!(decide_ticket_cleanup(&req, "missing", NOW, &snap, limits()).is_err());
+    let req = request(&changes, &claims[..2]);
+    assert!(decide_ticket_cleanup(&req, "missing", NOW, &snap, limits()).is_err());
+    let (id, expected) = reservation(0x42);
+    let terminal = ReservationTerminal {
+        repository: REPO,
+        occurred_ms: NOW,
+        kind: ReservationTerminalKind::Aborted {
+            reason: ReservationAbortReason::Internal,
+            detail: String::new(),
+        },
+    };
+    let mut zero = limits();
+    zero.guards = 0;
+    assert!(
+        decide_reservation_settlement(
+            REPO,
+            &OperationId([6; 32]),
+            &id,
+            &expected,
+            &terminal,
+            &snap,
+            zero
+        )
+        .is_err()
+    );
+    let mut ambiguous = snap.clone();
+    ambiguous
+        .reservations
+        .push((id.clone(), Observed::Absent(REV)));
+    assert!(
+        decide_reservation_settlement(
+            REPO,
+            &OperationId([6; 32]),
+            &id,
+            &expected,
+            &terminal,
+            &ambiguous,
+            limits()
+        )
+        .is_err()
+    );
+    let mut oversized = terminal;
+    oversized.kind = ReservationTerminalKind::Committed {
+        refs: vec![RefValue {
+            name: RefName("x".repeat(65_537)),
+            value: Some(NEW),
+        }],
+        accounting: decision::ReservationAccounting {
+            bytes_stored: 0,
+            new_to_repository: 0,
+            new_to_store: 0,
+        },
+    };
+    assert!(
+        decide_reservation_settlement(
+            REPO,
+            &OperationId([6; 32]),
+            &id,
+            &expected,
+            &oversized,
+            &snap,
+            limits()
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn upload_session_bytes_are_charged_before_deciding() {
+    let changes = pair();
+    let claims = [claim(0x42, UploadProof::Ready)];
+    let req = request(&changes, &claims);
+    let mut snap = snapshot(&changes, &[0x42]);
+    let Observed::Present { value, .. } = &mut snap.tickets[0].1 else {
+        unreachable!()
+    };
+    value.upload_session = Some(vec![0; 16]);
+    let mut bounded = limits();
+    bounded.work = 10_000_000;
+    bounded.bytes = (2 * changes
+        .iter()
+        .map(|change| change.name.0.len())
+        .sum::<usize>()
+        + 32
+        + head().0.len()
+        + 16) as u64;
+    assert!(decide_ticketed_advance(&req, &snap, bounded).is_ok());
+    let Observed::Present { value, .. } = &mut snap.tickets[0].1 else {
+        unreachable!()
+    };
+    value.upload_session.as_mut().unwrap().push(0);
+    assert_eq!(
+        decide_ticketed_advance(&req, &snap, bounded)
+            .unwrap_err()
+            .code,
+        FailureCode::ResourceLimit
+    );
+    let Observed::Present { value, .. } = &mut snap.tickets[0].1 else {
+        unreachable!()
+    };
+    value.upload_session = Some(vec![0; 65_537]);
+    assert_eq!(
+        decide_ticketed_advance(&req, &snap, limits())
+            .unwrap_err()
+            .code,
+        FailureCode::ResourceLimit
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn ticketed_semantic_fixtures_pin_terminal_identity_and_replay() {
+    let rows: serde_json::Value =
+        serde_json::from_str(include_str!("../../../fixtures/decision/ticketed.json")).unwrap();
+    for row in rows.as_array().unwrap() {
+        let case = row["case"].as_str().unwrap();
+        let changes = pair();
+        let claims = [claim(
+            0x42,
+            if case == "cleanup" {
+                UploadProof::PackMissing
+            } else {
+                UploadProof::Ready
+            },
+        )];
+        let mut req = request(&changes, &claims);
+        let mut snap = snapshot(&changes, &[0x42]);
+        if case == "replay" {
+            req.write.replay = Some(decision::ref_write::RefReplay {
+                scope: ReplayScope([8; 32]),
+                fingerprint: [9; 32],
+                expires_ms: 10_000,
+            });
+            snap.replay = Some(present(ReplayFact {
+                fingerprint: [9; 32],
+                expires_ms: 10_000,
+                state: ReplayState::Committed(TerminalResult::Applied(vec![])),
+            }));
+            snap.tickets.clear();
+        } else if case.starts_with("proof-") {
+            let pending = pending_binding(9);
+            snap.reservations
+                .push((pending.reservation.clone(), pending.expected.clone()));
+            req.pending = Some(pending);
+            req.verification = VerificationVerdict::Refused(decision::PermanentRefusal {
+                code: if case == "proof-late" {
+                    PermanentCode::FailedPrecondition
+                } else {
+                    PermanentCode::InvalidArgument
+                },
+                public_message: if case == "proof-late" {
+                    "proof arrived too late"
+                } else {
+                    "invalid pack"
+                }
+                .into(),
+            });
+        } else if case == "pending" {
+            req.verification = VerificationVerdict::Pending;
+        }
+        let decided = match case {
+            "cleanup" => decide_ticket_cleanup(&req, "pack missing", NOW, &snap, limits()).unwrap(),
+            "settle" => {
+                let (id, expected) = reservation(0x42);
+                let terminal = ReservationTerminal {
+                    repository: REPO,
+                    occurred_ms: NOW,
+                    kind: ReservationTerminalKind::Aborted {
+                        reason: ReservationAbortReason::Internal,
+                        detail: String::new(),
+                    },
+                };
+                decide_reservation_settlement(
+                    REPO,
+                    &OperationId([6; 32]),
+                    &id,
+                    &expected,
+                    &terminal,
+                    &snap,
+                    limits(),
+                )
+                .unwrap()
+            }
+            _ => decide_ticketed_advance(&req, &snap, limits()).unwrap(),
+        };
+        assert!(guards_match(&decided, &snap, NOW));
+        let (kind, tickets, settlements, outcomes) = match decided.decision() {
+            WriteDecision::Apply(effects) => {
+                assert!(
+                    effects
+                        .outcomes
+                        .iter()
+                        .all(|outcome| outcome.operation == OperationId([6; 32])
+                            && outcome.reservation == ReservationId([0xc2; 32]))
+                );
+                for settlement in &effects.reservations {
+                    assert_eq!(settlement.id, ReservationId([0xc2; 32]));
+                    assert_eq!(settlement.terminal.repository, REPO);
+                    if let ReservationTerminalKind::Aborted { reason, .. } =
+                        &settlement.terminal.kind
+                    {
+                        assert_eq!(format!("{reason:?}"), row["reason"].as_str().unwrap());
+                    } else if let ReservationTerminalKind::Committed { refs, accounting } =
+                        &settlement.terminal.kind
+                    {
+                        assert_eq!(
+                            refs,
+                            &vec![
+                                RefValue {
+                                    name: packmap(),
+                                    value: Some(NEW)
+                                },
+                                RefValue {
+                                    name: head(),
+                                    value: Some(NEW)
+                                }
+                            ]
+                        );
+                        assert_eq!(accounting.bytes_stored, 1066);
+                    }
+                }
+                (
+                    "apply",
+                    effects.tickets.len(),
+                    effects.reservations.len(),
+                    effects.outcomes.len(),
+                )
+            }
+            WriteDecision::Reject {
+                terminal,
+                reservation: Some(outcome),
+                ..
+            } => {
+                assert!(terminal.is_none());
+                assert_eq!(outcome.id, ReservationId([9; 32]));
+                assert_eq!(outcome.terminal.occurred_ms, NOW);
+                let ReservationTerminalKind::Aborted { reason, detail } = &outcome.terminal.kind
+                else {
+                    panic!("missing abort")
+                };
+                assert_eq!(format!("{reason:?}"), row["reason"].as_str().unwrap());
+                assert_eq!(
+                    detail,
+                    if case == "proof-late" {
+                        "proof arrived too late"
+                    } else {
+                        ""
+                    }
+                );
+                ("reject", 0, 1, 1)
+            }
+            WriteDecision::ReturnRecorded(value) => {
+                assert_eq!(value, &TerminalResult::Applied(vec![]));
+                ("recorded", 0, 0, 0)
+            }
+            WriteDecision::Retry(_) => ("retry", 0, 0, 0),
+            other => panic!("unexpected fixture decision: {other:?}"),
+        };
+        assert_eq!(kind, row["decision"].as_str().unwrap());
+        assert_eq!(tickets as u64, row["tickets"].as_u64().unwrap());
+        assert_eq!(settlements as u64, row["settlements"].as_u64().unwrap());
+        assert_eq!(outcomes as u64, row["outcomes"].as_u64().unwrap());
+    }
+}

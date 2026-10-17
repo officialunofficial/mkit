@@ -401,7 +401,7 @@ fn ticketed_advance_parity_sweep() {
             } else {
                 shards.ref_shard(&repo, HEAD)
             };
-            for fate in 0..6_u8 {
+            for fate in 0..7_u8 {
                 for replay_case in 0..4_u8 {
                     for pending_case in 0..3_u8 {
                         for generation in [None, Some(0), Some(1)] {
@@ -445,6 +445,10 @@ fn ticketed_advance_parity_sweep() {
                                 3 => ticket_present[0] = false,
                                 // 4: second reservation row holds a pending write.
                                 // 5: second reservation row absent.
+                                6 => {
+                                    tickets[0].created_at_ms = 0;
+                                    tickets[0].expires_at_ms = 1;
+                                }
                                 _ => {}
                             }
                             let advance = advance::AdvanceWrite {
@@ -592,6 +596,28 @@ fn ticketed_advance_parity_sweep() {
                                 );
                             }
                             parity(&req, &snap);
+                            // Competing faults preserve the reference's examined prefix:
+                            // pending/replay, ticket order, then ref order.
+                            for key in [
+                                keys::ref_key(&repo.name, HEAD),
+                                keys::ticket(&ids[1]),
+                                keys::reservation(reservations[1]).unwrap(),
+                                keys::repo_storage(&repo.name),
+                            ] {
+                                let mut corrupt = snap.clone();
+                                corrupt.insert(key, Some(Value::new(vec![0xff])));
+                                parity(&req, &corrupt);
+                            }
+                            let mut conflict = snap.clone();
+                            conflict.insert(
+                                keys::ref_key(&repo.name, PACKMAP),
+                                Some(codec::encode_ref_id(&A)),
+                            );
+                            conflict.insert(
+                                keys::ref_key(&repo.name, HEAD),
+                                Some(Value::new(vec![0xff])),
+                            );
+                            parity(&req, &conflict);
                             cases += 1;
                         }
                     }
@@ -599,5 +625,5 @@ fn ticketed_advance_parity_sweep() {
             }
         }
     }
-    assert_eq!(cases, 1296);
+    assert_eq!(cases, 1512);
 }

@@ -4,11 +4,11 @@ use super::{
 };
 use crate::{
     decision::{
-        AcceptanceEffects, DurableOutcome, Guarded, Observed, OperationId, PermanentCode, RefName,
-        RefValue, RequiredGuard, ReservationAbortReason, ReservationAccounting, ReservationFact,
-        ReservationId, ReservationOutcome, ReservationTerminal, ReservationTerminalKind,
-        RetryReason, Snapshot, StorageEffect, StorageFact, TicketFact, TicketId, TicketTransition,
-        WriteDecision,
+        AcceptanceEffects, DurableOutcome, Guarded, Observed, OperationId, PermanentCode,
+        PermanentRefusal, RefName, RefValue, RequiredGuard, ReservationAbortReason,
+        ReservationAccounting, ReservationFact, ReservationId, ReservationOutcome,
+        ReservationTerminal, ReservationTerminalKind, RetryReason, Snapshot, StorageEffect,
+        StorageFact, TicketFact, TicketId, TicketTransition, WriteDecision,
         ref_write::{
             RefDecisionLimits, RefWriteKind, RefWriteRequest,
             checks::{bounds, failure},
@@ -48,15 +48,7 @@ pub fn decide_ticketed_advance(
     if write.kind != RefWriteKind::Advance || write.changes.len() != 2 {
         return Err(failure(FailureCode::InvalidRefRequest));
     }
-    if request.tickets.len() > MAX_TICKETS_PER_ADVANCE
-        || request.tickets.iter().enumerate().any(|(i, claim)| {
-            request.tickets[..i]
-                .iter()
-                .any(|o| o.ticket == claim.ticket)
-        })
-    {
-        return Err(failure(FailureCode::InvalidRefRequest));
-    }
+    validate_claims(request.tickets)?;
     if !request.tickets.is_empty() {
         if write.changes.iter().any(|change| change.target.is_none())
             || !canonical_pair(&write.changes[0].name, &write.changes[1].name)
@@ -134,19 +126,8 @@ fn drive(
             }
         }
     }
-    match &request.verification {
-        VerificationVerdict::Pending => return Ok(WriteDecision::Retry(RetryReason::Unavailable)),
-        VerificationVerdict::Refused(refusal) => {
-            if refusal.public_message.len() > attempt.limits.public_message_bytes as usize {
-                return Err(failure(FailureCode::ResourceLimit));
-            }
-            return Ok(WriteDecision::Reject {
-                refusal: refusal.clone(),
-                terminal: None,
-                reservation: None,
-            });
-        }
-        VerificationVerdict::Satisfied => {}
+    if let Some(decision) = verification(request, attempt.limits)? {
+        return Ok(decision);
     }
     if let Some(decision) = attempt.context()? {
         return Ok(decision);
@@ -421,6 +402,7 @@ pub fn decide_ticket_cleanup(
     {
         return Err(failure(FailureCode::InvalidRefRequest));
     }
+    validate_claims(request.tickets)?;
     bounds(write, snapshot, limits)?;
     if detail.len() > limits.public_message_bytes as usize {
         return Err(failure(FailureCode::ResourceLimit));
@@ -549,6 +531,7 @@ pub fn decide_reservation_settlement(
     if snapshot.repository != repository || terminal.repository != repository {
         return Err(failure(FailureCode::InvalidResponse));
     }
+    settlement_bounds(repository, expected, terminal, snapshot, limits)?;
     let prior_legal = match expected {
         Observed::Present {
             value: ReservationFact::Pending { .. } | ReservationFact::Ticketed(_),
@@ -598,23 +581,46 @@ pub fn decide_reservation_settlement(
         outcomes: Vec::new(),
     };
     if observed == expected {
+        effects
+            .reservations
+            .try_reserve_exact(1)
+            .map_err(|_| failure(FailureCode::ResourceLimit))?;
+        effects
+            .outcomes
+            .try_reserve_exact(1)
+            .map_err(|_| failure(FailureCode::ResourceLimit))?;
         effects.reservations.push(ReservationOutcome {
             id: reservation.clone(),
-            terminal: terminal.clone(),
+            terminal: copy_terminal(terminal)?,
         });
         effects.outcomes.push(DurableOutcome {
             operation: operation.clone(),
             reservation: reservation.clone(),
-            terminal: terminal.clone(),
+            terminal: copy_terminal(terminal)?,
         });
     }
+    let mut required = Vec::new();
+    required
+        .try_reserve_exact(1)
+        .map_err(|_| failure(FailureCode::ResourceLimit))?;
+    let expected = match observed {
+        Observed::Present {
+            value: ReservationFact::Terminal(value),
+            revision,
+        } => Observed::Present {
+            value: ReservationFact::Terminal(copy_terminal(value)?),
+            revision: *revision,
+        },
+        other => other.clone(),
+    };
+    required.push(RequiredGuard::Reservation {
+        id: reservation.clone(),
+        expected,
+    });
     Ok(Guarded {
         repository,
         decision: WriteDecision::Apply(effects),
-        required: vec![RequiredGuard::Reservation {
-            id: reservation.clone(),
-            expected: observed.clone(),
-        }],
+        required,
         source_fences: Vec::new(),
     })
 }
@@ -706,4 +712,221 @@ fn seal(
         required: attempt.guards,
         source_fences,
     }
+}
+
+fn validate_claims(claims: &[TicketClaim]) -> Result<(), Failure> {
+    if claims.len() > MAX_TICKETS_PER_ADVANCE
+        || claims
+            .iter()
+            .enumerate()
+            .any(|(i, claim)| claims[..i].iter().any(|prior| prior.ticket == claim.ticket))
+    {
+        return Err(failure(FailureCode::InvalidRefRequest));
+    }
+    Ok(())
+}
+
+// Keep the reference's reservation::abort_reason classification, including its
+// safe-detail rule. Content errors such as invalid_argument settle as Internal;
+// policy/precondition refusals carry a bounded, printable denial detail.
+fn verification(
+    request: &TicketedAdvanceRequest<'_>,
+    limits: RefDecisionLimits,
+) -> Result<Option<WriteDecision>, Failure> {
+    Ok(match &request.verification {
+        VerificationVerdict::Pending => Some(WriteDecision::Retry(RetryReason::Unavailable)),
+        VerificationVerdict::Refused(refusal) => {
+            if refusal.public_message.len() > limits.public_message_bytes as usize {
+                return Err(failure(FailureCode::ResourceLimit));
+            }
+            Some(WriteDecision::Reject {
+                refusal: refusal.clone(),
+                terminal: None,
+                reservation: request
+                    .pending
+                    .as_ref()
+                    .map(|pending| failed_proof_outcome(request, pending, refusal)),
+            })
+        }
+        VerificationVerdict::Satisfied => None,
+    })
+}
+
+fn failed_proof_outcome(
+    request: &TicketedAdvanceRequest<'_>,
+    pending: &PendingBinding,
+    refusal: &PermanentRefusal,
+) -> ReservationOutcome {
+    let (reason, detail) = proof_abort(refusal);
+    let mut terminal = pending_terminal(request, pending, false);
+    terminal.kind = ReservationTerminalKind::Aborted { reason, detail };
+    ReservationOutcome {
+        id: pending.reservation.clone(),
+        terminal,
+    }
+}
+
+fn proof_abort(refusal: &PermanentRefusal) -> (ReservationAbortReason, String) {
+    if matches!(
+        refusal.code,
+        PermanentCode::PermissionDenied | PermanentCode::FailedPrecondition
+    ) {
+        let detail = if refusal.public_message.len() <= 512
+            && !refusal.public_message.chars().any(char::is_control)
+        {
+            refusal.public_message.clone()
+        } else {
+            "write denied".into()
+        };
+        (ReservationAbortReason::Unspecified, detail)
+    } else {
+        (ReservationAbortReason::Internal, String::new())
+    }
+}
+
+fn settlement_bounds(
+    repository: RepositoryId,
+    expected: &Observed<ReservationFact>,
+    terminal: &ReservationTerminal,
+    snapshot: &Snapshot,
+    mut limits: RefDecisionLimits,
+) -> Result<(), Failure> {
+    use crate::decision::ref_write::{MembershipWindow, RefRequirements};
+    if limits.guards == 0 {
+        return Err(failure(FailureCode::ResourceLimit));
+    }
+    // Charge the independently supplied prior and terminal, including the two
+    // output copies, before validating or cloning any variable-size contents.
+    let mut refs = 0_u32;
+    let mut bytes = 0_u64;
+    let mut charge = |value: &ReservationTerminal| -> Result<(), Failure> {
+        match &value.kind {
+            ReservationTerminalKind::Committed { refs: values, .. } => {
+                refs = refs
+                    .checked_add(
+                        u32::try_from(values.len())
+                            .map_err(|_| failure(FailureCode::ResourceLimit))?,
+                    )
+                    .ok_or_else(|| failure(FailureCode::ResourceLimit))?;
+                if refs > limits.facts {
+                    return Err(failure(FailureCode::ResourceLimit));
+                }
+                for value in values {
+                    bytes = bytes
+                        .checked_add(value.name.0.len() as u64)
+                        .ok_or_else(|| failure(FailureCode::ResourceLimit))?;
+                    if bytes > limits.bytes {
+                        return Err(failure(FailureCode::ResourceLimit));
+                    }
+                }
+            }
+            ReservationTerminalKind::Aborted { detail, .. } => {
+                if detail.len() > limits.public_message_bytes as usize {
+                    return Err(failure(FailureCode::ResourceLimit));
+                }
+                bytes = bytes
+                    .checked_add(detail.len() as u64)
+                    .ok_or_else(|| failure(FailureCode::ResourceLimit))?;
+            }
+            _ => {}
+        }
+        Ok(())
+    };
+    charge(terminal)?;
+    if let Observed::Present {
+        value: ReservationFact::Terminal(value),
+        ..
+    } = expected
+    {
+        charge(value)?;
+    }
+    limits.facts = limits
+        .facts
+        .checked_sub(
+            refs.checked_add(2)
+                .ok_or_else(|| failure(FailureCode::ResourceLimit))?,
+        )
+        .ok_or_else(|| failure(FailureCode::ResourceLimit))?;
+    limits.bytes = limits
+        .bytes
+        .checked_sub(
+            bytes
+                .checked_mul(3)
+                .ok_or_else(|| failure(FailureCode::ResourceLimit))?,
+        )
+        .ok_or_else(|| failure(FailureCode::ResourceLimit))?;
+    limits.work = limits
+        .work
+        .checked_sub(
+            bytes
+                .saturating_mul(3)
+                .saturating_add(u64::from(refs) * 8 + 64),
+        )
+        .ok_or_else(|| failure(FailureCode::ResourceLimit))?;
+    let request = RefWriteRequest {
+        repository,
+        operation: None,
+        kind: RefWriteKind::Update,
+        changes: &[],
+        admitted: &[],
+        presence: None,
+        signer: None,
+        replay: None,
+        ancestry: &[],
+        now_ms: 0,
+        required: RefRequirements {
+            authority: None,
+            grant: None,
+            incarnation: None,
+            policy: None,
+            admission: None,
+            members: &[],
+            indexed_head: false,
+            membership_window: MembershipWindow::Elapsed,
+            denial: false,
+            publication: false,
+            source: None,
+            valid_through_ms: None,
+        },
+    };
+    bounds(&request, snapshot, limits)
+}
+
+fn copy_terminal(value: &ReservationTerminal) -> Result<ReservationTerminal, Failure> {
+    let copy_string = |value: &str| -> Result<String, Failure> {
+        let mut copied = String::new();
+        copied
+            .try_reserve_exact(value.len())
+            .map_err(|_| failure(FailureCode::ResourceLimit))?;
+        copied.push_str(value);
+        Ok(copied)
+    };
+    let kind = match &value.kind {
+        ReservationTerminalKind::Committed { refs, accounting } => {
+            let mut copied = Vec::new();
+            copied
+                .try_reserve_exact(refs.len())
+                .map_err(|_| failure(FailureCode::ResourceLimit))?;
+            for item in refs {
+                copied.push(RefValue {
+                    name: RefName(copy_string(&item.name.0)?),
+                    value: item.value,
+                });
+            }
+            ReservationTerminalKind::Committed {
+                refs: copied,
+                accounting: *accounting,
+            }
+        }
+        ReservationTerminalKind::Aborted { reason, detail } => ReservationTerminalKind::Aborted {
+            reason: *reason,
+            detail: copy_string(detail)?,
+        },
+        other => other.clone(),
+    };
+    Ok(ReservationTerminal {
+        repository: value.repository,
+        occurred_ms: value.occurred_ms,
+        kind,
+    })
 }

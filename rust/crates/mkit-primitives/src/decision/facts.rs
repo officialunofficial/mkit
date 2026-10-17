@@ -185,7 +185,7 @@ pub struct TicketFact {
     pub expires_ms: u64,
     /// Bound reservation.
     pub reservation: ReservationId,
-    /// Authority generation the ticket was issued under; `None` predates fencing.
+    /// Authority generation the ticket was issued under; `None` means fencing is disabled.
     pub authority_generation: Option<u64>,
     /// Backend upload-session incarnation, when one was allocated.
     pub upload_session: Option<Vec<u8>>,

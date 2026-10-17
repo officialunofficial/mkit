@@ -61,7 +61,9 @@ pub enum VerificationVerdict {
     Satisfied,
     /// Verification remains scheduled; the operation waits and retries.
     Pending,
-    /// Verification refused the batch.
+    /// Verification refused the batch, including a proof arriving too late.
+    /// An exact inline pending binding produces its guarded abort obligation;
+    /// the host applies that settlement separately without terminal replay.
     Refused(PermanentRefusal),
 }
 

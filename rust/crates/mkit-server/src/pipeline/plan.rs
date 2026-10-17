@@ -464,7 +464,7 @@ pub(crate) fn plan_write(
     }
     // The composed ticketed decision covers pending stability, replay and
     // ticket rows for an advance the portable contract serves.
-    let ticketed = ticketed_decision::decide(req, snap, clock)?;
+    let ticketed = ticketed_decision::decide(req, snap, clock);
     if let Some(decided) = &ticketed
         && let Some(answer) = decided.verdict()
     {

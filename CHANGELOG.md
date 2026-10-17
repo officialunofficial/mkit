@@ -15,6 +15,17 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Breaking (toward 0.6)
 
+- [embedder: breaking API] The ALPHA decision facts now model the exact ticket
+  and pending-reservation observations. Migration: replace `TicketFact.authority`
+  with `authority_generation: Option<u64>`, replace `upload` with
+  `upload_session: Option<Vec<u8>>`, and supply the reservation-derived `ticket`
+  identity. Replace `ReservationFact::Pending.operation`/`expires_ms` with
+  `created_ms`, `reconcile_ms`, and `op: ReservationOp`; retain operation identity
+  in the request. Add `storage: None` to `Snapshot` and an empty `storage` vector
+  to `AcceptanceEffects` when counting is disabled. Handle `GuardKind::Storage`
+  and `ReservationTerminalKind::StorageChanged` in exhaustive consumers.
+  Wire and stored formats are unchanged; no store reset is required.
+
 - Native `pack-zstd` now enforces the same 8 MiB effective window and RFC 8878
   block maximum as `pack-ruzstd`. Previously accepted oversized windows or
   blocks return `ZstdDecompress`. Migration: re-encode such input with a window
@@ -87,8 +98,8 @@ collect the applicable entries between their old and new immutable pins.
   durable-outcome effects. The defensive `PackMissing` cleanup and standalone
   reservation settlement share the same portable rules. The reference server
   decides ticketed advances through them and verifies every sealed guard
-  projects to a physical precondition. Additive ALPHA API; no wire or
-  stored-format change, migration, or store reset.
+  projects to a physical precondition. No wire or stored-format change or
+  store reset; source migrations are listed under Breaking.
 
 - Add portable guarded ref and publication decisions to `mkit-primitives`, with
   exact keyed dependencies, refusal-only guards, finite work bounds, semantic
@@ -1268,6 +1279,17 @@ collect the applicable entries between their old and new immutable pins.
   URL-token reads, supplied hooks, cold outcome retry and injected slice recovery.
 
 ### Breaking (toward 0.6)
+
+- [embedder: breaking API] The ALPHA decision facts now model the exact ticket
+  and pending-reservation observations. Migration: replace `TicketFact.authority`
+  with `authority_generation: Option<u64>`, replace `upload` with
+  `upload_session: Option<Vec<u8>>`, and supply the reservation-derived `ticket`
+  identity. Replace `ReservationFact::Pending.operation`/`expires_ms` with
+  `created_ms`, `reconcile_ms`, and `op: ReservationOp`; retain operation identity
+  in the request. Add `storage: None` to `Snapshot` and an empty `storage` vector
+  to `AcceptanceEffects` when counting is disabled. Handle `GuardKind::Storage`
+  and `ReservationTerminalKind::StorageChanged` in exhaustive consumers.
+  Wire and stored formats are unchanged; no store reset is required.
 
 - [embedder: breaking API] [embedder: stored-format change]
   [embedder: store reset required] Fork jobs retain the authorized source policy,

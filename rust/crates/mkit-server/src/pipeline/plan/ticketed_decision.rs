@@ -110,8 +110,20 @@ fn refusal_error(refusal: &PermanentRefusal) -> ServerError {
 
 /// Decide the ticketed-advance fragment. `None` keeps the unextracted
 /// planner: non-ticketed writes, and shapes the contract does not serve.
-#[allow(clippy::too_many_lines)] // One decode-and-decide pass builds every observation in snapshot order.
 pub(super) fn decide(
+    req: &WriteRequest<'_>,
+    snap: &Snapshot,
+    clock: &PlanClock,
+) -> Option<Decided> {
+    // Decoding is speculative and has no effects. If a later row cannot be
+    // projected, let the reference path examine its original prefix: a replay,
+    // changed pending reservation or earlier refusal can precede that row.
+    // This also preserves physical corruption diagnostics for unsupported facts.
+    try_decide(req, snap, clock).ok().flatten()
+}
+
+#[allow(clippy::too_many_lines)] // One decode-and-decide pass builds every observation in snapshot order.
+fn try_decide(
     req: &WriteRequest<'_>,
     snap: &Snapshot,
     clock: &PlanClock,
@@ -778,23 +790,11 @@ impl Decided {
                 .is_some_and(|(_, key)| row_projects(key.clone(), expected, conditions)),
             RequiredGuard::Storage { expected, .. } => {
                 let key = keys::repo_storage(req.repo);
-                match expected {
-                Observed::Absent(_) => conditions.contains(&Precondition::Absent(key)),
-                Observed::Present { .. } => conditions.iter().any(|condition| {
-                    matches!(condition, Precondition::Equals(k, v) if *k == key && codec::decode_repo_storage(v).is_ok())
-                }),
-                _ => false,
-            }
+                row_projects(key, expected, conditions)
             }
             RequiredGuard::Replay { scope, expected } => {
                 let key = keys::replay(&scope.0);
-                match expected {
-                    Observed::Absent(_) => conditions.contains(&Precondition::Absent(key)),
-                    Observed::Present { .. } => conditions.iter().any(
-                        |condition| matches!(condition, Precondition::Equals(k, _) if *k == key),
-                    ),
-                    _ => false,
-                }
+                row_projects(key, expected, conditions)
             }
             _ => false,
         }
@@ -806,9 +806,10 @@ impl Decided {
 fn row_projects<T>(key: Key, expected: &Observed<T>, conditions: &[Precondition]) -> bool {
     match expected {
         Observed::Absent(_) => conditions.contains(&Precondition::Absent(key)),
-        Observed::Present { .. } => conditions
-            .iter()
-            .any(|condition| matches!(condition, Precondition::Equals(k, _) if *k == key)),
+        Observed::Present { revision, .. } => conditions.iter().any(|condition| {
+            matches!(condition, Precondition::Equals(k, value)
+                if *k == key && Revision(hash(value.as_bytes())) == *revision)
+        }),
         _ => false,
     }
 }
@@ -967,4 +968,77 @@ pub(in crate::pipeline) fn cleanup_lost(
         lost.push(index);
     }
     Ok(Some(lost))
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+
+    #[test]
+    fn exact_row_projection_rejects_substituted_values_at_the_same_key() {
+        // Ticket, reservation, storage and replay use the same raw-row
+        // projection. Each replacement is validly encoded for that row kind.
+        let ticket = TicketV1 {
+            authority_generation: None,
+            repo: crate::RepoName::new("repo").unwrap(),
+            ref_name: "refs/heads/main".into(),
+            signer: [1; 32],
+            pack_id: [2; 32],
+            bytes: 44,
+            part_size: 8 * 1024 * 1024,
+            created_at_ms: 1,
+            expires_at_ms: 1000,
+            reservation_id: "s:projection".into(),
+            upload_session: None,
+        };
+        let mut changed_ticket = ticket.clone();
+        changed_ticket.bytes = 45;
+        let replay = crate::replay::ReplayRecord {
+            fingerprint: [3; 32],
+            expires_at_ms: 1000,
+            state: crate::replay::ReplayState::InFlight { resumable: false },
+        };
+        let mut changed_replay = replay.clone();
+        changed_replay.fingerprint = [4; 32];
+        for (key, first, second) in [
+            (
+                keys::ticket(&[1; 32]),
+                codec::encode_ticket(&ticket),
+                codec::encode_ticket(&changed_ticket),
+            ),
+            (
+                keys::reservation("s:projection").unwrap(),
+                codec::encode_reservation(&ReservationV1::Ticketed { ticket_id: [1; 32] }),
+                codec::encode_reservation(&ReservationV1::Ticketed { ticket_id: [2; 32] }),
+            ),
+            (
+                keys::repo_storage(&ticket.repo),
+                crate::store::repo_storage::initial_counter(),
+                codec::encode_repo_storage(&codec::RepoStorageV1 {
+                    stored_bytes: 4,
+                    version: 2,
+                }),
+            ),
+            (
+                keys::replay(&[1; 32]),
+                codec::encode_replay_record(&replay),
+                codec::encode_replay_record(&changed_replay),
+            ),
+        ] {
+            let expected = Observed::Present {
+                value: (),
+                revision: Revision(hash(first.as_bytes())),
+            };
+            assert!(row_projects(
+                key.clone(),
+                &expected,
+                &[Precondition::Equals(key.clone(), first)]
+            ));
+            assert!(!row_projects(
+                key.clone(),
+                &expected,
+                &[Precondition::Equals(key, second)]
+            ));
+        }
+    }
 }

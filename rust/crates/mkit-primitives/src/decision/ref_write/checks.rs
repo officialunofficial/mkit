@@ -136,6 +136,7 @@ fn input_bytes(
         add(32)?;
         if let Observed::Present { value, .. } = observed {
             add(value.name.0.len())?;
+            add(value.upload_session.as_ref().map_or(0, Vec::len))?;
         }
     }
     add(reservation_bytes(snapshot)?)?;

@@ -274,7 +274,9 @@ and durable-outcome effects it composes (§6.3, §6.5, §9.3). The separate
 defensive abort for a ticket whose pack never landed and a standalone
 reservation settlement share the same portable rules. A ticketed request
 that is unsigned or carries no replay binding, that was rejected before
-planning, or that holds a fork barrier keeps the reference path.
+planning, or that holds a fork barrier keeps the reference path. If stored
+observations cannot be projected, the reference path retains its original
+pending/replay and first-failure precedence, including corruption diagnostics.
 
 ### 3.2 Replay, durability, and recovery
 
