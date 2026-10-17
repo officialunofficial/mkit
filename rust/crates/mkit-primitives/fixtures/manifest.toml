@@ -947,6 +947,20 @@ sha256 = "e3f20e2d3ef43b750772653b11084b4476e7f6295b66e5cf45ecd7b7a263686b"
 semantic = "evidence/proof-multilevel-absence.json"
 semantic_sha256 = "fdaf4e0392f890e6140fa2134a46febfd73bdeab9a5b876ea3416b1546baa207"
 
+# Semantic export vectors; no new evidence encoding.
+[[contracts]]
+type = "AcceptanceEvidence::from_verified"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance-export/heads-root.json"
+semantic = "acceptance-export/README.md"
+spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+expected = "exact closure head roots, preserving order and duplicate occurrences"
+decode_config = "in-memory export; at most 3 head occurrences; 96 id bytes"
+sha256 = "9d4b94758bedcf8ab307f772b19d7047be44b60935cbbd73ffe77a88da278c58"
+semantic_sha256 = "d53497f36f3318de521280162169c2baf425e88a382214a5bbc4149f7dfd4a0c"
+
 # pack_verify
 [[formats]]
 type = "pack-framing"
