@@ -153,6 +153,7 @@ mkit-cli
 mkit-client
 mkit-core
 mkit-keystore
+mkit-primitives
 mkit-rpc
 mkit-server
 mkit-sync
