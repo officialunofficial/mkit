@@ -500,7 +500,10 @@ fn fifty_base_hops_cross_slices_without_restarting_the_object() {
             rounds += 1;
             assert!(rounds < 10);
         }
-        assert!(rounds > 1);
+        assert!(
+            rounds > 1,
+            "the walk must span slices; grow the fixture if SLICE_CALLS rises"
+        );
         assert!(p.calls > u64::from(SLICE_CALLS));
         assert_eq!(p.bytes, head_len + 550 + 11);
     });
@@ -1347,6 +1350,7 @@ fn a_failing_cleared_set_load_is_charged_and_a_corrupt_one_ends_the_proof() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // Staged inventory, flagged witnesses and the slice loop share one fixture.
 fn a_cleared_tree_is_never_skipped_as_the_head_of_a_pair() {
     use crate::store::publication::Witness;
     use mkit_core::object::Tree;
@@ -1430,7 +1434,8 @@ fn a_cleared_tree_is_never_skipped_as_the_head_of_a_pair() {
         )
         .await;
         let mut progress = read_progress(&kv, &repo, root).await;
-        for _ in 0..4 {
+        let mut rounds = 0;
+        while progress.terminal.is_none() && !progress.complete {
             slice(
                 &kv,
                 &SinglePartition,
@@ -1441,6 +1446,8 @@ fn a_cleared_tree_is_never_skipped_as_the_head_of_a_pair() {
             )
             .await
             .unwrap();
+            rounds += 1;
+            assert!(rounds < 8);
         }
         // The cleared set was actually loaded before the head was read and
         // refused: requests are sequential, so a hit precedes the verdict.
@@ -2190,7 +2197,7 @@ fn pair_coverage_resume_after_each_slice_matches_uninterrupted() {
             rounds += 1;
             assert!(rounds < 20);
         }
-        assert!(rounds > 1);
+        assert!(rounds > 1, "the restart must follow a continuation");
         let want: Vec<Hash> = BTreeSet::from_iter([root, pack]).into_iter().collect();
         assert_eq!(p.dependencies.into_iter().collect::<Vec<Hash>>(), want);
         assert!(p.bases.is_empty());
