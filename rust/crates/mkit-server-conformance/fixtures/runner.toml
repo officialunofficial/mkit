@@ -1,0 +1,24 @@
+# Example for a disposable opaque test server, not a production configuration.
+# Edit audience, repository, limits, features, controls, and known gaps to match
+# your server. Set CONFORMANCE_SIGNER_SEED to a 64-character hex test seed.
+# Pass --base-url separately; --control-url overrides the binding URL below.
+version = 1
+
+[wire]
+auth = "auth-v2"
+audience = "http://127.0.0.1:8080"
+repository = "default"
+signer_seed_env = "CONFORMANCE_SIGNER_SEED"
+atomic_advance = true
+milestone = "M1"
+max_pack_bytes = 67108864
+run_id = "standalone"
+features = ["tickets", "-authority-fencing", "-authority-setter", "-fork"]
+relay_lag_bound_ms = 0
+
+[control]
+url = "http://127.0.0.1:8080"
+controls = ["clock.pin", "observe", "restart.graceful"]
+
+[control.declared_skips]
+"acceptance.kill_recovery" = "This test host retains process-local memory only."

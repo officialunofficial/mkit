@@ -1,8 +1,8 @@
 //! Test-only loopback host for contract tests that need a real HTTP boundary
 //! around the core Connect handlers.
 //!
-//! Enable the `test-host` feature in a debug/test dependency. The feature is
-//! rejected in release builds. Each host owns isolated memory stores and a
+//! Enable `test-host` in a debug/test dependency. Optimized standalone test
+//! utilities additionally opt into `reference-runner`. Each host owns isolated memory stores and a
 //! manual clock; callers advance time and explicitly drain core timers.
 
 #![forbid(unsafe_code)]

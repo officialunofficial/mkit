@@ -6,9 +6,10 @@ are private to its test binding.
 
 - **Tier 1: wire.** Ordinary transport HTTP requests, a base URL, and a declared
   wire profile. No server control is required.
-- **Tier 2: server control.** The same URL and profile plus the version 1
-  test-only binding below. Cases combine wire operations with controlled
-  restart, authority changes, barriers, and atomic observations.
+- **Tier 2: server control.** The wire URL and profile plus the version 1
+  test-only HTTP binding below, at the same or a separate origin. Cases combine
+  wire operations with controlled restart, authority changes, barriers, and atomic
+  observations.
 - **Optional storage SPI suite.** Enable `storage-spi` to implement
   `storage::KvHarness` and invoke `storage_suite!`. This tests the reference
   server's storage API; other implementations do not have to implement it.
@@ -57,12 +58,120 @@ The wire profile declares authentication, optional features, and fixture limits;
 `wire::ProfileSpec` documents all TOML fields. Controls never enable production
 capabilities. Run Tier 2 only against an isolated disposable test instance.
 
+## Standalone run and differential commands
+
+Install the portable runner at the same immutable revision as your server:
+
+```sh
+cargo install --git https://github.com/officialunofficial/mkit --rev <revision> \
+  --locked mkit-server-conformance
+```
+
+The `run` command runs Tier 1 and Tier 2 without linking a Rust dependency.
+Specify the transport URL and the test-control binding separately when needed:
+
+```sh
+mkit-server-conformance run --base-url http://127.0.0.1:8080 \
+  --control-url http://127.0.0.1:8081 --profile conformance.toml
+```
+
+Copy the packaged [example runner profile](fixtures/runner.toml) to
+**conformance.toml**. Edit its origin, repository, limits, features, controls, and
+known gaps to match your disposable server, and set `CONFORMANCE_SIGNER_SEED` to
+a 64-character hex test seed. Installing the binary does not copy fixture files
+into your working directory.
+
+The version 1 runner profile contains the existing wire profile under `[wire]`
+and test-control declarations under `[control]`. These declarations describe an
+already isolated test host; they never enable production routes.
+
+```toml
+version = 1
+
+[wire]
+auth = "auth-v2"
+audience = "http://127.0.0.1:8080"
+repository = "default"
+signer_seed_env = "CONFORMANCE_SIGNER_SEED"
+atomic_advance = true
+run_id = "standalone"
+features = ["tickets", "-authority-fencing", "-authority-setter", "-fork"]
+relay_lag_bound_ms = 0
+
+[control]
+controls = ["clock.pin", "observe", "restart.graceful"]
+
+[control.declared_skips]
+"acceptance.kill_recovery" = "This test host retains process-local memory only."
+```
+
+Use `--tier wire` or `--tier controlled` to select one tier, and `--filter` to
+select case names. Every selected case appears in the report. Missing optional
+features are not applicable; missing controls require a concrete declared skip
+for the applicable case. Negotiation errors fail setup. Even `--tier wire` negotiates the test binding.
+The optional `[control]` field `url` sets its origin; `--control-url` overrides it.
+
+Install the embedded reference test utility for differential runs:
+
+```sh
+cargo install --git https://github.com/officialunofficial/mkit --rev <revision> \
+  --locked --features reference-runner mkit-server-conformance
+mkit-server-conformance diff --base-url http://127.0.0.1:8080 \
+  --control-url http://127.0.0.1:8081 --profile conformance.toml
+```
+
+`diff` starts a fresh reference server on loopback and drives the same
+canonical fixtures against it and the target. Both test bindings pin business
+time; fixed keys, nonces, and timestamps make each logical operation repeatable.
+Run against disposable instances with no other writers. Differential writes use
+an Ed25519 test key whose public seed is 32 bytes of `0x75`, independently of the
+profile's Tier-1 signer seed. A multi-repository target must admit that key's
+owner namespace and the repository named `differential-v1`; a single-repository
+target uses the configured repository. The reference host supports its declared
+test profile; unsupported profiles fail setup explicitly. Indexed differential
+profiles declare `multi-repo`, `indexed-mode`, `tickets`, auth v2, and atomic
+advance. The native CLI regression exercises that profile without dropping its
+features; the small canonical packs complete verification within the inline bound.
+This does not establish scheduled-verification equivalence.
+
+Normalization excludes allocated server identifiers, timing fields, and
+`Retry-After` values. Refusal comparison uses protocol error codes. Replay
+fingerprints are first checked against each exact signed operation, including
+its target audience, then normalized to that operation's logical role. Each
+server must replay its original receipt bytes. Receipt issuance, signatures, and
+statement fields are outside these differential fixtures; they require separate
+receipt conformance coverage. Atomic snapshots retain ref pairs, ticket and
+reservation order, membership, terminal result multiplicity, and quota counters. The report names each differing field.
+Two failed executions never count as passing equivalence.
+
+Differential results establish decision equivalence for these deterministic
+fixtures. They do not establish crash, recovery, or concurrency behavior;
+Tier 2 covers those properties separately. Cloud Build's all-feature workspace
+suite exercises two native reference hosts over HTTP.
+
+Both commands write a versioned JSON report to stdout by default; `run` also
+supports `--format tap`. JSON contains case results and differences, without
+credentials or signing material. Exit codes are `0` for a passing run, `1` for a
+failed case or differential mismatch, and `2` for usage, profile, setup,
+negotiation, or runner execution-limit errors. Existing `wire` and `controlled`
+commands retain TAP output.
+
+Differential decisions have a 45-second execution budget. The runner honors
+valid pending-verification polling hints clamped to 1–60 seconds. If a mandatory
+wait cannot fit, the JSON case status is `runner_error` and the command exits 2;
+this is inconclusive, not a protocol failure or a match. An already observed
+protocol violation remains `failed` with exit 1 even if a later step or the other
+target reaches this budget. Rerun against a disposable
+fixture whose verification resolves within that budget. The runner never polls
+early to avoid the wait. Ordinary protocol refusals retain their failure result.
+
 ## Version 1 test-control binding
 
 **Protocol requirement (test interface only).** This interface is optional test
 infrastructure, outside the public transport wire. A production build MUST NOT
-mount these routes. The reference binding requires `test-host`, which fails to
-compile without debug assertions. A server under test implements the binding
+mount these routes. The reference binding requires `test-host`. Optimized
+builds additionally require the explicit `reference-runner` test utility feature. Production artifacts
+never enable these features. A server under test implements the binding
 in its own test host; it need not use Rust or any reference storage layout.
 
 `GET /__mkit_test/v1/capabilities` returns JSON with `version: 1`, `controls`
@@ -377,7 +486,9 @@ apply when a server offers the feature.
 | Restore/recovery preserves authoritative fences, unresolved work, replay, and denial (§§6.2.1, 14.9, 17) | Protocol requirement for the offered recovery profile | **Planned:** independent import/restore and interrupted-recovery cases; reference layout export/import audits do not certify protocol recovery. |
 | Admin replay completes the original operation and audit responsibility survives interruption (§16) | Protocol requirement when admin is offered | **Case:** the takedown contract checks restricted admin status. **Planned:** independent interrupted admin acceptance, operation replay, audit completion, and recovery cases. |
 | Profile advertisement matches implemented capabilities, retention, limits, and the declared launch/admin scope (§18; STC §2.1) | Protocol requirement | **Case:** existing Tier 1 server-info and enabled takedown contract checks. **Planned:** independent unsupported-configuration refusal, declared namespace coverage, resource-exhaustion classification, and launch subset boundary cases. |
-| Protocol boundary controls remain test-only and disabled without the test feature (§18.1) | Protocol requirement for this test interface | **Case:** control-host negotiation/rejection tests and `public_service_has_no_test_control_routes`; the reference host is unavailable in release builds. |
+| Protocol boundary controls remain test-only and disabled without the test feature (§18.1) | Protocol requirement for this test interface | **Case:** control-host negotiation/rejection tests and `public_service_has_no_test_control_routes`; the reference host requires an explicit test feature; optimized test utilities additionally require `reference-runner`. |
+| Deterministic protocol decision equivalence across implementations | Test runner guarantee | **Case:** native two-host differential acceptance, replay, paired-CAS and refusal fixtures; comparator mutation tests. This does not claim crash, recovery, or concurrency coverage. |
+| Standalone runner profile, separate control binding, and JSON exit status | Test runner interface | **Case:** runner profile/report tests, CLI tests, and `controlled_cases_keep_transport_requests_on_the_transport_origin`. |
 | Reference NamespaceStore transaction, key, batch, and timer mechanisms | Reference-server behavior | **Case:** the optional `storage-spi` suite and reference host tests; these mechanisms are not requirements for other servers. |
 
 ## In-process test host
@@ -385,8 +496,8 @@ apply when a server offers the feature.
 Contract tests that need real loopback HTTP can use the debug-only
 `test-host` feature. It runs the production core Connect handlers over fresh
 `MemoryKv` and `MemoryBlobStore` instances and exposes the same profile shape
-as the wire suite. This is an unstable test-support API. Release builds reject
-the feature.
+as the wire suite. This is an unstable test-support API. Optimized builds reject
+the feature unless the standalone test utility opts into `reference-runner`.
 
 Pin the feature-enabled dependency to the same mkit revision as the other
 contract-test dependencies:

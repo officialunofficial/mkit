@@ -44,6 +44,26 @@ caller could publish a truncated missing set as a complete diagnostic.
 graph oracle, protocol/adversarial tests, and closure transition fuzz replay.
 Reference-server integration is separate; this primitive grants no visibility.
 
+## Differential conformance compares validated protocol decisions
+
+**Always:** deterministic differential fixtures pin both servers' business clocks
+and use fixed signing keys, nonces, and timestamps. Each replay fingerprint is
+validated against its target's exact signed operation before normalization.
+Reports preserve query order, multiplicity, and terminal responsibility counts.
+Execution failures do not become passing equivalence results.
+
+**Because:** different server origins and allocated identifiers can represent the
+same protocol decision, while an invalid replay binding or repeated settlement
+is a protocol difference.
+
+**If violated:** normalization could hide corrupt replay records or duplicated
+acceptance effects, and two broken servers could appear conforming.
+
+**Enforcement:** the differential runner drives wire requests and typed HTTP
+observations. Native two-host and mutation regressions run in the Cloud Build
+workspace test gate. This checks decision equivalence; Tier 2 separately checks
+crash, recovery, and concurrency behavior.
+
 ## Conformance distinguishes absent features from implementation gaps
 
 **Always:** cases for undeclared protocol features report not applicable with
