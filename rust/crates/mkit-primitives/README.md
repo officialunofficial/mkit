@@ -115,7 +115,13 @@ corruption and does not authenticate hostile state or authorize resume. Hosts
 must trust retained checkpoints or authenticate the complete envelope and its
 bindings. Resume must validate expected context, cursor consistency, and
 retained evidence before advancing. Active decoder and hash-library memory is
-never a persisted checkpoint format.
+never a persisted checkpoint format. The driver resumes safe integrity,
+acknowledged entry, and completion boundaries under a fresh generation. Decode
+resume compares validated core cursor metadata with every outer binding,
+recovers retained predecessor pages, then reacquires and authenticates the
+current window prefix. Cumulative budgets survive restart. Window acquisition
+prepays incremental prefix hashing; repeated warm checkpoints charge fixed
+encoding work rather than recharging the complete window.
 
 ## Module and decoder inventory
 

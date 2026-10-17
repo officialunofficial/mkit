@@ -130,6 +130,110 @@ fn measured(bytes: &[u8], expected: Option<FailureCode>, expected_frames: u32) {
     );
 }
 
+fn measured_decode_resume(bytes: &[u8]) {
+    use mkit_primitives::evidence::checkpoint::Checkpoint;
+    let source = PackSource {
+        id: hash::hash(bytes),
+        len: bytes.len() as u64,
+        binding: SourceBinding([3; 32]),
+    };
+    let repository = RepositoryId([7; 32]);
+    let profile = IndexedProfile {
+        pack_bytes: 4 << 20,
+        decoded_bytes: 4 << 20,
+        delta_depth: 50,
+    };
+    let limits = VerifyLimits::indexed();
+    let mut original = FramingDriver::new(source, repository, profile, limits, 5).unwrap();
+    let (checkpoint, retained) = loop {
+        match original.step().unwrap() {
+            FramingStep::Request(Request::Bytes {
+                request,
+                source,
+                range,
+            }) => {
+                let start = usize::try_from(range.offset).unwrap();
+                original
+                    .supply(Response::Bytes {
+                        request,
+                        source,
+                        range,
+                        value: Acquisition::Present(
+                            &bytes[start..start + usize::try_from(range.len).unwrap()],
+                        ),
+                    })
+                    .unwrap();
+            }
+            FramingStep::RetainEvidence(page) => {
+                let retained = (page.commitment, page.bytes.to_vec());
+                original.acknowledge_retention(retained.0).unwrap();
+                let snapshot = original.checkpoint().unwrap();
+                break (
+                    Checkpoint::from_bytes(snapshot.bytes(), limits).unwrap(),
+                    retained,
+                );
+            }
+            FramingStep::Frame(_) | FramingStep::Progress => (),
+            _ => panic!("expected a resumable first entry"),
+        }
+    };
+    // Host-owned source, checkpoint and page are acquired before this epoch.
+    // Drop the original reader first so its frees cannot reduce the measurement.
+    drop(original);
+    let epoch = heap::Epoch::begin();
+    let mut restored =
+        FramingDriver::resume(source, repository, profile, limits, 6, &checkpoint).unwrap();
+    assert!(epoch.live() <= restored.usage().resident_bytes);
+    let mut recovered = false;
+    loop {
+        match restored.step().unwrap() {
+            FramingStep::Request(Request::EvidencePage { request, page }) => {
+                assert_eq!(page, retained.0);
+                restored
+                    .supply(Response::EvidencePage {
+                        request,
+                        page,
+                        value: Acquisition::Present(&retained.1),
+                    })
+                    .unwrap();
+                recovered = true;
+            }
+            FramingStep::Request(Request::Bytes {
+                request,
+                source,
+                range,
+            }) => {
+                assert!(recovered);
+                let start = usize::try_from(range.offset).unwrap();
+                restored
+                    .supply(Response::Bytes {
+                        request,
+                        source,
+                        range,
+                        value: Acquisition::Present(
+                            &bytes[start..start + usize::try_from(range.len).unwrap()],
+                        ),
+                    })
+                    .unwrap();
+            }
+            FramingStep::RetainEvidence(page) => {
+                let commitment = page.commitment;
+                restored.acknowledge_retention(commitment).unwrap();
+                snapshot(&mut restored, &epoch);
+            }
+            FramingStep::Frame(_) | FramingStep::Progress => (),
+            FramingStep::Complete(_) => break,
+            _ => panic!("unexpected resumed request"),
+        }
+        assert!(epoch.live() <= restored.usage().resident_bytes);
+        assert!(epoch.peak() <= restored.usage().peak_resident_bytes);
+    }
+    assert!(epoch.peak() <= restored.usage().peak_resident_bytes);
+    assert!(epoch.peak() <= limits.resident_bytes);
+    drop(restored);
+    assert_eq!(epoch.live(), 0);
+}
+
 #[cfg(all(feature = "pack-ruzstd", not(feature = "pack-zstd")))]
 fn corrupt_compression() -> Vec<u8> {
     // RFC frame with a sequence flood rejected by the vendored block preflight.
@@ -156,12 +260,15 @@ fn framing_allocations_fit_live_reservations_and_peak_ceiling() {
     let payload = vec![0x41; 300_000];
     let bytes = pack(1, 0, &[&payload, &payload, &payload]);
     measured(&bytes, None, 3);
+    measured_decode_resume(&bytes);
     #[cfg(any(feature = "pack-ruzstd", feature = "pack-zstd"))]
     measured(
         include_bytes!("../../../tests/golden/pack-v2/raw_4k_repeat.bin"),
         None,
         1,
     );
+    #[cfg(any(feature = "pack-ruzstd", feature = "pack-zstd"))]
+    measured_decode_resume(include_bytes!("../../../tests/golden/pack-v2/mixed.bin"));
     #[cfg(all(feature = "pack-ruzstd", not(feature = "pack-zstd")))]
     measured(
         &corrupt_compression(),

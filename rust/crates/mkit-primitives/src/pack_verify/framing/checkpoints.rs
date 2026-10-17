@@ -8,6 +8,7 @@ use super::{
 use crate::evidence::checkpoint::{
     self, Checkpoint, CheckpointMeta, CheckpointPhase, CheckpointView, IntegrityView,
 };
+use mkit_core::pack::window::WindowCursor;
 
 impl FramingDriver {
     /// Restores a trusted-at-rest snapshot under the exact original bindings.
@@ -18,7 +19,7 @@ impl FramingDriver {
     ///
     /// # Errors
     /// Refuses changed sources, repositories, profiles or limits, reused run
-    /// generations, invalid state, unsupported resume phases, and exhaustion.
+    /// generations, invalid state, inconsistent cursor bindings, and exhaustion.
     pub fn resume(
         source: PackSource,
         repository: RepositoryId,
@@ -78,10 +79,8 @@ impl FramingDriver {
                 )?);
                 machine.phase = Phase::Integrity;
             }
-            // Core owns the cursor grammar. Refuse rather than interpret its
-            // private bytes without a validated metadata view.
             CheckpointPhase::Decode => {
-                return Err(failure(FailureCode::UnsupportedCapability));
+                machine.resume_decode(&meta, &state.cursor, &mut resources)?;
             }
             CheckpointPhase::Complete => {
                 machine.integrity = None;
@@ -118,6 +117,44 @@ impl FramingDriver {
             });
         }
         Ok(machine)
+    }
+
+    fn resume_decode(
+        &mut self,
+        meta: &CheckpointMeta,
+        cursor_bytes: &[u8],
+        resources: &mut Resources,
+    ) -> Result<(), Failure> {
+        self.integrity = None;
+        resources.release(self.integrity_reservation)?;
+        resources.reserve(self.decoder_reservation)?;
+        let cursor = WindowCursor::from_bytes(cursor_bytes)
+            .map_err(|_| failure(FailureCode::InvalidCheckpoint))?;
+        let view = cursor
+            .metadata()
+            .map_err(|_| failure(FailureCode::InvalidCheckpoint))?;
+        let position = meta
+            .ordinal
+            .checked_mul(5)
+            .and_then(|n| n.checked_add(12))
+            .and_then(|n| n.checked_add(meta.payload))
+            .ok_or_else(|| failure(FailureCode::InvalidCheckpoint))?;
+        if view.pack_len() != self.source.len
+            || view.window_size() != self.limits.acquisition_bytes
+            || view.position() != position
+            || view.payload_sum() != meta.payload
+            || Some((view.pack_version(), view.entry_count())) != meta.header
+            || u64::from(view.entry_index()) != meta.ordinal
+            || view.expected_pack_id() != Some(self.source.id)
+        {
+            return Err(failure(FailureCode::InvalidCheckpoint));
+        }
+        self.reader = Some(
+            WindowReader::resume(&cursor, Self::decode_limits())
+                .map_err(|_| failure(FailureCode::InvalidCheckpoint))?,
+        );
+        self.phase = Phase::Decode;
+        Ok(())
     }
 
     fn checkpoint_reservation(&self) -> Result<u64, Failure> {
@@ -172,15 +209,11 @@ impl FramingDriver {
         };
         let reservation = self.checkpoint_reservation()?;
         self.resources.reserve(reservation)?;
-        // Reserve opaque core cursor copies and its possible prefix hashing
-        // before invoking core. Frontier copying/encoding is bounded by 518
-        // CVs per stream, a 4 KiB cursor, and fixed envelope fields.
-        let work = 3 * (369 + 8 + 49 + 47 + 64 + 2 * 518 * 32 + 4096)
-            + if self.phase == Phase::Decode {
-                self.limits.acquisition_bytes
-            } else {
-                0
-            };
+        // Reserve cursor copies, finalization and envelope encoding before
+        // invoking core. Window acquisition already prepaid the incremental
+        // prefix pass; repeated checkpoints do not hash that window again.
+        // Frontier copying is bounded by 518 CVs per stream and a 4 KiB cursor.
+        let work = 3 * (369 + 8 + 49 + 47 + 64 + 2 * 518 * 32 + 4096);
         let result = (|| {
             self.resources.work(work)?;
             let cursor = if self.phase == Phase::Decode {
@@ -505,3 +538,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "resume_tests.rs"]
+mod resume_tests;

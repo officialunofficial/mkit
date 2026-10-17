@@ -297,6 +297,12 @@ impl FramingDriver {
         }
     }
 
+    fn decode_limits() -> DecodeLimits {
+        DecodeLimits::default()
+            .with_max_decoded_bytes(CANONICAL_BYTES)
+            .with_entry_geometry(FRAME_BYTES, DELTA_BYTES)
+    }
+
     fn advance_integrity(&mut self) -> Result<FramingStep<'_>, Failure> {
         let pass = self
             .integrity
@@ -310,14 +316,11 @@ impl FramingDriver {
         self.integrity = None;
         self.resources.release(self.integrity_reservation)?;
         self.resources.reserve(self.decoder_reservation)?;
-        let limits = DecodeLimits::default()
-            .with_max_decoded_bytes(CANONICAL_BYTES)
-            .with_entry_geometry(FRAME_BYTES, DELTA_BYTES);
         self.reader = Some(
             WindowReader::new(
                 self.source.len,
                 self.limits.acquisition_bytes,
-                limits,
+                Self::decode_limits(),
                 Some(self.source.id),
             )
             .map_err(|error| map_core(&error))?,
@@ -447,9 +450,13 @@ impl FramingDriver {
         if u64::try_from(bytes.len()).ok() != Some(range.len) {
             return Err(failure(FailureCode::InvalidResponse));
         }
+        // Decoder feeds copy and commit the window. Prepay one additional
+        // prefix pass: cold resume hashes the consumed prefix once, and live
+        // checkpoints hash only its remaining suffix across entry boundaries.
+        let passes = if self.phase == Phase::Decode { 4 } else { 3 };
         let charge = range
             .len
-            .checked_mul(3)
+            .checked_mul(passes)
             .ok_or_else(|| failure(FailureCode::ResourceLimit))?;
         if let Err(error) = self.resources.work(charge) {
             self.pending = None;

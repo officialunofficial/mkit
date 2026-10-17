@@ -53,16 +53,19 @@ def check(root):
         if identity in contracts:
             raise ValueError(f"duplicate semantic contract: {identity}")
         contracts.add(identity)
-        name = row["path"]
-        path = root / name
-        if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()):
-            raise ValueError(f"fixture escapes inventory: {name}")
-        if not path.is_file():
-            raise ValueError(f"missing fixture: {name}")
-        if name in registered:
-            raise ValueError(f"duplicate fixture: {name}")
-        verify_digest(path, name, row["sha256"])
-        registered.add(name)
+        if "semantic_sha256" in row and "semantic" not in row:
+            raise ValueError("semantic digest without contract sidecar")
+        for key in ("path", "semantic") if "semantic" in row else ("path",):
+            name = row[key]
+            path = root / name
+            if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()):
+                raise ValueError(f"fixture escapes inventory: {name}")
+            if not path.is_file():
+                raise ValueError(f"missing fixture: {name}")
+            if name in registered:
+                raise ValueError(f"duplicate fixture: {name}")
+            verify_digest(path, name, row.get("sha256" if key == "path" else "semantic_sha256"))
+            registered.add(name)
     actual = {str(p.relative_to(root)) for p in root.rglob("*") if p.is_file() and p != root / "manifest.toml"}
     if actual != registered:
         raise ValueError(f"orphan or missing fixtures: {sorted(actual ^ registered)}")

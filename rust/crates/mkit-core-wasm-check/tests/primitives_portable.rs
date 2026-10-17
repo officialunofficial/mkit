@@ -15,22 +15,25 @@ use mkit_primitives::{
 use wasm_bindgen_test::wasm_bindgen_test;
 
 fn verify(bytes: &[u8]) -> Result<u32, FailureCode> {
-    let mut driver = FramingDriver::new(
-        PackSource {
-            id: hash::hash(bytes),
-            len: u64::try_from(bytes.len()).unwrap(),
-            binding: SourceBinding([1; 32]),
-        },
-        mkit_primitives::evidence::RepositoryId([9; 32]),
-        IndexedProfile {
-            pack_bytes: 5 << 30,
-            decoded_bytes: 4 << 30,
-            delta_depth: 50,
-        },
-        VerifyLimits::indexed(),
-        23,
-    )
-    .map_err(|error| error.code)?;
+    verify_run(bytes, false)
+}
+
+fn verify_run(bytes: &[u8], restart: bool) -> Result<u32, FailureCode> {
+    let pack_source = PackSource {
+        id: hash::hash(bytes),
+        len: u64::try_from(bytes.len()).unwrap(),
+        binding: SourceBinding([1; 32]),
+    };
+    let repository = mkit_primitives::evidence::RepositoryId([9; 32]);
+    let profile = IndexedProfile {
+        pack_bytes: 5 << 30,
+        decoded_bytes: 4 << 30,
+        delta_depth: 50,
+    };
+    let limits = VerifyLimits::indexed();
+    let mut driver = FramingDriver::new(pack_source, repository, profile, limits, 23)
+        .map_err(|error| error.code)?;
+    let mut saved_page = None;
     for _ in 0..100 {
         match driver.step().map_err(|error| error.code)? {
             FramingStep::Request(Request::Bytes {
@@ -51,11 +54,43 @@ fn verify(bytes: &[u8]) -> Result<u32, FailureCode> {
                     })
                     .map_err(|error| error.code)?;
             }
+            FramingStep::Request(Request::EvidencePage { request, page }) => {
+                let (commitment, bytes): &(mkit_primitives::evidence::PageCommitment, Vec<u8>) =
+                    saved_page.as_ref().unwrap();
+                assert_eq!(*commitment, page);
+                driver
+                    .supply(Response::EvidencePage {
+                        request,
+                        page,
+                        value: Acquisition::Present(bytes),
+                    })
+                    .map_err(|error| error.code)?;
+            }
             FramingStep::RetainEvidence(page) => {
+                let saved = (restart && saved_page.is_none())
+                    .then(|| (page.commitment, page.bytes.to_vec()));
                 let commitment = page.commitment;
                 driver
                     .acknowledge_retention(commitment)
                     .map_err(|error| error.code)?;
+                if let Some(page) = saved {
+                    saved_page = Some(page);
+                    let snapshot = driver.checkpoint().map_err(|error| error.code)?;
+                    let checkpoint = mkit_primitives::evidence::checkpoint::Checkpoint::from_bytes(
+                        snapshot.bytes(),
+                        limits,
+                    )
+                    .map_err(|error| error.code)?;
+                    driver = FramingDriver::resume(
+                        pack_source,
+                        repository,
+                        profile,
+                        limits,
+                        24,
+                        &checkpoint,
+                    )
+                    .map_err(|error| error.code)?;
+                }
             }
             FramingStep::Frame(_) | FramingStep::Progress => {}
             FramingStep::Complete(summary) => {
@@ -85,6 +120,12 @@ fn raw_compressed_and_unsigned_length_fixtures_execute() {
         )),
         Ok(1)
     );
+    for bytes in [
+        include_bytes!("../../mkit-primitives/fixtures/framing/earlier-delta-base.bin").as_slice(),
+        include_bytes!("../../../tests/golden/pack-v2/raw_4k_repeat.bin").as_slice(),
+    ] {
+        assert_eq!(verify_run(bytes, true), verify(bytes));
+    }
     for bytes in [
         include_bytes!("../../mkit-primitives/fixtures/framing/payload-high-bit.bin").as_slice(),
         include_bytes!("../../mkit-primitives/fixtures/framing/payload-u32-max.bin").as_slice(),
