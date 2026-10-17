@@ -542,6 +542,18 @@ spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "UnsupportedEvidenceVersion"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
 
+# Semantic export vectors; no new evidence encoding.
+[[fixtures]]
+type = "AcceptanceEvidence::from_verified"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance-export/heads-root.json"
+semantic = "acceptance-export/README.md"
+spec = "SPEC-SERVER#local-closure-evidence-pages"
+expected = "exact closure head roots, preserving order and duplicate occurrences"
+decode_config = "in-memory export; at most 3 head occurrences; 96 id bytes"
+
 # pack_verify
 # closure
 [[fixtures]]

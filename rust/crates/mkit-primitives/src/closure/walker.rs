@@ -13,7 +13,7 @@ use crate::{
     pack_verify::{Acquisition, EvidenceSequence, RequestId},
 };
 use mkit_core::{
-    hash::{Hash, Hasher, ZERO},
+    hash::{Hash, ZERO},
     object::ObjectType,
 };
 
@@ -319,19 +319,7 @@ impl<V: InPackObjectView> ClosureWalker<V> {
             .map_err(|_| failure(FailureCode::ResourceLimit))?;
         owned_heads.extend_from_slice(heads);
         // Bind the exact requested sequence, including duplicate head occurrences.
-        let mut digest = Hasher::new();
-        let domain = b"mkit-closure-heads:v1";
-        digest
-            .update(
-                &u16::try_from(domain.len())
-                    .map_err(|_| failure(FailureCode::ResourceLimit))?
-                    .to_le_bytes(),
-            )
-            .update(domain)
-            .update(&(heads.len() as u64).to_le_bytes());
-        for head in heads {
-            digest.update(head);
-        }
+        let heads_root = super::heads_root(heads.iter().copied())?;
         let mut frames = Vec::new();
         frames
             .try_reserve(1)
@@ -349,7 +337,7 @@ impl<V: InPackObjectView> ClosureWalker<V> {
             generation,
             sequence: 0,
             heads: owned_heads,
-            heads_root: digest.finalize(),
+            heads_root,
             frames,
             phase: Phase::Fill,
             journal: Journal::new(),

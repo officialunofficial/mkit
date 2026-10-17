@@ -2991,3 +2991,22 @@ or object-count-sized payloads could exhaust writer memory.
 **Enforced by:** `AcceptanceEvidence::decode`, `check_binding`, `recheck_heads`,
 and acceptance-evidence codec, binding, and signature regression tests. The host
 authenticates origin and atomically checks live guards; the library does not.
+
+## Acceptance export binds sealed artifacts before carrying their facts
+
+**Always:** in-process evidence export compares object-set roots, ruleset/profile
+bindings, and repository identity. It verifies canonical signed heads and the
+closure's original requested head sequence before sorting envelope records. It
+authenticates every relied-on witness page and requires exact count and chain
+termination before emitting bounded distinct supplier IDs.
+
+**Because:** privately constructed artifacts from different operations or a partial
+witness chain cannot jointly establish the facts carried to an acceptance writer.
+
+**If violated:** substituted heads, truncated dependencies, or unrelated proofs
+could be reported as facts from one verified operation.
+
+**Enforcement status:** bounded export helper regressions and frozen closure-root
+vectors cover head checks, witness-chain authentication, budgets, and binding.
+Full sealed-verifier export and decision parity await verifier integration. No
+live guard or remote authentication responsibility moves into this constructor.

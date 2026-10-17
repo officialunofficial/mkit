@@ -161,3 +161,8 @@ an approved format change, run **tools/generate-acceptance-fixtures.py** with
 the Python `blake3` package installed, inspect every changed vector, and update
 the specification and version policy together. The same bounded fuzz body runs
 in stable corpus replay and the scheduled `acceptance_decode` target.
+
+The in-process `from_verified` export additionally accepts bounded caller-supplied
+canonical heads and streamed authenticated closure witnesses. See the
+[export contract and resource model](docs/acceptance-evidence.md). It preserves
+format 1 and does not add a wire form for either sealed artifact.
