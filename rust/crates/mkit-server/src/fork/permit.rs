@@ -652,6 +652,7 @@ mod tests {
             BatchOutcome::Committed
         ));
         let env = ForkEnv {
+            publication_policy: None,
             store: &store,
             shards: &shards,
             clock: clock.as_ref(),
