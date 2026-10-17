@@ -902,10 +902,14 @@ fn denial_capability_for_test() -> mkit_server::takedown::DenialCapability {
 }
 
 #[tokio::test]
-async fn publish_deadlines_have_retry_after_for_new_and_joining_requests() {
+async fn accepted_result_survives_activation_deadlines_for_new_and_joining_requests() {
     let source = Source::build_with("source", 4, denial).await;
     let dest = source.at("forked");
     let req = request(&source);
+    let (pipe, _) = hooked(&source, None, plain_limits(), Some("activation-deadline"));
+    let coordinator = source.shards.coordinator(&dest.repo.namespace);
+    let mut saved = None;
+    let mut terminal_rows = None;
     for nonce in 1..=2 {
         let clock = source.clock.clone();
         *source.store.trigger.lock().unwrap() = Some((
@@ -917,13 +921,139 @@ async fn publish_deadlines_have_retry_after_for_new_and_joining_requests() {
                 })
             }),
         ));
+        // Acceptance is already terminal even if this request's physical
+        // activation write loses its deadline. A joining nonce sees that result.
+        let result = call(&pipe, &dest, nonce, &req).await.unwrap();
+        let job = mkit_server::fork::read_job(
+            source.store.inner.as_ref(),
+            source.shards.as_ref(),
+            &dest.repo,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+        assert_eq!(job.phase, mkit_server::fork::Phase::Publish);
+        assert_eq!(job.accepted, Some(result.clone()));
+        assert!(job.result.is_none(), "clearance has not completed");
+        if let Some(saved) = &saved {
+            assert_eq!(&result, saved);
+        } else {
+            saved = Some(result);
+        }
+        assert_eq!(
+            source
+                .store
+                .inner
+                .get(&coordinator, &keys::fork_barrier(&dest.repo.name))
+                .await
+                .unwrap(),
+            Some(mkit_server::Value::new(job.binding.to_vec()))
+        );
+        for pack in &job.packs {
+            let partition = source
+                .shards
+                .membership(&dest.repo, &mkit_server::BlobKey::pack(pack.id));
+            for key in [
+                keys::membership(&dest.repo.name, &pack.id),
+                keys::published_member(&dest.repo.name, &pack.id),
+            ] {
+                assert!(
+                    source
+                        .store
+                        .inner
+                        .get(&partition, &key)
+                        .await
+                        .unwrap()
+                        .is_none(),
+                    "a deadline-losing activation must not install membership"
+                );
+            }
+        }
+        let settle = job.settle.as_ref().unwrap();
+        let replay = settle.replay.as_ref().unwrap();
+        let row_keys = [
+            keys::reservation(&settle.rid).unwrap(),
+            keys::replay(&replay.scope),
+        ];
+        let rows = source
+            .store
+            .inner
+            .get_many(&coordinator, &row_keys)
+            .await
+            .unwrap();
+        assert!(rows.iter().all(Option::is_some));
+        assert!(matches!(
+            codec::decode_reservation(rows[0].as_ref().unwrap()).unwrap(),
+            ReservationV1::Committed { .. }
+        ));
+        assert_eq!(
+            codec::decode_replay_record(rows[1].as_ref().unwrap())
+                .unwrap()
+                .state,
+            mkit_server::ReplayState::Committed(mkit_server::StoredResult::Fork)
+        );
+        if let Some(terminal_rows) = &terminal_rows {
+            assert_eq!(&rows, terminal_rows);
+        } else {
+            terminal_rows = Some(rows);
+        }
+    }
+}
+
+#[tokio::test]
+async fn copy_deadlines_have_retry_after_before_acceptance() {
+    let source = Source::build_with("source", 4, denial).await;
+    let dest = source.at("forked");
+    let req = request(&source);
+    for nonce in 1..=2 {
+        let clock = source.clock.clone();
+        *source.store.trigger.lock().unwrap() = Some((
+            "i",
+            Arc::new(move || {
+                let clock = clock.clone();
+                Box::pin(async move {
+                    clock.advance(10_001);
+                })
+            }),
+        ));
         let error = call(source.pipe.as_ref(), &dest, nonce, &req)
             .await
             .unwrap_err();
         assert_eq!(error.code(), Code::Unavailable);
-        assert_eq!(error.public_message(), "fork publish deadline");
-        // The default unavailable status mapping is retained.
+        assert_eq!(error.public_message(), "fork copy deadline");
         assert_eq!(error.http_status(), None);
         assert_eq!(error.headers(), &[("Retry-After".into(), "1".into())]);
+        let job = mkit_server::fork::read_job(
+            source.store.inner.as_ref(),
+            source.shards.as_ref(),
+            &dest.repo,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+        assert_eq!(job.phase, mkit_server::fork::Phase::Copy);
+        assert!(job.accepted.is_none());
+        assert!(job.result.is_none());
+        for pack in &job.packs {
+            let partition = source
+                .shards
+                .membership(&dest.repo, &mkit_server::BlobKey::pack(pack.id));
+            for key in [
+                keys::membership(&dest.repo.name, &pack.id),
+                keys::published_member(&dest.repo.name, &pack.id),
+            ] {
+                assert!(
+                    source
+                        .store
+                        .inner
+                        .get(&partition, &key)
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        }
     }
 }

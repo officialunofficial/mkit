@@ -1052,7 +1052,8 @@ impl NamespaceStore for ControlStore {
         self.inner.read_call_allowance()
     }
     async fn get(&self, p: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
-        self.before_fork_source_read(p).await?;
+        self.before_fork_source_read(p, std::slice::from_ref(key))
+            .await?;
         self.inner.get(p, key).await
     }
     async fn get_many(
@@ -1060,7 +1061,7 @@ impl NamespaceStore for ControlStore {
         p: &Partition,
         keys: &[Key],
     ) -> Result<Vec<Option<Value>>, StoreError> {
-        self.before_fork_source_read(p).await?;
+        self.before_fork_source_read(p, keys).await?;
         self.inner.get_many(p, keys).await
     }
     async fn scan(
@@ -1434,7 +1435,11 @@ impl Admission for TestAdmission {
 }
 
 impl ControlStore {
-    async fn before_fork_source_read(&self, partition: &Partition) -> Result<(), StoreError> {
+    async fn before_fork_source_read(
+        &self,
+        partition: &Partition,
+        read_keys: &[Key],
+    ) -> Result<(), StoreError> {
         let selected = self
             .barriers
             .state
@@ -1447,15 +1452,19 @@ impl ControlStore {
             && let Some(raw) = self.inner.get(&target, &key).await?
         {
             let job = mkit_server::fork::decode_job(&raw)?;
-            if job.phase == mkit_server::fork::Phase::Accept {
+            if job.phase == mkit_server::fork::Phase::Accept && job.cursor == 0 {
                 let source = RepoId {
                     namespace: parse_namespace(&job.source_ns).map_err(StoreError::unavailable)?,
                     name: RepoName::new(job.source_repo)
                         .map_err(|e| StoreError::unavailable(e.to_string()))?,
                 };
-                if partition == &mkit_server::pipeline::D34Shards.coordinator(&source.namespace)
-                    || partition
-                        == &mkit_server::pipeline::D34Shards.ref_shard(&source, &job.source_ref)
+                let first = job.packs.first().ok_or_else(|| {
+                    StoreError::Corrupt("fork proof lacks inherited packs".into())
+                })?;
+                if partition
+                    == &mkit_server::pipeline::D34Shards
+                        .membership(&source, &mkit_server::BlobKey::pack(first.id))
+                    && read_keys.contains(&keys::published_member(&source.name, &first.id))
                 {
                     self.barriers
                         .pass_decision("before_acceptance", "fork_source_proof", 1, &target, &key)

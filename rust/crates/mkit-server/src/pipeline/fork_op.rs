@@ -94,7 +94,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     }
 
     /// [`Self::fork_repo`], also returning the success-only admission
-    /// headers (empty unless this very request finished the job).
+    /// headers (empty unless this request started the accepted job).
     ///
     /// # Errors
     /// Those of [`Self::fork_repo`].
@@ -422,15 +422,32 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             self.resolve_pending(&p, pending, AbortReason::ReplayRace, String::new())
                 .await;
         }
-        let report = fork::step(&env, &dest, &SliceBudget::new(SLICE_CALLS))
-            .await
-            .map_err(|error| step_error(&error))?;
+        let job = match fork::step(&env, &dest, &SliceBudget::new(SLICE_CALLS)).await {
+            Ok(report) => report.job,
+            Err(error) => self
+                .accepted_fork_after_step_error(&spec)
+                .await?
+                .ok_or_else(|| step_error(&error))?,
+        };
         let meta = if ours {
             response_meta(allowance)
         } else {
             ResponseMeta::default()
         };
-        Self::fork_answer(report.job, meta)
+        Self::fork_answer(job, meta)
+    }
+
+    /// A clearance refusal cannot replace the accepted job's terminal answer.
+    /// Joining requests already passed authorization for this exact fork binding.
+    async fn accepted_fork_after_step_error(
+        &self,
+        spec: &fork::ForkSpec,
+    ) -> Result<Option<fork::ForkJobV1>, ServerError> {
+        Ok(fork::read_job(&self.meta, self.shards.as_ref(), &spec.dest)
+            .await
+            .map_err(meta_error)?
+            .map(|(job, _)| job)
+            .filter(|job| fork::CompletedFork::check(job, spec).is_some()))
     }
 
     /// What a request answers about the job it advanced.
