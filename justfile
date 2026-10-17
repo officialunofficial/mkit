@@ -140,6 +140,11 @@ ci-security:
     }
     ( cd rust && run_audit )
     ( cd contrib/signers && run_audit )
+    # The apps workspaces carry only the paste advisory (RUSTSEC-2024-0436);
+    # mirror the same legs as cloudbuild/security.yaml.
+    ( cd apps/keys-worker && cargo audit --deny warnings --ignore RUSTSEC-2024-0436 )
+    ( cd apps/repo-worker && cargo audit --deny warnings --ignore RUSTSEC-2024-0436 )
+    ( cd apps/mkit-worker-common && cargo audit --deny warnings --ignore RUSTSEC-2024-0436 )
     cargo deny --manifest-path rust/Cargo.toml --all-features check
 
 # Mirrors .github/workflows/buf.yml: buf-action lint/breaking and its JSON step.
