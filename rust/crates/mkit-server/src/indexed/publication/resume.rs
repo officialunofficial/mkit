@@ -585,8 +585,8 @@ async fn one<S: NamespaceStore>(
         PairRequest::Object {
             request,
             object,
+            head,
             restricted,
-            ..
         } => {
             let closure = PairStore {
                 store,
@@ -637,10 +637,6 @@ async fn one<S: NamespaceStore>(
             if row.canonical_len != located.value.decoded_size || row.kind == 0 || row.kind == 6 {
                 return Err(unavailable().into());
             }
-            let mut children = Vec::new();
-            for n in 0..row.references.pages.len() {
-                children.extend(denial::page(store, &row.references, n).await?);
-            }
             // Inventory kinds are the wire object tags; unknown values are
             // not history kinds, matching the reference's head-only check.
             let kind = match row.kind {
@@ -651,6 +647,14 @@ async fn one<S: NamespaceStore>(
                 7 => mkit_core::object::ObjectType::Tag,
                 _ => mkit_core::object::ObjectType::Blob,
             };
+            // A non-history head fails before any reference page is read, as
+            // the reference did; the machine refuses it without children.
+            let mut children = Vec::new();
+            if !head || matches!(row.kind, 3 | 4 | 7) {
+                for n in 0..row.references.pages.len() {
+                    children.extend(denial::page(store, &row.references, n).await?);
+                }
+            }
             walker
                 .answer(PairResponse::Object {
                     request,

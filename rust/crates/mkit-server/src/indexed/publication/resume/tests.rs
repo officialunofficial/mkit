@@ -1569,7 +1569,9 @@ async fn stage_member_pack(
         let object_bytes = mkit_core::serialize::serialize(object).unwrap();
         let base_bytes = mkit_core::serialize::serialize(base).unwrap();
         let stream = mkit_core::delta::encode(&base_bytes, &object_bytes).unwrap();
-        pack_writer.push_delta(&base.id().unwrap(), &stream).unwrap();
+        pack_writer
+            .push_delta(&base.id().unwrap(), &stream)
+            .unwrap();
     }
     let body = pack_writer.finish().unwrap();
     let pack = hash(&body);
@@ -2390,5 +2392,107 @@ fn non_branch_pair_resumes_across_slices() {
                 .into_iter()
                 .collect::<Vec<Hash>>()
         );
+    });
+}
+
+/// Counts `denial::page` reads: every chunk-page get carries the
+/// `\0chunks\0` marker in its key bytes.
+struct CountPages<'a> {
+    inner: &'a MemoryKv,
+    pages: std::sync::atomic::AtomicUsize,
+}
+impl NamespaceStore for CountPages<'_> {
+    fn capabilities(&self) -> crate::store::StoreCapabilities {
+        self.inner.capabilities()
+    }
+    async fn get(&self, p: &Partition, k: &crate::Key) -> Result<Option<Value>, StoreError> {
+        if k.as_bytes().windows(8).any(|w| w == b"\0chunks\0") {
+            self.pages.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.inner.get(p, k).await
+    }
+    async fn scan(
+        &self,
+        p: &Partition,
+        start: &crate::Key,
+        end: &crate::Key,
+        after: Option<&crate::Cursor>,
+        limit: u32,
+    ) -> Result<crate::ScanPage, StoreError> {
+        self.inner.scan(p, start, end, after, limit).await
+    }
+    async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+        self.inner.apply(p, batch).await
+    }
+    async fn stats(&self, p: &Partition) -> Result<crate::PartitionStats, StoreError> {
+        self.inner.stats(p).await
+    }
+    async fn probe(&self) -> Result<(), StoreError> {
+        self.inner.probe().await
+    }
+}
+/// A non-history head (`ChunkedBlob`, inventory kind 5) with a non-empty
+/// reference-page set must hit the terminal open-closure verdict without
+/// any reference-page read — the reference refused before touching pages.
+#[test]
+fn non_history_head_never_reads_reference_pages() {
+    block_on(async {
+        let kv = MemoryKv::with_clock(std::sync::Arc::new(crate::rt::ManualClock::new(0)));
+        let blobs = MemoryBlobStore::default();
+        let repo = repo();
+        let chunk = Object::Blob(Blob { data: vec![9] });
+        let chunked = Object::ChunkedBlob(mkit_core::object::ChunkedBlob {
+            total_size: 1,
+            chunk_size: 0,
+            chunks: vec![chunk.id().unwrap()],
+        });
+        let source = SinglePartition.ref_shard(&repo, "refs/heads/main");
+        let pack = stage_member_pack(&kv, &blobs, &repo, &source, &[&chunked, &chunk], &[]).await;
+        let node = mkit_core::transfer::encode_packlist(None, &[pack]).unwrap();
+        let root = store_packlist_blob(&blobs, &node).await;
+        facts_with(&kv, root, None, &[pack]).await;
+        let mut a = advance(root);
+        a.value.head = Some(chunked.id().unwrap());
+        let mut p = progress(&a);
+        let store = CountPages {
+            inner: &kv,
+            pages: std::sync::atomic::AtomicUsize::new(0),
+        };
+        while p.terminal.is_none() && !p.complete {
+            slice(
+                &store,
+                &SinglePartition,
+                &repo,
+                &mut p,
+                &crate::telemetry::NoopMetrics,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(p.terminal, Some(TerminalFailure::OpenClosure));
+        assert_eq!(store.pages.load(std::sync::atomic::Ordering::SeqCst), 0);
+        // Control: a history head with a tree child reads its reference page.
+        let kv2 = MemoryKv::with_clock(std::sync::Arc::new(crate::rt::ManualClock::new(0)));
+        let (commit, tree, blob) = history_objects();
+        let f = head_fixture(&kv2, &blobs, &repo, &[tree, blob], commit.clone()).await;
+        let mut a2 = advance(f.root);
+        a2.value.head = Some(commit.id().unwrap());
+        let mut p2 = progress(&a2);
+        let store2 = CountPages {
+            inner: &kv2,
+            pages: std::sync::atomic::AtomicUsize::new(0),
+        };
+        slice(
+            &store2,
+            &SinglePartition,
+            &repo,
+            &mut p2,
+            &crate::telemetry::NoopMetrics,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(store2.pages.load(std::sync::atomic::Ordering::SeqCst) > 0);
     });
 }
