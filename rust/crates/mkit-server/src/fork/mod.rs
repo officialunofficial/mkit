@@ -213,6 +213,12 @@ impl ForkError {
             Self::Slice => ServerError::unavailable("fork in progress"),
         }
     }
+
+    /// A full partition is a capacity failure, not a fork outage.
+    pub(crate) fn is_partition_full(&self) -> bool {
+        matches!(self, Self::Unavailable("storage partition full"))
+    }
+
     fn from_error(error: &ServerError) -> Self {
         match error.code() {
             crate::Code::NotFound | crate::Code::PermissionDenied => Self::NotFound,
@@ -226,6 +232,10 @@ impl From<StoreError> for ForkError {
     fn from(error: StoreError) -> Self {
         if crate::budget::is_exhausted(&error) {
             Self::Slice
+        } else if matches!(error, StoreError::Full) {
+            // Keep the storage classification. Callers that own a partition
+            // counter must report this through that path, not as a fork outage.
+            Self::Unavailable("storage partition full")
         } else {
             Self::Unavailable("fork storage unavailable")
         }
@@ -715,6 +725,16 @@ mod tests {
         parent.charge_many(SLICE_CALLS + 10).unwrap();
         assert!(child.charge().is_err());
         assert!(!fresh(&child));
+    }
+
+    #[test]
+    fn a_full_partition_is_not_reported_as_fork_unavailability() {
+        let full = ForkError::from(crate::store::StoreError::Full);
+        assert!(full.is_partition_full());
+        assert_eq!(full.error().public_message(), "storage partition full");
+        let outage = ForkError::from(crate::store::StoreError::unavailable("backend down"));
+        assert_eq!(outage, ForkError::Unavailable("fork storage unavailable"));
+        assert!(!outage.is_partition_full());
     }
 
     #[test]

@@ -147,7 +147,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             self.clock.as_ref(),
             &self.cfg,
         );
-        if crate::fork::permit::transition(
+        let drained = match crate::fork::permit::transition(
             &env,
             ns,
             &kind.key(),
@@ -161,8 +161,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 ),
         )
         .await
-        .map_err(|error| error.error())?
         {
+            Ok(done) => done,
+            Err(error) => return Err(self.fork_storage_error(&p, error).await),
+        };
+        if drained {
             return Ok(EpochTransition::Advance);
         }
         let pending = match kind {
