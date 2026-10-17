@@ -484,7 +484,11 @@ fn effect_guard_kinds_reports_each_intrinsic_effect_and_its_omission() {
     let mut effects = base.clone();
     // An unguarded unconditional write needs no intrinsic kind; each other
     // effect group contributes exactly its own category.
-    assert!(effect_guard_kinds(&DecisionClass::Apply, &effects).unwrap().is_empty());
+    assert!(
+        effect_guard_kinds(&DecisionClass::Apply, &effects)
+            .unwrap()
+            .is_empty()
+    );
     let additions: [(GuardKind, Add); 6] = [
         (GuardKind::Membership, |effects| {
             effects.membership.push(MembershipEffect {
@@ -503,17 +507,15 @@ fn effect_guard_kinds_reports_each_intrinsic_effect_and_its_omission() {
             });
         }),
         (GuardKind::Reservation, |effects| {
-            effects
-                .reservation_transitions
-                .push(ReservationTransition {
-                    id: crate::decision::ReservationId([9; 32]),
-                    next: ReservationFact::Pending {
-                        repository: REPO,
-                        operation: crate::decision::OperationId([10; 32]),
-                        created_ms: 0,
-                        expires_ms: 1,
-                    },
-                });
+            effects.reservation_transitions.push(ReservationTransition {
+                id: crate::decision::ReservationId([9; 32]),
+                next: ReservationFact::Pending {
+                    repository: REPO,
+                    operation: crate::decision::OperationId([10; 32]),
+                    created_ms: 0,
+                    expires_ms: 1,
+                },
+            });
         }),
         (GuardKind::Replay, |effects| {
             effects.replay = Some(ReplayTransition {
@@ -553,9 +555,11 @@ fn effect_guard_kinds_reports_each_intrinsic_effect_and_its_omission() {
         assert!(kinds.contains(&kind), "missing intrinsic kind {kind:?}");
         // Omitting the effect must omit its kind: embedders under SPEC-SERVER
         // §10.4 compose only effects, so the rule observes the effect itself.
-        assert!(!effect_guard_kinds(&DecisionClass::Apply, &base)
-            .unwrap()
-            .contains(&kind));
+        assert!(
+            !effect_guard_kinds(&DecisionClass::Apply, &base)
+                .unwrap()
+                .contains(&kind)
+        );
         let mut repeated = composed.clone();
         add(&mut repeated);
         assert_eq!(

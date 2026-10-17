@@ -642,11 +642,7 @@ impl VerifyDriver {
                         // Decoder feeds copy and commit the window. Prepay one
                         // additional prefix pass: cold resume re-feeds and
                         // re-hashes consumed windows.
-                        let passes = if self.phase == Phase::Entries {
-                            4
-                        } else {
-                            3
-                        };
+                        let passes = if self.phase == Phase::Entries { 4 } else { 3 };
                         self.charge_feed(range, passes)?;
                         self.accept_input(range.offset, bytes)
                     }

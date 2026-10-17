@@ -382,8 +382,7 @@ fn resident_ledger_is_symmetric_across_leaf_flushes() {
     let mut host = Host::new(&pack);
     let mut limits = limits();
     limits.page_bytes = 4096;
-    let mut machine =
-        VerifyDriver::new(source(&pack), REPOSITORY, profile(), limits, 17).unwrap();
+    let mut machine = VerifyDriver::new(source(&pack), REPOSITORY, profile(), limits, 17).unwrap();
     let mut first = None;
     let mut last = 0;
     for _ in 0..200_000 {
@@ -1031,7 +1030,9 @@ fn record_domain_must_match_the_kind_signing_domain() {
     let mut wrong_domain = signed;
     wrong_domain[98] = 1;
     assert_eq!(
-        OccurrenceRecord::from_bytes(&wrong_domain).unwrap_err().code,
+        OccurrenceRecord::from_bytes(&wrong_domain)
+            .unwrap_err()
+            .code,
         FailureCode::InvalidEvidence
     );
 }
