@@ -28,6 +28,9 @@ use crate::wire::{Feature, Profile, WireAuth};
 
 #[path = "test_host_publication.rs"]
 mod publication;
+#[path = "reference_fork.rs"]
+mod reference_fork;
+use reference_fork::ForkBinding;
 
 type Core = Pipeline<MemoryBlobStore, ControlStore, Hooks<TestAuthority, TestAdmission>>;
 
@@ -89,7 +92,9 @@ impl ControlledHost {
         let authority = configure_authority(&mut profile, &mut config)?;
         let blobs = MemoryBlobStore::default();
         let core = build_core(&store, &blobs, &clock, &config)?;
+        let forks = ForkBinding::new(&store, &blobs, &clock, &config)?;
         let state = Arc::new(HostState {
+            forks,
             store,
             blobs,
             clock,
@@ -111,12 +116,17 @@ impl ControlledHost {
                     async move { state.command(request).await }
                 }
             }))
+            .route("/__mkit_test/fork", axum::routing::post({
+                let state = state.clone();
+                move |headers: http::HeaderMap, body: bytes::Bytes| { let state = state.clone(); async move { state.invoke_fork(headers, body).await } }
+            }))
             .fallback({
                 let state = state.clone();
                 move |request: axum::extract::Request| {
                     let state = state.clone();
                     async move {
-                        let core = state.core.read().await.clone();
+                        let repository = request.headers().get("x-repository").and_then(|v|v.to_str().ok()).unwrap_or("");
+                        let core = if state.forks.handles(repository) { state.forks.core.read().await.clone() } else { state.core.read().await.clone() };
                         let response = tokio::select! {
                             biased;
                             () = state.reset.notified() => return http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
@@ -241,6 +251,7 @@ fn build_core(
 }
 
 struct HostState {
+    forks: ForkBinding,
     store: ControlStore,
     blobs: MemoryBlobStore,
     clock: Arc<ManualClock>,
@@ -276,25 +287,26 @@ impl HostState {
                     .into(),
             ),
         ]);
-        unsupported.extend([
-
-            ("fork.fixture".into(),"gated fork test binding awaits destination activation and advancing-commit fencing".into()),
-            ("fork.invoke".into(),"gated fork test binding awaits destination activation and advancing-commit fencing".into()),
-            ("fork.observe".into(),"gated fork test binding awaits destination activation and advancing-commit fencing".into()),
-            ("fork.destination_gate".into(),"reference fork does not yet gate destination reads and writes on guarded acceptance".into()),
-            ("fork.authority_fence".into(),"reference fork does not yet compare recorded authority facts at every advancing commit".into()),
-            ("decision.fork_acceptance".into(),"gated fork test binding is not yet available".into()),
-            ("decision.fork_progress".into(),"advancing fork authority-fence control is not yet available".into()),
-            ("decision.fork_source_proof".into(),"reference fork has no final source proof after all destination membership effects are staged".into()),
-            ("fork.final_source_proof".into(),"reference fork proves individual publication writes but does not prove the complete source after the last staged membership effect and before terminal acceptance".into()),
-        ]);
-        for change in ["moved", "unpublished", "visibility_revoked", "denied"] {
-            unsupported.insert(
-                format!("fork.source_change.{change}"),
-                "source-change binding awaits final source proof and guarded fork acceptance"
-                    .into(),
-            );
-        }
+        controls.extend(
+            [
+                "fork.fixture",
+                "fork.invoke",
+                "fork.observe",
+                "fork.destination_gate",
+                "fork.authority_fence",
+                "decision.fork_acceptance",
+                "decision.fork_progress",
+                "decision.fork_destination_claim",
+                "decision.writer_authority_ready",
+                "decision.fork_source_proof",
+                "fork.final_source_proof",
+                "fork.source_change.moved",
+                "fork.source_change.unpublished",
+                "fork.source_change.visibility_revoked",
+                "fork.source_change.denied",
+            ]
+            .map(str::to_owned),
+        );
         for name in [
             "reliance.fixture",
             "reliance.observe",
@@ -458,11 +470,14 @@ impl HostState {
                     on_resume,
                 )?;
             }
-            Request::PrepareFork { .. }
-            | Request::ObserveFork { .. }
-            | Request::ChangeForkSource { .. } => {
-                return Err((http::StatusCode::NOT_IMPLEMENTED,
-                    "reference fork destination gate and advancing-commit authority fence are not implemented".into()));
+            Request::PrepareFork { query } => {
+                reply.fork_fixture = Some(self.prepare_fork(query).await.map_err(bad)?);
+            }
+            Request::ObserveFork { query } => {
+                reply.fork_observation = Some(self.observe_fork(query).await.map_err(bad)?);
+            }
+            Request::ChangeForkSource { query, change } => {
+                self.change_fork_source(query, change).await.map_err(bad)?;
             }
             Request::BarrierStatus => {
                 reply.paused = self.store.barriers.paused();
@@ -483,6 +498,10 @@ impl HostState {
                 self.store.barriers.resume();
                 *self.core.write().await =
                     build_core(&self.store, &self.blobs, &self.clock, &self.config).map_err(bad)?;
+                self.forks
+                    .restart(&self.store, &self.blobs, &self.clock)
+                    .await
+                    .map_err(bad)?;
             }
             Request::BumpAuthority { namespace } => {
                 if !self.authority {
@@ -559,13 +578,14 @@ impl HostState {
                 | "after_durable_acceptance_before_response"
                 | "before_published_clearance"
         ) || decision_class.as_deref().is_some_and(|class| {
-            class
-                != if step == "before_published_clearance" {
-                    "published_clearance"
-                } else {
-                    "ref_acceptance"
-                }
-        }) || occurrence.is_some_and(|n| n != 1)
+            if step == "before_published_clearance" {
+                class != "published_clearance"
+            } else {
+                !matches!(class, "ref_acceptance" | "fork_acceptance" | "fork_progress"
+                    | "fork_source_proof" | "fork_destination_claim" | "writer_authority_ready")
+            }
+        }) || occurrence == Some(0)
+            || step == "before_published_clearance" && occurrence.is_some_and(|n| n != 1)
             || on_resume
                 .as_deref()
                 .is_some_and(|action| action != "uncertain_storage_result")
@@ -592,13 +612,29 @@ impl HostState {
             .barriers
             .arm(
                 step.clone(),
-                SinglePartition.ref_shard(&repo, &head),
-                if step == "before_published_clearance" {
+                if decision_class
+                    .as_deref()
+                    .is_some_and(|class| class.starts_with("fork_"))
+                {
+                    mkit_server::pipeline::D34Shards.coordinator(&repo.namespace)
+                } else if decision_class.as_deref() == Some("writer_authority_ready") {
+                    mkit_server::pipeline::D34Shards.ref_shard(&repo, &head)
+                } else {
+                    SinglePartition.ref_shard(&repo, &head)
+                },
+                if decision_class
+                    .as_deref()
+                    .is_some_and(|class| class.starts_with("fork_"))
+                {
+                    keys::fork_job(&repo.name)
+                } else if step == "before_published_clearance" {
                     keys::publication(&repo.name, &head)
                 } else {
                     keys::ref_key(&repo.name, &head)
                 },
                 on_resume.is_some(),
+                decision_class.unwrap_or_else(|| "ref_acceptance".into()),
+                occurrence.unwrap_or(1),
             )
             .map_err(bad)
     }
@@ -625,6 +661,14 @@ impl HostState {
         self.store
             .inner
             .apply(&p, Batch::new().put(key, codec::encode_u64(generation)))
+            .await
+            .map_err(|e| e.to_string())?;
+        self.store
+            .inner
+            .apply(
+                &mkit_server::pipeline::D34Shards.coordinator(&ns),
+                Batch::new().put(keys::authority_generation(), codec::encode_u64(generation)),
+            )
             .await
             .map_err(|e| e.to_string())?;
         Ok(generation)
@@ -916,7 +960,7 @@ fn result_class(result: &mkit_server::StoredResult) -> &'static str {
         StoredResult::BeginUpload(_) => "begin_upload",
         StoredResult::UploadPack => "upload_pack",
         StoredResult::RepoVisibility => "repo_visibility",
-        StoredResult::Fork => "fork",
+        StoredResult::Fork => "fork_committed",
         StoredResult::Rejected(_) => "rejected",
     }
 }
@@ -955,6 +999,7 @@ struct ControlStore {
     accepted_reservations: Arc<Mutex<BTreeMap<Hash, String>>>,
     next_reservation: Arc<AtomicU64>,
     publication_eligibility: Arc<Mutex<BTreeMap<(Partition, Key), bool>>>,
+    fork_progress: Arc<Mutex<BTreeMap<(Partition, Key), u64>>>,
 }
 
 impl ControlStore {
@@ -969,6 +1014,7 @@ impl ControlStore {
             accepted_reservations: Arc::default(),
             next_reservation: Arc::default(),
             publication_eligibility: Arc::default(),
+            fork_progress: Arc::default(),
         }
     }
 }
@@ -1002,7 +1048,16 @@ impl NamespaceStore for ControlStore {
         self.inner.read_call_allowance()
     }
     async fn get(&self, p: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
+        self.before_fork_source_read(p).await?;
         self.inner.get(p, key).await
+    }
+    async fn get_many(
+        &self,
+        p: &Partition,
+        keys: &[Key],
+    ) -> Result<Vec<Option<Value>>, StoreError> {
+        self.before_fork_source_read(p).await?;
+        self.inner.get_many(p, keys).await
     }
     async fn scan(
         &self,
@@ -1014,7 +1069,75 @@ impl NamespaceStore for ControlStore {
     ) -> Result<mkit_server::ScanPage, StoreError> {
         self.inner.scan(p, start, end, after, limit).await
     }
+    #[allow(clippy::too_many_lines)] // Wrap each complete reference commit and its fault boundary.
     async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+        let fork_rows: Vec<_> = batch
+            .writes
+            .iter()
+            .filter_map(|write| {
+                if let Write::Put(key, value) = write
+                    && matches!(keys::parse(key), Some(keys::ParsedKey::ForkJob(_)))
+                {
+                    return Some((key.clone(), mkit_server::fork::decode_job(value)));
+                }
+                None
+            })
+            .collect();
+        let mut fork_commits = Vec::new();
+        for (key, next) in fork_rows {
+            let next = next?;
+            let prior = self
+                .inner
+                .get(p, &key)
+                .await?
+                .as_ref()
+                .map(mkit_server::fork::decode_job)
+                .transpose()?;
+            if let Some(prior) = prior {
+                let accepting = prior.accepted.is_none() && next.accepted.is_some();
+                let preparing =
+                    reference_fork::preparation(&prior) && reference_fork::preparation(&next);
+                let occurrence = self
+                    .fork_progress
+                    .lock()
+                    .unwrap()
+                    .get(&(p.clone(), key.clone()))
+                    .copied()
+                    .unwrap_or(0)
+                    + 1;
+                if batch.writes.iter().any(|write| matches!(write, Write::Put(key, _) if matches!(keys::parse(key), Some(keys::ParsedKey::ForkBarrier(_))))) {
+                    self.barriers.pass_decision("before_acceptance", "fork_destination_claim", 1, p, &key).await;
+                }
+                if accepting {
+                    self.barriers
+                        .pass_decision("before_acceptance", "fork_acceptance", 1, p, &key)
+                        .await;
+                } else if preparing {
+                    self.barriers
+                        .pass_decision("before_acceptance", "fork_progress", occurrence, p, &key)
+                        .await;
+                }
+                fork_commits.push((key, preparing, accepting));
+            }
+        }
+        if matches!(p, Partition::Ref { .. }) {
+            for write in &batch.writes {
+                if let Write::Put(key, value) = write
+                    && matches!(keys::parse(key), Some(keys::ParsedKey::Ticket(_)))
+                {
+                    let ticket = codec::decode_ticket(value)?;
+                    self.barriers
+                        .pass_decision(
+                            "before_acceptance",
+                            "writer_authority_ready",
+                            1,
+                            p,
+                            &keys::ref_key(&ticket.repo, &ticket.ref_name),
+                        )
+                        .await;
+                }
+            }
+        }
         let refs: Vec<_> = batch
             .writes
             .iter()
@@ -1073,6 +1196,16 @@ impl NamespaceStore for ControlStore {
         }
         let outcome = self.inner.apply(p, batch).await?;
         if outcome == BatchOutcome::Committed {
+            for (key, preparing, _) in &fork_commits {
+                if *preparing {
+                    *self
+                        .fork_progress
+                        .lock()
+                        .unwrap()
+                        .entry((p.clone(), key.clone()))
+                        .or_default() += 1;
+                }
+            }
             let mut counts = self.terminal_counts.lock().unwrap();
             for id in terminals {
                 *counts.entry(id).or_default() += 1;
@@ -1087,6 +1220,24 @@ impl NamespaceStore for ControlStore {
         }
         drop(guard);
         if outcome == BatchOutcome::Committed {
+            for (key, _, accepting) in &fork_commits {
+                if *accepting
+                    && self
+                        .barriers
+                        .pass_decision(
+                            "after_durable_acceptance_before_response",
+                            "fork_acceptance",
+                            1,
+                            p,
+                            key,
+                        )
+                        .await
+                {
+                    return Err(StoreError::unavailable(
+                        "test uncertain committed fork outcome",
+                    ));
+                }
+            }
             for key in &refs {
                 if self
                     .barriers
@@ -1118,6 +1269,8 @@ struct Barrier {
     key: Key,
     reached: bool,
     uncertain_result: bool,
+    decision_class: String,
+    occurrence: u64,
 }
 
 impl Barriers {
@@ -1127,6 +1280,8 @@ impl Barriers {
         partition: Partition,
         key: Key,
         uncertain_result: bool,
+        decision_class: String,
+        occurrence: u64,
     ) -> Result<(), String> {
         let mut state = self.state.lock().unwrap();
         if state.is_some() {
@@ -1138,6 +1293,8 @@ impl Barriers {
             key,
             reached: false,
             uncertain_result,
+            decision_class,
+            occurrence,
         });
         Ok(())
     }
@@ -1153,6 +1310,17 @@ impl Barriers {
         self.resume.notify_waiters();
     }
     async fn pass(&self, step: &str, partition: &Partition, key: &Key) -> bool {
+        self.pass_decision(step, "ref_acceptance", 1, partition, key)
+            .await
+    }
+    async fn pass_decision(
+        &self,
+        step: &str,
+        decision_class: &str,
+        occurrence: u64,
+        partition: &Partition,
+        key: &Key,
+    ) -> bool {
         let notified = self.resume.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
@@ -1160,6 +1328,8 @@ impl Barriers {
             let mut state = self.state.lock().unwrap();
             if let Some(barrier) = state.as_mut()
                 && barrier.step == step
+                && barrier.decision_class == decision_class
+                && barrier.occurrence == occurrence
                 && partition == &barrier.partition
                 && key == &barrier.key
                 && !barrier.reached
@@ -1186,7 +1356,11 @@ impl Authorizer for TestAuthority {
             self.0
                 .inner
                 .get(
-                    &SinglePartition.coordinator(&op.repo.namespace),
+                    &if op.repo.name.as_str().starts_with("fork-") {
+                        mkit_server::pipeline::D34Shards.coordinator(&op.repo.namespace)
+                    } else {
+                        SinglePartition.coordinator(&op.repo.namespace)
+                    },
                     &keys::authority_generation(),
                 )
                 .await
@@ -1197,6 +1371,26 @@ impl Authorizer for TestAuthority {
                 .map_err(|_| ServerError::unavailable("test authority state corrupt"))?
                 .unwrap_or(0),
         );
+        if op.repo.name.as_str().starts_with("fork-source-") {
+            let raw = self
+                .0
+                .inner
+                .get(
+                    &mkit_server::pipeline::D34Shards.coordinator(&op.repo.namespace),
+                    &keys::repo_visibility(&op.repo.name),
+                )
+                .await
+                .map_err(|_| ServerError::unavailable("test visibility read failed"))?;
+            if raw
+                .as_ref()
+                .map(codec::decode_repo_visibility)
+                .transpose()
+                .map_err(|_| ServerError::unavailable("test visibility corrupt"))?
+                .is_some_and(|v| v.visibility == codec::StoredVisibility::Private)
+            {
+                return Err(ServerError::permission_denied("source read revoked"));
+            }
+        }
         facts.caller_view = mkit_server::CallerView::Writer;
         Ok(facts)
     }
@@ -1219,5 +1413,39 @@ impl Admission for TestAdmission {
         } else {
             decision
         })
+    }
+}
+
+impl ControlStore {
+    async fn before_fork_source_read(&self, partition: &Partition) -> Result<(), StoreError> {
+        let selected = self
+            .barriers
+            .state
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|b| b.decision_class == "fork_source_proof" && !b.reached)
+            .map(|b| (b.partition.clone(), b.key.clone()));
+        if let Some((target, key)) = selected
+            && let Some(raw) = self.inner.get(&target, &key).await?
+        {
+            let job = mkit_server::fork::decode_job(&raw)?;
+            if job.phase == mkit_server::fork::Phase::Accept {
+                let source = RepoId {
+                    namespace: parse_namespace(&job.source_ns).map_err(StoreError::unavailable)?,
+                    name: RepoName::new(job.source_repo)
+                        .map_err(|e| StoreError::unavailable(e.to_string()))?,
+                };
+                if partition == &mkit_server::pipeline::D34Shards.coordinator(&source.namespace)
+                    || partition
+                        == &mkit_server::pipeline::D34Shards.ref_shard(&source, &job.source_ref)
+                {
+                    self.barriers
+                        .pass_decision("before_acceptance", "fork_source_proof", 1, &target, &key)
+                        .await;
+                }
+            }
+        }
+        Ok(())
     }
 }

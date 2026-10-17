@@ -7,8 +7,8 @@ use std::time::Duration;
 use buffa::Message as _;
 use mkit_core::hash::{from_hex, hash, to_hex};
 use mkit_transport_connect::generated::{
-    AdvanceRefsResponse, DownloadPackRequest, DownloadPackResponse, PackExistsRequest,
-    PackExistsResponse,
+    AdvanceRefsResponse, BeginUploadRequest, BeginUploadResponse, DownloadPackRequest,
+    DownloadPackResponse, PackExistsRequest, PackExistsResponse,
 };
 
 use crate::control::{
@@ -282,6 +282,10 @@ fn wire_result_matches(reply: &Reply, expected: &ForkResultView) -> CaseResult {
 }
 
 async fn probe_inert(ctx: &Ctx, fixture: &Fixture) -> CaseResult {
+    probe_inert_at(ctx, fixture, None).await
+}
+
+async fn probe_inert_at(ctx: &Ctx, fixture: &Fixture, now: Option<i64>) -> CaseResult {
     let signer = ctx.v2_signer("main")?;
     for (pack, object) in fixture.source.packs.iter().zip(&fixture.source.objects) {
         let request = PackExistsRequest {
@@ -290,6 +294,7 @@ async fn probe_inert(ctx: &Ctx, fixture: &Fixture) -> CaseResult {
         };
         let probe = sign_unary(&signer, Rpc::PackExists, &request, |envelope| {
             envelope.repository.clone_from(&fixture.query.destination);
+            fresh_time(envelope, now);
         });
         match ctx.send::<PackExistsResponse>(&probe).await? {
             Ok(result) => ensure!(
@@ -309,6 +314,7 @@ async fn probe_inert(ctx: &Ctx, fixture: &Fixture) -> CaseResult {
         let body = frame(&download.encode_to_vec());
         let mut envelope = signer.envelope(Rpc::DownloadPack.procedure(), body_commitment(&body));
         envelope.repository.clone_from(&fixture.query.destination);
+        fresh_time(&mut envelope, now);
         envelope.digest = Some(to_hex(&hash(&body)));
         let download = ctx
             .client()
@@ -352,7 +358,10 @@ async fn probe_inert(ctx: &Ctx, fixture: &Fixture) -> CaseResult {
             (&ctx.head("source"), Exp::Missing, &tip),
             (&ctx.packmap("source"), Exp::Missing, &packmap),
         ),
-        |envelope| envelope.repository.clone_from(&fixture.query.destination),
+        |envelope| {
+            envelope.repository.clone_from(&fixture.query.destination);
+            fresh_time(envelope, now);
+        },
     );
     let response = ctx.send::<AdvanceRefsResponse>(&write).await?;
     ensure!(
@@ -487,10 +496,184 @@ async fn reject_after_bump(
 pub(crate) async fn failed_destination_inert(ctx: Ctx, control: &ControlClient) -> CaseResult {
     let fixture = fixture(&ctx, control, 0).await?;
     reject_after_bump(&ctx, control, &fixture, "fork_acceptance", None).await?;
+    // A fresh ordinary write in the same namespace proves the post-move
+    // principal is usable; stale authorization must not masquerade as exclusion.
+    let sibling = fixture_for_post_move(&ctx, control).await?;
+    writer_won(ctx.send(&writer(&ctx, &sibling)?).await?)?;
+    writer_lost(ctx.send(&writer(&ctx, &fixture)?).await?)?;
     probe_inert(&ctx, &fixture).await?;
     let after = observe(control, &fixture).await?;
     inert(&after)?;
     ensure!(after.failed, "write probe reactivated a failed destination");
+    let advanced = control
+        .command(&Request::AdvanceClock {
+            delta_ms: 25 * 3_600_000,
+        })
+        .await?;
+    let now = advanced
+        .now_ms
+        .ok_or("clock advance omitted current time")?;
+    control
+        .command(&Request::Restart {
+            mode: "graceful".into(),
+        })
+        .await?;
+    probe_inert_at(&ctx, &fixture, Some(now)).await?;
+    writer_won(ctx.send(&writer_at(&ctx, &sibling, Some(now))?).await?)?;
+    writer_lost(ctx.send(&writer_at(&ctx, &fixture, Some(now))?).await?)?;
+    let recovered = observe(control, &fixture).await?;
+    inert(&recovered)?;
+    ensure!(
+        recovered.failed && recovered.result == after.result && recovered.outcome == after.outcome,
+        "failed destination expired or changed terminal responsibility: {recovered:?}"
+    );
+    control
+        .command(&Request::PinClock {
+            now_ms: now - 25 * 3_600_000,
+        })
+        .await?;
+    Ok(())
+}
+
+async fn fixture_for_post_move(ctx: &Ctx, control: &ControlClient) -> Result<Fixture, Failure> {
+    fixture(ctx, control, 1).await
+}
+
+fn fresh_time(envelope: &mut crate::wire::sign::Envelope, now: Option<i64>) {
+    if let Some(now) = now {
+        envelope.created_at = now;
+        envelope.expires_at = now + 60_000;
+    }
+}
+
+fn writer(ctx: &Ctx, fixture: &Fixture) -> Result<crate::wire::cases::Signed, Failure> {
+    writer_at(ctx, fixture, None)
+}
+
+fn writer_at(
+    ctx: &Ctx,
+    fixture: &Fixture,
+    now: Option<i64>,
+) -> Result<crate::wire::cases::Signed, Failure> {
+    let signer = ctx.v2_signer("main")?;
+    Ok(sign_unary(
+        &signer,
+        Rpc::BeginUpload,
+        &BeginUploadRequest {
+            r#ref: Some(fixture.source.source_head.clone()),
+            pack_id: Some(
+                hash(format!("{}:{now:?}", fixture.query.destination).as_bytes()).to_vec(),
+            ),
+            bytes: Some(64),
+            ..Default::default()
+        },
+        |envelope| {
+            envelope.repository.clone_from(&fixture.query.destination);
+            fresh_time(envelope, now);
+        },
+    ))
+}
+
+fn writer_won(result: Result<BeginUploadResponse, crate::wire::client::RpcError>) -> CaseResult {
+    ensure!(matches!(result, Ok(BeginUploadResponse { result: Some(mkit_transport_connect::generated::__buffa::oneof::begin_upload_response::Result::Ticket(_)), .. })), "writer failed to establish a real upload ticket: {result:?}");
+    Ok(())
+}
+
+fn writer_lost(result: Result<BeginUploadResponse, crate::wire::client::RpcError>) -> CaseResult {
+    ensure!(
+        matches!(&result, Err(error) if matches!(error.code.as_str(), "not_found" | "permission_denied" | "failed_precondition" | "unavailable")
+            && error.message != "namespace authority generation changed"
+            && error.message != "write grant epoch changed; re-authorize"),
+        "writer escaped fork exclusion: {result:?}"
+    );
+    Ok(())
+}
+
+fn fork_lost(reply: &Reply) -> CaseResult {
+    let error: serde_json::Value =
+        serde_json::from_slice(&reply.body).map_err(|e| e.to_string())?;
+    ensure!(
+        reply.status != 200
+            && refusal(reply)? == "failed_precondition"
+            && error.get("message").and_then(serde_json::Value::as_str)
+                == Some("destination not empty"),
+        "fork did not lose destination creation: {reply:?}"
+    );
+    Ok(())
+}
+
+/// A writer creates the destination while fork's atomic claim is paused.
+pub(crate) async fn writer_against_registration(ctx: Ctx, control: &ControlClient) -> CaseResult {
+    let fixture = fixture(&ctx, control, 0).await?;
+    pause(
+        control,
+        &fixture,
+        "before_acceptance",
+        "fork_destination_claim",
+        None,
+    )
+    .await?;
+    let pending = start(&ctx, &fixture);
+    control.wait_paused().await?;
+    writer_won(ctx.send(&writer(&ctx, &fixture)?).await?)?;
+    control.command(&Request::Resume).await?;
+    fork_lost(&finish(pending).await?)?;
+    let after = observe(control, &fixture).await?;
+    ensure!(
+        !after.accepted && after.visible_memberships.iter().all(|visible| !visible),
+        "losing fork installed membership: {after:?}"
+    );
+    Ok(())
+}
+
+/// Fork owns destination exclusion; its acceptance wins over a new writer.
+pub(crate) async fn writer_against_acceptance(ctx: Ctx, control: &ControlClient) -> CaseResult {
+    let fixture = fixture(&ctx, control, 0).await?;
+    pause(
+        control,
+        &fixture,
+        "before_acceptance",
+        "fork_acceptance",
+        None,
+    )
+    .await?;
+    let pending = start(&ctx, &fixture);
+    control.wait_paused().await?;
+    writer_lost(ctx.send(&writer(&ctx, &fixture)?).await?)?;
+    control.command(&Request::Resume).await?;
+    success(&finish(pending).await?, &fixture)?;
+    accepted(&observe(control, &fixture).await?, &fixture)
+}
+
+/// Retained usable writer authority predates the fork's destination claim.
+pub(crate) async fn leased_writer_against_registration(
+    ctx: Ctx,
+    control: &ControlClient,
+) -> CaseResult {
+    let fixture = fixture(&ctx, control, 0).await?;
+    pause(
+        control,
+        &fixture,
+        "before_acceptance",
+        "writer_authority_ready",
+        None,
+    )
+    .await?;
+    let operation = writer(&ctx, &fixture)?;
+    let task = tokio::spawn({
+        let ctx = ctx.clone();
+        async move { ctx.send::<BeginUploadResponse>(&operation).await }
+    });
+    control.wait_paused().await?;
+    let fork = drive(ctx.clone(), fixture.op.clone()).await?;
+    fork_lost(&fork)?;
+    control.command(&Request::Resume).await?;
+    writer_won(task.await.map_err(|e| e.to_string())??)?;
+    let after = observe(control, &fixture).await?;
+    ensure!(
+        !after.accepted && after.visible_memberships.iter().all(|visible| !visible),
+        "fork defeated retained writer authority: {after:?}"
+    );
     Ok(())
 }
 

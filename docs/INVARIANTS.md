@@ -138,20 +138,13 @@ source changes do not invalidate acceptance.
 **Because:** construction may survive a crash or continue after revocation;
 partial construction must not grant repository access.
 
-**Known reference-server gap:** current construction publishes membership before
-terminal acceptance and lacks the destination write gate and fence comparison
-at every advancing commit and acceptance. The conformance runner declares the
-destination-gate and authority-fence cases skipped with those reasons. Existing
-fork construction tests establish resumability, not those missing guarantees.
-The reference implementation also lacks the final source proof at the required
-boundary; per-pack checks do not establish it. Source-change cases are declared
-skips, including the visibility race that currently returns a retryable error
-instead of uniform absence.
-
-**Enforcement:** [SPEC-SERVER §9.9](specs/SPEC-SERVER.md#99-fork) defines the
-conditional protocol requirements. The
+**Reference enforcement:** guarded acceptance, destination exclusion, and
+coordinator fences enforce the destination boundary. Distributed membership
+installation still needs drained permits, and resumed pack proofs still need
+versioned evidence for one coherent source point. The
 [conformance coverage table](../rust/crates/mkit-server-conformance/README.md)
-records the declared gaps; it must not report them as passing.
+records the exercised assertions; passing those cases does not certify these
+remaining requirements.
 
 ## Typed pack evidence retains exact keys and live witness semantics
 
@@ -2874,8 +2867,8 @@ could change after a lost reply, or a reservation could settle twice.
 
 **Enforced by:** `fork::job`, `fork::accept`, `fork::publish`, and the fork engine
 acceptance, settlement, membership-order, source-change, and lost-reply tests.
-The stronger single-ordering-point source proof remains incomplete: the enabled
-disjoint-eligibility regression demonstrates an unresolved resumed-proof gap.
+The stronger single-ordering-point source proof remains incomplete across
+resumed proof slices.
 
 ## Fork registration arbitrates with destination writers
 

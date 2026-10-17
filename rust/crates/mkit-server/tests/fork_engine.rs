@@ -3814,60 +3814,6 @@ async fn a_source_change_after_acceptance_does_not_change_the_saved_result_or_cl
 }
 
 #[tokio::test]
-async fn an_authority_move_at_the_physical_activation_commit_installs_no_member() {
-    use mkit_server::fork::{FenceV1, ForkError};
-    use mkit_server::store::adapter_spi::codec;
-    let source = Source::build("source", 4).await;
-    let id = dest(&source, "forked");
-    let settle = settlement::admit(&source, &id).await;
-    mkit_server::fork::start_with(
-        &env(&source),
-        &spec(&source, "forked"),
-        Some(settle),
-        Some(FenceV1 {
-            authority_generation: Some(0),
-            grant_epoch: Some(0),
-            create_namespace: true,
-        }),
-    )
-    .await
-    .unwrap();
-    stop_at_fork_phase(&source, &env(&source), &id, Phase::Publish).await;
-    let accepted = job_of(&source, &id).await.accepted.unwrap();
-    let outcome = settlement::outcome(&source, &id).await;
-    let store = source.store.inner.clone();
-    let coordinator = source.shards.coordinator(&id.namespace);
-    *source.store.trigger.lock().unwrap() = Some((
-        "m",
-        Arc::new(move || {
-            let (store, coordinator) = (store.clone(), coordinator.clone());
-            Box::pin(async move {
-                store
-                    .apply(
-                        &coordinator,
-                        mkit_server::Batch::new()
-                            .put(keys::authority_generation(), codec::encode_u64(1)),
-                    )
-                    .await
-                    .unwrap();
-            })
-        }),
-    ));
-    assert_eq!(
-        drive(&env(&source), &id).await.unwrap_err(),
-        ForkError::Moved("authority")
-    );
-    assert_eq!(job_of(&source, &id).await.accepted, Some(accepted));
-    assert_eq!(settlement::outcome(&source, &id).await, outcome);
-    for pack in [source.pack, source.packmap] {
-        assert!(
-            member(&source, &id, pack).await.is_none(),
-            "an activation membership write committed after the authority moved"
-        );
-    }
-}
-
-#[tokio::test]
 async fn every_coordinator_progress_commit_compares_the_recorded_authority_rows() {
     use mkit_server::fork::FenceV1;
     use mkit_server::store::adapter_spi::codec;
