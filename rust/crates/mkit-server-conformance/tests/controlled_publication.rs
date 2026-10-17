@@ -115,8 +115,15 @@ struct Proxy {
 
 impl Proxy {
     async fn start(upstream: &str, fault: Fault) -> Self {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("valid isolated publication fault-proxy fixture");
+        let base = format!(
+            "http://{}",
+            listener
+                .local_addr()
+                .expect("valid isolated publication fault-proxy fixture")
+        );
         let state = Arc::new(ProxyState {
             upstream: upstream.into(),
             client: reqwest::Client::new(),
@@ -127,7 +134,9 @@ impl Proxy {
             .fallback(forward)
             .with_state(state.clone());
         let task = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
+            axum::serve(listener, app)
+                .await
+                .expect("valid isolated publication fault-proxy fixture");
         });
         Self { base, state, task }
     }
@@ -140,9 +149,13 @@ impl Drop for Proxy {
 
 async fn forward(State(state): State<Arc<ProxyState>>, request: Request) -> Response {
     let (parts, body) = request.into_parts();
-    let body = to_bytes(body, 16 * 1024 * 1024).await.unwrap();
+    let body = to_bytes(body, 16 * 1024 * 1024)
+        .await
+        .expect("valid isolated publication fault-proxy fixture");
     let observing = parts.uri.path() == control::CONTROL_PATH
-        && serde_json::from_slice::<Value>(&body).unwrap()["operation"] == "observe_publication";
+        && serde_json::from_slice::<Value>(&body)
+            .expect("valid isolated publication fault-proxy fixture")["operation"]
+            == "observe_publication";
     let mut headers = parts.headers;
     headers.remove(http::header::HOST);
     headers.remove(http::header::TRANSFER_ENCODING);
@@ -153,22 +166,28 @@ async fn forward(State(state): State<Arc<ProxyState>>, request: Request) -> Resp
         .body(body)
         .send()
         .await
-        .unwrap();
+        .expect("valid isolated publication fault-proxy fixture");
     let status = reply.status();
     let mut headers = reply.headers().clone();
-    let mut body = reply.bytes().await.unwrap().to_vec();
+    let mut body = reply
+        .bytes()
+        .await
+        .expect("valid isolated publication fault-proxy fixture")
+        .to_vec();
     if observing && status.is_success() {
-        let mut value: Value = serde_json::from_slice(&body).unwrap();
+        let mut value: Value =
+            serde_json::from_slice(&body).expect("valid isolated publication fault-proxy fixture");
         let snapshot = &mut value["publication_observation"];
         if snapshot["published_head"].is_string() {
             match state.fault {
                 Fault::TornPair => snapshot["published_packmap"] = Value::Null,
                 Fault::DuplicateTerminal => {
-                    snapshot["acceptance"]["reservations"][0]["terminal_count"] = 2.into()
+                    snapshot["acceptance"]["reservations"][0]["terminal_count"] = 2.into();
                 }
             }
             state.mutations.fetch_add(1, Ordering::Relaxed);
-            body = serde_json::to_vec(&value).unwrap();
+            body =
+                serde_json::to_vec(&value).expect("valid isolated publication fault-proxy fixture");
         }
     }
     headers.remove(http::header::CONTENT_LENGTH);
