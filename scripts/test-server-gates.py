@@ -63,6 +63,39 @@ class ServerGates(unittest.TestCase):
                 self.assertNotIn("allowFailure", step)
                 self.assertNotIn("allowExitCodes", step)
 
+    def test_cloud_nextest_reports_every_failure(self):
+        yaml = (ROOT / "cloudbuild/ci.yaml").read_text()
+        steps = re.split(r"(?m)^  - name: ", yaml)[1:]
+        for step_id in ("check", "ignored-lane"):
+            step, = [s for s in steps if f"\n    id: {step_id}\n" in s]
+            with self.subTest(step=step_id):
+                # Assemble each test command, following `\` continuations.
+                commands = []
+                lines = step.splitlines()
+                index = 0
+                while index < len(lines):
+                    if lines[index].lstrip().startswith("#"):
+                        index += 1
+                        continue
+                    if "nextest run" in lines[index] or "cargo test" in lines[index]:
+                        command = lines[index]
+                        while command.rstrip().endswith("\\"):
+                            index += 1
+                            command += lines[index]
+                        commands.append(command)
+                    index += 1
+                self.assertTrue(commands)
+                for command in commands:
+                    # No failure is suppressed or skipped: each test command
+                    # records into the step's aggregate status instead of
+                    # aborting (`set -e`) or being swallowed (`|| true`).
+                    self.assertNotIn("|| true", command)
+                    self.assertRegex(command, r"\|\| (failed|status)=1\s*$")
+                    if "nextest run" in command:
+                        self.assertIn("--no-fail-fast", command)
+                self.assertNotIn("allowFailure", step)
+                self.assertNotIn("allowExitCodes", step)
+
     def test_native_wire_executor_and_gate(self):
         yaml = (ROOT / ".github/workflows/rust.yml").read_text()
         native = section(yaml, "native-wire-conformance:")
@@ -83,7 +116,7 @@ if __name__ == "__main__":
     if "--hosted-only" in sys.argv:
         suite = unittest.defaultTestLoader.loadTestsFromNames([
             "test_cloud_linux_allocator_executor", "test_cloud_workspace_test_compilation_is_serial",
-            "test_native_wire_executor_and_gate"], ServerGates)
+            "test_cloud_nextest_reports_every_failure", "test_native_wire_executor_and_gate"], ServerGates)
         result = unittest.TextTestRunner().run(suite)
         sys.exit(not result.wasSuccessful())
     unittest.main()
