@@ -712,11 +712,12 @@ impl VerifyDriver {
 
     /// Charges `range.len * passes` of feed work; exhaustion is terminal.
     fn charge_feed(&mut self, range: ByteRange, passes: u64) -> Result<(), Failure> {
-        let charge = range
+        let result = range
             .len
             .checked_mul(passes)
-            .ok_or_else(|| failure(FailureCode::ResourceLimit))?;
-        if let Err(error) = self.resources.work(charge) {
+            .ok_or_else(|| failure(FailureCode::ResourceLimit))
+            .and_then(|charge| self.resources.work(charge));
+        if let Err(error) = result {
             self.phase = Phase::Failed;
             return Err(error);
         }
