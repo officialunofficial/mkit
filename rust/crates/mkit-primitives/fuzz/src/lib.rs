@@ -6,6 +6,7 @@ pub mod fork;
 
 mod framing_model;
 mod proof_model;
+mod verify_model;
 
 /// Largest input admitted by a fuzz body before applying its own tighter limits.
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
@@ -18,6 +19,35 @@ pub fn framing(data: &[u8]) {
     if data.len() <= MAX_INPUT_BYTES {
         framing_model::exercise(data);
     }
+}
+
+/// Exercises all-entry verification, hostile replies, and cold resume schedules.
+///
+/// Also replays the input through the fixed-size verify record decoders; a
+/// successful parse must re-encode byte-for-byte.
+///
+/// # Panics
+/// Panics when a production decoder violates the fuzz target's invariant.
+pub fn verify(data: &[u8]) {
+    use mkit_primitives::pack_verify::verify::records::{
+        DependencyRecord, HeadRecord, ObjectRecord, OccurrenceRecord, OrdinalRecord,
+    };
+    if data.len() > MAX_INPUT_BYTES {
+        return;
+    }
+    for decoded in [
+        ObjectRecord::from_bytes(data).map(|record| record.to_bytes()),
+        OccurrenceRecord::from_bytes(data).map(|record| record.to_bytes()),
+        OrdinalRecord::from_bytes(data).map(|record| record.to_bytes()),
+        HeadRecord::from_bytes(data).map(|record| record.to_bytes()),
+        DependencyRecord::from_bytes(data).map(|record| record.to_bytes()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        assert_eq!(decoded, data);
+    }
+    verify_model::exercise(data);
 }
 
 /// Exercises the strict page decoder with finite shared operation limits.
@@ -184,6 +214,7 @@ mod tests {
     #[test]
     fn production_decoder_bodies_replay_stable_seeds() {
         replay_seeds(framing);
+        replay_seeds(verify);
         replay_seeds(page);
         replay_seeds(proof);
         replay_seeds(checkpoint);
@@ -192,6 +223,7 @@ mod tests {
             include_bytes!("../../fixtures/framing/payload-u32-max.bin").as_slice(),
         ] {
             framing(bytes);
+            verify(bytes);
         }
         page(include_bytes!("../../fixtures/evidence/page-empty.bin"));
         for bytes in [

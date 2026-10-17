@@ -1,0 +1,9 @@
+{
+  "blake3": "d47a69ee73be52ca35dd3963bb3753aa7b6d114cb787a492c18f917979c5cc6c",
+  "canonical_len": 87,
+  "description": "Ordinal lookup record for a tree object.",
+  "encoded_bytes": 42,
+  "expected": "OrdinalRecord",
+  "format_version": 1,
+  "kind": "tree"
+}

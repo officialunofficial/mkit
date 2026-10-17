@@ -1,0 +1,15 @@
+{
+  "blake3": "4aabdd08419b7359e4405c013f0eee0d96b0ee628bd8cb73c9685c2d85581ccc",
+  "canonical_len": 5,
+  "dep_count": 0,
+  "dep_start": 0,
+  "description": "Blob object record, first wire ordinal zero.",
+  "delta_depth": 0,
+  "domain": "none",
+  "encoded_bytes": 120,
+  "expected": "ObjectRecord",
+  "first_ordinal": 0,
+  "format_version": 1,
+  "kind": "blob",
+  "signature": "none"
+}
