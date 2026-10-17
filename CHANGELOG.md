@@ -114,6 +114,11 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Changed
 
+- Commonware dependencies accept compatible 2026.x releases. Committed
+  lockfiles retain reproducible builds; a weekly and manifest/lockfile PR
+  compatibility check builds and tests the latest release against pinned wire
+  bytes. No API, wire, or stored-format change; no store reset is required.
+
 - Performance: ClosureResolve and EmitIndex outside the tiny-pack path share
   up to eight durable slices per callback, with the original timer and job guards and
   shared call and time limits. The additive

@@ -905,34 +905,25 @@ unreachable object does not meet today.
 
 ## Single commonware release train across every manifest and lockfile
 
-**Always:** every `commonware-<name>` dependency — in `rust/Cargo.toml`,
-every `rust/crates/*/Cargo.toml`, `rust/fuzz/Cargo.toml`,
-`contrib/signers/Cargo.toml`, and the `apps/*-worker` manifests — pins the
-exact same version string (e.g. `=2026.9.0`, not merely a compatible
-range), AND every `Cargo.lock` in those same trees that contains a
-`commonware-*` package resolves to that same version.
+**Always:** Commonware requirements use the same caret minimum (`2026.9.0`)
+across manifests. Committed lockfiles select that baseline release train for
+reproducible builds. Downstream consumers can select compatible 2026.x releases.
+The latest-release compatibility probe updates its disposable lockfile separately.
 
-**Because:** the commonware crates (`-storage`, `-cryptography`,
-`-runtime`, `-coding`, `-codec`, `-parallel`, `-utils`, `-stream`,
-`-invariants`) ship as one coordinated release; mkit's on-disk formats
-(the ancestry MMB, the BLS threshold derivation) and wire
-compatibility depend on the exact same version being linked everywhere a
-crate touches them. A manifest bump without a matching `cargo update` in
-every workspace leaves the *text* aligned while the *lockfile* — what
-actually gets compiled — stays on the old train, silently defeating the
-single-version intent this file's `check_crate` (ed25519-dalek/sha2)
-already establishes.
+**Because:** exact library requirements prevent downstream consumers from
+selecting a newer compatible release. Reproducibility belongs in lockfiles.
+Commonware-backed mkit wire encodings must retain their pinned bytes when the
+resolved dependency changes.
 
-**If violated:** nothing fails to compile — each workspace has its own
-lockfile, so `rust/` can be on `2026.9.0` while `contrib/signers/` is still
-locked to `2026.7.1`, undetected until an on-disk format or golden-vector
-test run against the stale workspace disagrees with one run against the
-bumped one.
+**If violated:** an exact requirement can block downstream resolution, or a
+compatible release can silently change mkit bytes without an encoder regression.
 
-**Enforced by:** `scripts/check-crypto-stack-version.sh`'s
-`check_commonware_family`, run by the "Meta: crypto-stack version"
-workflow (trigger paths include `**/Cargo.lock` under `rust/`,
-`contrib/signers/`, and `apps/*`, not just `Cargo.toml`).
+**Enforced by:** `scripts/check-crypto-stack-version.sh` audits the baseline
+across manifests and committed lockfiles. The scheduled and manifest/lockfile PR
+workflow **commonware-latest.yml** runs `scripts/check-commonware-latest.sh`:
+it updates all resolved Commonware packages together, builds the consuming
+crates with all features, and runs their normal tests, including golden vectors.
+Build and test failures remain visible; the probe never restores an older pin.
 
 ## commonware `Strategy` cannot be spied on from outside commonware-parallel
 
