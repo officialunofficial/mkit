@@ -71,6 +71,9 @@ pub enum FailureCode {
     /// Authoritative repository base absence.
     #[error("ExternalBaseAbsent")]
     ExternalBaseAbsent,
+    /// Source is shorter than the pack header and trailer.
+    #[error("PackfileTooShort")]
+    PackfileTooShort,
     // closure
     /// Required child absence.
     #[error("MissingClosure")]
@@ -97,6 +100,9 @@ pub enum FailureCode {
     /// Build lacks the required decoder.
     #[error("UnsupportedCapability")]
     UnsupportedCapability,
+    /// The machine has not reached a checkpoint-safe boundary.
+    #[error("CheckpointNotReady")]
+    CheckpointNotReady,
     // decision
     /// Ref operation grammar, names, pairing, or deletion shape is invalid.
     #[error("InvalidRefRequest")]
@@ -153,6 +159,18 @@ pub enum FailureCode {
     /// Head kind or signer metadata does not match the evidence.
     #[error("EvidenceHeadMismatch")]
     EvidenceHeadMismatch,
+    /// Unsupported normative verification ruleset.
+    #[error("UnsupportedRuleset")]
+    UnsupportedRuleset,
+
+    /// Malformed or noncanonical evidence encoding.
+    #[error("InvalidEvidence")]
+    InvalidEvidence,
+
+    /// Evidence does not authenticate under the expected commitment.
+    #[error("EvidenceMismatch")]
+    EvidenceMismatch,
+
 }
 impl FailureCode {
     /// Stable machine-readable string. Diagnostic Display text is not a parser API.
@@ -191,6 +209,11 @@ impl FailureCode {
             Self::UnsupportedCapability => "UnsupportedCapability",
             // decision
             Self::InvalidRefRequest => "InvalidRefRequest",
+            Self::EvidenceMismatch => "EvidenceMismatch",
+            Self::InvalidEvidence => "InvalidEvidence",
+            Self::UnsupportedRuleset => "UnsupportedRuleset",
+            Self::CheckpointNotReady => "CheckpointNotReady",
+            Self::PackfileTooShort => "PackfileTooShort",
             // fork
             Self::ForkSourceNotFound => "ForkSourceNotFound",
             Self::ForkDestinationNotEmpty => "ForkDestinationNotEmpty",
@@ -275,6 +298,7 @@ mod tests {
             FailureCode::BadSignature.as_str(),
             FailureCode::DeltaChainTooDeep.as_str(),
             FailureCode::ExternalBaseAbsent.as_str(),
+            FailureCode::PackfileTooShort.as_str(),
             FailureCode::MissingClosure.as_str(),
             FailureCode::WrongKind.as_str(),
             FailureCode::ResourceLimit.as_str(),
@@ -285,6 +309,7 @@ mod tests {
             FailureCode::UnsupportedCapability.as_str(),
             // decision
             FailureCode::InvalidRefRequest.as_str(),
+            FailureCode::CheckpointNotReady.as_str(),
             FailureCode::ForkSourceNotFound.as_str(),
             FailureCode::ForkDestinationNotEmpty.as_str(),
             FailureCode::ForkPermissionDenied.as_str(),
@@ -297,6 +322,14 @@ mod tests {
             // auth
             FailureCode::InvalidEnvelope.as_str(),
             FailureCode::ClaimsBindingMismatch.as_str(),
+            FailureCode::UnsupportedEvidenceVersion.as_str(),
+            FailureCode::EvidenceProfileMismatch.as_str(),
+            FailureCode::NonCanonicalEvidence.as_str(),
+            FailureCode::EvidenceBindingMismatch.as_str(),
+            FailureCode::EvidenceHeadMismatch.as_str(),
+            FailureCode::UnsupportedRuleset.as_str(),
+            FailureCode::InvalidEvidence.as_str(),
+            FailureCode::EvidenceMismatch.as_str(),
         ];
         let unique: std::collections::BTreeSet<_> = codes.into_iter().collect();
         assert_eq!(unique.len(), codes.len());

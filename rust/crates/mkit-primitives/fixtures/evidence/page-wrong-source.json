@@ -1,0 +1,8 @@
+{
+  "blake3": "36b0a19a92c63280a72c6e80bafd5a0a07608873af7b13b0b7b67230aa4c6070",
+  "description": "Page source binding differs from the expected immutable source.",
+  "encoded_bytes": 123,
+  "expected": "SourceChanged",
+  "profile": "indexed",
+  "ruleset": 1
+}

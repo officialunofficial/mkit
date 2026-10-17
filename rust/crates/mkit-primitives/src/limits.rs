@@ -74,3 +74,39 @@ pub struct DecisionLimits {
     /// Maximum cumulative owned public refusal-message bytes.
     pub public_message_bytes: u32,
 }
+
+/// Finite limits for one evidence-codec operation and every nested page.
+///
+/// Proof decoding shares one work/allocation budget across the whole path.
+/// Borrowed input remains host-owned; its length is still checked against the
+/// appropriate input cap before parsing or hashing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EvidenceLimits {
+    /// Largest encoded page, including its binding and framing.
+    pub page_bytes: u64,
+    /// Largest value in one leaf record.
+    pub value_bytes: u64,
+    /// Largest encoded proof, including all embedded pages.
+    pub proof_bytes: u64,
+    /// Maximum root-to-leaf path length.
+    pub proof_pages: u32,
+    /// Cumulative parsing, copying, and hashing work units.
+    pub work: u64,
+    /// Cumulative bytes allocated by this operation.
+    pub allocated_bytes: u64,
+}
+
+impl EvidenceLimits {
+    /// Bounded codec profile for indexed evidence.
+    #[must_use]
+    pub const fn indexed() -> Self {
+        Self {
+            page_bytes: 1 << 20,
+            value_bytes: 1 << 20,
+            proof_bytes: 16 << 20,
+            proof_pages: 16,
+            work: 128 << 20,
+            allocated_bytes: 4 << 20,
+        }
+    }
+}

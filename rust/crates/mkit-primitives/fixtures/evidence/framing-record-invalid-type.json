@@ -1,0 +1,12 @@
+{
+  "blake3": "cec2dbf2fd233a88242000c4db4bf740430c843c5ee0614fe94b8edd579f584b",
+  "decoded_bytes": 0,
+  "description": "Versioned provisional occurrence value with reserved wire type one.",
+  "encoded_bytes": 58,
+  "expected": "InvalidEvidence",
+  "format_version": 1,
+  "length": 5,
+  "offset": 12,
+  "previous": "0000000000000000000000000000000000000000000000000000000000000000",
+  "wire_type": 1
+}

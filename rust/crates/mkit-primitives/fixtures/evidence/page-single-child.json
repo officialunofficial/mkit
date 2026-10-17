@@ -1,0 +1,14 @@
+{
+  "blake3": "d45df8cd05ea6e3c611fd4635ce05a636de335038b60be4964a190f8a9de8d7a",
+  "child_digest": "0808080808080808080808080808080808080808080808080808080808080808",
+  "child_items": 1,
+  "child_len": 159,
+  "commitment": "53211a9d10b9818f38fe828ec1a6eb83514c56fe5159b4ad92d3a6998760d7fc",
+  "description": "Canonical height-one root committing one unavailable nonempty child.",
+  "encoded_bytes": 172,
+  "expected": "Page",
+  "height": 1,
+  "items": 1,
+  "profile": "indexed",
+  "ruleset": 1
+}

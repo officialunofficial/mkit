@@ -1,7 +1,13 @@
 //! Pull protocol and opaque all-entry verification result.
 //!
-//! No machine constructor exists in the skeleton. A request never authorizes
-//! storage or publication. Missing input differs from authoritative absence.
+//! The framing driver establishes source integrity and framing. All-entry
+//! verification owns sealed pack evidence. A request authorizes no publication;
+//! unavailable input differs from authoritative absence.
+
+mod integrity;
+mod resources;
+pub use resources::ResourceUsage;
+pub mod framing;
 
 use crate::{
     evidence::{

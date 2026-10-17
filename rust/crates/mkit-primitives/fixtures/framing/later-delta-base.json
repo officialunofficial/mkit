@@ -1,0 +1,6 @@
+{
+  "description": "Framing is valid; a later entry alone cannot satisfy delta-base ordering.",
+  "framing_entries": 3,
+  "pack_id": "b6f1c8c67f753a47c8f59eac4de100ba08aa16d8789de223510141153e39dfaf",
+  "reference_expected": "DeltaBaseMissing"
+}

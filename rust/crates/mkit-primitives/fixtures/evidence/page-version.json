@@ -1,0 +1,8 @@
+{
+  "blake3": "e7e21f56e0b8497cc9af16514486b38034cd053da6f83bf575a2041ac4174478",
+  "description": "Future page envelope version under the unchanged indexed binding.",
+  "encoded_bytes": 123,
+  "expected": "UnsupportedEvidenceVersion",
+  "profile": "indexed",
+  "ruleset": 1
+}

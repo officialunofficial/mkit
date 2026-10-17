@@ -1,0 +1,18 @@
+{
+  "blake3": "403d64ad4f58da89135a967390c56282e9e2681eabcb61ce3a740233a4a728b9",
+  "description": "Unsupported envelope version with an otherwise valid recomputed checksum.",
+  "encoded_bytes": 369,
+  "expected": "InvalidCheckpoint",
+  "format_version": 2,
+  "generation": 17,
+  "ordinal": 0,
+  "pack_id": "115769ad53d3d620942422bc750e94f4ee9c21c5594ed40db29d02808a9757c9",
+  "payload_bytes": 0,
+  "phase": "header",
+  "profile": "indexed",
+  "repository": "0909090909090909090909090909090909090909090909090909090909090909",
+  "retention_count": 0,
+  "ruleset": 1,
+  "source_binding": "0707070707070707070707070707070707070707070707070707070707070707",
+  "source_len": 44
+}

@@ -1,0 +1,10 @@
+{
+  "blake3": "98c446027cbf426380ac8e95ef9d96ed424b83f73d8b99be3b030c8471ee9493",
+  "description": "Authenticated internal root path ends before its required child; absence cannot be established.",
+  "encoded_bytes": 265,
+  "expected": "UnavailableInput",
+  "profile": "indexed",
+  "query": "0505050505050505050505050505050505050505050505050505050505050505",
+  "root": "53211a9d10b9818f38fe828ec1a6eb83514c56fe5159b4ad92d3a6998760d7fc",
+  "ruleset": 1
+}

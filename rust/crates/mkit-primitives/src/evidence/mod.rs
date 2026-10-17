@@ -1,9 +1,12 @@
 //! Source and ruleset bindings and references to retained evidence.
 //!
-//! These are caller-supplied facts, not remote attestations. No byte encoding is
-//! defined by these in-memory contracts. Only owning verifier modules seal proofs.
+//! Caller-supplied facts are not remote attestations. Versioned pages, proofs,
+//! and checkpoints have explicit bounded codecs; decoding seals no authority.
 
 pub mod acceptance;
+pub mod checkpoint;
+pub mod pages;
+pub mod proof;
 use mkit_core::{hash::Hash, object::ObjectType};
 
 /// Logical repository identity, independent of storage routing.
