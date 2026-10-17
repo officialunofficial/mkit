@@ -204,6 +204,29 @@ fn paired_chain_and_walk_cover_dependencies_and_suppliers() {
 }
 
 #[test]
+fn resumed_unpaired_branch_head_is_still_refused() {
+    let pair = ResultingPair {
+        head: Some(id(10)),
+        packmap: None,
+        branch: true,
+    };
+    let walker = fresh(pair, &[]);
+    let bytes = walker.checkpoint().unwrap();
+    let expected = PairResume {
+        pair,
+        additions: &[],
+        repository: REPO,
+        view: VIEW,
+        ruleset: RULESET,
+        limits: LIMITS,
+        honor_cleared: true,
+    };
+    let mut resumed = PairWalker::resume(&bytes, cfg(), &expected, 7).unwrap();
+    let error = resumed.step().unwrap_err();
+    assert_eq!(error.code, FailureCode::MissingClosure);
+    assert_eq!(resumed.failure_context(), Some(PairCheck::UnpairedHead));
+}
+#[test]
 fn unpaired_branch_head_and_unrestricted_nonbranch_walk() {
     let pair = ResultingPair {
         head: Some(id(10)),

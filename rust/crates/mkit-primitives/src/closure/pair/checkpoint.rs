@@ -13,7 +13,7 @@
 //! Set lists are strictly ascending; the queue keeps pop order.
 
 use super::{
-    BaseCursor, FLAG_BOUNDARY_SEEN, FLAG_HEAD_CHECKED, PairCheckpointCfg, PairResume,
+    BaseCursor, FLAG_BOUNDARY_SEEN, PairCheckpointCfg, PairResume,
     PairWalker, ResultingPair,
 };
 use crate::{
@@ -398,7 +398,9 @@ impl Parsed {
         walker.dependencies = self.dependencies;
         walker.suppliers = self.suppliers;
         walker.work = self.work;
-        walker.flags |= FLAG_HEAD_CHECKED;
+        // FLAG_HEAD_CHECKED is not persisted: the unpaired-head check re-runs
+        // after resume. A checkpoint of an unpaired pair can only predate the
+        // first step, which refuses it — re-checking is always correct.
         Ok(walker)
     }
 }
