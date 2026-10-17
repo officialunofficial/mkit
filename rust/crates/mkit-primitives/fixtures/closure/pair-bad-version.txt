@@ -1,0 +1,1 @@
+Corrupt pair checkpoint: version byte raised to 2 with the checksum recomputed. Decoders must refuse the unsupported version. Domain: mkit-pair-checkpoint:v1.

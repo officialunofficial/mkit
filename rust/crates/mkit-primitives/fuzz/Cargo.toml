@@ -43,6 +43,22 @@ bench = false
 required-features = ["libfuzzer"]
 
 [[bin]]
+name = "pair_steps"
+path = "fuzz_targets/pair_steps.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "pair_checkpoint"
+path = "fuzz_targets/pair_checkpoint.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
 name = "fork_acceptance"
 path = "fuzz_targets/fork_acceptance.rs"
 required-features = ["libfuzzer"]

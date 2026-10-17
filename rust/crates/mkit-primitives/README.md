@@ -105,7 +105,8 @@ is not a wasm configuration.
 
 Crate API version, normative ruleset, semantic profile, and encoded format
 versions are separate contracts. The initial indexed ruleset is 1. Page,
-proof, checkpoint, and ordered framing-record formats each start at version 1.
+proof, checkpoint, pair-coverage checkpoint, and ordered framing-record
+formats each start at version 1.
 Unsupported disposable state versions require restart from the immutable
 source; historical readers are not promised. Existing pack and object bytes
 remain unchanged.
@@ -207,6 +208,24 @@ and checked manifest totals. Resource exhaustion never returns a truncated set.
 
 Pages are local evidence, not transport messages or remote attestations. After
 page loss, replay from the same immutable inputs with a fresh generation.
+
+## Resulting-pair coverage
+
+`closure::pair::PairWalker` verifies the resulting-pair obligation of
+SPEC-SERVER section 10.2 without storage access: every packmap-chain pack is
+published or added by the advance, the head's reachable closure is contained
+in chain packs, and external delta-base suppliers are recorded separately so
+an advance's own additions never satisfy them. `closure::pair::pair_requirement`
+decides when coverage applies at all: deletion is exempt, and the immediate
+path without inspectors, takedown, or custom verification is exempt. The host
+owns membership reads, cost accounting, and refusal mapping; every caller
+bound is explicit in `PairLimits`.
+
+`PairWalker::checkpoint` encodes local resumable progress; `resume` binds the
+bytes to their expected parameters under a fresh generation. A checkpoint is
+corruption detection, not authentication, and creates no coverage on its own.
+Denial, inspection, publication state, and authorization remain separate host
+guards; a `PairCoverage` result never authorizes publication.
 
 ## Authentication and replay
 

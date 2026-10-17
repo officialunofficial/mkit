@@ -1,0 +1,1 @@
+Corrupt pair checkpoint: a queue entry overwritten with a visited id, checksum recomputed. The queue must be unique and disjoint from visited. Domain: mkit-pair-checkpoint:v1.

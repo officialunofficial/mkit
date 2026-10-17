@@ -1,0 +1,1 @@
+Pair checkpoint version 1, walk phase. Chain node 0x01*32 applied listing pack 0x02; head 0x0a visited; queue holds 0x0b and 0x0c; supplier 0x05 recorded. Domain: mkit-pair-checkpoint:v1.

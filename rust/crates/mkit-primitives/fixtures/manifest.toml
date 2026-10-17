@@ -1263,6 +1263,127 @@ spec = "SPEC-SERVER.md#direct-child-closure-edges"
 sha256 = "500e5903ac8a8c124d706aca40049228299cd0e81c9d6c294e3dab2e2eec433c"
 semantic_sha256 = "f9157e577165f1dc761fd00100231dfc2ac208491fdc8fabe545cc8aea77d02c"
 
+[[fixtures]]
+type = "pair-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/pair-minimal.bin"
+semantic = "closure/pair-minimal.txt"
+decode_config = "max_bytes=1048576"
+expected = "ok"
+spec = "SPEC-SERVER.md#local-pair-coverage-checkpoint"
+[[fixtures]]
+type = "pair-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/pair-walk.bin"
+semantic = "closure/pair-walk.txt"
+decode_config = "max_bytes=1048576"
+expected = "ok"
+spec = "SPEC-SERVER.md#local-pair-coverage-checkpoint"
+[[fixtures]]
+type = "pair-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/pair-base-cursor.bin"
+semantic = "closure/pair-base-cursor.txt"
+decode_config = "max_bytes=1048576"
+expected = "ok"
+spec = "SPEC-SERVER.md#local-pair-coverage-checkpoint"
+[[fixtures]]
+type = "pair-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/pair-boundary.bin"
+semantic = "closure/pair-boundary.txt"
+decode_config = "max_bytes=1048576"
+expected = "ok"
+spec = "SPEC-SERVER.md#local-pair-coverage-checkpoint"
+[[fixtures]]
+type = "pair-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/pair-bad-version.bin"
+semantic = "closure/pair-bad-version.txt"
+decode_config = "max_bytes=1048576"
+expected = "InvalidCheckpoint"
+spec = "SPEC-SERVER.md#local-pair-coverage-checkpoint"
+[[fixtures]]
+type = "pair-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/pair-bad-flag.bin"
+semantic = "closure/pair-bad-flag.txt"
+decode_config = "max_bytes=1048576"
+expected = "InvalidCheckpoint"
+spec = "SPEC-SERVER.md#local-pair-coverage-checkpoint"
+[[fixtures]]
+type = "pair-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/pair-trailing.bin"
+semantic = "closure/pair-trailing.txt"
+decode_config = "max_bytes=1048576"
+expected = "InvalidCheckpoint"
+spec = "SPEC-SERVER.md#local-pair-coverage-checkpoint"
+[[fixtures]]
+type = "pair-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/pair-bad-checksum.bin"
+semantic = "closure/pair-bad-checksum.txt"
+decode_config = "max_bytes=1048576"
+expected = "InvalidCheckpoint"
+spec = "SPEC-SERVER.md#local-pair-coverage-checkpoint"
+[[fixtures]]
+type = "pair-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/pair-unsorted.bin"
+semantic = "closure/pair-unsorted.txt"
+decode_config = "max_bytes=1048576"
+expected = "InvalidCheckpoint"
+spec = "SPEC-SERVER.md#local-pair-coverage-checkpoint"
+[[fixtures]]
+type = "pair-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/pair-queue-overlap.bin"
+semantic = "closure/pair-queue-overlap.txt"
+decode_config = "max_bytes=1048576"
+expected = "InvalidCheckpoint"
+spec = "SPEC-SERVER.md#local-pair-coverage-checkpoint"
+[[fixtures]]
+type = "pair-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/pair-count-over.bin"
+semantic = "closure/pair-count-over.txt"
+decode_config = "max_bytes=1048576"
+expected = "InvalidCheckpoint"
+spec = "SPEC-SERVER.md#local-pair-coverage-checkpoint"
+[[fixtures]]
+type = "pair-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/pair-cursor-in-chain.bin"
+semantic = "closure/pair-cursor-in-chain.txt"
+decode_config = "max_bytes=1048576"
+expected = "InvalidCheckpoint"
+spec = "SPEC-SERVER.md#local-pair-coverage-checkpoint"
+
 # decision
 [[fixtures]]
 type = "decision::ref_write"

@@ -1,0 +1,1 @@
+Corrupt pair checkpoint: unknown flag bits set with the checksum recomputed. Decoders must refuse unknown flag bits. Domain: mkit-pair-checkpoint:v1.
