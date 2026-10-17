@@ -1,4 +1,4 @@
-//! Evidence that a signed request replays a fork that already finished.
+//! Evidence that a signed request replays a fork that already accepted its terminal result.
 //!
 //! The answer is a witness, not a result: the result of a fork always comes
 //! from [`crate::pipeline::Pipeline::fork_repo`]. The witness only lets an
@@ -10,7 +10,7 @@ use crate::repo::{NamespaceKey, RepoId, RepoName};
 
 /// A request that replays a fork which finished, with consistent job
 /// evidence: the replay record is committed for this very request and the
-/// destination's job is `Done` and agrees with the request on its source,
+/// destination's job retains acceptance and agrees with the request on its source,
 /// branch, tip, destination, binding, packmap and source sequence.
 ///
 /// It carries no [`super::ForkResult`]; ask the pipeline for it.
@@ -36,7 +36,7 @@ impl CompletedFork {
     /// The witness for `job` against `spec`, or `None` when any field of the
     /// stored evidence disagrees with the request.
     pub(crate) fn check(job: &ForkJobV1, spec: &ForkSpec) -> Option<Self> {
-        let result = job.result.as_ref()?;
+        let result = job.accepted.as_ref()?;
         let source = RepoId {
             namespace: NamespaceKey::from_stored(job.source_ns.clone()),
             name: RepoName::new(job.source_repo.clone()).ok()?,
@@ -45,7 +45,12 @@ impl CompletedFork {
             namespace: NamespaceKey::from_stored(job.dest_ns.clone()),
             name: RepoName::new(job.dest_repo.clone()).ok()?,
         };
-        let consistent = job.phase == Phase::Done
+        let phase_consistent = match job.phase {
+            Phase::Publish => job.result.is_none(),
+            Phase::Done => job.result.as_ref() == Some(result),
+            _ => false,
+        };
+        let consistent = phase_consistent
             && job.failure.is_none()
             && job.binding == binding(spec)
             && destination == spec.dest

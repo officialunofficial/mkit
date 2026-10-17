@@ -200,6 +200,7 @@ fn try_planned_ticket_publication_admitted(
     let req = WriteRequest {
         denial_ids: None,
         denial_packs: &[],
+        fork_barrier: false,
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
         repo: &repo.name,
@@ -548,6 +549,7 @@ fn maximal_implicit_consume_plans_a_valid_batch() {
     let req = WriteRequest {
         denial_ids: None,
         denial_packs: &[],
+        fork_barrier: false,
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
         repo: &repo.name,
@@ -3323,6 +3325,7 @@ fn incapable_authority_planner_request_refuses_generation() {
         let req = WriteRequest {
             denial_ids: None,
             denial_packs: &[],
+            fork_barrier: false,
             authority_store,
             authority_generation: Some(0),
             publication: None,
@@ -3364,6 +3367,7 @@ fn simple_index_batch(
     let req = WriteRequest {
         denial_ids: None,
         denial_packs: &[],
+        fork_barrier: false,
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
         repo: &repo.name,
@@ -3530,6 +3534,7 @@ fn plan_cas_any_missing_match_on_snapshot() {
         let req = WriteRequest {
             denial_ids: None,
             denial_packs: &[],
+            fork_barrier: false,
             authority_store: AuthorityStore::Guarded,
             authority_generation: None,
             repo: &name,
@@ -3602,6 +3607,7 @@ fn plan_conflict_writes_only_the_replay_record() {
     let req = WriteRequest {
         denial_ids: None,
         denial_packs: &[],
+        fork_barrier: false,
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
         repo: &name,
@@ -3678,6 +3684,7 @@ fn plan_quota_exhaustion_yields_no_batch() {
     let req = WriteRequest {
         denial_ids: None,
         denial_packs: &[],
+        fork_barrier: false,
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
         repo: &name,
@@ -3739,6 +3746,7 @@ proptest! {
         let req = WriteRequest {
             denial_ids: None,
                     denial_packs: &[],
+                    fork_barrier: false,
             authority_store: AuthorityStore::Guarded,
             authority_generation: None,
             repo: &name,
@@ -4364,6 +4372,7 @@ fn plan_signed_conflict_still_charges_quota() {
     let req = WriteRequest {
         denial_ids: None,
         denial_packs: &[],
+        fork_barrier: false,
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
         repo: &name,
@@ -4430,6 +4439,7 @@ fn plan_prune_fits_the_batch_op_cap() {
     let req = WriteRequest {
         denial_ids: None,
         denial_packs: &[],
+        fork_barrier: false,
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
         repo: &name,
@@ -4483,12 +4493,89 @@ fn plan_prune_fits_the_batch_op_cap() {
 }
 
 #[test]
+fn fork_barrier_refuses_coordinator_uploads_and_fences_a_racing_claim() {
+    let name = repo_name();
+    let key = keys::fork_barrier(&name);
+    let clock = clock();
+    let meta = store(&clock);
+    let partition = Partition::Coordinator(repo().namespace);
+    for kind in [WriteKind::UploadReserve, WriteKind::UploadCommit] {
+        let request = WriteRequest {
+            denial_ids: None,
+            denial_packs: &[],
+            fork_barrier: true,
+            authority_store: AuthorityStore::Guarded,
+            authority_generation: None,
+            repo: &name,
+            kind,
+            refs: &[],
+            resolved_ref_updates: &[],
+            ref_index: None,
+            replay: Some(replay()),
+            charges: &[],
+            namespace_charge: None,
+            grant: None,
+            layout_version: false,
+            mark_repo_known: false,
+            lease: None,
+            rejection: None,
+            publication: None,
+            pending: None,
+            begin: None,
+            advance: None,
+            implicit: None,
+        };
+        let values = if kind == WriteKind::UploadCommit {
+            vec![(
+                keys::replay(&replay().scope),
+                codec::encode_replay_record(&ReplayRecord {
+                    fingerprint: replay().fingerprint,
+                    expires_at_ms: replay().expires_at_ms,
+                    state: ReplayState::InFlight { resumable: true },
+                }),
+            )]
+        } else {
+            vec![]
+        };
+        let mut initial = Batch::new().delete(key.clone());
+        for (record_key, value) in &values {
+            initial = initial.put(record_key.clone(), value.clone());
+        }
+        block_on(meta.apply(&partition, initial)).unwrap();
+        let mut snapshot = snapshot(&request, &values);
+        let Planned::Apply(plan) =
+            plan_write(&request, &snapshot, &clock_at(ms(T0), None)).unwrap()
+        else {
+            panic!("upload must produce a guarded batch")
+        };
+        assert!(
+            plan.batch
+                .preconditions
+                .contains(&Precondition::Absent(key.clone()))
+        );
+        block_on(meta.apply(&partition, Batch::new().put(key.clone(), Value::default()))).unwrap();
+        assert!(matches!(
+            block_on(meta.apply(&partition, plan.batch)).unwrap(),
+            BatchOutcome::PreconditionFailed { .. }
+        ));
+        snapshot.insert(key.clone(), Some(Value::default()));
+        assert_eq!(
+            plan_write(&request, &snapshot, &clock_at(ms(T0), None))
+                .unwrap_err()
+                .code(),
+            Code::Unavailable
+        );
+    }
+}
+
+#[test]
 fn prune_sampling_is_deterministic_one_in_eight() {
     let name = repo_name();
     let refs = [upd(HEAD, Any, C)];
     let request = |replay: Option<ReplayGuard>| WriteRequest {
         denial_ids: None,
         denial_packs: &[],
+        fork_barrier: false,
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
         repo: &name,
@@ -4980,6 +5067,7 @@ fn d34_prune_retry_refreshes_the_epoch_even_without_a_counted_replan() {
     let req = WriteRequest {
         denial_ids: None,
         denial_packs: &[],
+        fork_barrier: false,
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
         repo: &repo_name(),
@@ -5113,6 +5201,7 @@ fn leased_epoch_checks_use_the_granted_epoch_and_cap_replay_deadlines() {
         let req = WriteRequest {
             denial_ids: None,
             denial_packs: &[],
+            fork_barrier: false,
             authority_store: AuthorityStore::Guarded,
             authority_generation: None,
             repo: &name,
@@ -5701,6 +5790,7 @@ fn prepared_publication_pair_cannot_survive_a_counterpart_guard_race() {
     let req = WriteRequest {
         denial_ids: None,
         denial_packs: &[],
+        fork_barrier: false,
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
         repo: &repo.name,

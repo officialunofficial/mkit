@@ -44,6 +44,7 @@
 //! | repository stored-bytes counter (`Coordinator`) | `rb 00 <repo>` | codec `RepoStorageV1` (absolute pack bytes, version) |
 //! | counted pack marker (`Coordinator`) | `rn 00 <repo> 00 <pack:32>` | be64 pack bytes |
 //! | fork job (`Coordinator`) | `fj 00 <repo>` | v1 `ForkJobV1` |
+//! | fork write barrier (`Coordinator`) | `fb 00 <repo>` | empty |
 //! | fork working set or cleared set (`Coordinator`) | `fo 00 <repo> 00 <set:u8>` | binary id list; set 0 cleared commits and trees, 1 tree ids, 2 queue, 3 inherited base packs, 4 chunked-blob manifests |
 //! | grant epoch | `e 00` | be64; absent means 0, never written as 0 |
 //! | epoch lease (ref shard) | `el 00` | codec `EpochLease` |
@@ -219,6 +220,8 @@ pub const TAG_REPO_STORAGE: &str = "rb";
 pub const TAG_REPO_STORAGE_PACK: &str = "rn";
 /// Repository fork job tag (`Coordinator`).
 pub const TAG_FORK_JOB: &str = "fj";
+/// Destination write barrier during fork activation (`Coordinator`).
+pub const TAG_FORK_BARRIER: &str = "fb";
 /// Repository fork id-set tag (`Coordinator`).
 pub const TAG_FORK_SET: &str = "fo";
 /// Local repository membership tag.
@@ -334,6 +337,8 @@ pub enum ParsedKey {
     RepoRecord(RepoName),
     /// `fj 00 <repo>`.
     ForkJob(RepoName),
+    /// `fb 00 <repo>`.
+    ForkBarrier(RepoName),
     /// `fo 00 <repo> 00 <set>`.
     ForkSet { repo: RepoName, set: u8 },
     /// `rl 00 p/d 00 <repo>`; index values are empty.
@@ -977,6 +982,12 @@ pub fn fork_job(repo: &RepoName) -> Key {
     key(TAG_FORK_JOB, &[repo.as_str().as_bytes()])
 }
 
+/// `fb 00 <repo>`: blocks ordinary destination writes until fork activation.
+#[must_use]
+pub fn fork_barrier(repo: &RepoName) -> Key {
+    key(TAG_FORK_BARRIER, &[repo.as_str().as_bytes()])
+}
+
 /// `fo 00 <repo> 00 <set>`: one binary id set of the destination's fork.
 #[must_use]
 pub fn fork_set(repo: &RepoName, set: u8) -> Key {
@@ -1456,6 +1467,7 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
         b"nr" if body.is_empty() => ParsedKey::NamespaceRecord,
         b"rr" => ParsedKey::RepoRecord(RepoName::new(text(body)?).ok()?),
         b"fj" => ParsedKey::ForkJob(RepoName::new(text(body)?).ok()?),
+        b"fb" => ParsedKey::ForkBarrier(RepoName::new(text(body)?).ok()?),
         b"fo" => {
             let (name, set) = body.split_at(body.len().checked_sub(2)?);
             (set[0] == 0).then_some(())?;
@@ -1726,6 +1738,7 @@ mod tests {
             TAG_REPO_STORAGE,
             TAG_REPO_STORAGE_PACK,
             TAG_FORK_JOB,
+            TAG_FORK_BARRIER,
             TAG_FORK_SET,
             TAG_RELAY_HIGH_WATER,
             TAG_RELAY_SCAN,
@@ -1913,6 +1926,7 @@ mod tests {
             (repo_visibility(&repo("room-a")), b"rv\0room-a".to_vec()),
             (repo_known(&repo("room-a")), b"rk\0room-a".to_vec()),
             (fork_job(&repo("room-a")), b"fj\0room-a".to_vec()),
+            (fork_barrier(&repo("room-a")), b"fb\0room-a".to_vec()),
             (fork_set(&repo("room-a"), 3), b"fo\0room-a\0\x03".to_vec()),
             (repo_storage(&repo("room-a")), b"rb\0room-a".to_vec()),
             (
@@ -2343,6 +2357,7 @@ mod tests {
             (repo_record(&repo("a")), ParsedKey::RepoRecord(repo("a"))),
             (repo_known(&repo("a")), ParsedKey::RepoKnown(repo("a"))),
             (fork_job(&repo("a")), ParsedKey::ForkJob(repo("a"))),
+            (fork_barrier(&repo("a")), ParsedKey::ForkBarrier(repo("a"))),
             (
                 fork_set(&repo("a"), 2),
                 ParsedKey::ForkSet {

@@ -10,7 +10,8 @@ use crate::op::{AuthzFacts, CallerView, OpKind};
 use crate::policy::AuthorizerRole;
 use crate::repo::{Addressing, MAX_REPO_NAME_BYTES, RepoName};
 use crate::store::{
-    Batch, Cursor, Key, MultipartBlobStore, NamespaceStore, Partition, Value, codec, keys,
+    Batch, Cursor, Key, MultipartBlobStore, NamespaceStore, Partition, Precondition, Value, codec,
+    keys,
 };
 
 /// A repository name and its effective visibility. The registry has no cheap head/update projection.
@@ -145,11 +146,22 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     ) -> Result<(), ServerError> {
         let key = keys::repo_record(&repo.name);
         let revision_key = keys::repo_visibility_revision(&repo.name);
-        let rows = self
-            .meta
-            .get_many(p, &[key.clone(), revision_key.clone()])
-            .await
-            .map_err(meta_error)?;
+        let guarded = self.cfg.sharding == super::Sharding::D34;
+        let mut wanted = vec![key.clone(), revision_key.clone()];
+        let barrier = keys::fork_barrier(&repo.name);
+        if guarded {
+            wanted.push(barrier.clone());
+        }
+        let mut rows = self.meta.get_many(p, &wanted).await.map_err(meta_error)?;
+        if rows.len() != wanted.len() {
+            return Err(internal("invalid visibility boundary read"));
+        }
+        if guarded {
+            if rows.pop().flatten().is_some() {
+                return Err(ServerError::unavailable("fork activation pending; retry"));
+            }
+            batch.preconditions.push(Precondition::Absent(barrier));
+        }
         let [record, revision]: [Option<Value>; 2] = rows
             .try_into()
             .map_err(|_| internal("invalid visibility boundary read"))?;
@@ -158,9 +170,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             revision_key.clone(),
             revision.as_ref(),
         ));
-        // Once continuation fencing is activated, every writer maintains it,
-        // including pipelines that do not themselves issue history tokens.
-        if self.cfg.history_tokens.is_some() || revision.is_some() {
+        // Fork source proofs need a monotonic policy revision even without
+        // history tokens, so visibility changes away and back remain visible.
+        // Once present, every writer maintains it across configuration changes.
+        if guarded || self.cfg.history_tokens.is_some() || revision.is_some() {
             let next_revision = revision
                 .as_ref()
                 .map(codec::decode_u64)

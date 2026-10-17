@@ -41,6 +41,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let req = WriteRequest {
             denial_ids: None,
             denial_packs: &[],
+            fork_barrier: false,
             authority_store: super::plan::AuthorityStore::from_capabilities(
                 self.meta.capabilities(),
             ),

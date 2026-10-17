@@ -122,6 +122,113 @@ impl Admission for EmptyVisibilityCredentials {
 }
 
 #[test]
+fn fork_barrier_blocks_both_visibility_setters_and_their_stale_batches() {
+    for statement_mode in [false, true] {
+        for racing in [false, true] {
+            let owner = key(1);
+            let repository = repository(&owner);
+            let mut config = config(&owner, AuthorizerRole::Check);
+            config.sharding = Sharding::D34;
+            let clock = clock();
+            let changed = Arc::new(AtomicBool::new(false));
+            let observed = changed.clone();
+            let name = RepoName::new(REPO).unwrap();
+            let spy = Spy::new(store(&clock)).hook(move |kv, partition, batch| {
+                if racing && batch.writes.iter().any(|write| {
+                    matches!(write, Write::Put(key, _) if *key == keys::repo_visibility(&name))
+                }) && !observed.swap(true, Ordering::SeqCst) {
+                    assert!(batch.preconditions.contains(&Precondition::Absent(
+                        keys::fork_barrier(&name),
+                    )));
+                    now(kv.apply(partition, Batch::new().put(
+                        keys::fork_barrier(&name), Value::default(),
+                    ))).unwrap();
+                }
+            });
+            let e = build(config, spy, Hooks::new(), clock);
+            let id = repo_id(&e, &owner);
+            let partition = coordinator(&e, &owner);
+            put_repo(&e, &id, Some(codec::StoredVisibility::Public));
+            let original = get(&e, &partition, &keys::repo_visibility(&id.name));
+            if !racing {
+                now(e.pipe.meta.inner.apply(
+                    &partition,
+                    Batch::new().put(keys::fork_barrier(&id.name), Value::default()),
+                ))
+                .unwrap();
+            }
+            let (request, mode) = if statement_mode {
+                let (signed, _) = statement(&owner, &repository, Visibility::Private, T0, [9; 32]);
+                (
+                    unsigned_visibility(&repository),
+                    VisibilityRequest::Statement(signed),
+                )
+            } else {
+                (
+                    signed_visibility(&owner, &repository, 1, b"v"),
+                    VisibilityRequest::Envelope(Visibility::Private),
+                )
+            };
+            let auth = e.auth(&request).unwrap();
+            let replay = auth
+                .auth
+                .as_ref()
+                .map(|auth| keys::replay(&auth.replay_scope));
+            let error = block_on(e.pipe.set_repo_visibility(&auth, mode)).unwrap_err();
+            assert_eq!(error.code(), Code::Unavailable);
+            assert_eq!(error.public_message(), "fork activation pending; retry");
+            assert_eq!(changed.load(Ordering::SeqCst), racing);
+            assert_eq!(
+                get(&e, &partition, &keys::repo_visibility(&id.name)),
+                original
+            );
+            assert!(get(&e, &partition, &keys::repo_visibility_revision(&id.name)).is_none());
+            assert!(get(&e, &partition, &keys::fork_barrier(&id.name)).is_some());
+            if let Some(replay) = replay {
+                assert!(get(&e, &partition, &replay).is_none());
+            }
+        }
+    }
+}
+
+#[test]
+fn d34_visibility_round_trip_advances_revision_without_history_tokens() {
+    let owner = key(1);
+    let repository = repository(&owner);
+    let mut config = config(&owner, AuthorizerRole::Check);
+    config.sharding = Sharding::D34;
+    config.history_tokens = None;
+    let clock = clock();
+    let e = build(config, Spy::new(store(&clock)), Hooks::new(), clock);
+    let id = repo_id(&e, &owner);
+    let partition = coordinator(&e, &owner);
+    put_repo(&e, &id, Some(codec::StoredVisibility::Public));
+    let mut original = None;
+    // Keep one clock millisecond throughout: the visibility declaration can
+    // return byte-for-byte to its original value, but its revision cannot.
+    for (number, visibility) in [
+        (1, Visibility::Public),
+        (2, Visibility::Private),
+        (3, Visibility::Public),
+    ] {
+        set(
+            &e,
+            &signed_visibility(&owner, &repository, number, b"v"),
+            VisibilityRequest::Envelope(visibility),
+        )
+        .unwrap();
+        let revision = get(&e, &partition, &keys::repo_visibility_revision(&id.name)).unwrap();
+        assert_eq!(codec::decode_u64(&revision).unwrap(), u64::from(number));
+        let stored = get(&e, &partition, &keys::repo_visibility(&id.name));
+        if number == 1 {
+            original = stored;
+        } else if number == 3 {
+            assert_eq!(stored, original);
+        }
+    }
+}
+
+#[test]
 fn signed_visibility_keeps_credential_headers_out_of_admission() {
     let owner = key(1);
     let repo = repository(&owner);

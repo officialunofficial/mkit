@@ -228,6 +228,7 @@ fn phase_name(phase: Option<Phase>) -> &'static str {
         Some(Phase::Register) => "register",
         Some(Phase::Copy) => "copy",
         Some(Phase::Count) => "count",
+        Some(Phase::Accept) => "accept",
         Some(Phase::Publish) => "publish",
         Some(Phase::Done) => "done",
         Some(Phase::Failed) => "failed",

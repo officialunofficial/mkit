@@ -127,7 +127,8 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
     /// This does not authenticate an expired envelope, admit work, read the source,
     /// publish refs, or run effects. Missing, pending, and failed jobs return `None`.
     /// All evidence is read afresh, with replay and reservation in one batch.
-    /// The Done job, committed atomically with both rows, is authoritative:
+    /// Acceptance commits the result atomically with both rows; the Done job
+    /// retains that result and is authoritative:
     /// outcome acknowledgement deletes the reservation and the replay row is
     /// pruned after envelope expiry, so either or both may be absent. A row
     /// that is present must still match the job and the supplied identity.
@@ -179,7 +180,8 @@ impl<N: NamespaceStore> ReadAccess<'_, N> {
             .get_many(&self.shards.coordinator(&spec.dest.namespace), &wanted)
             .await
             .map_err(classify)?;
-        // The Done job was committed atomically with both rows, so it is
+        // Acceptance committed this result atomically with both rows, and
+        // Done retains the immutable result, so it is
         // authoritative. Outcome acknowledgement deletes the reservation and
         // the replay row is pruned after envelope expiry, so either may be
         // absent. A row that is present must still agree exactly.
@@ -506,6 +508,9 @@ mod tests {
                 grant_epoch: None,
                 create_namespace: false,
             }),
+            fence_rows: crate::fork::FenceRowsV1::default(),
+            source_access: crate::fork::SourceAccessV1::default(),
+            accepted: Some(result.clone()),
             result: Some(result),
         }
     }
