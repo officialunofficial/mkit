@@ -424,6 +424,9 @@ fn standalone_diff(args: &TargetArgs) -> Result<bool, String> {
                 serde_json::to_string_pretty(&report)
                     .map_err(|_| "JSON diff serialization failed")?
             );
+            if report.runner_error() {
+                return Err("mandatory verification poll interval exceeds runner budget; rerun against a fixture that resolves within the documented bound".into());
+            }
             Ok(!report.failed())
         })
         .map_err(|error| mkit_server_conformance::runner::redact(error, &auth))

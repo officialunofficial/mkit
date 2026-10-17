@@ -159,3 +159,104 @@ async fn deterministic_decisions_include_declared_quota_charges() {
     left.shutdown().await;
     right.shutdown().await;
 }
+
+#[tokio::test]
+async fn paired_cas_detects_a_matching_side_write_on_conflict() {
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, Response};
+    use buffa::Message as _;
+    use mkit_transport_connect::generated::AdvanceRefsRequest;
+    use std::sync::{Arc, Mutex};
+    let mut profile = Profile::new(WireAuth::AuthV2 {
+        audience: "http://placeholder.invalid".into(),
+        repository: "default".into(),
+        seed: [0x45; 32],
+    });
+    profile.atomic_advance = true;
+    profile.derive_features();
+    let left = ControlledHost::start(profile.clone()).await.unwrap();
+    let right = ControlledHost::start(profile).await.unwrap();
+    let upstream = right.base_url().to_owned();
+    let proposed = Arc::new(Mutex::new(None::<(String, String)>));
+    let router = axum::Router::new().fallback(move |request: Request<Body>| {
+        let upstream = upstream.clone();
+        let proposed = proposed.clone();
+        async move {
+            let (parts, body) = request.into_parts();
+            let bytes = to_bytes(body, 1024 * 1024).await.unwrap();
+            if parts.uri.path() == "/mkit.transport.v1.TransportService/AdvanceRefs" {
+                let request = AdvanceRefsRequest::decode_from_slice(&bytes).unwrap();
+                // Simulate a server applying the side whose CAS matches even
+                // though the paired operation reports a conflict. Retain the
+                // proposal from the first stale-pair request across its replay.
+                if request.ticket_ids.is_empty() {
+                    let mut proposed = proposed.lock().unwrap();
+                    if proposed.is_none() {
+                        let field = if request.packmap_expected_id.as_deref() == Some(&[0x19; 32]) {
+                            "head"
+                        } else {
+                            "packmap"
+                        };
+                        let id = if field == "head" {
+                            request.head_new_id
+                        } else {
+                            request.packmap_new_id
+                        }
+                        .unwrap();
+                        *proposed = Some((field.into(), mkit_core::hash::to_hex_bytes(&id)));
+                    }
+                }
+            }
+            let mut request =
+                reqwest::Client::new().request(parts.method, format!("{upstream}{}", parts.uri));
+            for (name, value) in &parts.headers {
+                if name != "host" && name != "content-length" {
+                    request = request.header(name, value);
+                }
+            }
+            let response = request.body(bytes).send().await.unwrap();
+            let status = response.status();
+            let content_type = response.headers().get("content-type").cloned();
+            let mut bytes = response.bytes().await.unwrap().to_vec();
+            if parts.uri.path() == mkit_server_conformance::control::CONTROL_PATH {
+                let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                if value["observation"].is_object()
+                    && let Some((field, id)) = proposed.lock().unwrap().as_ref()
+                {
+                    value["observation"][field] = id.clone().into();
+                }
+                bytes = serde_json::to_vec(&value).unwrap();
+            }
+            let mut response = Response::builder().status(status);
+            if let Some(content_type) = content_type {
+                response = response.header("content-type", content_type);
+            }
+            response.body(Body::from(bytes)).unwrap()
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_url: url::Url = format!("http://{}", listener.local_addr().unwrap())
+        .parse()
+        .unwrap();
+    let proxy = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let target = |host: &ControlledHost| DiffTarget {
+        wire: WireTarget {
+            base_url: host.base_url().parse().unwrap(),
+            profile: host.profile().clone(),
+        },
+        control_url: host.base_url().parse().unwrap(),
+    };
+    let mut candidate = target(&right);
+    candidate.wire.base_url = proxy_url.clone();
+    candidate.control_url = proxy_url;
+    let report = run(&target(&left), &candidate).await.unwrap();
+    assert!(
+        report.failed(),
+        "partial paired writes escaped the differential oracle"
+    );
+    proxy.abort();
+    left.shutdown().await;
+    right.shutdown().await;
+}

@@ -155,3 +155,101 @@ async fn diff_embeds_reference_and_emits_json() {
     );
     host.shutdown().await;
 }
+
+#[cfg(feature = "reference-runner")]
+#[tokio::test]
+async fn diff_reports_excessive_pending_hint_as_runner_error_without_polling_early() {
+    use axum::body::{Body, to_bytes};
+    use base64::Engine as _;
+    use buffa::Message as _;
+    use http::{Request, Response};
+    use mkit_transport_connect::generated::PendingVerification;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let host = ControlledHost::start(Profile::new(WireAuth::AuthV2 {
+        audience: "http://placeholder.invalid".into(),
+        repository: "default".into(),
+        seed: [0x62; 32],
+    }))
+    .await
+    .unwrap();
+    let upstream = host.base_url().to_owned();
+    let advances = Arc::new(AtomicUsize::new(0));
+    let observed = advances.clone();
+    let router = axum::Router::new().fallback(move |request: Request<Body>| {
+        let upstream = upstream.clone();
+        let observed = observed.clone();
+        async move {
+            let (parts, body) = request.into_parts();
+            if parts.uri.path().ends_with("/AdvanceRefs") {
+                observed.fetch_add(1, Ordering::SeqCst);
+                let detail = PendingVerification { retry_after_ms: Some(60_000), ..Default::default() }.encode_to_vec();
+                let error = serde_json::json!({"code":"unavailable", "message":"pending verification", "details":[{"type":"mkit.transport.v1.PendingVerification", "value":base64::engine::general_purpose::STANDARD.encode(detail)}]});
+                return Response::builder().status(503)
+                    .header("content-type", "application/json").header("retry-after", "60")
+                    .body(Body::from(error.to_string())).unwrap();
+            }
+            let bytes = to_bytes(body, 1024 * 1024).await.unwrap();
+            let mut forwarded = reqwest::Client::new().request(parts.method, format!("{upstream}{}", parts.uri));
+            for (name, value) in &parts.headers {
+                if name != "host" && name != "content-length" { forwarded = forwarded.header(name, value); }
+            }
+            let reply = forwarded.body(bytes).send().await.unwrap();
+            let status = reply.status();
+            let content_type = reply.headers().get("content-type").cloned();
+            let bytes = reply.bytes().await.unwrap();
+            let mut response = Response::builder().status(status);
+            if let Some(content_type) = content_type { response = response.header("content-type", content_type); }
+            response.body(Body::from(bytes)).unwrap()
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_url = format!("http://{}", listener.local_addr().unwrap());
+    let proxy = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("profile.toml");
+    std::fs::write(&path, profile_text(host.base_url())).unwrap();
+    let started = std::time::Instant::now();
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(50),
+        invoke(vec![
+            "diff".into(),
+            "--base-url".into(),
+            proxy_url.clone(),
+            "--control-url".into(),
+            proxy_url,
+            "--profile".into(),
+            path.display().to_string(),
+        ]),
+    )
+    .await
+    .expect("oversized poll hint must fail promptly");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["version"], 1);
+    assert!(
+        json["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|case| case["status"] == "runner_error")
+    );
+    assert_eq!(
+        advances.load(Ordering::SeqCst),
+        1,
+        "no poll may occur before the mandatory delay"
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    proxy.abort();
+    host.shutdown().await;
+}

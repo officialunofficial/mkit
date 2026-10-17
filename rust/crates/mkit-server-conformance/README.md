@@ -136,8 +136,8 @@ fingerprints are first checked against each exact signed operation, including
 its target audience, then normalized to that operation's logical role. Each
 server must replay its original receipt bytes. Receipt issuance, signatures, and
 statement fields are outside these differential fixtures; they require separate
-receipt conformance coverage. Atomic snapshots retain ref pairs, ticket and reservation order, membership, terminal
-result multiplicity, and quota counters. The report names each differing field.
+receipt conformance coverage. Atomic snapshots retain ref pairs, ticket and
+reservation order, membership, terminal result multiplicity, and quota counters. The report names each differing field.
 Two failed executions never count as passing equivalence.
 
 Differential results establish decision equivalence for these deterministic
@@ -148,8 +148,16 @@ suite exercises two native reference hosts over HTTP.
 Both commands write a versioned JSON report to stdout by default; `run` also
 supports `--format tap`. JSON contains case results and differences, without
 credentials or signing material. Exit codes are `0` for a passing run, `1` for a
-failed case or differential mismatch, and `2` for usage, profile, setup, or
-negotiation errors. Existing `wire` and `controlled` commands retain TAP output.
+failed case or differential mismatch, and `2` for usage, profile, setup,
+negotiation, or runner execution-limit errors. Existing `wire` and `controlled`
+commands retain TAP output.
+
+Differential decisions have a 45-second execution budget. The runner honors
+valid pending-verification polling hints clamped to 1–60 seconds. If a mandatory
+wait cannot fit, the JSON case status is `runner_error` and the command exits 2;
+this is inconclusive, not a protocol failure or a match. Rerun against a disposable
+fixture whose verification resolves within that budget. The runner never polls
+early to avoid the wait. Ordinary protocol refusals retain their failure result.
 
 ## Version 1 test-control binding
 

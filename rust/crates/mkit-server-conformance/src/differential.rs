@@ -66,12 +66,23 @@ pub struct DiffReport {
 }
 
 impl DiffReport {
+    /// The runner could not finish within its own bounded execution budget.
+    #[must_use]
+    pub fn runner_error(&self) -> bool {
+        self.cases
+            .iter()
+            .any(|case| case.status == DiffStatus::RunnerError)
+    }
+
     /// A decision mismatch or a failed scenario makes the run fail.
     #[must_use]
     pub fn failed(&self) -> bool {
-        self.cases
-            .iter()
-            .any(|case| matches!(case.status, DiffStatus::Mismatch | DiffStatus::Failed))
+        self.cases.iter().any(|case| {
+            matches!(
+                case.status,
+                DiffStatus::Mismatch | DiffStatus::Failed | DiffStatus::RunnerError
+            )
+        })
     }
 }
 
@@ -100,6 +111,8 @@ pub enum DiffStatus {
     Failed,
     /// A required optional feature is undeclared.
     NotApplicable,
+    /// A valid pending response exceeds the runner's execution budget.
+    RunnerError,
 }
 
 /// One path through a normalized protocol result; array order is significant.
@@ -151,8 +164,8 @@ pub async fn run(left: &DiffTarget, right: &DiffTarget) -> Result<DiffReport, St
 }
 
 fn compare_traces(
-    left: &Result<BTreeMap<String, Value>, String>,
-    right: &Result<BTreeMap<String, Value>, String>,
+    left: &Result<BTreeMap<String, Value>, ScenarioError>,
+    right: &Result<BTreeMap<String, Value>, ScenarioError>,
 ) -> DiffReport {
     DiffReport {
         version: 1,
@@ -183,7 +196,13 @@ fn compare_traces(
                 }
                 _ => DiffCase {
                     name: (*name).into(),
-                    status: DiffStatus::Failed,
+                    status: if matches!(left, Err(ScenarioError::Protocol(_)))
+                        || matches!(right, Err(ScenarioError::Protocol(_)))
+                    {
+                        DiffStatus::Failed
+                    } else {
+                        DiffStatus::RunnerError
+                    },
                     differences: Vec::new(),
                     reason: Some(format!(
                         "scenario execution failed; left={:?}; right={:?}",
@@ -228,6 +247,32 @@ fn difference(path: &str, left: &Value, right: &Value, out: &mut Vec<FieldDiffer
     }
 }
 
+#[derive(Debug)]
+enum ScenarioError {
+    Protocol(String),
+    Budget(String),
+}
+
+impl From<String> for ScenarioError {
+    fn from(message: String) -> Self {
+        Self::Protocol(message)
+    }
+}
+
+impl From<&str> for ScenarioError {
+    fn from(message: &str) -> Self {
+        Self::Protocol(message.into())
+    }
+}
+
+impl std::fmt::Display for ScenarioError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Protocol(message) | Self::Budget(message) => formatter.write_str(message),
+        }
+    }
+}
+
 struct SignedRequest {
     body: Vec<u8>,
     headers: SignedOp,
@@ -236,6 +281,7 @@ struct SignedRequest {
 
 struct Fixture {
     head: [u8; 32],
+    child: [u8; 32],
     packmap: [u8; 32],
     query: ObservationQuery,
     request: AdvanceRefsRequest,
@@ -355,10 +401,12 @@ impl Session {
             .ok_or_else(|| "atomic observation missing".into())
     }
 
-    async fn advance(&self, request: &SignedRequest) -> Result<AdvanceRefsResponse, String> {
-        // Pending verification is permission, not a decision difference. Retry
-        // exactly the original signed identity within one bounded window.
-        tokio::time::timeout(Duration::from_secs(45), async {
+    async fn advance(&self, request: &SignedRequest) -> Result<AdvanceRefsResponse, ScenarioError> {
+        // A legitimate pending response can outlast this runner's budget.
+        // Report that limitation without polling early or blaming the server.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+        let mut last_pending = false;
+        let result = tokio::time::timeout_at(deadline, async {
             loop {
                 match self
                     .client
@@ -371,14 +419,45 @@ impl Session {
                 {
                     Ok(reply) => return Ok(reply),
                     Err(error) if error.code == "unavailable" => {
-                        tokio::time::sleep(retry_delay(&error)?).await;
+                        last_pending = false;
+                        if !error
+                            .details
+                            .iter()
+                            .any(|(name, _)| name == "mkit.transport.v1.PendingVerification")
+                        {
+                            return Err(ScenarioError::Protocol(format!(
+                                "advance refused: {}",
+                                error.code
+                            )));
+                        }
+                        let delay = retry_delay(&error)?;
+                        last_pending = true;
+                        pending_fits_budget(
+                            delay,
+                            deadline.saturating_duration_since(tokio::time::Instant::now()),
+                        )?;
+                        tokio::time::sleep(delay).await;
                     }
-                    Err(error) => return Err(format!("advance refused: {}", error.code)),
+                    Err(error) => {
+                        last_pending = false;
+                        return Err(ScenarioError::Protocol(format!(
+                            "advance refused: {}",
+                            error.code
+                        )));
+                    }
                 }
             }
         })
-        .await
-        .map_err(|_| "advance did not resolve within fixture bound".to_owned())?
+        .await;
+        result.unwrap_or_else(|_| {
+            Err(if last_pending {
+                ScenarioError::Budget(
+                    "valid pending verification exceeded the runner's 45-second budget".into(),
+                )
+            } else {
+                ScenarioError::Protocol("advance did not resolve within fixture bound".into())
+            })
+        })
     }
 
     async fn upload(&self, pack: &[u8], index: usize) -> Result<Vec<u8>, String> {
@@ -426,7 +505,11 @@ impl Session {
     }
 
     async fn fixture(&self) -> Result<Fixture, String> {
-        let (pack, head) = canonical_pack()?;
+        let CanonicalPack {
+            bytes: pack,
+            head,
+            child,
+        } = canonical_pack()?;
         let pack_id = hash(&pack);
         let packlist =
             mkit_core::transfer::encode_packlist(None, &[pack_id]).map_err(|e| e.to_string())?;
@@ -489,6 +572,7 @@ impl Session {
         }
         Ok(Fixture {
             head,
+            child,
             packmap,
             query,
             request,
@@ -497,9 +581,10 @@ impl Session {
         })
     }
 
-    async fn execute(&self) -> Result<BTreeMap<String, Value>, String> {
+    async fn execute(&self) -> Result<BTreeMap<String, Value>, ScenarioError> {
         let Fixture {
             head,
+            child,
             packmap,
             query,
             request,
@@ -509,7 +594,7 @@ impl Session {
         let answer = self.advance(&accepted).await?;
         let outcome = answer.outcome.map_or(0, |value| value.to_i32());
         if outcome != 1 {
-            return Err(format!("expected acceptance, got outcome {outcome}"));
+            return Err(format!("expected acceptance, got outcome {outcome}").into());
         }
         let snapshot = self.snapshot(&query).await?;
         let acceptance_error = validate_accepted(
@@ -534,15 +619,15 @@ impl Session {
         let conflict = self.unary(
             Rpc::AdvanceRefs,
             &advance_req(
-                (HEAD, Exp::Match(&[0x19; 32]), &head),
-                (PACKMAP, Exp::Match(&packmap), &packmap),
+                (HEAD, Exp::Match(&head), &child),
+                (PACKMAP, Exp::Match(&[0x19; 32]), &packmap),
             ),
             "stale-pair",
         )?;
         let answer = self.advance(&conflict).await?;
         let outcome = answer.outcome.map_or(0, |value| value.to_i32());
-        if outcome != 2 {
-            return Err(format!("expected head conflict, got outcome {outcome}"));
+        if outcome != 3 {
+            return Err(format!("expected packmap conflict, got outcome {outcome}").into());
         }
         let after_conflict = self.snapshot(&query).await?;
         if after_conflict.head != snapshot.head
@@ -568,7 +653,7 @@ impl Session {
             .await?;
         let code = refusal.err().ok_or("invalid signature was accepted")?.code;
         if code != "unauthenticated" {
-            return Err(format!("invalid signature refusal class: {code}"));
+            return Err(format!("invalid signature refusal class: {code}").into());
         }
         let after_refusal = self.snapshot(&query).await?;
         if after_refusal != after_conflict {
@@ -645,6 +730,15 @@ fn normalize(snapshot: &Observation, fingerprint: &str) -> Result<Value, String>
     serde_json::to_value(snapshot).map_err(|e| e.to_string())
 }
 
+fn pending_fits_budget(delay: Duration, remaining: Duration) -> Result<(), ScenarioError> {
+    if delay >= remaining {
+        return Err(ScenarioError::Budget(
+            "valid pending verification hint cannot fit the runner's 45-second budget".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn retry_delay(error: &RpcError) -> Result<Duration, String> {
     let pending: Vec<_> = error
         .details
@@ -668,7 +762,14 @@ fn retry_delay(error: &RpcError) -> Result<Duration, String> {
     )))
 }
 
-fn canonical_pack() -> Result<(Vec<u8>, [u8; 32]), String> {
+#[derive(Debug, PartialEq, Eq)]
+struct CanonicalPack {
+    bytes: Vec<u8>,
+    head: [u8; 32],
+    child: [u8; 32],
+}
+
+fn canonical_pack() -> Result<CanonicalPack, String> {
     let tree = Object::Tree(Tree {
         entries: Vec::new(),
     });
@@ -686,8 +787,20 @@ fn canonical_pack() -> Result<(Vec<u8>, [u8; 32]), String> {
     commit.signature = sign_commit(&commit, &key).map_err(|e| e.to_string())?.0;
     let commit = Object::Commit(commit);
     let head = commit.id().map_err(|e| e.to_string())?;
+    let mut child = Commit::new_unannotated(
+        tree_id,
+        vec![head],
+        Identity::ed25519(key.public.0),
+        key.public.0,
+        b"differential child".to_vec(),
+        43,
+        [0; 64],
+    );
+    child.signature = sign_commit(&child, &key).map_err(|e| e.to_string())?.0;
+    let child = Object::Commit(child);
+    let child_id = child.id().map_err(|e| e.to_string())?;
     let mut writer = PackWriter::new_raw_only();
-    for object in [tree, commit] {
+    for object in [tree, commit, child] {
         writer
             .push_raw(
                 object.id().map_err(|e| e.to_string())?,
@@ -695,7 +808,11 @@ fn canonical_pack() -> Result<(Vec<u8>, [u8; 32]), String> {
             )
             .map_err(|e| e.to_string())?;
     }
-    Ok((writer.finish().map_err(|e| e.to_string())?, head))
+    Ok(CanonicalPack {
+        bytes: writer.finish().map_err(|e| e.to_string())?,
+        head,
+        child: child_id,
+    })
 }
 
 #[cfg(test)]
@@ -718,6 +835,22 @@ mod tests {
     fn two_failed_scenarios_never_count_as_equivalent() {
         let report = compare_traces(&Err("same error".into()), &Err("same error".into()));
         assert!(report.failed());
+        assert!(
+            report
+                .cases
+                .iter()
+                .all(|case| case.status == DiffStatus::Failed)
+        );
+    }
+
+    #[test]
+    fn protocol_failure_is_not_hidden_by_another_targets_runner_limit() {
+        let report = compare_traces(
+            &Err(ScenarioError::Protocol("protocol refusal".into())),
+            &Err(ScenarioError::Budget("execution limit".into())),
+        );
+        assert!(report.failed());
+        assert!(!report.runner_error());
         assert!(
             report
                 .cases
@@ -853,6 +986,37 @@ mod tests {
             mkit_transport_connect::generated::AdvanceOutcome::ADVANCE_OUTCOME_HEAD_CONFLICT.into(),
         );
         assert!(validate_replay_answer(&answer, &changed).is_err());
+    }
+
+    #[test]
+    fn legal_pending_hint_exceeding_runner_budget_is_a_runner_error() {
+        let error =
+            pending_fits_budget(Duration::from_mins(1), Duration::from_secs(45)).unwrap_err();
+        assert!(matches!(error, ScenarioError::Budget(_)));
+        assert!(pending_fits_budget(Duration::from_secs(3), Duration::from_secs(45)).is_ok());
+        let report = compare_traces(
+            &Err(error),
+            &Err(ScenarioError::Budget("same execution bound".into())),
+        );
+        assert!(report.runner_error());
+        assert!(report.failed());
+        assert!(
+            report
+                .cases
+                .iter()
+                .all(|case| case.status == DiffStatus::RunnerError)
+        );
+    }
+
+    #[test]
+    fn paired_cas_proposes_a_distinct_valid_child() {
+        let CanonicalPack { head, child, .. } = canonical_pack().unwrap();
+        assert_ne!(head, child);
+        let request = advance_req(
+            (HEAD, Exp::Match(&head), &child),
+            (PACKMAP, Exp::Match(&[0x19; 32]), &[0x20; 32]),
+        );
+        assert_ne!(request.head_new_id, request.head_expected_id);
     }
 
     #[test]
