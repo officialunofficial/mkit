@@ -291,6 +291,15 @@ repository-scoped verified-membership requirements of SPEC-SERVER §9.4 to
 external bases; naming another pack in the same operation does not establish
 that membership.
 
+**Delta-depth counting.** An entry reconstructed directly from `raw` or
+`zstd-raw` bytes has delta depth zero. An entry reconstructed from a `delta`
+or `zstd-delta` instruction stream has depth one more than the depth of the
+base it resolved against: an in-pack earlier object contributes its own
+verified depth, and an external base contributes the supplier-provided depth
+carried by its repository-scoped member fact. Depth therefore counts delta
+edges on the longest chain that produced the object, and a chain at the
+caller-selected cap refuses rather than wraps or silently truncates.
+
 Writers SHOULD emit non-blob objects first (commits, trees,
 chunked_blob, remix), then base blobs, then delta blobs. This lets a
 streaming reader complete without buffering.
@@ -363,6 +372,55 @@ A future version may add a trailing index; neither v1 nor v2 does.
 Readers MUST reject any bytes between the end of the declared entry list
 and the 32-byte trailer. A pack with trailing data is malformed even if
 the trailer hashes those extra bytes correctly.
+
+### 6.1 Provisional retention and final acceptance
+
+**Protocol requirement.**
+
+Verification strategies other than whole-pack buffering are permitted and
+MUST preserve the same observable outcomes. Whatever the execution
+strategy, canonical object bytes, decoded results, and any derived evidence
+are **provisional**: they may be emitted to the caller for private retention
+or re-derivation, but they MUST NOT be published, stored as verified
+objects, or treated as verified before **final acceptance**. Final
+acceptance requires all of: the declared header, every declared entry
+decoded and checked, the §8 trailer verified over the complete source, every
+required signature checked, and every retained-evidence acknowledgment
+completed. Only the terminal acceptance artifact confers verified status;
+intermediate progress never does.
+
+Error precedence is deterministic across execution strategies:
+
+1. Source and binding inconsistencies, malformed header or trailer
+   structure, and whole-source integrity failures precede every entry-level
+   check.
+2. Entry framing, declared-count, and wire-cap violations precede that
+   entry's content checks.
+3. Delta-base resolution, canonical decode and identity checks, edge
+   extraction, and signature checks follow in wire order; a signature
+   failure is recorded and prevents terminal acceptance but does not
+   substitute for integrity or decode failures.
+4. Malformed content, caller-selected content-profile limits, execution
+   resource exhaustion, and unavailable acquisition are distinct refusal
+   classes and MUST NOT be collapsed into one another (see §6.2 and
+   SPEC-PRIMITIVE-EVIDENCE §3). Unavailable input is retryable and never
+   produces absence; absence requires an authenticated answer to the exact
+   request.
+
+### 6.2 Refusal classification
+
+**Protocol requirement.**
+
+Refusals from pack verification classify as: *malformed content* (the bytes
+violate this or a referenced specification), *content-profile limit* (the
+caller-selected indexed ceilings, such as pack bytes, decoded bytes, or
+delta depth, are exceeded), *execution limit* (caller resource ceilings —
+work, residence, acquisition volume — are exceeded; retry with a larger
+budget or fewer concurrent operations may succeed), *unavailable input*
+(a bounded acquisition could not complete; retry or restart may succeed),
+and *invalid response* (a reply mismatched its outstanding request). The
+refusal for a given input MUST be identical whether entries are verified
+inline, streamed, or fanned out across caller-driven workers.
 
 ---
 
@@ -557,6 +615,13 @@ current-window prefix. Checkpoints finalize it; cold resume authenticates that
 prefix once and rebuilds it. Completed ranges use explicit subtree commitments,
 and the cursor stores no library hasher state. This bookkeeping does not waive
 the trailer or whole-pack identity checks in §§7–8.
+
+A streamed or windowed verifier additionally follows §6.1: canonical entry
+bytes it surfaces are provisional until final acceptance, and the host is
+responsible for retaining or reproducing any canonical bytes the verifier may
+re-request for delta-base resolution or evidence. Retention obligations are
+exact and acknowledged; provisional bytes must never reach an object store or
+publication path before the terminal acceptance step.
 
 ---
 

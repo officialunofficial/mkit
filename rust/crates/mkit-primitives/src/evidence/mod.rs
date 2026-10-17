@@ -55,6 +55,10 @@ pub enum PageKind {
     Dependencies,
     /// Closure traversal frontier and obligations.
     Closure,
+    /// Immutable head-candidate facts.
+    Heads,
+    /// Ordered distinct-object identities in first-occurrence order.
+    Ordinals,
 }
 /// Expected identity and bounds of a retained page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

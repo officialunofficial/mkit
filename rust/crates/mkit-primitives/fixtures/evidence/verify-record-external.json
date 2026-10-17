@@ -1,0 +1,12 @@
+{
+  "blake3": "f5b8682f3c9464ec4b35e3545d9af519c2fd7029fd7abfc06973bbae3672a655",
+  "canonical_len": 5,
+  "consumed_ordinal": 4,
+  "description": "External delta-base fact consumed at ordinal 4.",
+  "encoded_bytes": 289,
+  "expected": "DependencyRecord::External",
+  "format_version": 1,
+  "held": false,
+  "kind": "blob",
+  "published": true
+}

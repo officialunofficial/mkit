@@ -1,0 +1,16 @@
+{
+  "blake3": "c5ed52251aa7cdbb43d8ec7af03b33d104accc8869adcd915dc3309308c82358",
+  "canonical_len": 87,
+  "description": "Tree occurrence record at frame 12, first owning occurrence.",
+  "encoded_bytes": 179,
+  "expected": "OccurrenceRecord",
+  "ext_count": 0,
+  "first": true,
+  "format_version": 1,
+  "frame_len": 40,
+  "frame_offset": 12,
+  "from_delta": false,
+  "kind": "tree",
+  "signature": "none",
+  "wire_type": 0
+}
