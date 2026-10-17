@@ -7,6 +7,8 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
 use buffa::Message;
 use mkit_core::hash::{hash, to_hex, to_hex_bytes};
 use mkit_core::object::{Commit, Identity, Object, Tree};
@@ -16,7 +18,7 @@ use mkit_core::sign::{KeyPair, sign_commit};
 use mkit_core::write_auth::{Context, Operation};
 use mkit_transport_connect::generated::{
     AdvanceRefsRequest, AdvanceRefsResponse, BeginUploadRequest, BeginUploadResponse,
-    UploadPackResponse,
+    PendingVerification, UploadPackResponse,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -24,7 +26,7 @@ use serde_json::{Value, json};
 use crate::control::{Observation, ObservationQuery, QuotaQuery, ReplayIdentity, Request};
 use crate::controlled::ControlClient;
 use crate::wire::cases::{Exp, advance_req, upload_msgs};
-use crate::wire::client::{Client, Rpc, frames};
+use crate::wire::client::{Client, Rpc, RpcError, frames};
 use crate::wire::sign::{Envelope, SignedOp, Signer, body_commitment, pack_commitment};
 use crate::wire::{Feature, WireAuth, WireTarget};
 
@@ -353,7 +355,7 @@ impl Session {
             .ok_or_else(|| "atomic observation missing".into())
     }
 
-    async fn advance(&self, request: &SignedRequest) -> Result<i32, String> {
+    async fn advance(&self, request: &SignedRequest) -> Result<AdvanceRefsResponse, String> {
         // Pending verification is permission, not a decision difference. Retry
         // exactly the original signed identity within one bounded window.
         tokio::time::timeout(Duration::from_secs(45), async {
@@ -367,9 +369,9 @@ impl Session {
                     )
                     .await?
                 {
-                    Ok(reply) => return Ok(reply.outcome.map_or(0, |v| v.to_i32())),
+                    Ok(reply) => return Ok(reply),
                     Err(error) if error.code == "unavailable" => {
-                        tokio::time::sleep(Duration::from_millis(100)).await
+                        tokio::time::sleep(retry_delay(&error)?).await;
                     }
                     Err(error) => return Err(format!("advance refused: {}", error.code)),
                 }
@@ -504,7 +506,8 @@ impl Session {
             accepted,
             before,
         } = self.fixture().await?;
-        let outcome = self.advance(&accepted).await?;
+        let answer = self.advance(&accepted).await?;
+        let outcome = answer.outcome.map_or(0, |value| value.to_i32());
         if outcome != 1 {
             return Err(format!("expected acceptance, got outcome {outcome}"));
         }
@@ -522,11 +525,12 @@ impl Session {
         let mut trace = BTreeMap::new();
         trace.insert(CASES[0].into(), json!({"outcome": outcome, "before": normalize(&before, &accepted.fingerprint)?, "after": normalized, "oracle_error": acceptance_error}));
         let replay = self.advance(&accepted).await?;
+        validate_replay_answer(&answer, &replay)?;
         let replay_snapshot = self.snapshot(&query).await?;
-        if replay != outcome || replay_snapshot != snapshot {
+        if replay_snapshot != snapshot {
             return Err("replay changed the saved answer or acceptance effects".into());
         }
-        trace.insert(CASES[1].into(), json!({"outcome": replay, "observation": normalize(&replay_snapshot, &accepted.fingerprint)?}));
+        trace.insert(CASES[1].into(), json!({"outcome": outcome, "observation": normalize(&replay_snapshot, &accepted.fingerprint)?}));
         let conflict = self.unary(
             Rpc::AdvanceRefs,
             &advance_req(
@@ -535,7 +539,8 @@ impl Session {
             ),
             "stale-pair",
         )?;
-        let outcome = self.advance(&conflict).await?;
+        let answer = self.advance(&conflict).await?;
+        let outcome = answer.outcome.map_or(0, |value| value.to_i32());
         if outcome != 2 {
             return Err(format!("expected head conflict, got outcome {outcome}"));
         }
@@ -548,6 +553,11 @@ impl Session {
             || after_conflict.replay != snapshot.replay
         {
             return Err("paired CAS conflict changed accepted effects".into());
+        }
+        let conflict_replay = self.advance(&conflict).await?;
+        validate_replay_answer(&answer, &conflict_replay)?;
+        if self.snapshot(&query).await? != after_conflict {
+            return Err("replayed CAS conflict changed authoritative state or quota".into());
         }
         trace.insert(CASES[2].into(), json!({"outcome": outcome, "observation": normalize(&after_conflict, &accepted.fingerprint)?}));
         let mut bad = self.unary(Rpc::AdvanceRefs, &request, "bad-signature")?;
@@ -570,6 +580,18 @@ impl Session {
         );
         Ok(trace)
     }
+}
+
+fn validate_replay_answer(
+    original: &AdvanceRefsResponse,
+    replay: &AdvanceRefsResponse,
+) -> Result<(), String> {
+    // Receipts contain server-specific identities and signatures, so compare
+    // them exactly within each target before omitting them across targets.
+    if original != replay {
+        return Err("replay changed the original wire answer, including its receipt".into());
+    }
+    Ok(())
 }
 
 fn validate_accepted(
@@ -621,6 +643,29 @@ fn normalize(snapshot: &Observation, fingerprint: &str) -> Result<Value, String>
         replay.fingerprint = Some("accepted-pair".into());
     }
     serde_json::to_value(snapshot).map_err(|e| e.to_string())
+}
+
+fn retry_delay(error: &RpcError) -> Result<Duration, String> {
+    let pending: Vec<_> = error
+        .details
+        .iter()
+        .filter(|(name, _)| name == "mkit.transport.v1.PendingVerification")
+        .collect();
+    if pending.is_empty() {
+        return Ok(Duration::from_secs(1));
+    }
+    if pending.len() != 1 || error.details.len() != 1 {
+        return Err("pending verification requires exactly one typed detail".into());
+    }
+    let bytes = STANDARD
+        .decode(&pending[0].1)
+        .or_else(|_| STANDARD_NO_PAD.decode(&pending[0].1))
+        .map_err(|_| "invalid pending verification detail encoding")?;
+    let hint = PendingVerification::decode_from_slice(&bytes)
+        .map_err(|_| "invalid pending verification detail")?;
+    Ok(Duration::from_millis(u64::from(
+        hint.retry_after_ms.unwrap_or(0).clamp(1_000, 60_000),
+    )))
 }
 
 fn canonical_pack() -> Result<(Vec<u8>, [u8; 32]), String> {
@@ -746,6 +791,68 @@ mod tests {
             normalize(&snapshot, "expected").unwrap()["replay"]["fingerprint"],
             "accepted-pair"
         );
+    }
+
+    #[test]
+    fn pending_verification_poll_interval_obeys_typed_hint_and_bounds() {
+        for (hint, expected) in [
+            (None, 1_000),
+            (Some(0), 1_000),
+            (Some(500), 1_000),
+            (Some(3_000), 3_000),
+            (Some(70_000), 60_000),
+        ] {
+            let detail = PendingVerification {
+                retry_after_ms: hint,
+                ..Default::default()
+            };
+            let error = RpcError {
+                code: "unavailable".into(),
+                http_status: 503,
+                details: vec![(
+                    "mkit.transport.v1.PendingVerification".into(),
+                    STANDARD_NO_PAD.encode(detail.encode_to_vec()),
+                )],
+                message: String::new(),
+            };
+            assert_eq!(
+                retry_delay(&error).unwrap(),
+                Duration::from_millis(expected)
+            );
+        }
+        let mut error = RpcError {
+            code: "unavailable".into(),
+            http_status: 503,
+            details: vec![],
+            message: String::new(),
+        };
+        assert_eq!(retry_delay(&error).unwrap(), Duration::from_secs(1));
+        error.details.push((
+            "mkit.transport.v1.PendingVerification".into(),
+            "malformed!".into(),
+        ));
+        assert!(retry_delay(&error).is_err());
+        error.details[0].1 = STANDARD.encode([0xff]);
+        assert!(retry_delay(&error).is_err());
+    }
+
+    #[test]
+    fn replay_must_preserve_receipt_and_outcome_exactly() {
+        let answer = AdvanceRefsResponse {
+            receipt: Some(vec![1, 2, 3]),
+            ..Default::default()
+        };
+        assert!(validate_replay_answer(&answer, &answer).is_ok());
+        let mut changed = answer.clone();
+        changed.receipt = Some(vec![1, 2, 4]);
+        assert!(validate_replay_answer(&answer, &changed).is_err());
+        changed.receipt = None;
+        assert!(validate_replay_answer(&answer, &changed).is_err());
+        changed = answer.clone();
+        changed.outcome = Some(
+            mkit_transport_connect::generated::AdvanceOutcome::ADVANCE_OUTCOME_HEAD_CONFLICT.into(),
+        );
+        assert!(validate_replay_answer(&answer, &changed).is_err());
     }
 
     #[test]

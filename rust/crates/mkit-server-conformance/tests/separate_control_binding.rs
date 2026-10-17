@@ -10,13 +10,14 @@ use mkit_server_conformance::{control, controlled};
 
 #[tokio::test]
 async fn controlled_cases_keep_transport_requests_on_the_transport_origin() {
-    let host = ControlledHost::start(Profile::new(WireAuth::AuthV2 {
+    let mut profile = Profile::new(WireAuth::AuthV2 {
         audience: "http://placeholder.invalid".into(),
         repository: "default".into(),
         seed: [0x52; 32],
-    }))
-    .await
-    .unwrap();
+    });
+    profile.atomic_advance = true;
+    profile.derive_features();
+    let host = ControlledHost::start(profile).await.unwrap();
     let origin = Arc::new(host.base_url().to_owned());
     let proxy = axum::Router::new()
         .route(control::CAPABILITIES_PATH, axum::routing::any(forward))
@@ -50,13 +51,13 @@ async fn forward(
     request: axum::extract::Request,
 ) -> axum::response::Response {
     let (parts, body) = request.into_parts();
-    let body = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
+    let body = axum::body::to_bytes(body, 1024 * 1024).await.expect("read proxy request");
     let reply = reqwest::Client::new()
         .request(parts.method, format!("{origin}{}", parts.uri))
         .headers(parts.headers)
         .body(body)
         .send()
         .await
-        .unwrap();
-    (reply.status(), reply.bytes().await.unwrap()).into_response()
+        .expect("forward proxy request");
+    (reply.status(), reply.bytes().await.expect("read proxy response")).into_response()
 }

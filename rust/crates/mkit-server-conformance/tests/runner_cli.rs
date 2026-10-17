@@ -16,10 +16,10 @@ async fn invoke(args: Vec<String>) -> std::process::Output {
         std::process::Command::new(env!("CARGO_BIN_EXE_mkit-server-conformance"))
             .args(args)
             .output()
-            .unwrap()
+            .expect("execute conformance runner")
     })
     .await
-    .unwrap()
+    .expect("join conformance runner")
 }
 
 #[tokio::test]

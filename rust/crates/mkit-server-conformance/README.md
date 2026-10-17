@@ -6,9 +6,10 @@ are private to its test binding.
 
 - **Tier 1: wire.** Ordinary transport HTTP requests, a base URL, and a declared
   wire profile. No server control is required.
-- **Tier 2: server control.** The same URL and profile plus the version 1
-  test-only binding below. Cases combine wire operations with controlled
-  restart, authority changes, barriers, and atomic observations.
+- **Tier 2: server control.** The wire URL and profile plus the version 1
+  test-only HTTP binding below, at the same or a separate origin. Cases combine
+  wire operations with controlled restart, authority changes, barriers, and atomic
+  observations.
 - **Optional storage SPI suite.** Enable `storage-spi` to implement
   `storage::KvHarness` and invoke `storage_suite!`. This tests the reference
   server's storage API; other implementations do not have to implement it.
@@ -74,6 +75,12 @@ mkit-server-conformance run --base-url http://127.0.0.1:8080 \
   --control-url http://127.0.0.1:8081 --profile conformance.toml
 ```
 
+Copy the packaged [example runner profile](fixtures/runner.toml) to
+**conformance.toml**. Edit its origin, repository, limits, features, controls, and
+known gaps to match your disposable server, and set `CONFORMANCE_SIGNER_SEED` to
+a 64-character hex test seed. Installing the binary does not copy fixture files
+into your working directory.
+
 The version 1 runner profile contains the existing wire profile under `[wire]`
 and test-control declarations under `[control]`. These declarations describe an
 already isolated test host; they never enable production routes.
@@ -88,7 +95,7 @@ repository = "default"
 signer_seed_env = "CONFORMANCE_SIGNER_SEED"
 atomic_advance = true
 run_id = "standalone"
-features = ["tickets", "authority-fencing", "-authority-setter", "-fork"]
+features = ["tickets", "-authority-fencing", "-authority-setter", "-fork"]
 relay_lag_bound_ms = 0
 
 [control]
@@ -122,8 +129,10 @@ supports its declared test profile; unsupported profiles fail setup explicitly.
 Normalization excludes allocated server identifiers, timing fields, and
 `Retry-After` values. Refusal comparison uses protocol error codes. Replay
 fingerprints are first checked against each exact signed operation, including
-its target audience, then normalized to that operation's logical role. Atomic
-snapshots retain ref pairs, ticket and reservation order, membership, terminal
+its target audience, then normalized to that operation's logical role. Each
+server must replay its original receipt bytes. Receipt issuance, signatures, and
+statement fields are outside these differential fixtures; they require separate
+receipt conformance coverage. Atomic snapshots retain ref pairs, ticket and reservation order, membership, terminal
 result multiplicity, and quota counters. The report names each differing field.
 Two failed executions never count as passing equivalence.
 

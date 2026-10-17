@@ -153,8 +153,7 @@ impl JsonReport {
     }
 }
 
-/// Redact configured authentication material from a rendered diagnostic or JSON.
-/// This also covers a failing target reflecting a request's bearer header.
+/// Redact configured authentication material from one untrusted text value.
 #[must_use]
 pub fn redact(mut text: String, auth: &crate::wire::WireAuth) -> String {
     let secret = match auth {
@@ -163,14 +162,51 @@ pub fn redact(mut text: String, auth: &crate::wire::WireAuth) -> String {
         crate::wire::WireAuth::AuthV2 { seed, .. } => mkit_core::hash::to_hex_bytes(seed),
     };
     if !secret.is_empty() {
-        let escaped = serde_json::to_string(&secret).expect("string serialization");
-        text = text.replace(&escaped[1..escaped.len() - 1], "[REDACTED]");
         text = text.replace(&secret, "[REDACTED]");
         if matches!(auth, crate::wire::WireAuth::AuthV2 { .. }) {
             text = text.replace(&secret.to_uppercase(), "[REDACTED]");
         }
     }
     text
+}
+
+/// Redact only diagnostic contents, preserving case names and verdict variants.
+#[must_use]
+pub fn redact_report(report: &Report, auth: &crate::wire::WireAuth) -> Report {
+    let mut sanitized = report.clone();
+    for line in &mut sanitized.preamble {
+        *line = redact(std::mem::take(line), auth);
+    }
+    for case in &mut sanitized.cases {
+        let detail = match &mut case.verdict {
+            Verdict::Pass(note) => note.as_mut(),
+            Verdict::Fail(reason) | Verdict::Skip(reason) => Some(reason),
+            Verdict::NotApplicable(_) => None,
+        };
+        if let Some(detail) = detail {
+            *detail = redact(std::mem::take(detail), auth);
+        }
+    }
+    sanitized
+}
+
+/// Redact JSON string values recursively, preserving keys, numbers and booleans.
+/// Call only on untrusted diagnostic values, never on report schema fields.
+pub fn redact_value(value: &mut serde_json::Value, auth: &crate::wire::WireAuth) {
+    match value {
+        serde_json::Value::String(text) => *text = redact(std::mem::take(text), auth),
+        serde_json::Value::Array(values) => {
+            for value in values {
+                redact_value(value, auth);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values_mut() {
+                redact_value(value, auth);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Execute selected Tier-1 and Tier-2 suites using separate HTTP bindings.
@@ -215,6 +251,10 @@ mod tests {
 
     #[test]
     fn strict_profiles_do_not_echo_secrets_in_errors() {
+        let sample = RunnerProfile::from_toml(include_str!("../fixtures/runner.toml")).unwrap();
+        assert_eq!(sample.version, 1);
+        assert_eq!(sample.control.controls.len(), 3);
+        assert!(sample.wire.build(|_| Some("11".repeat(32))).is_ok());
         let error =
             RunnerProfile::from_toml("version=1\nsecret='private-value'\n[wire]").unwrap_err();
         assert!(!error.contains("private-value"));
@@ -261,18 +301,60 @@ mod tests {
     }
 
     #[test]
-    fn reflected_credentials_are_redacted_in_text_and_json() {
-        let auth = crate::wire::WireAuth::Bearer {
-            token: "private\"value".into(),
-        };
-        let raw = "reflected private\"value".to_owned();
-        assert_eq!(redact(raw.clone(), &auth), "reflected [REDACTED]");
-        let json = serde_json::to_string(&raw).unwrap();
-        let redacted = redact(json, &auth);
-        assert_eq!(
-            serde_json::from_str::<String>(&redacted).unwrap(),
-            "reflected [REDACTED]"
-        );
+    fn short_credentials_preserve_json_schema_and_tap_markers() {
+        for secret in [
+            "true",
+            "version",
+            "ok",
+            "pass",
+            "a",
+            "fork",
+            "tickets",
+            "private\"value",
+        ] {
+            let auth = crate::wire::WireAuth::Bearer {
+                token: secret.into(),
+            };
+            let report = Report {
+                preamble: vec![format!("reflected {secret}")],
+                cases: vec![
+                    CaseReport {
+                        name: "pass.version",
+                        verdict: Verdict::Pass(Some(format!("reflected {secret}"))),
+                    },
+                    CaseReport {
+                        name: "absent.feature",
+                        verdict: Verdict::NotApplicable(secret.into()),
+                    },
+                ],
+            };
+            let sanitized = redact_report(&report, &auth);
+            let json = serde_json::to_string(&JsonReport::from_report(&sanitized)).unwrap();
+            let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(value["version"], 1);
+            assert_eq!(value["passed"], true);
+            assert_eq!(value["cases"][0]["name"], "pass.version");
+            assert_eq!(value["cases"][0]["status"], "pass");
+            assert_eq!(value["cases"][0]["detail"], "reflected [REDACTED]");
+            assert_eq!(value["cases"][1]["status"], "not_applicable");
+            assert_eq!(value["cases"][1]["detail"], secret);
+            assert!(
+                sanitized
+                    .tap()
+                    .contains("ok 1 - pass.version # reflected [REDACTED]")
+            );
+            assert!(
+                sanitized
+                    .tap()
+                    .contains("# pass 1 fail 0 skip 0 not-applicable 1")
+            );
+            let mut diagnostic = serde_json::json!({"version": [secret, true, 1]});
+            redact_value(&mut diagnostic, &auth);
+            assert_eq!(
+                diagnostic,
+                serde_json::json!({"version": ["[REDACTED]", true, 1]})
+            );
+        }
     }
 
     #[test]

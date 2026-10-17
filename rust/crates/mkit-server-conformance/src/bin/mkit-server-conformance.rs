@@ -367,20 +367,15 @@ fn standalone_run(args: &RunArgs) -> Result<bool, String> {
             args.filter.as_deref(),
         ))
         .map_err(|error| mkit_server_conformance::runner::redact(error, &target.profile.auth))?;
+    let report = mkit_server_conformance::runner::redact_report(&report, &target.profile.auth);
     match args.format {
-        Format::Tap => print!(
-            "{}",
-            mkit_server_conformance::runner::redact(report.tap(), &target.profile.auth)
-        ),
+        Format::Tap => print!("{}", report.tap()),
         Format::Json => println!(
             "{}",
-            mkit_server_conformance::runner::redact(
-                serde_json::to_string_pretty(
-                    &mkit_server_conformance::runner::JsonReport::from_report(&report)
-                )
-                .map_err(|_| "JSON report serialization failed")?,
-                &target.profile.auth,
+            serde_json::to_string_pretty(
+                &mkit_server_conformance::runner::JsonReport::from_report(&report)
             )
+            .map_err(|_| "JSON report serialization failed")?
         ),
     }
     Ok(!report.failed())
@@ -413,14 +408,21 @@ fn standalone_diff(args: &TargetArgs) -> Result<bool, String> {
             };
             let result = differential::run(&left, &right).await;
             host.shutdown().await;
-            let report = result?;
+            let mut report = result?;
+            for case in &mut report.cases {
+                if let Some(reason) = &mut case.reason {
+                    *reason =
+                        mkit_server_conformance::runner::redact(std::mem::take(reason), &auth);
+                }
+                for difference in &mut case.differences {
+                    mkit_server_conformance::runner::redact_value(&mut difference.left, &auth);
+                    mkit_server_conformance::runner::redact_value(&mut difference.right, &auth);
+                }
+            }
             println!(
                 "{}",
-                mkit_server_conformance::runner::redact(
-                    serde_json::to_string_pretty(&report)
-                        .map_err(|_| "JSON diff serialization failed")?,
-                    &auth,
-                )
+                serde_json::to_string_pretty(&report)
+                    .map_err(|_| "JSON diff serialization failed")?
             );
             Ok(!report.failed())
         })
