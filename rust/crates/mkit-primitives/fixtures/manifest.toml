@@ -30,6 +30,13 @@ decoder = "evidence::checkpoint::Checkpoint::from_bytes"
 fuzz_target = "checkpoint"
 spec = "SPEC-PRIMITIVE-EVIDENCE"
 
+[[formats]]
+type = "verify-checkpoint"
+format_version = 2
+decoder = "evidence::checkpoint::Checkpoint::from_bytes"
+fuzz_target = "checkpoint"
+spec = "SPEC-PRIMITIVE-EVIDENCE"
+
 [[fixtures]]
 type = "AcceptanceEvidence"
 format_version = 1
@@ -889,6 +896,19 @@ semantic = "evidence/checkpoint-complete.json"
 semantic_sha256 = "e700621a5049b9fe2d53c480863fd1171840fab31cf44605684edd683b2cc3c5"
 
 [[fixtures]]
+type = "verify-checkpoint"
+format_version = 2
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-checkpoint"
+expected = "Checkpoint"
+spec = "SPEC-PRIMITIVE-EVIDENCE checkpoint envelope"
+path = "evidence/checkpoint-verify.bin"
+sha256 = "6249432dcd84699ffd1c33b50ad2d61f72d3b5bc1c023de1914ea165e6f8206e"
+semantic = "evidence/checkpoint-verify.json"
+semantic_sha256 = "9a5474ab4c71dec9f6a28630313440e5bcd80b7191ba250a0e85d0309f572d93"
+
+[[fixtures]]
 type = "evidence-page"
 format_version = 1
 ruleset = 1
@@ -1403,7 +1423,7 @@ spec = "README.md stable failure codes"
 [[formats]]
 type = "verify-record"
 format_version = 1
-decoder = "pack_verify::verify::records"
+decoder = "pack_verify::verify::records::{ObjectRecord,OccurrenceRecord,OrdinalRecord,DependencyRecord,HeadRecord}::from_bytes"
 fuzz_target = "verify"
 spec = "SPEC-PRIMITIVE-EVIDENCE"
 

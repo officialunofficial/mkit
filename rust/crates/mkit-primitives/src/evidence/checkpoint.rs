@@ -382,7 +382,7 @@ fn validate_verify(m: &CheckpointMeta, verify: &VerifyCheckpoint) -> Result<(), 
         || verify.ordinals.count > m.ordinal
         || verify.delta_entries > m.ordinal
         || verify.heads.count > verify.ordinals.count
-        || verify.dependencies.count > verify.edges + verify.external_lookups
+        || verify.dependencies.count > verify.edges.saturating_add(verify.external_lookups)
         || verify.decoded > m.limits.decoded_bytes
         || verify.decoded > m.profile.decoded_bytes
         || verify.edges > m.limits.dependency_edges
@@ -1119,6 +1119,54 @@ mod tests {
                 _ => panic!("unexpected core window transition"),
             }
         }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    fn frozen_v2_verify_state_decodes_index_checkpoints() {
+        let bytes = include_bytes!("../../fixtures/evidence/checkpoint-verify.bin");
+        let limits = VerifyLimits::indexed();
+        let checkpoint = Checkpoint::from_bytes(bytes, limits).unwrap();
+        let state = checkpoint.decode(limits).unwrap();
+        let reencoded = encode(
+            &CheckpointView {
+                meta: state.meta,
+                integrity: state.integrity.as_ref().map(IntegrityState::view),
+                cursor: &state.cursor,
+                verify: state.verify,
+            },
+            limits,
+        )
+        .unwrap();
+        assert_eq!(reencoded.bytes(), bytes);
+        assert_eq!(state.meta.generation, 17);
+        assert_eq!(state.meta.phase, CheckpointPhase::Decode);
+        assert_eq!(state.meta.header, Some((1, 2)));
+        assert_eq!(
+            (
+                state.meta.source.len,
+                state.meta.ordinal,
+                state.meta.payload
+            ),
+            (83, 1, 15)
+        );
+        assert_eq!(state.meta.retention_count, 9);
+        assert_eq!(state.meta.usage.evidence_pages, 9);
+        assert_eq!(state.meta.usage.evidence_bytes, 1556);
+        let page = state.meta.last_retained.unwrap();
+        assert_eq!(
+            (page.kind, page.len, page.items),
+            (PageKind::Ordinals, 201, 1)
+        );
+        let verify = state.verify.expect("v2 checkpoint carries verify state");
+        assert_eq!(verify.objects.count, verify.ordinals.count);
+        assert!(verify.occurrences.count == 1);
+        assert_eq!(verify.delta_entries, 0);
+        assert_eq!(verify.decoded, 15);
+        assert_eq!(verify.edges, 0);
+        assert_eq!(verify.external_lookups, 0);
+        assert!(verify.signature_failure.is_none());
+        assert!(!state.cursor.is_empty());
     }
 
     #[cfg_attr(not(target_arch = "wasm32"), test)]
