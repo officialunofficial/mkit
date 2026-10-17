@@ -13,8 +13,7 @@
 //! Set lists are strictly ascending; the queue keeps pop order.
 
 use super::{
-    BaseCursor, FLAG_BOUNDARY_SEEN, PairCheckpointCfg, PairResume,
-    PairWalker, ResultingPair,
+    BaseCursor, FLAG_BOUNDARY_SEEN, PairCheckpointCfg, PairResume, PairWalker, ResultingPair,
 };
 use crate::{
     error::{BoundedDetail, Failure, FailureCode, Location},
@@ -55,7 +54,8 @@ fn put_ids(out: &mut Vec<u8>, ids: &[Hash]) {
 
 pub(super) fn encode(walker: &PairWalker) -> Result<Vec<u8>, Failure> {
     let mut out = Vec::new();
-    out.try_reserve(256).map_err(|_| failure(FailureCode::ResourceLimit))?;
+    out.try_reserve(256)
+        .map_err(|_| failure(FailureCode::ResourceLimit))?;
     out.push(VERSION);
     out.extend_from_slice(&walker.repository.0);
     out.extend_from_slice(&walker.view.0);
@@ -131,10 +131,7 @@ struct Cursor<'a> {
 }
 impl<'a> Cursor<'a> {
     fn take(&mut self, n: usize) -> Result<&'a [u8], Failure> {
-        let end = self
-            .position
-            .checked_add(n)
-            .ok_or_else(invalid)?;
+        let end = self.position.checked_add(n).ok_or_else(invalid)?;
         let slice = self.bytes.get(self.position..end).ok_or_else(invalid)?;
         self.position = end;
         Ok(slice)
@@ -267,11 +264,7 @@ fn parse(bytes: &[u8], cfg: PairCheckpointCfg) -> Result<Parsed, Failure> {
 }
 
 /// Phase, cursors, and counted lists after the fixed-width header.
-fn body_of(
-    input: &mut Cursor<'_>,
-    limits: super::PairLimits,
-    len: usize,
-) -> Result<Body, Failure> {
+fn body_of(input: &mut Cursor<'_>, limits: super::PairLimits, len: usize) -> Result<Body, Failure> {
     let phase = input.byte()?;
     if phase > PHASE_BASE {
         return Err(invalid());

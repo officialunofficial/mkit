@@ -70,15 +70,18 @@ impl Host {
             } => PairResponse::Object {
                 request,
                 object,
-                value: self.objects.get(&object).map_or(Acquisition::Absent, |fact| {
-                    Acquisition::Present(ObjectFact {
-                        pack: fact.0,
-                        kind: fact.1,
-                        children: leak(&fact.2),
-                        suppliers: leak(&fact.3),
-                        base: fact.4,
-                    })
-                }),
+                value: self
+                    .objects
+                    .get(&object)
+                    .map_or(Acquisition::Absent, |fact| {
+                        Acquisition::Present(ObjectFact {
+                            pack: fact.0,
+                            kind: fact.1,
+                            children: leak(&fact.2),
+                            suppliers: leak(&fact.3),
+                            base: fact.4,
+                        })
+                    }),
             },
             PairRequest::Base {
                 request, object, ..
@@ -354,7 +357,10 @@ fn non_history_head_and_missing_object_refuse() {
         let mut walker = fresh(pair, &[]);
         assert_eq!(
             fail(&mut walker, &mut host),
-            (FailureCode::WrongKind, Some(PairCheck::Head { object: id(10) }))
+            (
+                FailureCode::WrongKind,
+                Some(PairCheck::Head { object: id(10) })
+            )
         );
     }
     let pair = ResultingPair {
@@ -386,10 +392,18 @@ fn cleared_head_is_still_requested_and_cleared_skips_walk() {
         host.nodes.insert(id(1), (None, vec![id(2)], true));
         host.objects.insert(
             id(10),
-            (id(2), ObjectType::Commit, vec![id(11), id(12)], vec![], None),
+            (
+                id(2),
+                ObjectType::Commit,
+                vec![id(11), id(12)],
+                vec![],
+                None,
+            ),
         );
-        host.objects
-            .insert(id(11), (id(2), ObjectType::Tree, vec![id(12)], vec![], None));
+        host.objects.insert(
+            id(11),
+            (id(2), ObjectType::Tree, vec![id(12)], vec![], None),
+        );
         host.objects
             .insert(id(12), (id(2), ObjectType::Blob, vec![], vec![], None));
         host.cleared = Some((vec![id(10), id(11)], vec![id(2), id(3)]));
@@ -410,10 +424,12 @@ fn cleared_head_is_still_requested_and_cleared_skips_walk() {
             assert_eq!(coverage.external_suppliers(), &[id(2), id(3)]);
         } else {
             assert_eq!(objects, vec![id(10), id(11), id(12)]);
-            assert!(!host
-                .log
-                .iter()
-                .any(|r| matches!(r, PairRequest::Boundary { .. })));
+            assert!(
+                !host
+                    .log
+                    .iter()
+                    .any(|r| matches!(r, PairRequest::Boundary { .. }))
+            );
             assert!(coverage.external_suppliers().is_empty());
         }
     }
@@ -463,7 +479,13 @@ fn base_hops_cap_and_external_supplier_rule() {
     host.nodes.insert(id(1), (None, vec![id(2)], false));
     host.objects.insert(
         id(10),
-        (id(2), ObjectType::Commit, vec![], vec![id(30)], Some(id(20))),
+        (
+            id(2),
+            ObjectType::Commit,
+            vec![],
+            vec![id(30)],
+            Some(id(20)),
+        ),
     );
     // 20 in the origin pack (not a supplier), 21 in pack 3 (supplier),
     // 22 back in the origin pack, 23 in pack 4 terminating.
@@ -520,8 +542,7 @@ fn base_hops_cap_and_external_supplier_rule() {
         max_delta_depth: 3,
         ..LIMITS
     };
-    let mut walker =
-        PairWalker::new(pair, &[], REPO, VIEW, RULESET, limits, true, 1).unwrap();
+    let mut walker = PairWalker::new(pair, &[], REPO, VIEW, RULESET, limits, true, 1).unwrap();
     let error = run(&mut walker, &mut host).unwrap_err();
     assert_eq!(error.code, FailureCode::DeltaChainTooDeep);
     assert_eq!(
@@ -566,7 +587,8 @@ fn chain_and_pack_bounds() {
         let mut host = Host::default();
         for i in 0..n {
             let prev = (i + 1 < n).then(|| id(u8::try_from(i).unwrap() + 2));
-            host.nodes.insert(id(u8::try_from(i).unwrap() + 1), (prev, vec![], false));
+            host.nodes
+                .insert(id(u8::try_from(i).unwrap() + 1), (prev, vec![], false));
         }
         let mut walker = fresh(pair(id(1)), &[]);
         assert_eq!(run(&mut walker, &mut host).is_ok(), ok, "chain {n}");
@@ -578,10 +600,8 @@ fn chain_and_pack_bounds() {
         }
     }
     let mut host = Host::default();
-    host.nodes.insert(
-        id(1),
-        (None, (10u8..27).map(id).collect(), false),
-    );
+    host.nodes
+        .insert(id(1), (None, (10u8..27).map(id).collect(), false));
     let mut walker = fresh(pair(id(1)), &[]);
     assert_eq!(
         run(&mut walker, &mut host).unwrap_err().code,
@@ -669,10 +689,7 @@ fn frontier_and_supplier_bounds() {
         walker.failure_context(),
         Some(PairCheck::Bound(PairBound::Suppliers))
     );
-    let limits = PairLimits {
-        work: 0,
-        ..LIMITS
-    };
+    let limits = PairLimits { work: 0, ..LIMITS };
     let mut walker = PairWalker::new(
         ResultingPair {
             head: None,
@@ -758,7 +775,10 @@ fn stale_unsolicited_duplicate_and_mismatched_responses_refuse() {
         FailureCode::UnavailableInput
     );
     assert!(walker.checkpoint().is_err());
-    assert_eq!(walker.step().unwrap_err().code, FailureCode::InvalidResponse);
+    assert_eq!(
+        walker.step().unwrap_err().code,
+        FailureCode::InvalidResponse
+    );
 }
 
 /// The same scripted pair, uninterrupted and checkpoint/resumed after every
@@ -832,34 +852,27 @@ fn checkpoint_and_resume_reproduce_the_uninterrupted_run() {
                 outcome = Some(done);
                 break;
             }
-                PairStep::Request(request) => {
-                    log.push(request.clone());
-                    let response = host.answer(request);
-                    walker.answer(response).unwrap();
-                    if resumes < 8
-                        && let Ok(bytes) = walker.checkpoint()
-                    {
-                        PairWalker::validate_checkpoint(&bytes, cfg()).unwrap();
-                        walker =
-                            PairWalker::resume(&bytes, cfg(), &expected, generation)
-                                .unwrap();
-                        generation += 1;
-                        resumes += 1;
-                    }
+            PairStep::Request(request) => {
+                log.push(request.clone());
+                let response = host.answer(request);
+                walker.answer(response).unwrap();
+                if resumes < 8
+                    && let Ok(bytes) = walker.checkpoint()
+                {
+                    PairWalker::validate_checkpoint(&bytes, cfg()).unwrap();
+                    walker = PairWalker::resume(&bytes, cfg(), &expected, generation).unwrap();
+                    generation += 1;
+                    resumes += 1;
                 }
+            }
         }
     }
-    let coverage = outcome.unwrap_or_else(|| {
-        panic!("resumed walk exceeded its transition bound")
-    });
+    let coverage = outcome.unwrap_or_else(|| panic!("resumed walk exceeded its transition bound"));
     let shapes: Vec<_> = log.iter().map(shape).collect();
     // The resumed run issues the same chain and walk requests; the boundary
     // load repeats once per resume that crosses it, exactly as the reference
     // resumable path reloads the cleared set per slice.
-    let core: Vec<_> = reference
-        .iter()
-        .filter(|s| s.0 != 1)
-        .collect();
+    let core: Vec<_> = reference.iter().filter(|s| s.0 != 1).collect();
     let resumed_log: Vec<_> = shapes.iter().filter(|s| s.0 != 1).collect();
     assert_eq!(resumed_log, core);
     assert!(
@@ -936,10 +949,7 @@ fn resume_refuses_every_expected_mismatch_and_corruption() {
             ..expected.clone()
         },
         PairResume {
-            limits: PairLimits {
-                chain: 9,
-                ..LIMITS
-            },
+            limits: PairLimits { chain: 9, ..LIMITS },
             ..expected.clone()
         },
         PairResume {
@@ -1033,10 +1043,8 @@ fn checkpoint_decode_refuses_corruption() {
     let mut rolled = snapshot;
     let mut host = Host::default();
     host.nodes.insert(id(1), (None, vec![id(3)], false));
-    host.objects.insert(
-        id(10),
-        (id(3), ObjectType::Commit, vec![], vec![], None),
-    );
+    host.objects
+        .insert(id(10), (id(3), ObjectType::Commit, vec![], vec![], None));
     assert!(run(&mut rolled, &mut host).is_ok());
 }
 
@@ -1121,7 +1129,13 @@ mod fixtures {
         host.nodes.insert(id(1), (None, vec![id(2)], false));
         host.objects.insert(
             id(10),
-            (id(2), ObjectType::Commit, vec![id(11), id(12)], vec![id(5)], None),
+            (
+                id(2),
+                ObjectType::Commit,
+                vec![id(11), id(12)],
+                vec![id(5)],
+                None,
+            ),
         );
         let mut walker = fresh(pair, &[id(1)]);
         for _ in 0..2 {
@@ -1145,7 +1159,8 @@ mod fixtures {
         out.insert("pair-base-cursor", bytes);
         // Boundary: cleared set applied; populated lists at their counts.
         let mut host = Host::default();
-        host.nodes.insert(id(1), (Some(id(2)), vec![id(3), id(4)], true));
+        host.nodes
+            .insert(id(1), (Some(id(2)), vec![id(3), id(4)], true));
         host.nodes.insert(id(2), (None, vec![id(4)], false));
         host.cleared = Some((vec![id(11)], vec![id(5), id(6)]));
         host.objects.insert(
@@ -1319,7 +1334,13 @@ fn seeded_dag_matches_independent_bfs_oracle() {
             let base = (next() % 5 == 0).then(|| id(50 + u8::try_from(next() % 4).unwrap()));
             host.objects.insert(
                 object,
-                (id(20 + u8::try_from(next() % 4).unwrap()), ObjectType::Commit, children.clone(), suppliers, base),
+                (
+                    id(20 + u8::try_from(next() % 4).unwrap()),
+                    ObjectType::Commit,
+                    children.clone(),
+                    suppliers,
+                    base,
+                ),
             );
             edges.push((object, children));
         }
@@ -1335,7 +1356,8 @@ fn seeded_dag_matches_independent_bfs_oracle() {
         }
         // Two-node chain listing all supplier packs.
         let packs: Vec<Hash> = (0..4).map(|n| id(20 + n)).collect();
-        host.nodes.insert(id(1), (Some(id(2)), packs.clone(), false));
+        host.nodes
+            .insert(id(1), (Some(id(2)), packs.clone(), false));
         host.nodes.insert(id(2), (None, vec![id(90)], false));
         let pair = ResultingPair {
             head: Some(id(1)),

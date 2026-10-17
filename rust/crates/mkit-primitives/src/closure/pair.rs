@@ -701,10 +701,7 @@ impl PairWalker {
         self.flags & FLAG_BOUNDARY_DONE != 0
     }
     fn boundary_ready(&self) -> bool {
-        self.next.is_none()
-            && self.boundary_seen()
-            && self.honor_cleared
-            && !self.boundary_done()
+        self.next.is_none() && self.boundary_seen() && self.honor_cleared && !self.boundary_done()
     }
     fn coverage(&self) -> PairCoverage {
         PairCoverage {
@@ -719,8 +716,12 @@ impl PairWalker {
     fn merge_cleared(&mut self) -> Result<(), Failure> {
         let suppliers = std::mem::take(&mut self.cleared_suppliers);
         for supplier in suppliers {
-            insert_sorted(&mut self.suppliers, supplier, u64::from(self.limits.suppliers))
-                .map_err(|error| self.bound(PairBound::Suppliers, error))?;
+            insert_sorted(
+                &mut self.suppliers,
+                supplier,
+                u64::from(self.limits.suppliers),
+            )
+            .map_err(|error| self.bound(PairBound::Suppliers, error))?;
         }
         Ok(())
     }
@@ -743,10 +744,7 @@ impl PairWalker {
         }
         if let Some(pack) = self.next {
             if self.chain.contains(&pack) {
-                return Err(self.fail(
-                    PairCheck::ChainRepeat { pack },
-                    FailureCode::PackmapCycle,
-                ));
+                return Err(self.fail(PairCheck::ChainRepeat { pack }, FailureCode::PackmapCycle));
             }
             let addition = self.additions.binary_search(&pack).is_ok();
             self.request = Some(PairRequest::PackmapNode {
@@ -866,8 +864,12 @@ impl PairWalker {
             .map_err(|error| self.bound(PairBound::Work, error))?;
         insert_sorted(&mut self.chain, pack, u64::from(self.limits.chain))
             .map_err(|error| self.bound(PairBound::Chain, error))?;
-        insert_sorted(&mut self.dependencies, pack, u64::from(self.limits.dependencies))
-            .map_err(|error| self.bound(PairBound::Dependencies, error))?;
+        insert_sorted(
+            &mut self.dependencies,
+            pack,
+            u64::from(self.limits.dependencies),
+        )
+        .map_err(|error| self.bound(PairBound::Dependencies, error))?;
         for listed in node.packs {
             insert_sorted(&mut self.packs, *listed, u64::from(self.limits.packs))
                 .map_err(|error| self.bound(PairBound::Packs, error))?;
@@ -950,10 +952,9 @@ impl PairWalker {
                 if self.visited.len() as u64 + self.queue.len() as u64
                     >= u64::from(self.limits.discovered)
                 {
-                    return Err(self.bound(
-                        PairBound::Discovered,
-                        failure(FailureCode::ResourceLimit),
-                    ));
+                    return Err(
+                        self.bound(PairBound::Discovered, failure(FailureCode::ResourceLimit))
+                    );
                 }
                 self.queue.try_reserve(1).map_err(|_| resource())?;
                 self.queue.push_back(*child);
@@ -1005,11 +1006,7 @@ impl PairWalker {
         self.request = None;
         Ok(())
     }
-    fn present<T>(
-        &mut self,
-        value: Acquisition<T>,
-        context: PairCheck,
-    ) -> Result<T, Failure> {
+    fn present<T>(&mut self, value: Acquisition<T>, context: PairCheck) -> Result<T, Failure> {
         match value {
             Acquisition::Present(value) => Ok(value),
             Acquisition::Absent => Err(self.fail(context, FailureCode::MissingClosure)),
