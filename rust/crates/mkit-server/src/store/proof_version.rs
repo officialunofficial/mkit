@@ -14,8 +14,5 @@ pub(crate) fn bump(batch: Batch, key: &Key) -> Batch {
 /// Repository-index partitions maintained by the sharded fork deployment.
 /// Single-partition writes keep their existing batches; they do not offer fork.
 pub(crate) fn index_partition(partition: &Partition) -> bool {
-    matches!(
-        partition,
-        Partition::RepoIndex { .. }
-    )
+    matches!(partition, Partition::RepoIndex { .. })
 }

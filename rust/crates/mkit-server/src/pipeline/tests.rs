@@ -707,7 +707,7 @@ fn golden_two_ticket_advance_batch_keys() {
             Write::Put(k, _) => writeln!(actual, "put {}", to_hex_bytes(k.as_bytes())).unwrap(),
             Write::Delete(k) => writeln!(actual, "delete {}", to_hex_bytes(k.as_bytes())).unwrap(),
             Write::Increment(k) => {
-                writeln!(actual, "increment {}", to_hex_bytes(k.as_bytes())).unwrap()
+                writeln!(actual, "increment {}", to_hex_bytes(k.as_bytes())).unwrap();
             }
         }
     }

@@ -221,8 +221,14 @@ pub(super) fn require_versioned_source<S>(
     source: &crate::RepoId,
 ) -> Result<(), ForkError> {
     let indices = env.shards.object_index_partitions(source);
-    if indices.is_empty() || indices.iter().any(|p| !matches!(p, Partition::RepoIndex { .. })) {
-        return Err(ForkError::Unavailable("fork source requires sharded repository indexes"));
+    if indices.is_empty()
+        || indices
+            .iter()
+            .any(|p| !matches!(p, Partition::RepoIndex { .. }))
+    {
+        return Err(ForkError::Unavailable(
+            "fork source requires sharded repository indexes",
+        ));
     }
     Ok(())
 }
@@ -724,7 +730,10 @@ mod evidence_tests {
         let store = MemoryKv::with_clock(clock.clone());
         let mut environment = env(&store, &clock);
         environment.shards = &crate::pipeline::SinglePartition;
-        assert!(matches!(require_versioned_source(&environment, &job().source().unwrap()), Err(ForkError::Unavailable(_))));
+        assert!(matches!(
+            require_versioned_source(&environment, &job().source().unwrap()),
+            Err(ForkError::Unavailable(_))
+        ));
     }
 
     #[test]

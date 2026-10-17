@@ -1205,7 +1205,8 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
         // A backend may reserve additional apply operations, so split its
         // direct groups again before adding the deadline and increment.
         for direct in plan.direct {
-            let overhead = 1 + usize::from(crate::store::proof_version::index_partition(&direct.target));
+            let overhead =
+                1 + usize::from(crate::store::proof_version::index_partition(&direct.target));
             let direct_puts = crate::store::MAX_BATCH_OPS
                 .checked_sub(store.capabilities().reserved_batch_ops)
                 .and_then(|ops| ops.checked_sub(overhead))
