@@ -43,7 +43,16 @@ impl Fixture {
             |_| {},
         );
         Ok(Self {
-            repository: probe.header("x-repository").into(),
+            repository: if ctx.profile().has(crate::wire::Feature::MultiRepo) {
+                let suffix = to_hex(&hash(ctx.ns().as_bytes()));
+                format!(
+                    "ed25519-{}/publication-{}",
+                    signer.public_key_hex(),
+                    &suffix[..16]
+                )
+            } else {
+                probe.header("x-repository").into()
+            },
             head: ctx.head("main"),
             packmap: ctx.packmap("main"),
             ctx,
@@ -213,6 +222,7 @@ impl Fixture {
         );
         request.head_new_id = None;
         request.packmap_new_id = None;
+        request.delete = Some(true);
         let signer = self.ctx.v2_signer("main")?;
         let op = sign_unary(&signer, Rpc::AdvanceRefs, &request, |env| {
             self.repository.clone_into(&mut env.repository)

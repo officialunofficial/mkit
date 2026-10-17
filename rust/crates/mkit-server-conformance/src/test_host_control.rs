@@ -310,7 +310,6 @@ impl HostState {
         if self.config.indexed.is_some() {
             controls.extend(
                 [
-                    "publication.combined",
                     "observe.publication",
                     "publication.eligibility",
                     "publication.drive",
@@ -322,7 +321,6 @@ impl HostState {
         } else {
             controls.push("fixture.opaque_refs".into());
             for name in [
-                "publication.combined",
                 "observe.publication",
                 "publication.eligibility",
                 "publication.drive",

@@ -56,10 +56,24 @@ async fn fixture(ctx: &Ctx, control: &ControlClient, gc: bool) -> Result<Fixture
         ),
         |_| {},
     );
-    let repository = probe.header("x-repository").to_owned();
+    let repository = if ctx.profile().has(crate::wire::Feature::MultiRepo) {
+        let suffix = to_hex(&hash(ctx.ns().as_bytes()));
+        format!(
+            "ed25519-{}/reliance-{}",
+            signer.public_key_hex(),
+            &suffix[..16]
+        )
+    } else {
+        probe.header("x-repository").to_owned()
+    };
     let prepared = control
         .command(&Request::PrepareReliance {
             query: RelianceFixtureQuery {
+                purpose: if gc {
+                    crate::control::ReliancePurpose::Gc
+                } else {
+                    crate::control::ReliancePurpose::Inspection
+                },
                 repository: repository.clone(),
                 head: head.clone(),
                 signer: signer.public_key_hex(),
@@ -122,7 +136,7 @@ async fn fixture(ctx: &Ctx, control: &ControlClient, gc: bool) -> Result<Fixture
                     bytes: Some(pack.len() as u64),
                     ..Default::default()
                 },
-                |_| {},
+                |env| repository.clone_into(&mut env.repository),
             );
             let response: BeginUploadResponse = want_ok(ctx.send(&open).await?, "reliance ticket")?;
             let Some(BeginResult::Ticket(ticket)) = response.result else {
@@ -133,7 +147,12 @@ async fn fixture(ctx: &Ctx, control: &ControlClient, gc: bool) -> Result<Fixture
             if let Some(UploadBody::Header(header)) = &mut messages[0].body {
                 header.ticket_token = ticket.token;
             }
-            let signed = signer.sign_pack(Rpc::UploadPack.procedure(), &pack_id, pack.len() as u64);
+            let mut envelope = signer.envelope(
+                Rpc::UploadPack.procedure(),
+                crate::wire::sign::pack_commitment(&pack_id, pack.len() as u64),
+            );
+            repository.clone_into(&mut envelope.repository);
+            let signed = signer.sign(&envelope);
             if let Some(error) = ctx.upload_with(&messages, &signed.headers).await? {
                 return Err(format!("reliance fixture upload: {error}").into());
             }
@@ -151,7 +170,9 @@ async fn fixture(ctx: &Ctx, control: &ControlClient, gc: bool) -> Result<Fixture
         (&ctx.packmap("reliance"), Exp::Missing, &candidate_map),
     );
     request.ticket_ids.clone_from(&tickets);
-    let operation = sign_unary(&signer, Rpc::AdvanceRefs, &request, |_| {});
+    let operation = sign_unary(&signer, Rpc::AdvanceRefs, &request, |env| {
+        repository.clone_into(&mut env.repository)
+    });
     let query = ObservationQuery {
         repository,
         head,

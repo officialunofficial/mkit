@@ -27,7 +27,7 @@ fn profile() -> Profile {
     });
     profile
         .features
-        .extend([Feature::Tickets, Feature::IndexedMode]);
+        .extend([Feature::MultiRepo, Feature::Tickets, Feature::IndexedMode]);
     profile.derive_features();
     profile
 }
@@ -45,6 +45,53 @@ async fn real_wire_publication_covers_recovery_prefix_deletion_and_combined_race
     assert_eq!(report.cases.len(), 5, "{}", report.tap());
     assert!(!report.failed(), "{}", report.tap());
     assert_eq!(report.passes().len(), 5, "{}", report.tap());
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn optional_removal_features_and_combined_publication_are_truthful() {
+    use mkit_server_conformance::wire::Verdict;
+    let host = ControlledHost::start(profile()).await.unwrap();
+    let mut declared = host.profile().clone();
+    declared.features.remove(&Feature::CombinedPublication);
+    let target = WireTarget {
+        base_url: host.base_url().parse().unwrap(),
+        profile: declared,
+    };
+    for filter in ["publication.combined_", "reliance."] {
+        let report = controlled::run(&target, &BTreeMap::new(), Some(filter)).await;
+        assert!(!report.cases.is_empty());
+        assert!(
+            report
+                .cases
+                .iter()
+                .all(|case| matches!(case.verdict, Verdict::NotApplicable(_))),
+            "{}",
+            report.tap()
+        );
+    }
+    let client = mkit_server_conformance::controlled::ControlClient::new(&target.base_url).unwrap();
+    let capabilities = client.capabilities().await.unwrap();
+    for capability in [
+        "reliance.fixture",
+        "reliance.observe",
+        "gc.prepare_drop",
+        "gc.commit_drop",
+        "inspection.hide_member",
+    ] {
+        assert!(capabilities.unsupported.contains_key(capability));
+        assert!(!capabilities.controls.iter().any(|name| name == capability));
+    }
+    assert!(
+        client
+            .command(&control::Request::CommitGcDrop {
+                repository: "not-a-repository".into(),
+                pack: "not-a-pack".into(),
+            })
+            .await
+            .unwrap_err()
+            .contains("HTTP 501")
+    );
     host.shutdown().await;
 }
 

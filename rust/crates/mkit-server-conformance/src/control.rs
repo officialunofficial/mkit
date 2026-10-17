@@ -285,10 +285,22 @@ pub struct PublicationObservation {
     pub published_memberships: Vec<bool>,
 }
 
+/// Reliance rule exercised by a disposable fixture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReliancePurpose {
+    /// Existing unrooted members with completed GC mark/wait history.
+    Gc,
+    /// An external delta whose base can receive an inspection serving stop.
+    Inspection,
+}
+
 /// Request an accepted base and a new, unpublished external-delta candidate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RelianceFixtureQuery {
+    /// Select required setup without inferring it from a branch name.
+    pub purpose: ReliancePurpose,
     /// Fresh repository identity owned by the fixture signer.
     pub repository: String,
     /// Candidate branch, initially absent.
@@ -300,8 +312,8 @@ pub struct RelianceFixtureQuery {
 /// Canonical candidate bytes relying on exactly one accepted external base.
 /// The binding establishes the base through a valid accepted operation; it
 /// MUST NOT accept the candidate or create the candidate branch. The base
-/// remains usable but has no independent root, pin, or hold forbidding the
-/// prepared GC drop, with required mark/wait history complete at the pinned
+/// remains usable. For `gc` fixtures it has no independent root, pin, or hold
+/// forbidding the prepared drop, with mark/wait history complete at the pinned
 /// clock; a real deletion may remove its original seeding ref. Fixture setup
 /// restores that clock and never fabricates an accepted candidate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
