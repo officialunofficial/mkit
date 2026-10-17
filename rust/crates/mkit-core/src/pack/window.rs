@@ -26,7 +26,7 @@ use crate::hash::Hash;
 use std::borrow::Cow;
 mod cursor;
 mod tree;
-pub use cursor::WindowCursor;
+pub use cursor::{WindowCursor, WindowCursorMetadata};
 use tree::Tree;
 
 /// A range which must be supplied in full to [`WindowReader::feed`].

@@ -1612,3 +1612,132 @@ fn concurrent_checkpoints_and_interrupted_initialization_match_prefix_bytes() {
     assert_eq!(reader.checkpoint().unwrap().to_bytes(), expected);
     assert_cursor_reference(&reader, &reader.checkpoint().unwrap());
 }
+
+#[test]
+fn cursor_metadata_matches_live_boundaries_and_roundtrips() {
+    for version in [1, 2] {
+        let pack = synthetic(
+            version,
+            &[
+                (0, vec![0x11; usize::try_from(WINDOW).unwrap() + 7]),
+                (0, vec![0x22; 9]),
+            ],
+        );
+        for expected in [None, Some(hash::hash(&pack))] {
+            let mut reader = WindowReader::new(
+                u64::try_from(pack.len()).unwrap(),
+                WINDOW,
+                DecodeLimits::default(),
+                expected,
+            )
+            .unwrap();
+            let mut ordinal = 0;
+            let mut payload = 0;
+            loop {
+                match reader.step().unwrap() {
+                    Step::NeedWindow(request) => feed_from(&mut reader, &pack, request),
+                    Step::Entry(entry) => {
+                        let PackEntry::Raw { bytes } = entry else {
+                            panic!("raw fixture")
+                        };
+                        ordinal += 1;
+                        payload += u64::try_from(bytes.len()).unwrap();
+                        let cursor = reader.checkpoint().unwrap();
+                        let encoded = cursor.to_bytes();
+                        let metadata = cursor.metadata().unwrap();
+                        assert_eq!(metadata.pack_len(), u64::try_from(pack.len()).unwrap());
+                        assert_eq!(metadata.window_size(), WINDOW);
+                        assert_eq!(metadata.position(), 12 + u64::from(ordinal) * 5 + payload);
+                        assert_eq!(metadata.payload_sum(), payload);
+                        assert_eq!(metadata.pack_version(), version);
+                        assert_eq!(metadata.entry_count(), 2);
+                        assert_eq!(metadata.entry_index(), ordinal);
+                        assert_eq!(metadata.expected_pack_id(), expected);
+                        assert_eq!(cursor.to_bytes(), encoded);
+                        let restored = WindowCursor::from_bytes(&encoded).unwrap();
+                        assert_eq!(restored.metadata().unwrap(), metadata);
+                        assert_eq!(restored.to_bytes(), encoded);
+                    }
+                    Step::Done(_) => {
+                        assert_eq!(ordinal, 2);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn cursor_metadata_reuses_geometry_and_frontier_validation() {
+    let pack = raw_pack(&[vec![0x11; 2 * usize::try_from(WINDOW).unwrap()]]);
+    let cursor = first_cursor(&pack, Some(hash::hash(&pack)));
+    let mutations: [fn(&mut WindowCursor); 9] = [
+        |state| state.pack_len = 0,
+        |state| state.window_size = 0,
+        |state| state.pos += 1,
+        |state| state.payload_sum += 1,
+        |state| state.version = 0,
+        |state| state.count = 0,
+        |state| state.index = state.count + 1,
+        |state| {
+            state.expected = None;
+            state.anchor = None;
+        },
+        |state| state.trailer_tree.stack.clear(),
+    ];
+    for mutate in mutations {
+        let mut inconsistent = cursor.clone();
+        mutate(&mut inconsistent);
+        assert!(matches!(
+            inconsistent.validate(),
+            Err(PackError::PackfileCorrupted)
+        ));
+        assert!(matches!(
+            inconsistent.metadata(),
+            Err(PackError::PackfileCorrupted)
+        ));
+    }
+}
+
+#[test]
+fn cursor_metadata_preserves_frozen_encoding() {
+    // Frozen from the existing public reader before metadata inspection existed.
+    let bytes = [
+        0x01, 0xbd, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x1f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x0c, 0xf2, 0xd3, 0xbf, 0x99,
+        0x8a, 0xa3, 0x7e, 0xd8, 0xc2, 0x48, 0x23, 0xff, 0xe7, 0x60, 0xae, 0x18, 0x42, 0xec, 0x66,
+        0xd0, 0xe7, 0xe6, 0x80, 0xc4, 0xb3, 0x34, 0x14, 0xe7, 0xb4, 0x05, 0xbb, 0x00, 0x01, 0xca,
+        0xb7, 0x45, 0x73, 0xaf, 0x17, 0x3b, 0x7c, 0x7c, 0x82, 0x30, 0x19, 0x87, 0x02, 0x6f, 0x1a,
+        0xee, 0x1c, 0xf5, 0x5c, 0x74, 0x6b, 0xc2, 0xa1, 0xdc, 0x40, 0x0b, 0x6d, 0x04, 0x65, 0x6e,
+        0x8e, 0x00, 0x00, 0x00, 0x00, 0xa8, 0x7a, 0x03, 0x51, 0x61, 0x00, 0x80, 0x3d, 0x46, 0x21,
+        0xff, 0xf5, 0xf2, 0xaf, 0xf5, 0xcb, 0xf7, 0xb8, 0x38, 0xb2, 0xf0, 0x69, 0x03, 0x08, 0xcc,
+        0xa7, 0xf1, 0xf5, 0x51, 0x38, 0xb5, 0x75,
+    ];
+    let cursor = WindowCursor::from_bytes(&bytes).unwrap();
+    let metadata = cursor.metadata().unwrap();
+    assert_eq!(metadata.pack_len(), 189);
+    assert_eq!(metadata.window_size(), 1 << 20);
+    assert_eq!(metadata.position(), 31);
+    assert_eq!(metadata.payload_sum(), 14);
+    assert_eq!(metadata.pack_version(), 1);
+    assert_eq!(metadata.entry_count(), 3);
+    assert_eq!(metadata.entry_index(), 1);
+    assert_eq!(
+        metadata.expected_pack_id(),
+        Some(
+            hash::from_hex("0cf2d3bf998aa37ed8c24823ffe760ae1842ec66d0e7e680c4b33414e7b405bb")
+                .unwrap()
+        )
+    );
+    assert_eq!(cursor.to_bytes(), bytes);
+    assert_eq!(
+        WindowCursor::from_bytes(&cursor.to_bytes())
+            .unwrap()
+            .metadata()
+            .unwrap(),
+        metadata
+    );
+}
