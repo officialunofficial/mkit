@@ -84,8 +84,9 @@ a different platform.
 Every nextest invocation in `ci.yaml` runs with `--no-fail-fast`, overriding the
 default profile's `fail-fast = true` (`rust/.config/nextest.toml`), so one
 failing test reports the run's complete failure set instead of cancelling it.
-Inside a step, each test command still runs after an earlier failure: failures
-are recorded and the step exits non-zero at the end. Timeouts, retries and
+Inside the `check` step, each command after the workspace build and TPM setup
+still runs after an earlier failure: failures are recorded and the step exits
+non-zero at the end. Timeouts, retries and
 test selection stay at the default profile's values &mdash; the `ci` profile's
 longer envelopes and retries are not used here.
 

@@ -147,7 +147,7 @@ steps:
         # breaks one of those two must not report a green CI run.
         export MKIT_TEST_STRICT=1
 
-        ( cd contrib/signers
+        ( cd contrib/signers || exit 1
           failed=0
           cargo fmt --check || failed=1
           cargo clippy --locked --all-targets --all-features -- -D warnings || failed=1
@@ -177,14 +177,14 @@ steps:
         # (predating #695) carries pre-existing fmt/clippy debt this issue
         # didn't introduce, and gating on it now would fail CI for unrelated
         # reasons. keys-worker has no such debt, so it gets the full sweep.
-        ( cd apps/repo-worker
+        ( cd apps/repo-worker || exit 1
           failed=0
           cargo fetch --locked || failed=1
           cargo test --locked --no-fail-fast || failed=1
           cargo build --locked --target wasm32-unknown-unknown || failed=1
           exit "$failed"
         ) || status=1
-        ( cd apps/keys-worker
+        ( cd apps/keys-worker || exit 1
           failed=0
           cargo fetch --locked || failed=1
           cargo fmt --check || failed=1
@@ -199,7 +199,7 @@ steps:
         # limit even alone. Smaller codegen units bound each LLVM module;
         # serial compilation reserves the remaining headroom for rustc.
         # Test selection and execution concurrency are unchanged.
-        ( cd rust
+        ( cd rust || exit 1
           failed=0
           cargo nextest run --locked --workspace --all-features --build-jobs 1 --no-fail-fast || failed=1
           # Indexed verification with one Extract step per slice (default chains).
@@ -247,7 +247,7 @@ steps:
         # the wasm32 graphs must stay free of C-toolchain crates, and the default `mkit` CLI must
         # stay server-free (docs/INVARIANTS.md). The triggers run on main
         # and PRs to main only (cloudbuild/README.md).
-        ( cd rust
+        ( cd rust || exit 1
           failed=0
           cargo build --locked -p mkit-client --target wasm32-unknown-unknown || failed=1
           cargo build --locked -p mkit-client --no-default-features --target wasm32-unknown-unknown || failed=1

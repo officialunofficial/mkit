@@ -93,6 +93,25 @@ class ServerGates(unittest.TestCase):
                     self.assertRegex(command, r"\|\| (failed|status)=1\s*$")
                     if "nextest run" in command:
                         self.assertIn("--no-fail-fast", command)
+                # Inside an aggregated subshell (between `failed=0` and its
+                # `exit "$failed"`), `set -e` is inert, so every command must
+                # record into `failed` — a dropped recorder would silently
+                # swallow that gate's failure.
+                aggregated = False
+                for line in lines:
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#"):
+                        continue
+                    if stripped == "failed=0":
+                        aggregated = True
+                    elif stripped == 'exit "$failed"':
+                        aggregated = False
+                    elif aggregated:
+                        self.assertTrue(
+                            stripped.endswith("|| failed=1")
+                            or stripped == "failed=1"
+                            or re.match(r"(echo|if|elif|else|fi|for|do|done|while)\b", stripped),
+                            f"command in aggregated subshell does not record failure: {stripped}")
                 self.assertNotIn("allowFailure", step)
                 self.assertNotIn("allowExitCodes", step)
 
