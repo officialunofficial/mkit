@@ -836,6 +836,97 @@ sha256 = "7a4a97d4aaf3215b0fa917f242451319214a1b5c10940f406b98672b65f3fcff"
 semantic = "evidence/framing-record-invalid-type.json"
 semantic_sha256 = "66fd85d4e309bed9d5497a0ebe376c304568c16dc6cc454a79ce7f04aaec72f3"
 
+[[fixtures]]
+type = "framing-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-checkpoint"
+expected = "Checkpoint"
+spec = "SPEC-PRIMITIVE-EVIDENCE"
+path = "evidence/checkpoint-integrity-finished.bin"
+sha256 = "897da86db9164bdd3442d38b055e9f66254c35288edccb0e01e93f7d2aff5db7"
+semantic = "evidence/checkpoint-integrity-finished.json"
+semantic_sha256 = "498456ebf35751e822adf0a2af96eab9c8fe4ecef1978c62d3daa1fee4534807"
+
+[[fixtures]]
+type = "framing-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-checkpoint"
+expected = "Checkpoint"
+spec = "SPEC-PRIMITIVE-EVIDENCE"
+path = "evidence/checkpoint-integrity-partial-trailer.bin"
+sha256 = "fb6c1cfbba816f4b32a30509b962ebe64bb97c747ddaa7ff963462e312bb39da"
+semantic = "evidence/checkpoint-integrity-partial-trailer.json"
+semantic_sha256 = "f113615fd91891871d691d03aa1cf04940efca8ac69a6fd7f06111c58e8404c9"
+
+[[fixtures]]
+type = "framing-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-checkpoint"
+expected = "Checkpoint"
+spec = "SPEC-PRIMITIVE-EVIDENCE"
+path = "evidence/checkpoint-decode.bin"
+sha256 = "ef21e3c2d6c74f3498f142097e4a559cd622887e9338742b34a04a397a8b33a0"
+semantic = "evidence/checkpoint-decode.json"
+semantic_sha256 = "b37cf8acaf7779c6e26dd981db307b1a6b6d049d2ce1e05b88aad3fa44bf26c7"
+
+[[fixtures]]
+type = "framing-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-checkpoint"
+expected = "Checkpoint"
+spec = "SPEC-PRIMITIVE-EVIDENCE"
+path = "evidence/checkpoint-complete.bin"
+sha256 = "6bfa89e174a23e365f9215949365a84a294e4f769c675a30fb0e4829b36f8559"
+semantic = "evidence/checkpoint-complete.json"
+semantic_sha256 = "e700621a5049b9fe2d53c480863fd1171840fab31cf44605684edd683b2cc3c5"
+
+[[fixtures]]
+type = "evidence-page"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-evidence"
+expected = "Page"
+spec = "SPEC-PRIMITIVE-EVIDENCE"
+path = "evidence/page-proof-multilevel-root.bin"
+sha256 = "2040adff049f3d24d9b0fd9532858064f3bfc9d4b8a556ee44099ce676a48e25"
+semantic = "evidence/page-proof-multilevel-root.json"
+semantic_sha256 = "0b18d5bd1f01ecf586ca1f3a77678384958df8db1e3329dd08ae15362e0a764a"
+
+[[fixtures]]
+type = "evidence-proof"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-evidence"
+expected = "Present"
+spec = "SPEC-PRIMITIVE-EVIDENCE"
+path = "evidence/proof-multilevel-inclusion.bin"
+sha256 = "f950ca064b63d60073cb739ada93a230b3cc1906601718d92f808f3f94d15169"
+semantic = "evidence/proof-multilevel-inclusion.json"
+semantic_sha256 = "a71600b77d95a5a4915f659f6453fbdb4c6be43592a548013aa4fd32b5ec49e0"
+
+[[fixtures]]
+type = "evidence-proof"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-evidence"
+expected = "Absent"
+spec = "SPEC-PRIMITIVE-EVIDENCE"
+path = "evidence/proof-multilevel-absence.bin"
+sha256 = "e3f20e2d3ef43b750772653b11084b4476e7f6295b66e5cf45ecd7b7a263686b"
+semantic = "evidence/proof-multilevel-absence.json"
+semantic_sha256 = "fdaf4e0392f890e6140fa2134a46febfd73bdeab9a5b876ea3416b1546baa207"
+
 # pack_verify
 [[formats]]
 type = "pack-framing"

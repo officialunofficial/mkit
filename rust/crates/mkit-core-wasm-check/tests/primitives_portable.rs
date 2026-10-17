@@ -64,7 +64,7 @@ fn verify(bytes: &[u8]) -> Result<u32, FailureCode> {
                 );
                 return Ok(summary.entries());
             }
-            FramingStep::Request(_) => panic!("unexpected portable transition"),
+            _ => panic!("unexpected portable transition"),
         }
     }
     panic!("bounded fixture exceeded transition ceiling")
@@ -196,4 +196,28 @@ fn portable_checkpoint_resume_and_authenticated_absence_execute() {
         )
         .is_err()
     );
+}
+
+// Execute the same frozen nonempty proof vectors as the native package.
+#[path = "../../mkit-primitives/tests/evidence_portable.rs"]
+mod evidence_portable;
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn portable_checkpoint_optional_states_preserve_bytes() {
+    use mkit_primitives::evidence::checkpoint::Checkpoint;
+    for bytes in [
+        include_bytes!("../../mkit-primitives/fixtures/evidence/checkpoint-integrity-finished.bin")
+            .as_slice(),
+        include_bytes!(
+            "../../mkit-primitives/fixtures/evidence/checkpoint-integrity-partial-trailer.bin"
+        )
+        .as_slice(),
+        include_bytes!("../../mkit-primitives/fixtures/evidence/checkpoint-decode.bin").as_slice(),
+        include_bytes!("../../mkit-primitives/fixtures/evidence/checkpoint-complete.bin")
+            .as_slice(),
+    ] {
+        let checkpoint = Checkpoint::from_bytes(bytes, VerifyLimits::indexed()).unwrap();
+        assert_eq!(checkpoint.bytes(), bytes);
+    }
 }

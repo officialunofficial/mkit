@@ -65,7 +65,7 @@ fn run(bytes: &[u8]) -> Result<Vec<Vec<u8>>, FailureCode> {
                 );
                 return Ok(output);
             }
-            FramingStep::Request(_) => panic!("unexpected framing acquisition"),
+            _ => panic!("unexpected framing acquisition"),
         }
     }
 }

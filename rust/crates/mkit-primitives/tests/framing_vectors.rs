@@ -122,7 +122,7 @@ fn streamed(bytes: &[u8], limits: VerifyLimits) -> Result<Outcome, FailureCode> 
                     max_request,
                 });
             }
-            FramingStep::Request(_) => panic!("unexpected acquisition in a fresh run"),
+            _ => panic!("unexpected acquisition in a fresh run"),
         }
     }
     panic!("bounded test driver did not terminate")

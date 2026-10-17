@@ -105,6 +105,7 @@ impl FramedPack {
 /// Cooperative framing transition. Frame payloads remain provisional.
 #[derive(Debug)]
 #[must_use]
+#[non_exhaustive]
 pub enum FramingStep<'a> {
     /// Acquire exactly this immutable byte range.
     Request(Request),
