@@ -918,7 +918,7 @@ impl PairWalker {
         value: Acquisition<ObjectFact<'_>>,
     ) -> Result<(), Failure> {
         let fact = self.present(value, PairCheck::Object { object })?;
-        if restricted && !self.packs.contains(&fact.pack) {
+        if restricted && self.packs.binary_search(&fact.pack).is_err() {
             return Err(failure(FailureCode::InvalidResponse));
         }
         if head
