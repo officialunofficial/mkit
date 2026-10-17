@@ -23,6 +23,12 @@ collect the applicable entries between their old and new immutable pins.
   fields are omitted when absent. No production wire or stored-format change;
   no wipe.
 
+- [embedder: stored-format change] [embedder: store reset required] Fork
+  activation uses durable membership permits and drain checkpoints. Migration:
+  reset stores before adopting these formats; no legacy decoder is provided.
+  Authority and epoch setters may return retryable unavailable while a drain
+  finishes. Ordinary writes retain their existing storage round trips.
+
 - Conformance profiles declare transport writes, authority RPCs, authority
   fencing, fork, and the relay-lag bound. Results distinguish `NotApplicable`
   from declared `Skip`. Migration: declare offered features and handle the new

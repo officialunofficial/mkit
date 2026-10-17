@@ -138,13 +138,12 @@ source changes do not invalidate acceptance.
 **Because:** construction may survive a crash or continue after revocation;
 partial construction must not grant repository access.
 
-**Reference enforcement:** guarded acceptance, destination exclusion, and
-coordinator fences enforce the destination boundary. Distributed membership
-installation still needs drained permits, and resumed pack proofs still need
-versioned evidence for one coherent source point. The
+**Reference enforcement:** acceptance, destination exclusion, coordinator fences,
+and drained membership permits enforce the destination boundary. The stronger
+single-point source proof across resumed slices remains incomplete. The
 [conformance coverage table](../rust/crates/mkit-server-conformance/README.md)
-records the exercised assertions; passing those cases does not certify these
-remaining requirements.
+records the exercised assertions; passing those cases does not certify this
+remaining requirement.
 
 ## Typed pack evidence retains exact keys and live witness semantics
 
@@ -2876,8 +2875,8 @@ could change after a lost reply, or a reservation could settle twice.
 
 **Enforced by:** `fork::job`, `fork::accept`, `fork::publish`, and the fork engine
 acceptance, settlement, membership-order, source-change, and lost-reply tests.
-The stronger single-ordering-point source proof remains incomplete across
-resumed proof slices.
+The stronger single-ordering-point source proof remains incomplete: the enabled
+disjoint-eligibility regression demonstrates an unresolved resumed-proof gap.
 
 ## Fork registration arbitrates with destination writers
 
@@ -3038,3 +3037,19 @@ or object-count-sized payloads could exhaust writer memory.
 **Enforced by:** `AcceptanceEvidence::decode`, `check_binding`, `recheck_heads`,
 and acceptance-evidence codec, binding, and signature regression tests. The host
 authenticates origin and atomically checks live guards; the library does not.
+
+## Authority moves drain fork membership permits
+
+**Always:** an acknowledged authority or grant-epoch move leaves no old-generation
+permit capable of installing membership. A drain freezes issuance, replaces
+local tokens with tombstones, and publishes the fence only after its durable
+registry is empty. A co-located install guards the recorded fence directly.
+
+**Because:** a coordinator checkpoint cannot retract a membership effect that
+already committed in another partition.
+
+**If violated:** a delayed activation could install membership after revocation
+completed, despite a later coordinator CAS failure.
+
+**Enforced by:** local atomic permit guards, resumable transition drains,
+recovery holdoffs, and the physical activation race regression.

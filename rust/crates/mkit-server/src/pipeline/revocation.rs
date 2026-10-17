@@ -130,30 +130,46 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         kind: FenceKind,
     ) -> Result<EpochTransition, ServerError> {
         let p = self.shards.coordinator(ns);
-        for _ in 0..super::coordinator::CREATION_ATTEMPTS {
-            let current = self.meta.get(&p, &kind.key()).await.map_err(meta_error)?;
-            let epoch = current
-                .as_ref()
-                .map(codec::decode_u64)
-                .transpose()
-                .map_err(meta_error)?
-                .unwrap_or(0);
-            let transition = epoch_transition(epoch, new_epoch);
-            if transition != EpochTransition::Advance {
-                return Ok(transition);
-            }
-            let batch = Batch::new()
-                .require(observed_guard(kind.key(), current.as_ref()))
-                .put(kind.key(), codec::encode_u64(new_epoch));
-            match self.apply_meta(&p, batch).await? {
-                BatchOutcome::Committed => return Ok(EpochTransition::Advance),
-                BatchOutcome::PreconditionFailed { .. } => {}
-                BatchOutcome::DeadlinePassed { .. } => {
-                    return Err(internal("epoch bump had no deadline"));
-                }
-            }
+        let current = self.meta.get(&p, &kind.key()).await.map_err(meta_error)?;
+        let epoch = current
+            .as_ref()
+            .map(codec::decode_u64)
+            .transpose()
+            .map_err(meta_error)?
+            .unwrap_or(0);
+        let transition = epoch_transition(epoch, new_epoch);
+        if transition != EpochTransition::Advance {
+            return Ok(transition);
         }
-        Err(ServerError::unavailable("epoch contention; retry").with_header("Retry-After", "1"))
+        let env = crate::fork::ForkEnv::from_config(
+            &self.meta,
+            self.shards.as_ref(),
+            self.clock.as_ref(),
+            &self.cfg,
+        );
+        if crate::fork::permit::transition(
+            &env,
+            ns,
+            &kind.key(),
+            current.as_ref(),
+            &codec::encode_u64(new_epoch),
+            self.cfg
+                .epoch_lease_ms
+                .saturating_add(self.cfg.lease_margin_ms)
+                .max(
+                    crate::store::CONTENT_APPLY_WINDOW_MS.saturating_add(self.cfg.lease_margin_ms),
+                ),
+        )
+        .await
+        .map_err(|error| error.error())?
+        {
+            return Ok(EpochTransition::Advance);
+        }
+        let pending = match kind {
+            FenceKind::Authority => "authority revocation pending; retry",
+            FenceKind::Grant => "epoch revocation pending; retry",
+        };
+        Err(ServerError::unavailable(pending).with_header("Retry-After", "1"))
     }
 
     /// Declare lease-table recovery using the real pipeline clock.

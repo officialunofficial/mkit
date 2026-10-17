@@ -83,12 +83,17 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         register: bool,
     ) -> Result<Option<u64>, ServerError> {
         let p = self.shards.coordinator(ns);
-        let wanted = [keys::authority_generation(), keys::lease_recovery()];
+        let wanted = [
+            keys::authority_generation(),
+            keys::lease_recovery(),
+            keys::fork_permits_seen(),
+        ];
         for _ in 0..1 {
             let rows = self.meta.get_many(&p, &wanted).await.map_err(meta_error)?;
-            let [generation, raw_mode] = rows.as_slice() else {
+            let [generation, raw_mode, permits_seen] = rows.as_slice() else {
                 return Err(super::internal("authority activation row count"));
             };
+            let mut generation = generation.clone();
             let current = generation
                 .as_ref()
                 .map(codec::decode_u64)
@@ -125,10 +130,46 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             {
                 return Err(ServerError::permission_denied("namespace not registered"));
             }
+            // A restored snapshot can predate the registry and its marker
+            // while local membership permits survive in other partitions.
+            if generation.is_none()
+                && (permits_seen.is_some() || raw_mode.is_some() && mode.recovery_time().is_some())
+            {
+                let env = crate::fork::ForkEnv::from_config(
+                    &self.meta,
+                    self.shards.as_ref(),
+                    self.clock.as_ref(),
+                    &self.cfg,
+                );
+                let initial = codec::encode_u64(current);
+                if !crate::fork::permit::transition(
+                    &env,
+                    ns,
+                    &wanted[0],
+                    None,
+                    &initial,
+                    self.cfg
+                        .epoch_lease_ms
+                        .saturating_add(self.cfg.lease_margin_ms)
+                        .max(
+                            crate::store::CONTENT_APPLY_WINDOW_MS
+                                .saturating_add(self.cfg.lease_margin_ms),
+                        ),
+                )
+                .await
+                .map_err(|error| error.error())?
+                {
+                    return Err(
+                        ServerError::unavailable("authority activation pending; retry")
+                            .with_header("Retry-After", "1"),
+                    );
+                }
+                generation = Some(initial);
+            }
             if mode.authority_fence != Some(true) {
                 mode.authority_fence = Some(true);
                 mode.authority_ready = Some(false);
-                let batch = crate::store::Batch::new()
+                let mut batch = crate::store::Batch::new()
                     .require(super::lease::observed_guard(
                         wanted[0].clone(),
                         generation.as_ref(),
@@ -139,6 +180,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     ))
                     .put(wanted[0].clone(), codec::encode_u64(current))
                     .put(wanted[1].clone(), codec::encode_lease_recovery(&mode));
+                if generation.is_none() {
+                    // First activation keeps its existing call count. A
+                    // concurrent first permit wins this guard or loses its
+                    // own recorded-absence authority guard.
+                    batch = batch
+                        .require(crate::store::Precondition::Absent(keys::fork_permits_seen()));
+                }
                 match self.apply_meta(&p, batch).await? {
                     crate::store::BatchOutcome::Committed => {}
                     crate::store::BatchOutcome::PreconditionFailed { .. } => continue,

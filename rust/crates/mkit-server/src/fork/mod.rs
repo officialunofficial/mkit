@@ -17,6 +17,7 @@ mod closure;
 mod completed;
 mod copy;
 mod job;
+pub(crate) mod permit;
 mod plan;
 mod publish;
 mod request;
@@ -89,8 +90,8 @@ pub(crate) const WAVE_WIDTH: usize = 6;
 
 /// The most storage calls one plan or publication unit costs without a
 /// takedown proof. Plan: the member row, the proof's two reads and the sealed
-/// head. Publication: the source pair, the proof's reads, the destination's
-/// rows and the guarded write.
+/// head. Publication: four permit calls, the destination witness snapshot,
+/// and the guarded membership apply; colocated installs need fewer calls.
 pub(crate) const WAVE_UNIT_CALLS: u32 = 8;
 
 /// How many units that each cost at most `unit_calls` storage calls may run
@@ -288,6 +289,17 @@ impl<S> core::fmt::Debug for ForkEnv<'_, S> {
 }
 
 impl<'a, S> ForkEnv<'a, S> {
+    pub(crate) fn with_store<'b, T>(&'b self, store: &'b T) -> ForkEnv<'b, T> {
+        ForkEnv {
+            store,
+            shards: self.shards,
+            clock: self.clock,
+            takedown_denial: self.takedown_denial,
+            extract_min_bytes: self.extract_min_bytes,
+            limits: self.limits,
+        }
+    }
+
     /// Build the fork environment from the configuration used by the pipeline.
     /// This is the supported construction path for pipeline and timer drivers.
     #[must_use]
