@@ -988,3 +988,34 @@ fn resending_set_authority_generation_is_idempotent_after_a_lost_reply() {
         assert_eq!(now(env.pipe.get_authority_generation(NS)).unwrap(), 1);
     }
 }
+
+#[test]
+fn restored_bootstrap_without_permit_registry_waits_for_surviving_permits_to_expire() {
+    let shared = Shared::new();
+    let mut cfg = config();
+    cfg.epoch_lease_ms = 2_000;
+    cfg.lease_margin_ms = 100;
+    let holdoff = crate::store::CONTENT_APPLY_WINDOW_MS + cfg.lease_margin_ms;
+    let env = shared.pipe(cfg, None);
+    let ns = NamespaceMode::Authority.namespace(NS).unwrap().key();
+    // A coordinator restored from before the first permit has neither registry
+    // rows nor its monotonic marker. Local permits can survive that restore.
+    now(env.pipe.mark_lease_table_recovered(&ns)).unwrap();
+    assert!(shared.row(NS, &keys::fork_permits_seen()).is_none());
+    assert!(shared.row(NS, &keys::authority_generation()).is_none());
+
+    // The ordinary lease recovery delay has elapsed, but membership permits
+    // issued immediately before recovery can still be live.
+    shared.clock.set(T0 + 2_101);
+    let error = now(env.pipe.set_authority_generation(&statement(NS, 0))).unwrap_err();
+    assert_eq!(error.code(), Code::Unavailable);
+    assert!(shared.row(NS, &keys::authority_generation()).is_none());
+    assert!(shared.row(NS, &keys::fork_permits_seen()).is_none());
+
+    shared.clock.set(T0 + i64::try_from(holdoff).unwrap());
+    register(&env, NS, 0);
+    assert_eq!(
+        shared.row(NS, &keys::authority_generation()),
+        Some(codec::encode_u64(0))
+    );
+}

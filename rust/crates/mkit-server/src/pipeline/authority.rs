@@ -130,7 +130,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             {
                 return Err(ServerError::permission_denied("namespace not registered"));
             }
-            if generation.is_none() && permits_seen.is_some() {
+            // A restored snapshot can predate the registry and its marker
+            // while local membership permits survive in other partitions.
+            if generation.is_none()
+                && (permits_seen.is_some() || raw_mode.is_some() && mode.recovery_time().is_some())
+            {
                 let env = crate::fork::ForkEnv::from_config(
                     &self.meta,
                     self.shards.as_ref(),

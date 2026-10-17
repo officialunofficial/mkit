@@ -89,8 +89,59 @@ pub(crate) async fn prepare<S: NamespaceStore>(
     }
     let local_key = keys::fork_permit_local(repo);
     let local = env.store.get(target, &local_key).await?;
+    let (record, value) = register(env, job, ns, repo, *prefix).await?;
+    let active = local_value(&value, true);
+    let install = Batch::new()
+        .require(observed(local_key.clone(), local.as_ref()))
+        .require(Precondition::NotAfter(record.expires_ms))
+        .put(local_key.clone(), active.clone());
+    if env.store.apply(target, install).await? != BatchOutcome::Committed {
+        // Sibling members in the same wave deliberately share one permit.
+        // A drain tombstone or a different token never satisfies this check.
+        if env.store.get(target, &local_key).await?.as_ref() != Some(&active) {
+            super::job::fence_after_loss(env, job).await?;
+            return Err(ForkError::Unavailable("fork permit installation raced"));
+        }
+    }
+    Ok(Permit {
+        guards: vec![
+            Precondition::Equals(local_key, active),
+            Precondition::NotAfter(record.expires_ms),
+        ],
+    })
+}
+
+fn matching_record(value: &Value, expected: &Record, now: u64) -> Result<Record, ForkError> {
+    let record: Record = decode(value)?;
+    matching_binding(&record, expected)?;
+    if record.expires_ms <= now {
+        return Err(ForkError::Unavailable("fork permit expired"));
+    }
+    Ok(record)
+}
+
+fn matching_binding(record: &Record, expected: &Record) -> Result<(), ForkError> {
+    if record.binding != expected.binding
+        || record.repo != expected.repo
+        || record.prefix != expected.prefix
+        || record.authority != expected.authority
+        || record.epoch != expected.epoch
+    {
+        return Err(ForkError::Unavailable("fork permit binding changed"));
+    }
+    Ok(())
+}
+
+/// Reuse live tokens rather than extending them on every sibling projection.
+async fn register<S: NamespaceStore>(
+    env: &ForkEnv<'_, S>,
+    job: &ForkJobV1,
+    ns: &NamespaceKey,
+    repo: &RepoName,
+    prefix: u16,
+) -> Result<(Record, Value), ForkError> {
     let coordinator = env.shards.coordinator(ns);
-    let registry_key = keys::fork_permit(repo, *prefix);
+    let registry_key = keys::fork_permit(repo, prefix);
     let drain_key = keys::fork_permit_drain();
     let rows = env
         .store
@@ -111,27 +162,27 @@ pub(crate) async fn prepare<S: NamespaceStore>(
     if drain.is_some() {
         return Err(ForkError::Unavailable("fork authority transition pending"));
     }
-    let mut record = Record {
+    let expected = Record {
         binding: job.binding,
         repo: repo.as_str().to_owned(),
-        prefix: *prefix,
+        prefix,
         authority: job.fence_rows.authority.clone(),
         epoch: job.fence_rows.epoch.clone(),
         expires_ms: env.now().saturating_add(super::CONTENT_WINDOW),
     };
-    if let Some(previous) = &previous {
-        let prior: Record = decode(previous)?;
-        if prior.binding != record.binding
-            || prior.repo != record.repo
-            || prior.prefix != record.prefix
-            || prior.authority != record.authority
-            || prior.epoch != record.epoch
-        {
-            return Err(ForkError::Unavailable("fork permit binding changed"));
+    let (record, value) = match previous.as_ref() {
+        Some(value) => {
+            // Validate identity even when an expired token needs replacement.
+            let prior: Record = decode(value)?;
+            matching_binding(&prior, &expected)?;
+            if prior.expires_ms > env.now() {
+                (prior, value.clone())
+            } else {
+                (expected.clone(), encode(&expected)?)
+            }
         }
-        record.expires_ms = record.expires_ms.max(prior.expires_ms);
-    }
-    let value = encode(&record)?;
+        None => (expected.clone(), encode(&expected)?),
+    };
     let mut registration = Batch::new()
         .require(Precondition::Absent(drain_key))
         .require(Precondition::Equals(
@@ -145,25 +196,51 @@ pub(crate) async fn prepare<S: NamespaceStore>(
     registration
         .preconditions
         .extend(job.fence_rows.guards(job));
-    if env.store.apply(&coordinator, registration).await? != BatchOutcome::Committed {
-        super::job::fence_after_loss(env, job).await?;
+    if env.store.apply(&coordinator, registration).await? == BatchOutcome::Committed {
+        return Ok((record, value));
+    }
+    registered_after_loss(env, job, ns, repo, prefix, &expected).await
+}
+
+/// Adopt only the exact token that won registration under the same live fence.
+async fn registered_after_loss<S: NamespaceStore>(
+    env: &ForkEnv<'_, S>,
+    job: &ForkJobV1,
+    ns: &NamespaceKey,
+    repo: &RepoName,
+    prefix: u16,
+    expected: &Record,
+) -> Result<(Record, Value), ForkError> {
+    let rows = env
+        .store
+        .get_many(
+            &env.shards.coordinator(ns),
+            &[
+                keys::fork_job(repo),
+                keys::authority_generation(),
+                keys::grant_epoch(),
+                keys::fork_permit(repo, prefix),
+                keys::fork_permit_drain(),
+                keys::fork_barrier(repo),
+            ],
+        )
+        .await?;
+    let [current, authority, epoch, permit, drain, barrier]: [_; 6] = rows
+        .try_into()
+        .map_err(|_| ForkError::Unavailable("fork permit read"))?;
+    job.fence_rows.check(job, &[authority, epoch])?;
+    let current = current.ok_or(ForkError::Unavailable("fork job missing"))?;
+    let current = super::decode_job(&current)?;
+    if current.binding != job.binding
+        || current.finished()
+        || drain.is_some()
+        || barrier.as_ref() != Some(&Value::new(job.binding.to_vec()))
+    {
         return Err(ForkError::Unavailable("fork permit registration raced"));
     }
-    let active = local_value(&value, true);
-    let install = Batch::new()
-        .require(observed(local_key.clone(), local.as_ref()))
-        .require(Precondition::NotAfter(record.expires_ms))
-        .put(local_key.clone(), active.clone());
-    if env.store.apply(target, install).await? != BatchOutcome::Committed {
-        super::job::fence_after_loss(env, job).await?;
-        return Err(ForkError::Unavailable("fork permit installation raced"));
-    }
-    Ok(Permit {
-        guards: vec![
-            Precondition::Equals(local_key, active),
-            Precondition::NotAfter(record.expires_ms),
-        ],
-    })
+    let value = permit.ok_or(ForkError::Unavailable("fork permit registration raced"))?;
+    let record = matching_record(&value, expected, env.now())?;
+    Ok((record, value))
 }
 
 /// Invalidate and remove a completed job's permits after its destination

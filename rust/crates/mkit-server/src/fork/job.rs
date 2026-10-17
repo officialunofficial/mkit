@@ -602,12 +602,7 @@ pub(super) async fn step_inner<S: NamespaceStore>(
         } else {
             store.get_many(&p, &wanted).await?
         };
-        let [raw, authority, epoch]: [_; 3] = rows
-            .try_into()
-            .map_err(|_| ForkError::Unavailable("fork progress read"))?;
-        let raw = raw.ok_or(ForkError::Unavailable("fork job missing"))?;
-        let fence_rows = [authority, epoch];
-        let mut job = decode_job(&raw).map_err(|_| ForkError::Unavailable("fork job corrupt"))?;
+        let (raw, mut job, fence_rows) = decode_progress_rows(rows)?;
         #[cfg(feature = "perf-metrics")]
         trace.note_job(job.phase, job.binding);
         let fence_check = job.fence_rows.check(&job, &fence_rows);
@@ -751,6 +746,18 @@ pub(super) async fn fence_after_loss<S: NamespaceStore>(
         .try_into()
         .map_err(|_| ForkError::Unavailable("fork progress read"))?;
     job.fence_rows.check(job, &[authority, epoch])
+}
+
+/// Decode the job and authority facts from one coordinator observation.
+fn decode_progress_rows(
+    rows: Vec<Option<Value>>,
+) -> Result<(Value, ForkJobV1, [Option<Value>; 2]), ForkError> {
+    let [raw, authority, epoch]: [_; 3] = rows
+        .try_into()
+        .map_err(|_| ForkError::Unavailable("fork progress read"))?;
+    let raw = raw.ok_or(ForkError::Unavailable("fork job missing"))?;
+    let job = decode_job(&raw).map_err(|_| ForkError::Unavailable("fork job corrupt"))?;
+    Ok((raw, job, [authority, epoch]))
 }
 
 /// Acceptance is terminal; a clearance refusal never rewrites its receipt.

@@ -3101,7 +3101,7 @@ async fn publish_waves_end_where_the_serial_publish_does_and_write_the_head_last
                 .iter()
                 .map(|p| p.id)
                 .find(|id| *key == keys::membership(&waved_id.name, id)),
-            mkit_server::Write::Delete(_) => None,
+            mkit_server::Write::Delete(_) | mkit_server::Write::Increment(_) => None,
         })
         .collect();
     assert_eq!(written.len(), 12, "{written:?}");
@@ -3852,11 +3852,31 @@ async fn an_authority_move_at_the_physical_activation_commit_installs_no_member(
         }])
         .unwrap(),
     );
+    struct Authority;
+    impl mkit_server::pipeline::Authorizer for Authority {
+        async fn authorize(
+            &self,
+            _: &mkit_server::Operation,
+        ) -> Result<mkit_server::AuthzFacts, mkit_server::ServerError> {
+            Ok(mkit_server::AuthzFacts {
+                authority_generation: Some(0),
+                ..mkit_server::AuthzFacts::default()
+            })
+        }
+    }
+    let defaults = mkit_server::pipeline::Hooks::new();
+    let hooks = mkit_server::pipeline::Hooks {
+        authorizer: Authority,
+        admission: defaults.admission,
+        pre_receive: defaults.pre_receive,
+        receipts: defaults.receipts,
+        outcomes: defaults.outcomes,
+    };
     let setter = Arc::new(
         mkit_server::pipeline::Pipeline::new(
             source.blobs.clone(),
             source.store.clone(),
-            mkit_server::pipeline::Hooks::new(),
+            hooks,
             config,
             source.clock.clone(),
             Arc::new(mkit_server::NoopMetrics),
