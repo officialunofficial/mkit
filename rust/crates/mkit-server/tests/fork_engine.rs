@@ -3101,7 +3101,7 @@ async fn publish_waves_end_where_the_serial_publish_does_and_write_the_head_last
                 .iter()
                 .map(|p| p.id)
                 .find(|id| *key == keys::membership(&waved_id.name, id)),
-            mkit_server::Write::Delete(_) | mkit_server::Write::Increment(_) => None,
+            mkit_server::Write::Delete(_) => None,
         })
         .collect();
     assert_eq!(written.len(), 12, "{written:?}");
