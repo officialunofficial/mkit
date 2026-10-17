@@ -250,6 +250,8 @@ impl Activation {
             expected_result: &self.expected,
             accepted_result: Some(&self.accepted),
             inherited_packs: &self.packs,
+            // Storage lifecycle transitions are outside the reference profile.
+            lifecycle: mkit_primitives::fork::ForkLifecycleProtection::NotOffered,
             unit: &unit,
             proof: Some(&proof),
         };
@@ -283,6 +285,7 @@ impl Activation {
             advance: &progress,
             expected_result: &self.expected,
             accepted_result: Some(&self.accepted),
+            lifecycle: mkit_primitives::fork::ForkLifecycleProtection::NotOffered,
             completed_packs: u64::from(job.cursor),
             completed_digest: job.pack_set(),
             expected_barrier_owner: job.binding,

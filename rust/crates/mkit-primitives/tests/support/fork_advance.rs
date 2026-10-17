@@ -4,13 +4,13 @@
 //! deterministic builders exercise composition; they do not establish provenance.
 use mkit_core::hash::Hasher;
 use mkit_primitives::{
-    decision::RefName,
+    decision::{LifecycleFact, LifecycleState, Observed, RefName},
     evidence::{RepositoryId, Revision},
     fork::{
         ForkActivationDecision, ForkActivationFacts, ForkActivationLimits, ForkAdvanceFacts,
-        ForkAdvancePhase, ForkClearanceProof, ForkEpochFence, ForkMembershipUnit, ForkObservation,
-        ForkPairContext, ForkProgress, ForkReservationFence, ForkResult, ForkWitness,
-        decide_fork_activation, decide_fork_advance,
+        ForkAdvancePhase, ForkClearanceProof, ForkEpochFence, ForkLifecycleProtection,
+        ForkMembershipUnit, ForkObservation, ForkPairContext, ForkProgress, ForkReservationFence,
+        ForkResult, ForkWitness, decide_fork_activation, decide_fork_advance,
     },
 };
 
@@ -114,6 +114,7 @@ pub fn facts<'a>(
     proof: &'a ForkClearanceProof,
 ) -> ForkActivationFacts<'a> {
     ForkActivationFacts {
+        lifecycle: ForkLifecycleProtection::NotOffered,
         advance,
         expected_result: result,
         accepted_result: Some(result),
@@ -124,6 +125,7 @@ pub fn facts<'a>(
 }
 
 struct FuzzCase {
+    lifecycle: ForkLifecycleProtection,
     advance: ForkAdvanceFacts,
     expected: ForkResult,
     accepted: ForkResult,
@@ -139,6 +141,7 @@ impl FuzzCase {
     fn new() -> Self {
         let expected = result();
         Self {
+            lifecycle: ForkLifecycleProtection::NotOffered,
             advance: advance(),
             accepted: expected.clone(),
             expected,
@@ -152,8 +155,8 @@ impl FuzzCase {
         }
     }
     fn mutate(&mut self, opcode: u8, value: u8) {
-        match opcode % 20 {
-            0..=3 => mutate_progress(&mut self.advance, opcode % 20, value),
+        match opcode % 21 {
+            0..=3 => mutate_progress(&mut self.advance, opcode % 21, value),
             4 => self.has_accepted = value & 1 == 0,
             5 => self.accepted.tip[0] = value,
             6 => self.has_proof = value & 1 == 0,
@@ -164,7 +167,7 @@ impl FuzzCase {
                 3 => self.proof.pack[0] ^= 1,
                 _ => self.proof.valid_through_ms = u64::from(value),
             },
-            8..=10 => mutate_witness(&mut self.unit, opcode % 20, value),
+            8..=10 => mutate_witness(&mut self.unit, opcode % 21, value),
             11 => match value % 4 {
                 0 => self.packs.reverse(),
                 1 => self.packs.clear(),
@@ -186,11 +189,13 @@ impl FuzzCase {
             16 => self.advance.progress.revision = revision(value),
             17 => self.unit.inherited_revision = revision(value),
             18 => self.limits.packs = u64::from(value % 5),
-            _ => self.unit.pack = [value; 32],
+            19 => self.unit.pack = [value; 32],
+            _ => self.lifecycle = lifecycle_mutation(value),
         }
     }
     fn facts(&self) -> ForkActivationFacts<'_> {
         ForkActivationFacts {
+            lifecycle: self.lifecycle.clone(),
             advance: &self.advance,
             expected_result: &self.expected,
             accepted_result: self.has_accepted.then_some(&self.accepted),
@@ -217,6 +222,38 @@ impl FuzzCase {
         assert!(self.unit.live.is_none() && self.unit.published.is_none());
         assert_eq!(self.unit.context, ForkPairContext::Initial);
         assert!(self.packs.contains(&self.unit.pack));
+        if let ForkLifecycleProtection::Managed {
+            expected_incarnation,
+            current,
+        } = &self.lifecycle
+        {
+            assert!(
+                matches!(current, Some(Observed::Present { value, .. }) if value.state == LifecycleState::Active && value.incarnation == *expected_incarnation)
+            );
+        }
+    }
+}
+fn lifecycle_mutation(value: u8) -> ForkLifecycleProtection {
+    if value.is_multiple_of(6) {
+        return ForkLifecycleProtection::NotOffered;
+    }
+    ForkLifecycleProtection::Managed {
+        expected_incarnation: revision(1),
+        current: match value % 6 {
+            1 => None,
+            2 => Some(Observed::Absent(revision(value))),
+            _ => Some(Observed::Present {
+                value: LifecycleFact {
+                    incarnation: revision(if value % 6 == 5 { 99 } else { 1 }),
+                    state: if value % 6 == 4 {
+                        LifecycleState::Deleting
+                    } else {
+                        LifecycleState::Active
+                    },
+                },
+                revision: revision(value),
+            }),
+        },
     }
 }
 fn mutate_progress(advance: &mut ForkAdvanceFacts, opcode: u8, value: u8) {

@@ -3,12 +3,14 @@
 //! These decisions consume trusted logical snapshots; they acquire no facts.
 //! Revisions may commit exact authoritative rows, including absence. The host
 //! scopes them to the actual job and compares every returned guard atomically.
-//! A destination clearance proof is trusted evidence of completed acquisition,
-//! not a boolean permission invented by this module. Its provenance, lifecycle
-//! and denial coverage, and any physical authority permit remain host duties.
+//! A destination denial proof is trusted evidence of completed acquisition,
+//! not a boolean permission invented by this module. Its provenance, denial
+//! coverage, and any physical authority permit remain host duties. Lifecycle
+//! protection is explicit: managed profiles supply acquired lifecycle facts.
 //! Current source state is deliberately absent: acceptance fixed the result.
 
 use super::{ForkRefusal, ForkResult};
+use crate::decision::{LifecycleFact, LifecycleState, Observed};
 use crate::error::{BoundedDetail, Failure, FailureCode, Location};
 use crate::evidence::{RepositoryId, Revision};
 use mkit_core::hash::{Hash, Hasher};
@@ -232,9 +234,41 @@ pub struct ForkMembershipUnit {
     /// Why this pair was acquired.
     pub context: ForkPairContext,
 }
-/// Trusted completed destination lifecycle and denial acquisition.
+/// Destination lifecycle profile and exact managed protection.
+/// Profiles without lifecycle transitions declare that limitation explicitly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForkLifecycleProtection {
+    /// Host profile offers no repository lifecycle transitions.
+    NotOffered,
+    /// Host profile offers lifecycle transitions and must fence exact current facts.
+    Managed {
+        /// Repository incarnation bound to this construction.
+        expected_incarnation: Revision,
+        /// Acquired lifecycle and revision; None means acquisition unavailable.
+        current: Option<Observed<LifecycleFact>>,
+    },
+}
+fn lifecycle_available(protection: &ForkLifecycleProtection) -> Result<bool, Failure> {
+    match protection {
+        ForkLifecycleProtection::NotOffered => Ok(true),
+        ForkLifecycleProtection::Managed {
+            expected_incarnation,
+            current,
+        } => {
+            match current
+                .as_ref()
+                .ok_or_else(|| fail(FailureCode::UnavailableInput))?
+            {
+                Observed::Present { value, .. } => Ok(value.incarnation == *expected_incarnation
+                    && value.state == LifecycleState::Active),
+                Observed::Absent(_) => Ok(false),
+            }
+        }
+    }
+}
+/// Trusted completed destination denial acquisition.
 ///
-/// The host attests current lifecycle and denial eligibility for this precise
+/// The host attests current denial eligibility for this precise
 /// unit, including descriptor/seal/dependency checks required by its profile.
 /// This evidence is source-independent, must be renewed after its deadline,
 /// and must be discharged by the host's actual publication proof/fence protocol.
@@ -257,6 +291,8 @@ pub struct ForkClearanceProof {
 /// Borrowed fixed-shape activation facts; no complete graph is reconstructed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForkActivationFacts<'a> {
+    /// Explicit lifecycle profile and any exact acquired managed facts.
+    pub lifecycle: ForkLifecycleProtection,
     /// Exact current progress and authority comparisons.
     pub advance: &'a ForkAdvanceFacts,
     /// Result recomputed from the immutable retained job fields.
@@ -331,12 +367,33 @@ fn fail(code: FailureCode) -> Failure {
         detail: BoundedDetail::None,
     }
 }
+fn check_activation_inventory(facts: &ForkActivationFacts<'_>) -> Result<(), Failure> {
+    if facts.inherited_packs.windows(2).any(|p| p[0] >= p[1]) {
+        return Err(fail(FailureCode::InvalidResponse));
+    }
+    let mut digest = Hasher::new();
+    for pack in facts.inherited_packs {
+        digest.update(pack);
+    }
+    if facts.unit.inherited_revision != facts.advance.progress.revision
+        || facts.inherited_packs.len() as u64 != facts.expected_result.packs
+        || digest.finalize() != facts.expected_result.pack_digest
+        || facts
+            .inherited_packs
+            .binary_search(&facts.unit.pack)
+            .is_err()
+    {
+        return Err(fail(FailureCode::InvalidResponse));
+    }
+    Ok(())
+}
 /// Decide one membership installation after terminal acceptance.
 ///
 /// # Errors
 /// Bounded comparisons fail with `ResourceLimit`; missing acquired proof is
 /// `UnavailableInput`; mismatched proof scope is `InvalidResponse`. Proof
-/// expiration is retryable `UnavailableInput`. These errors create no effects.
+/// expiration or missing managed lifecycle acquisition is retryable
+/// `UnavailableInput`. These errors create no effects.
 pub fn decide_fork_activation<'a>(
     facts: &'a ForkActivationFacts<'a>,
     now_ms: u64,
@@ -370,23 +427,14 @@ pub fn decide_fork_activation<'a>(
             valid_through_ms: u64::MAX,
         });
     }
-    if facts.inherited_packs.windows(2).any(|p| p[0] >= p[1]) {
-        return Err(fail(FailureCode::InvalidResponse));
+    if !lifecycle_available(&facts.lifecycle)? {
+        return Ok(GuardedForkActivation {
+            decision: ForkActivationDecision::Refuse(ForkRefusal::LifecycleUnavailable),
+            facts,
+            valid_through_ms: u64::MAX,
+        });
     }
-    let mut digest = Hasher::new();
-    for pack in facts.inherited_packs {
-        digest.update(pack);
-    }
-    if facts.unit.inherited_revision != facts.advance.progress.revision
-        || count != facts.expected_result.packs
-        || digest.finalize() != facts.expected_result.pack_digest
-        || facts
-            .inherited_packs
-            .binary_search(&facts.unit.pack)
-            .is_err()
-    {
-        return Err(fail(FailureCode::InvalidResponse));
-    }
+    check_activation_inventory(facts)?;
     let proof = facts
         .proof
         .ok_or_else(|| fail(FailureCode::UnavailableInput))?;
@@ -435,6 +483,8 @@ pub fn decide_fork_activation<'a>(
 /// No new membership is written by this decision, so it needs no new pack proof.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForkCompletionFacts<'a> {
+    /// Explicit lifecycle profile and any exact acquired managed facts.
+    pub lifecycle: ForkLifecycleProtection,
     /// Exact job and current authority observations.
     pub advance: &'a ForkAdvanceFacts,
     /// Result recomputed from retained immutable job fields.
@@ -505,7 +555,8 @@ fn check_result_bounds(
 /// Finish clearance only after the exact accepted inventory completed.
 ///
 /// # Errors
-/// `ResourceLimit` when result comparisons exceed explicit ceilings.
+/// `ResourceLimit` when result comparisons exceed explicit ceilings;
+/// `UnavailableInput` when required managed lifecycle acquisition is missing.
 pub fn decide_fork_completion<'a>(
     facts: &'a ForkCompletionFacts<'a>,
     limits: ForkActivationLimits,
@@ -531,6 +582,8 @@ pub fn decide_fork_completion<'a>(
         ForkCompletionDecision::Defer(reason)
     } else if facts.expected_barrier_owner != facts.advance.binding {
         ForkCompletionDecision::Refuse(ForkRefusal::BindingMismatch)
+    } else if !lifecycle_available(&facts.lifecycle)? {
+        ForkCompletionDecision::Refuse(ForkRefusal::LifecycleUnavailable)
     } else {
         ForkCompletionDecision::Complete
     };

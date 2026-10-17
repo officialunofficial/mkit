@@ -53,6 +53,8 @@ pub enum ForkRefusal {
     QuotaExceeded,
     /// A durable job or replay belongs to another admitted binding.
     BindingMismatch,
+    /// Destination lifecycle currently withholds accepted clearance.
+    LifecycleUnavailable,
 }
 impl ForkRefusal {
     /// Stable machine-readable registry code.
@@ -67,6 +69,7 @@ impl ForkRefusal {
             Self::Expired => FailureCode::ForkExpired,
             Self::QuotaExceeded => FailureCode::ForkQuotaExceeded,
             Self::BindingMismatch => FailureCode::ForkBindingMismatch,
+            Self::LifecycleUnavailable => FailureCode::ForkLifecycleUnavailable,
         }
     }
 }

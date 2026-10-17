@@ -89,6 +89,7 @@ fn facts<'a>(
     proof: &'a ForkClearanceProof,
 ) -> ForkActivationFacts<'a> {
     ForkActivationFacts {
+        lifecycle: ForkLifecycleProtection::NotOffered,
         advance,
         expected_result: result,
         accepted_result: Some(result),
@@ -397,6 +398,7 @@ fn completion_requires_exact_inventory_progress_barrier_and_never_settles() {
     advance.progress.cursor = 2;
     let result = result();
     let original = ForkCompletionFacts {
+        lifecycle: ForkLifecycleProtection::NotOffered,
         advance: &advance,
         expected_result: &result,
         accepted_result: Some(&result),
@@ -426,6 +428,7 @@ fn completion_requires_exact_inventory_progress_barrier_and_never_settles() {
     let mut done = advance.clone();
     done.progress.phase = ForkAdvancePhase::Complete;
     let replay = ForkCompletionFacts {
+        lifecycle: ForkLifecycleProtection::NotOffered,
         advance: &done,
         ..original
     };
@@ -514,4 +517,135 @@ fn hostile_progress_and_activation_seed_replay_is_bounded() {
     }
     fuzz_support::fuzz_fork_advance(&vec![255; fuzz_support::MAX_INPUT_BYTES]);
     fuzz_support::fuzz_fork_advance(&vec![255; fuzz_support::MAX_INPUT_BYTES + 1]);
+}
+
+fn managed_lifecycle(state: mkit_primitives::decision::LifecycleState) -> ForkLifecycleProtection {
+    ForkLifecycleProtection::Managed {
+        expected_incarnation: rev(1),
+        current: Some(mkit_primitives::decision::Observed::Present {
+            value: mkit_primitives::decision::LifecycleFact {
+                incarnation: rev(1),
+                state,
+            },
+            revision: rev(20),
+        }),
+    }
+}
+
+#[test]
+fn managed_lifecycle_requires_acquisition_active_incarnation_and_exact_revision() {
+    use mkit_primitives::decision::{LifecycleState, Observed};
+    let mut advance = progress();
+    advance.progress.phase = ForkAdvancePhase::Accepted;
+    let result = result();
+    let unit = unit();
+    let proof = proof();
+    let mut original = facts(&advance, &result, &unit, &proof);
+    original.lifecycle = managed_lifecycle(LifecycleState::Active);
+    let guard = decide_fork_activation(&original, 0, limits()).unwrap();
+    assert_eq!(guard.decision(), ForkActivationDecision::Install);
+    for change in 0..7 {
+        let mut changed = original.clone();
+        let ForkLifecycleProtection::Managed {
+            expected_incarnation,
+            current,
+        } = &mut changed.lifecycle
+        else {
+            unreachable!()
+        };
+        match change {
+            0 => *current = None,
+            1 => *current = Some(Observed::Absent(rev(20))),
+            2 => *expected_incarnation = rev(99),
+            _ => {
+                let Some(Observed::Present { value, revision }) = current else {
+                    unreachable!()
+                };
+                match change {
+                    3 => value.state = LifecycleState::Deleting,
+                    4 => value.state = LifecycleState::Deleted,
+                    5 => *revision = rev(99),
+                    _ => value.incarnation = rev(99),
+                }
+            }
+        }
+        assert!(!guard.matches(&changed, 0));
+        let decision = decide_fork_activation(&changed, 0, limits());
+        if change == 0 {
+            assert_eq!(decision.unwrap_err().code, FailureCode::UnavailableInput);
+        } else if change == 5 {
+            assert_eq!(
+                decision.unwrap().decision(),
+                ForkActivationDecision::Install
+            );
+        } else {
+            assert_eq!(
+                decision.unwrap().decision(),
+                ForkActivationDecision::Refuse(ForkRefusal::LifecycleUnavailable)
+            );
+        }
+        assert_eq!(changed.accepted_result, Some(&result));
+    }
+}
+
+#[test]
+fn managed_lifecycle_withholds_completion_but_never_changes_completed_replay() {
+    use mkit_primitives::decision::{LifecycleState, Observed};
+    let mut advance = progress();
+    advance.progress.phase = ForkAdvancePhase::Accepted;
+    advance.progress.cursor = 2;
+    let result = result();
+    let original = ForkCompletionFacts {
+        lifecycle: managed_lifecycle(LifecycleState::Active),
+        advance: &advance,
+        expected_result: &result,
+        accepted_result: Some(&result),
+        completed_packs: 2,
+        completed_digest: result.pack_digest,
+        expected_barrier_owner: advance.binding,
+    };
+    let guard = decide_fork_completion(&original, limits()).unwrap();
+    assert_eq!(guard.decision(), ForkCompletionDecision::Complete);
+    for current in [
+        None,
+        Some(Observed::Absent(rev(20))),
+        Some(Observed::Present {
+            value: mkit_primitives::decision::LifecycleFact {
+                incarnation: rev(1),
+                state: LifecycleState::Deleted,
+            },
+            revision: rev(20),
+        }),
+    ] {
+        let changed = ForkCompletionFacts {
+            lifecycle: ForkLifecycleProtection::Managed {
+                expected_incarnation: rev(1),
+                current: current.clone(),
+            },
+            ..original.clone()
+        };
+        assert!(!guard.matches(&changed));
+        let decision = decide_fork_completion(&changed, limits());
+        if current.is_none() {
+            assert_eq!(decision.unwrap_err().code, FailureCode::UnavailableInput);
+        } else {
+            assert_eq!(
+                decision.unwrap().decision(),
+                ForkCompletionDecision::Refuse(ForkRefusal::LifecycleUnavailable)
+            );
+        }
+        let mut completed = advance.clone();
+        completed.progress.phase = ForkAdvancePhase::Complete;
+        let replay = ForkCompletionFacts {
+            advance: &completed,
+            ..changed
+        };
+        assert_eq!(
+            decide_fork_completion(&replay, limits())
+                .unwrap()
+                .decision(),
+            ForkCompletionDecision::Replay
+        );
+        assert_eq!(replay.accepted_result, Some(&result));
+    }
 }
