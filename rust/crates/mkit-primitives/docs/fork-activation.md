@@ -84,3 +84,17 @@ observation and its revision belong to the activation/completion guard snapshot.
 `NotOffered` explicitly selects a profile without those transitions. Neither
 profile can change the accepted result; an already completed replay needs no
 new lifecycle authorization.
+
+## Durable checkpoints and proposed completion
+
+The progress revision names the original durable job row used by the
+coordinator CAS. A membership decision checks that checkpoint and the selected
+inherited pack; serial, wave, and head-last scheduling remain host duties.
+Physical permits bind the immutable acceptance and operation, and the final
+coordinator unit compares the original complete job row.
+
+A host can finish several units within one slice before saving a new checkpoint.
+Completion therefore supplies its proposed final cursor and part separately
+from the original durable progress. The decision validates the proposed complete
+count, digest, cursor, and part, then authorizes the owned barrier release under
+the original job CAS. It does not claim that proposed progress was already durable.

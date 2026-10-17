@@ -395,13 +395,14 @@ fn activation_bounds_precede_unavailable_acquisition_and_comparisons() {
 fn completion_requires_exact_inventory_progress_barrier_and_never_settles() {
     let mut advance = progress();
     advance.progress.phase = ForkAdvancePhase::Accepted;
-    advance.progress.cursor = 2;
     let result = result();
     let original = ForkCompletionFacts {
         lifecycle: ForkLifecycleProtection::NotOffered,
         advance: &advance,
         expected_result: &result,
         accepted_result: Some(&result),
+        completed_cursor: 2,
+        completed_part: 0,
         completed_packs: 2,
         completed_digest: result.pack_digest,
         expected_barrier_owner: advance.binding,
@@ -409,13 +410,15 @@ fn completion_requires_exact_inventory_progress_barrier_and_never_settles() {
     let guard = decide_fork_completion(&original, limits()).unwrap();
     assert_eq!(guard.decision(), ForkCompletionDecision::Complete);
     assert!(guard.matches(&original));
-    for field in 0..4 {
+    for field in 0..6 {
         let mut changed = original.clone();
         match field {
             0 => changed.completed_packs -= 1,
             1 => changed.completed_digest[0] ^= 1,
             2 => changed.expected_barrier_owner[0] ^= 1,
-            _ => changed.accepted_result = None,
+            3 => changed.accepted_result = None,
+            4 => changed.completed_cursor -= 1,
+            _ => changed.completed_part = 1,
         }
         assert!(!guard.matches(&changed));
         assert_eq!(
@@ -425,6 +428,31 @@ fn completion_requires_exact_inventory_progress_barrier_and_never_settles() {
             ForkCompletionDecision::Refuse(ForkRefusal::BindingMismatch)
         );
     }
+    let mut moved_checkpoint = advance.clone();
+    moved_checkpoint.progress.cursor = 1;
+    moved_checkpoint.progress.part = 1;
+    moved_checkpoint.progress.revision = rev(99);
+    let moved = ForkCompletionFacts {
+        advance: &moved_checkpoint,
+        ..original.clone()
+    };
+    assert!(!guard.matches(&moved));
+    // A new checkpoint can still complete units finished before this commit.
+    assert_eq!(
+        decide_fork_completion(&moved, limits()).unwrap().decision(),
+        ForkCompletionDecision::Complete
+    );
+    moved_checkpoint.progress.cursor = 3;
+    let backwards = ForkCompletionFacts {
+        advance: &moved_checkpoint,
+        ..original.clone()
+    };
+    assert_eq!(
+        decide_fork_completion(&backwards, limits())
+            .unwrap()
+            .decision(),
+        ForkCompletionDecision::Refuse(ForkRefusal::BindingMismatch)
+    );
     let mut done = advance.clone();
     done.progress.phase = ForkAdvancePhase::Complete;
     let replay = ForkCompletionFacts {
@@ -535,6 +563,11 @@ fn managed_lifecycle(state: mkit_primitives::decision::LifecycleState) -> ForkLi
 #[test]
 fn managed_lifecycle_requires_acquisition_active_incarnation_and_exact_revision() {
     use mkit_primitives::decision::{LifecycleState, Observed};
+
+    assert_eq!(
+        ForkRefusal::LifecycleUnavailable.code().as_str(),
+        "ForkLifecycleUnavailable"
+    );
     let mut advance = progress();
     advance.progress.phase = ForkAdvancePhase::Accepted;
     let result = result();
@@ -590,16 +623,16 @@ fn managed_lifecycle_requires_acquisition_active_incarnation_and_exact_revision(
 
 #[test]
 fn managed_lifecycle_withholds_completion_but_never_changes_completed_replay() {
-    use mkit_primitives::decision::{LifecycleState, Observed};
     let mut advance = progress();
     advance.progress.phase = ForkAdvancePhase::Accepted;
-    advance.progress.cursor = 2;
     let result = result();
     let original = ForkCompletionFacts {
         lifecycle: managed_lifecycle(LifecycleState::Active),
         advance: &advance,
         expected_result: &result,
         accepted_result: Some(&result),
+        completed_cursor: 2,
+        completed_part: 0,
         completed_packs: 2,
         completed_digest: result.pack_digest,
         expected_barrier_owner: advance.binding,

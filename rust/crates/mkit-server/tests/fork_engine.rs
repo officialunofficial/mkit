@@ -4148,3 +4148,58 @@ async fn accepted_clearance_outlives_construction_expiry_without_resettling() {
         assert!(member(&source, &id, pack).await.is_some());
     }
 }
+
+#[tokio::test]
+async fn activation_refuses_empty_immediate_membership_instead_of_adopting_semantic_aliases() {
+    use mkit_server::fork::ForkError;
+    for after_guard_loss in [false, true] {
+        let source = Source::build("source", 4).await;
+        let fork_env = env(&source);
+        let id = dest(&source, "forked");
+        mkit_server::fork::start(&fork_env, &spec(&source, "forked"), None)
+            .await
+            .unwrap();
+        stop_at_fork_phase(&source, &fork_env, &id, Phase::Publish).await;
+        let accepted = job_of(&source, &id).await.accepted.unwrap();
+        assert_ne!(source.pack, accepted.packmap);
+        let store = source.store.inner.clone();
+        let partition = source.shards.membership(&id, &BlobKey::pack(source.pack));
+        let live = keys::membership(&id.name, &source.pack);
+        let published = keys::published_member(&id.name, &source.pack);
+        if after_guard_loss {
+            *source.store.trigger.lock().unwrap() = Some((
+                "m",
+                Arc::new(move || {
+                    let (store, partition, live) = (store.clone(), partition.clone(), live.clone());
+                    Box::pin(async move {
+                        store
+                            .apply(
+                                &partition,
+                                mkit_server::Batch::new().put(live, mkit_server::Value::default()),
+                            )
+                            .await
+                            .unwrap();
+                    })
+                }),
+            ));
+        } else {
+            store
+                .apply(
+                    &partition,
+                    mkit_server::Batch::new()
+                        .put(live, mkit_server::Value::default())
+                        .put(published, mkit_server::Value::default()),
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            drive(&fork_env, &id).await.unwrap_err(),
+            ForkError::Unavailable("fork clearance pending"),
+            "after_guard_loss={after_guard_loss}"
+        );
+        let job = job_of(&source, &id).await;
+        assert_eq!(job.accepted.as_ref(), Some(&accepted));
+        assert!(job.result.is_none());
+    }
+}

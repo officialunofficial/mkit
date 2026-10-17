@@ -27,14 +27,15 @@ pub enum ForkAdvancePhase {
     /// Terminal refusal; destination remains inert.
     Failed,
 }
-/// Exact durable progress. The revision covers all omitted driver cursor data.
+/// Exact expected durable checkpoint. Its revision covers the original job row,
+/// including omitted driver cursor data; proposed progress is separate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForkProgress {
     /// Logical phase.
     pub phase: ForkAdvancePhase,
-    /// Next durable unit.
+    /// Next unit recorded by this durable checkpoint.
     pub cursor: u64,
-    /// Subunit within that cursor.
+    /// Subunit recorded by this durable checkpoint.
     pub part: u16,
     /// Exact job revision, including immutable binding and all progress fields.
     pub revision: Revision,
@@ -388,6 +389,8 @@ fn check_activation_inventory(facts: &ForkActivationFacts<'_>) -> Result<(), Fai
     Ok(())
 }
 /// Decide one membership installation after terminal acceptance.
+/// The selected pack must belong to accepted inventory. Serial or wave
+/// scheduling and installing the packmap head last remain host obligations.
 ///
 /// # Errors
 /// Bounded comparisons fail with `ResourceLimit`; missing acquired proof is
@@ -491,6 +494,11 @@ pub struct ForkCompletionFacts<'a> {
     pub expected_result: &'a ForkResult,
     /// Saved terminal acceptance result.
     pub accepted_result: Option<&'a ForkResult>,
+    /// Proposed next cursor after completed membership write/check units.
+    /// This may advance beyond the exact durable checkpoint in `advance`.
+    pub completed_cursor: u64,
+    /// Proposed subunit; completion requires no remaining half-unit.
+    pub completed_part: u16,
     /// Count of inherited packs whose write and subsequent check completed.
     pub completed_packs: u64,
     /// Digest of that complete retained inherited inventory.
@@ -570,8 +578,9 @@ pub fn decide_fork_completion<'a>(
     } else if phase != ForkAdvancePhase::Accepted
         || facts.completed_packs != facts.expected_result.packs
         || facts.completed_digest != facts.expected_result.pack_digest
-        || facts.advance.progress.cursor != facts.completed_packs
-        || facts.advance.progress.part != 0
+        || facts.completed_cursor != facts.completed_packs
+        || facts.completed_part != 0
+        || facts.advance.progress.cursor > facts.completed_cursor
     {
         ForkCompletionDecision::Refuse(ForkRefusal::BindingMismatch)
     } else if let Some(reason) = decide_fork_authority(

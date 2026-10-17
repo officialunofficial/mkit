@@ -212,15 +212,21 @@ impl Activation {
             value
                 .as_ref()
                 .map(|value| {
-                    crate::store::publication::Witness::decode(value)
-                        .map(|w| ForkWitness {
-                            generation: generation(w.generation),
-                            sequence: w.sequence,
-                            published: w.published,
-                            held: w.held,
-                            boundary: w.boundary,
-                        })
-                        .map_err(|_| ForkError::NotEmpty)
+                    let witness = crate::store::publication::Witness::decode(value)
+                        .map_err(|_| ForkError::NotEmpty)?;
+                    // Fork replay requires the original canonical bytes. Ordinary
+                    // immediate membership's empty form is a foreign value even
+                    // when its decoded generation-zero fields happen to match.
+                    if witness.encode() != *value {
+                        return Err(ForkError::NotEmpty);
+                    }
+                    Ok(ForkWitness {
+                        generation: generation(witness.generation),
+                        sequence: witness.sequence,
+                        published: witness.published,
+                        held: witness.held,
+                        boundary: witness.boundary,
+                    })
                 })
                 .transpose()
         };
@@ -278,14 +284,13 @@ impl Activation {
         use mkit_primitives::fork::{
             ForkCompletionDecision, ForkCompletionFacts, decide_fork_completion,
         };
-        let mut progress = progress.clone();
-        progress.progress.cursor = u64::from(job.cursor);
-        progress.progress.part = job.part;
         let facts = ForkCompletionFacts {
-            advance: &progress,
+            advance: progress,
             expected_result: &self.expected,
             accepted_result: Some(&self.accepted),
             lifecycle: mkit_primitives::fork::ForkLifecycleProtection::NotOffered,
+            completed_cursor: u64::from(job.cursor),
+            completed_part: job.part,
             completed_packs: u64::from(job.cursor),
             completed_digest: job.pack_set(),
             expected_barrier_owner: job.binding,
@@ -307,27 +312,51 @@ mod tests {
     use crate::store::publication::Witness;
     use mkit_primitives::fork::{ForkActivationDecision, ForkPairContext};
 
-    #[test]
-    fn activation_lowering_matches_the_frozen_reference_pair_matrix() {
+    fn fixture(membership_generation: u64) -> Activation {
+        let packs = vec![[7; 32], [8; 32]];
         let mut digest = mkit_core::hash::Hasher::new();
-        digest.update(&[7; 32]);
+        for pack in &packs {
+            digest.update(pack);
+        }
         let result = SemanticResult {
             source: RepositoryId([6; 32]),
             branch: RefName("refs/heads/main".into()),
             source_sequence: 1,
             tip: [5; 32],
-            packmap: [7; 32],
-            packs: 1,
+            packmap: [8; 32],
+            packs: 2,
             bytes: 100,
             index_entries: 2,
             pack_digest: digest.finalize(),
-            destination_generation: generation(1),
+            destination_generation: generation(membership_generation),
         };
-        let activation = Activation {
+        Activation {
             accepted: result.clone(),
             expected: result,
-            packs: vec![[7; 32]],
-        };
+            packs,
+        }
+    }
+
+    fn frozen_decision(
+        rows: &[Option<Value>; 2],
+        exact: &Value,
+        context: ForkPairContext,
+    ) -> Result<ForkActivationDecision, ForkError> {
+        if rows.iter().all(|v| v.as_ref() == Some(exact)) {
+            Ok(ForkActivationDecision::Replay)
+        } else if context == ForkPairContext::Initial && rows.iter().all(Option::is_none) {
+            Ok(ForkActivationDecision::Install)
+        } else if context == ForkPairContext::AfterGuardLoss
+            && rows.iter().flatten().all(|v| v == exact)
+        {
+            Ok(ForkActivationDecision::RetryPartial)
+        } else {
+            Err(ForkError::NotEmpty)
+        }
+    }
+
+    #[test]
+    fn activation_lowering_matches_the_frozen_reference_pair_matrix() {
         let progress = ForkAdvanceFacts {
             binding: [1; 32],
             destination: RepositoryId([2; 32]),
@@ -343,53 +372,44 @@ mod tests {
             reservation: None,
             construction_expires_ms: 0,
         };
-        let exact = Witness {
-            generation: 1,
-            sequence: 0,
-            published: true,
-            held: false,
-            boundary: true,
-        }
-        .encode();
-        let foreign = Witness {
-            generation: 1,
-            sequence: 0,
-            published: true,
-            held: true,
-            boundary: true,
-        }
-        .encode();
-        let choices = [
-            None,
-            Some(exact.clone()),
-            Some(foreign),
-            Some(Value::new(vec![255])),
-        ];
-        for live in &choices {
-            for published in &choices {
-                for context in [ForkPairContext::Initial, ForkPairContext::AfterGuardLoss] {
-                    let rows = [live.clone(), published.clone()];
-                    // Frozen reference contract works on complete raw rows. The
-                    // adapter independently decodes typed witnesses for the primitive.
-                    let expected =
-                        if live.as_ref() == Some(&exact) && published.as_ref() == Some(&exact) {
-                            Ok(ForkActivationDecision::Replay)
-                        } else if context == ForkPairContext::Initial
-                            && live.is_none()
-                            && published.is_none()
-                        {
-                            Ok(ForkActivationDecision::Install)
-                        } else if context == ForkPairContext::AfterGuardLoss
-                            && rows.iter().flatten().all(|v| *v == exact)
-                        {
-                            Ok(ForkActivationDecision::RetryPartial)
-                        } else {
-                            Err(ForkError::NotEmpty)
-                        };
-                    assert_eq!(
-                        activation.decide(&progress, [7; 32], &rows, context, 100),
-                        expected
-                    );
+        for membership_generation in [0, 1] {
+            let activation = fixture(membership_generation);
+            for pack in [[7; 32], [8; 32]] {
+                let witness = Witness {
+                    generation: membership_generation,
+                    sequence: 0,
+                    published: true,
+                    held: false,
+                    boundary: pack == activation.expected.packmap,
+                };
+                let exact = witness.encode();
+                let foreign = Witness {
+                    held: true,
+                    ..witness
+                }
+                .encode();
+                // The immediate-membership empty form aliases a canonical
+                // generation-zero non-head witness after decoding. It remains
+                // foreign to a fork under the original raw-byte contract.
+                let choices = [
+                    None,
+                    Some(exact.clone()),
+                    Some(foreign),
+                    Some(Value::new(vec![255])),
+                    Some(Value::default()),
+                ];
+                for live in &choices {
+                    for published in &choices {
+                        for context in [ForkPairContext::Initial, ForkPairContext::AfterGuardLoss] {
+                            let rows = [live.clone(), published.clone()];
+                            let expected = frozen_decision(&rows, &exact, context);
+                            assert_eq!(
+                                activation.decide(&progress, pack, &rows, context, 100),
+                                expected,
+                                "generation={membership_generation} pack={pack:?} context={context:?}"
+                            );
+                        }
+                    }
                 }
             }
         }
