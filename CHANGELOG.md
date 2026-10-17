@@ -76,6 +76,11 @@ collect the applicable entries between their old and new immutable pins.
 - `WindowCursor::metadata` returns validated, read-only pack identity and entry
   geometry for binding caller-owned checkpoints. Cursor fields remain private,
   and cursor encodings and reader verification behavior are unchanged.
+- Add pure fork progress, membership activation, and clearance completion
+  decisions to `mkit-primitives` and adopt them in the reference fork driver.
+  Recorded authority and exact pending reservation guards retain their commit
+  boundaries. Accepted clearance preserves its saved result and never repeats
+  settlement. Additive ALPHA API; no wire or stored-format change; no reset.
 
 - Add guarded fork acceptance to `mkit-primitives`: bounded full-inventory plans,
   authoritative destination emptiness, final source-proof ordering, exact

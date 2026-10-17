@@ -161,3 +161,16 @@ an approved format change, run **tools/generate-acceptance-fixtures.py** with
 the Python `blake3` package installed, inspect every changed vector, and update
 the specification and version policy together. The same bounded fuzz body runs
 in stable corpus replay and the scheduled `acceptance_decode` target.
+
+## Fork progress and published clearance
+
+`fork::decide_fork_advance` fences each advancing unit against the recorded
+authority, applicable grant epoch, and pre-acceptance reservation protection.
+`decide_fork_activation` returns membership installation, exact replay, or a
+guarded refusal. `decide_fork_completion` authorizes the final owned write-barrier
+release only after complete accepted progress. These decisions emit no terminal
+outcome or settlement.
+
+The [activation contract](docs/fork-activation.md) explains the complete guard
+matrix and host proof obligations. Run `cargo run -p mkit-primitives --example
+fork_activation` for a bounded membership decision.

@@ -10,6 +10,7 @@ use crate::store::{
 };
 use crate::takedown::denial;
 use mkit_core::hash::Hash;
+use mkit_primitives::fork::{ForkActivationDecision, ForkPairContext};
 
 /// Calls below which a unit is not started. A proof costs about twenty calls
 /// plus a few per active takedown descriptor; a unit that runs out anyway ends
@@ -54,8 +55,9 @@ pub(crate) async fn slice<S: NamespaceStore>(
     env: &ForkEnv<'_, S>,
     job: &mut ForkJobV1,
     budget: &SliceBudget,
+    progress: &mkit_primitives::fork::ForkAdvanceFacts,
 ) -> Result<bool, ForkError> {
-    let source = job.source()?;
+    job.source()?;
     let dest = job.dest()?;
     let store = Budgeted::new(env.store, budget);
     let order = order(job);
@@ -74,7 +76,7 @@ pub(crate) async fn slice<S: NamespaceStore>(
             return Ok(false);
         }
         if job.part >= WRITES {
-            let (done, failure) = wave(env, &store, budget, job, &source, &dest, &order).await;
+            let (done, failure) = wave(env, &store, budget, job, &dest, &order, progress).await;
             progressed |= done > 0;
             match failure {
                 None => {}
@@ -93,7 +95,7 @@ pub(crate) async fn slice<S: NamespaceStore>(
         // Two units per pack, each costing one proof: the write (proof, then
         // the guarded rows) and the check after it. `job.part` says which.
         let unit = match job.part {
-            0 => write_one(env, &store, job, &source, &dest, &id).await,
+            0 => write_one(env, &store, job, &dest, &id, progress).await,
             1 => clear(env, &store, &dest, &id).await,
             _ => return Err(ForkError::Unavailable("fork publish state")),
         };
@@ -132,9 +134,9 @@ async fn wave<S: NamespaceStore>(
     store: &Budgeted<'_, S>,
     budget: &SliceBudget,
     job: &mut ForkJobV1,
-    source: &RepoId,
     dest: &RepoId,
     order: &[Hash],
+    progress: &mkit_primitives::fork::ForkAdvanceFacts,
 ) -> (usize, Option<ForkError>) {
     let last = order.len() - 1;
     let start = job.cursor as usize;
@@ -145,7 +147,7 @@ async fn wave<S: NamespaceStore>(
         let job = &*job;
         futures::future::join_all(units.iter().map(|id| async move {
             if stage == WRITES {
-                write_one(env, store, job, source, dest, id).await
+                write_one(env, store, job, dest, id, progress).await
             } else {
                 clear(env, store, dest, id).await
             }
@@ -179,16 +181,14 @@ async fn write_one<S: NamespaceStore>(
     env: &ForkEnv<'_, S>,
     store: &Budgeted<'_, S>,
     job: &ForkJobV1,
-    _source: &RepoId,
     dest: &RepoId,
     id: &Hash,
+    progress: &mkit_primitives::fork::ForkAdvanceFacts,
 ) -> Result<(), ForkError> {
     // Installation projects an immutable accepted binding. Source changes
     // after its final proof are ordered after acceptance, so only the live
     // destination denial/lifecycle proof is repeated here.
-    if job.accepted.as_ref() != Some(&super::accept::result(job)?) {
-        return Err(ForkError::Unavailable("fork acceptance missing"));
-    }
+    let activation = super::decision::Activation::new(job)?;
     clear(env, store, dest, id).await?;
     let witness = Witness {
         generation: super::MEMBERSHIP_GENERATION,
@@ -209,15 +209,15 @@ async fn write_one<S: NamespaceStore>(
     // never overwritten.
     let pair = [live.clone(), published.clone()];
     let rows = store.get_many(&target, &pair).await?;
-    match rows.as_slice() {
-        [None, None] => {
+    let apply_now = env.now();
+    let valid_through = apply_now.saturating_add(CONTENT_APPLY_WINDOW_MS);
+    match activation.decide(progress, *id, &rows, ForkPairContext::Initial, apply_now)? {
+        ForkActivationDecision::Install => {
             let mut batch = Batch::new()
                 // Stamped at the write: the check unit that follows (a proof
                 // after the write) is what closes the window between the
                 // proof and the write, however long the proof took.
-                .require(Precondition::NotAfter(
-                    env.now().saturating_add(CONTENT_APPLY_WINDOW_MS),
-                ))
+                .require(Precondition::NotAfter(valid_through))
                 .require(Precondition::Absent(live.clone()))
                 .require(Precondition::Absent(published.clone()))
                 .put(live, witness.clone())
@@ -233,11 +233,14 @@ async fn write_one<S: NamespaceStore>(
                     // Another driver may have published this exact unit.
                     // Accept only its complete, byte-identical witness pair.
                     let rows = store.get_many(&target, &pair).await?;
-                    match rows.as_slice() {
-                        [Some(a), Some(b)] if *a == witness && *b == witness => {}
-                        _ if rows.iter().flatten().any(|row| *row != witness) => {
-                            return Err(ForkError::NotEmpty);
-                        }
+                    match activation.decide(
+                        progress,
+                        *id,
+                        &rows,
+                        ForkPairContext::AfterGuardLoss,
+                        env.now(),
+                    )? {
+                        ForkActivationDecision::Replay => {}
                         _ => return Err(ForkError::Unavailable("fork publish raced")),
                     }
                 }
@@ -246,7 +249,7 @@ async fn write_one<S: NamespaceStore>(
                 }
             }
         }
-        [Some(a), Some(b)] if *a == witness && *b == witness => {}
+        ForkActivationDecision::Replay => {}
         _ => return Err(ForkError::NotEmpty),
     }
     Ok(())

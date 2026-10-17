@@ -350,3 +350,31 @@ admission and unaccepted recovery enforce the same source requirement, because
 single-partition membership mutations do not maintain these proof revisions.
 Single-partition ordinary writes keep their existing batches. Completed results
 remain recoverable without a new source proof.
+
+Permit rows retain a deadline. Coordinator recovery holds transitions until
+previously issued apply windows have expired, even if restoration lost their
+registry rows. Completed forks drain their permits after removing the write
+barrier. Ordinary lease renewal and authority bootstrap add keys to existing
+snapshots and batches; they add no storage round trip to ordinary writes.
+
+## Portable progress and activation decisions
+
+The fork driver supplies its retained binding, progress, exact authority
+observations, and applicable reservation protection to the pure progress
+decision. It lowers the decision alongside the existing job CAS. The selected
+phase, bounded waves, slice allowance, and physical key routing stay in the host.
+
+Membership activation supplies the exact accepted result and sorted inherited
+inventory, current destination proof, and live/published witness pair. The
+pure decision distinguishes an initial install, an identical replay, a foreign
+witness, and a retryable partial pair after guard loss. Source changes after
+acceptance do not change that result. The host retains the real denial and
+lifecycle proof calls and every physical authority permission at membership
+apply. It never substitutes a coordinator preflight for a physical commit guard.
+
+The final completion decision validates the accepted result and completed
+inventory before the coordinator atomically saves Done and removes the exact
+operation-owned write barrier. Proof reclamation, which changes no decision,
+finishes before that completion check. The decision creates no terminal outcome
+or reservation settlement. Failed destinations remain inert, and no cleanup
+removes holders.

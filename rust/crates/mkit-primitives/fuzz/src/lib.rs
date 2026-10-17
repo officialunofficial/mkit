@@ -48,3 +48,7 @@ pub mod auth_claims;
 pub mod acceptance;
 #[cfg(test)]
 mod acceptance_seed_tests;
+
+/// Bounded fork progress and accepted-clearance transitions.
+#[path = "../../tests/support/fork_advance.rs"]
+pub mod fork_advance;

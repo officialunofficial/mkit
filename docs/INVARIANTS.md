@@ -3122,3 +3122,25 @@ completed, despite a later coordinator CAS failure.
 
 **Enforced by:** local atomic permit guards, resumable transition drains,
 recovery holdoffs, and the physical activation race regression.
+
+## Fork clearance preserves the terminal acceptance
+
+**Always:** with authority fencing, every advancing fork commit compares its
+recorded authority facts. Before acceptance it also compares exact reservation
+protection. After acceptance,
+progress and membership activation retain the exact saved result and complete
+inherited inventory; construction expiry and pruned settlement evidence do not
+create a new terminal outcome. Destination writes remain blocked until complete
+clearance. Later source movement cannot rewrite the accepted source pair.
+
+**Because:** clearance may resume after the response, reservation acknowledgement,
+or a crash. An advancing checkpoint cannot manufacture authorization or repeat
+an accepted charge.
+
+**If violated:** defer clearance without replacing the saved result. Refuse
+foreign membership witnesses and retain a failed destination's inert state.
+
+**Enforced by:** the pure fork progress, activation, and completion decisions,
+full-snapshot mutation and hostile-fact tests, and reference fork driver lowering.
+The host retains current destination proof acquisition, exact storage CAS, and
+physical authority-permission enforcement.

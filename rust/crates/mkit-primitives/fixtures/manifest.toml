@@ -854,3 +854,14 @@ semantic = "fork/acceptance.md"
 decode_config = "semantic; packs=3; edges=4; branch_bytes=128; index_entries=30; inherited_bytes=300; work=4096"
 expected = "per-case decision or stable code"
 spec = "SPEC-SERVER §9.9"
+
+[[fixtures]]
+type = "fork.progress"
+format_version = 0
+ruleset = "SPEC-SERVER-9.9"
+profile = "indexed"
+path = "fork/progress.txt"
+semantic = "fork/progress.md"
+decode_config = "semantic; fixed-shape facts; explicit time; construction_expires_ms=100"
+expected = "per-case progress decision"
+spec = "SPEC-SERVER §9.9; §10.2"
