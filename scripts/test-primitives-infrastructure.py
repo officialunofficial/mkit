@@ -180,6 +180,34 @@ spec = "test"
             with self.assertRaisesRegex(ValueError, "invalid SHA256 digest"):
                 fixtures.check(root)
 
+    def test_semantic_contract_sidecars_are_pinned_and_inventoried(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            manifest, _ = self.write_semantic_contract(root)
+            sidecar = root / "codes.md"
+            original = b"Semantic expectations\n"
+            sidecar.write_bytes(original)
+            manifest.write_text(manifest.read_text() + 'semantic = "codes.md"\n'
+                                + f'semantic_sha256 = "{hashlib.sha256(original).hexdigest()}"\n')
+            self.assertEqual(fixtures.check(root), 0)
+            self.assertEqual(sidecar.read_bytes(), original)
+            sidecar.write_bytes(b"Changed expectations\n")
+            with self.assertRaisesRegex(ValueError, "changed fixture bytes: codes.md"):
+                fixtures.check(root)
+            sidecar.unlink()
+            with self.assertRaisesRegex(ValueError, "missing fixture: codes.md"):
+                fixtures.check(root)
+            sidecar.write_bytes(original)
+            pinned = manifest.read_text()
+            manifest.write_text("\n".join(line for line in pinned.splitlines()
+                                          if not line.startswith("semantic_sha256 = ")))
+            with self.assertRaisesRegex(ValueError, "missing or invalid SHA256 digest: codes.md"):
+                fixtures.check(root)
+            manifest.write_text("\n".join(line for line in pinned.splitlines()
+                                          if not line.startswith(("semantic = ", "semantic_sha256 = "))))
+            with self.assertRaisesRegex(ValueError, "orphan"):
+                fixtures.check(root)
+
     def test_wrapper_only_marks_primitives(self):
         wrapper = HERE / "primitives-stability-rustc.py"
         environment = dict(os.environ, MKIT_PRIMITIVES_MIN_STABILITY="GAMMA")

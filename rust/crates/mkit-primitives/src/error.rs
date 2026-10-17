@@ -138,7 +138,7 @@ pub enum FailureCode {
     ClaimsBindingMismatch,
     // replay
     // evidence
-    /// Unsupported acceptance-evidence format.
+    /// Unsupported evidence format version.
     #[error("UnsupportedEvidenceVersion")]
     UnsupportedEvidenceVersion,
     /// Evidence ruleset or profile does not match the writer configuration.
@@ -164,7 +164,6 @@ pub enum FailureCode {
     /// Evidence does not authenticate under the expected commitment.
     #[error("EvidenceMismatch")]
     EvidenceMismatch,
-
 }
 impl FailureCode {
     /// Stable machine-readable string. Diagnostic Display text is not a parser API.
@@ -193,19 +192,16 @@ impl FailureCode {
             Self::BadSignature => "BadSignature",
             Self::DeltaChainTooDeep => "DeltaChainTooDeep",
             Self::ExternalBaseAbsent => "ExternalBaseAbsent",
+            Self::PackfileTooShort => "PackfileTooShort",
             Self::MissingClosure => "MissingClosure",
             Self::WrongKind => "WrongKind",
             Self::ResourceLimit => "ResourceLimit",
             Self::UnavailableInput => "UnavailableInput",
             Self::InvalidResponse => "InvalidResponse",
             Self::InvalidCheckpoint => "InvalidCheckpoint",
+            Self::CheckpointNotReady => "CheckpointNotReady",
             Self::SourceChanged => "SourceChanged",
             Self::UnsupportedCapability => "UnsupportedCapability",
-            Self::EvidenceMismatch => "EvidenceMismatch",
-            Self::InvalidEvidence => "InvalidEvidence",
-            Self::UnsupportedRuleset => "UnsupportedRuleset",
-            Self::CheckpointNotReady => "CheckpointNotReady",
-            Self::PackfileTooShort => "PackfileTooShort",
             // fork
             Self::ForkSourceNotFound => "ForkSourceNotFound",
             Self::ForkDestinationNotEmpty => "ForkDestinationNotEmpty",
@@ -224,6 +220,9 @@ impl FailureCode {
             Self::NonCanonicalEvidence => "NonCanonicalEvidence",
             Self::EvidenceBindingMismatch => "EvidenceBindingMismatch",
             Self::EvidenceHeadMismatch => "EvidenceHeadMismatch",
+            Self::UnsupportedRuleset => "UnsupportedRuleset",
+            Self::InvalidEvidence => "InvalidEvidence",
+            Self::EvidenceMismatch => "EvidenceMismatch",
         }
     }
 }

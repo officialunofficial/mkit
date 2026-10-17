@@ -43,6 +43,7 @@ fn compare_schedules(bytes: &[u8]) {
     let baseline = run(bytes, 0);
     assert_eq!(run(bytes, 1), baseline);
     assert_eq!(run(bytes, 2), baseline);
+    assert_eq!(run(bytes, 3), baseline);
 }
 
 fn run(bytes: &[u8], schedule: u8) -> Outcome {
@@ -61,6 +62,7 @@ fn run(bytes: &[u8], schedule: u8) -> Outcome {
         delta_depth: 50,
     };
     let mut frames = Hasher::new();
+    let mut recovered_page = None;
     let mut driver = match FramingDriver::new(source, RepositoryId([9; 32]), profile, limits, 17) {
         Ok(driver) => driver,
         Err(error) => return Outcome::Refused(error.code, frames.finalize()),
@@ -95,21 +97,23 @@ fn run(bytes: &[u8], schedule: u8) -> Outcome {
                     return Outcome::Refused(error.code, frames.finalize());
                 }
             }
-            FramingStep::Frame(frame) => {
-                frames.update(&frame.ordinal.to_le_bytes());
-                match frame.entry {
-                    FramedEntry::Raw(raw) => {
-                        frames.update(&[0]);
-                        frames.update(raw);
-                    }
-                    FramedEntry::Delta { base, stream } => {
-                        frames.update(&[1]);
-                        frames.update(&base);
-                        frames.update(stream);
-                    }
-                }
+            FramingStep::Frame(frame) => record_frame(&mut frames, &frame),
+            FramingStep::Request(Request::EvidencePage { request, page }) => {
+                let (saved, bytes): &(PageCommitment, Vec<u8>) = recovered_page
+                    .as_ref()
+                    .expect("resume requests only the acknowledged first page");
+                assert_eq!(*saved, page);
+                driver
+                    .supply(Response::EvidencePage {
+                        request,
+                        page,
+                        value: Acquisition::Present(bytes),
+                    })
+                    .expect("authenticated resume page");
             }
             FramingStep::RetainEvidence(page) => {
+                let should_restart = schedule == 3 && recovered_page.is_none();
+                let saved = should_restart.then(|| page.bytes.to_vec());
                 let commitment = page.commitment;
                 let digest = hash::hash(page.bytes);
                 if schedule != 0 {
@@ -118,6 +122,10 @@ fn run(bytes: &[u8], schedule: u8) -> Outcome {
                 driver
                     .acknowledge_retention(commitment)
                     .expect("bounded model invariant");
+                if let Some(bytes) = saved {
+                    recovered_page = Some((commitment, bytes));
+                    driver = restart(&mut driver, source, profile, limits);
+                }
             }
             FramingStep::Complete(pack) => {
                 assert_eq!(pack.source(), source);
@@ -129,6 +137,42 @@ fn run(bytes: &[u8], schedule: u8) -> Outcome {
         }
     }
     panic!("bounded framing did not terminate");
+}
+
+fn restart(
+    driver: &mut FramingDriver,
+    source: PackSource,
+    profile: IndexedProfile,
+    limits: VerifyLimits,
+) -> FramingDriver {
+    let snapshot = driver.checkpoint().expect("safe acknowledged entry");
+    let checkpoint =
+        mkit_primitives::evidence::checkpoint::Checkpoint::from_bytes(snapshot.bytes(), limits)
+            .expect("canonical checkpoint");
+    FramingDriver::resume(
+        source,
+        RepositoryId([9; 32]),
+        profile,
+        limits,
+        18,
+        &checkpoint,
+    )
+    .expect("bound cold resume")
+}
+
+fn record_frame(frames: &mut Hasher, frame: &mkit_primitives::pack_verify::framing::Frame<'_>) {
+    frames.update(&frame.ordinal.to_le_bytes());
+    match frame.entry {
+        FramedEntry::Raw(raw) => {
+            frames.update(&[0]);
+            frames.update(raw);
+        }
+        FramedEntry::Delta { base, stream } => {
+            frames.update(&[1]);
+            frames.update(&base);
+            frames.update(stream);
+        }
+    }
 }
 
 fn exercise_retention(driver: &mut FramingDriver, commitment: PageCommitment, digest: Hash) {

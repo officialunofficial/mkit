@@ -25,13 +25,15 @@ source. Cargo compatibility alone does not promise checkpoint compatibility.
 
 The current framing release implements the bounded two-pass framing driver,
 page and proof codecs, and strict checkpoint envelope codec. `FramedPack`
-records integrity and framing only. The all-entry verifier, closure walker,
-acceptance decision implementation, and optional compute executor are separate
-work; the public contracts below define their composition boundary.
+records integrity and framing only. All-entry verification and optional compute
+execution remain future work. Closure and guarded decisions have separate entry
+points; framing completion establishes none of their semantic checks.
 
-Driver checkpoint/resume integration requires validation of the core cursor's
-metadata against the outer envelope. Envelope decoding alone does not provide
-that validation or authorize resumption.
+The driver resumes integrity, acknowledged entry, and completion boundaries.
+Decode restoration checks the core cursor's validated metadata against every
+outer source, window, header, position, payload and entry binding. It recovers
+all retained predecessor pages before decoding. Envelope decoding alone does
+not provide those checks or authorize resumption.
 
 ## Evidence layers
 

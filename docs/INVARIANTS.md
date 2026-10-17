@@ -83,6 +83,25 @@ retention events and refusal of wrong or duplicate acknowledgments. Page and
 checkpoint decoders reject unsupported versions, malformed bounds, and trailing
 bytes; checkpoint checksums grant no authority to resume.
 
+## Primitive cold resume binds cursor metadata before decoder progress
+
+**Always:** Decode resume compares the validated core cursor's source length,
+window size, position, payload total, version, entry count/index and expected
+whole-pack identity with its outer envelope. It reserves restore memory first,
+recovers every retained predecessor page, then authenticates the reacquired
+window prefix. Cumulative work, evidence and historical memory peaks survive.
+
+**Because:** an internally consistent cursor can still belong to a different
+source or logical boundary, and a lost page cannot support dependent progress.
+
+**If violated:** resumption could skip entries, substitute bytes or evidence,
+or repeatedly reset the resource ceiling.
+
+**Enforced by:** `pack_verify::framing::checkpoints::resume_tests` covers each
+binding, every acknowledged entry, compressed cross-window frames, lost pages,
+changed prefixes and exhausted restore/admission budgets. The framing fuzz
+schedule compares cold restart with uninterrupted results and refusals.
+
 ## Conformance distinguishes absent features from implementation gaps
 
 **Always:** cases for undeclared protocol features report not applicable with
