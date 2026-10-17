@@ -3087,4 +3087,3 @@ completed, despite a later coordinator CAS failure.
 
 **Enforced by:** local atomic permit guards, resumable transition drains,
 recovery holdoffs, and the physical activation race regression.
-
