@@ -1,11 +1,8 @@
 //! Ref compare-and-swap and ref-name helpers (SPEC-TRANSPORT-CONNECT §3,
 //! SPEC-TRANSPORT §4.2.1, SPEC-REFS §3 and §4).
 //!
-//! The canonical copy of logic that lived in `mkit serve`'s
-//! `pack_key_from_id`/`decode_update_ref` (removed in WP-M0-13), vcs-worker's
-//! former `refs.rs` (removed in WP-M0-17), and `mkit-transport-connect` 0.4's
-//! `refs_convert.rs` and `hashutil.rs` (removed in WP-M0-15).
-//! `apps/repo-worker` keeps its own copy (planner decision Q11).
+//! Shared by the SSH and Connect server bindings.
+//! `apps/repo-worker` keeps its own service integration.
 
 use std::borrow::Cow;
 
@@ -227,7 +224,7 @@ impl RefWireError {
 
     /// `mkit serve`'s message, verbatim. The ssh wire ignores a non-empty
     /// `expected_id` for `ANY`/`MISSING`, so `IdNotEmpty` never reaches it and
-    /// borrows `vcs-worker`'s text.
+    /// uses the Connect error text.
     #[must_use]
     pub const fn ssh_message(self) -> &'static str {
         match self {
@@ -363,7 +360,6 @@ mod tests {
     const ID_A: &[u8] = &[0xaa; 32];
     const ID_B: &[u8] = &[0xbb; 32];
 
-    // Ported from apps/vcs-worker/src/refs.rs `any_clobbers`.
     #[test]
     fn any_clobbers() {
         assert_eq!(
@@ -380,7 +376,6 @@ mod tests {
         ));
     }
 
-    // Ported from apps/vcs-worker/src/refs.rs `missing_create_only`.
     #[test]
     fn missing_create_only() {
         assert_eq!(
@@ -397,7 +392,6 @@ mod tests {
         ));
     }
 
-    // Ported from apps/vcs-worker/src/refs.rs `match_cas`.
     #[test]
     fn match_cas() {
         assert_eq!(
@@ -418,7 +412,6 @@ mod tests {
         ));
     }
 
-    // Ported from apps/vcs-worker/src/refs.rs `unspecified_is_protocol_error`.
     #[test]
     fn unspecified_is_protocol_error() {
         assert!(matches!(
@@ -451,7 +444,6 @@ mod tests {
         }
     }
 
-    // Ported from apps/vcs-worker/src/refs.rs `from_wire_numbers_match_proto`.
     #[test]
     fn from_wire_numbers_match_proto() {
         assert_eq!(RefExpectationWire::from_wire(1), RefExpectationWire::Any);
@@ -470,9 +462,7 @@ mod tests {
         );
     }
 
-    // Ported from apps/vcs-worker/src/refs.rs `digest_length` (`is_valid_digest`),
-    // with the Connect message of mkit-transport-connect/src/hashutil.rs
-    // (0.4, removed in WP-M0-15).
+    // Digest validation retains the Connect error message for a bad byte length.
     #[test]
     fn digest_length() {
         let new_id = |b: &[u8]| hash_from_slice(DigestField::NewId, Some(b));

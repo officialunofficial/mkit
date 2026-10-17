@@ -1,45 +1,8 @@
 name: "CI: Workers"
 
-# apps/repo-worker, apps/keys-worker, apps/vcs-worker, and
-# apps/mkit-worker-common are standalone Cargo packages (each with its own
-# [package]/[workspace]) — none is a member of rust/Cargo.toml, so cargo
-# fmt/clippy/nextest in cloudbuild/ci.yaml never touches them. This workflow
-# is their dedicated gate: fmt, clippy, `cargo test --lib` for all four
-# crates, a wasm32-unknown-unknown build for keys-worker and
-# mkit-worker-common (repo-worker gets an incidental wasm build via the
-# codegen-freshness check in cloudbuild/codegen.yaml — not duplicated here;
-# vcs-worker gets its wasm32 clippy step and the conformance job's
-# worker-build), and `buf lint` against apps/repo-worker/proto
-# (apps/repo-worker/buf.yaml is otherwise dormant; no CI surface runs it
-# today). vcs-worker has no app-local buf.yaml — it compiles against the
-# repo-root `proto/` module, already covered by buf.yml/proto.yml — so
-# there is no per-app buf lint step for it here.
-#
-# apps/mkit-worker-common (mkit#797) holds the CORS/body-cap/fetch-adapter
-# glue shared by repo-worker and vcs-worker. It gets the SAME per-crate
-# treatment as keys-worker rather than being folded into repo-worker's or
-# vcs-worker's steps: it has no other CI footprint (no codegen-freshness
-# check touches it, since it emits no generated proto code), and both
-# consumer crates already build/test it transitively via their own `cargo
-# test`/wasm32 build steps below — but that transitive coverage wouldn't
-# catch a `cargo fmt`/`clippy` violation scoped to files ONLY this crate
-# touches, or a case where a change compiles fine as a dependency but fails
-# clippy/fmt on its own (e.g. an unused-in-context import). Explicit
-# per-crate steps close that gap at negligible extra CI cost.
-#
-# Deploys live elsewhere (Cloudflare Workers Builds on merge to main, same
-# model as apps/web) — this workflow is validation only.
-# The TypeScript workspace Worker has a separate job below: rebuild the Rust
-# WASM codec, generate binding types, test nanocodex integration, and bundle
-# the Worker plus its Sandbox image.
-#
-# apps/vcs-worker is a thin deployment of rust/crates/mkit-server-worker
-# (WP-M0-17), so changes to mkit-server* also trigger this workflow. The
-# `vcs-worker-conformance` job runs the black-box wire suite
-# (mkit-server-conformance) against a direct workerd socket
-# (scripts/vcs-worker-conformance.sh). This workflow triggers only on `main`
-# (pushes and PRs into it). The same script can be run locally. All jobs feed
-# the existing stable gate.
+# Dedicated gates for the standalone Rust Workers and the TypeScript workspace
+# Worker. These packages are outside the root Rust workspace. The reference
+# server's native wire conformance runs in rust.yml.
 
 on:
   push:
@@ -48,8 +11,6 @@ on:
       - '.github/workflows/workers.yml'
       - 'apps/repo-worker/**'
       - 'apps/keys-worker/**'
-      - 'apps/vcs-worker/**'
-      - 'apps/embedded-worker/**'
       - 'apps/mkit-worker-common/**'
       - 'apps/workspace-worker/**'
       - 'rust/Cargo.lock'
@@ -59,33 +20,8 @@ on:
       - 'rust/crates/mkit-attest/**'
       - 'rust/crates/mkit-rpc/**'
       - 'rust/crates/mkit-wasm/**'
-      - 'rust/crates/mkit-server/**'
-      - 'rust/crates/mkit-server-worker/**'
-      - 'rust/crates/mkit-server-conformance/**'
-      - 'rust/crates/mkit-transport-connect/**'
-      - 'scripts/vcs-worker-conformance.sh'
-      - 'scripts/workers-wire-diagnostics.py'
-      - 'scripts/test-workers-wire-diagnostics.py'
-      - 'scripts/enable-worker-alarm-info.py'
-      - 'scripts/test-enable-worker-alarm-info.py'
-      - 'scripts/workers-runtime-versions.cjs'
-      - 'scripts/workers-wire-runtime.cjs'
-      - 'scripts/embedded-worker-conformance.*'
-      - 'scripts/reference-worker-acceptance.py'
-      - 'scripts/connect-deadline-runtime.py'
-      - 'rust/vendor/ruzstd/**'
-      - 'rust/crates/mkit-core-wasm-check/**'
-      - 'rust/tests/golden/pack-v2/**'
-      - 'scripts/paid-worker-acceptance.py'
-      - 'scripts/embedded-worker-hooks.py'
-      - 'scripts/vcs-worker-launch-runtime.py'
-      - 'scripts/check-launch-feature-graph.py'
-      - 'scripts/wasm-ruzstd-check.sh'
-      - 'scripts/test-server-gates.py'
-      - 'cloudbuild/ci.yaml'
       - 'apps/workspace-worker/package-lock.json'
       - 'apps/workspace-worker/package.json'
-      - 'proto/mkit/transport/v1/**'
   # No `paths:` filter on pull_request: the workflow ALWAYS triggers on PRs so
   # its required check (workers-gate) is never absent. The `ci` job is gated
   # on the in-workflow paths-filter below instead — this avoids the
@@ -105,7 +41,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # Detect whether this PR touches either worker crate. The `ci` job runs
+  # Detect whether this PR touches a retained worker crate. The `ci` job runs
   # only when it does; the `workers-gate` job below always runs and is the
   # stable required-check name.
   changes:
@@ -124,17 +60,12 @@ jobs:
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d  # v4.0.3
         id: filter
         with:
-          # `workers` lists every in-repo path dependency of the four
-          # worker crates and of the conformance runner (`cargo metadata`
-          # of each app; `cargo tree -p mkit-server-conformance`), plus the
-          # rust/ workspace files the runner builds with.
+          # Include the retained standalone Workers and their path dependencies.
           filters: |
             workers:
               - '.github/workflows/workers.yml'
               - 'apps/repo-worker/**'
               - 'apps/keys-worker/**'
-              - 'apps/vcs-worker/**'
-              - 'apps/embedded-worker/**'
               - 'apps/mkit-worker-common/**'
               - 'rust/Cargo.lock'
               - 'rust/Cargo.toml'
@@ -142,33 +73,8 @@ jobs:
               - 'rust/crates/mkit-core/**'
               - 'rust/crates/mkit-attest/**'
               - 'rust/crates/mkit-rpc/**'
-              - 'rust/crates/mkit-transport-connect/**'
-              - 'rust/crates/mkit-server/**'
-              - 'rust/crates/mkit-server-worker/**'
-              - 'rust/crates/mkit-server-conformance/**'
-              - 'scripts/vcs-worker-conformance.sh'
-              - 'scripts/workers-wire-diagnostics.py'
-              - 'scripts/test-workers-wire-diagnostics.py'
-              - 'scripts/enable-worker-alarm-info.py'
-              - 'scripts/test-enable-worker-alarm-info.py'
-              - 'scripts/workers-runtime-versions.cjs'
-              - 'scripts/workers-wire-runtime.cjs'
-              - 'scripts/embedded-worker-conformance.*'
-              - 'scripts/reference-worker-acceptance.py'
-              - 'scripts/connect-deadline-runtime.py'
-              - 'rust/vendor/ruzstd/**'
-              - 'rust/crates/mkit-core-wasm-check/**'
-              - 'rust/tests/golden/pack-v2/**'
-              - 'scripts/paid-worker-acceptance.py'
-              - 'scripts/embedded-worker-hooks.py'
-              - 'scripts/vcs-worker-launch-runtime.py'
-              - 'scripts/check-launch-feature-graph.py'
-              - 'scripts/wasm-ruzstd-check.sh'
-              - 'scripts/test-server-gates.py'
-              - 'cloudbuild/ci.yaml'
               - 'apps/workspace-worker/package-lock.json'
               - 'apps/workspace-worker/package.json'
-              - 'proto/mkit/transport/v1/**'
             workspace:
               - '.github/workflows/workers.yml'
               - 'apps/workspace-worker/**'
@@ -211,8 +117,6 @@ jobs:
           workspaces: |
             apps/repo-worker -> apps/repo-worker/target
             apps/keys-worker -> apps/keys-worker/target
-            apps/vcs-worker -> apps/vcs-worker/target
-            apps/embedded-worker -> apps/embedded-worker/target
             apps/mkit-worker-common -> apps/mkit-worker-common/target
           prefix-key: "rust-ci-workers"
           cache-on-failure: false
@@ -246,8 +150,8 @@ jobs:
         working-directory: apps/mkit-worker-common
         run: cargo test
 
-      # mkit-worker-common has no other CI footprint (unlike repo-worker/
-      # vcs-worker, no codegen-freshness check incidentally builds it for
+      # mkit-worker-common has no other CI footprint (no
+      # codegen-freshness check incidentally builds it for
       # wasm32) — build it explicitly, mirroring keys-worker's identical
       # rationale below.
       - name: mkit-worker-common - wasm32 build
@@ -287,32 +191,6 @@ jobs:
       - name: keys-worker - wasm32 build
         working-directory: apps/keys-worker
         run: cargo build --target wasm32-unknown-unknown
-
-      - name: vcs-worker - Check formatting
-        working-directory: apps/vcs-worker
-        run: cargo fmt --check
-
-      - name: vcs-worker - Clippy
-        working-directory: apps/vcs-worker
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: vcs-worker - Clippy (wasm32)
-        working-directory: apps/vcs-worker
-        run: cargo clippy --target wasm32-unknown-unknown --all-targets -- -D warnings
-
-      # vcs-worker's wasm32 build is exercised by the clippy (wasm32) step
-      # above and by the vcs-worker-conformance job's worker-build.
-      - name: vcs-worker - Test (lib)
-        working-directory: apps/vcs-worker
-        run: cargo test --lib
-
-      - name: embedded-worker - Check formatting
-        working-directory: apps/embedded-worker
-        run: cargo fmt --check
-
-      - name: embedded-worker - Clippy (wasm32)
-        working-directory: apps/embedded-worker
-        run: cargo clippy --locked --target wasm32-unknown-unknown -- -D warnings
 
   workspace:
     name: Workspace typecheck, tests, and production bundle
@@ -379,213 +257,6 @@ jobs:
         working-directory: apps/workspace-worker
         run: npm run build
 
-  # The M0 wire-conformance check of the vcs-worker port (WP-M0-17): the
-  # black-box wire suite against the Worker on direct workerd, in both
-  # the release feature set and the `test-faults` one (clock skew, stats,
-  # quota and growth cases, and the adapter's body-buffer bound).
-  vcs-worker-conformance:
-    name: vcs-worker wire conformance (direct workerd, perf=${{ matrix.perf_metrics }})
-    strategy:
-      fail-fast: false
-      matrix:
-        perf_metrics: ['0', '1']
-    needs: changes
-    if: >-
-      always() &&
-      (github.event_name == 'push' || needs.changes.outputs.workers == 'true')
-    runs-on: ubuntu-latest
-    env:
-      WRANGLER_SEND_METRICS: 'false'
-      MKIT_PERF_METRICS: ${{ matrix.perf_metrics }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-
-      - name: Install Rust 1.95.0 + wasm32 target
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
-        with:
-          toolchain: '1.95.0'
-          targets: wasm32-unknown-unknown
-
-      - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16  # v2
-        with:
-          workspaces: |
-            rust -> rust/target
-            apps/vcs-worker -> apps/vcs-worker/target
-            rust/crates/mkit-server-worker/tests/connect-deadline-probe -> rust/crates/mkit-server-worker/tests/connect-deadline-probe/target
-          prefix-key: "rust-ci-vcs-conformance"
-          cache-on-failure: false
-
-      - name: Setup Node.js
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
-        with:
-          node-version: '22'
-
-      - name: Install worker-build
-        run: cargo install worker-build --locked --version 0.8.6
-
-      - name: Install independent admin signer hash tool
-        run: cargo install b3sum --locked --version 1.8.5
-
-      # D34 is the default sharding (WP-1.28c); the explicit single phase
-      # keeps the snapshot round-trip and single-sharding growth coverage.
-      - name: Create diagnostic log directory
-        run: |
-          mkdir -p "${RUNNER_TEMP}/wire-logs"
-          npx --yes --package wrangler@4.134.0 -c 'node scripts/workers-runtime-versions.cjs' \
-            >"${RUNNER_TEMP}/wire-logs/runtime-versions.json"
-
-      - name: Portable conformance has no reference orchestration dependency
-        working-directory: rust
-        run: |
-          cargo check --locked -p mkit-server-conformance --no-default-features --lib
-          cargo tree --locked -p mkit-server-conformance --no-default-features -e normal --prefix none --format '{p}' > "${RUNNER_TEMP}/portable-conformance-deps.txt"
-          if rg '^(mkit-server|mkit-server-worker) v' "${RUNNER_TEMP}/portable-conformance-deps.txt"; then
-            echo '::error::portable conformance depends on reference orchestration'
-            exit 1
-          fi
-
-      - name: Portable contracts on the native test host (show case verdicts)
-        working-directory: rust
-        env:
-          TMPDIR: ${{ runner.temp }}/wire-logs
-          CARGO_PROFILE_DEV_DEBUG: '0'
-        run: |
-          cargo test --locked -p mkit-server-conformance --features test-host --test test_host portable_file_cases_run_against_the_native_host_without_skips -- --exact --nocapture
-          cargo test --locked -p mkit-server-conformance --features test-host --test test_host signed_takedown_contract_survives_native_listener_and_pipeline_restart -- --exact --nocapture
-
-      - name: Portable contracts and Connect deadlines on wasm (all dispatch entry points)
-        timeout-minutes: 15
-        env:
-          TMPDIR: ${{ runner.temp }}/wire-logs
-          CARGO_PROFILE_DEV_DEBUG: '0'
-        run: python3 scripts/connect-deadline-runtime.py --portable
-
-      - name: Wire suite (release features, D34)
-        env:
-          TMPDIR: ${{ runner.temp }}/wire-logs
-          VCS_CONFORMANCE_KEEP: '1'
-        run: scripts/vcs-worker-conformance.sh
-
-      - name: Wire suite (test-faults, D34, Multi, index prewake enabled)
-        env:
-          TMPDIR: ${{ runner.temp }}/wire-logs
-          VCS_CONFORMANCE_KEEP: '1'
-          VCS_CONFORMANCE_PREWAKE: 'true'
-          VCS_CONFORMANCE_PREWAKE_ANONYMOUS: 'true'
-        run: scripts/vcs-worker-conformance.sh --test-faults --multi
-
-      - name: Wire suite (test-faults, D34, Multi, signed-only index prewake)
-        env:
-          TMPDIR: ${{ runner.temp }}/wire-logs
-          VCS_CONFORMANCE_KEEP: '1'
-          VCS_CONFORMANCE_PREWAKE: 'true'
-          VCS_CONFORMANCE_PREWAKE_ANONYMOUS: 'false'
-        run: scripts/vcs-worker-conformance.sh --test-faults --multi
-
-      - name: Wire suite (test-faults, single sharding)
-        env:
-          TMPDIR: ${{ runner.temp }}/wire-logs
-          VCS_CONFORMANCE_KEEP: '1'
-        run: scripts/vcs-worker-conformance.sh --test-faults --sharding single
-
-      - name: Paid indexed verification, hold off/on and same-shard concurrency
-        timeout-minutes: 20
-        env:
-          TMPDIR: ${{ runner.temp }}/wire-logs
-          VCS_CONFORMANCE_KEEP: '1'
-        run: scripts/vcs-worker-conformance.sh --indexed-only
-
-      - name: Summarize connection losses and retries
-        id: wire-diagnostics
-        if: always()
-        run: |
-          python3 scripts/test-workers-wire-diagnostics.py
-          python3 scripts/test-enable-worker-alarm-info.py
-          python3 scripts/workers-wire-diagnostics.py "${RUNNER_TEMP}/wire-logs" \
-            --output "${RUNNER_TEMP}/wire-logs/diagnostics.json" \
-            --summary "$GITHUB_STEP_SUMMARY" --github-output "$GITHUB_OUTPUT"
-
-      - name: Upload Wrangler and Miniflare diagnostics
-        if: always() && (failure() || steps.wire-diagnostics.outputs.keep == 'true')
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: workers-wire-logs-perf-${{ matrix.perf_metrics }}
-          path: ${{ runner.temp }}/wire-logs/**
-          if-no-files-found: warn
-          retention-days: 7
-
-  paid-acceptance:
-    name: Paid embedded release acceptance
-    needs: changes
-    if: >-
-      always() &&
-      (github.event_name == 'push' || needs.changes.outputs.workers == 'true')
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      WRANGLER_SEND_METRICS: 'false'
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Create diagnostic directory
-        run: |
-          mkdir -p "${RUNNER_TEMP}/paid-logs"
-          echo "TMPDIR=${RUNNER_TEMP}/paid-logs" >> "$GITHUB_ENV"
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          toolchain: '1.95.0'
-          targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
-        with:
-          workspaces: |
-            rust -> rust/target
-            apps/embedded-worker -> apps/embedded-worker/target
-            apps/embedded-worker/tests/embedding-conformance -> apps/embedded-worker/tests/embedding-conformance/target
-          prefix-key: paid-acceptance
-          cache-on-failure: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: '22'
-      - name: Install pinned build tools
-        run: |
-          cargo install worker-build --locked --version 0.8.6
-          cargo install wasm-pack --locked --version 0.13.1
-          cargo install b3sum --locked --version 1.8.5
-      - name: Install locked local runtime
-        working-directory: apps/workspace-worker
-        run: npm ci --ignore-scripts
-      - name: Verify hosted gates and launch decoder graphs
-        timeout-minutes: 5
-        run: |
-          python3 scripts/test-server-gates.py --hosted-only
-          time python3 scripts/check-launch-feature-graph.py
-      - name: Bounded decoder on wasm32
-        timeout-minutes: 10
-        run: time bash scripts/wasm-ruzstd-check.sh
-      - name: Locked wasm release build of embedding fixture
-        working-directory: apps/embedded-worker/tests/embedding-conformance
-        timeout-minutes: 10
-        run: cargo build --locked --release --target wasm32-unknown-unknown
-      - name: Release push, published read, URL token and cold outcome retry
-        timeout-minutes: 10
-        env:
-          MKIT_MINIFLARE_MODULE: ${{ github.workspace }}/apps/workspace-worker/node_modules/miniflare
-        run: python3 scripts/paid-worker-acceptance.py
-      - name: Generic reference sessions, storage projection, purge and cold retry
-        timeout-minutes: 10
-        env:
-          MKIT_MINIFLARE_MODULE: ${{ github.workspace }}/apps/workspace-worker/node_modules/miniflare
-        run: python3 scripts/reference-worker-acceptance.py
-      - name: Retain acceptance diagnostics
-        if: failure()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: paid-acceptance-logs
-          path: ${{ runner.temp }}/paid-logs/**
-          if-no-files-found: error
-          retention-days: 7
-
   # Stable required-check name for branch protection. Always runs on PRs
   # (if: always()) so the status is never absent — closing the
   # "required-but-skipped" trap. All jobs must succeed or be legitimately
@@ -594,7 +265,7 @@ jobs:
   workers-gate:
     name: Workers CI gate
     if: always() && github.event_name == 'pull_request'
-    needs: [ci, workspace, vcs-worker-conformance, paid-acceptance]
+    needs: [ci, workspace]
     runs-on: ubuntu-latest
     steps:
       - name: Check ci job result
@@ -602,14 +273,12 @@ jobs:
         env:
           CI: ${{ needs.ci.result }}
           WORKSPACE: ${{ needs.workspace.result }}
-          CONFORMANCE: ${{ needs.vcs-worker-conformance.result }}
-          PAID: ${{ needs.paid-acceptance.result }}
         run: |
-          for result in "${CI}" "${WORKSPACE}" "${CONFORMANCE}" "${PAID}"; do
+          for result in "${CI}" "${WORKSPACE}"; do
             case "${result}" in
               success|skipped) ;;
               *)
-                echo "::error::Workers job did not succeed (Rust=${CI}, workspace=${WORKSPACE}, conformance=${CONFORMANCE}, paid=${PAID})"
+                echo "::error::Workers job did not succeed (Rust=${CI}, workspace=${WORKSPACE})"
                 exit 1
                 ;;
             esac

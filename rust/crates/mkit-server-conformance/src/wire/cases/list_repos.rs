@@ -1,4 +1,4 @@
-//! Shared black-box `ListRepos` case for the in-process host and vcs-worker.
+//! Shared black-box `ListRepos` case for native and third-party servers.
 
 use mkit_transport_connect::generated::{ListReposRequest, ListReposResponse, RepoVisibility};
 

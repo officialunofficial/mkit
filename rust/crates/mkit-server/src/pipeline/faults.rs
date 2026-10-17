@@ -71,10 +71,10 @@ pub enum FaultPoint {
     /// After stage 2, before admission: the authorize→apply barrier.
     AfterAuthorize,
     /// `UploadPack`: after the reservation, before any chunk is written
-    /// (`vcs-worker`'s `after-reserve`).
+    /// (`after-reserve`).
     AfterReserve,
     /// `UploadPack`: after the blob committed, before the final batch
-    /// (`vcs-worker`'s `after-put`).
+    /// (`after-put`).
     AfterBlobCommit,
     /// After a durable lease grant, before the shard installs it.
     AfterLeaseGrant,
@@ -120,10 +120,9 @@ impl<F: FaultHooks> DynFaultHooks for F {
 }
 
 /// Per-request test directives, parsed from headers only under
-/// `__test-faults`: [`FAULT_HEADER`] (`vcs-worker` parity: `after-reserve`,
+/// `__test-faults`: [`FAULT_HEADER`] (`after-reserve`,
 /// `after-put`) and [`CLOCK_SKEW_HEADER`] (added to the business clock for
-/// this request, so black-box suites on `wrangler dev` exercise expiry
-/// without sleeping; WP-1.14, WP-2.8). The skew never feeds a `NotAfter`
+/// this request, so black-box suites exercise expiry without sleeping). The skew never feeds a `NotAfter`
 /// deadline, which uses the real clock; the backend evaluates it on its
 /// own clock anyway.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -212,8 +211,7 @@ impl TestDirectives {
     }
 }
 
-/// `vcs-worker`'s `test_fault` (`auth_v2.mjs --fault`): when the request's
-/// [`FAULT_HEADER`] is `after-reserve` or `after-put`, the matching point
+/// When [`FAULT_HEADER`] is `after-reserve` or `after-put`, the matching point
 /// ([`FaultPoint::AfterReserve`], [`FaultPoint::AfterBlobCommit`]) fails
 /// with `internal` once per replay scope; a retry of the same operation
 /// passes and resumes.

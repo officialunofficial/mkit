@@ -224,8 +224,7 @@ pub fn send_wrap<F: Future + Send>(f: F) -> F {
 }
 
 /// Make a [`MaybeSend`] future satisfy the `+ Send` bound that generated
-/// connectrpc service traits require. The Workers adapter wraps the whole
-/// handler future once (PRD §5.2).
+/// connectrpc service traits require. Wrap the whole handler future once.
 ///
 /// `SendWrapper` checks the thread on every poll and drop: a poll or drop on
 /// a thread other than the one that created it panics, and is never

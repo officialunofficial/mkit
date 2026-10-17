@@ -14,10 +14,9 @@
 //! `FaultHooks` and [`Pipeline::authenticate`] reads per-request
 //! `TestDirectives`; without it none of that exists in the binary.
 //!
-//! Behavior equals the servers it replaces: `mkit serve --http` (`Bearer`/`Open`:
-//! no replay or quota, packmap-then-head on a non-atomic store),
-//! `vcs-worker` (`AuthV2`: replay ledger, per-signer quota, atomic
-//! advance) and `mkit serve` over ssh (`TransportIdentity`).
+//! `Bearer`/`Open` support packmap-then-head on a non-atomic store without
+//! replay or quota. `AuthV2` supports a replay ledger, per-signer quota and
+//! atomic advance. `mkit serve` over SSH uses `TransportIdentity`.
 
 mod admission;
 mod advance;
@@ -330,7 +329,7 @@ pub struct PipelineConfig {
     /// Largest download chunk (used by M0-05b).
     pub download_chunk_max: usize,
     /// The default write quota: `Some(DEFAULT_WRITE_QUOTA)` for auth v2
-    /// deployments (`vcs-worker` parity). Under D34 it counts per ref shard;
+    /// deployments. Under sharding it counts per ref shard;
     /// Multi-addressing deployments also use it as the default namespace cap.
     pub write_quota: Option<QuotaLimits>,
     /// `ListRefs` scan page size, at least 1.

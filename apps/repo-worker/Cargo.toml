@@ -42,7 +42,7 @@ buffa = "0.9.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# CORS/body-cap/fetch-adapter glue shared with apps/vcs-worker (mkit#797) —
+# Shared CORS/body-cap/fetch-adapter glue —
 # a standalone sibling crate, not a rust/ workspace member (same pattern as
 # the mkit-core/mkit-attest path deps below).
 mkit-worker-common = { path = "../mkit-worker-common" }

@@ -1,7 +1,7 @@
 # mkit-server
 
 A generic, runtime-agnostic mkit server core. Embedders build a deployment on
-it (for example, the Cloudflare Workers adapter in this repository), and
+it, and
 `mkit serve` in the `mkit` CLI uses its `fs` and `ssh` pieces. It compiles for
 native targets and `wasm32-unknown-unknown`.
 
@@ -175,8 +175,6 @@ Neither stored data nor pack framing changes.
 
 ## Related crates
 
-- `mkit-server-worker`: Cloudflare Workers adapter (R2 blobs, Durable Objects).
-  Not published.
 - `mkit-server-conformance`: backend and wire conformance suites. Not
   published.
 
@@ -188,18 +186,17 @@ details.
 Licensed under either of Apache License, Version 2.0 or MIT license, at your
 option.
 
-The `SQLite` store lives in `mkit_server_worker::sql`; core has no SQL feature.
+Core has no SQL feature; embedders provide their storage adapters.
 
 ### Connect deadlines on wasm
 
-On wasm32, mkit entry points (`connect::service`, `serve`, `serve_with`,
-`serve_admin_with` and the `fetch*` helpers) are safe with `connect-timeout-ms`
-and `grpc-timeout` present. **Deadlines are ignored on wasm**: the core Connect
+On wasm32, `connect::service` is safe with `connect-timeout-ms` and
+`grpc-timeout` present. **Deadlines are ignored on wasm**: the core Connect
 service removes both headers before connectrpc computes an absolute deadline,
 and ignores configured `DeadlinePolicy` settings, including default and
 inter-message timeouts. Native deadlines are unchanged. Body streaming,
 authentication and body limits still apply. Bound host work using the platform
-clock and timer as needed; the admin engine already uses the Worker timer.
+clock and timer as needed.
 
 To mount `connect::router` yourself, use `connect::ConnectService::new(router)`
 instead of a raw connectrpc service. `ConnectService` aliases

@@ -3,9 +3,8 @@
 // mkit.transport.v1 — the canonical Connect remote protocol.
 //
 // TransportService is the single Connect service every remote mkit
-// deployment target implements: the reference Worker, `mkit-server`
-// (self-hosted, over axum/hyper), and the native (non-wasm) CLI client
-// all compile against this one proto — no per-target dialect. It maps
+// deployment target implements. `mkit-server` and the native (non-wasm)
+// CLI client compile against this one proto, with no per-target dialect. It maps
 // one-to-one onto the verbs of the
 // `Transport` trait (rust/crates/mkit-core/src/protocol.rs), the same
 // trait `mkit-transport-http`/`-s3`/`-ssh`/`-enc` already implement.
@@ -26,7 +25,7 @@
 // (mkit#677) to import across module boundaries.
 //
 // The service implementation is `mkit-server`'s `connect` binding over
-// its pipeline, served on Workers by `mkit-server-worker`; the
+// its pipeline; the
 // client is `mkit-transport-connect`'s `ConnectTransport`.
 
 edition = "2023";

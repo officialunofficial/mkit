@@ -32,9 +32,8 @@ fail=0
 # wasm-compatible sync/time primitives, unrelated to commonware or to
 # mkit's own crates. Checking for it there would flag a dependency this
 # repo already accepts, not a regression. mkit-server is not checked for it
-# either: its Connect binding pulls `connectrpc` (and so `tokio`) from
-# WP-M0-06 on, for the same reason. Nor is mkit-server-worker, which adds
-# `worker` on top of mkit-server (WP-M0-16).
+# either: its Connect binding pulls `connectrpc` (and so `tokio`)
+# for the same reason.
 #
 # check_tree <label> <manifest-dir> <extra-cargo-tree-args> <required> <forbidden...>
 #   extra-cargo-tree-args: e.g. "--no-default-features --features pack-ruzstd",
@@ -98,10 +97,6 @@ check_tree "mkit-server (remote-hooks)" "rust/crates/mkit-server" "--features re
 # wasm-clean; adapters opt in through explicit indexed HTTP configuration.
 check_tree "mkit-server (http-objects)" "rust/crates/mkit-server" "--features http-objects" "" \
   blst zstd-sys commonware-runtime commonware-storage
-check_tree "mkit-server-worker" "rust/crates/mkit-server-worker" "" "" blst zstd-sys commonware-runtime commonware-storage
-# apps/vcs-worker is a thin deployment of mkit-server-worker (WP-M0-17),
-# built by worker-build from its own Cargo.lock.
-check_tree "apps/vcs-worker" "apps/vcs-worker" "" "" blst zstd-sys commonware-runtime commonware-storage
 # mkit-core's decode-only pure-Rust zstd backend must select `ruzstd` and
 # stay C-free. The first consumer that enables it (WP 4.8) adds its own
 # positive check here.
@@ -131,4 +126,4 @@ if [ "$fail" -ne 0 ]; then
 fi
 
 
-echo "ok: mkit-client, mkit-wasm, apps/repo-worker, mkit-server (also with remote-hooks), mkit-server-worker, apps/vcs-worker and mkit-core (pack-ruzstd) wasm32 dependency graphs contain no C-toolchain crates"
+echo "ok: mkit-client, mkit-wasm, apps/repo-worker, mkit-server (also with remote-hooks) and mkit-core (pack-ruzstd) wasm32 dependency graphs contain no C-toolchain crates"

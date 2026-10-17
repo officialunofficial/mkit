@@ -5,10 +5,9 @@
 //! isolate first), with a post-buffer backstop for chunked/unknown-length
 //! bodies where `Content-Length` is absent. See mkit#797.
 //!
-//! The two Workers return a differently-shaped "too large" error
-//! (repo-worker: Connect `invalid_argument`; vcs-worker: `resource_exhausted`)
-//! — so this crate only owns the size-check MECHANICS via [`CappedBody`];
-//! each Worker builds its own error response when it gets back
+//! Callers choose the shape of their "too large" error; repo-worker uses
+//! Connect `invalid_argument`. This crate owns the size check via [`CappedBody`];
+//! each caller builds its own error response when it gets back
 //! `CappedBody::TooLarge`, keeping the error code and JSON shape
 //! Worker-specific rather than forcing one on the other.
 

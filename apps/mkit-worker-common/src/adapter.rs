@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! The CF Worker fetch-adapter skeleton shared by both Workers: converting
+//! The CF Worker fetch-adapter skeleton: converting
 //! a `worker::Request` into an `http::Request<Full<Bytes>>` for `tower`
 //! dispatch, driving a `tower::Service` (each Worker's `ConnectRpcService`)
 //! via `oneshot` wrapped in `worker::send::SendFuture`, and copying the
 //! resulting `http::Response`'s status/headers back onto a
 //! `worker::Response` — either streamed (server-streaming RPCs, e.g.
-//! repo-worker's WatchRefs) or buffered (vcs-worker, whose body is already
-//! size-capped upstream — see `body_cap`). See mkit#797.
+//! repo-worker's WatchRefs) or buffered (with a body already size-capped
+//! upstream; see `body_cap`).
 
 use bytes::Bytes;
 use futures_util::StreamExt;
@@ -18,7 +18,7 @@ use worker::{Method as WorkerMethod, Request, Response, Result};
 
 /// Map a `worker::Method` to its `http::Method` equivalent. Anything
 /// exotic (`Connect`/`Trace`/`Report` — never actually sent by a Connect
-/// client) falls back to `POST`, matching both Workers' original behavior.
+/// client) falls back to `POST`.
 pub fn to_http_method(method: WorkerMethod) -> http::Method {
     match method {
         WorkerMethod::Get => http::Method::GET,
@@ -48,10 +48,7 @@ pub fn to_http_method(method: WorkerMethod) -> http::Method {
 /// (`RequestContext::deadline()` sees `None`, matching the documented
 /// no-`DeadlinePolicy` behavior) — an accepted trade for a wasm32 target
 /// with no wall clock, not a change to the transport's write-auth contract.
-/// A single named predicate rather than each Worker hand-rolling its own
-/// closure: repo-worker originally passed `|_| true` here (keeping
-/// everything) while vcs-worker filtered correctly, a duplication-drift bug
-/// the shared `mkit-worker-common` crate exists to prevent — see mkit#797.
+/// A single named predicate keeps deadline filtering consistent across callers.
 pub fn is_deadline_header(name: &str) -> bool {
     name.eq_ignore_ascii_case("connect-timeout-ms") || name.eq_ignore_ascii_case("grpc-timeout")
 }
@@ -59,11 +56,9 @@ pub fn is_deadline_header(name: &str) -> bool {
 /// Copy `(name, value)` header pairs onto an `http::HeaderMap`, dropping
 /// any pair that isn't a valid HTTP header name/value rather than failing
 /// the whole request. `keep` lets a caller filter out headers the dispatch
-/// target can't handle — e.g. vcs-worker drops `connect-timeout-ms`/
-/// `grpc-timeout` before they reach `connectrpc`'s dispatcher, because
-/// parsing either into a deadline calls `Instant::now()`, which panics on
-/// wasm32 (see vcs-worker's `worker_impl.rs` doc comment for the full
-/// rationale). Pass `|_| true` to keep everything.
+/// target can't handle. Negate [`is_deadline_header`] to drop deadline headers
+/// before they reach `connectrpc` on wasm32, where `Instant::now()` panics.
+/// Pass `|_| true` to keep everything.
 pub fn copy_headers_filtered(
     entries: impl IntoIterator<Item = (String, String)>,
     headers: &mut http::HeaderMap,
@@ -162,7 +157,7 @@ where
 
 /// Bridge a buffered `http_body::Body` response onto a `worker::Response`,
 /// collecting it whole first. Used by Workers with no server-streaming
-/// route (e.g. vcs-worker), whose response bodies are already capped
+/// route, whose response bodies are already capped
 /// upstream (see `body_cap`).
 pub async fn respond_buffered<B>(status: u16, body: B) -> Result<Response>
 where

@@ -591,7 +591,7 @@ module atomicAny3 {
                  MODE = "atomic", LEDGER = false, ANY_FALLBACK = false, INIT_HEAD = 0, THRESH = 1,
                  ATTEMPTS = 3, LADDER = 2, FAULTS = { oldConflict: false, trustConflict: false, noGate: false, gateNoAny: false, splitCas: false, headFirst: false, noTimeout: false, noLadderBound: false }).*
 }
-// atomic store with the auth v2 replay ledger (vcs-worker / mkit-server AuthV2).
+// atomic store with the auth v2 replay ledger (mkit-server AuthV2).
 module ledger2 {
   import advance(PUSHERS = Map(1 -> { tip: 1, cond: 0 }, 2 -> { tip: 2, cond: 0 }),
                  MODE = "atomic", LEDGER = true, ANY_FALLBACK = false, INIT_HEAD = 0, THRESH = 1,

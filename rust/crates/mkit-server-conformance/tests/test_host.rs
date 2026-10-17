@@ -75,6 +75,7 @@ async fn reusable_host_runs_the_existing_wire_suite() {
 
     let host = TestHost::start(profile).await.unwrap();
     let report = run(&target(&host), None).await;
+    println!("{}", report.tap());
 
     assert!(!report.failed(), "wire suite failures:\n{}", report.tap());
 
@@ -118,6 +119,7 @@ async fn expired_ticket_cases_use_the_frozen_server_clock() {
         "tickets.expiry_timer_frees_cap_slot",
     ] {
         let report = run(&target, Some(name)).await;
+        println!("{}", report.tap());
         assert!(
             matches!(report.verdict(name), Some(Verdict::Pass(_))),
             "{}",
@@ -182,6 +184,7 @@ async fn ticketed_auth_v2_wire_cases_run_against_the_host() {
     .await
     .unwrap();
     let report = run(&target(&host), Some("tickets.")).await;
+    println!("{}", report.tap());
     assert!(
         !report.failed(),
         "ticket wire suite failures:\n{}",
@@ -358,6 +361,7 @@ async fn in_process_hooks_see_repository_visibility_changes_over_the_wire() {
     .unwrap();
     for name in ["visibility.envelope_owner", "visibility.statement_ed25519"] {
         let report = run(&target(&host), Some(name)).await;
+        println!("{}", report.tap());
         assert!(
             matches!(report.verdict(name), Some(Verdict::Pass(_))),
             "{name}: {}",
@@ -395,6 +399,7 @@ async fn sharded_auth_v2_quota_cases_run_against_the_host() {
 
     let host = TestHost::start(profile).await.unwrap();
     let report = run(&target(&host), Some("quota.")).await;
+    println!("{}", report.tap());
 
     for name in [
         "quota.ops_exhaustion_resource_exhausted",
@@ -432,6 +437,7 @@ async fn d34_multi_addressing_runs_membership_wire_cases_against_the_host() {
         "repository.ticketed_upload_multi",
     ] {
         let report = run(&target(&host), Some(name)).await;
+        println!("{}", report.tap());
         assert!(
             matches!(report.verdict(name), Some(Verdict::Pass(_))),
             "{name} did not pass against the D34 Multi test host: {:?}",
@@ -454,6 +460,7 @@ async fn list_repos_wire_case_runs_with_single_and_d34_sharding() {
         profile.derive_features();
         let host = TestHost::start(profile).await.unwrap();
         let report = run(&target(&host), Some("repo.list_repos")).await;
+        println!("{}", report.tap());
         assert!(
             matches!(report.verdict("repo.list_repos"), Some(Verdict::Pass(_))),
             "{}",

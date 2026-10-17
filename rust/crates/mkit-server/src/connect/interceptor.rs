@@ -40,8 +40,7 @@ use crate::store::{MultipartBlobStore, NamespaceStore};
 /// A unary body is verified as connectrpc hands it over, after any
 /// `Content-Encoding` is undone. The client signs the bytes it sends
 /// (SPEC-WRITE-GRANTS §9.2, SPEC-TRANSPORT-CONNECT §7.1), so a compressed
-/// signed request does not verify and is rejected `unauthenticated`, as in
-/// `vcs-worker`.
+/// signed request does not verify and is rejected `unauthenticated`.
 pub struct AuthInterceptor<B, N, H> {
     pipe: Shared<Pipeline<B, N, H>>,
 }

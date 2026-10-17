@@ -292,8 +292,8 @@ fn measured_pages(fx: &Fx, commits: &[Object], size: usize, writer: bool, latenc
                 .meta
                 .latency_ms
                 .store(u64::from(latency), Ordering::SeqCst);
-            // The Workers adapter issues one GET for a bounded range. The doubled
-            // delay (a HEAD then a GET) is a conservative model; set
+            // The doubled delay (a HEAD then a GET) conservatively models a
+            // store that checks metadata before fetching a range; set
             // MKIT_BENCH_RANGED_HEAD for a single delay.
             let blob_latency = if std::env::var_os("MKIT_BENCH_RANGED_HEAD").is_some() {
                 latency

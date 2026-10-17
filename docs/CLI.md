@@ -1161,7 +1161,7 @@ Remote / sync:
 
   `mkit serve` has no network listener, and `--http` and `--listen-enc` are
   usage errors (exit 64). Serve repositories over SSH with `mkit serve`, or
-  on Cloudflare Workers with the `mkit-server-worker` adapter. The
+  embed `mkit-server` to expose Connect over HTTP. The
   `mkit+enc://` transport is deprecated: no maintained server exists for it
   (a `mkit` built with `--features enc-transport` still carries the client).
   `MKIT_API_TOKEN` is sent as a bearer token by `mkit+https://` remotes.
@@ -1804,7 +1804,7 @@ accepted (for shape-consistency with the other schemes) but currently
 has no wire effect: every RPC resolves to the fixed
 `/mkit.transport.v1.TransportService/<Method>` path regardless.
 Write RPCs against a deployment that requires the Ed25519 write envelope
-(for example, `apps/vcs-worker`, the reference server) need
+(for example, an auth-v2 `mkit-server` deployment) need
 `mkit config transport_auth envelope` &mdash; see the config table above and
 SPEC-TRANSPORT-CONNECT §7.3.
 

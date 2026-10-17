@@ -342,9 +342,8 @@ impl<B: BlobStore> BlobStore for Budgeted<'_, B> {
         range: Option<ByteRange>,
     ) -> Result<Option<BlobBody>, StoreError> {
         self.charge_read()?;
-        // A ranged read is charged as two backend requests, conservatively: the
-        // Workers adapter now issues one GET for a bounded range, but a store
-        // that checks metadata first needs both.
+        // A ranged read is charged as two backend requests, conservatively:
+        // a store that checks metadata before fetching the range needs both.
         if let Some(range) = range {
             self.charge_read()?;
             if let Some(encoded) = self.encoded {
