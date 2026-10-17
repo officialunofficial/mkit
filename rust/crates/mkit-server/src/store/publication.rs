@@ -5,6 +5,11 @@
 use std::collections::BTreeSet;
 
 use mkit_core::hash::Hash;
+use mkit_primitives::decision::{
+    ClearanceAdvance, ClearanceDecision, ClearanceFacts, ClearanceLifecycle, ClearanceLimits,
+    ClearanceMoment, ClearanceState, OperationId, PriorPublication, decide_clearance,
+};
+use mkit_primitives::evidence::{RepositoryId, Revision};
 use serde::{Deserialize, Serialize};
 
 use super::outbox::{OutboxBuilder, guard};
@@ -437,7 +442,7 @@ pub async fn prefix<S: NamespaceStore>(
             "short publication prefix read".into(),
         ));
     }
-    let mut result = (state.published, state.value.clone());
+    let mut decoded = Vec::with_capacity(wanted.len());
     for (sequence, raw) in (state.published + 1..=state.sequence).zip(rows) {
         let current = if changed.sequence == sequence {
             changed.clone()
@@ -452,12 +457,122 @@ pub async fn prefix<S: NamespaceStore>(
                 "retained advance binding mismatch".into(),
             ));
         }
+        decoded.push(current);
+    }
+    if !decoded.iter().any(|row| row.sequence == changed.sequence) {
+        return Ok(stored_prefix(state, &decoded));
+    }
+    clearance_prefix(state, changed, &decoded)
+}
+
+fn stored_prefix(state: &Publication, decoded: &[Advance]) -> (u64, Pair) {
+    let mut result = (state.published, state.value.clone());
+    for current in decoded {
         if !current.state.publishable() {
             break;
         }
-        result = (sequence, current.value);
+        result = (current.sequence, current.value.clone());
     }
-    Ok(result)
+    result
+}
+
+fn clearance_prefix(
+    state: &Publication,
+    changed: &Advance,
+    decoded: &[Advance],
+) -> Result<(u64, Pair), StoreError> {
+    let obligations: Vec<Vec<ClearanceState>> = decoded
+        .iter()
+        .map(|advance| advance.obligations.iter().map(obligation_state).collect())
+        .collect();
+    let revisions: Vec<Vec<Revision>> = obligations
+        .iter()
+        .map(|states| vec![Revision([0; 32]); states.len()])
+        .collect();
+    let views: Vec<ClearanceAdvance<'_>> = decoded
+        .iter()
+        .zip(obligations.iter())
+        .zip(revisions.iter())
+        .map(|((advance, states), revisions)| clearance_advance(advance, states, revisions))
+        .collect();
+    let changed_view = views
+        .iter()
+        .find(|view| view.sequence == changed.sequence)
+        .cloned()
+        .unwrap_or_else(|| clearance_advance(changed, &[], &[]));
+    let facts = ClearanceFacts {
+        repository: RepositoryId([0; 32]),
+        moment: ClearanceMoment::Recheck,
+        prior: PriorPublication {
+            generation: state.generation,
+            sequence: state.sequence,
+            published_prefix: state.published,
+            deletion_boundary: state.boundary,
+            head: state.value.head,
+            packmap: state.value.packmap,
+            revision: Revision([0; 32]),
+        },
+        previous_state: obligation_state_from(changed.state),
+        changed: changed_view,
+        suffix: &views,
+        witnesses: &[],
+        lifecycle: ClearanceLifecycle::NotOffered,
+        deleted: false,
+    };
+    let decided = decide_clearance(&facts, &ClearanceLimits::reference())
+        .map_err(|_| StoreError::Corrupt("publication prefix decision refused".into()))?;
+    Ok(match decided.decision() {
+        ClearanceDecision::AdvancePrefix {
+            published_prefix,
+            head,
+            packmap,
+            ..
+        } => (
+            *published_prefix,
+            Pair {
+                head: *head,
+                packmap: *packmap,
+            },
+        ),
+        ClearanceDecision::Retain { published_prefix } => (*published_prefix, state.value.clone()),
+    })
+}
+
+fn clearance_advance<'a>(
+    advance: &'a Advance,
+    obligations: &'a [ClearanceState],
+    revisions: &'a [Revision],
+) -> ClearanceAdvance<'a> {
+    ClearanceAdvance {
+        sequence: advance.sequence,
+        generation: advance.generation,
+        operation: OperationId(advance.operation),
+        head: advance.value.head,
+        packmap: advance.value.packmap,
+        state: obligation_state_from(advance.state),
+        additions: &[],
+        dependencies: &[],
+        external_suppliers: &[],
+        obligations,
+        obligation_revisions: revisions,
+        takedown_complete: advance.state == Clearance::Resolved,
+        flagged: false,
+        revision: Revision([0; 32]),
+    }
+}
+
+fn obligation_state(obligation: &Obligation) -> ClearanceState {
+    obligation_state_from(obligation.state)
+}
+
+fn obligation_state_from(state: Clearance) -> ClearanceState {
+    match state {
+        Clearance::Pending => ClearanceState::Pending,
+        Clearance::Cleared => ClearanceState::Cleared,
+        Clearance::Held => ClearanceState::Held,
+        Clearance::Hit => ClearanceState::Hit,
+        Clearance::Resolved => ClearanceState::Resolved,
+    }
 }
 
 /// Guarded clearance fragment. A caller has verified obligations, flags and membership

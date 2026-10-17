@@ -4,11 +4,18 @@
 //! The host compares every atomic guard and commits every effect together.
 //! Source fences are separate pre-apply checks on each destination attempt.
 
+mod clearance;
 mod effects;
 mod facts;
 mod guards;
 pub mod ref_write;
 pub mod ticketed;
+
+pub use clearance::{
+    ClearanceAdvance, ClearanceDecision, ClearanceFacts, ClearanceLifecycle, ClearanceLimits,
+    ClearanceMoment, ClearanceState, DependencyWitness, GuardedClearance, PriorPublication,
+    decide_clearance,
+};
 
 pub use effects::{
     AcceptanceEffects, AccountingEffect, DurableOutcome, MembershipEffect, PublicationEffect,
