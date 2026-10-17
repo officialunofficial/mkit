@@ -80,19 +80,31 @@ pub fn inspect_headers(
             reason: "duplicate auth v2 header",
         });
     }
-    if counts
-        .iter()
-        .enumerate()
-        .any(|(index, count)| *count == 0 && (index != 5 || requires_digest))
+    // Signed addressing precedes the core verifier. The remaining missing
+    // fields follow verify_headers_with's order and diagnostics. Values still
+    // pass through that verifier; this is only a multiplicity check.
+    let missing = [
+        (2, "missing X-Repository on a signed request"),
+        (0, "auth v2 required"),
+        (1, "missing auth v2 header"),
+        (6, "missing auth v2 header"),
+        (7, "missing validity header"),
+        (8, "missing validity header"),
+        (9, "missing auth v2 header"),
+        (5, "body digest mismatch"),
+        (3, "missing signature header"),
+        (4, "missing signature header"),
+    ];
+    if let Some((_, reason)) = missing
+        .into_iter()
+        .find(|(index, _)| counts[*index] == 0 && (*index != 5 || requires_digest))
     {
-        return Err(AuthFailure {
-            reason: "missing auth v2 header",
-        });
+        return Err(AuthFailure { reason });
     }
     Ok(EnvelopePresence::Present)
 }
 
-/// A failed envelope verification. The diagnostic preserves the core reason;
+/// A failed envelope verification. The diagnostic preserves the reference reason;
 /// callers classify by the stable code rather than parsing its display text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("{reason}")]
@@ -107,7 +119,7 @@ impl AuthFailure {
         FailureCode::InvalidEnvelope
     }
 
-    /// Bounded public diagnostic from the core verifier.
+    /// Bounded public diagnostic from signed addressing or the core verifier.
     #[must_use]
     pub const fn reason(&self) -> &'static str {
         self.reason

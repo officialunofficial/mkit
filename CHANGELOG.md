@@ -122,6 +122,11 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Fixed
 
+- Preserve reference diagnostics for partial signed envelopes in the portable
+  auth header precheck, including a missing repository, validity, signature,
+  version, or unary body digest. Authentication codes, duplicate rejection,
+  and verification before repository routing remain unchanged.
+
 - Use smaller test codegen units and serialize Cloud Build's workspace test
   compilation on the existing worker to bound compiler memory. All tests
   and their execution concurrency remain unchanged.
