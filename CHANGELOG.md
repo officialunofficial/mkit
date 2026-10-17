@@ -152,6 +152,10 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Changed
 
+- Windowed pack checkpoints reuse an incremental BLAKE3 prefix digest.
+  Cold resumes authenticate and rebuild the current prefix once. Cursor bytes,
+  public signatures, refusal order, and final pack integrity checks are unchanged.
+
 - Commonware dependencies accept compatible 2026.x releases. Committed
   lockfiles retain reproducible builds; a weekly and manifest/lockfile PR
   compatibility check builds and tests the latest release against pinned wire
