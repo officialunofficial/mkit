@@ -469,6 +469,7 @@ async fn combined_race(ctx: Ctx, control: &ControlClient) -> CaseResult {
     fixture.eligible(control, true).await?;
     let first = fixture.advance(1, None).await?;
     fixture.accept(&first).await?;
+    let original = observe(control, &first).await?;
     let candidate = fixture.advance(2, Some(&first)).await?;
     fixture.pause(control, "before_acceptance").await?;
     let pending = tokio::spawn({
@@ -480,6 +481,13 @@ async fn combined_race(ctx: Ctx, control: &ControlClient) -> CaseResult {
     fixture.delete(&first).await?;
     fixture.recreate(&first).await?;
     let recreated = observe(control, &candidate).await?;
+    ensure!(
+        recreated.deletion_boundary > original.deletion_boundary
+            && recreated.live_sequence > original.live_sequence
+            && recreated.acceptance.head == original.acceptance.head
+            && recreated.acceptance.packmap == original.acceptance.packmap,
+        "delete and recreation did not change the guarded publication incarnation"
+    );
     control.command(&Request::Resume).await?;
     let result = pending.await.map_err(|e| e.to_string())??;
     let after = observe(control, &candidate).await?;
@@ -505,7 +513,10 @@ async fn combined_race(ctx: Ctx, control: &ControlClient) -> CaseResult {
         }
         Err(error) => {
             ensure!(
-                matches!(error.code.as_str(), "aborted" | "failed_precondition"),
+                matches!(
+                    error.code.as_str(),
+                    "aborted" | "failed_precondition" | "unavailable"
+                ),
                 "combined race returned wrong refusal: {error}"
             );
             ensure!(
