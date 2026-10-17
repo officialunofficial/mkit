@@ -1,7 +1,7 @@
 //! Auth v2 glue (SPEC-TRANSPORT-CONNECT §7.1): read the ten headers, run
-//! [`mkit_core::write_auth::verify_headers`] and decode its result into a
+//! [`mkit_primitives::auth::validate_envelope`] and decode its result into a
 //! [`VerifiedAuth`]. Verification itself (canonical fields, validity window,
-//! strict Ed25519) stays in `mkit-core`; nothing here reimplements it.
+//! strict Ed25519) stays in `mkit-core`, behind the primitives façade.
 //!
 //! This is step 1, **authenticate**, of the signed-write order in §7.1. It
 //! writes no state; the replay lookup comes after it.
@@ -10,26 +10,13 @@
 //! `apps/repo-worker` owns its separate service integration.
 
 use mkit_core::hash::{hash, to_hex};
-use mkit_core::write_auth::{
-    AuthError, Context, ExpectedCommitment, Headers, validate_audience, verify_headers_with,
-};
+use mkit_core::write_auth::{AuthError, Context, ExpectedCommitment, Headers, validate_audience};
 
 use crate::error::ServerError;
 use crate::op::{Commitment, Procedure, VerifiedAuth};
 
-/// The auth v2 request headers, lowercase, in [`Headers`] field order.
-pub const HEADER_NAMES: [&str; 10] = [
-    "x-envelope-version",
-    "x-audience",
-    "x-repository",
-    "x-public-key",
-    "x-signature",
-    "x-digest",
-    "x-content-commitment",
-    "x-created-at",
-    "x-expires-at",
-    "idempotency-key",
-];
+/// The auth-v2 headers, in the core header field order.
+pub use mkit_primitives::auth::HEADER_NAMES;
 
 /// `Access-Control-Allow-Headers` for browser clients: the auth v2 headers
 /// plus the Connect request headers.
@@ -89,7 +76,7 @@ impl AuthV2Config {
 /// a value). SPEC-TRANSPORT-CONNECT §7.1: a signed read verifies in full;
 /// it never falls back to anonymous.
 pub(crate) fn carries_auth_headers(get: impl Fn(&str) -> Option<String>) -> bool {
-    ["x-envelope-version", "x-public-key", "x-signature"]
+    mkit_primitives::auth::TRIGGER_HEADER_NAMES
         .iter()
         .any(|name| get(name).is_some())
 }
@@ -187,22 +174,15 @@ fn verify(
     } else {
         ExpectedCommitment::PackStream
     };
-    let authorized = verify_headers_with(
+    let envelope = mkit_primitives::auth::validate_envelope(
+        headers,
         cfg.context(repository),
         procedure_path,
         expected,
         now_ms,
-        headers,
     )
-    .map_err(|e| ServerError::unauthenticated(e.0))?;
-    let mut auth = VerifiedAuth::try_from(&authorized)?;
-    // `verify_headers_with` accepted this canonical decimal.
-    auth.created_at_ms = headers
-        .created_at
-        .as_deref()
-        .and_then(|text| text.parse().ok())
-        .unwrap_or(0);
-    Ok(auth)
+    .map_err(|error| ServerError::unauthenticated(error.reason()))?;
+    VerifiedAuth::try_from(&envelope)
 }
 
 /// An `UploadPack` header that differs from the signed commitment. The

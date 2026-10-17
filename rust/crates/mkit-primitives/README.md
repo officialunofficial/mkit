@@ -2,7 +2,10 @@
 
 Pure protocol contracts for pack verification, repository closure, and guarded
 write decisions. Version **0.1.0** is independent of the workspace release train.
-All public APIs are **ALPHA**. The crate provides guarded fork acceptance
+The reference server depends on this crate; publish the required primitives
+version independently before publishing a workspace release that uses it.
+All public APIs are **ALPHA**. Auth-v2 validation and replay classification use
+the existing protocol rules. The crate also provides guarded fork acceptance
 and bounded direct-child closure with authenticated local evidence pages.
 Pack verification and other decision drivers currently expose contracts;
 their implementations land separately.
@@ -102,3 +105,32 @@ and checked manifest totals. Resource exhaustion never returns a truncated set.
 
 Pages are local evidence, not transport messages or remote attestations. After
 page loss, replay from the same immutable inputs with a fresh generation.
+
+## Authentication and replay
+
+`auth::validate_envelope` delegates raw canonical fields, commitments, time
+bounds, and strict signatures to `mkit_core::write_auth`. Call
+`auth::inspect_headers` on raw header multiplicities first: any field in
+`auth::TRIGGER_HEADER_NAMES` marks an envelope. Repository addressing and an
+idempotency key alone do not. Partial or duplicate envelopes fail closed. Unary
+requests require `x-digest`; upload streams may omit it. Trusted destination
+identity comes from configuration and resolved addressing. Verification grants
+no permission and reserves no nonce.
+
+Envelope expiry is inclusive at ingress. Current host acceptance deadlines
+remain separate; replay never extends envelope validity. Signed reads verify
+fully and bypass the replay ledger.
+
+`replay::classify_replay` returns the saved terminal result by reference. Hosts
+supply successful durable results through `RecordedResult::success`; permanent
+refusals pass the explicit allowlist through `RecordedResult::rejection`.
+Challenges, membership lag, pending verification, and unavailable inspection
+cannot be constructed through the rejection path. A fresh result requires an
+absence guard before reservation or commit. A different fingerprint conflicts;
+nonresumable in-flight work is retryable. Hosts atomically guard replay and
+commit its transitions with their effects.
+
+Claims validation takes borrowed principal and pack bindings after the host
+has authenticated its token. Token encoding, MAC, keys, rotation, expiry,
+current ticket state, and authorization remain host responsibilities. There is
+no portable token encoding or new signing domain.

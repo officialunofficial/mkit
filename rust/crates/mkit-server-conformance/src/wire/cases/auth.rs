@@ -151,6 +151,71 @@ pub(super) async fn v2_missing_headers(ctx: Ctx) -> CaseResult {
     Ok(())
 }
 
+/// Partial and duplicate envelopes on reads never fall back to anonymous.
+pub(super) async fn v2_partial_envelope(ctx: Ctx) -> CaseResult {
+    let names = [
+        "x-audience",
+        "x-envelope-version",
+        "x-repository",
+        "x-public-key",
+        "x-signature",
+        "x-digest",
+        "x-content-commitment",
+        "x-created-at",
+        "x-expires-at",
+        "idempotency-key",
+    ];
+    let request = ListRefsRequest::default();
+    let signer = ctx.v2_signer("main")?;
+    let envelope = sign_unary(&signer, Rpc::ListRefs, &request, |_| {});
+    let unsigned: Vec<_> = envelope
+        .headers
+        .iter()
+        .filter(|(name, _)| matches!(name.as_str(), "x-repository" | "idempotency-key"))
+        .cloned()
+        .collect();
+    let got: Result<ListRefsResponse, _> = ctx
+        .client()
+        .unary(Rpc::ListRefs, request.encode_to_vec(), &unsigned)
+        .await?;
+    want_ok(got, "unsigned repository addressing and nonce")?;
+    for name in names {
+        for value in ["", "partial"] {
+            if matches!(name, "x-repository" | "idempotency-key") {
+                continue;
+            }
+            let headers = [(name.to_owned(), value.to_owned())];
+            let got: Result<ListRefsResponse, _> = ctx
+                .client()
+                .unary(Rpc::ListRefs, request.encode_to_vec(), &headers)
+                .await?;
+            want_code(got, UNAUTH, &format!("ListRefs with only {name}"))?;
+        }
+        let mut missing = envelope.headers.clone();
+        missing.retain(|(header, _)| header != name);
+        let got: Result<ListRefsResponse, _> = ctx
+            .client()
+            .unary(Rpc::ListRefs, request.encode_to_vec(), &missing)
+            .await?;
+        want_code(got, UNAUTH, &format!("ListRefs without {name}"))?;
+        let value = envelope
+            .headers
+            .iter()
+            .find(|(header, _)| header == name)
+            .ok_or_else(|| Failure::Fail(format!("signed fixture missing {name}")))?
+            .1
+            .clone();
+        let mut duplicate = envelope.headers.clone();
+        duplicate.push((name.to_owned(), value));
+        let got: Result<ListRefsResponse, _> = ctx
+            .client()
+            .unary(Rpc::ListRefs, request.encode_to_vec(), &duplicate)
+            .await?;
+        want_code(got, UNAUTH, &format!("ListRefs with duplicate {name}"))?;
+    }
+    ctx.expect_ref(&ctx.head("main"), None).await
+}
+
 pub(super) async fn v2_wrong_audience(ctx: Ctx) -> CaseResult {
     let signer = ctx.v2_signer("main")?;
     let other = |env: &mut Envelope| "https://conformance.invalid".clone_into(&mut env.audience);

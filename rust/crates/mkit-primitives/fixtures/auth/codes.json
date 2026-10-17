@@ -1,0 +1,4 @@
+[
+  {"failure_code":"InvalidEnvelope","connect_code":"unauthenticated"},
+  {"failure_code":"ClaimsBindingMismatch","connect_code":"permission_denied"}
+]

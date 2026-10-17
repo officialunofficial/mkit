@@ -124,6 +124,12 @@ pub enum FailureCode {
     #[error("ForkBindingMismatch")]
     ForkBindingMismatch,
     // auth
+    /// Malformed, mismatched, expired, or incorrectly signed auth envelope.
+    #[error("InvalidEnvelope")]
+    InvalidEnvelope,
+    /// Host-authenticated upload claims do not bind to the request.
+    #[error("ClaimsBindingMismatch")]
+    ClaimsBindingMismatch,
     // replay
     // evidence
 }
@@ -171,6 +177,9 @@ impl FailureCode {
             Self::ForkExpired => "ForkExpired",
             Self::ForkQuotaExceeded => "ForkQuotaExceeded",
             Self::ForkBindingMismatch => "ForkBindingMismatch",
+            // auth
+            Self::InvalidEnvelope => "InvalidEnvelope",
+            Self::ClaimsBindingMismatch => "ClaimsBindingMismatch",
         }
     }
 }
@@ -252,6 +261,9 @@ mod tests {
             FailureCode::ForkExpired.as_str(),
             FailureCode::ForkQuotaExceeded.as_str(),
             FailureCode::ForkBindingMismatch.as_str(),
+            // auth
+            FailureCode::InvalidEnvelope.as_str(),
+            FailureCode::ClaimsBindingMismatch.as_str(),
         ];
         let unique: std::collections::BTreeSet<_> = codes.into_iter().collect();
         assert_eq!(unique.len(), codes.len());

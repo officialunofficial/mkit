@@ -860,9 +860,9 @@ For `DownloadPack` the committed bytes are the uncompressed envelope
 `0x00`, the 4-byte big-endian message length and the message; a signed
 request whose body is compressed is `unauthenticated`.
 
-- A request that carries any auth v2 header (`X-Envelope-Version`,
-  `X-Public-Key`, `X-Signature`) is signed, and the server MUST verify
-  the whole envelope. A failure is `unauthenticated`. Envelope
+- A request that carries any signature-triggering auth v2 header, as
+  enumerated in SPEC-TRANSPORT-CONNECT §7.1, is signed, and the server MUST
+  verify the whole envelope. `X-Repository` addressing alone is unsigned. A failure is `unauthenticated`. Envelope
   verification does not depend on whether the repository exists or is
   private, so the code is never an existence oracle.
 - A signed read is idempotent. The server checks the validity window

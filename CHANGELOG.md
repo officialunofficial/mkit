@@ -44,6 +44,12 @@ collect the applicable entries between their old and new immutable pins.
   result replay. Acceptance creates no visible membership or destination refs.
   Additive ALPHA API; no wire or stored-format change; no store reset.
 
+- Portable auth-v2 validation, upload-claims binding, and replay classification
+  in `mkit-primitives`, with raw header multiplicity checks, shared vectors,
+  and deterministic claims replay. Hosts retain token formats, key custody,
+  authorization, storage, and atomic application. APIs are additive; no wire
+  or stored-format change or store reset.
+
 - Add the independently versioned `mkit-primitives` ALPHA contract skeleton.
   It defines opaque verification, closure, and guarded-decision types without
   changing existing runtime paths or wire formats. No migration or store reset.
@@ -108,6 +114,15 @@ collect the applicable entries between their old and new immutable pins.
   RUSTSEC-2026-0349 without new advisory exceptions.
 - Restore the web terminal's Sandbox SDK pin to 0.12.10, matching the backend
   terminal protocol and restoring the SDK's `xterm` export.
+
+- Auth-v2 servers reject incomplete signed metadata on reads whenever any
+  signature-triggering envelope header is supplied. Repository addressing and
+  an idempotency key alone remain unsigned. Duplicate envelope fields fail
+  closed before routing. Signed reads still bypass replay, and replay never
+  extends envelope validity. The compressed-read check uses the expanded
+  signature-trigger set in every authentication mode. Existing unsigned client
+  writes retain their authentication-mode behavior. No wire schema or stored-format
+  change; no store reset.
 
 - Fork publication absorbs a competing driver's exact witness pair after a
   guard loss. Foreign rows still refuse the fork. Retryable job-step errors
