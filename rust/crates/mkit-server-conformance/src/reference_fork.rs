@@ -629,7 +629,7 @@ impl HostState {
         body: bytes::Bytes,
     ) -> axum::response::Response {
         let core = self.forks.core.read().await.clone();
-        let result = async {
+        let result = Box::pin(async {
             let request = fork::ForkRequest::parse(&body)?;
             let authenticated = core.authenticate(&mkit_server::pipeline::RequestMeta {
                 procedure: mkit_server::Procedure::Fork,
@@ -643,14 +643,31 @@ impl HostState {
                 unary_body: Some(&body),
                 transport_principal: None,
             })?;
-            core.fork_repo(&authenticated, request).await
-        }
+            Box::pin(core.fork_repo(&authenticated, request)).await
+        })
         .await;
         match result {
             Ok(result) => axum::Json(serde_json::json!({ "tip":to_hex(&result.tip), "source_sequence":result.source_sequence, "pack_count":result.pack_count, "pack_bytes":result.pack_bytes, "object_count":result.object_count, "membership_generation":result.membership_generation })).into_response(),
-            Err(error) => (http::StatusCode::from_u16(error.http_status().unwrap_or_else(|| match error.code() { mkit_server::Code::NotFound => 404, mkit_server::Code::PermissionDenied => 403, mkit_server::Code::InvalidArgument => 400, mkit_server::Code::FailedPrecondition => 400, mkit_server::Code::Unavailable => 503, _ => 500 })).unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR), axum::Json(serde_json::json!({"code": error.code().as_str(), "message": error.public_message()}))).into_response(),
+            Err(error) => fork_error_response(&error),
         }
     }
+}
+
+fn fork_error_response(error: &ServerError) -> axum::response::Response {
+    let status = error.http_status().unwrap_or_else(|| match error.code() {
+        mkit_server::Code::NotFound => 404,
+        mkit_server::Code::PermissionDenied => 403,
+        mkit_server::Code::InvalidArgument | mkit_server::Code::FailedPrecondition => 400,
+        mkit_server::Code::Unavailable => 503,
+        _ => 500,
+    });
+    (
+        http::StatusCode::from_u16(status).unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR),
+        axum::Json(
+            serde_json::json!({"code": error.code().as_str(), "message": error.public_message()}),
+        ),
+    )
+        .into_response()
 }
 
 fn result_view(result: &ForkResult) -> ForkResultView {

@@ -113,12 +113,12 @@ impl ControlledHost {
                 let state = state.clone();
                 move |axum::Json(request): axum::Json<Request>| {
                     let state = state.clone();
-                    async move { state.command(request).await }
+                    async move { Box::pin(state.command(request)).await }
                 }
             }))
             .route("/__mkit_test/fork", axum::routing::post({
                 let state = state.clone();
-                move |headers: http::HeaderMap, body: bytes::Bytes| { let state = state.clone(); async move { state.invoke_fork(headers, body).await } }
+                move |headers: http::HeaderMap, body: bytes::Bytes| { let state = state.clone(); async move { Box::pin(state.invoke_fork(headers, body)).await } }
             }))
             .fallback({
                 let state = state.clone();
@@ -361,7 +361,7 @@ impl HostState {
     }
 
     async fn command(&self, request: Request) -> axum::response::Response {
-        match self.execute(request).await {
+        match Box::pin(self.execute(request)).await {
             Ok(reply) => (http::StatusCode::OK, axum::Json(reply)).into_response(),
             Err((code, message)) => {
                 (code, axum::Json(serde_json::json!({"error":message}))).into_response()
