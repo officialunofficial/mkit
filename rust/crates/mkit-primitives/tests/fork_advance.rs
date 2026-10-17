@@ -100,12 +100,18 @@ fn facts<'a>(
 }
 
 #[test]
-fn advance_guards_every_fixed_shape_field_and_deadline() {
+fn advance_guards_every_fixed_shape_field_and_samples_construction_expiry() {
     let original = progress();
     let guard = decide_fork_advance(&original, 100);
     assert_eq!(guard.decision(), ForkAdvanceDecision::Advance);
-    assert!(guard.matches(&original, 100));
-    assert!(!guard.matches(&original, 101));
+    assert_eq!(guard.evaluated_at_ms(), 100);
+    assert!(guard.matches(&original));
+    // Starting at the inclusive boundary is eligible; a new phase after it
+    // refuses. The original decision does not invent a later commit deadline.
+    assert_eq!(
+        decide_fork_advance(&original, 101).decision(),
+        ForkAdvanceDecision::Refuse(ForkAdvanceRefusal::Expired)
+    );
     let mutations: Vec<ForkAdvanceFacts> = (0..13)
         .map(|n| {
             let mut f = original.clone();
@@ -128,17 +134,17 @@ fn advance_guards_every_fixed_shape_field_and_deadline() {
         })
         .collect();
     for changed in mutations {
-        assert!(!guard.matches(&changed, 100));
+        assert!(!guard.matches(&changed));
     }
     let mut changed = original.clone();
     changed.reservation.as_mut().unwrap().expected = rev(99);
-    assert!(!guard.matches(&changed, 100));
+    assert!(!guard.matches(&changed));
     changed = original.clone();
     changed.grant_epoch = None;
-    assert!(!guard.matches(&changed, 100));
+    assert!(!guard.matches(&changed));
     changed = original.clone();
     changed.reservation = None;
-    assert!(!guard.matches(&changed, 100));
+    assert!(!guard.matches(&changed));
 }
 #[test]
 fn authority_precedes_epoch_and_reservation_and_terminal_replay_never_advances() {
@@ -179,8 +185,8 @@ fn accepted_clearance_outlives_expiry_and_reservation_pruning() {
     f.reservation.as_mut().unwrap().current = ForkObservation::Absent;
     let guard = decide_fork_advance(&f, u64::MAX);
     assert_eq!(guard.decision(), ForkAdvanceDecision::Advance);
-    assert_eq!(guard.valid_through_ms(), None);
-    assert!(guard.matches(&f, u64::MAX));
+    assert_eq!(guard.evaluated_at_ms(), u64::MAX);
+    assert!(guard.matches(&f));
     f.reservation = None;
     assert_eq!(
         decide_fork_advance(&f, u64::MAX).decision(),

@@ -2214,6 +2214,8 @@ the denial directory, and content-state versions for every registered subject.
 This provides a coherent source point across resumed slices; changes refuse
 uniformly as a missing source. A custom publication policy supplies a coherent,
 non-repeating fork-eligibility version; its default refuses unaccepted forks.
+Activation uses the retained accepted result and repeats current destination
+denial checks; later source changes do not alter that result.
 
 Every advancing coordinator commit compares recorded authority observations.
 Physical activation compares a bound local permit, or direct authority guards

@@ -38,12 +38,19 @@ A preflight authority read alone does not discharge this requirement.
 
 | Boundary | Required evidence and comparison |
 | --- | --- |
-| Preparation progress | Exact operation and destination, job observation and progress, recorded authority and applicable grant epoch, exact pending reservation when granted, original construction deadline |
+| Preparation progress | Exact operation and destination, job observation and progress, recorded authority and applicable grant epoch, exact pending reservation when granted; construction eligibility sampled at phase start |
 | Acceptance | All acceptance guards and the final ordered source proof; progress fencing applies to this commit too |
 | Member installation | Exact accepted binding and result, selected inherited pack, exact job progress, current destination clearance fence, recorded authority permission at the physical commit, exact live and published witness observations, apply deadline |
 | Identical replay | Complete identical live and published witnesses; neither a partial pair nor a foreign witness establishes completion |
 | Completion | Exact accepted result and complete progress; operation-owned destination write barrier and current authority guarded with the final job transition |
 | Failed construction | No advancement or visibility permission; retain the inert destination and its saved failure |
+
+Construction expiry is sampled when a preparation phase starts, preserving the
+reference driver's eligibility boundary. It is not a new commit deadline.
+The host separately retains exact pending reservation comparisons, authority
+fences, full job CAS, and physical apply deadlines. An eligible phase may finish
+after its construction eligibility bound; starting another preparation phase
+then refuses.
 
 After acceptance, reservation expiry, outcome acknowledgement, and permitted
 replay pruning do not cancel recovery responsibility. Clearance remains

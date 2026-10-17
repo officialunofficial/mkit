@@ -83,7 +83,8 @@ pub struct ForkAdvanceFacts {
     pub grant_epoch: Option<ForkEpochFence>,
     /// Original admission protection; absent for default admission.
     pub reservation: Option<ForkReservationFence>,
-    /// Construction expiry, inclusive. Accepted clearance outlives this deadline.
+    /// Inclusive construction eligibility bound at phase start.
+    /// This is not a commit deadline. Accepted clearance ignores this bound.
     pub construction_expires_ms: u64,
 }
 /// Fine-grained host mapping preserves authority-before-epoch precedence.
@@ -125,7 +126,7 @@ pub enum ForkAdvanceDecision {
 pub struct GuardedForkAdvance<'a> {
     decision: ForkAdvanceDecision,
     facts: &'a ForkAdvanceFacts,
-    valid_through_ms: Option<u64>,
+    evaluated_at_ms: u64,
 }
 impl<'a> GuardedForkAdvance<'a> {
     /// Decision requiring every returned comparison.
@@ -138,15 +139,18 @@ impl<'a> GuardedForkAdvance<'a> {
     pub const fn required_guards(&self) -> &'a ForkAdvanceFacts {
         self.facts
     }
-    /// Inclusive business deadline, absent after acceptance.
+    /// Host-supplied phase-start time used to evaluate construction eligibility.
+    /// It is not a deadline to lower into a later commit.
     #[must_use]
-    pub const fn valid_through_ms(&self) -> Option<u64> {
-        self.valid_through_ms
+    pub const fn evaluated_at_ms(&self) -> u64 {
+        self.evaluated_at_ms
     }
-    /// Reference comparison; the host performs it inside its atomic boundary.
+    /// Compare exact acquired facts at the host's atomic boundary.
+    /// Construction eligibility was sampled at phase start; independently
+    /// required reservation, authority, and physical apply fences still apply.
     #[must_use]
-    pub fn matches(&self, current: &ForkAdvanceFacts, now_ms: u64) -> bool {
-        self.facts == current && self.valid_through_ms.is_none_or(|t| now_ms <= t)
+    pub fn matches(&self, current: &ForkAdvanceFacts) -> bool {
+        self.facts == current
     }
 }
 /// Compare already acquired authority observations before any progress work.
@@ -166,6 +170,9 @@ pub fn decide_fork_authority(
     }
 }
 /// Decide an advancing coordinator commit from exact already acquired facts.
+/// `now_ms` is the sampled phase-start time. Construction expiry controls
+/// eligibility to start that phase, not the later commit time. The host retains
+/// its independently required commit deadlines and exact acquired-fact guards.
 /// Terminal jobs return before fence checks, matching immutable replay semantics.
 #[must_use = "compare every required guard before advancing"]
 pub fn decide_fork_advance(facts: &ForkAdvanceFacts, now_ms: u64) -> GuardedForkAdvance<'_> {
@@ -193,8 +200,7 @@ pub fn decide_fork_advance(facts: &ForkAdvanceFacts, now_ms: u64) -> GuardedFork
     GuardedForkAdvance {
         decision,
         facts,
-        valid_through_ms: (phase == ForkAdvancePhase::Preparing)
-            .then_some(facts.construction_expires_ms),
+        evaluated_at_ms: now_ms,
     }
 }
 /// Exact semantic membership witness. No storage encoding is specified.
