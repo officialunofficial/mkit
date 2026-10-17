@@ -112,6 +112,10 @@ pub struct WindowReader {
     carry: Vec<u8>,
     trailer: [u8; 32],
     resume_prefix: Option<Hash>,
+    // Fixed-size live state, never serialized. Length is relative to `start`
+    // and bounded by the current window (at most 64 MiB).
+    prefix_hasher: crate::hash::Hasher,
+    prefix_len: usize,
     last_frame: Option<FrameInfo>,
     #[cfg(test)]
     peak: usize,
@@ -164,7 +168,10 @@ impl WindowReader {
         ))
     }
 
-    /// Restore an entry boundary. The first request contains the next entry.
+    /// Restore a trusted entry boundary for the same immutable pack source.
+    /// The first request contains the next entry and authenticates its consumed
+    /// window prefix once, rebuilding the live incremental digest. Completed
+    /// ranges remain bound by the cursor's explicit tree frontier.
     ///
     /// # Errors
     /// Inconsistent cursors give `PackfileCorrupted`.
@@ -196,6 +203,8 @@ impl WindowReader {
             carry: Vec::new(),
             trailer: [0; 32],
             resume_prefix: None,
+            prefix_hasher: crate::hash::Hasher::new(),
+            prefix_len: 0,
             last_frame: None,
             #[cfg(test)]
             peak: 0,
@@ -331,6 +340,7 @@ impl WindowReader {
             return Err(PackError::TooManyObjects(self.state.count));
         }
         self.phase = Phase::Boundary;
+        self.update_prefix()?;
         self.boundary = Some(self.boundary_state());
         Ok(None)
     }
@@ -580,6 +590,7 @@ impl WindowReader {
             .checked_add(1)
             .ok_or(PackError::PackfileTooLarge)?;
         self.phase = Phase::Boundary;
+        self.update_prefix()?;
         self.boundary = Some(self.boundary_state());
         Ok(())
     }
@@ -587,8 +598,8 @@ impl WindowReader {
     /// Supply exactly the outstanding range. Wrong ranges leave it pending.
     ///
     /// # Errors
-    /// Wrong ranges give `PackfileCorrupted`; failed allocations give
-    /// `PackfileTooLarge`.
+    /// Wrong ranges or changed consumed prefixes give `PackfileCorrupted`.
+    /// Failed allocations give `PackfileTooLarge`.
     pub fn feed(&mut self, offset: u64, bytes: &[u8]) -> Result<(), PackError> {
         self.validate_feed(offset, bytes)?;
         let retain = self.retains_window();
@@ -608,7 +619,8 @@ impl WindowReader {
     /// Supply a range by transferring its buffer, avoiding two full-window copies.
     ///
     /// # Errors
-    /// Wrong ranges give `PackfileCorrupted`; allocation failure gives `PackfileTooLarge`.
+    /// Wrong ranges or changed consumed prefixes give `PackfileCorrupted`;
+    /// allocation failure gives `PackfileTooLarge`.
     pub fn feed_owned(&mut self, offset: u64, bytes: Vec<u8>) -> Result<(), PackError> {
         self.validate_feed(offset, &bytes)?;
         let retain = self.retains_window();
@@ -641,16 +653,20 @@ impl WindowReader {
 
     fn feed_data(&mut self, offset: u64, bytes: &[u8]) -> Result<(), PackError> {
         let request = self.validate_feed(offset, bytes)?;
+        let mut prefix_hasher = crate::hash::Hasher::new();
+        let mut prefix_len = 0;
         if let Some(expected) = self.resume_prefix {
-            let prefix_len = self
+            let consumed = self
                 .state
                 .pos
                 .checked_sub(offset)
                 .ok_or(PackError::PackfileCorrupted)?;
             let prefix = bytes
-                .get(..us(prefix_len)?)
+                .get(..us(consumed)?)
                 .ok_or(PackError::PackfileCorrupted)?;
-            if crate::hash::hash(prefix) != expected {
+            prefix_hasher.update(prefix);
+            prefix_len = prefix.len();
+            if prefix_hasher.finalize() != expected {
                 return Err(PackError::PackfileCorrupted);
             }
             self.resume_prefix = None;
@@ -688,7 +704,26 @@ impl WindowReader {
                 self.phase = Phase::Header;
             }
         }
+        self.prefix_hasher = prefix_hasher;
+        self.prefix_len = prefix_len;
         self.request = None;
+        Ok(())
+    }
+
+    // Absorb only the newly consumed part of the current window. An entry
+    // may span earlier windows; their commitments already live in the trees.
+    fn update_prefix(&mut self) -> Result<(), PackError> {
+        let end = us(self
+            .state
+            .pos
+            .checked_sub(self.start)
+            .ok_or(PackError::PackfileCorrupted)?)?;
+        let bytes = self
+            .window
+            .get(self.prefix_len..end)
+            .ok_or(PackError::PackfileCorrupted)?;
+        self.prefix_hasher.update(bytes);
+        self.prefix_len = end;
         Ok(())
     }
 
@@ -719,12 +754,33 @@ impl WindowReader {
 
     /// A compact checkpoint only at an entry boundary, never within an entry.
     ///
-    /// Hashes the current window prefix lazily on this call. Returns `None` if
+    /// Finalizes the live incremental prefix digest without rereading bytes.
+    /// Entry boundaries absorb only newly consumed bytes; cold resume verifies
+    /// and rebuilds the prefix once from the supplied immutable source window.
+    /// Completed ranges retain explicit subtree commitments. This does not
+    /// replace the final trailer or requested whole-pack identity checks.
+    /// Returns `None` if
     /// the reader has released the bytes needed for that prefix, including while
     /// fetching a split trailer or awaiting a resumed window. Keep the previous
     /// cursor in that case. No bytes are needed when the boundary is exactly at
     /// a window start. Mid-entry states, including carried straddling entries,
     /// never produce a checkpoint.
+    ///
+    /// # Examples
+    /// ```
+    /// use mkit_core::{hash, pack::{DecodeLimits, PackWriter, window::{Step, WindowReader}}};
+    /// let mut writer = PackWriter::new_raw_only();
+    /// writer.push_raw(hash::hash(b"entry"), b"entry")?;
+    /// let pack = writer.finish()?;
+    /// let mut reader = WindowReader::new(pack.len() as u64, 64 << 10,
+    ///     DecodeLimits::default(), Some(hash::hash(&pack)))?;
+    /// assert!(matches!(reader.step()?, Step::NeedWindow(_)));
+    /// reader.feed(0, &pack)?;
+    /// assert!(matches!(reader.step()?, Step::Entry(_)));
+    /// let cursor = reader.checkpoint().unwrap();
+    /// assert_eq!(cursor.to_bytes(), reader.checkpoint().unwrap().to_bytes());
+    /// # Ok::<(), mkit_core::pack::PackError>(())
+    /// ```
     #[must_use]
     pub fn checkpoint(&self) -> Option<WindowCursor> {
         if !matches!(self.phase, Phase::Boundary | Phase::Finish | Phase::Done) {
@@ -746,7 +802,11 @@ impl WindowReader {
                 return None;
             }
             let end = usize::try_from(prefix_len).ok()?;
-            Some(crate::hash::hash(self.window.get(..end)?))
+            self.window.get(..end)?;
+            if self.prefix_len != end {
+                return None;
+            }
+            Some(self.prefix_hasher.finalize())
         };
         Some(cursor)
     }

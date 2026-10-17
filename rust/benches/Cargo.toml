@@ -43,6 +43,10 @@ harness = false
 name = "pack_window"
 harness = false
 
+[[bench]]
+name = "pack_prefix"
+harness = false
+
 # Read-side counterpart of `pack_build_fanout` (below): wallclock of
 # `PackReader::read` (unpack) across entry counts, spanning the
 # raw-entry parallel-fan-out threshold in `mkit-core`'s

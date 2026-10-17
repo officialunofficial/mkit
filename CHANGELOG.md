@@ -89,6 +89,10 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Changed
 
+- Windowed pack checkpoints reuse an incremental BLAKE3 prefix digest.
+  Cold resumes authenticate and rebuild the current prefix once. Cursor bytes,
+  public signatures, refusal order, and final pack integrity checks are unchanged.
+
 - Performance: ClosureResolve and EmitIndex outside the tiny-pack path share
   up to eight durable slices per callback, with the original timer and job guards and
   shared call and time limits. The additive

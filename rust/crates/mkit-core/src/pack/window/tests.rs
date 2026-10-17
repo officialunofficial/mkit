@@ -371,6 +371,7 @@ fn resume_each_entry(pack: &[u8], window: u64, expected: Option<Hash>) {
             Step::Entry(entry) => {
                 values.push(value(entry));
                 let cursor = reader.checkpoint().unwrap();
+                assert_cursor_reference(&reader, &cursor);
                 let bytes = cursor.to_bytes();
                 assert!(bytes.len() <= 4096);
                 let cursor = WindowCursor::from_bytes(&bytes).unwrap();
@@ -391,6 +392,9 @@ fn resume_each_entry(pack: &[u8], window: u64, expected: Option<Hash>) {
                 feed_from(&mut reader, pack, request);
             }
             Step::Done(summary) => {
+                if let Some(cursor) = reader.checkpoint() {
+                    assert_cursor_reference(&reader, &cursor);
+                }
                 assert_eq!((values, summary), reference);
                 return;
             }
@@ -1414,4 +1418,120 @@ fn explicit_geometry_carried_compressed_frame_binds_the_released_prefix() {
     ));
     let mut clean = WindowReader::resume(&cursor, limits).unwrap();
     assert!(drive(&mut clean, &pack).is_ok());
+}
+
+// Independent pre-optimization checkpoint algorithm: hash the complete prefix.
+fn assert_cursor_reference(reader: &WindowReader, cursor: &WindowCursor) {
+    let mut reference = reader.boundary.clone().unwrap();
+    let start = reference.completed * reference.window_size;
+    let len = usize::try_from(reference.pos - start).unwrap();
+    reference.window_prefix = if len == 0 {
+        None
+    } else {
+        assert_eq!(reader.start, start);
+        Some(hash::hash(&reader.window[..len]))
+    };
+    assert_eq!(cursor.to_bytes(), reference.to_bytes());
+}
+
+#[test]
+fn checkpoints_match_reference_on_every_valid_fixture() {
+    let mut paths = Vec::new();
+    pack_fixtures(&golden_root(), &mut paths);
+    for path in paths {
+        let pack = std::fs::read(path).unwrap();
+        if buffered(&pack).is_ok() {
+            for expected in [None, Some(hash::hash(&pack))] {
+                resume_each_entry(&pack, WINDOW, expected);
+            }
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 24,
+        rng_seed: proptest::test_runner::RngSeed::Fixed(0x5052_4546),
+        ..ProptestConfig::default()
+    })]
+    #[test]
+    fn warm_cold_many_checkpoints_and_rollover(
+        seed in any::<u8>(), size in 1usize..2048, interval in 1usize..17,
+    ) {
+        let payloads = (0u8..180).map(|i| vec![seed.wrapping_add(i); size]).collect::<Vec<_>>();
+        let pack = raw_pack(&payloads);
+        for expected in [None, Some(hash::hash(&pack))] {
+            let mut warm = WindowReader::new(u64::try_from(pack.len()).unwrap(), WINDOW, DecodeLimits::default(), expected).unwrap();
+            let mut seen = 0;
+            loop {
+                match warm.step().unwrap() {
+                    Step::NeedWindow(r) => feed_from(&mut warm, &pack, r),
+                    Step::Entry(entry) => {
+                        assert_eq!(value(entry), Value::Raw(payloads[seen].clone()));
+                        seen += 1;
+                        let cursor = warm.checkpoint().unwrap();
+                        assert_cursor_reference(&warm, &cursor);
+                        assert!(warm.prefix_len <= usize::try_from(WINDOW).unwrap());
+                        assert_eq!(u64::try_from(warm.prefix_len).unwrap(), warm.state.pos - warm.start);
+                        assert!(std::mem::size_of_val(&warm.prefix_hasher) <= 2048);
+                        assert_eq!(cursor.to_bytes(), warm.checkpoint().unwrap().to_bytes());
+                        if seen % interval == 0 {
+                            let mut cold = WindowReader::resume(&cursor, DecodeLimits::default()).unwrap();
+                            let Step::NeedWindow(r) = cold.step().unwrap() else { panic!() };
+                            feed_from(&mut cold, &pack, r);
+                            assert_eq!(cursor.to_bytes(), cold.checkpoint().unwrap().to_bytes());
+                            if cursor.pos > r.offset {
+                                let mut changed = pack[usize::try_from(r.offset).unwrap()..usize::try_from(r.offset + r.len).unwrap()].to_vec();
+                                changed[usize::try_from(cursor.pos - r.offset - 1).unwrap()] ^= 1;
+                                let mut bad = WindowReader::resume(&cursor, DecodeLimits::default()).unwrap();
+                                bad.step().unwrap();
+                                assert!(matches!(bad.feed(r.offset, &changed), Err(PackError::PackfileCorrupted)));
+                            }
+                            warm = cold;
+                        }
+                    }
+                    Step::Done(_) => break,
+                }
+            }
+            assert_eq!(seen, 180);
+        }
+    }
+}
+
+#[test]
+fn window_relative_offsets_fit_32_bits_even_past_4_gib() {
+    let offset = u64::from(u32::MAX) + 1;
+    let pos = offset + WINDOW - 1;
+    assert_eq!(
+        us(pos - offset).unwrap(),
+        usize::try_from(WINDOW - 1).unwrap()
+    );
+    assert!(u32::try_from(pos).is_err());
+    assert!(u32::try_from(pos - offset).is_ok());
+    #[cfg(target_pointer_width = "32")]
+    assert!(matches!(us(u64::MAX), Err(PackError::PackfileTooLarge)));
+    let bytes = vec![0; 54];
+    let mut cursor = WindowCursor::initial(offset + 54, WINDOW, Some([0; 32]));
+    cursor.pos = offset + 17;
+    cursor.payload_sum = offset;
+    cursor.version = 1;
+    cursor.count = 2;
+    cursor.index = 1;
+    cursor.completed = offset / WINDOW;
+    cursor.window_prefix = Some(hash::hash(&bytes[..17]));
+    cursor.trailer_tree.stack.push([1; 32]);
+    cursor.id_tree.stack.push([1; 32]);
+    let cursor = WindowCursor::from_bytes(&cursor.to_bytes()).unwrap();
+    let mut reader = WindowReader::resume(&cursor, DecodeLimits::default()).unwrap();
+    let Step::NeedWindow(r) = reader.step().unwrap() else {
+        panic!()
+    };
+    assert_eq!(r.offset, offset);
+    reader.feed_owned(offset, bytes).unwrap();
+    assert_eq!(reader.checkpoint().unwrap().to_bytes(), cursor.to_bytes());
+    assert!(matches!(reader.step().unwrap(), Step::Entry(_)));
+    assert_cursor_reference(&reader, &reader.checkpoint().unwrap());
+    // Trusted cursor construction above uses synthetic CVs. Reaching the
+    // boundary does not grant a completion result with those commitments.
+    assert!(matches!(reader.step(), Err(PackError::PackfileCorrupted)));
 }

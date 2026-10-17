@@ -1558,8 +1558,14 @@ reach `Done`, but only with entries of the verified pack.
 A `None` checkpoint means keep the previous cursor. After a boundary-state `None` (the trailer phase), resuming re-reads at most one window plus the trailer; after a mid-entry `None`, it re-reads every window the unfinished entry spans.
 
 **Because:** a streaming trailer check occurs after entries have been delivered;
-completed-window CVs and the lazy current-window prefix commitment bind the
+completed-window CVs and the incremental current-window prefix commitment bind the
 entries staged across resumes without re-reading completed ranges.
+
+The live prefix state has one fixed-size BLAKE3 hasher and a window-relative
+length bounded by 64 MiB. Each entry boundary absorbs only newly consumed bytes;
+repeated checkpoints finalize that state without rereading the prefix. Cold resume
+authenticates the prefix once and reconstructs this state. Only the existing
+explicit subtree commitments and prefix digest enter the cursor encoding.
 
 **If violated:** malformed packs or mismatched cursor/source pairs can publish
 partially verified data.
