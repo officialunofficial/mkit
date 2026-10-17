@@ -83,6 +83,14 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Fixed
 
+- Use smaller test codegen units and serialize Cloud Build's workspace test
+  compilation on the existing worker to bound compiler memory. All tests
+  and their execution concurrency remain unchanged.
+- Update rustls to 0.23.46 to address RUSTSEC-2026-0346 through
+  RUSTSEC-2026-0349 without new advisory exceptions.
+- Restore the web terminal's Sandbox SDK pin to 0.12.10, matching the backend
+  terminal protocol and restoring the SDK's `xterm` export.
+
 - Fork publication absorbs a competing driver's exact witness pair after a
   guard loss. Foreign rows still refuse the fork. Retryable job-step errors
   now carry `Retry-After: 1`, retaining `unavailable` and HTTP 503. Error message
