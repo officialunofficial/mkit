@@ -158,6 +158,12 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Fixed
 
+- Unfenced multipart and stream writes no longer read the fork permit marker
+  during authority activation. That marker is consulted only when fencing is
+  enabled, inside the existing activation read. A full coordinator partition
+  during an epoch or authority move is again `unavailable` with
+  `storage partition full`, not fork unavailability. No API, wire, or
+  stored-format change; no store reset.
 - Use smaller test codegen units and serialize Cloud Build's workspace test
   compilation on the existing worker to bound compiler memory. All tests
   and their execution concurrency remain unchanged.
