@@ -2644,6 +2644,11 @@ ref when the token expires or its bound anchor or authority changes.
 
 **Protocol requirement.**
 
+Acceptance MAY precede reader-visible publication. A server deferring
+publication MUST preserve the accepted decision and its durable recovery
+responsibility while clearance remains outstanding. Acceptance and clearance
+are distinct decisions, even when they commit together under this section.
+
 Each ref MUST have an ordered advance sequence. The branch head
 `refs/heads/<x>` and `refs/mkit/packmap/<x>` share one sequence: every
 successful `AdvanceRefs`, head-only `UpdateRef`, or packmap-only
@@ -2752,11 +2757,47 @@ post-takedown packmap chain and replacement packs. Its own replacement
 packs can publish atomically with resolution; other packs and external
 delta bases must already be in published membership.
 
-Clearing *k* MUST atomically publish its added membership and update the
-published ref pointer to the largest eligible prefix. Completion out of
-order can make membership eligible, but MUST NOT expose a ref value
-beyond that prefix. A branch's head and packmap MUST remain a pair in
-both live and published views. Publishing membership MUST durably
+Clearing *k* MUST atomically publish its eligible added membership and update
+the authoritative published ref pointer to the largest eligible prefix. That
+unit MUST preserve the deletion boundary described below. Completion out of
+order can make membership eligible, but MUST NOT expose a ref value beyond
+that prefix. A branch's head and packmap MUST remain a pair in both live and
+published views.
+
+When a publication Event sink is configured (§12.4), a clearance that changes
+the published pointer MUST record its corresponding transition and durable
+delivery responsibility in that same atomic unit. Membership-only clearance
+MUST NOT emit a publication transition. Correlation MUST identify the resulting
+prefix value's originating operation, including when the pointer jumps over
+several advances. External projections and deliveries MAY lag only as their
+respective specifications permit. Event delivery MUST NOT disclose an undurable
+clearance. Clearance and dependent disclosures retain §3.2's declared durability
+guarantees.
+
+Clearance MUST NOT re-execute acceptance, charge the accepted operation again,
+consume its tickets again, create another acceptance terminal outcome, or settle
+an acceptance reservation again. A publication Event is distinct from the
+acceptance's terminal outcome. Recovery and repeated clearance MUST preserve
+those distinctions even after acceptance replay evidence or acknowledged
+outcome evidence has been pruned under its permitted rules. At-least-once
+redelivery of the original outcome remains permitted; clearance MUST NOT create
+a second terminal result or settlement responsibility.
+
+A server MAY commit clearance in the acceptance's atomic unit when every
+clearance condition already holds. That unit MUST guard every mutable fact
+relied on for clearance: inspection and obligation state; applicable denial and
+takedown evidence; the contiguous eligible prefix and external-supplier
+membership; and the membership generation, deletion boundary, and other race
+conditions required by this section. Denial evidence retains §14.2's specified
+plan-time freshness and `NotAfter` bounds; this permission does not replace
+those rules with an unbounded cached check. If a clearance guard fails, the
+combined unit MUST commit nothing, or the server MAY re-plan acceptance with
+separate clearance while retaining every acceptance guard. The observable
+result of a combined unit MUST equal acceptance followed by clearance with no
+intervening operation. Combining the decisions MUST NOT waive any condition
+that would apply to separate clearance.
+
+Publishing membership MUST durably
 schedule re-evaluation of every advance previously blocked on that
 membership, including an external delta-base dependency, in any ref.
 The scheduled work MUST be retained until completed and MUST run within
@@ -2810,7 +2851,7 @@ its takedown replacement packs MUST additionally be retained until its
 §14 takedown completes, including when a deletion has moved the ref's
 publication boundary past that advance. §13 makes these GC roots.
 
-The published pointer MUST be written in the same apply for an advance
+The published pointer MUST change in the same atomic unit as an advance
 that starts `cleared` and has an eligible prefix. An advance starting
 `held` leaves the previous published value in place.
 Published equals live exactly while no advance on that ref is held or
@@ -2852,6 +2893,40 @@ inspector is configured, independently of repository existence. Writers
 MUST sign reads to see their own pending content that is not held. Held
 content is hidden from every caller, even when this field is false
 because only synchronous inspectors are configured.
+
+### 10.4 Embedding composition
+
+**Draft &mdash; pending architecture review.** These requirements may change.
+
+**Protocol requirement.** A server profile MAY add namespaced local guards,
+evidence, and durable responsibilities to an acceptance or published-clearance
+decision. A server offering that profile MUST commit its covered additions with
+the protocol decision in one atomic unit, or commit none of them. A failed
+additional guard MUST NOT commit any effect of that decision or its covered
+additions. A failed clearance guard leaves any earlier acceptance intact. An
+extension MUST NOT waive authorization, denial, freshness, durability, or replay
+requirements.
+
+The profile MUST declare its covered decision classes and atomic domain,
+including the protocol state and local responsibilities each decision covers.
+Physical colocation, a shared process, or a shared storage provider MUST NOT
+serve as proof of atomicity. Later remote delivery remains a separate effect;
+its durable responsibility MAY belong to the decision's atomic unit.
+
+For these additional guards, authority movement MUST return `permission_denied`;
+a stale or consumed permit or incarnation MUST return `failed_precondition`;
+retryable local contention MUST return `aborted`.
+
+A committed replay MUST resolve the original accepted decision without
+re-running its composition or creating another covered responsibility.
+Clearance composition MUST NOT re-settle acceptance. A profile MUST distinguish
+acceptance responsibilities from later clearance responsibilities. A profile
+requiring recovery beyond ordinary retained evidence MUST declare and retain
+that additional evidence without extending the wire replay lifetime.
+
+Composition coverage is planned until a server exposes the composition seam.
+The absence of that seam is not a declared implementation skip. This section
+defines no programming-language API or physical storage layout.
 
 ## 11. Quarantine and inspection
 
@@ -3625,36 +3700,77 @@ membership and index removal and compares the holder change sequence. Orphan
 holder reconciliation preserves that same guard. These timestamps, registries,
 frontiers, and stored marks are mechanisms for the requirements above.
 
-**Protocol requirement.** A server using collection marks MUST observe the
-following new-reliance rule; another implementation MUST provide equivalent
-protection against removing a concurrently referenced member.
+**Protocol requirement. GC reliance fence.** Every acceptance that newly
+relies on an existing member MUST defeat a stale GC removal of that member.
+No drop based on an earlier re-check may commit after such an acceptance
+without re-checking its new reliance. The server MUST ensure the repository's
+holder exists. Two conforming mechanisms are:
 
-A planner relying on a `gc_pending` member MUST clear its mark before
-planning the use and MUST ensure the repository's holder exists. More
-generally, a write that newly relies on an existing member MUST durably
-clear that member's GC mark before the write commits and MUST ensure its
-holder exists. New reliance means making a member reachable from a ref value
-where it was not before, directly or transitively: every pack and packlist
-node newly reachable from the new ref value, including through `prev` links
-to existing packlist nodes, closure objects and the packs containing them,
-and external delta bases (§§9.2–9.4). Any ref target counts, including a
-head-only branch update, together with its closure (indexed mode) or its
-packmap chain (opaque mode). In opaque mode, a write that introduces new
-packmap nodes MUST apply this rule to every pack and node reachable from
-them, including through `prev` links, except packs the same write uploaded
-that were not already members; the server MUST decode those nodes as GC
-does. If the mark cannot be cleared because the member is `deleting`, the
-write MUST NOT rely on it and MUST answer retryable `unavailable` or cause a
-re-upload. If the member is gone, the write MUST NOT rely on it and answers
-as §9.4 answers a missing member; opaque mode uses the same responses.
-A new mark restarts the wait. This rule and the commit deadlines cover
-planned, unapplied advances without requiring one global transaction. Without this rule, GC cannot safely drop membership: the
-drop guard sees changes only to the candidate member's own state, not a
-new ref that relies on it. A planner encountering `deleting` MUST
-return retryable `unavailable` or arrange a re-upload; it MUST NOT
-report a permanent absence merely because deletion is in progress.
-Informative: the detection mechanism and cost of finding newly relied-on
-members belong to the server GC implementation.
+1. Clear each relied-on member's GC mark durably before acceptance commits and
+   ensure its holder. A planner encountering an existing mark clears it before
+   planning the use. A new mark restarts the required wait and re-check.
+2. Maintain a per-repository reliance version. Every acceptance newly relying
+   on existing members increments that version in its atomic unit. Every GC
+   drop guards the version observed at its re-check. If the version changed,
+   the drop MUST fail and re-mark before attempting removal again.
+
+New reliance means making a member reachable from a ref value where it was not
+before, directly or transitively: every pack and packlist node newly reachable
+from the new value, including through `prev` links, closure objects and their
+containing packs, and external delta bases (§§9.2–9.4). Any ref target counts,
+including a head-only branch update, with its indexed closure or opaque packmap
+chain. An opaque write introducing new packmap nodes MUST cover every pack and
+node reachable from them, including through `prev` links, except packs the same
+write uploaded that were not already members. It MUST decode those nodes as GC
+does. The version mechanism does not require per-member mark writes, but MUST
+protect every member this rule covers.
+
+A write MUST NOT rely on a `deleting` member. It MUST return retryable
+`unavailable` or arrange a re-upload, rather than report permanent absence merely
+because deletion is in progress. A member already gone receives §9.4's missing
+member response in either mode. The reliance fence and commit deadlines protect
+planned, unapplied writes without prescribing a global transaction or execution
+stages. The detection mechanism and cost of finding new reliance belong to the
+server implementation.
+
+**Reference-server behavior.** The per-member mark-clear and holder mechanism
+satisfies this requirement; a reference server need not implement a reliance
+version. This permission does not integrate currently deferred GC paths.
+
+#### 13.3.1 Membership witness
+
+**Protocol requirement.** A server MAY guard previously verified repository
+membership with a constant-size witness consisting of the repository's
+membership generation and removal version. Every event removing a member or
+making it unusable for delta-base or closure reliance MUST increment the
+removal version in the same atomic unit as that repository change. This
+includes serving stops even when the underlying membership record remains.
+Versions MUST NOT be reused within a generation. Every acceptance using the
+witness MUST guard both unchanged values in its atomic unit, paired with the
+reliance fence above. Additions alone do not require a removal-version change;
+this witness is not a per-write state version.
+
+The removal events are:
+
+| Event | Required invalidation |
+|---|---|
+| Repository GC drops membership or its usable serving evidence (§13.3). | Increment the repository's removal version with removal. |
+| A member enters `deleting` (§§13.3–13.4). | Increment the removal version with any repository transition that makes a still-retained member unusable. Global zero-holder, zero-hold byte deletion cannot have a usable retained member under §13.4's holder rules. |
+| Inspection verdicts, flags, or holds stop serving or reliance (§§11.2–11.3), including quarantine without flagged ids. | Increment the removal version with the repository's serving stop, covering every affected pack and object even if membership remains stored. |
+| Takedown replaces or removes old membership, packs, indexes, or now-unreachable manifest chunks (§14.4). | Increment the removal version with each repository change that removes usable membership. |
+| Repository-level lease deletion (§12.2). | Invalidate the membership generation; a later lease cannot restore it. |
+| Per-ref deletion, including a per-ref lease deletion (§§10.2, 12.2; STC §7.8). | Change neither membership generation nor removal version solely for ref deletion: shared membership survives. |
+
+The witness proves that the previously verified members remain usable members
+of that repository. It MUST NOT replace independent authorization, effective
+lease-state, inspection-policy, or denial checks. In particular, repository or
+namespace suspension (§12.2) and global block activation (§14.2) retain their
+own required guards and freshness. A block's immediate serving stop (§14.3)
+does not permit a stale denial proof: §14.2 defines which time-qualified proof
+can still authorize a planned write and when it must be renewed. Repository
+holds and flags that invalidate membership reliance still require the removal
+version change above. These independent guards are required even when no
+membership record changes.
 
 ### 13.4 Global byte deletion
 
@@ -3948,8 +4064,8 @@ blocklist.
 
 Before writing replacement bytes or reusing an existing replacement,
 the server MUST create durable holds under §13.4. It MUST apply §13.3's
-new-reliance rule to every newly relied-on member, clearing a GC mark
-before commit, and use a guarded write with `NotAfter`. An in-progress
+new-reliance rule to every newly relied-on member, using either conforming
+reliance fence, and use a guarded write with `NotAfter`. An in-progress
 `deleting` member produces retryable `unavailable`; a stale plan MUST
 re-plan rather than publish a partial chain. The server MUST pair each
 branch's unchanged head with its new packmap. It MUST substitute the

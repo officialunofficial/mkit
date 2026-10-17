@@ -340,3 +340,68 @@ async fn authority_setter_disabled_case_detects_an_enabled_wire_setter() {
     assert!(report.failed(), "{}", report.tap());
     host.shutdown().await;
 }
+
+#[tokio::test]
+async fn opaque_host_rejects_publication_controls_before_parameter_validation() {
+    let host = ControlledHost::start(profile()).await.unwrap();
+    let response = reqwest::get(format!("{}{}", host.base_url(), control::CAPABILITIES_PATH))
+        .await
+        .unwrap();
+    let capabilities: control::Capabilities =
+        serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    for name in [
+        "observe.publication",
+        "publication.eligibility",
+        "publication.drive",
+    ] {
+        assert!(capabilities.unsupported.contains_key(name));
+        assert!(!capabilities.controls.iter().any(|control| control == name));
+    }
+    let snapshot = Request::Observe {
+        query: ObservationQuery {
+            repository: "default".into(),
+            head: "refs/heads/unsupported-publication".into(),
+            ..ObservationQuery::default()
+        },
+    };
+    let (status, before) = command(&host, &snapshot).await;
+    assert_eq!(status, 200);
+    let before = serde_json::from_slice::<Response>(&before)
+        .unwrap()
+        .observation;
+    let requests = [
+        Request::ObservePublication {
+            query: control::PublicationQuery {
+                acceptance: ObservationQuery {
+                    repository: "invalid/repository".into(),
+                    head: "invalid head".into(),
+                    packs: vec!["invalid pack".into()],
+                    ..ObservationQuery::default()
+                },
+            },
+        },
+        Request::SetPublicationEligibility {
+            repository: "invalid/repository".into(),
+            head: "invalid head".into(),
+            eligible: false,
+        },
+        Request::DrivePublication {
+            repository: "invalid/repository".into(),
+            head: "invalid head".into(),
+        },
+    ];
+    let mut statuses = Vec::new();
+    for request in requests {
+        statuses.push(command(&host, &request).await.0);
+    }
+    assert_eq!(statuses, [501, 501, 501]);
+    let (status, after) = command(&host, &snapshot).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        serde_json::from_slice::<Response>(&after)
+            .unwrap()
+            .observation,
+        before
+    );
+    host.shutdown().await;
+}

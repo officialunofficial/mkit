@@ -26,6 +26,9 @@ use tower::ServiceExt as _;
 use crate::control::{self, Observation, ObservationQuery, Request, Response};
 use crate::wire::{Feature, Profile, WireAuth};
 
+#[path = "test_host_publication.rs"]
+mod publication;
+
 type Core = Pipeline<MemoryBlobStore, ControlStore, Hooks<TestAuthority, TestAdmission>>;
 
 /// Disposable loopback reference server implementing the versioned test controls.
@@ -47,23 +50,27 @@ impl std::fmt::Debug for ControlledHost {
 }
 
 impl ControlledHost {
-    /// Starts an isolated opaque core Connect host. Indexed, branch-bucketed, and object HTTP profiles are
-    /// refused: this fixture observes one single-partition acceptance domain.
+    /// Starts an isolated opaque or indexed core Connect host. Branch-bucketed and
+    /// object HTTP profiles are refused: this fixture observes one atomic domain.
     ///
     /// # Errors
     /// Returns a configuration, listener, or pipeline construction error.
     pub async fn start(mut profile: Profile) -> Result<Self, String> {
         if profile.sharding_d34
             || profile.has(Feature::HttpObjects)
-            || profile.has(Feature::IndexedMode)
             || profile.has(Feature::Takedown)
+            || profile.has(Feature::Gc)
+            || profile.has(Feature::AsyncInspection)
         {
-            return Err("controlled host requires unsharded opaque core Connect profile".into());
+            return Err("controlled host requires unsharded core Connect profile without object HTTP, takedown, GC, or async inspection".into());
         }
         if !matches!(profile.auth, WireAuth::AuthV2 { .. }) {
             return Err("controlled reservation fixture requires auth v2".into());
         }
         profile.features.insert(Feature::Tickets);
+        if profile.has(Feature::IndexedMode) {
+            profile.features.insert(Feature::CombinedPublication);
+        }
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .map_err(|e| e.to_string())?;
@@ -214,7 +221,7 @@ fn build_core(
         receipts: NoReceipts,
         outcomes: NoOutcomes,
     };
-    Pipeline::new(
+    let pipeline = Pipeline::new(
         blobs.clone(),
         store.clone(),
         hooks,
@@ -222,8 +229,15 @@ fn build_core(
         clock.clone(),
         Arc::new(NoopMetrics),
     )
-    .map(Arc::new)
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    let pipeline = if config.indexed.is_some() {
+        pipeline
+            .with_publication_policy(Arc::new(publication::Eligibility(store.clone())))
+            .map_err(|e| e.to_string())?
+    } else {
+        pipeline
+    };
+    Ok(Arc::new(pipeline))
 }
 
 struct HostState {
@@ -241,7 +255,6 @@ impl HostState {
     fn capabilities(&self) -> control::Capabilities {
         let mut controls = [
             "observe",
-            "fixture.opaque_refs",
             "clock.pin",
             "clock.advance",
             "restart.graceful",
@@ -264,7 +277,7 @@ impl HostState {
             ),
         ]);
         unsupported.extend([
-            ("pause.before_published_clearance".into(),"opaque fixture has no deferred publication decision".into()),
+
             ("fork.fixture".into(),"gated fork test binding awaits destination activation and advancing-commit fencing".into()),
             ("fork.invoke".into(),"gated fork test binding awaits destination activation and advancing-commit fencing".into()),
             ("fork.observe".into(),"gated fork test binding awaits destination activation and advancing-commit fencing".into()),
@@ -281,6 +294,41 @@ impl HostState {
                 "source-change binding awaits final source proof and guarded fork acceptance"
                     .into(),
             );
+        }
+        for name in [
+            "reliance.fixture",
+            "reliance.observe",
+            "gc.prepare_drop",
+            "gc.commit_drop",
+            "inspection.hide_member",
+        ] {
+            unsupported.insert(
+                name.into(),
+                "GC reliance and async inspection controls are not integrated".into(),
+            );
+        }
+        if self.config.indexed.is_some() {
+            controls.extend(
+                [
+                    "observe.publication",
+                    "publication.eligibility",
+                    "publication.drive",
+                    "fixture.indexed_refs",
+                    "pause.before_published_clearance",
+                ]
+                .map(str::to_owned),
+            );
+        } else {
+            controls.push("fixture.opaque_refs".into());
+            for name in [
+                "observe.publication",
+                "publication.eligibility",
+                "publication.drive",
+                "fixture.indexed_refs",
+                "pause.before_published_clearance",
+            ] {
+                unsupported.insert(name.into(), "requires indexed publication profile".into());
+            }
         }
         if self.authority {
             controls.push("authority.bump".into());
@@ -355,21 +403,43 @@ impl HostState {
         let bad = |message: String| (http::StatusCode::BAD_REQUEST, message);
         let mut reply = Response::default();
         match request {
+            Request::ObservePublication { query } => {
+                self.require_publication()?;
+                reply.publication_observation =
+                    Some(self.observe_publication(query).await.map_err(bad)?);
+            }
+            Request::SetPublicationEligibility {
+                repository,
+                head,
+                eligible,
+            } => {
+                self.require_publication()?;
+                self.set_publication_eligibility(&repository, &head, eligible)
+                    .map_err(bad)?;
+            }
+            Request::DrivePublication { repository, head } => {
+                self.require_publication()?;
+                self.drive_publication(&repository, &head)
+                    .await
+                    .map_err(bad)?;
+            }
+            Request::PrepareReliance { .. }
+            | Request::PrepareGcDrop { .. }
+            | Request::CommitGcDrop { .. }
+            | Request::HideMember { .. }
+            | Request::ObserveReliance { .. } => {
+                return Err((
+                    http::StatusCode::NOT_IMPLEMENTED,
+                    "GC reliance and async inspection controls are not integrated".into(),
+                ));
+            }
             Request::PrepareAuthoritySetter => return self.authority_setter_fixture().await,
             Request::PinClock { now_ms } => {
                 self.clock.set(now_ms);
                 reply.now_ms = Some(now_ms);
             }
             Request::AdvanceClock { delta_ms } => {
-                let delta = i64::try_from(delta_ms)
-                    .map_err(|_| bad("clock duration out of range".into()))?;
-                let now = self
-                    .clock
-                    .now_ms()
-                    .checked_add(delta)
-                    .ok_or_else(|| bad("clock overflow".into()))?;
-                self.clock.set(now);
-                reply.now_ms = Some(now);
+                reply.now_ms = Some(self.advance_clock(delta_ms).map_err(bad)?);
             }
             Request::Pause {
                 step,
@@ -430,6 +500,28 @@ impl HostState {
         Ok(reply)
     }
 
+    fn require_publication(&self) -> Result<(), (http::StatusCode, String)> {
+        if self.config.indexed.is_none() {
+            return Err((
+                http::StatusCode::NOT_IMPLEMENTED,
+                "requires indexed publication profile".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn advance_clock(&self, delta_ms: u64) -> Result<i64, String> {
+        let delta =
+            i64::try_from(delta_ms).map_err(|_| "clock duration out of range".to_owned())?;
+        let now = self
+            .clock
+            .now_ms()
+            .checked_add(delta)
+            .ok_or_else(|| "clock overflow".to_owned())?;
+        self.clock.set(now);
+        Ok(now)
+    }
+
     fn repository(&self, identity: &str) -> Result<RepoId, String> {
         match &self.config.addressing {
             Addressing::Single { repo } => {
@@ -463,11 +555,17 @@ impl HostState {
         let unsupported = |message: &str| (http::StatusCode::NOT_IMPLEMENTED, message.to_owned());
         if !matches!(
             step.as_str(),
-            "before_acceptance" | "after_durable_acceptance_before_response"
-        ) || decision_class
-            .as_deref()
-            .is_some_and(|class| class != "ref_acceptance")
-            || occurrence.is_some_and(|n| n != 1)
+            "before_acceptance"
+                | "after_durable_acceptance_before_response"
+                | "before_published_clearance"
+        ) || decision_class.as_deref().is_some_and(|class| {
+            class
+                != if step == "before_published_clearance" {
+                    "published_clearance"
+                } else {
+                    "ref_acceptance"
+                }
+        }) || occurrence.is_some_and(|n| n != 1)
             || on_resume
                 .as_deref()
                 .is_some_and(|action| action != "uncertain_storage_result")
@@ -475,6 +573,9 @@ impl HostState {
             return Err(unsupported(
                 "unsupported protocol boundary or decision selector",
             ));
+        }
+        if step == "before_published_clearance" && self.config.indexed.is_none() {
+            return Err(unsupported("requires indexed publication profile"));
         }
         if on_resume.is_some() && step != "after_durable_acceptance_before_response" {
             return Err((
@@ -490,9 +591,13 @@ impl HostState {
         self.store
             .barriers
             .arm(
-                step,
+                step.clone(),
                 SinglePartition.ref_shard(&repo, &head),
-                keys::ref_key(&repo.name, &head),
+                if step == "before_published_clearance" {
+                    keys::publication(&repo.name, &head)
+                } else {
+                    keys::ref_key(&repo.name, &head)
+                },
                 on_resume.is_some(),
             )
             .map_err(bad)
@@ -526,6 +631,11 @@ impl HostState {
     }
 
     async fn observe(&self, query: ObservationQuery) -> Result<Observation, String> {
+        let _guard = self.store.gate.lock().await;
+        self.observe_locked(query).await
+    }
+
+    async fn observe_locked(&self, query: ObservationQuery) -> Result<Observation, String> {
         if query.ticket_ids.len() + query.reservation_ids.len() + query.packs.len() > 64 {
             return Err("observation exceeds 64 identities".into());
         }
@@ -536,11 +646,9 @@ impl HostState {
         let partition = SinglePartition.ref_shard(&repo, &query.head);
         // Every engine apply and the complete typed observation share this
         // wrapper lock. All helpers run within the same observation point.
-        let guard = self.store.gate.lock().await;
         let reader = ObservationReader {
             host: self,
             partition,
-            _guard: guard,
         };
         let head = reader.ref_id(&repo.name, &query.head).await?;
         let packmap_name =
@@ -578,12 +686,11 @@ impl HostState {
     }
 }
 
-/// Holds the mutation gate for the complete observation, including every
-/// helper's reads and the reference fixture's terminal-creation counters.
+/// Reads one snapshot while the caller holds the mutation gate, including
+/// every helper read and the reference fixture's terminal-creation counters.
 struct ObservationReader<'a> {
     host: &'a HostState,
     partition: Partition,
-    _guard: tokio::sync::MutexGuard<'a, ()>,
 }
 
 impl ObservationReader<'_> {
@@ -847,6 +954,7 @@ struct ControlStore {
     operation_reservations: Arc<Mutex<BTreeMap<Hash, String>>>,
     accepted_reservations: Arc<Mutex<BTreeMap<Hash, String>>>,
     next_reservation: Arc<AtomicU64>,
+    publication_eligibility: Arc<Mutex<BTreeMap<(Partition, Key), bool>>>,
 }
 
 impl ControlStore {
@@ -860,8 +968,30 @@ impl ControlStore {
             operation_reservations: Arc::default(),
             accepted_reservations: Arc::default(),
             next_reservation: Arc::default(),
+            publication_eligibility: Arc::default(),
         }
     }
+}
+
+/// Terminal writes are counted only after the real guarded batch commits.
+fn terminal_reservations(batch: &Batch) -> Vec<String> {
+    batch
+        .writes
+        .iter()
+        .filter_map(|write| {
+            if let Write::Put(key, value) = write
+                && let Some(keys::ParsedKey::Reservation(id)) = keys::parse(key)
+                && let Ok(record) = codec::decode_reservation(value)
+                && !matches!(
+                    record,
+                    codec::ReservationV1::Pending { .. } | codec::ReservationV1::Ticketed { .. }
+                )
+            {
+                return Some(id);
+            }
+            None
+        })
+        .collect()
 }
 
 impl NamespaceStore for ControlStore {
@@ -898,25 +1028,13 @@ impl NamespaceStore for ControlStore {
         for key in &refs {
             self.barriers.pass("before_acceptance", p, key).await;
         }
+        for key in publication::clearance_keys(self, p, &batch).await? {
+            self.barriers
+                .pass("before_published_clearance", p, &key)
+                .await;
+        }
         let guard = self.gate.lock().await;
-        let terminals: Vec<_> = batch
-            .writes
-            .iter()
-            .filter_map(|write| {
-                if let Write::Put(key, value) = write
-                    && let Some(keys::ParsedKey::Reservation(id)) = keys::parse(key)
-                    && let Ok(record) = codec::decode_reservation(value)
-                    && !matches!(
-                        record,
-                        codec::ReservationV1::Pending { .. }
-                            | codec::ReservationV1::Ticketed { .. }
-                    )
-                {
-                    return Some(id);
-                }
-                None
-            })
-            .collect();
+        let terminals = terminal_reservations(&batch);
         let mut accepted_ref_reservation = None;
         if !refs.is_empty() {
             for id in &terminals {

@@ -157,6 +157,10 @@ pub enum Feature {
     CombinedChallengeFields,
     /// Tiny configured backlog cap.
     BacklogCap,
+    /// Combines acceptance and eligible publication in one atomic decision.
+    CombinedPublication,
+    /// Asynchronous inspection verdicts or holds can hide relied-on members.
+    AsyncInspection,
     /// Indexed mode (M4).
     IndexedMode,
     /// Indexed mode whose packs verify asynchronously in scheduled slices,
@@ -173,7 +177,9 @@ pub enum Feature {
     /// Explicit local paid-read fixture with an owned token output file.
     /// A runner selection flag; never inferred from HTTP support.
     LaunchReadFixture,
-    /// Lifecycle leases and GC (M5).
+    /// Repository membership garbage collection.
+    Gc,
+    /// Lifecycle leases and GC profile (M5).
     Leases,
     /// Takedown (M5).
     Takedown,
@@ -183,7 +189,7 @@ pub enum Feature {
     Admin,
 }
 
-const FEATURE_NAMES: [(Feature, &str); 35] = [
+const FEATURE_NAMES: [(Feature, &str); 38] = [
     (Feature::TransportWrites, "transport-writes"),
     (Feature::AuthoritySetter, "authority-setter"),
     (Feature::AuthorityFencing, "authority-fencing"),
@@ -212,12 +218,15 @@ const FEATURE_NAMES: [(Feature, &str); 35] = [
         Feature::CombinedChallengeFields,
         "combined-challenge-fields",
     ),
+    (Feature::CombinedPublication, "combined-publication"),
+    (Feature::AsyncInspection, "async-inspection"),
     (Feature::IndexedMode, "indexed-mode"),
     (Feature::IndexedAsync, "indexed-async"),
     (Feature::AdvanceHold, "advance-hold"),
     (Feature::HttpObjects, "http-objects"),
     (Feature::SyncInspection, "sync-inspection"),
     (Feature::LaunchReadFixture, "launch-read-fixture"),
+    (Feature::Gc, "gc"),
     (Feature::Leases, "leases"),
     (Feature::Takedown, "takedown"),
     (Feature::Receipts, "receipts"),
@@ -718,6 +727,30 @@ mod tests {
             file.merge(over).build(|_| None).unwrap().relay_lag_bound_ms,
             0
         );
+    }
+
+    #[test]
+    fn publication_and_removal_features_are_independent_and_opt_in() {
+        let default = ProfileSpec::default().build(|_| None).unwrap();
+        for feature in [
+            Feature::CombinedPublication,
+            Feature::Gc,
+            Feature::AsyncInspection,
+        ] {
+            assert!(!default.has(feature));
+            assert_eq!(feature.as_str().parse::<Feature>().unwrap(), feature);
+        }
+        let profile = ProfileSpec::from_toml(
+            "features = [\"combined-publication\", \"gc\", \"async-inspection\"]",
+        )
+        .unwrap()
+        .build(|_| None)
+        .unwrap();
+        assert!(profile.has(Feature::CombinedPublication));
+        assert!(profile.has(Feature::Gc));
+        assert!(profile.has(Feature::AsyncInspection));
+        assert!(!profile.has(Feature::Leases));
+        assert!(!profile.has(Feature::SyncInspection));
     }
 
     #[test]
