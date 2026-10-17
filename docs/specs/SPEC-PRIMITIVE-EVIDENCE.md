@@ -236,11 +236,14 @@ cursor, but no integrity frontier. Complete phase has neither frontier nor
 cursor; its consumed count and byte position MUST exactly reach the declared
 entry count and trailer boundary.
 
-For every checkpoint, acknowledged page count MUST equal consumed entry count
-and cumulative evidence page count. A last retained commitment exists exactly
-when this count is nonzero; it names one occurrence record. Cumulative usage
-MUST fit the encoded limits. The source length MUST fit both protocol and
-content-profile ceilings. Resume additionally compares the envelope with the
+For a format version 1 checkpoint, acknowledged page count MUST equal consumed
+entry count and cumulative evidence page count. A last retained commitment
+exists exactly when this count is nonzero; it names one occurrence record. A
+format version 2 checkpoint instead requires the acknowledged page count to
+equal the cumulative committed page count across all six evidence indexes, and
+its last retained commitment may name any committed evidence page kind (see
+4.1.1). Cumulative usage MUST fit the encoded limits. The source length MUST
+fit both protocol and content-profile ceilings. Resume additionally compares the envelope with the
 caller's expected source, repository, ruleset, limits, and run binding, and
 checks core cursor metadata against the outer phase and counters. Successful
 envelope decoding alone does not perform those resume checks.
@@ -386,8 +389,10 @@ ext_start:u64            first external-fact ordinal this occurrence owns
 ext_count:u64
 ```
 
-The **ordinal record** (42 bytes, kind `ordinals`) maps wire ordinal to
-object identity for positional lookup:
+The **ordinal record** (42 bytes, kind `ordinals`) enumerates the distinct
+object set in first-occurrence order for positional lookup; its sequence
+position is the object's first-occurrence rank, not a wire ordinal (the
+occurrence record already maps wire ordinal to object):
 
 ```text
 record_version:u8        1

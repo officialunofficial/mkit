@@ -182,6 +182,30 @@ fn run(bytes: &[u8], schedule: u8) -> Outcome {
                     .map_or(Acquisition::Unavailable, |(_, bytes)| {
                         Acquisition::Present(bytes.as_slice())
                     });
+                if schedule != 0 {
+                    let Step::Request(Request::EvidencePage {
+                        request: repeated,
+                        page: repeated_page,
+                    }) = driver.step().expect("bounded model invariant")
+                    else {
+                        panic!("outstanding evidence page request advanced");
+                    };
+                    assert_eq!(repeated, request);
+                    assert_eq!(repeated_page, page);
+                    let mut wrong = page;
+                    wrong.digest[0] ^= 1;
+                    assert_eq!(
+                        driver
+                            .supply(Response::EvidencePage {
+                                request,
+                                page: wrong,
+                                value: value.clone(),
+                            })
+                            .expect_err("wrong page commitment must refuse")
+                            .code,
+                        FailureCode::InvalidResponse
+                    );
+                }
                 if let Err(error) = driver.supply(Response::EvidencePage {
                     request,
                     page,
@@ -209,15 +233,20 @@ fn run(bytes: &[u8], schedule: u8) -> Outcome {
                 driver
                     .acknowledge_retention(commitment)
                     .expect("bounded model invariant");
+            }
+            Step::Progress => {
                 if schedule == 3 && !restarted && driver.checkpoint().is_ok() {
                     restarted = true;
                     driver = restart(&mut driver, source, profile, limits);
                 }
             }
-            Step::Progress => {}
             Step::Complete(pack) => {
                 assert_eq!(pack.source(), source);
                 assert!(driver.usage().peak_resident_bytes <= limits.resident_bytes);
+                assert!(
+                    schedule != 3 || restarted,
+                    "cold-resume schedule never restarted"
+                );
                 trace.update(&pack.object_set_root());
                 trace.update(&pack.counts().entries.to_le_bytes());
                 trace.update(&pack.counts().delta_entries.to_le_bytes());

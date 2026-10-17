@@ -219,9 +219,10 @@ pub struct EvidenceSequence {
 /// fn forge(source: PackSource, counts: PackCounts, ruleset: RulesetBinding,
 ///          profile: IndexedProfile, limits: VerifyLimits,
 ///          sequence: EvidenceSequence) -> VerifiedPack {
-///     VerifiedPack { source, counts, ruleset, profile, limits,
+///     VerifiedPack { source, counts, version: 1, trailer: [0; 32],
+///         ruleset, profile, limits,
 ///         object_set_root: [0; 32], occurrences: sequence,
-///         external_dependencies: sequence, heads: sequence }
+///         dependencies: sequence, ordinals: sequence, heads: sequence }
 /// }
 /// ```
 #[derive(Debug, Clone)]
@@ -229,12 +230,15 @@ pub struct EvidenceSequence {
 pub struct VerifiedPack {
     source: PackSource,
     counts: PackCounts,
+    version: u32,
+    trailer: Hash,
     ruleset: RulesetBinding,
     profile: IndexedProfile,
     limits: VerifyLimits,
     object_set_root: Hash,
     occurrences: EvidenceSequence,
-    external_dependencies: EvidenceSequence,
+    dependencies: EvidenceSequence,
+    ordinals: EvidenceSequence,
     heads: EvidenceSequence,
 }
 impl VerifiedPack {
@@ -244,23 +248,29 @@ impl VerifiedPack {
     pub(crate) fn seal(
         source: PackSource,
         counts: PackCounts,
+        version: u32,
+        trailer: Hash,
         ruleset: RulesetBinding,
         profile: IndexedProfile,
         limits: VerifyLimits,
         object_set_root: Hash,
         occurrences: EvidenceSequence,
-        external_dependencies: EvidenceSequence,
+        dependencies: EvidenceSequence,
+        ordinals: EvidenceSequence,
         heads: EvidenceSequence,
     ) -> Self {
         Self {
             source,
             counts,
+            version,
+            trailer,
             ruleset,
             profile,
             limits,
             object_set_root,
             occurrences,
-            external_dependencies,
+            dependencies,
+            ordinals,
             heads,
         }
     }
@@ -289,6 +299,16 @@ impl VerifiedPack {
     pub const fn counts(&self) -> PackCounts {
         self.counts
     }
+    /// Verified pack format version from the validated header.
+    #[must_use]
+    pub const fn version(&self) -> u32 {
+        self.version
+    }
+    /// Verified trailer digest from the integrity pass.
+    #[must_use]
+    pub const fn trailer(&self) -> Hash {
+        self.trailer
+    }
     /// Established ruleset and semantic profile.
     #[must_use]
     pub const fn ruleset(&self) -> RulesetBinding {
@@ -314,10 +334,18 @@ impl VerifiedPack {
     pub const fn occurrences(&self) -> EvidenceSequence {
         self.occurrences
     }
-    /// Exact external base facts, not repository closure.
+    /// Dependency evidence: per-object graph-edge records followed by
+    /// repository-scoped external base facts, not repository closure.
+    /// Occurrence records carry the start/count spans into this sequence.
     #[must_use]
-    pub const fn external_dependencies(&self) -> EvidenceSequence {
-        self.external_dependencies
+    pub const fn dependencies(&self) -> EvidenceSequence {
+        self.dependencies
+    }
+    /// Distinct objects enumerated in first-occurrence order for positional
+    /// lookup; sequence position is the first-occurrence rank.
+    #[must_use]
+    pub const fn ordinals(&self) -> EvidenceSequence {
+        self.ordinals
     }
     /// Authenticated head-fact sequence.
     #[must_use]

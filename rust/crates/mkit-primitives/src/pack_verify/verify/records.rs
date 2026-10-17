@@ -215,6 +215,7 @@ impl ObjectRecord {
         };
         cursor.finish()?;
         if (record.domain == Domain::None) != (record.signature == Signature::None)
+            || record.domain != Domain::for_kind(record.kind)
             || (record.kind != ObjectType::ChunkedBlob
                 && (record.chunk_total != 0 || record.chunk_count != 0))
             || (record.signature == Signature::None
@@ -325,6 +326,7 @@ impl OccurrenceRecord {
         cursor.finish()?;
         if !matches!(record.wire_type, 0x00 | 0x02 | 0x03 | 0x04)
             || (record.domain == Domain::None) != (record.signature == Signature::None)
+            || record.domain != Domain::for_kind(record.kind)
             || (!record.from_delta && record.delta_base != [0; 32])
             || (record.signature == Signature::None
                 && (record.signer != [0; 32] || record.signing_digest != [0; 32]))

@@ -15,7 +15,7 @@ mod tests;
 use super::{
     Acquisition, ByteRange, ByteSource, EvidencePage, EvidenceSequence, ObjectPurpose, PackCounts,
     Request, RequestId, Response, Step, VerifiedPack,
-    framing::{CANONICAL_BYTES, DELTA_BYTES, FRAME_BYTES, map_core},
+    framing::{CANONICAL_BYTES, DECODER_SCRATCH, DELTA_BYTES, FRAME_BYTES, map_core},
     integrity::{IntegrityPass, MAX_PACK_BYTES},
     resources::{ResourceUsage, Resources},
 };
@@ -194,6 +194,8 @@ struct Work {
     base_depth: u32,
     /// Served and validated canonical base bytes.
     base_bytes: Option<Vec<u8>>,
+    /// Resident charge held for `base_bytes`.
+    base_len: u64,
     /// Decoded object.
     object: Option<Object>,
     id: Hash,
@@ -331,6 +333,7 @@ impl VerifyDriver {
             .and_then(|n| n.checked_add(FRAME_BYTES))
             .and_then(|n| n.checked_add(DELTA_BYTES + 32))
             .and_then(|n| n.checked_add(CANONICAL_BYTES))
+            .and_then(|n| n.checked_add(DECODER_SCRATCH))
             .and_then(|n| n.checked_add(64 << 10))
             .ok_or_else(|| failure(FailureCode::ResourceLimit))?;
         resources.reserve(
@@ -491,6 +494,9 @@ impl VerifyDriver {
     /// is supplied.
     pub fn step(&mut self) -> Result<Step<'_>, Failure> {
         self.release_checkpoint()?;
+        if self.phase == Phase::Failed {
+            return Err(invalid());
+        }
         if self.retained.is_some() {
             return self.retention_event();
         }
@@ -670,8 +676,10 @@ impl VerifyDriver {
                 let result = self
                     .index_mut(live.index)
                     .feed(&mut live.op, bytes, &mut budget);
+                let used = self.limits.work.saturating_sub(budget.remaining());
                 self.op = Some(live);
-                result
+                let charged = self.resources.work(used);
+                result.and(charged)
             }
             _ => Err(invalid()),
         }
@@ -684,6 +692,11 @@ impl VerifyDriver {
         if fact.held || !fact.published {
             self.phase = Phase::Failed;
             return Err(failure(FailureCode::ExternalBaseAbsent));
+        }
+        // A fact that cannot name servable canonical bytes is a protocol
+        // violation, not a missing member.
+        if fact.canonical_len == 0 || fact.canonical_len > CANONICAL_BYTES {
+            return Err(invalid());
         }
         self.resources.charge_external()?;
         self.external_lookups = self
@@ -782,7 +795,10 @@ impl VerifyDriver {
         }
         let depth = if external {
             let fact = work.fact.as_ref().ok_or_else(invalid)?;
-            if fact.canonical_len != bytes.len() as u64 || fact.object != base {
+            if fact.canonical_len != bytes.len() as u64
+                || fact.object != base
+                || fact.kind != object.object_type()
+            {
                 return Err(invalid());
             }
             fact.delta_depth
@@ -790,11 +806,15 @@ impl VerifyDriver {
             work.base_depth
         };
         work.base_depth = depth;
+        let base_len =
+            u64::try_from(bytes.len()).map_err(|_| failure(FailureCode::ResourceLimit))?;
+        self.resources.reserve(base_len)?;
         let mut owned = Vec::new();
         owned
             .try_reserve_exact(bytes.len())
             .map_err(|_| failure(FailureCode::ResourceLimit))?;
         owned.extend_from_slice(bytes);
+        work.base_len = base_len;
         work.base_bytes = Some(owned);
         work.stage = Stage::Decode;
         Ok(())
@@ -840,6 +860,7 @@ impl VerifyDriver {
         match next {
             CoreStep::NeedWindow(range) => self.request_input(range.offset, range.len),
             CoreStep::Entry(entry) => {
+                self.resources.work(1)?;
                 let info = reader.last_frame().ok_or_else(invalid)?;
                 let ordinal = self.ordinal;
                 let base = match &entry {
@@ -870,6 +891,7 @@ impl VerifyDriver {
                     fact: None,
                     base_depth: 0,
                     base_bytes: None,
+                    base_len: 0,
                     object: None,
                     id: [0; 32],
                     bytes: Vec::new(),
@@ -967,6 +989,8 @@ impl VerifyDriver {
         };
         let (id, bytes) = decode_entry_with(entry, &mut bases, Self::decode_limits())
             .map_err(|error| map_core(&error))?;
+        let base_len = work.base_len;
+        self.resources.release(base_len)?;
         let object = deserialize(&bytes).map_err(|_| failure(FailureCode::NonCanonicalObject))?;
         let kind = object.object_type();
         let canonical_len =
@@ -1095,14 +1119,16 @@ impl VerifyDriver {
         work.ext_start = self.dependencies.committed() + self.dependencies.pending() as u64;
         if let Some(fact) = work.fact.clone() {
             work.ext_count = 1;
-            self.dependencies.append(
-                DependencyRecord::External {
-                    consumed_ordinal: work.ordinal,
-                    child: work.id,
-                    fact,
-                }
-                .to_bytes(),
-            );
+            let value = DependencyRecord::External {
+                consumed_ordinal: work.ordinal,
+                child: work.id,
+                fact,
+            }
+            .to_bytes();
+            let len =
+                u64::try_from(value.len()).map_err(|_| failure(FailureCode::ResourceLimit))?;
+            self.resources.reserve(len)?;
+            self.dependencies.append(value);
         }
         work.dep_start = self.dependencies.committed() + self.dependencies.pending() as u64;
         if work.first {
@@ -1112,47 +1138,52 @@ impl VerifyDriver {
             let object = work.object.clone().ok_or_else(invalid)?;
             for ordinal in 0..total {
                 let edge = edge_at(&object, ordinal).ok_or_else(invalid)?;
-                self.dependencies.append(
-                    DependencyRecord::Edge {
-                        subject,
-                        subject_ordinal,
-                        edge,
-                    }
-                    .to_bytes(),
-                );
+                let value = DependencyRecord::Edge {
+                    subject,
+                    subject_ordinal,
+                    edge,
+                }
+                .to_bytes();
+                let len =
+                    u64::try_from(value.len()).map_err(|_| failure(FailureCode::ResourceLimit))?;
+                self.resources.reserve(len)?;
+                self.dependencies.append(value);
             }
             work.dep_count = total;
         }
-        self.occurrences.append(
-            OccurrenceRecord {
+        let value = OccurrenceRecord {
+            object: work.id,
+            kind: work.kind,
+            canonical_len: work.canonical_len,
+            frame_offset: work.info.offset,
+            frame_len: work.info.length,
+            wire_type: work.info.wire_type,
+            from_delta: work.base.is_some(),
+            delta_base: work.base.unwrap_or([0; 32]),
+            delta_depth: work.depth,
+            signature: work.signature,
+            first: work.first,
+            domain: Domain::for_kind(work.kind),
+            signer: work.signer,
+            signing_digest: work.digest,
+            ext_start: work.ext_start,
+            ext_count: work.ext_count,
+        }
+        .to_bytes();
+        let len = u64::try_from(value.len()).map_err(|_| failure(FailureCode::ResourceLimit))?;
+        self.resources.reserve(len)?;
+        self.occurrences.append(value);
+        if work.first {
+            let value = OrdinalRecord {
                 object: work.id,
                 kind: work.kind,
                 canonical_len: work.canonical_len,
-                frame_offset: work.info.offset,
-                frame_len: work.info.length,
-                wire_type: work.info.wire_type,
-                from_delta: work.base.is_some(),
-                delta_base: work.base.unwrap_or([0; 32]),
-                delta_depth: work.depth,
-                signature: work.signature,
-                first: work.first,
-                domain: Domain::for_kind(work.kind),
-                signer: work.signer,
-                signing_digest: work.digest,
-                ext_start: work.ext_start,
-                ext_count: work.ext_count,
             }
-            .to_bytes(),
-        );
-        if work.first {
-            self.ordinals.append(
-                OrdinalRecord {
-                    object: work.id,
-                    kind: work.kind,
-                    canonical_len: work.canonical_len,
-                }
-                .to_bytes(),
-            );
+            .to_bytes();
+            let len =
+                u64::try_from(value.len()).map_err(|_| failure(FailureCode::ResourceLimit))?;
+            self.resources.reserve(len)?;
+            self.ordinals.append(value);
             work.stage = Stage::ObjectInsert;
         } else {
             work.stage = Stage::Flush;
@@ -1239,6 +1270,7 @@ impl VerifyDriver {
             }
             Ok(Event::Page(commitment)) => {
                 self.op = Some(live);
+                self.resources.work(1)?;
                 let request = self.request_id()?;
                 Ok(self.issue(Pending::Page {
                     request,
@@ -1324,6 +1356,16 @@ impl VerifyDriver {
                 if rightmost {
                     return Err(invalid());
                 }
+                let drained = self.sequence_mut(seq).drained();
+                self.resources.release(drained)?;
+                let retained = spine.as_ref().map_or(0, |spine| {
+                    spine
+                        .records
+                        .iter()
+                        .map(|(_, value)| u64::try_from(value.len()).unwrap_or(u64::MAX))
+                        .sum()
+                });
+                self.resources.reserve(retained)?;
                 self.sequence_mut(seq).set_spine(spine);
                 if self.phase == Phase::Seal {
                     self.advance_seal()
@@ -1425,7 +1467,11 @@ impl VerifyDriver {
                 page: seal.page,
                 ordinal_in_page: seal.position,
             };
-            self.heads.append(record.to_bytes());
+            let value = record.to_bytes();
+            let len =
+                u64::try_from(value.len()).map_err(|_| failure(FailureCode::ResourceLimit))?;
+            self.resources.reserve(len)?;
+            self.heads.append(value);
         }
         seal.next += 1;
         self.advance_seal()
@@ -1528,6 +1574,8 @@ impl VerifyDriver {
         self.complete = Some(VerifiedPack::seal(
             self.source,
             counts,
+            self.header.ok_or_else(invalid)?.0,
+            self.trailer,
             self.ruleset,
             self.profile,
             self.limits,
@@ -1539,6 +1587,10 @@ impl VerifyDriver {
             EvidenceSequence {
                 root: self.dependencies.commitment().digest,
                 count: self.dependencies.committed(),
+            },
+            EvidenceSequence {
+                root: self.ordinals.commitment().digest,
+                count: self.ordinals.committed(),
             },
             EvidenceSequence {
                 root: self.heads.commitment().digest,

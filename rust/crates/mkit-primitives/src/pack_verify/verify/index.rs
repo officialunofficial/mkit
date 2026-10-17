@@ -481,10 +481,15 @@ impl Index {
         else {
             return Err(invalid());
         };
-        *stage = RewriteStage::Up;
+        // Encode first, mutate second: a refused encode must leave the op
+        // exactly as it was so the failure can retry or unwind cleanly.
         if records.len() > FANOUT {
-            let right = records.split_off(records.len() / 2);
-            let (left_page, right_page) = (self.leaf_page(records)?, self.leaf_page(&right)?);
+            let mid = records.len() / 2;
+            let (left_page, right_page) = (
+                self.leaf_page(&records[..mid])?,
+                self.leaf_page(&records[mid..])?,
+            );
+            let right = records.split_off(mid);
             produced.push((records[0].0, left_page.commitment()));
             produced.push((right[0].0, right_page.commitment()));
             if let Some(track) = track.as_mut() {
@@ -508,6 +513,7 @@ impl Index {
             }
             queue.push_back(page);
         }
+        *stage = RewriteStage::Up;
         let page = queue.pop_front().ok_or_else(invalid)?;
         *outstanding = Some(page.commitment());
         Ok(Event::Emit(page))
@@ -587,7 +593,7 @@ impl Index {
         let Some(mut parent) = path.pop() else {
             // The produced level is the top of the tree.
             if produced.len() == 1 && *graft == Graft::Replace {
-                *pending_root = Some(produced[0].1);
+                *pending_root = Some(produced.first().ok_or_else(invalid)?.1);
                 *stage = RewriteStage::Fin;
                 return self.poll(op);
             }
@@ -605,10 +611,10 @@ impl Index {
                     1 + tracked_right,
                 ),
                 _ => (
-                    produced[0].1,
+                    produced.first().ok_or_else(invalid)?.1,
                     vec![BranchChild {
-                        separator: produced[1].0,
-                        child: produced[1].1,
+                        separator: produced.get(1).ok_or_else(invalid)?.0,
+                        child: produced.get(1).ok_or_else(invalid)?.1,
                     }],
                     tracked_right,
                 ),
@@ -642,16 +648,21 @@ impl Index {
                 Graft::ReplaceInsert => usize::from(track.as_ref().is_some_and(|t| t.right)),
                 Graft::InsertInsert => 1 + usize::from(track.as_ref().is_some_and(|t| t.right)),
             };
+        let first_produced = produced.first().copied().ok_or_else(invalid)?;
         match graft {
-            Graft::Replace => parent.set_child(slot, produced[0].1),
+            Graft::Replace => parent.set_child(slot, first_produced.1),
             Graft::ReplaceInsert => {
-                parent.set_child(slot, produced[0].1);
-                parent.insert_child(slot + 1, produced[1].0, produced[1].1);
+                let second = produced.get(1).copied().ok_or_else(invalid)?;
+                parent.set_child(slot, first_produced.1);
+                parent.insert_child(slot + 1, second.0, second.1);
             }
-            Graft::Insert => parent.insert_child(slot + 1, produced[0].0, produced[0].1),
+            Graft::Insert => {
+                parent.insert_child(slot + 1, first_produced.0, first_produced.1);
+            }
             Graft::InsertInsert => {
-                parent.insert_child(slot + 1, produced[0].0, produced[0].1);
-                parent.insert_child(slot + 2, produced[1].0, produced[1].1);
+                let second = produced.get(1).copied().ok_or_else(invalid)?;
+                parent.insert_child(slot + 1, first_produced.0, first_produced.1);
+                parent.insert_child(slot + 2, second.0, second.1);
             }
         }
         produced.clear();
@@ -819,8 +830,11 @@ impl Index {
                 Ok(())
             }
             Op::Audit { stack, want, seen } => {
-                let (page, lower, upper) = want.take().ok_or_else(invalid)?;
-                let view = self.view(bytes, page, budget)?;
+                let (page, lower, upper) = want.ok_or_else(invalid)?;
+                let view = self.view(bytes, page, budget).inspect_err(|_| {
+                    *want = Some((page, lower, upper));
+                })?;
+                *want = None;
                 if view.height() == 0 {
                     *seen = seen
                         .checked_add(u64::from(view.items()))
@@ -856,6 +870,7 @@ pub(super) struct Sequence {
     index: Index,
     open: Vec<(Hash, Vec<u8>)>,
     spine: Option<Spine>,
+    drained_bytes: u64,
 }
 
 /// Ordinal evidence key: 24 zero bytes then the ordinal big-endian.
@@ -879,6 +894,7 @@ impl Sequence {
                 index,
                 open: Vec::new(),
                 spine: None,
+                drained_bytes: 0,
             },
             page,
         ))
@@ -896,6 +912,7 @@ impl Sequence {
             index: Index::resume(kind, binding, limits, root, count)?,
             open: Vec::new(),
             spine: None,
+            drained_bytes: 0,
         })
     }
 
@@ -966,15 +983,28 @@ impl Sequence {
         self.spine = spine.map(|spine| *spine);
     }
 
+    /// Record bytes the last flush op consumed; released by the caller once
+    /// the op completes and the pages stand committed.
+    pub(super) const fn drained(&self) -> u64 {
+        self.drained_bytes
+    }
+
     fn rewrite_op(&mut self, spine: Spine) -> Op {
         let fresh = spine.records.len() >= FANOUT;
+        let kept = if fresh { 0 } else { spine.records.len() };
+        // A rewrite can emit at most two leaves; bounded batches re-enter
+        // through the caller's flush loop until `open` drains.
+        let moved = self.open.len().min((2 * FANOUT).saturating_sub(kept));
         let mut records = if fresh {
             Vec::new()
         } else {
             spine.records.clone()
         };
-        let added = self.open.len() as u64;
-        records.append(&mut self.open);
+        records.extend(self.open.drain(..moved));
+        self.drained_bytes = records
+            .iter()
+            .map(|(_, value)| u64::try_from(value.len()).unwrap_or(u64::MAX))
+            .sum();
         Index::rewrite(
             Descent {
                 leaf: spine.leaf,
@@ -985,7 +1015,7 @@ impl Sequence {
             },
             records,
             fresh,
-            added,
+            moved as u64,
             true,
         )
     }

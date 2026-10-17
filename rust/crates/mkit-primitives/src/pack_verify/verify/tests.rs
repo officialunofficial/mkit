@@ -260,7 +260,7 @@ fn raw_pack_seals_exact_counts_and_heads() {
     assert_eq!(counts.decoded_bytes, counts.wire_payload_bytes);
     assert_eq!(verified.occurrences().count, 3);
     assert_eq!(verified.head_facts().count, 2);
-    assert_eq!(verified.external_dependencies().count, 0);
+    assert_eq!(verified.dependencies().count, 0);
     assert_eq!(verified.source().id, source(&pack).id);
 }
 
@@ -290,6 +290,141 @@ fn in_pack_delta_chain_counts_delta_entries_exactly() {
         (base.len() + middle.len() + target.len()) as u64
     );
     let _ = target_id;
+}
+
+#[test]
+fn unavailable_canonical_base_is_retryable_unavailable_input() {
+    let (base_id, base) = blob(b"lost canonical");
+    let (result_id, result) = blob(b"canonical result");
+    let mut writer = PackWriter::new();
+    writer.push_raw(base_id, &base).unwrap();
+    writer
+        .push_delta(&base_id, &delta::encode(&base, &result).unwrap())
+        .unwrap();
+    let pack = writer.finish().unwrap();
+    let mut host = Host::new(&pack);
+    host.unavailable = true;
+    let mut machine = driver(&pack);
+    let mut refusals = 0;
+    let verified = loop {
+        match machine.step().unwrap() {
+            Step::Request(request) => {
+                if let Err(error) = host.serve(&mut machine, &request) {
+                    assert_eq!(error.code, FailureCode::UnavailableInput);
+                    refusals += 1;
+                    if refusals == 2 {
+                        host.unavailable = false;
+                    }
+                }
+            }
+            Step::ProvisionalObject(fragment) => {
+                host.fragments
+                    .entry(fragment.ordinal)
+                    .or_default()
+                    .extend_from_slice(fragment.bytes);
+            }
+            Step::RetainEvidence(page) => {
+                let commitment = page.commitment;
+                host.pages.push((commitment, page.bytes.to_vec()));
+                machine.acknowledge_retention(commitment).unwrap();
+            }
+            Step::Progress => (),
+            Step::Complete(pack) => break pack,
+        }
+        assert!(refusals <= 8, "canonical fetch never recovered");
+    };
+    assert!(refusals >= 1);
+    assert_eq!(verified.counts().delta_entries, 1);
+    let _ = result_id;
+}
+
+#[test]
+fn wide_tree_flushes_edge_records_across_bounded_rewrites() {
+    let (child_id, child) = blob(b"child");
+    let entries: Vec<TreeEntry> = (0..40)
+        .map(|n| TreeEntry {
+            name: format!("entry-{n:02}").into_bytes(),
+            mode: EntryMode::Blob,
+            object_hash: child_id,
+        })
+        .collect();
+    let (tree_id, tree) = canonical(&Object::Tree(Tree { entries }));
+    let mut writer = PackWriter::new_raw_only();
+    writer.push_raw(child_id, &child).unwrap();
+    writer.push_raw(tree_id, &tree).unwrap();
+    let pack = writer.finish().unwrap();
+    let mut host = Host::new(&pack);
+    let verified = host.finish(&mut driver(&pack)).unwrap();
+    let counts = verified.counts();
+    assert_eq!(counts.entries, 2);
+    assert_eq!(counts.objects, 2);
+    assert_eq!(verified.dependencies().count, 40);
+    assert_eq!(verified.head_facts().count, 1);
+}
+
+#[test]
+fn undersized_page_bytes_refuses_without_losing_inertness() {
+    let (a_id, a) = blob(b"alpha");
+    let mut writer = PackWriter::new_raw_only();
+    writer.push_raw(a_id, &a).unwrap();
+    let pack = writer.finish().unwrap();
+    let mut host = Host::new(&pack);
+    let mut limits = limits();
+    limits.page_bytes = 140;
+    let mut machine = VerifyDriver::new(source(&pack), REPOSITORY, profile(), limits, 17).unwrap();
+    let mut refused = None;
+    for _ in 0..400 {
+        match machine.step() {
+            Ok(Step::Request(request)) => host.serve(&mut machine, &request).unwrap(),
+            Ok(Step::ProvisionalObject(fragment)) => {
+                host.fragments
+                    .entry(fragment.ordinal)
+                    .or_default()
+                    .extend_from_slice(fragment.bytes);
+            }
+            Ok(Step::RetainEvidence(page)) => {
+                let commitment = page.commitment;
+                host.pages.push((commitment, page.bytes.to_vec()));
+                if machine.acknowledge_retention(commitment).is_err() {
+                    refused = Some(FailureCode::InvalidResponse);
+                    break;
+                }
+            }
+            Ok(Step::Progress) => (),
+            Ok(Step::Complete(_)) => panic!("verification completed with unusable page size"),
+            Err(error) => {
+                refused = Some(error.code);
+                break;
+            }
+        }
+    }
+    assert_eq!(refused, Some(FailureCode::ResourceLimit));
+    // A terminal refusal makes the driver inert: no panic, no new requests.
+    for _ in 0..8 {
+        assert!(machine.step().is_err());
+    }
+}
+
+#[test]
+fn absurd_external_fact_length_is_a_protocol_violation() {
+    let (base_id, base) = blob(b"absurd base");
+    let (result_id, result) = blob(b"absurd result");
+    let mut writer = PackWriter::new();
+    writer
+        .push_delta(&base_id, &delta::encode(&base, &result).unwrap())
+        .unwrap();
+    let pack = writer.finish().unwrap();
+    let mut host = Host::new(&pack);
+    let mut oversized = fact(base_id, &base, ObjectType::Blob);
+    oversized.canonical_len = u64::MAX;
+    host.externals.insert(base_id, (oversized, base.clone()));
+    let mut machine = driver(&pack);
+    let result_outcome = host.finish(&mut machine);
+    assert_eq!(
+        result_outcome.unwrap_err().code,
+        FailureCode::InvalidResponse
+    );
+    let _ = result_id;
 }
 
 #[test]
@@ -332,7 +467,7 @@ fn external_delta_base_verifies_through_member_fact() {
     assert_eq!(counts.entries, 1);
     assert_eq!(counts.delta_entries, 1);
     assert!(counts.delta_entries <= counts.entries);
-    assert_eq!(verified.external_dependencies().count, 1);
+    assert_eq!(verified.dependencies().count, 1);
     let _ = result_id;
 }
 
@@ -410,7 +545,7 @@ fn signed_commit_tag_and_tree_edges_seal() {
     // Only the tag is unreferenced: it alone is a head.
     assert_eq!(verified.head_facts().count, 1);
     // tree→blob, commit→tree, tag→commit.
-    assert_eq!(verified.external_dependencies().count, 3);
+    assert_eq!(verified.dependencies().count, 3);
 }
 
 #[test]
@@ -633,8 +768,9 @@ fn resumed_run_refuses_lost_evidence_pages() {
         }
     }
     let snapshot = snapshot.unwrap_or_else(|| panic!("no snapshot; last error: {last_error:?}"));
-    // Lose the first emitted page: audit must surface loss as unavailable.
-    host.lost_pages.push(host.pages[0].0);
+    // Lose the last retained page: it is always live in a committed index, so
+    // the audit must surface the loss as unavailable input.
+    host.lost_pages.push(host.pages.last().unwrap().0);
     let mut resumed = VerifyDriver::resume(
         source(&pack),
         REPOSITORY,
