@@ -59,11 +59,13 @@ any pushed entry ended up compressed under the policy in §3.3.
 
 ## 2. Entry framing
 
+**Protocol requirement.**
+
 Each entry:
 
 ```
 [u8 entry_type]
-[u32 LE payload_len]                         0 .. 2^31 - 1
+[u32 LE payload_len]                         0 .. 2^32 - 1
 [payload_len bytes payload]                  type-specific, see §3
 ```
 
@@ -71,6 +73,14 @@ Each entry:
 1-byte `entry_type` and the 4-byte length field itself. Readers MUST
 bounds-check every `payload_len` against the remaining packfile tail
 (before the trailer) to avoid buffer over-read.
+
+All 32 bits of the length field are significant. The maximum representable
+value is `4,294,967,295`; the field has no signed interpretation or reserved
+high bit. This does not waive §5's cumulative cap, deployment limits, or the
+available bytes before the trailer. Readers MUST evaluate length, offset, and
+sum arithmetic without wraparound, and MUST reject a payload extending past
+the trailer. A representable length does not require an implementation to
+allocate a buffer of that size.
 
 ---
 
@@ -118,6 +128,8 @@ type.
 
 ### 3.2 `delta` (0x02)
 
+**Protocol requirement.**
+
 Payload:
 
 ```
@@ -125,9 +137,11 @@ Payload:
 [all remaining payload bytes = SPEC-DELTA stream]
 ```
 
-`base_hash` MUST be reachable at delta-resolution time: either as a
-previous `raw` entry in the same pack or already present in the
-destination object store. If unresolvable → `DeltaBaseMissing`.
+`base_hash` MUST be eligible at delta-resolution time under §4: either an
+earlier successfully decoded and reconstructed object in the same pack, or
+an eligible object already present in the destination. An earlier delta
+result is eligible just as an earlier raw object is. If unresolvable →
+`DeltaBaseMissing`.
 
 Delta payloads reconstruct a full serialized object (with its
 SPEC-OBJECTS prologue). The reconstructed bytes are then run through
@@ -264,16 +278,26 @@ delta-vs-raw.
 
 ## 4. Ordering rule
 
+**Protocol requirement.**
+
 Base objects MUST precede their deltas. Specifically, for any
 `0x02 delta` or `0x04 zstd-delta` entry with `base_hash = H` (§3.4's
 `base_hash` field is uncompressed precisely so this rule never
 requires decompressing anything to evaluate), at least one of:
 
-1. An earlier entry in the same pack whose computed hash is `H`, or
+1. An earlier successfully decoded and reconstructed entry in the same pack
+   whose type-dependent object ID is `H`, or
 2. An object already present at path `objects/<H>` in the destination
    store at unpack time.
 
 Must hold. Readers MUST NOT buffer undefined delta chains.
+
+The first case includes `raw`, `zstd-raw`, `delta`, and `zstd-delta` results;
+it is not restricted to uncompressed raw entries. A later entry alone MUST
+NOT make a base eligible. Repository admission additionally applies the
+repository-scoped verified-membership requirements of SPEC-SERVER §9.4 to
+external bases; naming another pack in the same operation does not establish
+that membership.
 
 Writers SHOULD emit non-blob objects first (commits, trees,
 chunked_blob, remix), then base blobs, then delta blobs. This lets a
@@ -511,6 +535,19 @@ surface; the spec-level names below stay protocol-neutral.
     (`backends_agree_on_committed_v2_fixtures`).
     Each sidecar records every frame's offset and length, so the
     reference `zstd -d` CLI can cross-check the decoded bytes.
+21. **Unsigned length boundaries:** lengths `2^31` and `2^32 - 1` in a
+    short, correctly checksummed pack are interpreted without sign extension
+    or wraparound. The general reader returns `UnexpectedEof`; an indexed
+    reader may first refuse its smaller encoded-entry ceiling. Portable bytes
+    are in `mkit-primitives/fixtures/framing/payload-high-bit.bin` and
+    `payload-u32-max.bin`; `unsigned_payload_boundaries_do_not_wrap_or_allocate_claims`
+    exercises the general reader.
+22. **Earlier reconstructed base:** raw A, delta B based on A, then delta C
+    based on B resolves all three objects. Moving B after C fails base
+    eligibility with `DeltaBaseMissing`. Portable bytes are in
+    `mkit-primitives/fixtures/framing/earlier-delta-base.bin` and
+    `later-delta-base.bin`; `earlier_reconstructed_delta_is_an_eligible_base`
+    exercises both orders.
 
 ---
 

@@ -71,6 +71,9 @@ pub enum FailureCode {
     /// Authoritative repository base absence.
     #[error("ExternalBaseAbsent")]
     ExternalBaseAbsent,
+    /// Source is shorter than the pack header and trailer.
+    #[error("PackfileTooShort")]
+    PackfileTooShort,
     // closure
     /// Required child absence.
     #[error("MissingClosure")]
@@ -97,6 +100,9 @@ pub enum FailureCode {
     /// Build lacks the required decoder.
     #[error("UnsupportedCapability")]
     UnsupportedCapability,
+    /// The machine has not reached a checkpoint-safe boundary.
+    #[error("CheckpointNotReady")]
+    CheckpointNotReady,
     // decision
     /// Ref operation grammar, names, pairing, or deletion shape is invalid.
     #[error("InvalidRefRequest")]
@@ -138,7 +144,7 @@ pub enum FailureCode {
     ClaimsBindingMismatch,
     // replay
     // evidence
-    /// Unsupported acceptance-evidence format.
+    /// Unsupported evidence format version.
     #[error("UnsupportedEvidenceVersion")]
     UnsupportedEvidenceVersion,
     /// Evidence ruleset or profile does not match the writer configuration.
@@ -153,6 +159,17 @@ pub enum FailureCode {
     /// Head kind or signer metadata does not match the evidence.
     #[error("EvidenceHeadMismatch")]
     EvidenceHeadMismatch,
+    /// Unsupported normative verification ruleset.
+    #[error("UnsupportedRuleset")]
+    UnsupportedRuleset,
+
+    /// Malformed or noncanonical evidence encoding.
+    #[error("InvalidEvidence")]
+    InvalidEvidence,
+
+    /// Evidence does not authenticate under the expected commitment.
+    #[error("EvidenceMismatch")]
+    EvidenceMismatch,
 }
 impl FailureCode {
     /// Stable machine-readable string. Diagnostic Display text is not a parser API.
@@ -181,12 +198,14 @@ impl FailureCode {
             Self::BadSignature => "BadSignature",
             Self::DeltaChainTooDeep => "DeltaChainTooDeep",
             Self::ExternalBaseAbsent => "ExternalBaseAbsent",
+            Self::PackfileTooShort => "PackfileTooShort",
             Self::MissingClosure => "MissingClosure",
             Self::WrongKind => "WrongKind",
             Self::ResourceLimit => "ResourceLimit",
             Self::UnavailableInput => "UnavailableInput",
             Self::InvalidResponse => "InvalidResponse",
             Self::InvalidCheckpoint => "InvalidCheckpoint",
+            Self::CheckpointNotReady => "CheckpointNotReady",
             Self::SourceChanged => "SourceChanged",
             Self::UnsupportedCapability => "UnsupportedCapability",
             // decision
@@ -210,6 +229,9 @@ impl FailureCode {
             Self::NonCanonicalEvidence => "NonCanonicalEvidence",
             Self::EvidenceBindingMismatch => "EvidenceBindingMismatch",
             Self::EvidenceHeadMismatch => "EvidenceHeadMismatch",
+            Self::UnsupportedRuleset => "UnsupportedRuleset",
+            Self::InvalidEvidence => "InvalidEvidence",
+            Self::EvidenceMismatch => "EvidenceMismatch",
         }
     }
 }
@@ -275,6 +297,7 @@ mod tests {
             FailureCode::BadSignature.as_str(),
             FailureCode::DeltaChainTooDeep.as_str(),
             FailureCode::ExternalBaseAbsent.as_str(),
+            FailureCode::PackfileTooShort.as_str(),
             FailureCode::MissingClosure.as_str(),
             FailureCode::WrongKind.as_str(),
             FailureCode::ResourceLimit.as_str(),
@@ -285,6 +308,7 @@ mod tests {
             FailureCode::UnsupportedCapability.as_str(),
             // decision
             FailureCode::InvalidRefRequest.as_str(),
+            FailureCode::CheckpointNotReady.as_str(),
             FailureCode::ForkSourceNotFound.as_str(),
             FailureCode::ForkDestinationNotEmpty.as_str(),
             FailureCode::ForkPermissionDenied.as_str(),
@@ -297,8 +321,26 @@ mod tests {
             // auth
             FailureCode::InvalidEnvelope.as_str(),
             FailureCode::ClaimsBindingMismatch.as_str(),
+            FailureCode::UnsupportedEvidenceVersion.as_str(),
+            FailureCode::EvidenceProfileMismatch.as_str(),
+            FailureCode::NonCanonicalEvidence.as_str(),
+            FailureCode::EvidenceBindingMismatch.as_str(),
+            FailureCode::EvidenceHeadMismatch.as_str(),
+            FailureCode::UnsupportedRuleset.as_str(),
+            FailureCode::InvalidEvidence.as_str(),
+            FailureCode::EvidenceMismatch.as_str(),
         ];
         let unique: std::collections::BTreeSet<_> = codes.into_iter().collect();
         assert_eq!(unique.len(), codes.len());
+        let registered: std::collections::BTreeSet<_> =
+            include_str!("../fixtures/error/failure-codes.txt")
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .collect();
+        assert_eq!(
+            unique, registered,
+            "stable code registry must match the API"
+        );
     }
 }

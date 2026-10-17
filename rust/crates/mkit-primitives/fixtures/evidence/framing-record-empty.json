@@ -1,0 +1,12 @@
+{
+  "blake3": "ab6605c18bcd6706c8c11af1190a2e9d014c3b7c1a12aba1c14bbd4c1ca0ffcb",
+  "decoded_bytes": 0,
+  "description": "Versioned provisional occurrence value with a valid empty raw frame.",
+  "encoded_bytes": 58,
+  "expected": "FrameRecord",
+  "format_version": 1,
+  "length": 5,
+  "offset": 12,
+  "previous": "0000000000000000000000000000000000000000000000000000000000000000",
+  "wire_type": 0
+}

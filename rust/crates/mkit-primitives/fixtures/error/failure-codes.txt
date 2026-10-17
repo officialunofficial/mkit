@@ -1,0 +1,67 @@
+# pack_verify
+InvalidMagic
+UnsupportedPackVersion
+UnexpectedEof
+InvalidEntryType
+TooManyObjects
+PackfileTooLarge
+PackfileCorrupted
+ZstdEntryTruncated
+DeltaEntryTruncated
+NonStorableObject
+TrailingData
+DecompressionFailed
+DecompressedSizeMismatch
+DecompressionLimitExceeded
+InvalidDelta
+DeltaBaseMismatch
+DeltaSizeMismatch
+NonCanonicalObject
+ObjectHashMismatch
+BadSignature
+DeltaChainTooDeep
+ExternalBaseAbsent
+PackfileTooShort
+
+# closure
+MissingClosure
+WrongKind
+
+# infrastructure
+CheckpointNotReady
+ResourceLimit
+UnavailableInput
+InvalidResponse
+InvalidCheckpoint
+SourceChanged
+UnsupportedCapability
+
+# decision
+InvalidRefRequest
+
+# auth
+InvalidEnvelope
+ClaimsBindingMismatch
+
+# replay
+
+# evidence
+EvidenceProfileMismatch
+NonCanonicalEvidence
+EvidenceBindingMismatch
+EvidenceHeadMismatch
+UnsupportedEvidenceVersion
+UnsupportedRuleset
+InvalidEvidence
+EvidenceMismatch
+
+# fork
+ForkSourceNotFound
+ForkDestinationNotEmpty
+ForkPermissionDenied
+ForkVisibilityMismatch
+ForkReservationSettled
+ForkExpired
+ForkQuotaExceeded
+ForkBindingMismatch
+ForkLifecycleUnavailable

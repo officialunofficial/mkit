@@ -469,7 +469,7 @@ check-local-build:
     python3 scripts/check-build-dir-authority.py
     bash scripts/tests/local-build.test.sh
 
-# Primitives-only maturity compilation (inventory sweep follows with encoded formats).
+# Primitives-only maturity compilation and compiler-derived public API inventory.
 check-primitives-stability:
     bash scripts/check-primitives-stability.sh
 

@@ -27,6 +27,7 @@ workspace = true
 
 [dev-dependencies]
 mkit-core = { path = "../mkit-core", default-features = false, features = ["pack-ruzstd"] }
+mkit-primitives = { path = "../mkit-primitives", default-features = false, features = ["pack-ruzstd"] }
 serde_json = "1"
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]

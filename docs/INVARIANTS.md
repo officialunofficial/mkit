@@ -43,6 +43,45 @@ caller could publish a truncated missing set as a complete diagnostic.
 **Enforced by:** `mkit_primitives::closure::ClosureWalker`, its independent seeded
 graph oracle, protocol/adversarial tests, and closure transition fuzz replay.
 Reference-server integration is separate; this primitive grants no visibility.
+## Primitive framing authenticates before emitting provisional frames
+
+**Always:** the framing driver checks the header, authenticates the trailer and
+whole immutable source, and then decodes frames in wire order. Every response
+matches its exact request, generation, source binding, range, and length.
+`FramedPack` remains distinct from all-entry `VerifiedPack` evidence.
+
+**Because:** valid frame geometry alone cannot establish canonical object
+identity, delta validity, signatures, or repository authority.
+
+**If violated:** a caller could admit corrupted bytes or promote a provisional
+frame into trusted pack evidence.
+
+**Enforcement:** `pack_verify::framing` owns private completion construction.
+Its `integrity_precedes_framing_and_every_decoded_frame_is_provisional` and
+`wrong_short_stale_missing_and_duplicate_replies_never_advance` tests pin the
+integrity boundary and host response protocol.
+
+## Primitive retained evidence never treats missing pages as absence
+
+**Always:** an absence answer requires an authenticated route to the correct
+leaf under the expected source, repository, ruleset, and root. The framing
+driver blocks dependent progress until acknowledgment of the exact emitted
+page commitment. Nested decoding shares cumulative work and allocation limits.
+
+**Because:** externally retained bytes can disappear or change independently
+of a machine's logical progress.
+
+**If violated:** lost scratch could manufacture membership absence or complete
+an operation whose evidence no longer exists.
+
+**Enforcement:** `evidence::proof` tests
+`pinned_empty_root_proves_absence_and_missing_page_never_does` and
+`inclusion_and_before_between_after_absence_are_exactly_keyed` pin query-bound
+absence. Framing's
+`retention_applies_backpressure_and_acknowledgments_are_exact` pins repeated
+retention events and refusal of wrong or duplicate acknowledgments. Page and
+checkpoint decoders reject unsupported versions, malformed bounds, and trailing
+bytes; checkpoint checksums grant no authority to resume.
 
 ## Differential conformance compares validated protocol decisions
 
@@ -63,6 +102,25 @@ acceptance effects, and two broken servers could appear conforming.
 observations. Native two-host and mutation regressions run in the Cloud Build
 workspace test gate. This checks decision equivalence; Tier 2 separately checks
 crash, recovery, and concurrency behavior.
+
+## Primitive cold resume binds cursor metadata before decoder progress
+
+**Always:** Decode resume compares the validated core cursor's source length,
+window size, position, payload total, version, entry count/index and expected
+whole-pack identity with its outer envelope. It reserves restore memory first,
+recovers every retained predecessor page, then authenticates the reacquired
+window prefix. Cumulative work, evidence and historical memory peaks survive.
+
+**Because:** an internally consistent cursor can still belong to a different
+source or logical boundary, and a lost page cannot support dependent progress.
+
+**If violated:** resumption could skip entries, substitute bytes or evidence,
+or repeatedly reset the resource ceiling.
+
+**Enforced by:** `pack_verify::framing::checkpoints::resume_tests` covers each
+binding, every acknowledged entry, compressed cross-window frames, lost pages,
+changed prefixes and exhausted restore/admission budgets. The framing fuzz
+schedule compares cold restart with uninterrupted results and refusals.
 
 ## Conformance distinguishes absent features from implementation gaps
 
