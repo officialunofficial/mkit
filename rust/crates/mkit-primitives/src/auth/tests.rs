@@ -235,14 +235,8 @@ fn stream_digest_values_preserve_core_acceptance() {
             nonce: fixture["nonce"].as_str().unwrap(),
         };
         let mut h = signed(operation);
-        let baseline = validate_envelope(
-            &h,
-            operation.context,
-            path,
-            expected,
-            operation.created_at,
-        )
-        .unwrap();
+        let baseline =
+            validate_envelope(&h, operation.context, path, expected, operation.created_at).unwrap();
         for digest in [None, Some(""), Some("garbage"), Some("AA")] {
             h.digest = digest.map(str::to_owned);
             let mut counts = [1; 10];

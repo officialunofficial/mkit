@@ -3333,6 +3333,7 @@ name = "mkit-core-wasm-check"
 version = "0.5.0"
 dependencies = [
  "mkit-core",
+ "mkit-primitives",
  "serde_json",
  "wasm-bindgen-test",
 ]

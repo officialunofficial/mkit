@@ -1,0 +1,10 @@
+{
+  "blake3": "23119fd431ee134fde13899e27ce6ded4c2daff3b516537ed4cc855f091e79a7",
+  "description": "Encoded query differs from the expected key of 05 repeated 32 times.",
+  "encoded_bytes": 216,
+  "expected": "EvidenceMismatch",
+  "profile": "indexed",
+  "query": "0505050505050505050505050505050505050505050505050505050505050505",
+  "root": "bab0119533ac8840c83871019afc5b709c67893affd4689eb915be79de1c53d6",
+  "ruleset": 1
+}

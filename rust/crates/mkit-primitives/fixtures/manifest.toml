@@ -1,8 +1,35 @@
 schema_version = 1
-# No encoded types or decoders exist in the skeleton. Owners append entries
-# under their module section when the implementation and fixtures land.
+# Encoded formats and semantic contracts register inside their owning module section.
+
 # evidence
-# Acceptance evidence: canonical bytes, finite configurations, and semantic outcomes.
+[[formats]]
+type = "AcceptanceEvidence"
+format_version = 1
+decoder = "evidence::acceptance::AcceptanceEvidence::decode"
+fuzz_target = "acceptance_decode"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+
+[[formats]]
+type = "evidence-page"
+format_version = 1
+decoder = "evidence::pages::PageView::from_bytes"
+fuzz_target = "page"
+spec = "SPEC-PRIMITIVE-EVIDENCE"
+
+[[formats]]
+type = "evidence-proof"
+format_version = 1
+decoder = "evidence::proof::verify_path"
+fuzz_target = "proof"
+spec = "SPEC-PRIMITIVE-EVIDENCE"
+
+[[formats]]
+type = "framing-checkpoint"
+format_version = 1
+decoder = "evidence::checkpoint::Checkpoint::from_bytes"
+fuzz_target = "checkpoint"
+spec = "SPEC-PRIMITIVE-EVIDENCE"
+
 [[fixtures]]
 type = "AcceptanceEvidence"
 format_version = 1
@@ -13,6 +40,8 @@ semantic = "acceptance/bad-magic.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "NonCanonicalEvidence"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "ff92c188fcfe16627b110e393c05cebb2b03ead426e3f960135f84ef8cddaa8c"
+semantic_sha256 = "924f2de9fc9a0dc3dc792e3a8899d104b4efca2f012ba8f57a449d36228e6900"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -24,6 +53,8 @@ semantic = "acceptance/boundary.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "ok"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "da17e25dcdac0ac9a4763b77fa236769eac103c9cd92a0bcd0a99301b7c1293b"
+semantic_sha256 = "d4952dc15ba473df4c79cf1b24e2b8593c31e5907576852353c4f6e4d19c5e2b"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -35,6 +66,8 @@ semantic = "acceptance/delta-count-exceeds-object-count.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "NonCanonicalEvidence"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "5d5dda8309683568df393c70c27d9e7ce5a1ff8f8e0328403fd3d2996dfa39e1"
+semantic_sha256 = "6e3e54cbf226d096fdc0c50360997e31c59286ed23a2d9bb73796d5ec77c9aec"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -46,6 +79,8 @@ semantic = "acceptance/dependencies-cap-plus-one.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "ResourceLimit"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 3, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "d5b9319d33a63b026596850cfa857f02d6de95ff1a7bfe039673202d08e8caf6"
+semantic_sha256 = "d6bd46fde26f36b8838089c50f9372517f27497fa175fcfd35d4ee41ba5ff238"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -57,6 +92,8 @@ semantic = "acceptance/dependencies-cap.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "ok"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 3, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "45a880c194e8cc0c84cc4b63e907e4b08ae3ae784ae3786d8befc30aabef01b2"
+semantic_sha256 = "788fd7f7b8b85c738480073f22ec6c30c68c32107173b794145792519e13b109"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -68,6 +105,8 @@ semantic = "acceptance/dependency-count-overflow.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "ResourceLimit"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "c5f523d7c22630472e94f016d2feab16094f662c86fcfcfe0a2f37ce1c7e951a"
+semantic_sha256 = "b96417c1e5faddca28464c0a70b7cb38ee973cdde435a8c83477172cf6bfc0c6"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -79,6 +118,8 @@ semantic = "acceptance/dependency-count-truncated.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "UnexpectedEof"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4294967295, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "02896e5f09b187f871f2dcfc063c03a74698ddcf97658d6d442651bdfd900e31"
+semantic_sha256 = "7624fbad7df64a204a7259a3a1564eb1f436071fc0bf70b6e06524be69d261a6"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -90,6 +131,8 @@ semantic = "acceptance/duplicate-dependencies.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "NonCanonicalEvidence"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "3b2668b764b4c4b58742c8f3d1fe96513a9bffdc8dde5ca20646aa650f7c9ecd"
+semantic_sha256 = "6acaded5430dd4038a3f0cdb1415edb3266fc606510421052fea70627a22a438"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -101,6 +144,8 @@ semantic = "acceptance/duplicate-heads.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "NonCanonicalEvidence"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "fc713e019c1f385d6834e744a7d189e4945c1f3c3c83d649725af6b63fb781a8"
+semantic_sha256 = "760b8e947d19d0f91ef1adaf5dfabe3b742c5f9fb83a6b5534cf49ecef9a68a2"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -112,6 +157,8 @@ semantic = "acceptance/empty-head-bytes.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "NonCanonicalEvidence"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "6347f4b7cf192ed57a022d01aff8581729beb0637ebd3ee58c48761c3ddbef2f"
+semantic_sha256 = "70991fe85d34ac8468169d8c21c3041e622c7962c39eb75fa8efe1dea5602624"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -123,6 +170,8 @@ semantic = "acceptance/envelope-cap-plus-one.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "ResourceLimit"
 decode_config = "{\"max_envelope_bytes\": 205, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "3574d6b2b88ef3af801bec9571328f1c0472db7d308de62c0ae2609e00c4a1c7"
+semantic_sha256 = "34b26516400ada35597199847ef9e68c8576fa74d1beff15fe6df3bef5792cd2"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -134,6 +183,8 @@ semantic = "acceptance/envelope-cap.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "ok"
 decode_config = "{\"max_envelope_bytes\": 206, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "3574d6b2b88ef3af801bec9571328f1c0472db7d308de62c0ae2609e00c4a1c7"
+semantic_sha256 = "21fcacc987d2e178dd17f2679ea6283b674da07d95050c7eacbc9fb3f23062d6"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -145,6 +196,8 @@ semantic = "acceptance/head-bytes-cap-plus-one.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "ResourceLimit"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 3, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "ecf0203c98bf79007033e9e1ca5bfa81f568d85d8601dedc4aa92cee6a1faef2"
+semantic_sha256 = "72babe3a4469d50f3ce22da1cac7ad68dcc74595987bc4046af66a80ca4686e5"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -156,6 +209,8 @@ semantic = "acceptance/head-bytes-cap.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "ok"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 3, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "2dcd5b2a99f78ec2dba7cdf2702a17dcdf984d68ab0b895ab7ae62e9cf6cf90d"
+semantic_sha256 = "46ccdfe72e501a9b061e6d0379e18851014113f7c881054d6ac9b82347513869"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -167,6 +222,8 @@ semantic = "acceptance/head-count-overflow.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "ResourceLimit"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "ca52cfa3c997c4a82ca8b6c3615813ac5f8bec3a4f2211dc34667cde4e06e965"
+semantic_sha256 = "f10b955721086b0a1126e9c91f5866899032e939efdb8002cfb4e11b4b6f19d9"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -178,6 +235,8 @@ semantic = "acceptance/head-count-truncated.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "UnexpectedEof"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4294967295, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "dd194b5fbfe68b25e3a61b88101043d3a8e233772976d671adf2184bf04ac27c"
+semantic_sha256 = "83dcb7e78bdda483c67658c4cd6818b273f1b66f13d14e67bea7359d62600d13"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -189,6 +248,8 @@ semantic = "acceptance/head-kind-mismatch.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "NonCanonicalEvidence"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "c8d4a349bb9c2b568c8aecc42b1779b8698122b108bce610e430ca0ec3ccca1f"
+semantic_sha256 = "41fdacec5df9c45d4b1cca290dcd8174336e77885f5ab81ba5cbfcd374140275"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -200,6 +261,8 @@ semantic = "acceptance/head-length-overflow.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "ResourceLimit"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "0397c7832046dbf93343ac838d720eef2cc90c0378356caa974136688f72d678"
+semantic_sha256 = "3375fb14553f6d32cb1a64c282605c08560a927426588583d36d5ef9c4214f97"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -211,6 +274,8 @@ semantic = "acceptance/head-length-truncated.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "UnexpectedEof"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 4294967295, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "4d64a1fa41a79a8d30cb8965d7154ab0b94eabd61a8b302635aef3db0b6fdc46"
+semantic_sha256 = "7b3e42586edd68acd92f72446f39c022d74cb047c4f2d3130b5a22c38b479c45"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -222,6 +287,8 @@ semantic = "acceptance/heads-cap-plus-one.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "ResourceLimit"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 3, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "1881056536d07930a3b56dd0df25cf1ff7c73bc391d3eeb6701181db34dc916d"
+semantic_sha256 = "b4d62a4258aa4c3ab3642f713cc1c82bf31d3e6ef7f8000eae759567a07cd11d"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -233,6 +300,8 @@ semantic = "acceptance/heads-cap.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "ok"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 3, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "90f404de8a6b1942ddf77d2f5a802668ae63d100f5839450aed89b23ac59090d"
+semantic_sha256 = "3960c4bed2399f595501b7341d9fcbddbfdc65024d1420f8aab4f9c1a6808f5f"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -244,6 +313,8 @@ semantic = "acceptance/minimal.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "ok"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "3574d6b2b88ef3af801bec9571328f1c0472db7d308de62c0ae2609e00c4a1c7"
+semantic_sha256 = "8b90fd498f751dde8b5e2d6dc93d4909c6611d0804e6a19bcdd39561d81fdfea"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -255,6 +326,8 @@ semantic = "acceptance/operation-cap-plus-one.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "ResourceLimit"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 3, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "74c6d27cfc80417ea70ed9e212d87927052f96e1e41d0e668b64eb38cbd4297b"
+semantic_sha256 = "7b4f6d1be7b94b2af9a87988db1cb5aea39808a4185967670e0d6459f605faa0"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -266,6 +339,8 @@ semantic = "acceptance/operation-cap.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "ok"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 3, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "c00728119d7d26ce0e9efae70c4cab7a0ab24aef67759758952032a78659721d"
+semantic_sha256 = "1388932ffd9dc1b89e34b34a27b7275c05f65c06209a6d08adf0e5cfc846583e"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -277,6 +352,8 @@ semantic = "acceptance/operation-length-overflow.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "ResourceLimit"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "a06c43065305c4e96d9a09698e54b9252237c44a6c9c360d37337253f676035a"
+semantic_sha256 = "14cd179dabf10f516c3a126d9c6f09d1a001f8d3ffcb4f47e97500c3648eb777"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -288,6 +365,8 @@ semantic = "acceptance/operation-length-truncated.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "UnexpectedEof"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 4294967295, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "c8b647b3689ffee62a757f887a74ca930e84a5cecc92bdc2274408bdeb20654c"
+semantic_sha256 = "9e1b5e61bafe0dd5869f79b0c8d3357de9c286931ffbb3c8f39629a67df70094"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -299,6 +378,8 @@ semantic = "acceptance/representative.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "ok"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 1024, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 3072, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "1bc1d5b2e81047491d648163aa1735888a92fff600501c8f5dfd9fd8aa687f38"
+semantic_sha256 = "9285ea9ee6193a1ffde0d827f7cf6fa4dc9f97d45820399548e7c40e9fc9ef28"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -310,6 +391,8 @@ semantic = "acceptance/total-head-bytes-cap-plus-one.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "ResourceLimit"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 3, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "ad91de20f87f39fd2552a640b5781fcb52cba07c9f58643d69ab4c67dd17bcac"
+semantic_sha256 = "369b3e3252c0ec0c395e7c2529fd85bbffb4978f6d0a67dfaf58cbaceb9c6807"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -321,6 +404,8 @@ semantic = "acceptance/total-head-bytes-cap.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "ok"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 3, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "3e6307e8f01806378a9d962c5c130eeafda7cc7889bd8fcf443edb0040b7b313"
+semantic_sha256 = "efe46be3a61199416bee43ab4f742929d6084d89692d934314ce6cbefb217a0f"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -332,6 +417,8 @@ semantic = "acceptance/trailing-bytes.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "NonCanonicalEvidence"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "cdbe73493b87eaa1a6f8703a64bb20bc1c8a31f8235b11cfe62336791a3f9899"
+semantic_sha256 = "3076c49c9c5f2798adeae0c55d89ba4bc59c9c78a1f7092d585bd32f30422b0a"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -343,6 +430,8 @@ semantic = "acceptance/truncated-dependency.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "UnexpectedEof"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "85030a2704dbe84e4f9cfd83b14075b5f56056d36633244addc6b35306b86bc0"
+semantic_sha256 = "0aba7eac6a026eb5a995e79719ca78219b1646b2120fee09593cb2b40b1a2f87"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -354,6 +443,8 @@ semantic = "acceptance/truncated-head-payload.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "UnexpectedEof"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "a46060e16a64fed3ff0e4ab24ced60ffb96ddb1321e46a7f5407af0fa50482c2"
+semantic_sha256 = "112f84e47292c10a74d560be23b025d161054d7077424530899da85a2001be72"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -365,6 +456,8 @@ semantic = "acceptance/truncated-head.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "UnexpectedEof"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "4f5efda6be7357a833de055bdb33d9375a2a73d81b6d65ebccae87f2b6210a18"
+semantic_sha256 = "7eae0c2f28c3abb9a60841338a6d93db56eb085918420f99792e6252f126d724"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -376,6 +469,8 @@ semantic = "acceptance/truncated-magic.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "UnexpectedEof"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "f6a41363c9cb156c256ec00e66e5bed6deb55132eabbd2154b13ca1d818195cf"
+semantic_sha256 = "6fc3a1c0048ec40e1c8acd0b6e276325d4e22f9bf75e54d444685f4c13d0cc5b"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -387,6 +482,8 @@ semantic = "acceptance/truncated-operation-prefix.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "UnexpectedEof"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "5d238e9f0ed0d5cfc6b0e3d3f8704a0742d9801ecbdd0838775b3e6cc0738a3f"
+semantic_sha256 = "18829fbeea40e3843eaf2b57fd34e2a38dfcf6920c08c75304b5846fb267a87b"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -398,6 +495,8 @@ semantic = "acceptance/truncated-pack.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "UnexpectedEof"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "06fa1ee82b9bedfeb8e06d6a51468bd59198cd028820d28d6592e5eac5155b8b"
+semantic_sha256 = "0b3ca8dc8a6f5f256bf6e60249166bbcfb9595df89ca49056a511c4216543600"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -409,6 +508,8 @@ semantic = "acceptance/truncated-profile.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "UnexpectedEof"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "8a9b0c8e793774004a9b52af973d2f38093fc584aa33a4bdc7a4f6ea37ddac89"
+semantic_sha256 = "e7da52af62e1df2ccc3c682fccadc8b503e77e32c0b9f29a43cfd899133c8185"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -420,6 +521,8 @@ semantic = "acceptance/truncated-repository.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "UnexpectedEof"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "a10485542d2ac0e8548475fa23b3c0b7a533945fb7b034d3d9aaba770fea1211"
+semantic_sha256 = "d19e484ea3cfb7ffb395de31f5a9cb52898221ba61c7250a77adae87db7856d8"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -431,6 +534,8 @@ semantic = "acceptance/truncated-version.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "UnexpectedEof"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "b705abcfa4b09afa5b417de90a866e92b617aaf1725a40592bbd28ef0ee5796a"
+semantic_sha256 = "09703f3c64c35186070f56fc9e1af8fb3559cf96df80a55e2ad1536535fde20c"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -442,6 +547,8 @@ semantic = "acceptance/truncated-witness.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "UnexpectedEof"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "ce984226a67a8aeedec8d013971def785a64efce32d6393d73d3bd55c4628373"
+semantic_sha256 = "cf296f7b7df72d4e9a33cd71af1537421c6813fd08e22dd6baec33fccacb47db"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -453,6 +560,8 @@ semantic = "acceptance/unknown-head-kind.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "NonCanonicalEvidence"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "fb2d410a2135914139d8359ef560494da1c6dfc8d704761c566722f33e1ecdb6"
+semantic_sha256 = "b1a36f168e67e42f225e2a87d5bdd19d2ed904c3cedf372bccf79dba5b09c9ac"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -464,6 +573,8 @@ semantic = "acceptance/unknown-signature-tag.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "NonCanonicalEvidence"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "881653543dda28d92441ccf2ff6abd63962577fce3907eac16cd15b392ef1e22"
+semantic_sha256 = "dac40604f0807f7b94a9a8b08e00aacedd525a34e63af7f2d9c91cb666a0b935"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -475,6 +586,8 @@ semantic = "acceptance/unknown-version.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "UnsupportedEvidenceVersion"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "30083c426b77c1e174d21aa22cd50f21764033447380d4a6d08c8c0a8ffcd1be"
+semantic_sha256 = "7e46b5c6aa4e9df2d9facb327115f00d291344726f5448544546de4ee2586399"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -486,6 +599,8 @@ semantic = "acceptance/unordered-dependencies.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "NonCanonicalEvidence"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "09f3bf1efdef62f951648712f9dde41caf297317af7f21ecb769cf346a490ca5"
+semantic_sha256 = "46b0bb003ae86ac5698fcfb924f74a088918628988ec7dda33d23273f984b9df"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -497,6 +612,8 @@ semantic = "acceptance/unordered-heads.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "NonCanonicalEvidence"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "62cfa14ac9f9e9ea14bddde463df3b78edf3d2f7440ac7c528e50a7601018aaf"
+semantic_sha256 = "272a109b89cd8095532f1369e5c605f4cf9c019daf103fd583cb6d4ad4795c0c"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -508,6 +625,8 @@ semantic = "acceptance/wrong-profile.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "EvidenceProfileMismatch"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "6a1da524e3c245b4edf792120b53809eadab0b0168c7ff14c6a7bb0b9ac71f77"
+semantic_sha256 = "5a5ee74e3567a00c433ca42a3ba0127bdaf9a0f19c800913b4b026f1f0ff84c8"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -519,6 +638,8 @@ semantic = "acceptance/wrong-ruleset.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "EvidenceProfileMismatch"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "069714e70bbd42a679a3ed30eebba22ef37a98db930929cbffd30169166fd3cb"
+semantic_sha256 = "29c2eba50b37643d45372968c140c93dc29fc378066166c00794ae9afd3211e2"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -530,6 +651,8 @@ semantic = "acceptance/zero-signature-tag.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "NonCanonicalEvidence"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "0bdd621e08754fd3c9671ca6071329070e734f695c32a55ad2ce22fbfc70d4a9"
+semantic_sha256 = "eeb2518792c55979e44e8fafbac1c401c638842cfb1d0f2fcf3361645074e0ee"
 
 [[fixtures]]
 type = "AcceptanceEvidence"
@@ -541,9 +664,358 @@ semantic = "acceptance/zero-version.json"
 spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
 expected = "UnsupportedEvidenceVersion"
 decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+sha256 = "5aef90f1c9f903caf7538a1e44fc807b62bcdf47fb0047ac675d2301225915d9"
+semantic_sha256 = "dc0f19a45127bf0ca0757913297133b57b00de826264fe7e64f55c928b1184fd"
+
+[[fixtures]]
+type = "evidence-page"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-evidence"
+expected = "Page"
+spec = "SPEC-PRIMITIVE-EVIDENCE page envelope"
+path = "evidence/page-empty.bin"
+sha256 = "46dff41e7638ae0535f7cba39b2d1ec61d8ab13f1a854b192e1733c764901344"
+semantic = "evidence/page-empty.json"
+semantic_sha256 = "4d6f4b2607c6fab87b44121c96e00ed3a8fec72711777a243306fb3d15cae21c"
+
+[[fixtures]]
+type = "evidence-proof"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-evidence"
+expected = "Absent"
+spec = "SPEC-PRIMITIVE-EVIDENCE proof path"
+path = "evidence/proof-empty.bin"
+sha256 = "c02c2e4876997d73df67b40d158cc28588b8a3902846098741eaf9d45e86fae3"
+semantic = "evidence/proof-empty.json"
+semantic_sha256 = "92f8b6b073f73d5c69599e7d974e8c9ed573140c684373abce31c7446b13bd82"
+
+[[fixtures]]
+type = "evidence-page"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-evidence"
+expected = "UnsupportedEvidenceVersion"
+spec = "SPEC-PRIMITIVE-EVIDENCE page envelope"
+path = "evidence/page-version.bin"
+sha256 = "d5f6a68e7a4df93f706c6c16ea204ee160a36d76ff5c8a4014f5ad5d7b71a7a0"
+semantic = "evidence/page-version.json"
+semantic_sha256 = "a94f501f958f558fa07c088b8af51106a4ac9e7f4cf3ad8d5967b6550fb911b0"
+
+[[fixtures]]
+type = "evidence-page"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-evidence"
+expected = "SourceChanged"
+spec = "SPEC-PRIMITIVE-EVIDENCE page envelope"
+path = "evidence/page-wrong-source.bin"
+sha256 = "ef5d6eb3352fde779af38a997aa870d097c79081bb49baf22ca6e71616f697aa"
+semantic = "evidence/page-wrong-source.json"
+semantic_sha256 = "45095d8dc65ce2234765865da568d9e5cc38f866a8569fa8587a98d183a467a6"
+
+[[fixtures]]
+type = "evidence-page"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-evidence"
+expected = "Page"
+spec = "SPEC-PRIMITIVE-EVIDENCE page envelope"
+path = "evidence/page-single-child.bin"
+sha256 = "7dba2ec3afc21bc0695f74b4824fae88b4591d3d4a74af13a96a0db81dea62ed"
+semantic = "evidence/page-single-child.json"
+semantic_sha256 = "824c603fb8aab9d78389f9b0587a089bc3952b1dc146e3aaf64292487193f7ed"
+
+[[fixtures]]
+type = "evidence-proof"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-evidence"
+expected = "UnavailableInput"
+spec = "SPEC-PRIMITIVE-EVIDENCE proof path"
+path = "evidence/proof-missing-page.bin"
+sha256 = "77edeb26d731ac2ebcfa829709d9eae5c7b051b1fb3903582cfa4af9d3e50b8e"
+semantic = "evidence/proof-missing-page.json"
+semantic_sha256 = "3f92c99691be0e4300180118a97c41780e4e7f19081e19657a7dbd6232f9b1af"
+
+[[fixtures]]
+type = "evidence-proof"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-evidence"
+expected = "EvidenceMismatch"
+spec = "SPEC-PRIMITIVE-EVIDENCE proof path"
+path = "evidence/proof-wrong-query.bin"
+sha256 = "3619b21150695e512d967a1f5d9f9b4fb38b24f4ecbd449385f7f89af20d8902"
+semantic = "evidence/proof-wrong-query.json"
+semantic_sha256 = "22e8ce75232fed09381fc590f4bf5a5cfeebcfd7f1c5181f32de76e6b6b825f3"
+
+[[fixtures]]
+type = "evidence-proof"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-evidence"
+expected = "UnsupportedEvidenceVersion"
+spec = "SPEC-PRIMITIVE-EVIDENCE proof path"
+path = "evidence/proof-version.bin"
+sha256 = "2084709387d29ed1fe8865979470ce94e4a10247aba7e8f13c54c34ec4498a9f"
+semantic = "evidence/proof-version.json"
+semantic_sha256 = "8ebb3def9a61ac531c33227137b7bf578605e466fb76a8fc13148842c5a74c44"
+
+[[fixtures]]
+type = "framing-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-checkpoint"
+expected = "Checkpoint"
+spec = "SPEC-PRIMITIVE-EVIDENCE checkpoint envelope"
+path = "evidence/checkpoint-header.bin"
+sha256 = "792dbfc3601fc73312a5601dd70ae829cee0d134903c241da1d725d4fed16762"
+semantic = "evidence/checkpoint-header.json"
+semantic_sha256 = "a53743b7017be9d913566c411c8b75dc870b6413ebf0f2ed193b8dc3ccc4a512"
+
+[[fixtures]]
+type = "framing-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-checkpoint"
+expected = "InvalidCheckpoint"
+spec = "SPEC-PRIMITIVE-EVIDENCE checkpoint envelope"
+path = "evidence/checkpoint-version.bin"
+sha256 = "3fcf55ab8ec604854e09558a11b0ee80894b8d0a7e843c454c9c6c1c50545a7b"
+semantic = "evidence/checkpoint-version.json"
+semantic_sha256 = "aa61788774c2804f5ee7e18c0cc5d254715a81984251eac04abcdc0ce3dd9360"
+
+[[fixtures]]
+type = "framing-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-checkpoint"
+expected = "InvalidCheckpoint"
+spec = "SPEC-PRIMITIVE-EVIDENCE checkpoint envelope"
+path = "evidence/checkpoint-corrupt.bin"
+sha256 = "d41150ce7eadd2fe76fb9edf2bfc1fdbf1ee5705ba9efe1a7f5ba29eb47b4a0d"
+semantic = "evidence/checkpoint-corrupt.json"
+semantic_sha256 = "e4bc3589aa2f04d884b4e0c929805b3c0e9830af710206296b2cd7bf4010a7cb"
+
+[[fixtures]]
+type = "framing-record"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-frame-record"
+expected = "FrameRecord"
+spec = "SPEC-PRIMITIVE-EVIDENCE occurrence values"
+path = "evidence/framing-record-empty.bin"
+sha256 = "fbd405786685a615fe3c030bd9a153da48f153dcb91e05e098868d57c6860e59"
+semantic = "evidence/framing-record-empty.json"
+semantic_sha256 = "0abd41561aba177fe58f49fe2ee20814c163ab7543e5ba4e1d012943aa1d5fb1"
+
+[[fixtures]]
+type = "framing-record"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-frame-record"
+expected = "InvalidEvidence"
+spec = "SPEC-PRIMITIVE-EVIDENCE occurrence values"
+path = "evidence/framing-record-invalid-type.bin"
+sha256 = "7a4a97d4aaf3215b0fa917f242451319214a1b5c10940f406b98672b65f3fcff"
+semantic = "evidence/framing-record-invalid-type.json"
+semantic_sha256 = "66fd85d4e309bed9d5497a0ebe376c304568c16dc6cc454a79ce7f04aaec72f3"
+
+[[fixtures]]
+type = "framing-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-checkpoint"
+expected = "Checkpoint"
+spec = "SPEC-PRIMITIVE-EVIDENCE"
+path = "evidence/checkpoint-integrity-finished.bin"
+sha256 = "897da86db9164bdd3442d38b055e9f66254c35288edccb0e01e93f7d2aff5db7"
+semantic = "evidence/checkpoint-integrity-finished.json"
+semantic_sha256 = "498456ebf35751e822adf0a2af96eab9c8fe4ecef1978c62d3daa1fee4534807"
+
+[[fixtures]]
+type = "framing-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-checkpoint"
+expected = "Checkpoint"
+spec = "SPEC-PRIMITIVE-EVIDENCE"
+path = "evidence/checkpoint-integrity-partial-trailer.bin"
+sha256 = "fb6c1cfbba816f4b32a30509b962ebe64bb97c747ddaa7ff963462e312bb39da"
+semantic = "evidence/checkpoint-integrity-partial-trailer.json"
+semantic_sha256 = "f113615fd91891871d691d03aa1cf04940efca8ac69a6fd7f06111c58e8404c9"
+
+[[fixtures]]
+type = "framing-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-checkpoint"
+expected = "Checkpoint"
+spec = "SPEC-PRIMITIVE-EVIDENCE"
+path = "evidence/checkpoint-decode.bin"
+sha256 = "ef21e3c2d6c74f3498f142097e4a559cd622887e9338742b34a04a397a8b33a0"
+semantic = "evidence/checkpoint-decode.json"
+semantic_sha256 = "b37cf8acaf7779c6e26dd981db307b1a6b6d049d2ce1e05b88aad3fa44bf26c7"
+
+[[fixtures]]
+type = "framing-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-checkpoint"
+expected = "Checkpoint"
+spec = "SPEC-PRIMITIVE-EVIDENCE"
+path = "evidence/checkpoint-complete.bin"
+sha256 = "6bfa89e174a23e365f9215949365a84a294e4f769c675a30fb0e4829b36f8559"
+semantic = "evidence/checkpoint-complete.json"
+semantic_sha256 = "e700621a5049b9fe2d53c480863fd1171840fab31cf44605684edd683b2cc3c5"
+
+[[fixtures]]
+type = "evidence-page"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-evidence"
+expected = "Page"
+spec = "SPEC-PRIMITIVE-EVIDENCE"
+path = "evidence/page-proof-multilevel-root.bin"
+sha256 = "2040adff049f3d24d9b0fd9532858064f3bfc9d4b8a556ee44099ce676a48e25"
+semantic = "evidence/page-proof-multilevel-root.json"
+semantic_sha256 = "0b18d5bd1f01ecf586ca1f3a77678384958df8db1e3329dd08ae15362e0a764a"
+
+[[fixtures]]
+type = "evidence-proof"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-evidence"
+expected = "Present"
+spec = "SPEC-PRIMITIVE-EVIDENCE"
+path = "evidence/proof-multilevel-inclusion.bin"
+sha256 = "f950ca064b63d60073cb739ada93a230b3cc1906601718d92f808f3f94d15169"
+semantic = "evidence/proof-multilevel-inclusion.json"
+semantic_sha256 = "a71600b77d95a5a4915f659f6453fbdb4c6be43592a548013aa4fd32b5ec49e0"
+
+[[fixtures]]
+type = "evidence-proof"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-evidence"
+expected = "Absent"
+spec = "SPEC-PRIMITIVE-EVIDENCE"
+path = "evidence/proof-multilevel-absence.bin"
+sha256 = "e3f20e2d3ef43b750772653b11084b4476e7f6295b66e5cf45ecd7b7a263686b"
+semantic = "evidence/proof-multilevel-absence.json"
+semantic_sha256 = "fdaf4e0392f890e6140fa2134a46febfd73bdeab9a5b876ea3416b1546baa207"
 
 # pack_verify
+[[formats]]
+type = "pack-framing"
+format_version = 1
+decoder = "pack_verify::framing::FramingDriver"
+fuzz_target = "framing"
+spec = "SPEC-PACKFILE"
+
+[[formats]]
+type = "framing-record"
+format_version = 1
+decoder = "pack_verify::framing::FrameRecord::from_bytes"
+fuzz_target = "page"
+spec = "SPEC-PRIMITIVE-EVIDENCE"
+
+[[fixtures]]
+type = "pack-framing"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-frame-cap"
+expected = "PackfileTooLarge"
+spec = "SPEC-PACKFILE sections 2 and 4"
+path = "framing/payload-high-bit.bin"
+sha256 = "d64a9ecb98b23254341b0108b469e6df985123784528ee1d524698c2c1caf212"
+semantic = "framing/payload-high-bit.json"
+semantic_sha256 = "3b92784f0ec054dbe033b6be753476ed23e56b0f060d5ca00425d11511fa5bb3"
+
+[[fixtures]]
+type = "pack-framing"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-frame-cap"
+expected = "PackfileTooLarge"
+spec = "SPEC-PACKFILE sections 2 and 4"
+path = "framing/payload-u32-max.bin"
+sha256 = "5ebe85bc6f2d0244f820c149e33305471124b19918cb64207f562069fdb5b238"
+semantic = "framing/payload-u32-max.json"
+semantic_sha256 = "dbfe0f53cdf65439e14fc63dc396140cb4e61b78bcdb7751ef9a3159d2e3578f"
+
+[[fixtures]]
+type = "pack-framing"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-frame-cap"
+expected = "Complete"
+spec = "SPEC-PACKFILE sections 2 and 4"
+path = "framing/earlier-delta-base.bin"
+sha256 = "b2624e80b6b86c8e04447c47146a2c580ce27dcd6409890b677d3c1337cae31c"
+semantic = "framing/earlier-delta-base.json"
+semantic_sha256 = "d8aa3c890bc619190545557d84fa79ace486c064768b2b1ea7b807af1d5c8561"
+
+[[fixtures]]
+type = "pack-framing"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-frame-cap"
+expected = "Complete"
+spec = "SPEC-PACKFILE sections 2 and 4"
+path = "framing/later-delta-base.bin"
+sha256 = "4d02205bcc81533ad8c5c19e2fd08ea6fa16437ce9df952a62cc9cf9117c0072"
+semantic = "framing/later-delta-base.json"
+semantic_sha256 = "ccd8d14b416f63b06b0ed53a448a78c619d7ffe4762d0e78edf2cdfa1e8dd6a0"
+
 # closure
+[[formats]]
+type = "closure-state"
+format_version = 1
+decoder = "closure::output::validate_state_page"
+fuzz_target = "closure_pages"
+spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+
+[[formats]]
+type = "closure-witness"
+format_version = 1
+decoder = "closure::output::decode_witness"
+fuzz_target = "closure_pages"
+spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+
+[[formats]]
+type = "closure-missing"
+format_version = 1
+decoder = "closure::output::decode_missing"
+fuzz_target = "closure_pages"
+spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+
 [[fixtures]]
 type = "closure-missing"
 format_version = 1
@@ -554,6 +1026,8 @@ semantic = "closure/missing-all-reasons.txt"
 decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
 expected = "ok"
 spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+sha256 = "8f0e959cb18411757d7feb3948d04d2e4c0f2dbf217c5504bdbfab7acf88eef7"
+semantic_sha256 = "27e52772bacafe9f7b57c4eb936d04cc92f6e65afe1bc5de5e716fed69b86cd8"
 
 [[fixtures]]
 type = "closure-missing"
@@ -565,6 +1039,8 @@ semantic = "closure/missing-bad-edge.txt"
 decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
 expected = "InvalidResponse"
 spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+sha256 = "4c251f82f9a5dd14bb275d263bc553d8f3c7da747abb1ce34a5b38589617f38a"
+semantic_sha256 = "18db8d2a7f70502678b6ea50b88b81a3929fa5205b90c3529d6c5f36fbd92191"
 
 [[fixtures]]
 type = "closure-missing"
@@ -576,6 +1052,8 @@ semantic = "closure/missing-bad-version.txt"
 decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
 expected = "InvalidResponse"
 spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+sha256 = "6ba89fb7dbf0b46c8567cb9acf7b244bf7429f192419d9b94e20555cdc177083"
+semantic_sha256 = "8b14a9d8bac2562f2c4a1f0a605b6368bf2ecf23bb355a8bc99ffa487decac22"
 
 [[fixtures]]
 type = "closure-missing"
@@ -587,6 +1065,8 @@ semantic = "closure/missing-trailing.txt"
 decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
 expected = "InvalidResponse"
 spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+sha256 = "f77b2d7d4e7fc8057adedd08032f61426b6d52450ce758ccf8634da28688539a"
+semantic_sha256 = "348a95b148f590250330518998bcc6164d54938868ceac26334ecc079b361804"
 
 [[fixtures]]
 type = "closure-state"
@@ -598,6 +1078,8 @@ semantic = "closure/state-absent.txt"
 decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
 expected = "ok"
 spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+sha256 = "4a8fcdbc64e6e03de978236087a7fd29e4329c50764e8f6189b2bd6b8e0bb66d"
+semantic_sha256 = "f2f283f89249397bba269e7c9eaff550f53f5ab1cefa39906208f451a21ed2e5"
 
 [[fixtures]]
 type = "closure-state"
@@ -609,6 +1091,8 @@ semantic = "closure/state-bad-kind.txt"
 decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
 expected = "InvalidResponse"
 spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+sha256 = "cc715c943cdbc45901e215c4d5542659927073f44a43d4a3080a2d708db74942"
+semantic_sha256 = "fd149b5999d8354ff51a0702410f173a3bfc33fa9b081d025b2113c88ae21933"
 
 [[fixtures]]
 type = "closure-state"
@@ -620,6 +1104,8 @@ semantic = "closure/state-bad-version.txt"
 decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
 expected = "InvalidResponse"
 spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+sha256 = "c6cdceae75b205689669477eb3983e083ef5530b613f6439901399f192e4332c"
+semantic_sha256 = "db9b0746f95766d3f7bfb10a77497e68bb394b9a4a86e40310759b9d12f96ac3"
 
 [[fixtures]]
 type = "closure-state"
@@ -631,6 +1117,8 @@ semantic = "closure/state-black.txt"
 decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
 expected = "ok"
 spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+sha256 = "87a47a8e63a137d4fda1f021c16d1ab8bb22bfda75bcc4662b6d11390ba161c4"
+semantic_sha256 = "60b0adfa1ee76e31a484bfb2b2393da6187721cba656f40b31924cd79677872f"
 
 [[fixtures]]
 type = "closure-state"
@@ -642,6 +1130,8 @@ semantic = "closure/state-gray.txt"
 decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
 expected = "ok"
 spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+sha256 = "1bdea7695d4151f0b1df2113c2318eec84a6bd886e048c4ae7cbe148e9f49033"
+semantic_sha256 = "9b4beef9b03ec1aa7fbd27f9bd72b97a7c3fd037958b0713ef25e31d334b6508"
 
 [[fixtures]]
 type = "closure-state"
@@ -653,6 +1143,8 @@ semantic = "closure/state-member.txt"
 decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
 expected = "ok"
 spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+sha256 = "88ac981f9416ff53e1d2264d0b8386124f714575d8748cc01d3c9dbf47b08ab5"
+semantic_sha256 = "000fbf5b3700b59cb9c37a36247cfacdf31cfac4154613bb703c11c613b29dbd"
 
 [[fixtures]]
 type = "closure-state"
@@ -664,6 +1156,8 @@ semantic = "closure/state-trailing.txt"
 decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
 expected = "InvalidResponse"
 spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+sha256 = "1ae8d89bb1b293fbca469d93970a3b463df7076179a62a0c44fa8e7f88fcd4ae"
+semantic_sha256 = "10fbea05a864455d9799533118b2dc2f0c474f30b22566f5f2673f269315ec78"
 
 [[fixtures]]
 type = "closure-witness"
@@ -675,6 +1169,8 @@ semantic = "closure/witness-bad-boolean.txt"
 decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
 expected = "InvalidResponse"
 spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+sha256 = "61f7bee95e4662d01acc7c64033ac5d18e4d18684f61799da98a287b1f10cab1"
+semantic_sha256 = "0d2a8fc4abb2d4a2303fa998f85b19253e3a875c8edff1361e26f39935853c33"
 
 [[fixtures]]
 type = "closure-witness"
@@ -686,6 +1182,8 @@ semantic = "closure/witness-bad-version.txt"
 decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
 expected = "InvalidResponse"
 spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+sha256 = "e7f0a8834a7c346b11742d28afc73d45f8b26af4b6519c6a59a106609ad6d2d5"
+semantic_sha256 = "cdde710f5c82070ee2b669eeddb32b3db4d96e99a74d4bbf2d64e8d43d4b0b03"
 
 [[fixtures]]
 type = "closure-witness"
@@ -697,6 +1195,8 @@ semantic = "closure/witness-member.txt"
 decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
 expected = "ok"
 spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+sha256 = "993e90c748363e9258e810ea4e5c57a48d081c9b37d21311313cb58280a8c600"
+semantic_sha256 = "3dfe62b13ec3e4d8b572dda77f55a87db7f637ec53b70eccd33fcdace33542d4"
 
 [[fixtures]]
 type = "closure-witness"
@@ -708,6 +1208,8 @@ semantic = "closure/witness-trailing.txt"
 decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
 expected = "InvalidResponse"
 spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+sha256 = "2ac4d76903cc28c0e90683bd8943a93426bdce39c00576716089d1a149a1a943"
+semantic_sha256 = "abd836e77061d4a4615cc9178301efb0b3bdda969b35e58efd2419bf6be12fb6"
 
 [[fixtures]]
 type = "closure-state"
@@ -719,6 +1221,8 @@ semantic = "closure/state-bad-payload.txt"
 decode_config = "max_bytes=1024"
 expected = "InvalidResponse"
 spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+sha256 = "c6ea56039df954116495c4310cb8ce8ee59490028983501f41c587370cf0ebbb"
+semantic_sha256 = "a5c17da2088d5a61ea08ba0425c8f43317634d7aea91c3073bcc46f6b5d3bd51"
 
 [[fixtures]]
 type = "closure-witness"
@@ -730,6 +1234,8 @@ semantic = "closure/witness-first.txt"
 decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
 expected = "ok"
 spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+sha256 = "28861507f4d19e5cf9458970a82baff68c8e369f96334c7fd0e6856be308bef9"
+semantic_sha256 = "4471659f245a6545afd66dd1d19ff5e8c66d3fa77b82250a4e9715a3efa5e53c"
 
 [[fixtures]]
 type = "closure-missing"
@@ -741,8 +1247,10 @@ semantic = "closure/missing-head.txt"
 decode_config = "max_bytes=4096,max_reasons=6,max_work=8192"
 expected = "ok"
 spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+sha256 = "e6a41678e2ce440f6b7febf057c1ce6fb66745d135c44c74a72162ee6a398214"
+semantic_sha256 = "88508fbcb0bce65c275016dec320846557e19b2a809187a453a6e70c502c763f"
 
-[[fixtures]]
+[[contracts]]
 type = "closure-semantics"
 format_version = 1
 ruleset = 1
@@ -752,99 +1260,124 @@ semantic = "closure/direct-children.txt"
 decode_config = "items=16,edges=16,batch=4,work=100000"
 expected = "missing"
 spec = "SPEC-SERVER.md#direct-child-closure-edges"
+sha256 = "500e5903ac8a8c124d706aca40049228299cd0e81c9d6c294e3dab2e2eec433c"
+semantic_sha256 = "f9157e577165f1dc761fd00100231dfc2ac208491fdc8fabe545cc8aea77d02c"
 
 # decision
 # auth
-[[fixtures]]
-type = "auth::AuthenticatedEnvelope"
+[[contracts]]
+type = "auth::AuthenticatedEnvelope.unary"
 format_version = 2
 ruleset = "SPEC-TRANSPORT-CONNECT-2"
 profile = "auth-v2"
 path = "auth/unary.json"
-semantic = "auth/README.md"
 decode_config = "core auth-v2 bounds; in-memory semantic input"
 expected = "verified"
 spec = "SPEC-TRANSPORT-CONNECT §7.1; §7.6"
+notes = "auth/README.md"
+sha256 = "f00c71fcaf9ff25c441d4b3c0502115abd7715a261fd020e07aa9ac7f890fff8"
 
-[[fixtures]]
-type = "auth::AuthenticatedEnvelope"
+[[contracts]]
+type = "auth::AuthenticatedEnvelope.read"
 format_version = 2
 ruleset = "SPEC-TRANSPORT-CONNECT-2"
 profile = "auth-v2"
 path = "auth/read.json"
-semantic = "auth/README.md"
 decode_config = "core auth-v2 bounds; in-memory semantic input"
 expected = "verified"
 spec = "SPEC-TRANSPORT-CONNECT §7.1; §7.6"
+notes = "auth/README.md"
+sha256 = "4fd1ad3d3a8e62142450718dc5c63213b61e16be0d569f32595073a71b8c1bb9"
 
-[[fixtures]]
-type = "auth::AuthenticatedEnvelope"
+[[contracts]]
+type = "auth::AuthenticatedEnvelope.part"
 format_version = 2
 ruleset = "SPEC-TRANSPORT-CONNECT-2"
 profile = "auth-v2"
 path = "auth/part.json"
-semantic = "auth/README.md"
 decode_config = "core auth-v2 bounds; in-memory semantic input"
 expected = "verified"
 spec = "SPEC-TRANSPORT-CONNECT §7.1; §7.6"
+notes = "auth/README.md"
+sha256 = "66a7ba3d98521d544ab9754a1d91260d8e632c917d0a63a1f2ee214b539bb5ee"
 
-[[fixtures]]
+[[contracts]]
 type = "auth::AuthFailure"
 format_version = 1
 ruleset = "SPEC-TRANSPORT-CONNECT-2"
 profile = "auth-v2"
 path = "auth/codes.json"
-semantic = "auth/README.md"
 decode_config = "core auth-v2 bounds; in-memory semantic input"
 expected = "stable code mappings"
 spec = "SPEC-TRANSPORT-CONNECT §7.1; §7.6"
+notes = "auth/README.md"
+sha256 = "3909fd9238a4621c01ee33e287767f5ea0f68e6717d6b95201fc0b61e9a18428"
 
-[[fixtures]]
+[[contracts]]
 type = "auth::ClaimsPrincipal"
 format_version = 1
 ruleset = "SPEC-TRANSPORT-CONNECT-2"
 profile = "auth-v2"
 path = "auth/claims.json"
-semantic = "auth/README.md"
 decode_config = "core auth-v2 bounds; in-memory semantic input"
 expected = "binding matrix"
 spec = "SPEC-TRANSPORT-CONNECT §7.1; §7.6"
+notes = "auth/README.md"
+sha256 = "7287916773c56f56b1ceba532f86d128beb373fd1ca1f6727314143422ae9f9b"
 
-[[fixtures]]
+[[contracts]]
 type = "auth::EnvelopePresence"
 format_version = 1
 ruleset = "SPEC-TRANSPORT-CONNECT-2"
 profile = "auth-v2"
 path = "auth/header-presence.json"
-semantic = "auth/README.md"
 decode_config = "core auth-v2 bounds; in-memory semantic input"
 expected = "presence and duplicate matrix"
 spec = "SPEC-TRANSPORT-CONNECT §7.1; §7.6"
+notes = "auth/README.md"
+sha256 = "43aadbbfd4de50ba0ef05a6dfe30e731df0191116ea4572ce3fc8fe73aa63cc4"
+
+[[contracts]]
+type = "auth-fixture-notes"
+ruleset = "SPEC-TRANSPORT-CONNECT-2"
+path = "auth/README.md"
+spec = "SPEC-TRANSPORT-CONNECT §7.1; §7.6"
+sha256 = "a4f55844229b85f75b8e7ea77ebfb7fa3cdd1dfdf634eb28b986ca74ee1efce5"
+
 # replay
-[[fixtures]]
+[[contracts]]
 type = "replay::ReplayDecision"
 format_version = 1
 ruleset = "SPEC-TRANSPORT-CONNECT-2"
 profile = "auth-v2"
 path = "replay/classifier.json"
-semantic = "replay/README.md"
 decode_config = "in-memory semantic input; no row encoding"
 expected = "full classifier matrix"
 spec = "SPEC-TRANSPORT-CONNECT §7.1"
+notes = "replay/README.md"
+sha256 = "a9d81f49cf776bed892f1938f2962872f9cf572ddfefc69c3142fb87d93087eb"
 
-[[fixtures]]
+[[contracts]]
 type = "replay::PermanentCode"
 format_version = 1
 ruleset = "SPEC-TRANSPORT-CONNECT-2"
 profile = "auth-v2"
 path = "replay/codes.json"
-semantic = "replay/README.md"
 decode_config = "in-memory semantic input; no row encoding"
 expected = "permanent allowlist; transient exclusions"
 spec = "SPEC-TRANSPORT-CONNECT §7.1"
+notes = "replay/README.md"
+sha256 = "692f47f957a35e4faa31419064db9f1789182bb1ef3a3d57733f1686df96ebf3"
+
+[[contracts]]
+type = "replay-fixture-notes"
+ruleset = "SPEC-TRANSPORT-CONNECT-2"
+path = "replay/README.md"
+spec = "SPEC-TRANSPORT-CONNECT §7.1"
+sha256 = "cb62d6447ffb640b6b017ff69fb8f2f705bcc58413675cfb98185bb643d77180"
 
 # fork
-[[fixtures]]
+[[contracts]]
 type = "fork.acceptance"
 format_version = 0
 ruleset = "SPEC-SERVER-9.9"
@@ -854,3 +1387,14 @@ semantic = "fork/acceptance.md"
 decode_config = "semantic; packs=3; edges=4; branch_bytes=128; index_entries=30; inherited_bytes=300; work=4096"
 expected = "per-case decision or stable code"
 spec = "SPEC-SERVER §9.9"
+sha256 = "ad07b73e73ece3f25c09cdc8ddf0501f9597ea7a7d572d78fde622dc0eb2c62b"
+semantic_sha256 = "b4761fe5ef453f3dec3d0caaa2a096122b571e5bd2a86d4a56b5a9684b451e44"
+
+# error
+[[contracts]]
+type = "failure-codes"
+ruleset = 1
+path = "error/failure-codes.txt"
+sha256 = "cf9748645c47f660296db9c978f1c884011797d5b0927f069d925e58d765ab2e"
+spec = "README.md stable failure codes"
+

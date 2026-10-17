@@ -18,7 +18,7 @@ workspace = true
 cargo-fuzz = true
 
 [dependencies]
-mkit-primitives = { path = "..", version = "0.1", default-features = false }
+mkit-primitives = { path = "..", version = "0.1", default-features = false, features = ["pack-ruzstd"] }
 mkit-core = { path = "../../mkit-core", default-features = false }
 libfuzzer-sys = { version = "0.4", optional = true }
 
@@ -53,6 +53,38 @@ bench = false
 [[bin]]
 name = "acceptance_decode"
 path = "fuzz_targets/acceptance_decode.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "framing"
+path = "fuzz_targets/framing.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "page"
+path = "fuzz_targets/page.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "proof"
+path = "fuzz_targets/proof.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "checkpoint"
+path = "fuzz_targets/checkpoint.rs"
 test = false
 doc = false
 bench = false

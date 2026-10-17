@@ -32,7 +32,7 @@ commonware_macros::stability_mod!(ALPHA, pub mod fork);
 commonware_macros::stability_mod!(ALPHA, pub mod auth);
 // replay
 commonware_macros::stability_mod!(ALPHA, pub mod replay);
-// Private shared decode infrastructure, activated by encoded implementations.
+// Private shared bounded decode infrastructure.
 #[cfg(any(
     test,
     not(any(
@@ -43,5 +43,4 @@ commonware_macros::stability_mod!(ALPHA, pub mod replay);
         commonware_stability_RESERVED
     ))
 ))]
-#[allow(dead_code)]
 mod codec;
