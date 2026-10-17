@@ -158,6 +158,56 @@ async fn diff_embeds_reference_and_emits_json() {
 
 #[cfg(feature = "reference-runner")]
 #[tokio::test]
+async fn diff_preserves_indexed_multi_profile_and_matches_native_decisions() {
+    use mkit_server_conformance::wire::Feature;
+
+    let mut profile = Profile::new(WireAuth::AuthV2 {
+        audience: "http://placeholder.invalid".into(),
+        repository: "default".into(),
+        seed: [0x62; 32],
+    });
+    profile.atomic_advance = true;
+    profile
+        .features
+        .extend([Feature::MultiRepo, Feature::Tickets, Feature::IndexedMode]);
+    profile.derive_features();
+    let host = ControlledHost::start(profile).await.unwrap();
+    assert!(host.profile().has(Feature::MultiRepo));
+    assert!(host.profile().has(Feature::IndexedMode));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("indexed-profile.toml");
+    std::fs::write(
+        &path,
+        profile_text(host.base_url()).replace(
+            "features = ['tickets']",
+            "features = ['tickets', 'multi-repo', 'indexed-mode']",
+        ),
+    )
+    .unwrap();
+    let output = invoke(vec![
+        "diff".into(),
+        "--base-url".into(),
+        host.base_url().into(),
+        "--profile".into(),
+        path.display().to_string(),
+    ])
+    .await;
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let cases = report["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), 4);
+    assert!(cases.iter().all(|case| case["status"] == "matched"));
+    host.shutdown().await;
+}
+
+#[cfg(feature = "reference-runner")]
+#[tokio::test]
 async fn diff_reports_excessive_pending_hint_as_runner_error_without_polling_early() {
     pending_hint_cli(false).await;
 }

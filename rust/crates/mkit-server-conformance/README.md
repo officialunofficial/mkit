@@ -128,7 +128,11 @@ an Ed25519 test key whose public seed is 32 bytes of `0x75`, independently of th
 profile's Tier-1 signer seed. A multi-repository target must admit that key's
 owner namespace and the repository named `differential-v1`; a single-repository
 target uses the configured repository. The reference host supports its declared
-test profile; unsupported profiles fail setup explicitly.
+test profile; unsupported profiles fail setup explicitly. Indexed differential
+profiles declare `multi-repo`, `indexed-mode`, `tickets`, auth v2, and atomic
+advance. The native CLI regression exercises that profile without dropping its
+features; the small canonical packs complete verification within the inline bound.
+This does not establish scheduled-verification equivalence.
 
 Normalization excludes allocated server identifiers, timing fields, and
 `Retry-After` values. Refusal comparison uses protocol error codes. Replay
