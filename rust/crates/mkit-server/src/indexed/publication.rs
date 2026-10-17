@@ -13,7 +13,13 @@ use crate::telemetry::Metrics;
 use futures::StreamExt as _;
 use mkit_core::hash::{Hash, hash};
 use mkit_core::ops::graph::{ClosureMode, children};
-use std::collections::{BTreeSet, VecDeque};
+use mkit_primitives::closure::pair::{
+    ClearedSet, ObjectFact, PackmapNode as PairNode, PairCheck, PairLimits, PairRequest,
+    PairResponse, PairStep, PairWalker, ResultingPair,
+};
+use mkit_primitives::evidence::{ProfileId, RepositoryId, Revision, RulesetBinding, RulesetId};
+use mkit_primitives::pack_verify::Acquisition;
+use std::collections::BTreeSet;
 
 fn closed() -> ServerError {
     ServerError::invalid_argument("open closure")
@@ -37,7 +43,8 @@ struct PairStore<'a, S> {
     store: &'a S,
     repo: &'a RepoId,
     additions: &'a [Hash],
-    packs: Option<&'a BTreeSet<Hash>>,
+    /// Sorted unique chain-listed packs; membership outside them is hidden.
+    packs: Option<&'a [Hash]>,
     policy: &'a dyn PublicationPolicy,
 }
 impl<S: NamespaceStore> PairStore<'_, S> {
@@ -45,7 +52,9 @@ impl<S: NamespaceStore> PairStore<'_, S> {
         if let Some(keys::ParsedKey::Membership { repo, pack_id }) = keys::parse(key) {
             if repo != self.repo.name
                 || !self.policy.pack_available(self.repo, &pack_id)
-                || self.packs.is_some_and(|packs| !packs.contains(&pack_id))
+                || self
+                    .packs
+                    .is_some_and(|packs| packs.binary_search(&pack_id).is_err())
             {
                 return None;
             }
@@ -210,9 +219,40 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
     metrics: &dyn Metrics,
     honor_cleared: bool,
 ) -> Result<(), ServerError> {
-    if branch && value.head.is_some() && value.packmap.is_none() {
-        return Err(closed());
-    }
+    // The primitive owns resulting-pair graph semantics; this host owns
+    // storage reads, byte accounting, item caps, and refusal mapping.
+    let pair = ResultingPair {
+        head: value.head,
+        packmap: value.packmap,
+        branch,
+    };
+    // Local identities bind machine state to this repository view only;
+    // they never leave the process.
+    let limits = PairLimits {
+        chain: u32::try_from(MAX_ADVANCE_ITEMS).unwrap_or(u32::MAX),
+        packs: u32::try_from(MAX_ADVANCE_ITEMS).unwrap_or(u32::MAX),
+        // The inline host bounds the frontier by its visited cap and the
+        // decode budget instead of a discovery count.
+        discovered: u32::MAX,
+        dependencies: u32::try_from(MAX_ADVANCE_ITEMS).unwrap_or(u32::MAX),
+        suppliers: u32::try_from(MAX_ADVANCE_ITEMS).unwrap_or(u32::MAX),
+        cleared: u32::try_from(crate::fork::MAX_SET_IDS).unwrap_or(u32::MAX),
+        max_delta_depth: cfg.max_delta_chain_depth,
+        // Reference work is bounded by the call and byte ledgers, not the
+        // machine's abstract work counter.
+        work: u64::MAX,
+    };
+    let mut walker = PairWalker::new(
+        pair,
+        &advance.additions,
+        pair_identity(repo),
+        Revision(hash(&advance.generation.to_be_bytes())),
+        PAIR_RULESET,
+        limits,
+        honor_cleared,
+        advance.generation,
+    )
+    .map_err(|_| item_capacity())?;
     let live = PairStore {
         store,
         repo,
@@ -220,127 +260,215 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
         packs: None,
         policy,
     };
-    let mut chain = BTreeSet::new();
-    let mut packs = BTreeSet::new();
-    let mut inherited = false;
-    let mut next = value.packmap;
     let mut remaining = cfg.decode_budget;
-    while let Some(id) = next {
-        if chain.len() + packs.len() >= MAX_ADVANCE_ITEMS {
-            return Err(item_capacity());
-        }
-        if !chain.insert(id) {
-            return Err(capped());
-        }
-        let (node, flagged) = packlist(
-            blobs,
-            &live,
-            shards,
-            repo,
-            id,
-            &advance.additions,
-            &mut remaining,
-        )
-        .await?;
-        inherited |= flagged;
-        packs.extend(node.packs);
-        if chain.len() + packs.len() > MAX_ADVANCE_ITEMS {
-            return Err(item_capacity());
-        }
-        next = node.prev;
-    }
-    // Branch pairs cannot use a nonempty head with no reconstructing packmap.
-    // For standalone refs the caller supplies no packmap and closure may use
-    // any live repository member; dependencies still gate reader publication.
-    let restricted = value.packmap.is_some();
-    let closure = PairStore {
-        store,
-        repo,
-        additions: &advance.additions,
-        packs: restricted.then_some(&packs),
-        policy,
-    };
-    let mut queue = VecDeque::from_iter(value.head);
-    let mut visited = BTreeSet::new();
-    let mut dependencies = chain;
-    dependencies.extend(packs.iter().copied());
-    let mut bases = BTreeSet::new();
-    // A fork's cleared set is consulted only when the chain contains the
-    // flagged inherited head, so a skipped object's packs are listed here.
-    // The skip leans on the advance-time pack proof, which runs only with
-    // pack-level takedown denial; without it every object is walked, as the
-    // walk's own per-object block check needs.
-    let cleared = if inherited && honor_cleared {
-        crate::fork::boundary::load(store, shards, repo)
-            .await
-            .map_err(|_| unavailable())?
-    } else {
-        crate::fork::boundary::Cleared::default()
-    };
-    bases.extend(cleared.bases.iter().copied());
-    while let Some(id) = queue.pop_front() {
-        if !visited.insert(id) {
-            continue;
-        }
-        // The head is always read: its kind is checked below.
-        if cleared.ids.contains(&id) && Some(id) != value.head {
-            continue;
-        }
-        if visited.len() > MAX_ADVANCE_ITEMS {
-            return Err(item_capacity());
-        }
-        let located = resolve::locate_split(&closure, shards, repo, &[id], metrics)
-            .await?
-            .remove(&id)
-            .ok_or_else(closed)?
-            .map_err(|_| capped())?
-            .ok_or_else(closed)?;
-        dependencies.insert(located.pack);
-        let mut memo = resolve::MemberCache::with_work_budget(256);
-        let mut visiting = BTreeSet::new();
-        let (bytes, _) = resolve::member_object(
-            blobs,
-            &live,
-            shards,
-            repo,
-            id,
-            located,
-            cfg.max_delta_chain_depth,
-            remaining,
-            &mut memo,
-            &mut visiting,
-            metrics,
-        )
-        .await
-        .map_err(|e| match e {
-            resolve::ResolveFailure::Other(e) if e.public_message() == "object blocked" => e,
-            resolve::ResolveFailure::Missing => closed(),
-            resolve::ResolveFailure::Capped => capped(),
-            resolve::ResolveFailure::Store(_) => {
-                ServerError::unavailable("object storage request failed")
-            }
-            resolve::ResolveFailure::Other(e) | resolve::ResolveFailure::Corrupt(e) => e,
-        })?;
-        remaining = remaining
-            .checked_sub(memo.retained_bytes())
-            .ok_or_else(capped)?;
-        for ((_, pack, _), _) in memo.rows() {
-            if *pack != located.pack {
-                bases.insert(*pack);
+    loop {
+        // Reference order: the combined chain/pack cap is checked before the
+        // repeat check that step() performs.
+        if walker.pending_packmap().is_some() {
+            let counts = walker.counts();
+            if counts.chain + counts.packs >= MAX_ADVANCE_ITEMS as u64 {
+                return Err(item_capacity());
             }
         }
-        let object = mkit_core::serialize::deserialize(&bytes).map_err(|_| closed())?;
-        if Some(id) == value.head && super::verify::history_parents(&object).is_none() {
-            return Err(closed());
-        }
-        queue.extend(children(&object, ClosureMode::History));
-        if dependencies.len() > MAX_ADVANCE_ITEMS || bases.len() > MAX_ADVANCE_ITEMS {
-            return Err(item_capacity());
+        match walker.step() {
+            Err(error) => return Err(pair_failure(&error, walker.failure_context())),
+            Ok(PairStep::Progress) => {}
+            Ok(PairStep::Covered(coverage)) => {
+                advance.dependencies = coverage.dependencies().to_vec();
+                advance.external_bases = coverage.external_suppliers().to_vec();
+                return Ok(());
+            }
+            Ok(PairStep::Request(request)) => {
+                let request = request.clone();
+                match request {
+                    PairRequest::PackmapNode { request, pack, .. } => {
+                        let (node, flagged) = packlist(
+                            blobs,
+                            &live,
+                            shards,
+                            repo,
+                            pack,
+                            &advance.additions,
+                            &mut remaining,
+                        )
+                        .await?;
+                        walker
+                            .answer(PairResponse::PackmapNode {
+                                request,
+                                pack,
+                                value: Acquisition::Present(PairNode {
+                                    prev: node.prev,
+                                    packs: &node.packs,
+                                    boundary: flagged,
+                                }),
+                            })
+                            .map_err(|error| pair_failure(&error, walker.failure_context()))?;
+                        let counts = walker.counts();
+                        if counts.chain + counts.packs > MAX_ADVANCE_ITEMS as u64 {
+                            return Err(item_capacity());
+                        }
+                    }
+                    PairRequest::Boundary { request } => {
+                        // The machine asks exactly when a flagged chain node
+                        // makes the cleared set reachable and honored.
+                        let cleared = crate::fork::boundary::load(store, shards, repo)
+                            .await
+                            .map_err(|_| unavailable())?;
+                        let objects: Vec<Hash> = cleared.ids.iter().copied().collect();
+                        let suppliers: Vec<Hash> = cleared.bases.iter().copied().collect();
+                        walker
+                            .answer(PairResponse::Boundary {
+                                request,
+                                value: Acquisition::Present(ClearedSet {
+                                    objects: &objects,
+                                    suppliers: &suppliers,
+                                }),
+                            })
+                            .map_err(|error| pair_failure(&error, walker.failure_context()))?;
+                    }
+                    PairRequest::Object {
+                        request,
+                        object,
+                        restricted,
+                        ..
+                    } => {
+                        // Cleared skips happen inside the machine; the cap is
+                        // checked only on real object requests, as before.
+                        if walker.counts().visited > MAX_ADVANCE_ITEMS as u64 {
+                            return Err(item_capacity());
+                        }
+                        let closure = PairStore {
+                            store,
+                            repo,
+                            additions: &advance.additions,
+                            packs: restricted.then_some(walker.chain_packs()),
+                            policy,
+                        };
+                        let located =
+                            resolve::locate_split(&closure, shards, repo, &[object], metrics)
+                                .await?
+                                .remove(&object)
+                                .ok_or_else(closed)?
+                                .map_err(|_| capped())?
+                                .ok_or_else(closed)?;
+                        let mut memo = resolve::MemberCache::with_work_budget(256);
+                        let mut visiting = BTreeSet::new();
+                        let (bytes, _) = resolve::member_object(
+                            blobs,
+                            &live,
+                            shards,
+                            repo,
+                            object,
+                            located,
+                            cfg.max_delta_chain_depth,
+                            remaining,
+                            &mut memo,
+                            &mut visiting,
+                            metrics,
+                        )
+                        .await
+                        .map_err(|e| match e {
+                            resolve::ResolveFailure::Other(e)
+                                if e.public_message() == "object blocked" =>
+                            {
+                                e
+                            }
+                            resolve::ResolveFailure::Missing => closed(),
+                            resolve::ResolveFailure::Capped => capped(),
+                            resolve::ResolveFailure::Store(_) => {
+                                ServerError::unavailable("object storage request failed")
+                            }
+                            resolve::ResolveFailure::Other(e)
+                            | resolve::ResolveFailure::Corrupt(e) => e,
+                        })?;
+                        remaining = remaining
+                            .checked_sub(memo.retained_bytes())
+                            .ok_or_else(capped)?;
+                        let suppliers: Vec<Hash> = memo
+                            .rows()
+                            .filter(|((_, pack, _), _)| *pack != located.pack)
+                            .map(|((_, pack, _), _)| *pack)
+                            .collect();
+                        let object_data =
+                            mkit_core::serialize::deserialize(&bytes).map_err(|_| closed())?;
+                        let children = children(&object_data, ClosureMode::History);
+                        walker
+                            .answer(PairResponse::Object {
+                                request,
+                                object,
+                                value: Acquisition::Present(ObjectFact {
+                                    pack: located.pack,
+                                    kind: object_data.object_type(),
+                                    children: &children,
+                                    suppliers: &suppliers,
+                                    base: None,
+                                }),
+                            })
+                            .map_err(|error| pair_failure(&error, walker.failure_context()))?;
+                        let counts = walker.counts();
+                        if counts.dependencies > MAX_ADVANCE_ITEMS as u64
+                            || sorted_union_len(walker.suppliers(), walker.cleared_suppliers())
+                                > MAX_ADVANCE_ITEMS as u64
+                        {
+                            return Err(item_capacity());
+                        }
+                    }
+                    // Inline facts carry no base; this request never arises.
+                    _ => return Err(unavailable()),
+                }
+            }
+            _ => return Err(unavailable()),
         }
     }
-    advance.dependencies = dependencies.into_iter().collect();
-    advance.external_bases = bases.into_iter().collect();
-    Ok(())
+}
+
+/// Map a machine refusal to the reference error surface. Semantic checks keep
+/// their classification; host-side protocol violations are unavailability.
+/// Pair-coverage identities are process-local: they bind a walker's state
+/// (and its checkpoints) to this repository name and never leave the server.
+pub(super) fn pair_identity(repo: &RepoId) -> RepositoryId {
+    RepositoryId(hash(repo.name.as_str().as_bytes()))
+}
+/// The fixed ruleset the reference server verifies against.
+pub(super) const PAIR_RULESET: RulesetBinding = RulesetBinding {
+    ruleset: RulesetId(1),
+    profile: ProfileId::Indexed,
+};
+
+/// Sorted-union size of two strictly-ascending id lists, without allocation.
+fn sorted_union_len(left: &[Hash], right: &[Hash]) -> u64 {
+    let (mut a, mut b, mut n) = (0usize, 0usize, 0u64);
+    while a < left.len() && b < right.len() {
+        match left[a].cmp(&right[b]) {
+            std::cmp::Ordering::Less => a += 1,
+            std::cmp::Ordering::Greater => b += 1,
+            std::cmp::Ordering::Equal => {
+                a += 1;
+                b += 1;
+            }
+        }
+        n += 1;
+    }
+    n + (left.len() - a + right.len() - b) as u64
+}
+
+fn pair_failure(
+    error: &mkit_primitives::error::Failure,
+    context: Option<PairCheck>,
+) -> ServerError {
+    use mkit_primitives::error::FailureCode;
+    match error.code {
+        FailureCode::MissingClosure | FailureCode::WrongKind => closed(),
+        FailureCode::PackmapCycle => capped(),
+        FailureCode::ResourceLimit => item_capacity(),
+        _ => {
+            debug_assert!(
+                matches!(context, None | Some(PairCheck::Bound(_))),
+                "host must not feed the machine invalid facts"
+            );
+            unavailable()
+        }
+    }
 }
 
 /// Verify the resulting pair within a caller's slice, a child of the request's
