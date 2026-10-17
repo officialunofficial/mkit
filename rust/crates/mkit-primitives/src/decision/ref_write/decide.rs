@@ -15,7 +15,7 @@ use crate::{
 };
 use mkit_core::{
     hash::Hash,
-    refs::{BRANCH_REF_PREFIX, PACKMAP_REF_PREFIX, RefWriteCondition, validate_ref_name},
+    refs::{RefWriteCondition, validate_ref_name},
 };
 
 struct Attempt<'a> {
@@ -95,13 +95,9 @@ fn invalid_shape(request: &RefWriteRequest<'_>) -> bool {
     {
         return true;
     }
-    if pair {
-        let packmap = request.changes[0].name.0.strip_prefix(PACKMAP_REF_PREFIX);
-        let head = request.changes[1].name.0.strip_prefix(BRANCH_REF_PREFIX);
-        if packmap.is_none() || packmap != head {
-            return true;
-        }
-    }
+    // A pair is positional: any two valid ref names decide under the first
+    // change's outcome class (SPEC-TRANSPORT-CONNECT §4 leaves the canonical
+    // packmap/head pairing optional to the server).
     if matches!(
         request.kind,
         RefWriteKind::Delete | RefWriteKind::DeletePair

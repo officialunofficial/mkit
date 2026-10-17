@@ -67,7 +67,18 @@ pub const fn guard_kind(guard: &RequiredGuard) -> GuardKind {
     }
 }
 
-fn intrinsic_guard_kinds(
+/// Kind-level completeness over bare effects.
+///
+/// An embedder composing extra effects under SPEC-SERVER §10.4 has only the
+/// `AcceptanceEffects`, not a sealed decision: this is the intrinsic effect
+/// rule for that composition. The stronger sealed-decision rule is
+/// [`required_guard_kinds`], which calls this and adds the refusal-only
+/// dependencies the artifact retains.
+///
+/// # Errors
+/// `InvalidResponse` when a non-Apply class still carries mutations;
+/// `ResourceLimit` if the bounded category collection cannot be allocated.
+pub fn effect_guard_kinds(
     class: &DecisionClass,
     effects: &AcceptanceEffects,
 ) -> Result<Vec<GuardKind>, Failure> {
@@ -149,7 +160,7 @@ pub fn required_guard_kinds(
         WriteDecision::Apply(mutations) => mutations,
         _ => &empty,
     };
-    let mut kinds = intrinsic_guard_kinds(class, mutations)?;
+    let mut kinds = effect_guard_kinds(class, mutations)?;
     if matches!(
         effects.decision(),
         WriteDecision::Reject {

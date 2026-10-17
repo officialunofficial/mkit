@@ -14,8 +14,8 @@ mod publication;
 mod tests;
 
 pub use complete::{
-    GUARD_REQUIREMENTS_VERSION, check_guard_completeness, guard_kind, required_guard_kinds,
-    validate_guard_kind,
+    GUARD_REQUIREMENTS_VERSION, check_guard_completeness, effect_guard_kinds, guard_kind,
+    required_guard_kinds, validate_guard_kind,
 };
 pub use decide::decide_ref_write;
 pub use publication::{RefPublication, decide_ref_publication};
@@ -30,7 +30,9 @@ use mkit_core::{hash::Hash, refs::RefWriteCondition};
 pub enum RefWriteKind {
     /// One creation or update.
     Update,
-    /// Packmap followed by its head, with neither changing on conflict.
+    /// Two ref changes decided under the first change's outcome class. Any
+    /// two valid names decide — canonical packmap/head pairing is a server
+    /// option under SPEC-TRANSPORT-CONNECT §4, not a decision precondition.
     Advance,
     /// One deletion; only an exact match is permitted.
     Delete,

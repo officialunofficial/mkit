@@ -29,6 +29,10 @@ pub struct RefPublication {
 
 /// Decide publication sequence, prefix, pair and deletion boundary atomically.
 ///
+/// ALPHA: this fragment ships check-only — the server decides with it and
+/// verifies its projection, but no wire caller drives it yet. Lanes F3 and
+/// C2a will call it for clearance publication and fork activation.
+///
 /// This fragment composes with ref acceptance in the same transaction. It emits
 /// no membership, retained-advance or outcome effect. Those proofs and effects
 /// belong to their owning decisions. An absent row is the only initial state.

@@ -185,10 +185,12 @@ fn portable_ref_planner_preserves_generic_and_noncanonical_shapes() {
         condition,
         new: None,
     };
-    // Requests the portable contract does not express — unconditional or
-    // MISSING deletes, duplicate refs, unmatched or reversed pairs, mixed
-    // writes, extra updates, and unserved names — keep the generic CAS
-    // decision, guard order, conflict precedence, and outcomes.
+    // Protocol-admitted shapes the planner must answer either way: pairs are
+    // positional, so unmatched, reversed, and repeated names decide portably
+    // (SPEC-TRANSPORT-CONNECT §4). Shapes the wire rejects or no procedure
+    // emits — unconditional or MISSING deletes and extra updates — keep the
+    // generic CAS decision. Guard order, conflict precedence, and outcomes
+    // must match on both paths.
     let cases: Vec<Vec<RefUpdate>> = vec![
         vec![delete(Any)],
         vec![delete(Missing)],

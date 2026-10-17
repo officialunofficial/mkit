@@ -254,6 +254,17 @@ unless another rule depends on that value; admission may depend only on presence
 The published-source fence in §9.3 remains a separate check before each destination
 apply attempt, rather than an atomic source-at-commit comparison.
 
+**Reference-server behavior.** The portable ref decision answers every request
+shape the wire admits: a single create/update, a single exact-match delete,
+and any pair of valid ref names — canonical, unmatched, reversed, or
+repeated — decided positionally under the first change's outcome class
+(SPEC-TRANSPORT-CONNECT §4 makes the canonical packmap/head pairing
+optional). Shapes the wire rejects or leaves to the implementation — a delete
+whose expectation is not `MATCH` or whose new ID is nonempty
+(SPEC-TRANSPORT-CONNECT §7.8), and a request carrying more than two ref
+changes — keep the reference server's generic per-ref CAS decision, and the
+portable decision answers a typed refusal for them.
+
 ### 3.2 Replay, durability, and recovery
 
 **Protocol requirement.** A committed replay MUST answer with its saved result

@@ -462,6 +462,122 @@ fn completeness_catches_each_same_kind_key_and_kind_omission() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // Each intrinsic kind needs its own effect and assertion.
+fn effect_guard_kinds_reports_each_intrinsic_effect_and_its_omission() {
+    use crate::decision::ReservationFact;
+    use crate::evidence::{PackSource, SourceBinding};
+    type Add = fn(&mut AcceptanceEffects);
+    let base = AcceptanceEffects {
+        refs: vec![RefEffect {
+            name: name(),
+            target: Some(NEW),
+        }],
+        membership: vec![],
+        tickets: vec![],
+        reservations: vec![],
+        reservation_transitions: vec![],
+        replay: None,
+        publication: vec![],
+        accounting: vec![],
+        outcomes: vec![],
+    };
+    let mut effects = base.clone();
+    // An unguarded unconditional write needs no intrinsic kind; each other
+    // effect group contributes exactly its own category.
+    assert!(effect_guard_kinds(&DecisionClass::Apply, &effects).unwrap().is_empty());
+    let additions: [(GuardKind, Add); 6] = [
+        (GuardKind::Membership, |effects| {
+            effects.membership.push(MembershipEffect {
+                repository: REPO,
+                pack: PackSource {
+                    id: NEW,
+                    len: 1,
+                    binding: SourceBinding([7; 32]),
+                },
+            });
+        }),
+        (GuardKind::Ticket, |effects| {
+            effects.tickets.push(TicketTransition {
+                id: crate::decision::TicketId([8; 32]),
+                next: None,
+            });
+        }),
+        (GuardKind::Reservation, |effects| {
+            effects
+                .reservation_transitions
+                .push(ReservationTransition {
+                    id: crate::decision::ReservationId([9; 32]),
+                    next: ReservationFact::Pending {
+                        repository: REPO,
+                        operation: crate::decision::OperationId([10; 32]),
+                        created_ms: 0,
+                        expires_ms: 1,
+                    },
+                });
+        }),
+        (GuardKind::Replay, |effects| {
+            effects.replay = Some(ReplayTransition {
+                scope: crate::decision::ReplayScope(NEW),
+                next: ReplayFact {
+                    fingerprint: SIGNER,
+                    expires_ms: 1,
+                    state: ReplayState::InFlight { resumable: false },
+                },
+            });
+        }),
+        (GuardKind::Publication, |effects| {
+            effects.publication.push(PublicationEffect {
+                repository: REPO,
+                next: PublicationFact {
+                    generation: REV,
+                    sequence: 0,
+                    published_prefix: 0,
+                    deletion_boundary: 0,
+                    head: None,
+                    packmap: None,
+                },
+            });
+        }),
+        (GuardKind::Accounting, |effects| {
+            effects.accounting.push(AccountingEffect {
+                scope: NEW,
+                bytes: 1,
+                operations: 1,
+            });
+        }),
+    ];
+    for (kind, add) in additions {
+        let mut composed = effects.clone();
+        add(&mut composed);
+        let kinds = effect_guard_kinds(&DecisionClass::Apply, &composed).unwrap();
+        assert!(kinds.contains(&kind), "missing intrinsic kind {kind:?}");
+        // Omitting the effect must omit its kind: embedders under SPEC-SERVER
+        // §10.4 compose only effects, so the rule observes the effect itself.
+        assert!(!effect_guard_kinds(&DecisionClass::Apply, &base)
+            .unwrap()
+            .contains(&kind));
+        let mut repeated = composed.clone();
+        add(&mut repeated);
+        assert_eq!(
+            effect_guard_kinds(&DecisionClass::Apply, &repeated)
+                .unwrap()
+                .iter()
+                .filter(|k| **k == kind)
+                .count(),
+            1
+        );
+        effects = composed;
+    }
+    // A non-Apply class carrying mutations is an inconsistent composition.
+    assert_eq!(
+        effect_guard_kinds(&DecisionClass::Conflict, &effects)
+            .unwrap_err()
+            .code,
+        FailureCode::InvalidResponse
+    );
+}
+
+#[test]
 fn unacquired_duplicate_contradictory_and_cap_plus_one_inputs_fail_closed() {
     let changes = [change(Match(OLD))];
     let req = request(&changes);

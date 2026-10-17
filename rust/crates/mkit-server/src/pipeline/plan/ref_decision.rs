@@ -27,16 +27,18 @@ use crate::{
 };
 
 /// The request remains bound to its sealed semantic decision through lowering.
-/// Served shapes outside the portable contract — duplicate refs, unmatched or
-/// reversed pairs, and unconditional or `MISSING` deletes — keep the generic
-/// per-ref CAS decision the unextracted planner used.
+/// Shapes the wire rejects or no wire procedure emits — unconditional or
+/// `MISSING` deletes and requests with more than two changes — keep the
+/// generic per-ref CAS decision the unextracted planner used (SPEC-SERVER
+/// §3.1, "Reference-server behavior").
 pub(super) enum RefDecision<'request, 'data> {
-    /// A canonical served shape decided by the portable contract.
+    /// A served shape decided by the portable contract — including
+    /// noncanonical but protocol-admitted pairs.
     Portable {
         request: &'request WriteRequest<'data>,
         guarded: Box<Guarded<WriteDecision>>,
     },
-    /// A noncanonical shape decided by the generic CAS path.
+    /// A shape the portable contract refuses, decided by the generic CAS path.
     Generic {
         outcome: Option<StoredResult>,
         guards: Vec<Precondition>,
@@ -311,11 +313,25 @@ pub(super) fn lower(
                 WriteKind::UpdateRef => StoredResult::UpdateRef(UpdateRefResult::Conflict {
                     current: observed.value,
                 }),
-                WriteKind::AdvanceRefs if observed.name.0 == request.refs[0].name => {
-                    StoredResult::AdvanceRefs(mkit_core::protocol::AdvanceOutcome::PackmapConflict)
-                }
                 WriteKind::AdvanceRefs => {
-                    StoredResult::AdvanceRefs(mkit_core::protocol::AdvanceOutcome::HeadConflict)
+                    // Outcome names are positional, matching the reference
+                    // planner: the first change whose condition conflicts
+                    // with the observed value is the conflicting slot.
+                    match request.refs.iter().position(|update| {
+                        update.name == observed.name.0
+                            && matches!(
+                                evaluate_condition(observed.value.as_ref(), &update.condition,),
+                                CasDecision::Conflict(_)
+                            )
+                    }) {
+                        Some(0) => StoredResult::AdvanceRefs(
+                            mkit_core::protocol::AdvanceOutcome::PackmapConflict,
+                        ),
+                        Some(_) => StoredResult::AdvanceRefs(
+                            mkit_core::protocol::AdvanceOutcome::HeadConflict,
+                        ),
+                        None => return Err(super::internal("unmatched ref conflict")),
+                    }
                 }
                 _ => return Err(super::internal("unexpected ref conflict kind")),
             };
@@ -377,57 +393,142 @@ fn ref_snapshot(repository: RepositoryId) -> RefSnapshot {
     }
 }
 
+/// The guard sealed for `name`'s value expectation, when the decision took one.
+fn ref_value<'g>(
+    guarded: &'g Guarded<WriteDecision>,
+    name: &str,
+) -> Option<&'g Observed<mkit_core::hash::Hash>> {
+    guarded
+        .required_guards()
+        .iter()
+        .find_map(|guard| match guard {
+            RequiredGuard::RefValue {
+                name: candidate,
+                expected,
+                ..
+            } if candidate.0 == name => Some(expected),
+            _ => None,
+        })
+}
+
+fn push_value(
+    required: &mut Vec<Precondition>,
+    key: crate::store::Key,
+    expected: &Observed<mkit_core::hash::Hash>,
+) -> Result<(), ServerError> {
+    required.push(match expected {
+        Observed::Absent(_) => Precondition::Absent(key),
+        Observed::Present { value, .. } => Precondition::Equals(key, codec::encode_ref_id(value)),
+        _ => return Err(super::internal("unsupported ref observation")),
+    });
+    Ok(())
+}
+
+/// Emit each processed update's guards in request order. The reference guards
+/// every update it evaluates, so a repeated name contributes once per slot; a
+/// conflict bounds the processed prefix at the first failing condition.
+fn lower_ref_slots(
+    request: &WriteRequest<'_>,
+    guarded: &Guarded<WriteDecision>,
+    required: &mut Vec<Precondition>,
+) -> Result<(), ServerError> {
+    let boundary = if matches!(guarded.decision(), WriteDecision::Conflict { .. }) {
+        let mut found = None;
+        for (index, update) in request.refs.iter().enumerate() {
+            if update.condition == mkit_core::refs::RefWriteCondition::Any {
+                continue;
+            }
+            let expected = ref_value(guarded, &update.name)
+                .ok_or_else(|| super::internal("missing portable ref guard"))?;
+            let current = match expected {
+                Observed::Present { value, .. } => Some(*value),
+                Observed::Absent(_) => None,
+                _ => return Err(super::internal("unsupported ref observation")),
+            };
+            if matches!(
+                evaluate_condition(current.as_ref(), &update.condition),
+                CasDecision::Conflict(_)
+            ) {
+                found = Some(index + 1);
+                break;
+            }
+        }
+        found.ok_or_else(|| super::internal("unmatched ref conflict"))?
+    } else {
+        request.refs.len()
+    };
+    for update in &request.refs[..boundary] {
+        let key = keys::ref_key(request.repo, &update.name);
+        // A sealed presence guard is discharged by the slot's own CAS when
+        // admission already resolved it under a real condition.
+        let covered = update.condition != mkit_core::refs::RefWriteCondition::Any
+            && ref_value(guarded, &update.name).is_some()
+            && request
+                .resolved_ref_updates
+                .iter()
+                .any(|resolved| resolved.name == update.name);
+        let presence = guarded
+            .required_guards()
+            .iter()
+            .find_map(|guard| match guard {
+                RequiredGuard::RefPresence { name, present, .. } if name.0 == update.name => {
+                    Some(*present)
+                }
+                _ => None,
+            });
+        if let (Some(present), false) = (presence, covered) {
+            required.push(if present {
+                Precondition::Present(key.clone())
+            } else {
+                Precondition::Absent(key.clone())
+            });
+        }
+        if update.condition != mkit_core::refs::RefWriteCondition::Any {
+            match ref_value(guarded, &update.name) {
+                Some(expected) => push_value(required, key, expected)?,
+                None => return Err(super::internal("missing portable ref guard")),
+            }
+        }
+    }
+    Ok(())
+}
+
 fn lower_guards(
     request: &WriteRequest<'_>,
     guarded: &Guarded<WriteDecision>,
 ) -> Result<Vec<Precondition>, ServerError> {
-    let mut required = Vec::new();
     for requirement in guarded.required_guards() {
         match requirement {
-            RequiredGuard::RefValue {
-                repository,
-                name,
-                expected,
-            } if *repository == guarded.repository() => {
-                let key = keys::ref_key(request.repo, &name.0);
-                required.push(match expected {
-                    Observed::Absent(_) => Precondition::Absent(key),
-                    Observed::Present { value, .. } => {
-                        Precondition::Equals(key, codec::encode_ref_id(value))
-                    }
-                    _ => return Err(super::internal("unsupported ref observation")),
-                });
-            }
-            RequiredGuard::RefPresence {
-                repository,
-                name,
-                present,
-            } if *repository == guarded.repository() => {
-                // The exact CAS already discharges admission's presence guard.
-                // Preserve the reference batch shape instead of adding another
-                // backend condition for the same conditional admission fact.
-                let covered = request
-                    .resolved_ref_updates
-                    .iter()
-                    .any(|update| update.name == name.0)
-                    && request.refs.iter().any(|update| {
-                        update.name == name.0
-                            && update.condition != mkit_core::refs::RefWriteCondition::Any
-                    })
-                    && guarded.required_guards().iter().any(|guard| {
-                        matches!(guard,
-                        RequiredGuard::RefValue { name: key, .. } if key == name)
-                    });
-                if !covered {
+            RequiredGuard::RefValue { repository, .. }
+            | RequiredGuard::RefPresence { repository, .. }
+                if *repository == guarded.repository() => {}
+            _ => return Err(super::internal("unsupported portable ref guard")),
+        }
+    }
+    let mut required = Vec::new();
+    if matches!(
+        guarded.decision(),
+        WriteDecision::Apply(_) | WriteDecision::Conflict { .. }
+    ) {
+        lower_ref_slots(request, guarded, &mut required)?;
+    } else {
+        // Terminal classes emit each sealed guard once; the preconditions are
+        // checked for completeness but never committed.
+        for requirement in guarded.required_guards() {
+            match requirement {
+                RequiredGuard::RefValue { name, expected, .. } => {
                     let key = keys::ref_key(request.repo, &name.0);
+                    push_value(&mut required, key, expected)?;
+                }
+                RequiredGuard::RefPresence { name, present, .. } => {
                     required.push(if *present {
-                        Precondition::Present(key)
+                        Precondition::Present(keys::ref_key(request.repo, &name.0))
                     } else {
-                        Precondition::Absent(key)
+                        Precondition::Absent(keys::ref_key(request.repo, &name.0))
                     });
                 }
+                _ => return Err(super::internal("unsupported portable ref guard")),
             }
-            _ => return Err(super::internal("unsupported portable ref guard")),
         }
     }
     let discharged: Vec<_> = guarded
