@@ -33,6 +33,10 @@ impl Budget {
         self.owned = next_owned;
         Ok(())
     }
+    /// Work units still available inside this budget.
+    pub(crate) const fn remaining(&self) -> u64 {
+        self.work
+    }
 }
 
 #[derive(Debug)]

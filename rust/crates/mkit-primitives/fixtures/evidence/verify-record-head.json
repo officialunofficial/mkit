@@ -1,0 +1,10 @@
+{
+  "blake3": "49d28b265f54f905d3ffbdbf5ef07d8ba33623edbf7e459ce720b44e6f5b6ff1",
+  "description": "Head-candidate record for a commit at occurrence ordinal 3.",
+  "encoded_bytes": 99,
+  "expected": "HeadRecord",
+  "format_version": 1,
+  "kind": "commit",
+  "occurrence_ordinal": 3,
+  "ordinal_in_page": 0
+}

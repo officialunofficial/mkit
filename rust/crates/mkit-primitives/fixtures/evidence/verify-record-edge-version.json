@@ -1,0 +1,7 @@
+{
+  "blake3": "d006adb5cf698e4a8f1bde535ab16523d18babb20a9d6ddea174a93fc836497f",
+  "description": "Wrong version byte for the dependency edge record.",
+  "encoded_bytes": 93,
+  "expected": "InvalidEvidence",
+  "format_version": 1
+}

@@ -1,0 +1,7 @@
+{
+  "blake3": "f85049992a49e564e8b99f14a0ebae388a5fab332d92940ba50b4435273ba691",
+  "description": "Wrong version byte for the ordinal record.",
+  "encoded_bytes": 42,
+  "expected": "InvalidEvidence",
+  "format_version": 1
+}

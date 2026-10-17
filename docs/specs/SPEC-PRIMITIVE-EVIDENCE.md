@@ -52,7 +52,8 @@ source_len:u64           complete pack length including trailer
 source_binding[32]       immutable caller source version
 ruleset:u32              1
 profile:u8               1 = indexed
-kind:u8                  0 objects, 1 occurrences, 2 dependencies, 3 closure
+kind:u8                  0 objects, 1 occurrences, 2 dependencies, 3 closure,
+                         4 heads, 5 ordinals
 height:u8                0 leaf, 1..32 internal
 items:u16                0..16 leaf records, 1..16 internal children
 payload_len:u32
@@ -235,14 +236,66 @@ cursor, but no integrity frontier. Complete phase has neither frontier nor
 cursor; its consumed count and byte position MUST exactly reach the declared
 entry count and trailer boundary.
 
-For every checkpoint, acknowledged page count MUST equal consumed entry count
-and cumulative evidence page count. A last retained commitment exists exactly
-when this count is nonzero; it names one occurrence record. Cumulative usage
-MUST fit the encoded limits. The source length MUST fit both protocol and
-content-profile ceilings. Resume additionally compares the envelope with the
+For a format version 1 checkpoint, acknowledged page count MUST equal consumed
+entry count and cumulative evidence page count. A last retained commitment
+exists exactly when this count is nonzero; it names one occurrence record. A
+format version 2 checkpoint instead requires the acknowledged page count to
+equal the cumulative committed page count across all six evidence indexes, and
+its last retained commitment may name any committed evidence page kind (see
+4.1.1). Cumulative usage MUST fit the encoded limits. The source length MUST
+fit both protocol and content-profile ceilings. Resume additionally compares the envelope with the
 caller's expected source, repository, ruleset, limits, and run binding, and
 checks core cursor metadata against the outer phase and counters. Successful
 envelope decoding alone does not perform those resume checks.
+
+#### 4.1.1 Verify-state section (format version 2)
+
+**Protocol requirement.**
+
+`format_version:u16 = 2` appends one verify-state section after `core_cursor`
+and before `checksum`. The section exists exactly when the version is 2 and
+the phase is decode; a version-1 envelope carries no section and a version-2
+envelope with any other phase is invalid. Every earlier field keeps the §4.1
+v1 layout and validation.
+
+```text
+objects:page_commitment,     count:u64     kind byte MUST be 0
+ordinals:page_commitment,    count:u64     kind byte MUST be 5
+occurrences:page_commitment, count:u64     kind byte MUST be 1
+dependencies:page_commitment,count:u64     kind byte MUST be 2
+referenced:page_commitment,  count:u64     kind byte MUST be 0
+heads:page_commitment,       count:u64     kind byte MUST be 4
+delta_entries:u64
+decoded:u64
+edges:u64
+external_lookups:u64
+signature_failure:optional(object_id[32], ordinal:u64)
+```
+
+Each index entry is the 49-byte root commitment followed by the committed
+record count. `signature_failure` is a two-field optional value: `0` absent,
+`1` present with an object id and the owning occurrence ordinal; any other
+tag is invalid.
+
+Consistency rules, all of which resume MUST check before progress:
+
+- `occurrences.count = consumed_entries`; every consumed wire entry owns
+  exactly one occurrence record.
+- `objects.count = ordinals.count`; only first occurrences add object and
+  ordinal records.
+- `ordinals.count <= consumed_entries`, `heads.count <= ordinals.count`,
+  `delta_entries <= consumed_entries`, and
+  `dependencies.count <= edges + external_lookups`.
+- `decoded` fits both the encoded execution limits and the encoded content
+  profile; `edges` and `external_lookups` fit the encoded execution limits.
+- A present `signature_failure` ordinal is below `consumed_entries`.
+- Every committed page commitment names a canonical page within the encoded
+  page-byte and fan-out ceilings.
+
+Cold verify resume re-authenticates every committed evidence page through
+caller-supplied page requests before continuing; a lost page is unavailable
+input, never absence. The retained set is not serialized into the envelope
+beyond its root commitments.
 
 Integrity frontiers represent completed 8 MiB subtrees. A nonfinal acquired
 offset MUST lie on a subtree boundary. Sources no larger than 8 MiB have no
@@ -272,14 +325,157 @@ names the immediately preceding acknowledged occurrence page. Each complete page
 records framing and retention; it does not establish canonical object identity,
 delta resolution, signatures, membership, or acceptance.
 
+### 4.3 All-entry verify evidence
+
+**Protocol requirement.**
+
+The all-entry verify driver commits five ordered sequences and one keyed
+index. Ordered sequences use the ordinal key of §2; the object index and the
+referenced-object index use type-dependent object ids as keys. Every record
+begins with `record_version:u8 = 1`; any other version is invalid. Numeric
+fields are little-endian. A `kind` byte names a SPEC-OBJECTS type: 1 blob,
+2 tree, 3 commit, 4 remix, 5 chunked_blob, 7 tag. A boolean byte is `0` or
+`1`; any other value is invalid. `signature` is `0` none, `1` valid,
+`2` invalid; `domain` is `0` none, `1` commit, `2` remix, `3` tag. `domain`
+MUST equal the signing domain implied by `kind` — commit→`1`, remix→`2`,
+tag→`3`, every other kind→`0` — and domain `none` and signature `none` agree
+exactly: a record with one set and not the other is invalid. Unsigned
+records carry all-zero `signer` and `signing_digest`; any nonzero value
+under signature `none` is invalid.
+
+The **object record** (120 bytes, kind `objects`) is written once per
+distinct object, at its first wire occurrence:
+
+```text
+record_version:u8        1
+kind:u8
+canonical_len:u64
+first_ordinal:u64
+delta_depth:u32
+signature:u8
+domain:u8
+signer[32]
+signing_digest[32]
+dep_start:u64            first dependency-sequence ordinal this object owns
+dep_count:u64
+chunk_total:u64          chunked_blob payload length, else 0
+chunk_count:u64          chunked_blob chunk count, else 0
+```
+
+`chunk_total` and `chunk_count` are nonzero only when `kind` is
+`chunked_blob`; they summarize the chunked manifest for consumers that
+cannot re-read canonical bytes. `dep_start`/`dep_count` delimit the
+object's slice of the dependency sequence.
+
+The **occurrence record** (179 bytes, kind `occurrences`) is written once
+per wire entry, in wire order:
+
+```text
+record_version:u8        1
+object[32]
+kind:u8
+canonical_len:u64
+frame_offset:u64
+frame_len:u64
+wire_type:u8             pack frame type (SPEC-PACKFILE §3)
+from_delta:u8            boolean
+delta_base[32]           all-zero when from_delta is 0
+delta_depth:u32
+signature:u8
+first:u8                 boolean; the owning occurrence that wrote the
+                         object record
+domain:u8
+signer[32]
+signing_digest[32]
+ext_start:u64            first external-fact ordinal this occurrence owns
+ext_count:u64
+```
+
+The **ordinal record** (42 bytes, kind `ordinals`) enumerates the distinct
+object set in first-occurrence order for positional lookup; its sequence
+position is the object's first-occurrence rank, not a wire ordinal (the
+occurrence record already maps wire ordinal to object):
+
+```text
+record_version:u8        1
+object[32]
+kind:u8
+canonical_len:u64
+```
+
+The **head record** (99 bytes, kind `heads`) is one immutable head-candidate
+fact: an object never named as another object's edge target. Whether a
+candidate kind is an allowed head is a closure decision, not a verify one.
+
+```text
+record_version:u8        1
+object[32]
+kind:u8
+occurrence_ordinal:u64   owning wire occurrence
+page:page_commitment     object-index leaf holding the object record
+ordinal_in_page:u64      record position within that leaf
+```
+
+The `page` commitment's kind byte MUST be `0` (objects). With the verified
+object-set root, `page` plus `ordinal_in_page` completes an authenticated
+object-record lookup.
+
+The **dependency record** (kind `dependencies`) has two tagged layouts.
+Tag `1` is an object edge (93 bytes):
+
+```text
+record_version:u8        1
+tag:u8                   1
+subject[32]              referencing object id
+subject_ordinal:u64      subject's first-occurrence ordinal
+target[32]
+edge_kind:u8             0 tree-entry, 1 tree, 2 parent, 3 chunk, 4 tag-target
+edge_ordinal:u64         edge position within the subject
+flags:u8                 bit0 expected_kind present, bit1 expected_len present;
+                         other bits invalid
+expected_kind:u8         kind byte, or 0 when bit0 clear
+expected_len:u64         or 0 when bit1 clear
+```
+
+Tag `2` is an external delta-base fact (289 bytes):
+
+```text
+record_version:u8        1
+tag:u8                   2
+consumed_ordinal:u64     wire ordinal of the delta entry that consumed it
+child[32]                object the consuming entry produced
+repository[32]
+incarnation[32]
+object[32]
+kind:u8
+canonical_len:u64
+supplier_id[32]          supplier pack identity
+supplier_len:u64
+supplier_binding[32]
+canonical_binding[32]
+revision[32]             membership observation revision
+delta_depth:u32          supplier-reported base depth
+published:u8             boolean
+held:u8                  boolean
+```
+
+External facts are repository-scoped verified-member answers the caller
+supplied during verification; recording them binds the evidence to the exact
+repository, incarnation, supplier, and observation revision used. A
+verification that consumed no external base commits no tag-2 record, and
+the `dep_start`/`dep_count` + `ext_start`/`ext_count` spans let a consumer
+attribute every dependency record to its owning object or occurrence without
+rescanning the sequence.
+
 ## 5. Version history
 
 | Format | Version | Policy |
 |---|---|---|
-| Page | 1 | Initial source-bound canonical page envelope. |
+| Page | 1 | Initial source-bound canonical page envelope; kinds 4–5 added with verify. |
 | Proof | 1 | Exact routed root-to-leaf page path. |
 | Frame record | 1 | Ordered framing-only retention chain. |
-| Checkpoint | 1 | Current-only reconstructible state; unsupported versions restart. |
+| Checkpoint | 1–2 | Current-only reconstructible state; 2 adds verify state, unsupported versions restart. |
+| Verify records | 1 | All-entry object, occurrence, ordinal, head, and dependency evidence. |
 
 ## 6. Test vectors
 

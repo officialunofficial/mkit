@@ -26,6 +26,16 @@ collect the applicable entries between their old and new immutable pins.
   and `ReservationTerminalKind::StorageChanged` in exhaustive consumers.
   Wire and stored formats are unchanged; no store reset is required.
 
+- [embedder: breaking API] The all-entry pack verifier adds
+  `PackCounts::delta_entries` and replaces
+  `VerifiedPack::external_dependencies()` with `dependencies()`. Migration:
+  initialize the new count in struct literals and read typed
+  `DependencyRecord` values from the combined dependency sequence to distinguish
+  graph edges from external bases. Verification checkpoints use envelope
+  version 2; framing checkpoints retain version 1. Restart unsupported disposable
+  checkpoints from their immutable source. Pack and object bytes are unchanged;
+  no repository store reset is required.
+
 - Native `pack-zstd` now enforces the same 8 MiB effective window and RFC 8878
   block maximum as `pack-ruzstd`. Previously accepted oversized windows or
   blocks return `ZstdDecompress`. Migration: re-encode such input with a window
@@ -100,6 +110,12 @@ collect the applicable entries between their old and new immutable pins.
   decides ticketed advances through them and verifies every sealed guard
   projects to a physical precondition. No wire or stored-format change or
   store reset; source migrations are listed under Breaking.
+
+- Add bounded all-entry `VerifyDriver` verification to `mkit-primitives`, with
+  canonical object identity, earlier-entry and repository-scoped external delta
+  bases, individual signatures, authenticated paged evidence, and cold resume.
+  Object fragments stay provisional until `Step::Complete` seals a
+  `VerifiedPack`. Resource limits cover decoder scratch, evidence, and work.
 
 - Add portable guarded ref and publication decisions to `mkit-primitives`, with
   exact keyed dependencies, refusal-only guards, finite work bounds, semantic

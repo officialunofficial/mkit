@@ -28,7 +28,7 @@ pub use record::FrameRecord;
 pub(super) const CANONICAL_BYTES: u64 = 1_048_586;
 pub(super) const FRAME_BYTES: u64 = 16 << 20;
 pub(super) const DELTA_BYTES: u64 = CANONICAL_BYTES + CANONICAL_BYTES.div_ceil(127) + 9;
-const DECODER_SCRATCH: u64 = 28 << 20;
+pub(super) const DECODER_SCRATCH: u64 = 28 << 20;
 
 /// A decoded frame. Canonical validation, delta resolution, and signatures
 /// belong to all-entry verification; this event establishes none of them.

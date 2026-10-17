@@ -30,6 +30,13 @@ decoder = "evidence::checkpoint::Checkpoint::from_bytes"
 fuzz_target = "checkpoint"
 spec = "SPEC-PRIMITIVE-EVIDENCE"
 
+[[formats]]
+type = "verify-checkpoint"
+format_version = 2
+decoder = "evidence::checkpoint::Checkpoint::from_bytes"
+fuzz_target = "checkpoint"
+spec = "SPEC-PRIMITIVE-EVIDENCE"
+
 [[fixtures]]
 type = "AcceptanceEvidence"
 format_version = 1
@@ -793,9 +800,9 @@ decode_config = "indexed-checkpoint"
 expected = "InvalidCheckpoint"
 spec = "SPEC-PRIMITIVE-EVIDENCE checkpoint envelope"
 path = "evidence/checkpoint-version.bin"
-sha256 = "3fcf55ab8ec604854e09558a11b0ee80894b8d0a7e843c454c9c6c1c50545a7b"
+sha256 = "1ab054518a61715896408cdfca8495098584bffc3de366a00491d62523fdadee"
 semantic = "evidence/checkpoint-version.json"
-semantic_sha256 = "aa61788774c2804f5ee7e18c0cc5d254715a81984251eac04abcdc0ce3dd9360"
+semantic_sha256 = "ecf76fedd558f33954a0d9991ca6571c0af8d6ce8a26ecf6bb33934ad9f9282a"
 
 [[fixtures]]
 type = "framing-checkpoint"
@@ -887,6 +894,19 @@ path = "evidence/checkpoint-complete.bin"
 sha256 = "6bfa89e174a23e365f9215949365a84a294e4f769c675a30fb0e4829b36f8559"
 semantic = "evidence/checkpoint-complete.json"
 semantic_sha256 = "e700621a5049b9fe2d53c480863fd1171840fab31cf44605684edd683b2cc3c5"
+
+[[fixtures]]
+type = "verify-checkpoint"
+format_version = 2
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed-checkpoint"
+expected = "Checkpoint"
+spec = "SPEC-PRIMITIVE-EVIDENCE checkpoint envelope"
+path = "evidence/checkpoint-verify.bin"
+sha256 = "6249432dcd84699ffd1c33b50ad2d61f72d3b5bc1c023de1914ea165e6f8206e"
+semantic = "evidence/checkpoint-verify.json"
+semantic_sha256 = "be797c4125e6f742f3bc93d567008c5de007b64d7c5f0db9c51e26c40c5b2f8e"
 
 [[fixtures]]
 type = "evidence-page"
@@ -1643,3 +1663,167 @@ format_version = 1
 decoder = "decision::ticketed::decide_ticketed_advance"
 fuzz_target = "ref_decisions"
 spec = "SPEC-SERVER §6.3; §9.3; SPEC-TRANSPORT-CONNECT §4"
+
+# verify
+[[formats]]
+type = "verify-record"
+format_version = 1
+decoder = "pack_verify::verify::records::{ObjectRecord,OccurrenceRecord,OrdinalRecord,DependencyRecord,HeadRecord}::from_bytes"
+fuzz_target = "verify"
+spec = "SPEC-PRIMITIVE-EVIDENCE"
+
+[[fixtures]]
+type = "verify-record"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed"
+expected = "ObjectRecord"
+spec = "SPEC-PRIMITIVE-EVIDENCE verify records"
+path = "evidence/verify-record-object.bin"
+sha256 = "816263583444f1eee31190847411cc00dc67ae3a4bdb547dbeafdfc96761784d"
+semantic = "evidence/verify-record-object.json"
+semantic_sha256 = "2351b3ef138b9522617b5f7e421c12fba16d4ce1fc3980294d96a19a043e1e59"
+
+[[fixtures]]
+type = "verify-record"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed"
+expected = "InvalidEvidence"
+spec = "SPEC-PRIMITIVE-EVIDENCE verify records"
+path = "evidence/verify-record-object-version.bin"
+sha256 = "bdd6dfb79b9f696b307aabbd8510ab51ea29109fdf6135579e33389bc7475802"
+semantic = "evidence/verify-record-object-version.json"
+semantic_sha256 = "4e6eda9f38e7a7d0b4c1428265eb534571888d690358857ba38d321b2cfba3d8"
+
+[[fixtures]]
+type = "verify-record"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed"
+expected = "OccurrenceRecord"
+spec = "SPEC-PRIMITIVE-EVIDENCE verify records"
+path = "evidence/verify-record-occurrence.bin"
+sha256 = "2c66a0eb7a842ad7d976050cf14d06b0e355345c5464879bd972e69f722e0e80"
+semantic = "evidence/verify-record-occurrence.json"
+semantic_sha256 = "7c1125748c987c6dc6d465c29995f8befe423b426c2d8f5a37e6a9ad288f12ac"
+
+[[fixtures]]
+type = "verify-record"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed"
+expected = "InvalidEvidence"
+spec = "SPEC-PRIMITIVE-EVIDENCE verify records"
+path = "evidence/verify-record-occurrence-version.bin"
+sha256 = "abc05d60e0d724bb8acaaa48c8d0ad5d064bb1aaddde8f416ed0beb430edba74"
+semantic = "evidence/verify-record-occurrence-version.json"
+semantic_sha256 = "29bf222a36fe2b08c17308f26a6b327be082b111e0f59dfcc0e8d099504a4a9a"
+
+[[fixtures]]
+type = "verify-record"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed"
+expected = "OrdinalRecord"
+spec = "SPEC-PRIMITIVE-EVIDENCE verify records"
+path = "evidence/verify-record-ordinal.bin"
+sha256 = "0ee4c927d50caa5ff81d995c19c7864c62828f8f261deb521de1649a86a70ef4"
+semantic = "evidence/verify-record-ordinal.json"
+semantic_sha256 = "aae65981bd6859843cc2b66d96a0fc62f2de7cdc8f4c40d3c0d3d167e7ecba31"
+
+[[fixtures]]
+type = "verify-record"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed"
+expected = "InvalidEvidence"
+spec = "SPEC-PRIMITIVE-EVIDENCE verify records"
+path = "evidence/verify-record-ordinal-version.bin"
+sha256 = "82e6f8b77c49bbbc34cafad5735a8699cb0a4e4f6f7e0cdca1b74cc7ce3aa13a"
+semantic = "evidence/verify-record-ordinal-version.json"
+semantic_sha256 = "2a27fbef504c3a83fed8116b417c668e5294dc6b086fcfec7c1179c46c3d661b"
+
+[[fixtures]]
+type = "verify-record"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed"
+expected = "HeadRecord"
+spec = "SPEC-PRIMITIVE-EVIDENCE verify records"
+path = "evidence/verify-record-head.bin"
+sha256 = "97be3cdc4afbab42c513686ddc0d860dbbe40e9d66911d32c19f09aca2c3722e"
+semantic = "evidence/verify-record-head.json"
+semantic_sha256 = "a8aa18da2e5b5ea270f546a12508442eb986016ed6a29af8a9c77787cac6a2d7"
+
+[[fixtures]]
+type = "verify-record"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed"
+expected = "InvalidEvidence"
+spec = "SPEC-PRIMITIVE-EVIDENCE verify records"
+path = "evidence/verify-record-head-version.bin"
+sha256 = "bf77f757d878c9b8c6ff99c21171e1e1b3cefcf4c376f6ce11d69193cfbbc330"
+semantic = "evidence/verify-record-head-version.json"
+semantic_sha256 = "87eedbba52740c4e3aa073999fd995ff48fcc29378dd4c62dd70ba7810b83264"
+
+[[fixtures]]
+type = "verify-record"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed"
+expected = "DependencyRecord::Edge"
+spec = "SPEC-PRIMITIVE-EVIDENCE verify records"
+path = "evidence/verify-record-edge.bin"
+sha256 = "51d6de20a0ef5ec2332a8389daf8db094e17c432e3e6c985c7eb39ac922b473b"
+semantic = "evidence/verify-record-edge.json"
+semantic_sha256 = "9fdd66056c018792b5e39afc8bff24629216909692050c1c89deda364fcae552"
+
+[[fixtures]]
+type = "verify-record"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed"
+expected = "InvalidEvidence"
+spec = "SPEC-PRIMITIVE-EVIDENCE verify records"
+path = "evidence/verify-record-edge-version.bin"
+sha256 = "b9a33304b5b38cfc0b07d65295c3f3c3b92f791927a1d79abf9e083f479d8565"
+semantic = "evidence/verify-record-edge-version.json"
+semantic_sha256 = "3631910ec017f12e68a1ca92688a1070edb5dbf7bdbefdf86f1b01dd7433b292"
+
+[[fixtures]]
+type = "verify-record"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed"
+expected = "DependencyRecord::External"
+spec = "SPEC-PRIMITIVE-EVIDENCE verify records"
+path = "evidence/verify-record-external.bin"
+sha256 = "3ec90312e4d30522a6f7685dbe15794601c7eecc4e258a371ab6da228b7ae6c2"
+semantic = "evidence/verify-record-external.json"
+semantic_sha256 = "f1ce807794a3047bd2c7796a4dc3af5a7e687e8560a80f851b6aca34f6da4414"
+
+[[fixtures]]
+type = "verify-record"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+decode_config = "indexed"
+expected = "InvalidEvidence"
+spec = "SPEC-PRIMITIVE-EVIDENCE verify records"
+path = "evidence/verify-record-external-version.bin"
+sha256 = "ddfbfce8027b3218b1dc1cd968648094a06a15feece161924949995aa81b236a"
+semantic = "evidence/verify-record-external-version.json"
+semantic_sha256 = "d63ab9d7d11ce11a95ccad6a979900d28df0ba4722aa14afe1c2da4a2e22270c"

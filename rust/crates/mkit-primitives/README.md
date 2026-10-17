@@ -1,7 +1,7 @@
 # mkit-primitives
 
-Bounded sans-IO pack framing and evidence codecs, with shared contracts for
-all-entry verification, repository closure, and guarded write decisions.
+Bounded sans-IO pack framing, all-entry verification, and evidence codecs, with
+repository closure and guarded write decisions.
 Version **0.1.0** is independent of the workspace release train. All public
 APIs are **ALPHA**. The crate also provides guarded fork acceptance and
 bounded direct-child closure with authenticated local evidence pages, auth-v2
@@ -59,6 +59,23 @@ names content ceilings. Decoder reservations include window buffers, carried
 frames, decoded output, and scratch. Hosts budget their own source buffers and
 external retained-page storage separately.
 
+## Verify every entry
+
+`pack_verify::verify::VerifyDriver` authenticates the complete pack before
+decoding each canonical object in wire order. It resolves deltas from earlier
+entries or repository-scoped `MemberFact` bases and verifies each applicable
+signature individually. Construction uses the same source, repository, profile,
+limits, and fresh run generation as framing. Drive it through `Step`, supply
+the requested `Response`, and acknowledge retained pages before advancing.
+
+`ObjectFragment` bytes remain provisional until `Step::Complete` returns a
+privately constructed `VerifiedPack`. The artifact exposes exact counts,
+including `delta_entries`, and authenticated object, occurrence, ordinal,
+dependency, and head roots. Read `DependencyRecord` values to distinguish graph
+edges from external base facts. Missing retained evidence is unavailable input;
+it cannot establish absence or completion. Repository closure and live write
+authorization remain separate checks.
+
 ## Decode bounded evidence
 
 `encode_leaf` and `encode_internal` construct canonical pages; `BranchChild`
@@ -105,8 +122,10 @@ is not a wasm configuration.
 
 Crate API version, normative ruleset, semantic profile, and encoded format
 versions are separate contracts. The initial indexed ruleset is 1. Page,
-proof, checkpoint, pair-coverage checkpoint, and ordered framing-record
-formats each start at version 1.
+proof, pair-coverage checkpoint, and ordered framing-record formats use version
+1. Framing checkpoints use envelope version 1; all-entry verification
+checkpoints use version 2 and bind six evidence roots and cumulative
+verification counters.
 Unsupported disposable state versions require restart from the immutable
 source; historical readers are not promised. Existing pack and object bytes
 remain unchanged.
@@ -143,6 +162,8 @@ the full set; diagnostic `Display` text is not a code parser.
 | `evidence::checkpoint` | Strict current-version untrusted checkpoint envelope |
 | `pack_verify` | Request/response contracts, resource usage, opaque `VerifiedPack` accessors |
 | `pack_verify::framing` | Two-pass pull driver, provisional frames, retention, `FramedPack` |
+| `pack_verify::verify` | All-entry canonical/delta/signature verification, paged evidence, cold resume, sealed `VerifiedPack` |
+| `pack_verify::verify::records` | Strict fixed-size object, occurrence, ordinal, head, and dependency codecs |
 | `closure` | `ClosureWalker`, finite `ClosureLimits`, batched facts, authenticated local pages and opaque closure/missing results |
 | `fork` | Bounded full-inventory plans, final source fences, guarded acceptance and exact terminal replay |
 | `auth` | Portable envelope verification and host-authenticated claims binding |

@@ -1,0 +1,7 @@
+{
+  "blake3": "664c12b56109fd8093c97a29c808155d983593a71f2a9f969acceece99b1a1bd",
+  "description": "Wrong version byte for the external dependency record.",
+  "encoded_bytes": 289,
+  "expected": "InvalidEvidence",
+  "format_version": 1
+}
