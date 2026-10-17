@@ -43,8 +43,15 @@ fn decode<T: serde::de::DeserializeOwned>(value: &Value) -> Result<T, ForkError>
 fn observed(key: Key, value: Option<&Value>) -> Precondition {
     crate::store::outbox::guard(key, value)
 }
-fn local_value(record: &Value, active: bool) -> Value {
-    Value::new([&[u8::from(active)][..], record.as_bytes()].concat())
+fn local_value(record: &Value, active: bool) -> Result<Value, ForkError> {
+    let mut identity: Record = decode(record)?;
+    // Renewal changes only the coordinator deadline. Sibling projections keep
+    // one local identity, while their individual NotAfter guards still expire.
+    identity.expires_ms = 0;
+    let identity = encode(&identity)?;
+    Ok(Value::new(
+        [&[u8::from(active)][..], identity.as_bytes()].concat(),
+    ))
 }
 
 /// The exact local authority a physical membership batch must guard.
@@ -90,7 +97,7 @@ pub(crate) async fn prepare<S: NamespaceStore>(
     let local_key = keys::fork_permit_local(repo);
     let local = env.store.get(target, &local_key).await?;
     let (record, value) = register(env, job, ns, repo, *prefix).await?;
-    let active = local_value(&value, true);
+    let active = local_value(&value, true)?;
     let install = Batch::new()
         .require(observed(local_key.clone(), local.as_ref()))
         .require(Precondition::NotAfter(record.expires_ms))
@@ -132,7 +139,7 @@ fn matching_binding(record: &Record, expected: &Record) -> Result<(), ForkError>
     Ok(())
 }
 
-/// Reuse live tokens rather than extending them on every sibling projection.
+/// Renew bounded deadlines without changing the shared local permit identity.
 async fn register<S: NamespaceStore>(
     env: &ForkEnv<'_, S>,
     job: &ForkJobV1,
@@ -170,19 +177,13 @@ async fn register<S: NamespaceStore>(
         epoch: job.fence_rows.epoch.clone(),
         expires_ms: env.now().saturating_add(super::CONTENT_WINDOW),
     };
-    let (record, value) = match previous.as_ref() {
-        Some(value) => {
-            // Validate identity even when an expired token needs replacement.
-            let prior: Record = decode(value)?;
-            matching_binding(&prior, &expected)?;
-            if prior.expires_ms > env.now() {
-                (prior, value.clone())
-            } else {
-                (expected.clone(), encode(&expected)?)
-            }
-        }
-        None => (expected.clone(), encode(&expected)?),
-    };
+    let mut record = expected.clone();
+    if let Some(value) = previous.as_ref() {
+        let prior: Record = decode(value)?;
+        matching_binding(&prior, &expected)?;
+        record.expires_ms = record.expires_ms.max(prior.expires_ms);
+    }
+    let value = encode(&record)?;
     let mut registration = Batch::new()
         .require(Precondition::Absent(drain_key))
         .require(Precondition::Equals(
@@ -285,7 +286,7 @@ pub(crate) async fn release<S: NamespaceStore>(
         }
         let local_key = keys::fork_permit_local(&dest.name);
         let local = env.store.get(&target, &local_key).await?;
-        let tombstone = local_value(&value, false);
+        let tombstone = local_value(&value, false)?;
         if local.as_ref() != Some(&tombstone) {
             let batch = Batch::new()
                 .require(observed(local_key.clone(), local.as_ref()))
@@ -445,7 +446,7 @@ pub(crate) async fn transition<S: NamespaceStore>(
         }
         let local_key = keys::fork_permit_local(&repo);
         let local = env.store.get(&target, &local_key).await?;
-        let tombstone = local_value(&value, false);
+        let tombstone = local_value(&value, false)?;
         if local.as_ref() != Some(&tombstone) {
             let invalidation = Batch::new()
                 .require(Precondition::NotAfter(
@@ -528,7 +529,7 @@ mod tests {
                 expires_ms: 10_000,
             })
             .unwrap();
-            let active = local_value(&value, true);
+            let active = local_value(&value, true).unwrap();
             let mut registration = Batch::new()
                 .put(keys::fork_permit(&repo, 0), value)
                 .put(keys::fork_permits_seen(), Value::default());
@@ -586,6 +587,92 @@ mod tests {
                 Some(next)
             );
         }
+    }
+
+    #[test]
+    fn renewal_shares_identity_but_does_not_extend_an_older_batch_deadline() {
+        let clock = Arc::new(ManualClock::new(1_000));
+        let store = MemoryKv::with_clock(clock.clone());
+        let shards = D34Shards;
+        let ns = NamespaceKey::deployment_default();
+        let coordinator = shards.coordinator(&ns);
+        let repo = RepoName::new("destination").unwrap();
+        let target = Partition::RepoIndex {
+            ns: ns.clone(),
+            repo: repo.clone(),
+            prefix: 0,
+        };
+        let old = codec::encode_u64(0);
+        let mut record = Record {
+            binding: [1; 32],
+            repo: repo.as_str().to_owned(),
+            prefix: 0,
+            authority: Some(old.as_bytes().to_vec()),
+            epoch: None,
+            expires_ms: 2_000,
+        };
+        let earlier = encode(&record).unwrap();
+        record.expires_ms = 11_000;
+        let renewed = encode(&record).unwrap();
+        let active = local_value(&earlier, true).unwrap();
+        assert_eq!(active, local_value(&renewed, true).unwrap());
+        block_on(store.apply(
+            &target,
+            Batch::new().put(keys::fork_permit_local(&repo), active.clone()),
+        ))
+        .unwrap();
+        block_on(
+            store.apply(
+                &coordinator,
+                Batch::new()
+                    .put(keys::authority_generation(), old.clone())
+                    .put(keys::fork_permit(&repo, 0), renewed),
+            ),
+        )
+        .unwrap();
+        clock.advance(1_001);
+        let member = keys::membership(&repo, &[2; 32]);
+        let physical = |expires| {
+            Batch::new()
+                .require(Precondition::Equals(
+                    keys::fork_permit_local(&repo),
+                    active.clone(),
+                ))
+                .require(Precondition::NotAfter(expires))
+                .put(member.clone(), Value::default())
+        };
+        assert!(matches!(
+            block_on(store.apply(&target, physical(2_000))).unwrap(),
+            BatchOutcome::DeadlinePassed { .. }
+        ));
+        assert_eq!(block_on(store.get(&target, &member)).unwrap(), None);
+        assert!(matches!(
+            block_on(store.apply(&target, physical(11_000))).unwrap(),
+            BatchOutcome::Committed
+        ));
+        let env = ForkEnv {
+            store: &store,
+            shards: &shards,
+            clock: clock.as_ref(),
+            takedown_denial: false,
+            extract_min_bytes: None,
+            limits: super::super::ForkLimits::default(),
+        };
+        assert!(
+            block_on(transition(
+                &env,
+                &ns,
+                &keys::authority_generation(),
+                Some(&old),
+                &codec::encode_u64(1),
+                0
+            ))
+            .unwrap()
+        );
+        assert!(matches!(
+            block_on(store.apply(&target, physical(11_000))).unwrap(),
+            BatchOutcome::PreconditionFailed { .. }
+        ));
     }
 
     #[test]
