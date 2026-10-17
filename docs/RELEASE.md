@@ -263,8 +263,8 @@ the publish gate checks the server too, including that pinned baseline.
 
 crates.io publishing is **tag-driven**, owned by
 [`.github/workflows/crates-publish.yml`](../.github/workflows/crates-publish.yml).
-On a pushed `v*.*.*` tag it runs `cargo publish --workspace --locked`, which
-first publishes the standalone `mkit-ruzstd` package, then publishes every
+On a pushed `v*.*.*` tag it first ensures the standalone `mkit-ruzstd` package
+is published, then runs `cargo publish --workspace --locked` to publish every
 workspace member without `publish = false` to crates.io in
 dependency order, waiting for each to index before the next. A guard refuses to
 publish if the tag does not match the workspace version (`mkit-core`'s version
@@ -285,8 +285,19 @@ Notes on the published set:
 - **`mkit-ruzstd`** &mdash; the MIT-licensed bounded decoder is a standalone
   package under **rust/vendor/ruzstd/**. Its own version follows the fork's
   dependency requirement, independently of the workspace tag version. The
-  release workflow publishes it and waits for registry indexing before the
+  release workflow runs **scripts/publish-bounded-decoder.py** before the
   workspace publish, so `mkit-core/pack-ruzstd` resolves the named package.
+  The script runs `cargo package --locked --no-verify` and checks crates.io
+  for that exact version. An absent version is published, waiting for registry
+  indexing. For a present version, the script downloads the published `.crate`
+  and compares its extracted file list and every file byte with the local
+  package. Identical contents skip the upload with an explicit message.
+  Different contents fail the release: the fork changed and needs a version
+  bump. No published version is overwritten. Archive ordering, timestamps,
+  and compression metadata do not affect the comparison; packaged files do.
+  Registry or download errors fail the release instead of skipping publication.
+  Local fixture tests in **scripts/test-publish-bounded-decoder.py** cover
+  absent, identical, and different packages without network access.
   Validate the fork package with `cargo publish --dry-run --locked
   --manifest-path vendor/ruzstd/Cargo.toml` from **rust/** before release.
 

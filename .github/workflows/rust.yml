@@ -164,6 +164,7 @@ jobs:
           node-version: '22'
       - name: Verify native gate wiring and bounded decoder graph
         run: |
+          python3 scripts/test-publish-bounded-decoder.py
           python3 scripts/test-server-gates.py --hosted-only
           python3 scripts/check-launch-feature-graph.py
       - name: Native TestHost contracts over HTTP
