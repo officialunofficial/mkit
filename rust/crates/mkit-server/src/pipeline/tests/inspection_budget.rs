@@ -113,6 +113,7 @@ fn inspection_pair_budget_includes_dependency_visibility_before_hooks() {
             fork_barrier: false,
             authority_store: AuthorityStore::Guarded,
             authority_generation: None,
+            namespace: repo.namespace.clone(),
             repo: &repo.name,
             kind: WriteKind::UpdateRef,
             refs: &refs,

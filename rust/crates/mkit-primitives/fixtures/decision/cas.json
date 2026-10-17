@@ -1,0 +1,56 @@
+[
+  {
+    "condition": "any",
+    "current": "absent",
+    "decision": "apply",
+    "guard": false
+  },
+  {
+    "condition": "any",
+    "current": "old",
+    "decision": "apply",
+    "guard": false
+  },
+  {
+    "condition": "any",
+    "current": "new",
+    "decision": "apply",
+    "guard": false
+  },
+  {
+    "condition": "missing",
+    "current": "absent",
+    "decision": "apply",
+    "guard": true
+  },
+  {
+    "condition": "missing",
+    "current": "old",
+    "decision": "conflict",
+    "guard": true
+  },
+  {
+    "condition": "missing",
+    "current": "new",
+    "decision": "conflict",
+    "guard": true
+  },
+  {
+    "condition": "match",
+    "current": "absent",
+    "decision": "conflict",
+    "guard": true
+  },
+  {
+    "condition": "match",
+    "current": "old",
+    "decision": "apply",
+    "guard": true
+  },
+  {
+    "condition": "match",
+    "current": "new",
+    "decision": "conflict",
+    "guard": true
+  }
+]

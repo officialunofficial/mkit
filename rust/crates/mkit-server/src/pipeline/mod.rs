@@ -3778,6 +3778,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             fork_barrier: false,
             authority_store: plan::AuthorityStore::from_capabilities(self.meta.capabilities()),
             authority_generation: op.authz.authority_generation,
+            namespace: op.repo.namespace.clone(),
             repo: &op.repo.name,
             kind,
             refs,

@@ -3144,3 +3144,22 @@ foreign membership witnesses and retain a failed destination's inert state.
 full-snapshot mutation and hostile-fact tests, and reference fork driver lowering.
 The host retains current destination proof acquisition, exact storage CAS, and
 physical authority-permission enforcement.
+
+## Portable ref decisions retain exact dependencies
+
+**Always:** lowering preserves every exact dependency in a sealed ref decision,
+including facts used only for a refusal. Any accepted composed effects compare
+those dependencies atomically. A separate source fence is repeated before each
+apply attempt. Guard loss reacquires facts under the original binding.
+
+**Because:** a guard category alone cannot distinguish two ref keys, and an
+unconditional write can depend on presence through admission or policy.
+
+**If violated:** fail lowering or retry decision without storing a terminal
+answer. Never accept a partial guard projection.
+
+**Enforcement:** portable decision mutation and omission tests cover exact
+keys and categories. The server checks ref and publication projections before
+committing its physical batch. Host policy acquisition and other effect groups
+retain their existing boundaries; these checks do not assert that every host
+policy path has moved into the portable module.
