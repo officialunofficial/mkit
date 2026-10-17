@@ -1,0 +1,12 @@
+{
+  "blake3": "fa5bab74ab260e417b15fa062621059f3bf1dc6618d0dece0533347e91665306",
+  "description": "Dependency edge from a tree entry to a blob of five bytes.",
+  "edge_kind": "tree-entry",
+  "edge_ordinal": 1,
+  "encoded_bytes": 93,
+  "expected": "DependencyRecord::Edge",
+  "expected_kind": "blob",
+  "expected_len": 5,
+  "format_version": 1,
+  "subject_ordinal": 0
+}

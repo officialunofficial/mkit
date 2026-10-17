@@ -1,0 +1,7 @@
+{
+  "blake3": "51d591ed39c6f5242db0e61373d999996ddcb589c3f56396fb255c1b0fbc2379",
+  "description": "Wrong version byte for the head record.",
+  "encoded_bytes": 99,
+  "expected": "InvalidEvidence",
+  "format_version": 1
+}

@@ -1,0 +1,7 @@
+{
+  "blake3": "3da610cc9a6e0a9b3d1eb4f57b9838043ecf14a9e503ca1361472480802b7efe",
+  "description": "Wrong version byte for the occurrence record.",
+  "encoded_bytes": 179,
+  "expected": "InvalidEvidence",
+  "format_version": 1
+}

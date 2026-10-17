@@ -8,6 +8,7 @@ mod integrity;
 mod resources;
 pub use resources::ResourceUsage;
 pub mod framing;
+pub mod verify;
 
 use crate::{
     evidence::{
@@ -192,6 +193,8 @@ pub struct PackCounts {
     pub entries: u64,
     /// Distinct canonical objects.
     pub objects: u64,
+    /// Wire entries decoded through a delta; never exceeds `entries`.
+    pub delta_entries: u64,
     /// Summed wire payload lengths.
     pub wire_payload_bytes: u64,
     /// Summed canonical decode lengths.
@@ -221,7 +224,7 @@ pub struct EvidenceSequence {
 ///         external_dependencies: sequence, heads: sequence }
 /// }
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[must_use]
 pub struct VerifiedPack {
     source: PackSource,
@@ -235,6 +238,32 @@ pub struct VerifiedPack {
     heads: EvidenceSequence,
 }
 impl VerifiedPack {
+    /// Seals a completed run. Only the verify driver may construct this; all
+    /// arguments are already authenticated at this point.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn seal(
+        source: PackSource,
+        counts: PackCounts,
+        ruleset: RulesetBinding,
+        profile: IndexedProfile,
+        limits: VerifyLimits,
+        object_set_root: Hash,
+        occurrences: EvidenceSequence,
+        external_dependencies: EvidenceSequence,
+        heads: EvidenceSequence,
+    ) -> Self {
+        Self {
+            source,
+            counts,
+            ruleset,
+            profile,
+            limits,
+            object_set_root,
+            occurrences,
+            external_dependencies,
+            heads,
+        }
+    }
     /// Requested and computed whole-pack identity; equality is established at sealing.
     #[must_use]
     pub const fn pack_id(&self) -> Hash {

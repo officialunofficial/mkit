@@ -1,0 +1,7 @@
+{
+  "blake3": "2cfbc2e0b7385179b01a283e61db083a6baa82a228fbba3c97316d76f87f67a7",
+  "description": "Wrong version byte for the object record.",
+  "encoded_bytes": 120,
+  "expected": "InvalidEvidence",
+  "format_version": 1
+}

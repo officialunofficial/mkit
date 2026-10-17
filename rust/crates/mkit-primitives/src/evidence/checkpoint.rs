@@ -3,6 +3,7 @@
 //! Decoding establishes envelope syntax and bounds only. The framing driver
 //! checks the expected source, repository, ruleset, budgets, and embedded cursor
 //! metadata before resuming. Checkpoints never establish verified-pack evidence.
+use super::pages::{HEADER_BYTES, MAX_PAGE_BYTES, PAGE_FANOUT, kind_byte};
 use super::{
     PackSource, PageCommitment, PageKind, ProfileId, RepositoryId, RulesetBinding, RulesetId,
     SourceBinding,
@@ -21,6 +22,7 @@ use mkit_core::{
 const DOMAIN: &[u8] = b"mkit-checkpoint-checksum:v1";
 const MAGIC: &[u8; 4] = b"MKCP";
 const VERSION: u16 = 1;
+const VERSION_VERIFY: u16 = 2;
 const SUBTREE: u64 = 8 << 20;
 const MAX_CVS: usize = 518;
 const MAX_PACK: u64 = MAX_TOTAL_PAYLOAD + MAX_ENTRIES as u64 * 5 + 44;
@@ -147,12 +149,35 @@ pub(crate) struct CheckpointState {
     pub meta: CheckpointMeta,
     pub integrity: Option<IntegrityState>,
     pub cursor: Vec<u8>,
+    pub verify: Option<VerifyCheckpoint>,
+}
+/// Committed root and record count of one paged evidence index.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct IndexCheckpoint {
+    pub commitment: PageCommitment,
+    pub count: u64,
+}
+/// All-entry verification state carried by version-2 envelopes.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct VerifyCheckpoint {
+    pub objects: IndexCheckpoint,
+    pub ordinals: IndexCheckpoint,
+    pub occurrences: IndexCheckpoint,
+    pub dependencies: IndexCheckpoint,
+    pub referenced: IndexCheckpoint,
+    pub heads: IndexCheckpoint,
+    pub delta_entries: u64,
+    pub decoded: u64,
+    pub edges: u64,
+    pub external_lookups: u64,
+    pub signature_failure: Option<(Hash, u64)>,
 }
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CheckpointView<'a> {
     pub meta: CheckpointMeta,
     pub integrity: Option<IntegrityView<'a>>,
     pub cursor: &'a [u8],
+    pub verify: Option<VerifyCheckpoint>,
 }
 
 fn validate_limits(l: VerifyLimits) -> Result<(), Failure> {
@@ -180,8 +205,11 @@ fn codec_budget(len: usize, limits: VerifyLimits) -> Result<Budget, Failure> {
     }
     Ok(Budget::new(limits.work, limits.resident_bytes))
 }
-fn validate_meta(m: &CheckpointMeta) -> Result<(), Failure> {
+fn validate_meta(m: &CheckpointMeta, version: u16) -> Result<(), Failure> {
     validate_limits(m.limits)?;
+    // Version 1 stores one occurrences page per frame, so its retention chain
+    // length equals the entry ordinal. Version 2 retains paged index output;
+    // its retention count only tracks cumulative emitted pages.
     if m.ruleset.ruleset != RulesetId(1)
         || m.ruleset.profile != ProfileId::Indexed
         || !(44..=MAX_PACK).contains(&m.source.len)
@@ -193,20 +221,25 @@ fn validate_meta(m: &CheckpointMeta) -> Result<(), Failure> {
         || m.usage.evidence_bytes > m.limits.evidence_bytes
         || m.usage.evidence_pages > m.limits.evidence_pages
         || m.usage.work > m.limits.work
-        || m.retention_count != m.ordinal
         || m.usage.evidence_pages != m.retention_count
+        || (version == VERSION && m.retention_count != m.ordinal)
         || m.last_retained.is_some() != (m.retention_count != 0)
     {
         return Err(invalid());
     }
-    if let Some(page) = m.last_retained
-        && (page.kind != PageKind::Occurrences
+    if let Some(page) = m.last_retained {
+        let shaped = if version == VERSION {
+            page.kind == PageKind::Occurrences && page.items == 1
+        } else {
+            page.items <= u64::from(PAGE_FANOUT)
+        };
+        if !shaped
             || page.len == 0
             || page.len > m.limits.page_bytes
-            || page.items != 1
-            || page.len > m.usage.evidence_bytes)
-    {
-        return Err(invalid());
+            || page.len > m.usage.evidence_bytes
+        {
+            return Err(invalid());
+        }
     }
     if let Some((version, count)) = m.header {
         if !matches!(version, 1 | 2) || m.ordinal > u64::from(count) {
@@ -273,7 +306,12 @@ fn validate_frontier(
     Ok(())
 }
 fn validate_view(v: &CheckpointView<'_>) -> Result<(), Failure> {
-    validate_meta(&v.meta)?;
+    let version = if v.verify.is_some() {
+        VERSION_VERIFY
+    } else {
+        VERSION
+    };
+    validate_meta(&v.meta, version)?;
     match v.meta.phase {
         CheckpointPhase::Header | CheckpointPhase::Complete => {
             if v.integrity.is_some() || !v.cursor.is_empty() {
@@ -306,7 +344,93 @@ fn validate_view(v: &CheckpointView<'_>) -> Result<(), Failure> {
             }
         }
     }
+    // A verify section exists only at a drained entry boundary.
+    if v.verify.is_some() != (version == VERSION_VERIFY) {
+        return Err(invalid());
+    }
+    if let Some(verify) = v.verify {
+        validate_verify(&v.meta, &verify)?;
+    }
     Ok(())
+}
+
+fn validate_verify(m: &CheckpointMeta, verify: &VerifyCheckpoint) -> Result<(), Failure> {
+    if m.phase != CheckpointPhase::Decode {
+        return Err(invalid());
+    }
+    for index in [
+        verify.objects,
+        verify.ordinals,
+        verify.occurrences,
+        verify.dependencies,
+        verify.referenced,
+        verify.heads,
+    ] {
+        let page = index.commitment;
+        if page.len < HEADER_BYTES
+            || page.len > m.limits.page_bytes.min(MAX_PAGE_BYTES)
+            || page.items > u64::from(PAGE_FANOUT)
+            || (page.items == 0 && page.len != HEADER_BYTES)
+        {
+            return Err(invalid());
+        }
+    }
+    // Every consumed entry owns exactly one occurrence; first occurrences
+    // alone add object and ordinal records, so their counts agree.
+    if verify.occurrences.count != m.ordinal
+        || verify.objects.count != verify.ordinals.count
+        || verify.ordinals.count > m.ordinal
+        || verify.delta_entries > m.ordinal
+        || verify.heads.count > verify.ordinals.count
+        || verify.dependencies.count > verify.edges + verify.external_lookups
+        || verify.decoded > m.limits.decoded_bytes
+        || verify.decoded > m.profile.decoded_bytes
+        || verify.edges > m.limits.dependency_edges
+        || verify.external_lookups > m.limits.external_lookups
+        || verify
+            .signature_failure
+            .is_some_and(|(_, ordinal)| ordinal >= m.ordinal)
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+fn read_index(c: &mut Cursor<'_, '_>, kind: PageKind) -> Result<IndexCheckpoint, Failure> {
+    let commitment = PageCommitment {
+        digest: c.array()?,
+        kind: {
+            let byte = c.byte()?;
+            if byte != kind_byte(kind) {
+                return Err(invalid());
+            }
+            kind
+        },
+        len: c.u64()?,
+        items: c.u64()?,
+    };
+    let count = c.u64()?;
+    Ok(IndexCheckpoint { commitment, count })
+}
+
+fn read_verify(c: &mut Cursor<'_, '_>) -> Result<VerifyCheckpoint, Failure> {
+    Ok(VerifyCheckpoint {
+        objects: read_index(c, PageKind::Objects)?,
+        ordinals: read_index(c, PageKind::Ordinals)?,
+        occurrences: read_index(c, PageKind::Occurrences)?,
+        dependencies: read_index(c, PageKind::Dependencies)?,
+        referenced: read_index(c, PageKind::Objects)?,
+        heads: read_index(c, PageKind::Heads)?,
+        delta_entries: c.u64()?,
+        decoded: c.u64()?,
+        edges: c.u64()?,
+        external_lookups: c.u64()?,
+        signature_failure: match c.byte()? {
+            0 => None,
+            1 => Some((c.array()?, c.u64()?)),
+            _ => return Err(invalid()),
+        },
+    })
 }
 
 fn optional_hash(c: &mut Cursor<'_, '_>) -> Result<Option<Hash>, Failure> {
@@ -387,7 +511,12 @@ fn read_meta(c: &mut Cursor<'_, '_>) -> Result<CheckpointMeta, Failure> {
         1 => Some(PageCommitment {
             digest: c.array()?,
             kind: match c.byte()? {
+                0 => PageKind::Objects,
                 1 => PageKind::Occurrences,
+                2 => PageKind::Dependencies,
+                3 => PageKind::Closure,
+                4 => PageKind::Heads,
+                5 => PageKind::Ordinals,
                 _ => return Err(invalid()),
             },
             len: c.u64()?,
@@ -428,11 +557,16 @@ fn parse(bytes: &[u8], budget: &mut Budget) -> Result<CheckpointState, Failure> 
         return Err(invalid());
     }
     let mut c = Cursor::new(body, budget);
-    if c.array::<4>()? != *MAGIC || c.u16()? != VERSION {
+    if c.array::<4>()? != *MAGIC {
         return Err(invalid());
     }
+    let version = match c.u16()? {
+        VERSION => VERSION,
+        VERSION_VERIFY => VERSION_VERIFY,
+        _ => return Err(invalid()),
+    };
     let meta = read_meta(&mut c)?;
-    validate_meta(&meta)?;
+    validate_meta(&meta, version)?;
     if bytes.len() as u64 > meta.limits.checkpoint_bytes {
         return Err(invalid());
     }
@@ -451,17 +585,24 @@ fn parse(bytes: &[u8], budget: &mut Budget) -> Result<CheckpointState, Failure> 
     };
     let cursor_len = u64::from(c.u16()?);
     let cursor = c.owned(cursor_len, CURSOR_CAP)?;
+    let verify = if version == VERSION_VERIFY {
+        Some(read_verify(&mut c)?)
+    } else {
+        None
+    };
     c.finish()?;
     validate_cursor(&cursor, budget)?;
     let state = CheckpointState {
         meta,
         integrity,
         cursor,
+        verify,
     };
     validate_view(&CheckpointView {
         meta: state.meta,
         integrity: state.integrity.as_ref().map(IntegrityState::view),
         cursor: &state.cursor,
+        verify: state.verify,
     })?;
     Ok(state)
 }
@@ -520,9 +661,9 @@ impl Output {
         Ok(())
     }
 }
-fn write_binding(out: &mut Output, m: &CheckpointMeta) -> Result<(), Failure> {
+fn write_binding(out: &mut Output, m: &CheckpointMeta, version: u16) -> Result<(), Failure> {
     out.append(MAGIC)?;
-    out.append(&VERSION.to_le_bytes())?;
+    out.append(&version.to_le_bytes())?;
     out.append(&m.source.id)?;
     out.u64(m.source.len)?;
     out.append(&m.source.binding.0)?;
@@ -569,7 +710,7 @@ fn write_progress(out: &mut Output, m: &CheckpointMeta) -> Result<(), Failure> {
     out.byte(u8::from(m.last_retained.is_some()))?;
     if let Some(page) = m.last_retained {
         out.append(&page.digest)?;
-        out.byte(1)?;
+        out.byte(kind_byte(page.kind))?;
         out.u64(page.len)?;
         out.u64(page.items)?;
     }
@@ -597,11 +738,47 @@ fn write_integrity(out: &mut Output, integrity: Option<IntegrityView<'_>>) -> Re
     }
     Ok(())
 }
+fn write_index(out: &mut Output, index: &IndexCheckpoint) -> Result<(), Failure> {
+    out.append(&index.commitment.digest)?;
+    out.byte(kind_byte(index.commitment.kind))?;
+    out.u64(index.commitment.len)?;
+    out.u64(index.commitment.items)?;
+    out.u64(index.count)
+}
+
+fn write_verify(out: &mut Output, verify: &VerifyCheckpoint) -> Result<(), Failure> {
+    for index in [
+        &verify.objects,
+        &verify.ordinals,
+        &verify.occurrences,
+        &verify.dependencies,
+        &verify.referenced,
+        &verify.heads,
+    ] {
+        write_index(out, index)?;
+    }
+    out.u64(verify.delta_entries)?;
+    out.u64(verify.decoded)?;
+    out.u64(verify.edges)?;
+    out.u64(verify.external_lookups)?;
+    out.byte(u8::from(verify.signature_failure.is_some()))?;
+    if let Some((object, ordinal)) = verify.signature_failure {
+        out.append(&object)?;
+        out.u64(ordinal)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn encode(
     view: &CheckpointView<'_>,
     limits: VerifyLimits,
 ) -> Result<Checkpoint, Failure> {
     validate_view(view)?;
+    let version = if view.verify.is_some() {
+        VERSION_VERIFY
+    } else {
+        VERSION
+    };
     // Compute and reserve once: incremental exact reallocations would copy
     // already written frontiers repeatedly and obscure simultaneous residency.
     let frontier_bytes = view.integrity.map_or(0, |f| {
@@ -609,11 +786,15 @@ pub(crate) fn encode(
             + u64::from(f.whole_root.is_some()) * 32
             + u64::from(f.trailer_root.is_some()) * 32
     });
+    let verify_bytes = view.verify.map_or(0, |v| {
+        6 * 57 + 32 + 1 + u64::from(v.signature_failure.is_some()) * 40
+    });
     let encoded_len = 369_u64
         .checked_add(u64::from(view.meta.header.is_some()) * 8)
         .and_then(|n| n.checked_add(u64::from(view.meta.last_retained.is_some()) * 49))
         .and_then(|n| n.checked_add(frontier_bytes))
         .and_then(|n| n.checked_add(view.cursor.len() as u64))
+        .and_then(|n| n.checked_add(verify_bytes))
         .ok_or_else(resource)?;
     if encoded_len > view.meta.limits.checkpoint_bytes {
         return Err(invalid());
@@ -633,7 +814,7 @@ pub(crate) fn encode(
         budget,
     };
     validate_cursor(view.cursor, &mut out.budget)?;
-    write_binding(&mut out, &view.meta)?;
+    write_binding(&mut out, &view.meta, version)?;
     write_progress(&mut out, &view.meta)?;
     write_integrity(&mut out, view.integrity)?;
     out.append(
@@ -642,6 +823,9 @@ pub(crate) fn encode(
             .to_le_bytes(),
     )?;
     out.append(view.cursor)?;
+    if let Some(verify) = &view.verify {
+        write_verify(&mut out, verify)?;
+    }
     out.budget.charge(out.bytes.len() as u64, 0)?;
     let checksum = domain_digest(DOMAIN, &out.bytes);
     out.append(&checksum)?;
@@ -689,6 +873,7 @@ mod tests {
             },
             integrity: None,
             cursor: &[],
+            verify: None,
         }
     }
     fn resign(bytes: &mut [u8]) {
@@ -707,6 +892,7 @@ mod tests {
                 meta: state.meta,
                 integrity: state.integrity.as_ref().map(IntegrityState::view),
                 cursor: &state.cursor,
+                verify: None,
             },
             limits,
         )
@@ -722,13 +908,20 @@ mod tests {
         for len in 0..cp.bytes().len() {
             assert!(Checkpoint::from_bytes(&cp.bytes()[..len], limits).is_err());
         }
-        let mut wrong = cp.bytes().to_vec();
-        wrong[4] = 2;
-        resign(&mut wrong);
-        assert_eq!(
-            Checkpoint::from_bytes(&wrong, limits).unwrap_err().code,
-            FailureCode::InvalidCheckpoint
-        );
+        for version in [3u8, 0xff] {
+            let mut wrong = cp.bytes().to_vec();
+            wrong[4] = version;
+            resign(&mut wrong);
+            assert_eq!(
+                Checkpoint::from_bytes(&wrong, limits).unwrap_err().code,
+                FailureCode::InvalidCheckpoint
+            );
+        }
+        // A version-1 body relabeled as the verify version is malformed.
+        let mut relabeled = cp.bytes().to_vec();
+        relabeled[4] = 2;
+        resign(&mut relabeled);
+        assert!(Checkpoint::from_bytes(&relabeled, limits).is_err());
         let mut trailing = cp.bytes().to_vec();
         trailing.insert(trailing.len() - 32, 0);
         resign(&mut trailing);
@@ -815,6 +1008,7 @@ mod tests {
                 meta: state.meta,
                 integrity: state.integrity.as_ref().map(IntegrityState::view),
                 cursor: &state.cursor,
+                verify: None,
             },
             limits,
         )
