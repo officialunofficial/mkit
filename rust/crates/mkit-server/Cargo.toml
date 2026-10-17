@@ -70,7 +70,7 @@ http = { version = "1", optional = true }
 tower-service = { version = "0.3", optional = true }
 # Unpadded base64: standard for Connect error-detail values, url-safe for
 # URL tokens (`url_token`, on every target, so not optional).
-base64 = { version = "0.22" }
+base64 = { version = "0.23" }
 # URL-token Ed25519 signing and strict verification (`url_token`):
 # `zeroize` wipes `SigningKey` secrets on drop. alloc-only, wasm-clean.
 ed25519-dalek = { version = "3", default-features = false, features = ["alloc", "zeroize"] }
