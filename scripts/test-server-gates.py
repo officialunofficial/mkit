@@ -103,7 +103,7 @@ class ServerGates(unittest.TestCase):
                 # must record too.
                 aggregated = False
                 pending_closer = False
-                previous = None
+                last_cd = None
                 for line in lines:
                     stripped = line.strip()
                     if not stripped or stripped.startswith("#"):
@@ -111,14 +111,19 @@ class ServerGates(unittest.TestCase):
                     if pending_closer:
                         self.assertEqual(") || status=1", stripped)
                         pending_closer = False
-                    # A subshell whose first body line is `failed=0` is an
-                    # aggregated one: its `cd` must abort loudly, not cascade.
-                    if previous and re.match(r"\(\s*cd\s", previous) and re.match(r"failed\s*=\s*0\b", stripped):
-                        self.assertTrue(previous.endswith("|| exit 1"),
-                                        f"aggregated subshell cd does not abort loudly: {previous}")
+                    if re.match(r"\(\s*cd\s", stripped):
+                        last_cd = stripped
+                    elif stripped.startswith(")"):
+                        last_cd = None
                     if re.match(r"failed\s*=\s*0\b", stripped):
+                        # A subshell containing a `failed=0` region is an
+                        # aggregated one: its `cd` must abort loudly, not
+                        # cascade "can't find Cargo.toml" noise.
+                        self.assertTrue(last_cd and last_cd.endswith("|| exit 1"),
+                                        f"aggregated subshell cd does not abort loudly: {last_cd}")
+                        last_cd = None
                         aggregated = True
-                    elif re.match(r'exit\s+"?\$failed"?\s*$', stripped):
+                    elif re.match(r'exit\s+"?\$\{?failed\}?"?\s*$', stripped):
                         aggregated = False
                         pending_closer = True
                     elif aggregated:
@@ -130,11 +135,15 @@ class ServerGates(unittest.TestCase):
                             or stripped == "failed=1"
                             or re.match(r"(echo|if|elif|else|fi|for|do|done|while|then|until|case|esac)\b", stripped),
                             f"command in aggregated subshell does not record failure: {stripped}")
-                    elif stripped.startswith("bash scripts/"):
+                    elif line.startswith("        bash scripts/"):
+                        # Top-level gates only (8-space script indent): a
+                        # `|| status=1` inside a subshell would set a
+                        # subshell-local variable that is discarded. New
+                        # top-level gate spellings need this check extended.
                         self.assertTrue(stripped.endswith("|| status=1"),
                                         f"top-level gate does not record failure: {stripped}")
-                    previous = stripped
                 self.assertFalse(pending_closer, "aggregated subshell missing its `) || status=1` closer")
+                self.assertFalse(aggregated, "aggregated subshell missing its `exit \"$failed\"` marker")
                 self.assertNotIn("allowFailure", step)
                 self.assertNotIn("allowExitCodes", step)
 
