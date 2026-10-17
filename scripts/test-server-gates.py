@@ -96,29 +96,45 @@ class ServerGates(unittest.TestCase):
                 # Inside an aggregated subshell (between `failed=0` and its
                 # `exit "$failed"`), `set -e` is inert, so every command must
                 # record into `failed` — a dropped recorder would silently
-                # swallow that gate's failure.
+                # swallow that gate's failure. The subshell's `( cd` opener
+                # must abort loudly (`|| exit 1`) instead of cascading, its
+                # `)` closer must record (`|| status=1`) instead of
+                # hard-aborting the step, and top-level `bash scripts/` gates
+                # must record too.
                 aggregated = False
+                pending_closer = False
                 previous = None
                 for line in lines:
                     stripped = line.strip()
                     if not stripped or stripped.startswith("#"):
                         continue
+                    if pending_closer:
+                        self.assertEqual(") || status=1", stripped)
+                        pending_closer = False
                     # A subshell whose first body line is `failed=0` is an
                     # aggregated one: its `cd` must abort loudly, not cascade.
-                    if (previous or "").startswith("( cd ") and stripped == "failed=0":
+                    if previous and re.match(r"\(\s*cd\s", previous) and re.match(r"failed\s*=\s*0\b", stripped):
                         self.assertTrue(previous.endswith("|| exit 1"),
                                         f"aggregated subshell cd does not abort loudly: {previous}")
-                    if stripped == "failed=0":
+                    if re.match(r"failed\s*=\s*0\b", stripped):
                         aggregated = True
-                    elif stripped == 'exit "$failed"':
+                    elif re.match(r'exit\s+"?\$failed"?\s*$', stripped):
                         aggregated = False
+                        pending_closer = True
                     elif aggregated:
+                        # Heuristic: shell keywords are allowlisted even
+                        # though a command hidden in an `if`/`until`/`while`
+                        # condition would swallow its status unrecorded.
                         self.assertTrue(
                             stripped.endswith("|| failed=1")
                             or stripped == "failed=1"
                             or re.match(r"(echo|if|elif|else|fi|for|do|done|while|then|until|case|esac)\b", stripped),
                             f"command in aggregated subshell does not record failure: {stripped}")
+                    elif stripped.startswith("bash scripts/"):
+                        self.assertTrue(stripped.endswith("|| status=1"),
+                                        f"top-level gate does not record failure: {stripped}")
                     previous = stripped
+                self.assertFalse(pending_closer, "aggregated subshell missing its `) || status=1` closer")
                 self.assertNotIn("allowFailure", step)
                 self.assertNotIn("allowExitCodes", step)
 
