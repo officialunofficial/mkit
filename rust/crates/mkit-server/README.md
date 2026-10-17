@@ -85,29 +85,15 @@ indexed.decode_budget = 4 * upload.max_total_bytes;
 | `ssh` | The `mkit.rpc.v1.ssh` session (`ssh::serve_session`), with no async runtime of its own. |
 | `remote-hooks` | Signed `mkit.server.hooks.v1` authorization, admission and outcome adapters over a `HookChannel`. |
 | `http-objects` | Runtime-agnostic HTTP object serving; requires explicit configuration and indexed mode. |
-| `pack-ruzstd` | Pure-Rust zstd decoding for wasm targets. Needs a ruzstd patch when consumed from crates.io (see below). |
+| `pack-ruzstd` | Pure-Rust zstd decoding for wasm targets. Selects the named bounded decoder through mkit-core (see below). |
 
-### `pack-ruzstd` and the ruzstd patch
+### `pack-ruzstd` and the bounded decoder
 
-`pack-ruzstd` relies on a bounded-decode patch to ruzstd 0.9 (the RFC 8878
-block-size preflight) that lives only in this repository's workspace
-`[patch.crates-io]`. Cargo does not inherit a dependency's patches, and the
-crates.io `ruzstd` 0.9 has no such bound, so a consumer that enables
-`pack-ruzstd` must apply the patch in its own workspace until upstream
-releases it:
-
-```toml
-[patch.crates-io]
-ruzstd = { git = "https://github.com/officialunofficial/mkit", tag = "v0.5.0" }
-```
-
-Upstreaming of the patch is in progress; the patch will be dropped once a
-ruzstd release includes it. Without it the feature still builds but decodes
-through the unbounded upstream path.
-
-Upstream tracking: [KillingSpark/zstd-rs #124, "Refuse blocks that decode past
-Block_Maximum_Size"](https://github.com/KillingSpark/zstd-rs/pull/124) is open. Keep the patch until a released
-version includes the bound; the tracked PR does not establish released coverage.
+`pack-ruzstd` selects `mkit-ruzstd` through mkit-core's versioned path dependency.
+Cargo preserves the package name when publishing, so consumers get the bounded
+decoder without repeating a workspace patch. The fork retains upstream's MIT
+license and notice. Its RFC 8878 block preflight remains until an upstream
+release includes the required bounds.
 
 ## Object-reader sessions and entry sizes
 

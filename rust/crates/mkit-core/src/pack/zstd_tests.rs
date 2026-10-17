@@ -186,6 +186,100 @@ fn raw_only_writer_when_no_c_zstd() {
     assert_eq!(pack[HEADER_LEN], 0x00);
 }
 
+/// This same public decoder fixture runs in C-only and Rust-only builds.
+/// A short budget must reject the claim before reading a corrupt frame.
+#[cfg(any(feature = "pack-zstd", feature = "pack-ruzstd"))]
+#[test]
+fn backend_entry_budget_and_error_parity() {
+    let object = crate::serialize::serialize(&crate::object::Object::Blob(crate::object::Blob {
+        data: vec![b'A'; 1500],
+    }))
+    .unwrap();
+    let mut zstd = cat(&[&MAGIC, &[0, 0]]); // 1 KiB window
+    for (index, part) in object.chunks(1024).enumerate() {
+        let last = u32::from(index == 1);
+        let header = (u32::try_from(part.len()).unwrap() << 3) | last;
+        zstd.extend_from_slice(&header.to_le_bytes()[..3]);
+        zstd.extend_from_slice(part);
+    }
+    let make_frame = |bytes: &[u8], claim: usize| {
+        let mut frame = vec![0x03];
+        frame.extend_from_slice(&u32::try_from(bytes.len() + 4).unwrap().to_le_bytes());
+        frame.extend_from_slice(&u32::try_from(claim).unwrap().to_le_bytes());
+        frame.extend_from_slice(bytes);
+        frame
+    };
+    let limits = DecodeLimits::default().with_max_decoded_bytes(object.len() as u64);
+    let frame = make_frame(&zstd, object.len());
+    assert_eq!(
+        decode_frame_with(&frame, VERSION_V2, &mut NoExternalBases, limits).unwrap(),
+        (hash::hash(&object), object.clone())
+    );
+    let mut pack = super::MAGIC.to_vec();
+    pack.extend_from_slice(&VERSION_V2.to_le_bytes());
+    pack.extend_from_slice(&2u32.to_le_bytes());
+    pack.extend_from_slice(&frame);
+    pack.extend_from_slice(&frame);
+    pack.extend_from_slice(&hash::hash(&pack));
+    let cumulative = (object.len() * 2) as u64;
+    assert!(
+        decode_entries_with(
+            &pack,
+            &mut NoExternalBases,
+            DecodeLimits::default().with_max_decoded_bytes(cumulative),
+            |_| Ok(())
+        )
+        .is_ok()
+    );
+    let mut sink_calls = 0;
+    assert!(matches!(
+        decode_entries_with(
+            &pack,
+            &mut NoExternalBases,
+            DecodeLimits::default().with_max_decoded_bytes(cumulative - 1),
+            |_| {
+                sink_calls += 1;
+                Ok(())
+            }
+        ),
+        Err(PackError::PackfileTooLarge)
+    ));
+    assert_eq!(
+        sink_calls, 0,
+        "cumulative claims rejected before first sink call"
+    );
+    let short = DecodeLimits::default().with_max_decoded_bytes(object.len() as u64 - 1);
+    for bytes in [&zstd[..], &b"invalid zstd"[..]] {
+        assert!(matches!(
+            decode_frame_with(
+                &make_frame(bytes, object.len()),
+                VERSION_V2,
+                &mut NoExternalBases,
+                short
+            ),
+            Err(PackError::PackfileTooLarge)
+        ));
+    }
+    assert!(matches!(
+        decode_frame_with(
+            &make_frame(&zstd, MAX_RAW_OBJECT_SIZE + 1),
+            VERSION_V2,
+            &mut NoExternalBases,
+            limits
+        ),
+        Err(PackError::DecompressedSizeOverCap(_))
+    ));
+    assert!(matches!(
+        decode_frame_with(
+            &make_frame(&zstd, object.len() + 1),
+            VERSION_V2,
+            &mut NoExternalBases,
+            DecodeLimits::default().with_max_decoded_bytes(object.len() as u64 + 1)
+        ),
+        Err(PackError::DecompressedSizeMismatch(..))
+    ));
+}
+
 #[cfg(feature = "pack-ruzstd")]
 mod ruzstd_backend {
     use super::*;
@@ -535,12 +629,12 @@ mod differential {
     fn backends_agree_on_reserved_sequence_mode_bits() {
         let content = b"sequence modes reserved bits. ".repeat(50);
         let frame = compress_with(&content, &[]);
-        assert!(ruzstd_check_reserved_fields(&frame).is_ok());
+        assert!(check_zstd_frame_bounds(&frame).is_ok());
         let mut hits = 0;
         for i in 0..frame.len() {
             let mut f = frame.clone();
             f[i] |= 1;
-            if ruzstd_check_reserved_fields(&f)
+            if check_zstd_frame_bounds(&f)
                 != Err("zstd sequences section has its reserved mode bits set")
             {
                 continue;
@@ -552,20 +646,89 @@ mod differential {
         assert!(hits >= 1, "the frame's sequences section was never hit");
     }
 
-    /// Fail-closed window divergences: the C one-shot decoder accepts
-    /// huge windows and oversized raw blocks; the pure-Rust decoder applies
-    /// a fixed 8 MiB window cap and the RFC per-block maximum for every type.
+    /// Both backends enforce the same 8 MiB window and RFC block maximum.
     #[test]
-    fn window_divergences_are_fail_closed() {
-        for (content, window_log) in [(vec![5u8; 1024], 31), (vec![4u8; 5000], 10)] {
-            let payload = entry(
-                content.len(),
-                &raw_block_frame(&content, None, Some(window_log)),
+    fn backends_agree_on_window_and_block_limits() {
+        for (case, content, window_log, accepted) in [
+            ("window at limit", vec![5u8; 1024], 23, true),
+            ("window above limit", vec![5u8; 1024], 24, false),
+            ("huge window", vec![5u8; 1024], 31, false),
+            ("raw block at window", vec![4u8; 1024], 10, true),
+            ("raw block over window", vec![4u8; 1025], 10, false),
+            (
+                "raw block at absolute limit",
+                vec![4u8; 128 << 10],
+                23,
+                true,
+            ),
+            (
+                "multi-block over window total",
+                vec![4u8; 256 << 10],
+                23,
+                true,
+            ),
+        ] {
+            let result = agree(
+                case,
+                &entry(
+                    content.len(),
+                    &raw_block_frame(&content, None, Some(window_log)),
+                ),
             );
-            let c = decompress_zstd_entry_with(&payload, zstd_decompress_capped);
-            assert_eq!(c.unwrap(), content);
-            let rs = decompress_zstd_entry_with(&payload, ruzstd_decompress_capped);
-            assert_eq!(class(&rs), "ZstdDecompress", "{rs:?}");
+            if accepted {
+                assert_eq!(result.unwrap(), content, "{case}");
+            } else {
+                assert_eq!(class(&result), "ZstdDecompress", "{case}");
+            }
+        }
+        for size in [1024u32, 1025] {
+            let mut frame = cat(&[&MAGIC, &[0, 0]]); // 1 KiB window
+            frame.extend_from_slice(&((size << 3) | 3).to_le_bytes()[..3]);
+            frame.push(b'A');
+            let result = agree("RLE block window bound", &entry(size as usize, &frame));
+            assert_eq!(
+                class(&result),
+                if size == 1024 { "ok" } else { "ZstdDecompress" }
+            );
+        }
+    }
+
+    /// The heap-regression attack classes must return the same stable variant.
+    #[test]
+    fn backends_agree_on_oversized_literals_and_block_bodies() {
+        let literals_header = ((512u32 << 10) << 4) | 0x0d;
+        let mut literals = literals_header.to_le_bytes()[..3].to_vec();
+        literals.extend_from_slice(&[b'A', 0]);
+        let mut compressed = ((1024u16 << 4) | 4).to_le_bytes().to_vec();
+        compressed.extend_from_slice(&[b'A'; 1024]);
+        compressed.push(0);
+        for (case, kind, size, body, window) in [
+            ("oversized literals", 2u32, literals.len(), literals, 0),
+            (
+                "compressed body over window",
+                2,
+                compressed.len(),
+                compressed,
+                0,
+            ),
+            (
+                "raw over 128 KiB",
+                0,
+                (128 << 10) + 1,
+                vec![b'A'; (128 << 10) + 1],
+                0x68,
+            ),
+            ("RLE over 128 KiB", 1, (128 << 10) + 1, vec![b'A'], 0x68),
+        ] {
+            let mut frame = cat(&[&MAGIC, &[0, window]]);
+            let header = (u32::try_from(size).unwrap() << 3) | (kind << 1) | 1;
+            frame.extend_from_slice(&header.to_le_bytes()[..3]);
+            frame.extend_from_slice(&body);
+            assert_eq!(
+                class(&agree(case, &entry(1024, &frame))),
+                "ZstdDecompress",
+                "{case}"
+            );
         }
     }
 

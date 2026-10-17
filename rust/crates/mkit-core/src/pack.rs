@@ -767,7 +767,7 @@ fn zstd_decompress_into(
     capacity: usize,
     output: &mut Vec<u8>,
 ) -> Result<(), PackError> {
-    require_zstd_frame_magic(frame)?;
+    check_zstd_frame_bounds(frame).map_err(|error| PackError::ZstdDecompress(error.to_string()))?;
     // `ZSTD_decompressDCtx` (behind `bulk::decompress`) would otherwise
     // decode concatenated frames and skip skippable ones.
     match zstd::zstd_safe::find_frame_compressed_size(frame) {
@@ -828,12 +828,11 @@ fn zstd_decompress_into(
     ))
 }
 
-/// Fixed pure-Rust decode window cap: 8 MiB (`windowLog` 23).
+/// Shared decode window cap: 8 MiB (`windowLog` 23).
 /// This covers the default windows of non-ultra zstd levels. Larger windows
-/// fail closed even if the output claim is larger; native C keeps its policy.
-#[cfg(feature = "pack-ruzstd")]
-#[cfg_attr(all(feature = "pack-zstd", not(test)), allow(dead_code))]
-const RUZSTD_WINDOW_LIMIT: u64 = 8 << 20;
+/// fail closed on both backends even if the output claim is larger.
+#[cfg(any(feature = "pack-zstd", feature = "pack-ruzstd"))]
+const ZSTD_WINDOW_LIMIT: u64 = 8 << 20;
 
 /// Read the base and result lengths from a zstd-compressed SPEC-DELTA v1 header.
 ///
@@ -872,7 +871,7 @@ fn read_delta_header_prefix(
     use std::io::Read as _;
     require_zstd_frame_magic(frame)?;
     let mut decoder = FrameDecoder::new();
-    decoder.set_max_window_size(RUZSTD_WINDOW_LIMIT);
+    decoder.set_max_window_size(ZSTD_WINDOW_LIMIT);
     let mut stream = StreamingDecoder::new_with_decoder(frame, decoder)
         .map_err(|error| PackError::ZstdDecompress(error.to_string()))?;
     stream
@@ -956,20 +955,15 @@ fn ruzstd_decompress_into(
         PackError::ZstdDecompress(msg.to_string())
     }
 
-    require_zstd_frame_magic(frame)?;
+    check_zstd_frame_bounds(frame).map_err(fail)?;
     let cap = u64::try_from(capacity).unwrap_or(u64::MAX);
     let mut decoder = FrameDecoder::new();
-    decoder.set_max_window_size(RUZSTD_WINDOW_LIMIT);
+    decoder.set_max_window_size(ZSTD_WINDOW_LIMIT);
     let mut src = frame;
     let mut stream = StreamingDecoder::new_with_decoder(&mut src, decoder).map_err(fail)?;
 
-    // RFC 8878 §3.1.1.1.1. The header parsed, so the descriptor byte
-    // after the magic exists. ruzstd ignores the reserved bit, which a
-    // decoder must refuse (the C decoder does).
+    // Shared preflight has already validated the descriptor byte.
     let descriptor = frame[ZSTD_FRAME_MAGIC.len()];
-    if descriptor & 0x08 != 0 {
-        return Err(fail("zstd frame descriptor has its reserved bit set"));
-    }
     // A content size is present iff the FCS flag or the single-segment
     // flag is set.
     let declared =
@@ -1025,21 +1019,24 @@ fn ruzstd_decompress_into(
             src.len()
         )));
     }
-    ruzstd_check_reserved_fields(frame).map_err(fail)?;
     Ok(())
 }
 
-/// Re-walk an already-decoded frame's blocks (RFC 8878 §3.1.1.2–3) for
-/// the reserved fields ruzstd ignores and the C decoder rejects: the
-/// sequences section's `Symbol_Compression_Modes` reserved bits. Without
-/// this, a frame the C path refuses would decode here — a fail-open
-/// divergence between the native and Workers readers.
-#[cfg(feature = "pack-ruzstd")]
-#[cfg_attr(all(feature = "pack-zstd", not(test)), allow(dead_code))]
-fn ruzstd_check_reserved_fields(frame: &[u8]) -> Result<(), &'static str> {
+/// Inspect frame and block headers without allocating decoder working memory.
+/// Both backends enforce the same window cap and RFC 8878 §3.1.1.2.4
+/// block maximum, including raw/RLE blocks the C one-shot decoder accepts.
+/// Also reject reserved sequence-mode bits that the pure-Rust decoder ignores.
+#[cfg(any(feature = "pack-zstd", feature = "pack-ruzstd"))]
+fn check_zstd_frame_bounds(frame: &[u8]) -> Result<(), &'static str> {
     const MALFORMED: &str = "malformed zstd frame";
+    if !frame.starts_with(&ZSTD_FRAME_MAGIC) {
+        return Err(MALFORMED);
+    }
     let byte = |i: usize| frame.get(i).copied().ok_or(MALFORMED);
     let descriptor = byte(ZSTD_FRAME_MAGIC.len())?;
+    if descriptor & 0x08 != 0 {
+        return Err("zstd frame descriptor has its reserved bit set");
+    }
     let single_segment = descriptor & 0x20 != 0;
     let fcs_len = match descriptor >> 6 {
         0 => usize::from(single_segment),
@@ -1047,24 +1044,48 @@ fn ruzstd_check_reserved_fields(frame: &[u8]) -> Result<(), &'static str> {
         2 => 4,
         _ => 8,
     };
-    let mut pos = ZSTD_FRAME_MAGIC.len()
+    let fcs_start = ZSTD_FRAME_MAGIC.len()
         + 1
         + usize::from(!single_segment)
-        + [0, 1, 2, 4][usize::from(descriptor & 3)]
-        + fcs_len;
+        + [0, 1, 2, 4][usize::from(descriptor & 3)];
+    let mut pos = fcs_start + fcs_len;
+    // Even a frame without FCS must have its entire dictionary field.
+    frame.get(..pos).ok_or(MALFORMED)?;
+    let window = if single_segment {
+        let mut size = 0u64;
+        for i in 0..fcs_len {
+            size |= u64::from(byte(fcs_start + i)?) << (8 * i);
+        }
+        if fcs_len == 2 { size + 256 } else { size }
+    } else {
+        let descriptor = byte(ZSTD_FRAME_MAGIC.len() + 1)?;
+        let base = 1u64 << (10 + (descriptor >> 3));
+        base + (base / 8) * u64::from(descriptor & 7)
+    };
+    if window > ZSTD_WINDOW_LIMIT {
+        return Err("zstd frame window exceeds the 8 MiB cap");
+    }
+    let block_maximum = window.min(128 << 10);
     loop {
-        let header = u32::from_le_bytes([byte(pos)?, byte(pos + 1)?, byte(pos + 2)?, 0]);
-        pos += 3;
+        let header_end = pos.checked_add(3).ok_or(MALFORMED)?;
+        let bytes = frame.get(pos..header_end).ok_or(MALFORMED)?;
+        let header = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], 0]);
+        pos = header_end;
         let size = (header >> 3) as usize;
+        if size as u64 > block_maximum {
+            return Err("zstd block exceeds its window or the 128 KiB maximum");
+        }
         let body_len = match (header >> 1) & 3 {
             1 => 1, // RLE: one byte, repeated `size` times
+            3 => return Err("zstd block has its reserved type set"),
             _ => size,
         };
-        let body = frame.get(pos..pos + body_len).ok_or(MALFORMED)?;
+        let body_end = pos.checked_add(body_len).ok_or(MALFORMED)?;
+        let body = frame.get(pos..body_end).ok_or(MALFORMED)?;
         if (header >> 1) & 3 == 2 && ruzstd_sequence_modes(body)? & 3 != 0 {
             return Err("zstd sequences section has its reserved mode bits set");
         }
-        pos += body_len;
+        pos = body_end;
         if header & 1 == 1 {
             return Ok(());
         }
@@ -1073,8 +1094,7 @@ fn ruzstd_check_reserved_fields(frame: &[u8]) -> Result<(), &'static str> {
 
 /// The `Symbol_Compression_Modes` byte of a compressed block, or `0` when
 /// the block has no sequences (RFC 8878 §3.1.1.3.1.1, §3.1.1.3.2.1).
-#[cfg(feature = "pack-ruzstd")]
-#[cfg_attr(all(feature = "pack-zstd", not(test)), allow(dead_code))]
+#[cfg(any(feature = "pack-zstd", feature = "pack-ruzstd"))]
 fn ruzstd_sequence_modes(block: &[u8]) -> Result<u8, &'static str> {
     const MALFORMED: &str = "malformed zstd block";
     // Header fields are assembled in `u64`, never `usize`: the 5-byte

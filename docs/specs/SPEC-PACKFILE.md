@@ -199,6 +199,14 @@ truncated/short frame &mdash; or too many). A pack that fails either check
 MUST NOT have any of its entries written to the object store, exactly
 like any other rejected pack (§6, §8).
 
+Both decoder backends MUST cap the effective frame window at 8 MiB and
+reject larger windows with `ZstdDecompress`, independently of the output claim.
+Each block MUST obey RFC 8878 §3.1.1.2.4:
+`Block_Maximum_Size = min(Window_Size, 128 KiB)`. The encoded block body and
+regenerated output MUST fit that maximum. Claims and aggregate decode budgets
+retain the same checks and stable error variants on both backends. A valid
+multi-block frame MAY produce more than one window of output in total.
+
 ### 3.4 `zstd-delta` (0x04, v2 only)
 
 Payload:

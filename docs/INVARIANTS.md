@@ -1179,13 +1179,14 @@ bomb guards (claim ≤ `MAX_RAW_OBJECT_SIZE` before decoding, output bounded
 to the claim, exact length re-check). Both paths reserve output fallibly
 without zero-filling the claim; unpack charges the resident budget first.
 The pure-Rust path reads out at most `claim + 1` bytes and never grows the
-reserved output. Its decode window is capped at 8 MiB independently of the
-claim. Vendored ruzstd checks `min(Window_Size, 128 KiB)` before raw/RLE
-materialization and before executing any compressed sequences. The patch is
-tracked by the open [KillingSpark/zstd-rs #124, "Refuse blocks that decode past
-Block_Maximum_Size"](https://github.com/KillingSpark/zstd-rs/pull/124).
-Embedders must repeat `[patch.crates-io]` until a release includes the fix;
-this is vendored enforcement, not released upstream coverage. Its separate
+reserved output. Both decode windows are capped at 8 MiB independently of the
+claim. The shared allocation-free preflight checks frame windows and encoded
+block sizes before either decoder starts. The named `mkit-ruzstd` dependency
+checks `min(Window_Size, 128 KiB)` before raw/RLE materialization and before
+executing any compressed sequences. The fork is selected by a versioned path
+dependency, retaining the import name
+`ruzstd`. Published and independent-workspace consumers inherit the named
+package without `[patch]` tables. Its separate
 ring and block scratch have a fixed 28 MiB working allowance, including
 transient old/new ring allocations during growth, outside the owned-payload
 resident cap and the window reader's carry/output budget. Scheduled verification
@@ -1216,18 +1217,15 @@ The hand-written frame parsing assembles header fields in `u64`, never
 on the encoder frames covered by the differential proptest over
 `PackWriter` output and C-encoded fixtures, and on the curated adversarial
 table. On *malformed* frames they do not fully agree. Fail-closed on
-`pack-ruzstd` (it rejects, C accepts): frames declaring a window above
-8 MiB, and
-corrupt entropy-coded sections the C one-shot decoder tolerates. Fail-open
+`pack-ruzstd` (it rejects, C accepts): corrupt entropy-coded sections the C
+one-shot decoder tolerates. Fail-open
 (it accepts, C rejects) and both-accept-different-bytes cases also exist
 for a small share of corrupted frames, in Huffman/FSE table internals
 that no cheap check reaches; the reference `zstd` CLI rejects those
 frames too. Over 850k mutated frames: 134 accepted only by `pack-ruzstd`,
 2,580 accepted only by C, 4 accepted by both with different bytes, no
-panics. The WP-4.1 brief called the first class "not tolerable"; it is
-accepted as this documented residual because no consumer enables
-`pack-ruzstd` yet and object ids are content-derived. Integrity is
-unaffected: decoded bytes must parse as a canonical object and are stored
+panics. This decoder-level difference remains documented; object ids are
+content-derived. Integrity is unaffected: decoded bytes must parse as a canonical object and are stored
 under their own content id, so no runtime can accept wrong content under
 a given id. The divergence can only change which objects, if any, a
 crafted pack yields on each runtime.

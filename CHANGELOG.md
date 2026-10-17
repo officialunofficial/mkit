@@ -15,6 +15,12 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Breaking (toward 0.6)
 
+- Native `pack-zstd` now enforces the same 8 MiB effective window and RFC 8878
+  block maximum as `pack-ruzstd`. Previously accepted oversized windows or
+  blocks return `ZstdDecompress`. Migration: re-encode such input with a window
+  no larger than 8 MiB and conforming block sizes. Output claims, cumulative
+  budgets, and stable error variants are unchanged; no store reset is required.
+
 - The conformance profile adds `combined-publication`, `gc`, and
   `async-inspection`, with feature-gated publication and removal-race cases.
   Test-control messages add typed publication and reliance observations.
@@ -168,6 +174,12 @@ collect the applicable entries between their old and new immutable pins.
   public APIs, and wire formats are unchanged; no store reset is required.
 
 ### Changed
+
+- `pack-ruzstd` selects the MIT-licensed `mkit-ruzstd` package through a
+  versioned path dependency. Published consumers inherit the bounded decoder.
+  Embedders can remove their workspace `ruzstd` patch after updating to this
+  release. The release pipeline publishes the decoder before the workspace.
+  Wire bytes, object budgets, and stored formats are unchanged; no reset.
 
 - Windowed pack checkpoints reuse an incremental BLAKE3 prefix digest.
   Cold resumes authenticate and rebuild the current prefix once. Cursor bytes,
