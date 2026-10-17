@@ -9,13 +9,10 @@
 // `hyper-util/server` + `dep:libc` — none of which build for
 // wasm32-unknown-unknown.
 //
-// The R2-HEAD half of the probe and the `service`-field match decision are
-// shared with apps/vcs-worker via `mkit_worker_common::health` (mkit#813).
-// The RefStore DO round trip and the `impl Health` trait itself stay here:
-// `do_call` addresses a per-room DO instance (the extra `HEALTH_PROBE_ROOM`
-// argument below), unlike vcs-worker's fixed-instance addressing, and the
-// generated `Health` trait is a nominally distinct type per Worker crate —
-// see `mkit_worker_common::health`'s doc comment for why that isn't shared.
+// The R2-HEAD half of the probe and the `service`-field match decision come
+// from `mkit_worker_common::health`. The RefStore DO round trip and the
+// generated `impl Health` stay here. `do_call` addresses a per-room DO
+// instance using the extra `HEALTH_PROBE_ROOM` argument below.
 
 use connectrpc::{
     ConnectError, RequestContext, Response, ServiceRequest, ServiceResult, ServiceStream,

@@ -6,10 +6,8 @@
 //! This is step 1, **authenticate**, of the signed-write order in §7.1. It
 //! writes no state; the replay lookup comes after it.
 //!
-//! The canonical copy of `apps/vcs-worker`'s `envelope.rs`, `hashing.rs`, the
-//! header reading in `worker_impl/auth.rs` and the pack commitment check in
-//! `worker_impl/service.rs`. The old copies go when `vcs-worker` switches in
-//! WP-M0-17. `apps/repo-worker` keeps its own copy (planner decision Q11).
+//! Header decoding and pack commitment checks are shared by server bindings.
+//! `apps/repo-worker` owns its separate service integration.
 
 use mkit_core::hash::{hash, to_hex};
 use mkit_core::write_auth::{

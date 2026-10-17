@@ -9,7 +9,7 @@
 # `mkit-server` block (since WP-M0-20) runs its
 # scripts/check-wasm-dep-graph.sh, scripts/check-cli-baseline.sh (the
 # server-free CLI check), `cargo check --target wasm32-unknown-unknown` of
-# mkit-server and the wasm32 build of mkit-server-worker, and docs-lint.yml
+# mkit-server and its wasm32 build, and docs-lint.yml
 # runs its check-spec-status.sh. Still local-only until WP-REL mirrors them
 # into the CI configs: the mkit-wasm wasm32 check, scripts/wasm-ruzstd-check.sh
 # (mkit-core's pack-ruzstd decoder run on wasm32 under node via wasm-pack),
@@ -162,8 +162,6 @@ ci-scripts:
     python3 scripts/check-feature-names.py
     python3 scripts/check-launch-feature-graph.py
     python3 scripts/test-server-gates.py
-    python3 scripts/test-workers-wire-diagnostics.py
-    python3 scripts/test-enable-worker-alarm-info.py
     bash scripts/check-cli-baseline.sh
     bash scripts/check-sync-native-deps.sh
     if ! rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unknown$'; then
@@ -178,14 +176,12 @@ ci-scripts:
     ( cd rust && cargo check --locked -p mkit-server --features remote-hooks --target wasm32-unknown-unknown )
     ( cd rust && cargo check --locked -p mkit-server --features http-objects --target wasm32-unknown-unknown )
     ( cd rust && cargo check --locked -p mkit-server --no-default-features --features test-support --target wasm32-unknown-unknown )
-    ( cd rust && cargo build --locked -p mkit-server-worker --target wasm32-unknown-unknown )
-    ( cd apps/embedded-worker && cargo clippy --locked --target wasm32-unknown-unknown -- -D warnings )
     bash scripts/wasm-ruzstd-check.sh
 
 # The mkit-server exit gate in one command: the mkit-server
 # crates' tests (memory storage suite and wire suite over the in-process
-# conformance host), the wasm32 builds of the runtime-agnostic core and the
-# Workers adapter, and the server-free CLI check. `just ci` already covers
+# conformance host), the wasm32 build of the runtime-agnostic core,
+# and the server-free CLI check. `just ci` already covers
 # every step (the nextest run is a subset of ci-linux / ci-macos's
 # workspace run; the rest is in ci-scripts), so `ci` does not call this
 # recipe and run the server suites twice. In CI: cloudbuild/ci.yaml's
@@ -194,24 +190,18 @@ ci-scripts:
 ci-server-allocator:
     ( cd rust && cargo test --locked -p mkit-server --no-default-features --features memory,pack-ruzstd --test zstd_slice_heap_bounds -- --ignored --test-threads=1 --nocapture )
 
-ci-connect-deadlines:
-    python3 scripts/connect-deadline-runtime.py
-
 ci-server:
     #!/usr/bin/env bash
     set -euo pipefail
     python3 scripts/check-feature-names.py
     just ci-server-allocator
     ( cd rust && cargo nextest run --locked -p mkit-server \
-        -p mkit-server-conformance -p mkit-server-worker --all-features )
+        -p mkit-server-conformance --all-features )
     ( cd rust && cargo check --locked -p mkit-server --target wasm32-unknown-unknown \
         && cargo check --locked -p mkit-server --features remote-hooks --target wasm32-unknown-unknown \
         && cargo check --locked -p mkit-server --features http-objects --target wasm32-unknown-unknown \
-        && cargo check --locked -p mkit-server --no-default-features --features test-support --target wasm32-unknown-unknown \
-        && cargo build --locked -p mkit-server-worker --target wasm32-unknown-unknown )
-    ( cd rust && cargo clippy --locked -p mkit-server -p mkit-server-worker \
-        --target wasm32-unknown-unknown -- -D warnings )
-    ( cd rust && cargo clippy --locked -p mkit-server-worker --features perf-metrics \
+        && cargo check --locked -p mkit-server --no-default-features --features test-support --target wasm32-unknown-unknown )
+    ( cd rust && cargo clippy --locked -p mkit-server \
         --target wasm32-unknown-unknown -- -D warnings )
     bash scripts/check-cli-baseline.sh
 
@@ -477,3 +467,15 @@ worktree-gc *args:
 check-local-build:
     python3 scripts/check-build-dir-authority.py
     bash scripts/tests/local-build.test.sh
+
+# Primitives-only maturity compilation (inventory sweep follows with encoded formats).
+check-primitives-stability:
+    bash scripts/check-primitives-stability.sh
+
+# Read-only portable evidence fixture inventory.
+check-primitives-fixtures:
+    python3 scripts/check-primitives-fixtures.py
+
+# Package-rooted normal target edges, excluding host proc macros.
+check-primitives-graph:
+    python3 scripts/check-primitives-graph.py

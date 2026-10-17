@@ -12,7 +12,7 @@ through `ConnectTransport::with_source` for `mkit+https` and `mkit+http`
 push, fetch, pull, and clone. Other schemes use `TransportSource`.
 
 The server side is not in this crate. `mkit-server`'s pipeline serves
-`mkit.transport.v1` (on Workers, via `mkit-server-worker`). The `server` cargo
+`mkit.transport.v1`. The `server` Cargo
 feature and its `serve`/`router`/`TransportServer`/`map_transport_error` API,
 which backed the removed `mkit serve --http`, were removed in 0.5.
 

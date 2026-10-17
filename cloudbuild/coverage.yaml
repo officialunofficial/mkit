@@ -22,6 +22,10 @@ availableSecrets:
       env: CODECOV_TOKEN
 
 options:
+  # The trigger runs this config as a dedicated service account, not the
+  # default Cloud Build account. Cloud Build rejects a custom account with no
+  # log option.
+  logging: CLOUD_LOGGING_ONLY
   machineType: E2_HIGHCPU_8
   diskSizeGb: 100
   dynamicSubstitutions: true

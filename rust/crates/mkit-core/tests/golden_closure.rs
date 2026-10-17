@@ -670,6 +670,24 @@ fn write_golden_closure_vectors_if_requested() {
     }
 }
 
+// Exercise today's encoder independently of the fixture-only verifier below.
+// Never regenerate the committed bytes to accommodate a dependency update.
+#[test]
+fn closure_encoders_match_committed_bytes() {
+    if writing() {
+        return;
+    }
+    for vector in build_vectors() {
+        let expected = fs::read(closure_dir().join(format!("{}.manifest.bin", vector.name)))
+            .expect("read committed golden bytes");
+        assert_eq!(
+            vector.manifest, expected,
+            "{}: encoded bytes changed; investigate before updating the wire format",
+            vector.name
+        );
+    }
+}
+
 fn manifest_names_and_digests() -> Vec<(String, String)> {
     let raw = fs::read_to_string(closure_dir().join("MANIFEST.txt"))
         .expect("read rust/tests/golden/closure/MANIFEST.txt");

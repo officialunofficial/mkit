@@ -1,0 +1,1 @@
+Authenticated Black state with Blob canonical length 19 but payload length 16. Canonical Blob payload must be 19 minus the ten-byte prologue, or 9. Expected InvalidResponse.

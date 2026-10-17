@@ -2,9 +2,8 @@
 //! SPEC-TRANSPORT-CONNECT): [`service`] mounts `TransportService` and
 //! `grpc.health.v1.Health` over a [`Pipeline`], behind the
 //! [`AuthInterceptor`]. It is runtime-agnostic and wasm-clean (connectrpc
-//! without its `server` and `zstd` features), so the native adapter serves
-//! it through axum and the Workers adapter through its fetch bridge, both
-//! unchanged.
+//! without its `server` and `zstd` features), so embedders can mount it
+//! through their runtime HTTP bridge unchanged.
 //!
 //! Every RPC runs pipeline stage 0 in the interceptor, which sees the exact
 //! unary request bytes (the auth v2 body commitment), and hands the

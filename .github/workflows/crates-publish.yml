@@ -143,7 +143,7 @@ jobs:
       # so re-runs after a partial publish need `--exclude` for what landed.
       - name: Publish workspace to crates.io
         working-directory: rust
-        run: cargo publish --workspace --locked
+        run: cargo publish --workspace --exclude mkit-primitives --locked
 
   # Publish the mkit-rpc and mkit-repo proto modules — the two modules in the
   # repo-root buf.yaml v2 workspace that carry a `name:` (issue #719) — to

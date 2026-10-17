@@ -8,6 +8,8 @@ exclude = ["vendor/ruzstd"]
 # default `cargo build` skips them.
 members = [
     "crates/mkit-core",
+    "crates/mkit-primitives",
+    "crates/mkit-primitives/fuzz",
     "crates/mkit-attest",
     "crates/mkit-git-bridge",
     "crates/mkit-keystore",
@@ -28,9 +30,6 @@ members = [
     "crates/mkit-server",
     # The storage-backend conformance suite (publish = false).
     "crates/mkit-server-conformance",
-    # The Cloudflare Workers adapter: R2 blobs, Durable Object metadata
-    # (publish = false).
-    "crates/mkit-server-worker",
     "benches",
     # Dev-only test helpers shared across crates' test suites
     # (publish = false — never a normal dependency, see the crate's
@@ -57,25 +56,26 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/officialunofficial/mkit"
 authors = ["Official Unofficial, Inc."]
 
-# commonware-* is shipped as a single 2026.9.x release train; pinning
-# the version here keeps every consumer (mkit-core, mkit-attest,
-# mkit-transport-enc) in lockstep. Per-feature `default-features` /
-# `features` flags are set at the consumer site because they vary by
-# crate. Bump in a single commit when the train rolls.
+# Commonware requirements allow compatible 2026.x releases so downstream
+# consumers can select a newer release without waiting for mkit to bump.
+# Cargo.lock keeps this workspace reproducible; latest-release CI checks
+# compatibility and golden wire bytes separately. Consumer feature flags
+# remain at the use site because they vary by crate.
 [workspace.dependencies]
+commonware-macros = { version = "=2026.9.0", default-features = false }
 # default-features = false here matches the strictest consumer
 # (mkit-attest / mkit-core). Consumers that want the default feature
 # set can NOT re-enable it via `workspace = true` — they would need a
 # direct path/version dep instead. The commonware crates only have a
 # `std` default that we always pass explicitly anyway, so this is safe.
-commonware-storage = { version = "=2026.9.0", default-features = false }
-commonware-cryptography = { version = "=2026.9.0", default-features = false }
-commonware-runtime = { version = "=2026.9.0" }
-commonware-coding = { version = "=2026.9.0" }
-commonware-codec = { version = "=2026.9.0", default-features = false }
-commonware-parallel = { version = "=2026.9.0", default-features = false }
-commonware-utils = { version = "=2026.9.0", default-features = false }
-commonware-stream = { version = "=2026.9.0" }
+commonware-storage = { version = "2026.9.0", default-features = false }
+commonware-cryptography = { version = "2026.9.0", default-features = false }
+commonware-runtime = { version = "2026.9.0" }
+commonware-coding = { version = "2026.9.0" }
+commonware-codec = { version = "2026.9.0", default-features = false }
+commonware-parallel = { version = "2026.9.0", default-features = false }
+commonware-utils = { version = "2026.9.0", default-features = false }
+commonware-stream = { version = "2026.9.0" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
@@ -87,7 +87,7 @@ unreachable_pub = "warn"
 # Kani proof harnesses live in `#[cfg(kani)]` modules next to the code
 # they verify (`cargo kani` sets the cfg); declare it so normal builds
 # don't flag it as unexpected.
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)", "cfg(commonware_stability_BETA)", "cfg(commonware_stability_GAMMA)", "cfg(commonware_stability_DELTA)", "cfg(commonware_stability_EPSILON)", "cfg(commonware_stability_RESERVED)"] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

@@ -1,6 +1,5 @@
 //! `connect::service` driven through real Connect HTTP requests on the host
-//! (`tower::ServiceExt::oneshot`, as `apps/vcs-worker/tests/
-//! health_check_dispatch.rs` does), over the memory stores: the unary JSON
+//! (`tower::ServiceExt::oneshot`), over the memory stores: the unary JSON
 //! and binary codecs, `connect+proto` stream framing, auth, health and the
 //! error-shaping path.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers

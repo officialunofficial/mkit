@@ -4,8 +4,8 @@
 # Summarize wire-suite TAP logs as Markdown tables: one row per suite run
 # (target profile and result counts), then every skipped case with its reason.
 # Input is any log holding `mkit-server-conformance` TAP output: a nextest run
-# with `--no-capture` over the native wire lanes, or the output of
-# `scripts/vcs-worker-conformance.sh`. Use the tables in conformance reports.
+# with `--no-capture` over the native wire lanes.
+# Use the tables in conformance reports.
 # Run the native lanes one at a time (`--no-capture` does),
 # or their TAP blocks interleave.
 #

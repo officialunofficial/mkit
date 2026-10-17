@@ -238,6 +238,37 @@ mod tests {
     use super::*;
     use commonware_utils::{NZU32, TestRng};
 
+    /// Public, synthetic BLS material: scalar one and the standard G1 generator.
+    /// Pin the codec wrappers used for stored shares and partial signatures,
+    /// separately from the dealer/key-derivation golden below.
+    #[test]
+    fn threshold_share_and_signature_codec_bytes_are_pinned() {
+        use commonware_cryptography::bls12381::primitives::group::{Private, Scalar};
+        use commonware_cryptography::bls12381::primitives::variant::MinPk;
+        use commonware_utils::Participant;
+
+        let scalar_hex = "0000000000000000000000000000000000000000000000000000000000000001";
+        let generator_hex = "97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb";
+        let share = Share::new(Participant::new(1), Private::new(Scalar::from(1u64)));
+        let partial = PartialSignature::<V> {
+            index: Participant::new(1),
+            value: share.public::<MinPk>(),
+        };
+        assert_eq!(
+            mkit_core::to_hex_bytes(&share.encode()),
+            format!("01{scalar_hex}")
+        );
+        assert_eq!(
+            mkit_core::to_hex_bytes(&partial.encode()),
+            format!("01{generator_hex}")
+        );
+        // Aggregated signatures are raw compressed G1, without the participant.
+        assert_eq!(
+            mkit_core::to_hex_bytes(&partial.value.encode()),
+            generator_hex
+        );
+    }
+
     /// Helper: deal a 3-of-? cohort. The N3f1 fault model with n=3
     /// gives quorum = 3 (no faults tolerated at n=3), so we use n=4
     /// to get a 3-of-4 cohort for the threshold tests. With n=4,

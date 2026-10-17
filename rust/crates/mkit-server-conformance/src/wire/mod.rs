@@ -1,9 +1,8 @@
 //! The black-box wire conformance suite (PRD §5.1 part b): it drives any
 //! `mkit.transport.v1` server over real HTTP, given only a base URL and a
 //! [`Profile`] of what the server offers. It never reaches into a
-//! server's process, so it runs unchanged against the in-process host, the
-//! vcs-worker under `wrangler dev`, staging, or a third party's server
-//! (e.g. Workers with custom storage). It is the M0
+//! server's process, so it runs unchanged against the native in-process host,
+//! staging, or a third party's server. It is the M0
 //! "nothing changes on the wire" oracle, and the M1–M5 cases extend it.
 //!
 //! ```no_run
@@ -24,18 +23,14 @@
 //!
 //! # Running it
 //!
-//! No CI runs it during the epic; the orchestrator runs it locally, at each
-//! WP that changes server behavior and at every milestone boundary.
+//! CI runs the suite over HTTP against the native `TestHost`.
 //!
 //! ```text
 //! # In-process baselines (the pipeline over memory stores):
 //! cargo nextest run -p mkit-server-conformance --all-features -E 'binary(/^baseline_/)'
 //!
-//! # vcs-worker under `wrangler dev`, from the repo root: builds the Worker,
-//! # serves it from a fresh state directory and runs this suite
-//! # (`--test-faults` adds the clock-skew, stats, quota and growth cases):
-//! scripts/vcs-worker-conformance.sh
-//! scripts/vcs-worker-conformance.sh --test-faults
+//! # Native reusable host, including fault and portable contracts:
+//! cargo nextest run -p mkit-server-conformance --features test-host --test test_host --test test_host_migrations --test test_host_regressions -j 3
 //!
 //! # A deployed server (staging, a third party's): the same flags with its
 //! # origin, or a TOML profile (see `ProfileSpec`); `--list-refs 0` skips the

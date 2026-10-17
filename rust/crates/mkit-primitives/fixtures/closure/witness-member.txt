@@ -1,0 +1,1 @@
+Witness page version 1; predecessor digest=0x90 repeated 32 times, length=64 (Closure, one item). Member fact matches state-member.bin exactly. Domain: mkit-closure-witness:v1. Retained facts preserve publication and hold evidence without granting authority.

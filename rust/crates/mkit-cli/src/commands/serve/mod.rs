@@ -220,7 +220,7 @@ pub fn run(args: &[String]) -> u8 {
                 eprintln!(
                     "hint: `mkit serve` no longer takes `{flag}`; it only speaks the ssh-frame \
                      protocol on stdin/stdout.\n\
-                     \x20     Use SSH (`mkit serve`) or a Connect server such as vcs-worker.\n\
+                     \x20     Use SSH (`mkit serve`) or a Connect server using mkit-server.\n\
                      \x20     The mkit+enc:// transport is deprecated: no maintained server."
                 );
             }

@@ -34,7 +34,6 @@ read -r -d '' MANIFEST_TABLE <<'EOF' || true
 /contrib/signers:cargo
 /apps/keys-worker:cargo
 /apps/repo-worker:cargo
-/apps/vcs-worker:cargo
 /apps/mkit-worker-common:cargo
 /apps/web:bun
 /apps/og:bun

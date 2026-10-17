@@ -7,7 +7,7 @@
 //!
 //! Both signers sign the raw 32-byte envelope digest directly — no
 //! SPEC-SIGNING domain prefix — matching
-//! `apps/vcs-worker`/`apps/repo-worker`'s envelope contract exactly (see
+//! the server's envelope contract exactly (see
 //! `mkit-transport-connect::envelope`'s module docs).
 
 use std::sync::Mutex;

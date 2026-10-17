@@ -30,6 +30,16 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Added
 
+- Add guarded fork acceptance to `mkit-primitives`: bounded full-inventory plans,
+  authoritative destination emptiness, final source-proof ordering, exact
+  authority and admission guards, terminal reservation settlement, and saved
+  result replay. Acceptance creates no visible membership or destination refs.
+  Additive ALPHA API; no wire or stored-format change; no store reset.
+
+- Add the independently versioned `mkit-primitives` ALPHA contract skeleton.
+  It defines opaque verification, closure, and guarded-decision types without
+  changing existing runtime paths or wire formats. No migration or store reset.
+
 - Protocol acceptance and recovery requirements now distinguish portable
   guarantees from reference-server mechanisms. Fork acceptance requires a final
   source proof after membership staging, with uniform source-race refusal and
@@ -38,6 +48,13 @@ collect the applicable entries between their old and new immutable pins.
   runner are prepared for the next lockstep crates.io release, with a
   versioned test-only control binding and declared server-control coverage.
   No production wire, runtime, or stored-format change; no wipe.
+
+- Sans-IO direct-child closure with bounded frontier membership batches, paged
+  visited state, complete missing-set evidence, and exact supplier witnesses.
+  Tree/tag child closure preserves existence-only semantics; chunk integrity
+  covers every consumed manifest. Hosts retain and acknowledge private evidence
+  pages, and replay verification after evidence loss. New local evidence format;
+  no transport change or repository store reset.
 
 - `ReadAccess::declared_visibility` reads the stored visibility declaration
   whether or not the repository record exists, for private-origin locks and
@@ -66,6 +83,14 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Fixed
 
+- Use smaller test codegen units and serialize Cloud Build's workspace test
+  compilation on the existing worker to bound compiler memory. All tests
+  and their execution concurrency remain unchanged.
+- Update rustls to 0.23.46 to address RUSTSEC-2026-0346 through
+  RUSTSEC-2026-0349 without new advisory exceptions.
+- Restore the web terminal's Sandbox SDK pin to 0.12.10, matching the backend
+  terminal protocol and restoring the SDK's `xterm` export.
+
 - Fork publication absorbs a competing driver's exact witness pair after a
   guard loss. Foreign rows still refuse the fork. Retryable job-step errors
   now carry `Retry-After: 1`, retaining `unavailable` and HTTP 503. Error message
@@ -92,6 +117,11 @@ collect the applicable entries between their old and new immutable pins.
 - Windowed pack checkpoints reuse an incremental BLAKE3 prefix digest.
   Cold resumes authenticate and rebuild the current prefix once. Cursor bytes,
   public signatures, refusal order, and final pack integrity checks are unchanged.
+
+- Commonware dependencies accept compatible 2026.x releases. Committed
+  lockfiles retain reproducible builds; a weekly and manifest/lockfile PR
+  compatibility check builds and tests the latest release against pinned wire
+  bytes. No API, wire, or stored-format change; no store reset is required.
 
 - Performance: ClosureResolve and EmitIndex outside the tiny-pack path share
   up to eight durable slices per callback, with the original timer and job guards and
@@ -1413,6 +1443,12 @@ stored shapes instead of upgrading or downgrading them.
   where a self-certifying identity is required. No stored-format change.
 
 ### Removed
+
+- Remove `mkit-server-worker`, `apps/vcs-worker`, and `apps/embedded-worker`,
+  along with their deployment guides, runtime probes, and build and CI wiring.
+  `mkit-server` remains the reference implementation with its existing features
+  and wasm32 support. Native HTTP wire conformance runs through the in-process
+  `TestHost`. Embedders can host the reference server through its library API.
 
 - [embedder: breaking API] The Workers-only `published-view` optimization (ref snapshots in R2, its
   timer, `PublishedViewConfig`, `fetch_configured`, `ns_object_configured`,

@@ -1,0 +1,51 @@
+[package]
+name = "mkit-primitives-fuzz"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Bounded replay harnesses for mkit-primitives"
+keywords = ["mkit", "fuzz"]
+categories = ["development-tools::testing"]
+
+[lints]
+workspace = true
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+mkit-primitives = { path = "..", default-features = false }
+mkit-core = { path = "../../mkit-core", default-features = false }
+libfuzzer-sys = { version = "0.4", optional = true }
+
+[features]
+default = []
+libfuzzer = ["dep:libfuzzer-sys"]
+
+[[bin]]
+name = "closure_steps"
+path = "fuzz_targets/closure_steps.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "closure_pages"
+path = "fuzz_targets/closure_pages.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "fork_acceptance"
+path = "fuzz_targets/fork_acceptance.rs"
+required-features = ["libfuzzer"]
+test = false
+doc = false
+bench = false

@@ -807,8 +807,8 @@ fn decide_write_result(
     {
         return Ok((StoredResult::Rejected(rejection.clone()), Vec::new(), false));
     }
-    // Quota IS charged on a CAS conflict, as in vcs-worker, where the
-    // charge commits in the same transaction as the replay row: a conflict
+    // Quota is charged on a CAS conflict. The charge commits in the same
+    // transaction as the replay row: a conflict
     // still costs an operation and a ledger row, so the charge bounds
     // ledger growth per signer. PRD §5.4's separate `Aborted` transaction
     // is for M3 payment reservations, not this abuse quota.

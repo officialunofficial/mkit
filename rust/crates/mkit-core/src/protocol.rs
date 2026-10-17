@@ -481,8 +481,7 @@ pub fn retrying<T>(
 /// Mirrors the wire-level `PackChunk` shape shared by the SSH and enc
 /// transports (`offset`, `data`, `last` — see
 /// `mkit-rpc/proto/mkit/rpc/v1/ssh/ssh.proto`) and the `mkit.transport.v1`
-/// Connect proto being designed for the HTTP
-/// reference worker, without this crate depending on any
+/// Connect proto used by HTTP servers, without this crate depending on any
 /// protobuf-generated type: `mkit-core` is the dependency root that
 /// `mkit-rpc` builds on, not the reverse (see this module's header
 /// comment), so the canonical protobuf `PackChunk` cannot be named here.

@@ -748,6 +748,34 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<ShardSet, ShardError> {
 mod tests {
     use super::*;
 
+    /// The zero payload gives two zero Reed-Solomon shards. The fixed bytes
+    /// include the codec's shard length, index and BMT proof, plus our manifest.
+    #[test]
+    fn shard_and_manifest_bytes_are_pinned() {
+        let config = Config {
+            minimum_shards: NonZeroU16::new(1).unwrap(),
+            extra_shards: NonZeroU16::new(1).unwrap(),
+        };
+        let (shards, manifest) =
+            encode_pack_to_shards_with_strategy(&[], config, &Sequential).unwrap();
+        let expected = [
+            "040000000000000000000201261f4cb39c0c26801a69a05e72c040f5df656fc26f10b485dc07cab6e00b3fd6",
+            "040000000000010000000201f4047236d04047475bab5a4fa2d4b5ce2a2c5d523189eddd94c7fc6d270a2cab",
+        ];
+        assert_eq!(shards.len(), expected.len());
+        for (shard, expected) in shards.iter().zip(expected) {
+            assert_eq!(hash::to_hex_bytes(&shard.bytes), expected);
+        }
+        assert_eq!(
+            hash::to_hex_bytes(&encode_manifest(&manifest).unwrap()),
+            "4d4b534802af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262010001003ffdb20f280dd8ce0fa4e06ef4b9d3519b0c2f6a028182adb0dfd317de0bf2ed020000008bbc8ea60903e36489e409c1caf7e9e2a1bce548a94ddfc52eb0a5b65620abb3ab30963e625c9156367714fee7348c5f8df6a2e2c1ac55e0c89fc89c08b0b98b"
+        );
+        assert_eq!(
+            decode_pack_from_shards(&shards[..1], &manifest).unwrap(),
+            b""
+        );
+    }
+
     /// A deterministic 1-MiB pack-like payload. Not a real packfile —
     /// the shard layer treats its input as opaque bytes, so any byte
     /// stream with enough entropy exercises the encoder.

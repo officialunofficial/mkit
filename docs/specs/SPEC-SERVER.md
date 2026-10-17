@@ -1597,6 +1597,99 @@ resulting-pair coverage under §10.2, denial under §14.2, or configured ref
 policy. Verification of every entry in the consumed packs, including entries
 outside the advanced head's closure, remains required.
 
+#### Direct-child closure edges
+
+The direct-child integrity obligation uses the following matrix. Every consumed
+object is included, even when it is not reachable from an advanced head.
+
+| Source | Required children | Additional integrity obligation |
+|---|---|---|
+| Commit or remix | Tree, then every parent | None beyond child availability. |
+| Tree | Every entry, preserving occurrences | Entry modes do not impose an additional child-kind refusal. |
+| Tag | Target | The declared target type does not impose an additional child-kind refusal. |
+| Chunked blob | Every chunk, preserving occurrences | Each child is a canonical, hash-correct Blob. Checked ordered payload sums never exceed the manifest total and the final sum equals it. |
+| Blob or pack-only delta | None | Delta-base resolution is a separate obligation. |
+
+Remix upstream source claims MUST NOT become same-repository closure edges.
+Chunk occurrences count separately toward reassembled size, even when they
+repeat an ID. This profile does not impose additional individual chunk lengths
+from `chunk_size`. A missing child prevents successful closure; unavailable
+acquisition or exhausted execution/evidence capacity MUST NOT be represented
+as a complete missing set. A complete missing set includes every reached missing
+ID and its reference occurrences. An unresolved child's unknown descendants
+are not additional inferred missing IDs.
+
+Verified same-repository members may terminate descent as described above.
+Advanced heads still require Commit, Remix, or Tag kind. A later chunk use of
+an already encountered ID still requires Blob integrity and occurrence length.
+Tree/tag kind hints and gray-edge cycle detection MAY be reported as diagnostics;
+they do not add content refusals to this profile. A traversal depth allowance
+is an execution resource bound, with roots at depth zero. It is independent of
+delta depth. The reached-ID ceiling includes verified frontier stops and permits
+exactly 10,000,000 distinct IDs; exhaustion never establishes closure.
+
+#### Local closure evidence pages
+
+The following versioned byte contracts support retained closure evidence. They
+are local algorithm evidence, not remote attestations or new transport messages.
+A checksum does not authenticate a malicious host or checkpoint origin.
+The caller retains pages privately until a complete result, acknowledges durable
+retention before dependent progress, and reacquires pages by exact commitment.
+Page loss requires replay or restart; it MUST NOT prove object absence.
+Unsupported formats are rejected and verification restarts; there is no older
+format reader. Reverification is the replacement for discarded local evidence.
+
+Each page commitment carries its digest, role `Closure`, exact byte length, and
+item count one. Each digest uses the SPEC-CONVENTIONS domain framing
+`BLAKE3(le16(domain_length) || domain || page_bytes)`. Domains are:
+
+- `mkit-closure-state:v1`: disposable visited-state journal pages.
+- `mkit-closure-witness:v1`: relied-on repository membership observations.
+- `mkit-closure-missing:v1`: complete missing-ID occurrence pages.
+- `mkit-closure-heads:v1`: exact requested head sequence, with body
+  `le64(count) || id[0] || ... || id[count-1]`, including duplicates.
+
+All page integers below are little-endian. Optional values use a single byte
+`0` for absent or `1` followed by the value; other tags are invalid. A page
+reference is `digest[32] || le64(encoded_length)`; its role and item count are
+implicit. Each page starts with version byte `1` and an optional previous-page
+reference. Trailing bytes, unknown versions/tags, and invalid object kinds are
+rejected. Decoders apply finite byte, item, allocation, and work allowances before
+hashing or allocation. Linked pages are independently authenticated when read.
+
+A membership record encodes, in order: repository ID `[32]`, incarnation `[32]`,
+object ID `[32]`, object kind `u8`, canonical length `u64`, supplier pack ID `[32]`,
+supplier length `u64`, supplier source binding `[32]`, canonical source binding
+`[32]`, membership revision `[32]`, effective delta depth `u32`, published `u8`,
+and held `u8`. Booleans are exactly `0` or `1`. A witness page contains one such
+record after its header. Acceptance guards the exact relied-on facts and suppliers;
+closure does not substitute these observations for live denial, inspection,
+publication, or authorization evidence.
+
+A state page contains, after its header: key `[32]`, object kind `u8`, canonical
+length `u64`, optional verified Blob payload length `u64`, then state tag
+`0` (gray), `1` (black), `2` (absent), or `3` followed by a membership record.
+The member key, kind, and canonical length must match the containing state record.
+An optional Blob payload length requires Blob kind and equals canonical length
+minus the ten-byte canonical Blob prologue.
+State pages are at most 1,024 bytes. There are 256 bucket heads, selected by the
+first key byte; an update prepends a page. Lookups authenticate the newest record
+for a key or exhaust that bucket chain. Only acknowledged heads are current.
+Scanned records and page bytes consume cumulative work; pathological buckets
+may exhaust it instead of yielding a conclusion. Resident journal metadata is
+independent of the reached-ID count.
+
+A missing page contains, after its header: missing object ID `[32]`, positive reason count
+`u64`, then that many reasons. Each reason is optional source ID `[32]`, edge tag
+`u8` (`0` head, `1` tree entry, `2` tree, `3` parent, `4` chunk, `5` tag target),
+and occurrence ordinal `u64`. Source and edge kind are either both absent (a
+head, with ordinal zero) or both present. Reasons are strictly ordered by
+optional source ID, then edge tag, then ordinal; duplicates are rejected.
+The final root follows links in ascending missing-ID
+order, with one page per distinct ID. The complete result includes an exact count.
+Empty sequences have count zero and the zero digest sentinel. Intermediate pages
+or a truncated traversal MUST NOT be presented as a complete set or closure proof.
+
 **Reference-server behavior.** The scheduled verifier may run up to eight durably checkpointed
 Extract selection slices in one callback. Slices share the existing call
 allowance, two-second elapsed cutoff and physical callback deadline; each keeps

@@ -7,6 +7,43 @@ profile; storage-only groundwork is labeled explicitly. The
 [SPEC-SERVER profile map](specs/SPEC-SERVER.md#1-scope-and-relation-to-spec-transport-connect)
 distinguishes current enforcement from future integration.
 
+## Primitive contracts keep trusted construction private
+
+**Always:** only the owning primitive module can construct `VerifiedPack`,
+`ClosureProof`, or `Guarded<D>`. Caller-supplied membership facts retain exact
+repository, incarnation, source, supplier, and revision bindings. Missing input
+is separate from authoritative absence. Source pre-apply fences remain separate
+from destination atomic guards.
+
+**Because:** type-safe composition must not promote unverified bytes or missing
+facts into acceptance evidence.
+
+**If violated:** callers could bypass verification, cross repository boundaries,
+or apply effects without every required live comparison.
+
+**Enforcement status:** the initial ALPHA skeleton has private fields and
+compile-fail doctests. The closure entry point enforces its semantic checks with bounded state-machine
+tests. Pack verification and decision entry points land with their owners.
+
+## Portable closure completion requires every occurrence and retained page
+
+**Always:** direct-child closure checks every supplied verified object and every
+advanced head. Membership batches use only the requested repository incarnation.
+Every chunk occurrence contributes its verified Blob payload length, including
+surplus manifests and repeated IDs. A later use cannot bypass a new obligation.
+Only acknowledged authenticated pages support visited-state and relied-on member
+proofs. Resource exhaustion and acquisition loss never yield a complete result.
+
+**Because:** head-only traversal misses surplus entries; ID deduplication alone
+can skip file-integrity obligations or erase a supplier dependency.
+
+**If violated:** an incomplete or corrupt consumed set could be accepted, or a
+caller could publish a truncated missing set as a complete diagnostic.
+
+**Enforced by:** `mkit_primitives::closure::ClosureWalker`, its independent seeded
+graph oracle, protocol/adversarial tests, and closure transition fuzz replay.
+Reference-server integration is separate; this primitive grants no visibility.
+
 ## Conformance distinguishes absent features from implementation gaps
 
 **Always:** cases for undeclared protocol features report not applicable with
@@ -99,9 +136,9 @@ at their existing boundaries. No wire or stored-format change.
 
 **Always:** `perf-metrics` collectors retain fixed-size numeric aggregates and
 constant partition-kind, stage, operation, and stop-reason labels. They never
-retain keys, credentials, names, object ids, SQL text, values, or error details.
+retain keys, credentials, names, object ids, values, or error details.
 Default builds omit new timers, metadata, and log events. Enabled builds execute
-the same checks, SQL, budgets, checkpoint writes, and reply bodies.
+the same checks, budgets, checkpoint writes, and reply bodies.
 
 **Because:** measuring latency must not disclose private data or change a
 security boundary, page boundary, scheduling decision, or resource allowance.
@@ -109,13 +146,11 @@ security boundary, page boundary, scheduling decision, or resource allowance.
 **If violated:** diagnostics could leak private repository data, distort timing,
 or alter correctness while measuring it.
 
-**Enforced by:** feature-gated collectors, numeric-only RPC header metadata,
-fixed top-four/100-call windows, fixed denial buckets, telemetry privacy and
-volume tests, and the native scan wire-identity cost harness. Slice observations
-are scoped to each future poll and retain only one slowest call. Missing alarm
-or failure evidence stays unknown; telemetry never guesses a disconnect or
-adds storage reads to recover diagnostic state. Worker timestamps
-are wall/I/O measurements; synchronous CPU requires platform/local profiling.
+**Enforced by:** feature-gated collectors, fixed denial buckets, and native
+verification instrumentation tests. Slice observations are scoped to each
+future poll. Missing alarm or failure evidence stays unknown; telemetry never
+guesses a disconnect or adds storage reads to recover diagnostic state.
+Durations measure elapsed wall time; synchronous CPU requires profiling.
 See [Performance measurements](operations/performance-metrics.md).
 
 ## Packmap advances preserve node bytes and live-ref leases
@@ -472,10 +507,8 @@ current-ticket and denial checks with shared call/response bounds;
 first descriptor pages with at most 4 MiB of raw descriptor values plus
 bounded key, cursor and collection overhead; continuations and
 nested inventory/chunk/action proofs remain sequential with their existing
-bounds, and existing callers remain serial; core,
-native and Worker scanner retrieval regression suites. The native and Worker
-mounts are default-off; configured Worker launch activation requires the Paid Workers
-profile and each facility's complete validated configuration.
+bounds, and existing callers remain serial; core and native scanner retrieval
+regression suites. Embedders configure and mount scanner retrieval explicitly.
 
 ## Ticketed pushes bind uploaded bytes to one paired advance
 
@@ -705,7 +738,7 @@ storage after exhausting their write budget.
 
 **Enforced by:** `mkit-server` ref policy permanent-denial, lag-retry and
 concurrent replay winner tests; shared core canonical/context tests; Connect retry tests;
-actual local Workers regressions in `apps/{repo-worker,vcs-worker,keys-worker}/tests/`;
+actual local Workers regressions in `apps/{repo-worker,keys-worker}/tests/`;
 quota and rate admission in `apps/mkit-worker-common/tests/quota_ledger.mjs`;
 web/spammer envelope tests. Keys failure injection after name and result writes
 rolls back both; saved results survive a full Worker restart. Production builds
@@ -872,34 +905,25 @@ unreachable object does not meet today.
 
 ## Single commonware release train across every manifest and lockfile
 
-**Always:** every `commonware-<name>` dependency — in `rust/Cargo.toml`,
-every `rust/crates/*/Cargo.toml`, `rust/fuzz/Cargo.toml`,
-`contrib/signers/Cargo.toml`, and the `apps/*-worker` manifests — pins the
-exact same version string (e.g. `=2026.9.0`, not merely a compatible
-range), AND every `Cargo.lock` in those same trees that contains a
-`commonware-*` package resolves to that same version.
+**Always:** Commonware requirements use the same caret minimum (`2026.9.0`)
+across manifests. Committed lockfiles select that baseline release train for
+reproducible builds. Downstream consumers can select compatible 2026.x releases.
+The latest-release compatibility probe updates its disposable lockfile separately.
 
-**Because:** the commonware crates (`-storage`, `-cryptography`,
-`-runtime`, `-coding`, `-codec`, `-parallel`, `-utils`, `-stream`,
-`-invariants`) ship as one coordinated release; mkit's on-disk formats
-(the ancestry MMB, the BLS threshold derivation) and wire
-compatibility depend on the exact same version being linked everywhere a
-crate touches them. A manifest bump without a matching `cargo update` in
-every workspace leaves the *text* aligned while the *lockfile* — what
-actually gets compiled — stays on the old train, silently defeating the
-single-version intent this file's `check_crate` (ed25519-dalek/sha2)
-already establishes.
+**Because:** exact library requirements prevent downstream consumers from
+selecting a newer compatible release. Reproducibility belongs in lockfiles.
+Commonware-backed mkit wire encodings must retain their pinned bytes when the
+resolved dependency changes.
 
-**If violated:** nothing fails to compile — each workspace has its own
-lockfile, so `rust/` can be on `2026.9.0` while `contrib/signers/` is still
-locked to `2026.7.1`, undetected until an on-disk format or golden-vector
-test run against the stale workspace disagrees with one run against the
-bumped one.
+**If violated:** an exact requirement can block downstream resolution, or a
+compatible release can silently change mkit bytes without an encoder regression.
 
-**Enforced by:** `scripts/check-crypto-stack-version.sh`'s
-`check_commonware_family`, run by the "Meta: crypto-stack version"
-workflow (trigger paths include `**/Cargo.lock` under `rust/`,
-`contrib/signers/`, and `apps/*`, not just `Cargo.toml`).
+**Enforced by:** `scripts/check-crypto-stack-version.sh` audits the baseline
+across manifests and committed lockfiles. The scheduled and manifest/lockfile PR
+workflow **commonware-latest.yml** runs `scripts/check-commonware-latest.sh`:
+it updates all resolved Commonware packages together, builds the consuming
+crates with all features, and runs their normal tests, including golden vectors.
+Build and test failures remain visible; the probe never restores an older pin.
 
 ## commonware `Strategy` cannot be spied on from outside commonware-parallel
 
@@ -965,8 +989,7 @@ unrecognized `BackendKind`/`KeyRef` backend string, not a fail-closed one.
 ## wasm32 dependency graphs contain no C-toolchain crates
 
 **Always:** the `wasm32-unknown-unknown` normal-dependency graphs of
-`mkit-wasm`, `apps/repo-worker`, `mkit-server`, `mkit-server-worker` and
-`apps/vcs-worker` contain none of `blst`,
+`mkit-wasm`, `apps/repo-worker`, and `mkit-server` contain none of `blst`,
 `zstd-sys`, `commonware-runtime` or `commonware-storage`; `mkit-wasm`'s also
 contains no `tokio`. Each crate depends on `mkit-core` with
 `default-features = false`, which keeps `pack-zstd` (and so `zstd-sys`) out.
@@ -978,23 +1001,22 @@ its graph must not contain `ruzstd` either until it opts in.
 
 **Because:** none of those crates build for `wasm32-unknown-unknown`.
 `mkit-wasm` ships to browsers, `apps/repo-worker` runs on Cloudflare
-Workers, and `mkit-server` is the runtime-agnostic core that the Workers
-server adapter builds on (production server work §5.1). Cargo unifies features per
+Workers, and `mkit-server` is the runtime-agnostic reference implementation
+that supports wasm32 embedders. Cargo unifies features per
 dependency graph, so one manifest line that re-enables a default feature
 silently pulls a C library into every wasm build downstream.
 
 **If violated:** the wasm32 builds fail, often only in a later, slower CI
 job (wasm-pack, `worker-build`), or on a machine without the C toolchain
-the native build happened to have. For `mkit-server`, a Workers deployment
-could no longer build the server at all.
+the native build happened to have. A wasm32 embedder could no longer build
+the server at all.
 
 **Enforced by:** `scripts/check-wasm-dep-graph.sh` (a `cargo tree` check
 per crate, including the `mkit-core` `pack-ruzstd` graph, which must
 contain `ruzstd`) and the `cargo check --target wasm32-unknown-unknown`
-steps for `mkit-wasm` and `mkit-server` (and the wasm32 build of
-`mkit-server-worker`), all run by `just ci-scripts` (part of `just ci`);
-cloudbuild/ci.yaml runs the script and the `mkit-server*` wasm32 builds
-on `main` and PRs to it (WP-M0-20).
+steps for `mkit-wasm` and `mkit-server`, all run by `just ci-scripts`
+(part of `just ci`); cloudbuild/ci.yaml runs the script and the
+`mkit-server` wasm32 build on `main` and PRs to it.
 
 ## The default `mkit` CLI is server-free
 
@@ -1011,7 +1033,7 @@ tokio itself is allowed: it is the runtime of the Connect and reqwest
 **Because:** the CLI is what every user installs (`cargo install
 mkit-cli`, the release archives). The HTTP server, the
 `SQLite` metadata store and their dependencies belong outside the CLI (the
-`mkit-server` library and its Workers adapter). A server stack in the CLI
+`mkit-server` library and embedder storage adapters). A server stack in the CLI
 graph grows the published crate's supply chain, its build time and its
 binary, and invites serving code paths the CLI was never reviewed for.
 
@@ -1052,13 +1074,9 @@ readable before it is complete, on one backend only.
 **Enforced by:** one test binary per backend in
 `rust/crates/mkit-server-conformance/tests/`: `memory_backends.rs`
 (full-capability and `RefsOnly` memory stores, `MemoryBlobStore`),
-and `fs_backends.rs` (`FsLayoutStore`, `FsBlobStore`); the Workers
-stores (`DoNamespaceStore` over a simulated Durable Object, `R2BlobStore`)
-in `rust/crates/mkit-server-worker/tests/conformance.rs`. The suite's own
+and `fs_backends.rs` (`FsLayoutStore`, `FsBlobStore`). The suite's own
 mutation tests (`suite_selftest.rs`) prove each case fails the store bug it
 targets. All run in the workspace nextest (`just ci`, cloudbuild/ci.yaml).
-Simulated Durable Objects cannot show placement, Cloudflare's limits or
-point-in-time recovery; the M1 staging runs (WP-1.20) cover those.
 
 ## M2 Connect surfaces remain explicit stubs until implementation
 
@@ -1078,34 +1096,24 @@ before enabling their repository RPCs.
 and the TODO and SECURITY comments in `connect/service.rs`. Implementing
 WPs replace their stub assertions with behavior and auth tests.
 
-## The in-process host and the reference Worker pass the black-box wire suite
+## The native HTTP host passes the black-box wire suite
 
-**Always:** every `mkit.transport.v1` server mkit ships passes
-`mkit-server-conformance`'s wire suite (`mkit-server-conformance wire`)
-over the network, with no divergences (a divergence must be declared with
-its justification in the test, and fails the test once the case passes):
-`mkit-server` over the in-process conformance host, and `apps/vcs-worker`
-under `wrangler dev`. The suite speaks raw Connect with its own client, so
-it checks the wire, not mkit's client library.
+**Always:** the reference `mkit.transport.v1` implementation passes
+`mkit-server-conformance`'s wire suite over HTTP through its in-process
+`TestHost`, enabled by the `test-host` feature. The suite speaks raw Connect
+with its own client, so it checks the wire independently of mkit's client library.
 
-**Because:** the servers share one pipeline, but each binding (the
-in-process host, Workers fetch, the storage adapters) can still change status codes,
-compression, streaming or limits on its own. "Nothing changes on the wire"
-(production server work §8, M0 exit) is only checkable against a fixed, black-box
-suite; a client that happens to tolerate a change would hide it.
+**Because:** HTTP bindings can change status codes, compression, streaming, or
+limits even when the pipeline stays unchanged. A fixed black-box suite catches
+changes that a permissive client might hide.
 
-**If violated:** a deployment answers with a different error code, drops a
-precondition or a limit, or buffers a stream where the spec requires it to
-stream, and existing clients or third-party implementations break against
-one server only.
+**If violated:** a deployment can answer with a different error code, drop a
+precondition or limit, or buffer a stream where the spec requires streaming.
 
-**Enforced by:** `rust/crates/mkit-server-conformance/tests/baseline_pipeline_memory.rs`
-(the pipeline over memory stores, plus store mutants each case must catch),
-in the workspace nextest (`just ci`, `just ci-server`, cloudbuild/ci.yaml);
-`scripts/vcs-worker-conformance.sh` for `apps/vcs-worker`, run by
-`.github/workflows/workers.yml`'s `vcs-worker-conformance` job (main and
-PRs to main only; during the production server work epic it runs locally at each
-milestone boundary).
+**Enforced by:** `rust/crates/mkit-server-conformance/tests/test_host.rs` and
+`test_host_migrations.rs`, run with `--features test-host` by the Rust workflow's
+`native-wire-conformance` job. `baseline_pipeline_memory.rs` separately exercises
+the pipeline over memory stores and the store mutants each case must catch.
 
 ## Both zstd backends accept exactly one frame per entry
 
@@ -1551,8 +1559,8 @@ any error, including entries yielded before a checkpoint.
 through its cursors) is an entry, in order, of the one pack whose bytes hash to the verified pack id: the trailer,
 and `expected_pack_id` when set. A cursor from pack A used on a source that yields different bytes for any
 not-yet-verified range fails with `PackfileCorrupted`, never `Done`. The reader does not re-read ranges it has
-already verified. **Keeping the source immutable across resumes is the caller's job** (informative: WP-4.8 binds
-R2 range reads to the object's etag). A source whose already-verified prefix changed after verification can still
+already verified. **Keeping the source immutable across resumes is the caller's job**;
+for example, an object-store adapter can pin range reads to one object version. A source whose already-verified prefix changed after verification can still
 reach `Done`, but only with entries of the verified pack.
 
 A `None` checkpoint means keep the previous cursor. After a boundary-state `None` (the trailer phase), resuming re-reads at most one window plus the trailer; after a mid-entry `None`, it re-reads every window the unfinished entry spans.
@@ -1652,100 +1660,7 @@ cancellation must not hide a durable timer from a driver.
 
 **If violated:** effects can run twice or a committed timer can remain asleep.
 
-**Enforced by:** `mkit-server/src/timers/tests.rs` race and atomicity tests
-and the worker's pure alarm tests.
-
-## Physical timer alarms share bounds and retain cold fairness
-
-**Always:** Worker raw timer enumeration and every logical head share one
-512-row, 128-commit, 32-attempt-per-kind and 10-second injected-clock allowance.
-Enumeration uses bounded indexed raw windows. A volatile cursor rotates warm
-work; guarded failed/unknown-row moves persist capped exponential backoff for
-cold fairness. Retry moves preserve opaque payloads and original handler due
-times, never waive work, and require an absent destination.
-
-**Because:** a frozen Worker clock and repeated isolate restarts cannot bound
-unlimited head enumeration or prevent retained failures from pinning a window.
-
-**If violated:** one physical alarm can exceed its limits, or later durable work
-can remain permanently hidden behind failing or unknown rows.
-
-**Enforced by:** `timers::TickState`, `timers::run_due_with_state`,
-`mkit-server-worker::alarm::run_physical_alarm`, SQL indexed window/VM-step tests,
-and timer/alarm regressions for aggregate bounds, cold restarts and retained rows.
-The bounds above are enforced across the complete physical alarm invocation.
-
-## Worker shard classes reject foreign partition kinds
-
-**Always:** each Durable Object class accepts only its assigned partition kinds
-before dispatching a store call. RepoIndexShard serves both repo and ref indexes.
-
-**Because:** the wire carries the partition, so a class must check the request's
-kind rather than trusting its caller's binding selection.
-
-**If violated:** an incorrectly routed request can write into a foreign class.
-
-**Enforced by:** `mkit-server-worker::ns_object::serve_reply` and the full
-class/partition cross-product in `mkit-server-worker/tests/stores.rs`.
-
-## Worker timer ticks retain alarms scheduled while awaiting I/O
-
-**Always:** after running due timers, the alarm handler re-reads the current
-alarm and retains the earlier of it and the tick's next wake. With default
-storage options and no intervening I/O, Cloudflare input gates protect this
-final read/write sequence from request delivery. Every successor alarm is
-clamped strictly after a fresh reading of the object's clock, including a
-retained alarm or a dirty tick's immediate wake. Stored timer due times and
-tick budgets stay independent of this runtime wake scheduling.
-
-**Because:** `getAlarm` returns null during an alarm handler unless `setAlarm`
-has been called since it started. A timer Apply interleaved while a handler
-awaits non-storage I/O may install a new alarm.
-Rearming at the active alarm's timestamp can preserve its metadata without
-scheduling another callback when the runtime clock is frozen.
-
-**If violated:** the final tick reschedule or delete can overwrite that alarm,
-delaying or stranding a newly inserted timer.
-
-**Enforced by:** `NsObject::alarm`, `alarm_after_tick_with_current`, and its host
-regression tests. Gate semantics follow [Cloudflare's glossary](https://developers.cloudflare.com/durable-objects/reference/glossary/)
-and [storage transaction documentation](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/#transaction);
-the null behavior is documented in [the alarms API](https://developers.cloudflare.com/durable-objects/api/alarms/#getalarm).
-`continuation_advances_a_frozen_alarm_clock` pins equal-clock scheduling;
-`scripts/vcs-worker-alarm-probe.mjs` exercises the real Rust driver across
-multiple bounded ticks using the pinned workerd runtime's clock, awaiting one
-explicit completion response after all fixture timers drain and their handlers
-finish;
-[workerd issue #6866](https://github.com/cloudflare/workerd/issues/6866) describes
-the equal-timestamp scheduling failure.
-
-## Worker deployment sharding is bound before serving RPCs
-
-**Always:** a Worker isolate validates its configured sharding (`SHARDING`,
-default `d34`) against `sm 00` in the root RefStore before serving RPCs. An
-unmarked root with rows is single, so it answers 503 until `SHARDING=single` is
-pinned: there is no single to D34 migration (R-123).
-Each cold request runs its own check with its own store handle. The thread-local
-`RefCell<Option<Settled>>` caches only plain definitive data: success, mismatch
-or corruption. No future, promise or request handle crosses request contexts.
-Storage failures remain request-local and are retried by the next request.
-The cache is keyed by mode and jurisdiction; a changed key drops the cache and
-re-checks storage. A failed Absent uses its atomic observation; an absent
-observation or an undecodable marker refuses as corruption.
-
-**Because:** changing partition routing over existing data hides its refs;
-[Workers continuations](https://developers.cloudflare.com/workers/configuration/compatibility-flags/#handle-cross-request-promise-resolution-correctly)
-remain tied to their original request context; a transient backend
-outage must not permanently poison an isolate.
-
-**If violated:** cold requests can hang, deployments can appear empty, or a
-brief outage can strand all subsequent requests.
-
-**Enforced by:** `sharding_guard::{Settled, check_mode}`, the adapter's isolate-local
-cache, host interleaving/error/config regression tests, and 30 concurrent cold
-health checks before every Worker conformance phase. At most 3 DO calls per
-request arriving before the first definitive result is cached; 0 afterwards;
-never more than one check per request.
+**Enforced by:** `mkit-server/src/timers/tests.rs` race and atomicity tests.
 
 ## Epoch lease acknowledgements describe durable shard state
 
@@ -1917,16 +1832,10 @@ Restoring an older source requires raising `os` above every target's `rh` for
 that source or re-keying it (R-102; WP-1.29).
 
 **Enforced by:** `mkit-server/src/relay/tests.rs` crash, contention, ordering,
-chunk-limit and wake-up tests; native SQLite driver and soft-limit checkpoint
-tests; Worker Loopback host
-tests. Worker RefShard registration uses
-plan-specific fire caps and two target calls per target per fire, including
-chunking and contention. Fires inspect up to four times their row delivery
-budget, persist bounded cycle progress in `rs 00`, and revisit blocked targets
-at the next cycle. A healthy target is reached when fewer than 32 distinct
-failing targets precede it; beyond the cap, the cycle resets. Corruption stops
-delivery after its decodable prefix. Coordinator watermarks follow in WP-1.23c;
-writers in WP-1.9/1.10.
+chunk-limit, wake-up and bounded-cycle fairness tests. Fires inspect up to four
+times their row delivery budget, persist bounded cycle progress in `rs 00`, and
+revisit blocked targets at the next cycle. Corruption stops delivery after its
+decodable prefix.
 
 <a id="object-index-visibility-follows-repository-membership-writer-gate-pending"></a>
 
@@ -2042,12 +1951,7 @@ In-place and Merge restore require another proof and are deferred to WP-5.11b.
 **Always:** GetServerInfo is unauthenticated, never resolves a repository and
 never reads the store. Its response depends only on deployment configuration,
 hook defaults and store capabilities, with the upload threshold zero for
-Multi addressing or admission. The one exception is the Worker's
-deployment-wide sharding guard (R-94), which runs before every RPC, this one
-included: until an isolate has settled the guard, a cold GetServerInfo may
-read the root marker, and a deployment whose marker mismatches answers
-`unavailable` instead of advertising capabilities it would then refuse. The
-guard is deployment-wide, so this never depends on a repository.
+Multi addressing or admission.
 
 **Because:** clients need capabilities before authenticating, and discovery
 must never expose whether a repository exists (STC §2.1).
@@ -2058,7 +1962,7 @@ unknown identities become a repository existence oracle.
 **Enforced by:** pipeline `tests::info`, Connect dispatch discovery tests,
 native `server_hardening` bearer/concurrency regression and wire cases
 `info.shape_and_policy` and `info.ignores_repository_header` on Single, Multi,
-native binary and Worker runners.
+native TestHost runners.
 
 ## Client repository addressing and capabilities remain stable
 
@@ -2214,37 +2118,11 @@ upload can bypass BeginUpload's authorization and admission.
 
 **If violated:** a stale receipt could select replaced bytes, or a crash could expose a partial pack or discard a live session.
 
-**Enforced by:** `mkit-server-conformance/src/storage/multipart.rs` on memory, FS, R2 and S3; `mkit-server/src/fs/tests.rs` ticket-layout, restart and seven-day sweep tests; `Feature::Multipart` wire cases on memory, native FS + SQLite, native S3 + SQLite, and Worker R2.
-
-## Object-store multipart staging cannot publish unverified bytes
-
-**Always:** R2 and S3 stage parts under CV-keyed `server-uploads/<ticket-id>/<index>-<cv>` objects. A part becomes visible only after its subtree CV verifies. R2 re-hashes the assembled stream and withholds the final byte of the conditional pack put until the full root verifies. S3 streams each staged part through a subtree hash immediately before completion, then pins each `UploadPartCopy` to the ETag observed on that GET; the ETag identifies the object version, never proves integrity. A failed hash or copy precondition publishes no pack. Successful completion and abort remove session meta before parts, so concurrent completion sees `SessionGone`. Bucket lifecycle rules expire `server-uploads/` after eight days.
-
-**Because:** staged objects can change between upload and completion, while abandoned sessions must not persist indefinitely.
-
-**If violated:** a corrupted or replaced part can publish a pack whose bytes do not match its BLAKE3 root, or a stale session can remain available to another completion.
-
-**Enforced by:** the shared multipart suite on R2 and S3, corrupted-at-rest completion tests, conditional-copy FakeS3 tests, and the R2/S3 lifecycle runbook.
-
-## Storage pressure observes physical capacity after commit
-
-**Always:** Worker pressure samples use the local physical database size only
-following a committed batch containing a put, before alarm I/O. Native SQLite
-samples the database-wide physical size every 60 seconds and stops on shutdown.
-Alerts use the put soft limit, 70%/90% thresholds and five-point hysteresis;
-per-instance ten-minute limits survive clearing and re-entry. Only the highest
-active severity emits. Counters and gauges are never sampled; Worker latency
-observations are sampled once per hundred calls across the isolate.
-
-**Because:** logical row bytes do not measure the physical storage cap, and
-pre-commit or unsampled latency logging can mislead or overwhelm operators.
-
-**If violated:** capacity exhaustion becomes invisible, or repeated writes
-flood logs while operators need the critical alert.
-
-**Enforced by:** `mkit-server-worker/src/telemetry/pressure.rs` pure transition tests, Worker
-`ns_object::PressureStore` and `tests/stores.rs` over the DO SQL shim,
-console sink/subscriber tests, and native `pressure.rs` shutdown/size-task tests.
+**Enforced by:** `mkit-server-conformance/src/storage/multipart.rs`, instantiated
+by `tests/memory_backends.rs` and `tests/fs_backends.rs`; `mkit-server/src/fs/tests.rs`
+ticket-layout, restart, replacement and seven-day sweep tests. The native HTTP
+`TestHost` runs `Feature::Multipart` wire cases over `MemoryBlobStore` and
+`MemoryKv`; filesystem multipart behavior is covered by the storage suite.
 
 ## Connect read authentication is scoped to one attempt
 
@@ -2371,25 +2249,6 @@ remain fresh after the authorization expires.
 `http_objects/private_tokens` tests. With HTTP serving enabled, shared-cache bypass belongs
 to the adapters in WP-4.16.
 
-## HTTP adapter mounts remain explicitly opt-in
-
-**Always:** the native and Worker HTTP-object adapter features are default
-off, and a mount requires explicit indexed and HTTP configuration plus
-adapter opt-in. Mounted requests retain escaped paths and empty queries,
-stream without collecting bodies, suppress every HEAD body, apply read
-CORS to every response and perform no shared-cache operations. URL-token
-active and retained public keys remain distinct from other deployment roles.
-
-**Because:** unconfigured deployments must not expose indexed content, private content must
-not enter shared caches, and URI normalization or query logging could
-reinterpret paths or disclose bearer capabilities.
-
-**If violated:** a deployment exposes routes unintentionally, leaks private
-content or tokens, or serves a different object from the requested URL.
-
-**Enforced by:** native `tests/http_mount.rs`, Worker `http_mount` tests,
- default feature/startup configuration, and the release feature gate.
-
 ## Unsupported HTTP proofs stop before preparation and payment
 
 **Always:** the shipped HTTP handlers validate proof query syntax and retain
@@ -2499,29 +2358,7 @@ renewal/completion and the conformance memory-backend authority tests.
 Deployment activation is
 optional and requires an Authority hook with explicit generation facts.
 
-## Worker extracted-object backend completion verifies before visibility
-
-**Always:** server-internal object multipart sessions pin a trusted raw-root/CV
-plan, geometry and operation identity before staging. Actual streamed parts
-verify length/CV before receiving opaque backend receipts. Completion checks the
-ordered receipt/session binding, geometry and merged root before R2 completion;
-it never rereads part payloads. All R2 object writer paths share an immutable
-root/length pin. Public pack receipt limits and upload semantics are unchanged.
-
-**Because:** R2 completion immediately publishes and has no conditional object
-write option. An ETag selects a backend part and does not prove integrity.
-The canonical verifier binds object identity to one correct raw root; AlreadyPresent is
-advisory and cannot replace repository-local source verification or charging.
-
-**If violated:** a replacement, forged receipt or competing writer could expose
-unverified bytes or falsely authorize reuse in another repository.
-
-**Enforced by:** `r2/object_multipart.rs`, R2 object sink/completion root
-pins, bounded-object multipart model tests, and the local R2 runtime probe.
-WP-4.10b establishes canonical identity and immutable verified source evidence
-in its first bounded source pass before opening a root-pinned upload session.
-
-### Pending holder work protects bytes beyond hold TTL (WP-4.10b foundation)
+## Pending holder work protects bytes beyond hold TTL
 
 **Always:** any content-shard `gp` row for an object prevents collection.
 Insertion guards and bumps `c`; the row does not expire by age. Identical
@@ -2590,7 +2427,7 @@ restart midway through a 50-hop chain, including 250 KiB nodes and the exact
 whole-source decode-budget boundary. `extraction_step_futures_stay_small` bounds
 unpolled coroutine sizes with both ordinary and counted stores. These steps are
 shared with wasm32; the native size guard complements the wasm32 build and
-Workers wire-conformance checks. Apply validation retains 100 ops / 1 MiB.
+native HTTP wire-conformance checks. Apply validation retains 100 ops / 1 MiB.
 
 ## Launch inspection checks the complete bounded set before apply
 
@@ -2614,7 +2451,7 @@ the 1,000-call accounting contract. Scanners decode chunk membership through
 R-193 private retrieval.
 
 **If violated:** unscanned content can publish, retry can bypass inspection, or
-an accepted request can exhaust its Worker budget.
+an accepted request can exhaust its configured invocation budget.
 
 **Spec:** [SPEC-SERVER §§11, 18](specs/SPEC-SERVER.md#11-quarantine-and-inspection).
 **Enforced by:** [inspection code](../rust/crates/mkit-server/src/indexed/inspection.rs)
@@ -2637,76 +2474,6 @@ the earlier role-reconstruction cost; see
 Full classification, async holds and unrestricted multi-batch inspection remain
 future integration; the durable marker is retained storage-only groundwork.
 
-## Paid launch opt-ins validate before accepting work (WP-4.18 / R-194)
-
-**Always:** the Paid Workers launch explicitly selects Paid indexed Multi/D34,
-uses upload tickets at threshold zero, and retains content permanently with
-leases and GC off. Each HTTP/token, hook, and inspection/retrieval opt-in
-validates its complete configuration and distinct key roles before requests.
-Inspection is synchronous and fail-closed; native accepts at most four
-inspectors. No inspector means no advertised inspection bound. Discovery
-reports false leases/async inspection. Receipt key fields are empty without a
-configured receipt-and-notice key and populated when takedown requires it
-([SPEC-SERVER §15.5](specs/SPEC-SERVER.md#155-signing-key-publication-and-rotation)). Worker
-proof serving remains unsupported. Takedown still refuses activation until
-verified preservation and its complete configured purge interface are wired.
-
-**Because:** an artifact feature or parsed secret does not establish an active,
-complete capability. Partial opt-ins must never silently authorize writes or
-expose a broader administration/scanner scope.
-
-**If violated:** deployment discovery overstates safety, or missing hooks,
-scanner isolation, preservation or key separation accepts protected work.
-
-**Enforced by:** Worker `launch.rs` and adapter startup/pipeline validation,
-native launch/scanner startup validation, and focused launch, discovery and
-real native scanner HTTP tests. Full release Worker conformance, preservation
-and embedding addenda remain phase-2 gates recorded in `launch-evidence.md`.
-
-## Embedded fetch and Durable Objects share validated configuration
-
-**Always:** embedded fetch and DO factories use the same Worker configuration,
-including publication, Outcome delivery and custom purge/local invalidation.
-Programmatic ref rules validate before store access. Host-routed admin retains
-the canonical signed path and ADMIN_KEYS authentication. The signed audience
-is the public configuration origin even for a constructed internal request.
-
-**Because:** separate fetch and alarm configuration can acknowledge work with
-the wrong sink or bypass the policy and authentication selected by the host.
-
-**If violated:** durable delivery diverges from accepted work, or internal
-dispatch authorizes a different audience or operator.
-
-**Enforced by:** Worker `validate`, `serve_with`, `serve_admin_with`, the combined
-`NsObjectBuilder` and shared-config `durable_objects!` factories. Host regression
-coverage is in `embedding.rs`; cross-crate wasm and streamed local runtime
-acceptance are recorded separately in the launch evidence matrix.
-
-## Launch backend work shares limits and response lifetimes
-
-**Always:** ticket proofs and implicit packmap checks retain at most six
-concurrent backend responses, and scanner first-page proof reads retain at most
-six. All launch alarm handlers share one 960-operation allowance under the
-existing 1,000-operation project envelope; the remaining 40 operations are
-reserved for dispatch and settlement. Request backends share their existing
-9,000-call allowance and reserve the existing 1,000-call hook/settlement
-headroom. The Worker HTTP mount attaches paid-read settlement to the fetch
-context's `wait_until` lifetime, including cancellation.
-
-**Because:** independent allowances and dropped response settlement can exceed
-physical invocation limits or lose the durable paid-read outcome.
-
-**If violated:** calls stall, timers stop progressing, or admitted reads lose
-accounting when the response is cancelled.
-
-**Enforced by:** chunked ticket/implicit checks and pending-response occupancy
-regressions, measured scanner concurrency, Worker shared-budget clients and
-sixteen-head budget regression, and the request-context HTTP mount. Complete
-runtime lifetime evidence is pending phase 2. Cold SQL timer-head enumeration
-and repeated-restart fairness are repaired separately in open PR #1247;
-this invariant does not claim that unmerged work is bounded. The resumable
-publication recheck repair (#1245) is merged; integrated evidence is phase 2.
-
 ## HTTP file headers never interpolate raw filenames
 
 **Always:** ordinary successful ref-path Blob/ChunkedBlob responses select media
@@ -2722,14 +2489,14 @@ content under the serving origin.
 
 **Enforced by:** `http_objects/content_headers.rs`, success-only selection in
 `pipeline/http.rs`, common pipeline tests, and shared `content-headers.json`
-wire vectors on the native mount and local workerd probe (WP-4.16b, R-201).
+wire vectors on the native mount.
 
 ## Publication rechecks retain bounded progress
 
 **Always:** timer 12 persists its next unchecked or unsatisfied routed witness position in
 its existing row, bound to the full retained advance plus publication generation
 and deletion boundary. Each fire makes at most 128 routed witness calls and
-stops before the shared Worker alarm budget is exhausted. Checkpoints and
+stops before the supplied timer budget is exhausted. Checkpoints and
 completion guard the advance, publication state and original timer row together.
 Local mutable witnesses are re-read each fire. Missing witnesses, outstanding
 obligations, holds and hits never authorize completion.
@@ -2740,8 +2507,8 @@ alarm permits, and restarting every check can leave it permanently pending.
 **If violated:** publication stalls, or stale progress skips a dependency after
 an obligation or generation change.
 
-**Enforced by:** `timers/publication_recheck.rs`, Worker shared alarm registration,
-and the publication recheck regressions. No tag, timer kind, public protocol,
+**Enforced by:** `timers/publication_recheck.rs` and the publication recheck
+regressions. No tag, timer kind, public protocol,
 packmap limit or whole-alarm budget changes. Pre-launch timer codecs are reset,
 not migrated (R-198 B1).
 
@@ -3022,36 +2789,6 @@ CLI transport display parity and the existing CLI golden suites retain output
 and exit-code behavior. No authorization, wire, or stored-format boundary moves.
 
 
-## Repository activation hints carry no authority
-
-**Always:** Workers repository index warm-up runs for authenticated, validated
-reads joined with their authorization prologue (ListRefs joins bucket scans
-following authorization and token validation), or for anonymous reads only after
-repository existence and readability succeed, joined with the next read step.
-The wave drains before final serving guards and capture expiry checks. Delayed
-activation cannot hold already-validated output past revocation or expiry.
-Every result is discarded. Private/missing/invalid repositories never start an
-anonymous wave. Anonymous claims share a rolling cap of eight waves per sixty
-seconds per isolate, retained after cancellation and failure.
-Two sequential groups of sixteen ping RefIndex then RepoIndex; all thirty-two
-calls reserve the existing invocation budget and a separate bounded
-activation allowance before dispatch. A volatile repository claim prevents
-another wave during its TTL, including after cancellation or failure.
-
-**Because:** cold activation can overlap without changing membership, denial,
-proof, or final guards. Optional work must not bypass resource or admission bounds.
-
-**If violated:** anonymous traffic could amplify object wakes, backend calls
-could exceed the invocation allowance, or hints could substitute for fresh checks.
-
-**Enforced by:** the pipeline's signed-read and owner-reader entries, the Workers
-prewake claim and reservation, width/TTL/budget/failure tests, the canonical cold
-model, and enabled/disabled Workers wire conformance. The default storage hook
-performs no work; single sharding skips activation. The master switch defaults
-off; the independent anonymous sub-switch defaults on under that master switch.
-Anonymous absence, rolling-cap, TTL and cold-read regressions enforce the new
-boundaries. No authorization state is cached by either volatile bound.
-
 ## Pending advance waits precede fresh guarded attempts
 
 **Always:** an optional ticketed verification hold retains no attempt snapshot,
@@ -3113,8 +2850,7 @@ extraction settings from the same `PipelineConfig` through
 `ForkEnv::from_config` and `ForkTimer::from_config`. Low-level public fields
 remain caller-controlled; drain fork jobs before switching denial mode.
 
-**Enforced by:** the Worker configured-timer mode regression for both denial
-settings, the fork engine tests for the denial-on full walk, the carried
+**Enforced by:** the fork engine tests for the denial-on full walk, the carried
 pair check, the plan fallback, the publication stage order and the round probe.
 
 ## Fork publication absorbs only exact witness replays
@@ -3156,3 +2892,30 @@ failed unit publishes partial progress.
 
 **Enforced by:** the fork wave regressions and existing crash, resume, lifecycle,
 and denial-gate tests. See [bounds and latency model](operations/fork-waves.md).
+
+## Primitive fork acceptance separates terminal settlement from visibility
+
+**Always:** `mkit-primitives::fork::decide_fork_acceptance` emits acceptance only
+for a complete bounded full-inventory plan, an exactly bound protected
+reservation and admission debit when granted/applicable, authoritative absence
+otherwise, phantom-safe destination emptiness, and a final
+source proof ordered after the last staged membership effect and before the
+current acceptance attempt. Every relied-on destination fact and revision is
+returned for one atomic comparison. Acceptance records terminal response,
+replay, and outcome responsibility and settles the optional exact reservation
+together.
+It emits no visible membership, destination ref, or permission to write.
+
+**Because:** construction, terminal acceptance, and published clearance have
+different responsibilities. A sampled absence cannot exclude phantom additions;
+a per-pack proof before the last staged effect cannot fence the full source.
+A lost response or a later source move must not repeat a charge or outcome.
+
+**If violated:** an unaccepted fork could become readable, an unauthorized or
+changed plan could be accepted, or retries could settle another reservation.
+
+**Enforced by:** the primitive's semantic fixtures, all-observation mutation
+checks, phantom-addition and transitive-supplier tests, bounded hostile-fact
+replay, and once-only terminal replay tests. This primitive is not yet adopted
+by the reference server; its existing conformance gaps remain declared until
+the activation integration passes the independent conformance suite.

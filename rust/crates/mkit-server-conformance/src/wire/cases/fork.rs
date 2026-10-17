@@ -1,10 +1,8 @@
-//! The embedded `ForkRepo` driver probe (Lane RX2). `ForkRepo` has no
-//! Connect route, so this drives `POST /__mkit_test/fork`, which a
-//! `__test-faults` Worker build serves through the real embedded dispatch:
-//! the same signature checks, guards, job row and kind-16 timer as a
-//! production call. A `perf-metrics` build then records one `fork_step`
-//! event per driver in the worker log; the measurement script aggregates
-//! them into the request/alarm race table.
+//! The embedded `ForkRepo` driver probe. `ForkRepo` has no Connect route,
+//! so the native test host mounts `POST /__mkit_test/fork` through the core
+//! embedded dispatch: the same signature checks, guards, job row and kind-16
+//! timer as a production call. The case reports wall time and attempts for
+//! each source size; embedders can collect core fork-step telemetry separately.
 //!
 //! Each run seeds a two-commit source of `files` blobs, forks it into a
 //! fresh repository and polls `in flight` replies until the job finishes.
@@ -199,8 +197,7 @@ async fn probe_once(ctx: &Ctx, files: u32) -> Result<String, Failure> {
 
 /// The probe entry: one fork per size in `MKIT_FORK_PROBE_FILES`
 /// (default `500,3000`), each on a fresh source and destination. The case
-/// note carries the wall times; the race table is aggregated from the
-/// `fork_step` events the run leaves in the worker log.
+/// note carries the wall times and request attempt counts.
 pub(super) async fn driver_probe(ctx: Ctx) -> CaseResult {
     let sizes = std::env::var(FILES_ENV)
         .ok()

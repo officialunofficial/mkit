@@ -165,6 +165,10 @@ name = "mkit-transport-connect"
 version_group = "mkit"
 
 [[package]]
+name = "mkit-primitives"
+release = false
+
+[[package]]
 name = "mkit-server-conformance"
 version_group = "mkit"
 

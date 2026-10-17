@@ -1,30 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! `grpc.health.v1.Health` glue shared by both Workers (mkit#813, deferred
-//! step 7 of mkit#797): the R2-HEAD half of the reachability probe and the
-//! `service` field match decision `check()` makes before probing at all.
+//! `grpc.health.v1.Health` glue: the R2-HEAD half of the reachability probe
+//! and the `service` field match decision made before probing.
 //!
-//! NOT here: the `impl Health for HealthServer` trait impl itself, or the
-//! generated `Health`/`HealthCheckRequest`/`HealthCheckResponse` types. Each
-//! Worker's `connectrpc-build` codegen produces its own nominally distinct
-//! `Health` trait (`mkit_repo_worker::proto::grpc::health::v1::Health` and
-//! `mkit_vcs_worker::proto::grpc::health::v1::Health` are different types,
-//! even though byte-identical in shape) — a crate with no generated proto
-//! code of its own cannot implement either. Unifying that would mean this
-//! crate owning a shared `grpc.health.v1` generated tree that both Workers'
-//! `_connectrpc.rs` re-export instead of independently generating, which is
-//! a codegen-pipeline change (build.rs, `scripts/regen-{repo,transport}-proto.sh`,
-//! the `buf lint`/`breaking` gates, `scripts/check-generated-fresh.sh`) — a
-//! separate, larger refactor than "shared glue" extraction, not attempted
-//! here. Also NOT here: the RefStore DO round trip each Worker's `probe()`
-//! also performs — repo-worker's `do_call` addresses a per-room DO instance
-//! (an extra `room` argument), vcs-worker's addresses one fixed instance (no
-//! `room` concept at all); that's a real architectural difference, not
-//! duplication, so it stays in each Worker's own `worker_impl::health`.
-//!
-//! Because this crate pulls in no generated proto types for this, it adds no
-//! `buffa`/`connectrpc` dependency and does not grow the vendored-codegen
-//! "3 lockfiles" buffa-bump runbook to 4 (a risk mkit#797's plan flagged
-//! for any health-check extraction that shares the trait impl itself).
+//! Each caller owns its generated `Health` trait implementation and any
+//! Durable Object round trip. This module has no generated proto types or
+//! `buffa`/`connectrpc` dependency.
 
 use worker::Env;
 use worker::send::SendFuture;

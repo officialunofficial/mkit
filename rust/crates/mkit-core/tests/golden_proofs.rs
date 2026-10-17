@@ -529,6 +529,24 @@ fn write_golden_proof_vectors_if_requested() {
     }
 }
 
+// Exercise today's encoder independently of the fixture-only verifier below.
+// Never regenerate the committed bytes to accommodate a dependency update.
+#[test]
+fn proof_encoders_match_committed_bytes() {
+    if writing() {
+        return;
+    }
+    for vector in build_vectors() {
+        let expected = fs::read(proofs_dir().join(format!("{}.bin", vector.name)))
+            .expect("read committed golden bytes");
+        assert_eq!(
+            vector.bin, expected,
+            "{}: encoded bytes changed; investigate before updating the wire format",
+            vector.name
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Consumer: reads ONLY the committed files, never the generator above.
 // ---------------------------------------------------------------------------
