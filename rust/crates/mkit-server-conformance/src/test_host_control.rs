@@ -1000,6 +1000,9 @@ struct ControlStore {
     next_reservation: Arc<AtomicU64>,
     publication_eligibility: Arc<Mutex<BTreeMap<(Partition, Key), bool>>>,
     fork_progress: Arc<Mutex<BTreeMap<(Partition, Key), u64>>>,
+    // Retained test evidence for jobs the engine discards atomically with abort.
+    // The reservation row, not this remembered snapshot, establishes failure.
+    discarded_forks: Arc<Mutex<BTreeMap<(Partition, Key), mkit_server::fork::ForkJobV1>>>,
 }
 
 impl ControlStore {
@@ -1015,6 +1018,7 @@ impl ControlStore {
             next_reservation: Arc::default(),
             publication_eligibility: Arc::default(),
             fork_progress: Arc::default(),
+            discarded_forks: Arc::default(),
         }
     }
 }
@@ -1194,8 +1198,21 @@ impl NamespaceStore for ControlStore {
                 consumed.push((to_hex(&id), ticket.reservation_id));
             }
         }
+        let mut discarded_forks = Vec::new();
+        for write in &batch.writes {
+            if let Write::Delete(key) = write
+                && matches!(keys::parse(key), Some(keys::ParsedKey::ForkJob(_)))
+                && let Some(raw) = self.inner.get(p, key).await?
+            {
+                discarded_forks.push((
+                    (p.clone(), key.clone()),
+                    mkit_server::fork::decode_job(&raw)?,
+                ));
+            }
+        }
         let outcome = self.inner.apply(p, batch).await?;
         if outcome == BatchOutcome::Committed {
+            self.discarded_forks.lock().unwrap().extend(discarded_forks);
             for (key, preparing, _) in &fork_commits {
                 if *preparing {
                     *self

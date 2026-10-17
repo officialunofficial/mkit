@@ -40,8 +40,12 @@ impl ForkBinding {
         config: &PipelineConfig,
     ) -> Result<Self, String> {
         let mut config = config.clone();
-        config.sharding = Sharding::D34;
-        config.indexed = Some(mkit_server::indexed::IndexedConfig::scheduled(1024 * 1024));
+        // Single-repository control fixtures retain their opaque configuration;
+        // only Multi addressing can offer the fork fixture.
+        if matches!(config.addressing, Addressing::Multi(_)) {
+            config.sharding = Sharding::D34;
+            config.indexed = Some(mkit_server::indexed::IndexedConfig::scheduled(1024 * 1024));
+        }
         config.write_quota = None;
         config.takedown_denial = false;
         Ok(Self {
@@ -440,7 +444,21 @@ impl HostState {
             .as_ref()
             .map(fork::decode_job)
             .transpose()
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
+            .or_else(|| {
+                self.store
+                    .discarded_forks
+                    .lock()
+                    .unwrap()
+                    .get(&(partition.clone(), keys::fork_job(&dest.name)))
+                    .filter(|job| {
+                        job.settle
+                            .as_ref()
+                            .and_then(|s| s.replay.as_ref())
+                            .is_some_and(|replay| replay.scope == replay_scope(&query.replay))
+                    })
+                    .cloned()
+            });
         let mut staged_memberships = Vec::new();
         let mut visible_memberships = Vec::new();
         for pack in &query.packs {
@@ -503,7 +521,10 @@ impl HostState {
         let accepted = job.as_ref().and_then(|job| job.accepted.as_ref());
         Ok(ForkObservation {
             accepted: accepted.is_some(),
-            failed: job.as_ref().is_some_and(|job| job.failure.is_some()),
+            failed: job.as_ref().is_some_and(|job| job.failure.is_some())
+                || outcome
+                    .as_ref()
+                    .is_some_and(|outcome| matches!(outcome.state.as_str(), "aborted" | "expired")),
             writable: job.as_ref().is_some_and(|job| job.phase == Phase::Done),
             head,
             packmap,
