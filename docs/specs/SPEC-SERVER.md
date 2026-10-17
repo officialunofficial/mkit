@@ -2797,39 +2797,6 @@ An advance *k* clears only when all of these conditions hold:
 3. No flagged id in the repository occurs in its inspected set or its
    packs. Such an advance is `held` under §11.3, not merely `pending`.
 
-#### Resulting-pair coverage
-
-Condition 2's coverage obligation decomposes into an exact implementer
-checklist. For an advance writing the live (head, packmap) pair:
-
-| Obligation | Requirement |
-|------------|-------------|
-| Chain packs | Every pack on the packmap chain is already in published membership or added by this advance. |
-| Reachable closure | Every object reachable from the resulting head is contained in at least one chain pack; a non-branch ref's walk is unrestricted, while a branch head's members MUST locate inside chain packs only. |
-| Head kind | A present head MUST be a history kind (Commit, Remix, or Tag); other kinds fail closed. |
-| External delta suppliers | Delta bases outside the chain packs are recorded as external suppliers; they MUST already be in published membership and this advance's own additions MUST NOT satisfy them. |
-
-The coverage requirement applies exactly when at least one verification regime
-is configured (inspection obligations, takedown denial, or a custom
-publication policy) and the write does not delete every touched ref. A
-deletion is exempt. With none of those regimes configured, an immediate-path
-write is exempt, including the published-source `AdvanceRefs` form — that form
-gets no separate exemption: once any regime is configured the destination
-retains coverage. Direct-child closure evidence never substitutes for
-resulting-pair coverage.
-
-Coverage evidence splits into *dependencies* — the packmap chain, the packs it
-lists, and the packs located members resolve to — and *external suppliers* —
-packs that supplied delta bases for covered members, merged with any cleared-set
-suppliers at a fork boundary. Denial, inspection, and publication checks remain
-separate guards: coverage alone never authorizes publication.
-
-**Reference-server behavior.** The reference implementation bounds the chain,
-listed packs, reachable members, dependencies, supplier sets, and cleared set to
-4,096 items each, bounds retained verification state to a fixed byte budget, and
-walks per slice under the scheduled verifier's call ledger. Those numeric caps
-are implementation mechanisms, not protocol promises.
-
 A `hit` advance becomes `resolved` only when its §14 takedown is complete,
 all non-hit obligations are satisfied, and condition 2 holds for its
 post-takedown packmap chain and replacement packs. Its own replacement
@@ -2936,6 +2903,40 @@ that starts `cleared` and has an eligible prefix. An advance starting
 Published equals live exactly while no advance on that ref is held or
 pending (and no hit awaits resolution). A deployment with only
 synchronous inspectors MUST still maintain the published view.
+
+#### Resulting-pair coverage
+
+Condition 2's coverage obligation decomposes into an exact implementer
+checklist. For an advance writing the live (head, packmap) pair:
+
+| Obligation | Requirement |
+|------------|-------------|
+| Chain packs | Every pack on the packmap chain is already in published membership or added by this advance. |
+| Reachable closure | Every object reachable from the resulting head is contained in at least one chain pack; a non-branch ref's walk is unrestricted, while a branch head's members MUST locate inside chain packs only. |
+| Head kind | A present head MUST be a history kind (Commit, Remix, or Tag); other kinds fail closed. |
+| External delta suppliers | Delta bases outside the chain packs are recorded as external suppliers; they MUST already be in published membership and this advance's own additions MUST NOT satisfy them. |
+
+The coverage requirement applies exactly when at least one verification regime
+is configured (inspection obligations, takedown denial, or a custom
+publication policy) and the write deletes none of its refs. A write that
+deletes any ref is exempt. With none of those regimes configured, an immediate-path
+write is exempt, including the published-source `AdvanceRefs` form — that form
+gets no separate exemption: once any regime is configured the destination
+retains coverage. Direct-child closure evidence never substitutes for
+resulting-pair coverage.
+
+Coverage evidence splits into *dependencies* — the packmap chain, the packs it
+lists, and the packs located members resolve to — and *external suppliers* —
+packs that supplied delta bases for covered members, merged with any cleared-set
+suppliers at a fork boundary. Denial, inspection, and publication checks remain
+separate guards: coverage alone never authorizes publication.
+
+**Reference-server behavior.** The reference implementation bounds the chain,
+listed packs, reachable members, dependencies, and supplier sets to 4,096 items
+each and the fork cleared set to 8,000 objects, bounds retained verification
+state to a fixed byte budget, and walks per slice under the scheduled
+verifier's call ledger. Those numeric caps
+are implementation mechanisms, not protocol promises.
 
 ### 10.3 Every reader surface uses the published view
 
