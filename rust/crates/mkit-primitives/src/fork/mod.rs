@@ -20,6 +20,9 @@
 //! // then call decide_fork_acceptance. Commit only after all guards compare.
 //! ```
 
+mod advance;
+pub use advance::*;
+
 mod facts;
 mod plan;
 pub use facts::*;

@@ -2188,6 +2188,13 @@ Its embedding dispatch authenticates, checks deployment compatibility, resolves
 completed replay evidence, and then runs the embedding server's dispatch policy.
 The public embedding guide and crate documentation define this API.
 
+The reference fork driver lowers coordinator progress, accepted membership
+activation, and final clearance through pure `mkit-primitives::fork` decisions.
+The host retains proof acquisition, routing, atomic comparison, budgets, and
+scheduling. These in-memory decisions add no wire or stored format. Their
+required snapshots do not replace physical authority permissions or the final
+source proof required above.
+
 The reference implementation uses bounded resumable preparation with a 24-hour
 construction lifetime. Registration installs a destination write barrier;
 preparation copies indexes and holder evidence and stages the complete pack list

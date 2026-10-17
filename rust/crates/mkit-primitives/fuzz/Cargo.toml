@@ -57,3 +57,11 @@ test = false
 doc = false
 bench = false
 required-features = ["libfuzzer"]
+
+[[bin]]
+name = "fork_advance"
+path = "fuzz_targets/fork_advance.rs"
+required-features = ["libfuzzer"]
+test = false
+doc = false
+bench = false

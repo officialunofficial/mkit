@@ -19,15 +19,7 @@ pub struct FenceRowsV1 {
 
 impl FenceRowsV1 {
     pub(super) fn check(&self, job: &ForkJobV1, rows: &[Option<Value>]) -> Result<(), ForkError> {
-        if rows.first().and_then(Option::as_ref).map(Value::as_bytes) != self.authority.as_deref() {
-            return Err(ForkError::Moved("authority"));
-        }
-        if job.fence.as_ref().is_some_and(|f| f.grant_epoch.is_some())
-            && rows.get(1).and_then(Option::as_ref).map(Value::as_bytes) != self.epoch.as_deref()
-        {
-            return Err(ForkError::Moved("epoch"));
-        }
-        Ok(())
+        super::decision::authority(self, job, rows)
     }
 
     pub(super) fn guards(&self, job: &ForkJobV1) -> Vec<Precondition> {

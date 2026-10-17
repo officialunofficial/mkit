@@ -618,7 +618,7 @@ pub(super) async fn step_inner<S: NamespaceStore>(
             Some(error) => Err(error),
             None => match fence_check {
                 Err(error) => Err(error),
-                Ok(()) => advance(env, &mut job, budget).await,
+                Ok(()) => advance(env, &mut job, budget, &raw, &fence_rows).await,
             },
         };
         let mut encoded = None;
@@ -863,11 +863,20 @@ async fn advance<S: NamespaceStore>(
     env: &ForkEnv<'_, S>,
     job: &mut ForkJobV1,
     budget: &SliceBudget,
+    raw: &Value,
+    fence_rows: &[Option<Value>],
 ) -> Result<Batch, ForkError> {
     let now = env.now();
-    if job.accepted.is_none() && (now > job.expires_ms || !settle::current(env, job).await?) {
+    if job.accepted.is_none() && now > job.expires_ms {
         return Err(ForkError::Expired);
     }
+    let reservation = if job.accepted.is_none() {
+        settle::observe(env, job).await?
+    } else {
+        None
+    };
+    let progress = super::decision::facts(job, raw, fence_rows, reservation.as_ref())?;
+    super::decision::progress(&progress, now)?;
     match job.phase {
         Phase::Plan => {
             if plan::slice(env, job, budget).await? {
@@ -945,14 +954,17 @@ async fn advance<S: NamespaceStore>(
                 // racing writer created is the one change they cannot see.
                 require_empty(env, &job.dest()?, false).await?;
             }
-            if !publish::slice(env, job, budget).await? {
+            if !publish::slice(env, job, budget, &progress).await? {
                 return Ok(Batch::new());
             }
+            // Proof reclamation changes no decision. Completion still requires
+            // the exact accepted inventory before the barrier is removed.
             if job.proof.evidence_pending()
                 && !reclaim_before_clearance(env, &job.dest()?, budget).await?
             {
                 return Ok(Batch::new());
             }
+            super::decision::Activation::new(job)?.complete(&progress, job)?;
             job.result.clone_from(&job.accepted);
             job.phase = Phase::Done;
             // The walk's scratch sets go; the cleared set and the inherited
