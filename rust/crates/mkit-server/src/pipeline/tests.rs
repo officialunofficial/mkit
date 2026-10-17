@@ -1,5 +1,6 @@
 //! Pipeline tests over the memory stores and a `ManualClock`.
 
+mod auth_envelopes;
 mod authority_bootstrap;
 #[path = "tests_begin_parts.rs"]
 mod begin_parts;

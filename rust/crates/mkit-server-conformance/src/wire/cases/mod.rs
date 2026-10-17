@@ -425,6 +425,7 @@ cases! {
     "auth.bearer_missing_unauthenticated" => auth::bearer_missing, M0, [Bearer], [];
     "auth.bearer_wrong_unauthenticated" => auth::bearer_wrong, M0, [Bearer], [];
     "auth.bearer_applies_to_streaming" => auth::bearer_streaming, M0, [Bearer], [];
+    "auth.v2_partial_envelope" => auth::v2_partial_envelope, M0, [AuthV2], [];
     "auth.v2_missing_headers_unauthenticated" => auth::v2_missing_headers, M0, [AuthV2], [];
     "auth.v2_wrong_audience" => auth::v2_wrong_audience, M0, [AuthV2], [];
     "auth.v2_wrong_repository" => auth::v2_wrong_repository, M0, [AuthV2], [MultiRepo];

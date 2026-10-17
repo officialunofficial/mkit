@@ -1,0 +1,52 @@
+[
+  {
+    "state": "absent",
+    "same_fingerprint": true,
+    "expected": "fresh"
+  },
+  {
+    "state": "absent",
+    "same_fingerprint": false,
+    "expected": "fresh"
+  },
+  {
+    "state": "committed",
+    "same_fingerprint": true,
+    "expected": "recorded"
+  },
+  {
+    "state": "committed",
+    "same_fingerprint": false,
+    "expected": "conflict"
+  },
+  {
+    "state": "resumable",
+    "same_fingerprint": true,
+    "expected": "resume"
+  },
+  {
+    "state": "resumable",
+    "same_fingerprint": false,
+    "expected": "conflict"
+  },
+  {
+    "state": "in_flight",
+    "same_fingerprint": true,
+    "expected": "in_flight"
+  },
+  {
+    "state": "in_flight",
+    "same_fingerprint": false,
+    "expected": "conflict"
+  },
+  {
+    "state": "rejected",
+    "same_fingerprint": true,
+    "expected": "recorded"
+  },
+  {
+    "state": "rejected",
+    "same_fingerprint": false,
+    "expected": "conflict"
+  }
+]

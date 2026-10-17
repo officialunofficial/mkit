@@ -42,3 +42,5 @@ mod tests {
 pub mod closure;
 /// Authenticated closure page grammars and canonical reencoding.
 pub mod closure_pages;
+// auth
+pub mod auth_claims;

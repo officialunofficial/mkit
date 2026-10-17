@@ -935,8 +935,25 @@ The signature is strict Ed25519 over the 32-byte BLAKE3 of those bytes. The
 origin is the URL's lowercase ASCII HTTP(S) origin with no userinfo, path,
 query, fragment, trailing dot, or default port. `<repository>` is the full
 repository identity of §7.4, exactly as `X-Repository` carries it.
-Repository and procedure are nonempty printable ASCII fields; newlines and
-whitespace are rejected.
+Audience, repository, and procedure MUST be nonempty ASCII byte strings
+containing only bytes `0x21` through `0x7e`. Their byte lengths MUST NOT exceed
+512, 255, and 512 respectively. Procedure MUST begin with `/`. The audience
+additionally obeys the canonical-origin rules above. No normalization is
+performed before comparison or signature verification.
+
+Hexadecimal fields in the signed commitment, nonce, public key, and signature
+MUST use lowercase hexadecimal with their exact widths: 64 characters for a
+nonce, public key, commitment digest, pack id, ticket id, or subtree hash,
+and 128 for a signature. Unary `X-Digest` MUST equal the body commitment's
+digest. A pack or part stream MAY omit `X-Digest`; if supplied once, its value
+is unused and MUST NOT affect envelope verification. The stream's content
+commitment remains binding. Every decimal field MUST contain only ASCII
+`0` through `9`, with no sign, whitespace, separator, or leading zero unless
+the field is exactly `0`. Creation and expiry MUST each be in
+`0..=9223372036854775807`. Pack byte counts MUST be in
+`0..=18446744073709551615`; part indexes in `0..=4294967295`; part lengths in
+`1..=18446744073709551615`. Overflow, extra commitment fields, and noncanonical spellings
+MUST be rejected, independently of the implementation language.
 A unary commitment is `body:<64 lowercase hex BLAKE3 of exact request bytes>`.
 An UploadPack commitment is `pack:<64 lowercase hex pack id>:<decimal byte count>`.
 An UploadPart commitment is `part:<ticket>:<index>:<subtree-hash>:<len>` (§7.6).
@@ -950,6 +967,15 @@ Required headers are `X-Envelope-Version: 2`, `X-Audience`, `X-Repository`,
 matching the body commitment. Nonces are 32 cryptographically random bytes
 encoded as 64 lowercase hexadecimal characters, generated once per logical
 operation and retained with timestamps across every transport retry.
+
+Here, "any auth v2 header" means a signature-triggering envelope header,
+other than the addressing header `X-Repository` (§7.4). The trigger set is
+`X-Public-Key`, `X-Signature`, `X-Digest`, `X-Created-At`, `X-Expires-At`,
+`X-Envelope-Version`, `X-Audience`, and `X-Content-Commitment`.
+`X-Repository` and `Idempotency-Key` alone do not indicate a signed request.
+If any trigger occurs, the complete envelope, including its required signed
+repository and nonce, MUST verify; malformed or partial signed metadata MUST
+NOT fall back to anonymous access. Repeated envelope fields MUST be rejected.
 
 A request MAY also carry `X-Write-Grant`, a grant that authorizes the
 signer ([SPEC-WRITE-GRANTS §4.2](SPEC-WRITE-GRANTS.md#42-header-encoding)).
@@ -975,9 +1001,21 @@ with `Retry-After` in delay-seconds. The generation is independent of grant epoc
 When a pending `SetGrantEpoch` or `SetRepoVisibility` call returns `unavailable`, its retry hint is a `Retry-After` response header in delay-seconds (SPEC-WRITE-GRANTS §5.3, §9.1).
 
 The validity interval MUST be positive and at most 300,000 ms; sender clocks
-may lead the server by at most 30,000 ms. Expired requests MUST be rejected,
-including requests whose results remain cached. Missing or unsupported auth
+may lead the server by at most 30,000 ms. At ingress, server time MUST be
+nonnegative, creation MUST be at most server time plus 30,000 ms, and server
+time MUST be at most expiry. Both boundaries are inclusive. Expired requests
+MUST be rejected, including resumed requests and requests whose results remain
+cached; a replay never extends envelope validity. Missing or unsupported auth
 versions MUST fail closed.
+
+**Reference-server behavior.** A signed write authenticated within that window
+retains the existing absolute commit-deadline cap of signed expiry plus
+30,000 ms, further bounded by its configured apply window and applicable lease
+or ticket deadlines. Arithmetic saturates at the host time representation's
+maximum rather than wrapping. This commit margin does not permit ingress,
+resume authentication, or committed-result lookup after signed expiry.
+
+**Protocol requirement.**
 
 A valid signature alone is insufficient replay protection. Each service MUST
 persist, for every signed write except the replay-exempt uploads of §7.6
@@ -1037,6 +1075,16 @@ a `PendingVerification` answer (§7.6), a membership-lag `unavailable`
 `unavailable` (SPEC-SERVER §11.2) MUST NOT be stored as replay results: the
 server leaves no record for the attempt, and removes any `in_flight` record it
 inserted, so a retry with the same nonce is evaluated again from step 2.
+Only permanent refusals with codes `invalid_argument`, `not_found`,
+`already_exists`, `permission_denied`, `failed_precondition`, `out_of_range`,
+or `unimplemented` MAY be stored as terminal rejection results. Admission
+challenges MUST NOT be stored, regardless of their code; rejection details
+MUST NOT be stored in the replay result. Every other code, including an unknown
+future code, MUST NOT be stored as a terminal rejection. Committed successes
+and these permanent refusals are final; uncommitted pending or transient attempts are
+re-evaluated on retry. A stored fingerprint mismatch is still checked before
+returning any terminal result or resuming in-flight work.
+
 When receipt signing is enabled, that unit also fixes the
 statement bytes and signing key and durably records responsibility for the
 pending signature (SPEC-SERVER §15.1). A post-apply signing failure is the

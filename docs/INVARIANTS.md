@@ -2910,3 +2910,27 @@ checks, phantom-addition and transitive-supplier tests, bounded hostile-fact
 replay, and once-only terminal replay tests. This primitive is not yet adopted
 by the reference server; its existing conformance gaps remain declared until
 the activation integration passes the independent conformance suite.
+
+## Portable auth checks preserve the core grammar and terminal replay rules
+
+**Always:** auth-v2 envelope validation delegates raw canonical fields,
+commitments, destination, time, and strict signatures to the core verifier.
+Header inspection treats any declared signature trigger as envelope presence
+and refuses partial or repeated fields. Repository addressing and an idempotency
+key alone do not indicate a signature. A recorded rejection must use the permanent-code allowlist;
+challenges and transient refusals cannot enter through that constructor.
+
+**Because:** portable servers need one grammar, deterministic header treatment,
+and final-result eligibility independent of token or storage representation.
+
+**If violated:** implementations could disagree on signed bytes, interpret
+ambiguous metadata differently, or retain a retryable refusal as permanent.
+
+**Enforced by:** primitives raw-input parity, header and classifier matrices,
+code fixtures, and stable seeded claims replay. Host adapters must inspect raw
+multiplicities before collapsing headers, authenticate before replay lookup,
+and keep signed reads outside their ledger. The reference adapter applies
+these checks before repository routing in AuthV2 mode, preserves raw header
+presence through verification, and retains the other authentication modes.
+All write methods that emit unsigned client timestamps already require a full
+envelope in AuthV2 mode; the visibility-statement exception emits no timestamps.

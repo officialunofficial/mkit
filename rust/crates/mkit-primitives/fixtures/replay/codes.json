@@ -1,0 +1,19 @@
+[
+  {"code":"canceled","storable":false},
+  {"code":"unknown","storable":false},
+  {"code":"invalid_argument","storable":true},
+  {"code":"deadline_exceeded","storable":false},
+  {"code":"not_found","storable":true},
+  {"code":"already_exists","storable":true},
+  {"code":"permission_denied","storable":true},
+  {"code":"resource_exhausted","storable":false},
+  {"code":"failed_precondition","storable":true},
+  {"code":"aborted","storable":false},
+  {"code":"out_of_range","storable":true},
+  {"code":"unimplemented","storable":true},
+  {"code":"internal","storable":false},
+  {"code":"unavailable","storable":false},
+  {"code":"data_loss","storable":false},
+  {"code":"unauthenticated","storable":false},
+  {"code":"future_code","storable":false}
+]

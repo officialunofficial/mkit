@@ -825,3 +825,16 @@ async fn signed_takedown_contract_survives_native_listener_and_pipeline_restart(
     }
     host.shutdown().await;
 }
+
+#[tokio::test]
+async fn auth_partial_and_duplicate_envelopes_fail_closed_over_http() {
+    let host = TestHost::start(auth_v2_profile()).await.unwrap();
+    let name = "auth.v2_partial_envelope";
+    let report = run(&target(&host), Some(name)).await;
+    assert!(
+        matches!(report.verdict(name), Some(Verdict::Pass(_))),
+        "{}",
+        report.tap()
+    );
+    host.shutdown().await;
+}
