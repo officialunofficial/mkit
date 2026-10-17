@@ -1,5 +1,5 @@
 use mkit_core::hash::Hasher;
-use mkit_primitives::decision::RefName;
+use mkit_primitives::decision::{LifecycleState, Observed, RefName};
 use mkit_primitives::error::FailureCode;
 use mkit_primitives::evidence::{RepositoryId, Revision};
 use mkit_primitives::fork::*;
@@ -562,8 +562,6 @@ fn managed_lifecycle(state: mkit_primitives::decision::LifecycleState) -> ForkLi
 
 #[test]
 fn managed_lifecycle_requires_acquisition_active_incarnation_and_exact_revision() {
-    use mkit_primitives::decision::{LifecycleState, Observed};
-
     assert_eq!(
         ForkRefusal::LifecycleUnavailable.code().as_str(),
         "ForkLifecycleUnavailable"
