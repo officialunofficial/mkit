@@ -67,6 +67,39 @@ ignore = [
     # `tracing-subscriber` in the tree is v0.3.23, the fixed line).
     # `cargo deny check advisories` confirms with an
     # `advisory-not-detected` warning — this ignore is now dead weight.
+
+    # RUSTSEC-2026-0370 / -0371 / -0372 (all reported 2026-10-16): upstream
+    # folded the standalone zvariant, zvariant_derive and zbus_names crates
+    # into zbus 6.0.0 (as `zbus::wire` / `zbus::names`) and filed these
+    # informational "unmaintained" advisories itself to push the migration
+    # (z-galaxy/zbus#2043). They reach us only through the optional
+    # `backend-linux-secret-service` keystore feature:
+    #
+    #   mkit-cli / mkit-fuzz (all-features) -> mkit-keystore
+    #     -> zbus-secret-service-keyring-store 1.0.1
+    #     -> secret-service 5.2.0 + zbus 5.19.0
+    #     -> zbus_names / zbus_macros -> zvariant -> zvariant_derive
+    #
+    # Not exploitable here: these are INFO unmaintained advisories, not
+    # vulnerabilities — no CVE and no known defect in the pinned code.
+    # zvariant_derive is a proc-macro (compile-time only, contributes no
+    # runtime code); zvariant/zbus_names do D-Bus wire marshalling and
+    # bus-name validation on the per-user session bus (same-UID local IPC
+    # to gnome-keyring/KWallet), not an attacker-reachable surface. The
+    # backend is opt-in and Linux-desktop only.
+    #
+    # No maintained upgrade path yet: zbus-secret-service-keyring-store
+    # 1.0.1 and secret-service 5.2.0 are the newest releases and still pin
+    # zbus 5.x; only a zbus-6-based release of one of them removes this
+    # chain. The lockfile now carries the terminal 5.x releases
+    # (zvariant/zvariant_derive 5.15.1, zbus_names 4.3.5).
+    #
+    # TODO(2026-11-19): re-check whether zbus-secret-service-keyring-store
+    # or secret-service has a zbus-6 release; if so, bump and drop all
+    # three ignores together (the crates leave the graph as one unit).
+    { id = "RUSTSEC-2026-0370", reason = "transitive via zbus-secret-service-keyring-store 1.0.1 -> zbus 5.19.0 for the opt-in Linux secret-service keystore backend; informational unmaintained flag (merged into zbus 6.0), no known defect. Re-justify by 2026-11-19." },
+    { id = "RUSTSEC-2026-0371", reason = "same path as RUSTSEC-2026-0370; D-Bus bus-name types on the same-UID session bus only, not attacker-reachable. Re-justify by 2026-11-19." },
+    { id = "RUSTSEC-2026-0372", reason = "same path as RUSTSEC-2026-0370; proc-macro crate, compile-time only, no runtime code. Re-justify by 2026-11-19." },
 ]
 
 [licenses]

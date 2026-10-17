@@ -1,0 +1,1 @@
+Pair checkpoint version 1, base phase. Chain applied; head visited; a delta-base cursor names origin 0x02*32, next 0x14*32, depth 0. Domain: mkit-pair-checkpoint:v1.

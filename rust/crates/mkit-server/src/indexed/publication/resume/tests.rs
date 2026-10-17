@@ -1,11 +1,16 @@
 #![allow(clippy::unwrap_used)]
 use super::*;
+use crate::Code;
+use crate::indexed::publication::verify_within;
 use crate::repo::RepoName;
 use crate::store::index::{IndexEntry, IndexValue, plan_index_rows_direct};
 use crate::store::publication::Clearance;
-use crate::{Code, MemoryKv, NamespaceKey};
+use crate::{BlobKey, BlobStore, MemoryBlobStore, MemoryKv, NamespaceKey, PackSink};
+use bytes::Bytes;
 use futures_executor::block_on;
 use mkit_core::object::{Blob, Object};
+use mkit_core::protocol::PackKey;
+use std::collections::{BTreeMap, BTreeSet};
 fn repo() -> RepoId {
     RepoId {
         namespace: NamespaceKey::deployment_default(),
@@ -30,33 +35,123 @@ fn advance(root: Hash) -> Advance {
 }
 fn progress(a: &Advance) -> Progress {
     let cfg = IndexedConfig::default();
-    Progress {
+    let mut p = Progress {
         binding: binding(a, cfg).unwrap(),
         value: a.value.clone(),
+        branch: a.value.packmap.is_some(),
         generation: a.generation,
         additions: a.additions.clone(),
-        next_packmap: a.value.packmap,
-        chain: BTreeSet::new(),
-        packs: BTreeSet::new(),
-        queue: VecDeque::from_iter(a.value.head),
-        visited: BTreeSet::new(),
+        walk: None,
+        runs: 0,
         dependencies: BTreeSet::new(),
         bases: BTreeSet::new(),
         bytes: 0,
         calls: 0,
         byte_limit: cfg.decode_budget,
         depth_limit: cfg.max_delta_chain_depth,
-        base_cursor: None,
         failure: None,
         terminal: None,
         missing: false,
         missing_base: false,
         complete: false,
-        boundary: None,
+    };
+    p.walk = Some(hex_encode(&fresh_walker(&p).checkpoint().unwrap()));
+    p
+}
+/// A walker at the pair's initial position, matching `prepare_with`'s binding.
+fn fresh_walker(p: &Progress) -> PairWalker {
+    PairWalker::new(
+        progress_pair(p),
+        &p.additions,
+        crate::indexed::publication::pair_identity(&repo()),
+        Revision(p.binding),
+        crate::indexed::publication::PAIR_RULESET,
+        walker_limits(p),
+        true,
+        p.runs + 1,
+    )
+    .unwrap()
+}
+/// Resume the stored checkpoint, giving tests the machine's live view.
+fn walk_of(p: &Progress) -> PairWalker {
+    walker_resume(&repo(), p).unwrap()
+}
+/// Checkpoint at a base cursor, built by driving a walker to that position.
+fn walk_with_cursor(p: &Progress, pack: Hash, base: Hash) -> String {
+    let mut walker = fresh_walker(p);
+    loop {
+        let request = match walker.step() {
+            Ok(PairStep::Request(request)) => request.clone(),
+            Ok(PairStep::Progress) => continue,
+            _ => panic!("walker must keep requesting"),
+        };
+        match request {
+            PairRequest::PackmapNode {
+                request,
+                pack: node,
+                ..
+            } => walker
+                .answer(PairResponse::PackmapNode {
+                    request,
+                    pack: node,
+                    value: Acquisition::Present(PairNode {
+                        prev: None,
+                        packs: &[pack],
+                        boundary: false,
+                    }),
+                })
+                .unwrap(),
+            PairRequest::Object {
+                request, object, ..
+            } => {
+                walker
+                    .answer(PairResponse::Object {
+                        request,
+                        object,
+                        value: Acquisition::Present(ObjectFact {
+                            pack,
+                            kind: mkit_core::object::ObjectType::Commit,
+                            children: &[],
+                            suppliers: &[],
+                            base: Some(base),
+                        }),
+                    })
+                    .unwrap();
+                break;
+            }
+            _ => panic!("chain and walk requests only"),
+        }
     }
+    hex_encode(&walker.checkpoint().unwrap())
+}
+/// Checkpoint one node into a self-looping chain.
+fn walk_chain_repeat(p: &Progress) -> String {
+    let mut walker = fresh_walker(p);
+    let request = match walker.step() {
+        Ok(PairStep::Request(request)) => request.clone(),
+        _ => panic!("chain phase must request the packmap node"),
+    };
+    let PairRequest::PackmapNode { request, pack, .. } = request else {
+        panic!("chain phase must request the packmap node")
+    };
+    walker
+        .answer(PairResponse::PackmapNode {
+            request,
+            pack,
+            value: Acquisition::Present(PairNode {
+                prev: Some(pack),
+                packs: &[],
+                boundary: false,
+            }),
+        })
+        .unwrap();
+    hex_encode(&walker.checkpoint().unwrap())
 }
 async fn facts(kv: &MemoryKv, id: Hash, prev: Option<Hash>) {
-    inventory::stage_packlist(kv, &id, 100, prev, &[], 0)
+    facts_with(kv, id, prev, &[]).await;
+}
+async fn facts_with(kv: &MemoryKv, id: Hash, prev: Option<Hash>, packs: &[Hash]) {
+    inventory::stage_packlist(kv, &id, 100, prev, packs, 0)
         .await
         .unwrap();
     inventory::complete(kv, &id, 100, 0).await.unwrap();
@@ -121,6 +216,7 @@ fn missing_predecessor_recovers_without_resetting_cumulative_work() {
             0,
             &crate::telemetry::NoopMetrics,
             0,
+            true,
         )
         .await
         .unwrap_err();
@@ -140,6 +236,7 @@ fn missing_predecessor_recovers_without_resetting_cumulative_work() {
             cfg.relay_lag_bound_ms,
             &crate::telemetry::NoopMetrics,
             0,
+            true,
         )
         .await
         .unwrap_err();
@@ -161,7 +258,8 @@ fn missing_predecessor_recovers_without_resetting_cumulative_work() {
                 cfg,
                 0,
                 &crate::telemetry::NoopMetrics,
-                0
+                0,
+                true
             )
             .await
             .unwrap()
@@ -193,6 +291,7 @@ fn changed_generation_rebinds_and_corrupt_completion_fails_closed() {
             0,
             &crate::telemetry::NoopMetrics,
             0,
+            true,
         )
         .await
         .unwrap();
@@ -208,16 +307,17 @@ fn changed_generation_rebinds_and_corrupt_completion_fails_closed() {
             0,
             &crate::telemetry::NoopMetrics,
             0,
+            true,
         )
         .await
         .unwrap();
         let next = read_progress(&kv, &repo, root).await;
         assert_ne!(first.binding, next.binding);
         let mut corrupt = next.clone();
-        corrupt.chain.clear();
+        corrupt.additions.clear();
         assert!(corrupt.validate().is_err());
         let mut corrupt = next.clone();
-        corrupt.dependencies.clear();
+        corrupt.walk = Some("zz".into());
         assert!(corrupt.validate().is_err());
         let mut corrupt = next;
         corrupt.generation = 2;
@@ -253,7 +353,7 @@ fn exhaustion_and_shared_alarm_refusal_remain_typed_and_bounded() {
         .unwrap();
         assert_eq!(alarm.used(), 0);
         assert!(!p.complete);
-        assert_eq!(p.next_packmap, Some(root));
+        assert_eq!(walk_of(&p).pending_packmap(), Some(root));
         let charged = p.calls;
         slice(
             &kv,
@@ -307,13 +407,15 @@ fn exhaustion_and_shared_alarm_refusal_remain_typed_and_bounded() {
         );
     });
 }
-async fn fifty_base_fixture(kv: &MemoryKv, repo: &RepoId) -> (Hash, Hash) {
+async fn fifty_base_fixture(kv: &MemoryKv, repo: &RepoId) -> (Hash, Hash, Hash, u64) {
     let pack = [5; 32];
     let mut previous = None;
     let mut entries = vec![];
+    let mut first = None;
     for n in 0..50u8 {
         let object = Object::Blob(Blob { data: vec![n] });
         let id = object.id().unwrap();
+        first.get_or_insert(id);
         inventory::stage(kv, &pack, 10_000, &id, &object, previous, 0)
             .await
             .unwrap();
@@ -330,6 +432,31 @@ async fn fifty_base_fixture(kv: &MemoryKv, repo: &RepoId) -> (Hash, Hash) {
         });
         previous = Some(id);
     }
+    let head = Object::Commit(mkit_core::object::Commit::new_unannotated(
+        first.unwrap(),
+        vec![],
+        mkit_core::object::Identity::ed25519([0; 32]),
+        [0; 32],
+        vec![],
+        0,
+        [0; 64],
+    ));
+    let head_id = head.id().unwrap();
+    let head_len = mkit_core::serialize::serialize(&head).unwrap().len() as u64;
+    inventory::stage(kv, &pack, 10_000, &head_id, &head, previous, 0)
+        .await
+        .unwrap();
+    entries.push(IndexEntry {
+        object: head_id,
+        value: IndexValue {
+            frame_offset: 1_000,
+            frame_length: 20,
+            wire_type: 2,
+            decoded_size: head_len,
+            chain_depth: 1,
+            delta_base: previous,
+        },
+    });
     inventory::complete(kv, &pack, 10_000, 0).await.unwrap();
     let source = SinglePartition.ref_shard(repo, "refs/heads/main");
     for batch in plan_index_rows_direct(&SinglePartition, repo, &source, &pack, &entries, 0)
@@ -342,22 +469,18 @@ async fn fifty_base_fixture(kv: &MemoryKv, repo: &RepoId) -> (Hash, Hash) {
         }
         kv.apply(&batch.target, writes).await.unwrap();
     }
-    (pack, previous.unwrap())
+    (pack, previous.unwrap(), head_id, head_len)
 }
 #[test]
 fn fifty_base_hops_cross_slices_without_restarting_the_object() {
     block_on(async {
         let kv = MemoryKv::with_clock(std::sync::Arc::new(crate::rt::ManualClock::new(0)));
         let repo = repo();
-        let (pack, last) = fifty_base_fixture(&kv, &repo).await;
+        let (pack, _last, head, head_len) = fifty_base_fixture(&kv, &repo).await;
         let mut a = advance(pack);
         a.value.packmap = None;
+        a.value.head = Some(head);
         let mut p = progress(&a);
-        p.base_cursor = Some(BaseCursor {
-            origin: pack,
-            next: last,
-            depth: 0,
-        });
         let mut rounds = 0;
         while !p.complete {
             let before = p.calls;
@@ -377,9 +500,12 @@ fn fifty_base_hops_cross_slices_without_restarting_the_object() {
             rounds += 1;
             assert!(rounds < 10);
         }
-        assert!(rounds > 1);
+        assert!(
+            rounds > 1,
+            "the walk must span slices; grow the fixture if SLICE_CALLS rises"
+        );
         assert!(p.calls > u64::from(SLICE_CALLS));
-        assert_eq!(p.bytes, 550);
+        assert_eq!(p.bytes, head_len + 550 + 11);
     });
 }
 
@@ -389,9 +515,8 @@ fn oversized_frontier_compacts_into_terminal_typed_exhaustion() {
     let mut p = progress(&a);
     for n in 0..MAX_ADVANCE_ITEMS {
         let id = hash(&n.to_be_bytes());
-        p.queue.push_back(id);
-        p.visited.insert(id);
         p.dependencies.insert(id);
+        p.bases.insert(id);
     }
     p.calls = 123;
     let mut retained = state::VerificationV1::Verified {
@@ -498,6 +623,7 @@ fn storage_retry_retains_safe_progress_and_dispatched_calls() {
             0,
             &crate::telemetry::NoopMetrics,
             0,
+            true,
         )
         .await
         .unwrap_err();
@@ -506,8 +632,8 @@ fn storage_retry_retains_safe_progress_and_dispatched_calls() {
         let first = read_progress(&kv, &repo, root).await;
         assert_eq!(first.calls, 2, "successful and failed dispatch both count");
         assert_eq!(first.bytes, 100);
-        assert_eq!(first.next_packmap, Some(prev));
-        assert_eq!(first.chain, BTreeSet::from([root]));
+        assert_eq!(walk_of(&first).pending_packmap(), Some(prev));
+        assert_eq!(walk_of(&first).counts().chain, 1);
         assert!(!first.complete);
         first.validate().unwrap();
 
@@ -537,8 +663,8 @@ fn storage_retry_retains_safe_progress_and_dispatched_calls() {
         let failed = read_progress(&kv, &repo, root).await;
         assert_eq!(failed.calls, first.calls + 1);
         assert_eq!(failed.bytes, first.bytes);
-        assert_eq!(failed.chain, first.chain);
-        assert_eq!(failed.next_packmap, Some(prev));
+        assert_eq!(failed.walk, first.walk);
+        assert_eq!(walk_of(&failed).pending_packmap(), Some(prev));
         assert!(!failed.complete);
         failed.validate().unwrap();
         let key = keys::verification(&repo.name, &root);
@@ -596,8 +722,7 @@ fn failing_dispatch_at_total_limit_is_terminal_typed_exhaustion() {
             key: keys::membership(&repo.name, &prev),
             armed: std::sync::atomic::AtomicBool::new(true),
         };
-        let mut p = progress(&advance([14; 32]));
-        p.next_packmap = Some(prev);
+        let mut p = progress(&advance(prev));
         p.calls = TOTAL_CALLS;
         slice(
             &target,
@@ -611,8 +736,9 @@ fn failing_dispatch_at_total_limit_is_terminal_typed_exhaustion() {
         .unwrap();
         assert_eq!(p.calls, TOTAL_CALLS + 1);
         assert_eq!(p.failure, Some(Exhaustion::IndexCalls));
-        assert_eq!(p.next_packmap, Some(prev));
-        assert!(p.chain.is_empty(), "failed item changes are rolled back");
+        let w = walk_of(&p);
+        assert_eq!(w.pending_packmap(), Some(prev));
+        assert_eq!(w.counts().chain, 0, "failed item changes are rolled back");
         p.validate().unwrap();
         assert_eq!(
             p.result(&mut advance([14; 32]), 0, 0, 1)
@@ -630,7 +756,7 @@ fn lowered_delta_depth_becomes_durable_terminal_failure_across_timers() {
         let clock = std::sync::Arc::new(crate::rt::ManualClock::new(0));
         let kv = MemoryKv::with_clock(clock.clone());
         let repo = repo();
-        let (pack, last) = fifty_base_fixture(&kv, &repo).await;
+        let (pack, last, head, _) = fifty_base_fixture(&kv, &repo).await;
         let root = [15; 32];
         let mut a = advance(root);
         a.additions.push(pack);
@@ -640,18 +766,12 @@ fn lowered_delta_depth_becomes_durable_terminal_failure_across_timers() {
         };
         // Existing sealed content can have been verified under a higher cap.
         // This is the frozen proof after its MKPL phase, at a base-hop boundary.
+        a.value.head = Some(head);
         let mut p = progress(&a);
         p.binding = binding(&a, cfg).unwrap();
         p.depth_limit = cfg.max_delta_chain_depth;
-        p.next_packmap = None;
-        p.chain.insert(root);
-        p.packs.insert(pack);
         p.dependencies.extend([root, pack]);
-        p.base_cursor = Some(BaseCursor {
-            origin: pack,
-            next: last,
-            depth: 0,
-        });
+        p.walk = Some(walk_with_cursor(&p, pack, last));
         p.validate().unwrap();
         let source = SinglePartition.ref_shard(&repo, "refs/heads/main");
         let key = keys::verification(&repo.name, &root);
@@ -714,7 +834,9 @@ fn lowered_delta_depth_becomes_durable_terminal_failure_across_timers() {
             );
             if retained.terminal.is_some() {
                 assert_eq!(retained.terminal, Some(TerminalFailure::DeltaDepth));
-                assert_eq!(retained.base_cursor.as_ref().unwrap().depth, 30);
+                // Exactly 30 base hops were charged at one 11-byte canonical
+                // blob entry each; the cursor checkpoint starts mid-walk.
+                assert_eq!(retained.bytes, 30 * 11);
                 break;
             }
             assert!(rounds < 10);
@@ -731,6 +853,7 @@ fn lowered_delta_depth_becomes_durable_terminal_failure_across_timers() {
                 rounds * 1_000,
                 &crate::telemetry::NoopMetrics,
                 0,
+                true,
             )
             .await
             .unwrap_err();
@@ -777,6 +900,7 @@ fn spent_request_ledger_checkpoints_resumable_work_without_a_terminal_verdict() 
             0,
             &crate::telemetry::NoopMetrics,
             0,
+            true,
             Some(&ledger),
             None,
         )
@@ -786,7 +910,7 @@ fn spent_request_ledger_checkpoints_resumable_work_without_a_terminal_verdict() 
         assert!(ledger.refused());
         let kept = read_progress(&kv, &repo, root).await;
         assert!(kept.failure.is_none() && kept.terminal.is_none() && !kept.complete);
-        assert_eq!(kept.next_packmap, Some(root));
+        assert_eq!(walk_of(&kept).pending_packmap(), Some(root));
         // The retained timer resumes the same proof under the alarm's own allowance.
         let registry = crate::timers::TimerRegistry::new().register(
             crate::timers::publication_recheck::PublicationRecheck::new(
@@ -892,6 +1016,7 @@ fn unsupported_historical_capacity_is_one_terminal_stop_not_a_recurring_alarm() 
                 600_000,
                 &crate::telemetry::NoopMetrics,
                 0,
+                true,
             )
             .await
             .unwrap_err();
@@ -995,24 +1120,52 @@ fn limit_counter_counts_only_committed_capacity_stops_once() {
                 cfg.decode_budget = 50;
             }
             let mut a = advance(root);
+            if failure == Exhaustion::Traversal {
+                // The flagged member read must happen: root is not an addition.
+                a.additions.clear();
+            }
             let mut p = progress(&a);
             p.binding = binding(&a, cfg).unwrap();
             p.byte_limit = cfg.decode_budget;
+            // The checkpoint binds the progress fields it was built against.
+            p.walk = Some(hex_encode(&fresh_walker(&p).checkpoint().unwrap()));
             p.missing = true; // Resume the retained slice on a foreground retry.
             if failure == Exhaustion::IndexCalls {
                 p.calls = TOTAL_CALLS;
             }
             if failure == Exhaustion::Traversal {
-                p.dependencies = (0..MAX_ADVANCE_ITEMS)
-                    .map(|n| {
-                        let mut id = [0; 32];
-                        id[..8].copy_from_slice(&(n as u64).to_le_bytes());
-                        id
-                    })
-                    .collect();
+                // A cleared-set supplier list over the retained-items bound
+                // exhausts at the completion merge — the one accumulating set
+                // that is not checkpointed, so the retained row stays small.
+                // The flagged witness makes the machine ask for it.
+                let flagged = crate::store::publication::Witness {
+                    generation: 0,
+                    sequence: 0,
+                    published: true,
+                    held: false,
+                    boundary: true,
+                }
+                .encode();
+                let mut bases = Vec::new();
+                for n in 0..=MAX_ADVANCE_ITEMS {
+                    bases.extend_from_slice(&hash(&n.to_be_bytes()));
+                }
+                kv.apply(
+                    &SinglePartition.membership(&repo, &crate::BlobKey::pack(root)),
+                    Batch::new().put(keys::membership(&repo.name, &root), flagged),
+                )
+                .await
+                .unwrap();
+                kv.apply(
+                    &SinglePartition.coordinator(&repo.namespace),
+                    Batch::new().put(keys::fork_set(&repo.name, 3), Value::new(bases)),
+                )
+                .await
+                .unwrap();
             }
             if failure == Exhaustion::IndexLookup {
-                p.chain.insert(root); // Repeating a packmap hits the input lookup cap.
+                // A self-looping packmap hits the input lookup cap.
+                p.walk = Some(walk_chain_repeat(&p));
             }
             state::write(
                 &kv,
@@ -1044,6 +1197,7 @@ fn limit_counter_counts_only_committed_capacity_stops_once() {
                 0,
                 &metrics,
                 0,
+                true,
             )
             .await
             .unwrap_err();
@@ -1061,6 +1215,7 @@ fn limit_counter_counts_only_committed_capacity_stops_once() {
                     0,
                     &metrics,
                     0,
+                    true,
                 )
                 .await
                 .unwrap_err();
@@ -1079,6 +1234,7 @@ fn limit_counter_counts_only_committed_capacity_stops_once() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // Corrupt and retryable loads in one fixture.
 fn a_failing_cleared_set_load_is_charged_and_a_corrupt_one_ends_the_proof() {
     use crate::store::publication::Witness;
     block_on(async {
@@ -1112,6 +1268,14 @@ fn a_failing_cleared_set_load_is_charged_and_a_corrupt_one_ends_the_proof() {
                     )
                     .await
                     .unwrap();
+                } else {
+                    kv.apply(
+                        &SinglePartition.coordinator(&repo.namespace),
+                        Batch::new()
+                            .put(keys::fork_set(&repo.name, 3), Value::new([9; 32].to_vec())),
+                    )
+                    .await
+                    .unwrap();
                 }
                 kv
             }
@@ -1132,6 +1296,7 @@ fn a_failing_cleared_set_load_is_charged_and_a_corrupt_one_ends_the_proof() {
             0,
             &crate::telemetry::NoopMetrics,
             0,
+            true,
         )
         .await
         .unwrap_err();
@@ -1156,6 +1321,7 @@ fn a_failing_cleared_set_load_is_charged_and_a_corrupt_one_ends_the_proof() {
             0,
             &crate::telemetry::NoopMetrics,
             0,
+            true,
         )
         .await
         .unwrap_err();
@@ -1177,11 +1343,14 @@ fn a_failing_cleared_set_load_is_charged_and_a_corrupt_one_ends_the_proof() {
         .unwrap();
         assert!(done.complete);
         assert!(done.calls > first.calls);
-        assert_eq!(done.boundary, Some(root));
+        // The boundary answer was honored: its cleared supplier merged into
+        // the retained bases.
+        assert_eq!(done.bases, BTreeSet::from_iter([[9; 32]]));
     });
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // Staged inventory, flagged witnesses and the slice loop share one fixture.
 fn a_cleared_tree_is_never_skipped_as_the_head_of_a_pair() {
     use crate::store::publication::Witness;
     use mkit_core::object::Tree;
@@ -1246,8 +1415,13 @@ fn a_cleared_tree_is_never_skipped_as_the_head_of_a_pair() {
         a.additions.clear();
         a.value.head = Some(id);
         let cfg = IndexedConfig::default();
+        let counter = CountGet {
+            store: &kv,
+            key: keys::fork_set(&repo.name, 0),
+            hits: std::sync::atomic::AtomicUsize::new(0),
+        };
         let _ = prepare(
-            &kv,
+            &counter,
             &source,
             &SinglePartition,
             &repo,
@@ -1256,10 +1430,12 @@ fn a_cleared_tree_is_never_skipped_as_the_head_of_a_pair() {
             0,
             &crate::telemetry::NoopMetrics,
             0,
+            true,
         )
         .await;
         let mut progress = read_progress(&kv, &repo, root).await;
-        for _ in 0..4 {
+        let mut rounds = 0;
+        while progress.terminal.is_none() && !progress.complete {
             slice(
                 &kv,
                 &SinglePartition,
@@ -1270,11 +1446,1123 @@ fn a_cleared_tree_is_never_skipped_as_the_head_of_a_pair() {
             )
             .await
             .unwrap();
+            rounds += 1;
+            assert!(rounds < 8);
         }
-        // The set names the tree, yet the head's kind is still checked: a tree
-        // is not a commit, remix or tag.
-        assert_eq!(progress.boundary, Some(root));
+        // The cleared set was actually loaded before the head was read and
+        // refused: requests are sequential, so a hit precedes the verdict.
+        assert!(
+            counter.hits.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            "the fork cleared set was loaded"
+        );
         assert_eq!(progress.terminal, Some(TerminalFailure::OpenClosure));
         assert!(!progress.complete);
+    });
+}
+
+/// Store a packlist node body in the blob store under its content id.
+async fn store_packlist_blob(blobs: &MemoryBlobStore, bytes: &[u8]) -> Hash {
+    let id = hash(bytes);
+    let mut sink = blobs
+        .begin(PackKey::new(id).into(), bytes.len() as u64)
+        .await
+        .unwrap();
+    sink.write(Bytes::copy_from_slice(bytes)).await.unwrap();
+    sink.commit().await.unwrap();
+    id
+}
+/// A two-node packmap chain staged for both verification paths: inventory
+/// rows for the resumable walk and packlist blobs for the inline one.
+async fn chain_fixture(
+    kv: &MemoryKv,
+    blobs: &MemoryBlobStore,
+    repo: &RepoId,
+) -> (Hash, Hash, Hash) {
+    let pack = [9; 32];
+    let tail = mkit_core::transfer::encode_packlist(None, &[pack]).unwrap();
+    let tail_id = store_packlist_blob(blobs, &tail).await;
+    facts_with(kv, tail_id, None, &[pack]).await;
+    // The tail is a previously-published chain node: it carries the live
+    // membership witness the inline membership read and the resumable
+    // chain_member read both expect for non-additions.
+    kv.apply(
+        &SinglePartition.membership(repo, &crate::BlobKey::pack(tail_id)),
+        Batch::new().put(
+            keys::membership(&repo.name, &tail_id),
+            crate::store::publication::Witness {
+                generation: 0,
+                sequence: 0,
+                published: true,
+                held: false,
+                boundary: false,
+            }
+            .encode(),
+        ),
+    )
+    .await
+    .unwrap();
+    let head_node = mkit_core::transfer::encode_packlist(Some(tail_id), &[]).unwrap();
+    let root = store_packlist_blob(blobs, &head_node).await;
+    let _ = repo;
+    inventory::stage_packlist(kv, &root, 100, Some(tail_id), &[], 0)
+        .await
+        .unwrap();
+    inventory::complete(kv, &root, 100, 0).await.unwrap();
+    (root, tail_id, pack)
+}
+/// The same frozen chain drives inline `verify_within` and resumable
+/// `prepare`; both must produce identical evidence sets.
+#[test]
+fn pair_coverage_inline_and_resumable_agree_on_chain_evidence() {
+    block_on(async {
+        let kv = MemoryKv::with_clock(std::sync::Arc::new(crate::rt::ManualClock::new(0)));
+        let blobs = MemoryBlobStore::default();
+        let repo = repo();
+        let (root, tail, pack) = chain_fixture(&kv, &blobs, &repo).await;
+        verified(&kv, &repo, root).await;
+        let source = SinglePartition.ref_shard(&repo, "refs/heads/main");
+        let cfg = IndexedConfig::default();
+        // Inline path.
+        let mut inline = advance(root);
+        verify_within(
+            &blobs,
+            &kv,
+            &SinglePartition,
+            &repo,
+            &inline.value.clone(),
+            true,
+            &mut inline,
+            &crate::pipeline::clearance::Immediate,
+            cfg,
+            &crate::telemetry::NoopMetrics,
+            true,
+            &SliceBudget::new(10_000),
+        )
+        .await
+        .unwrap();
+        // Resumable path over the same fixture.
+        let mut resumed = advance(root);
+        loop {
+            let done = prepare(
+                &kv,
+                &source,
+                &SinglePartition,
+                &repo,
+                &mut resumed,
+                cfg,
+                0,
+                &crate::telemetry::NoopMetrics,
+                0,
+                true,
+            )
+            .await
+            .unwrap();
+            if done {
+                break;
+            }
+        }
+        let want: Vec<Hash> = BTreeSet::from_iter([root, tail, pack])
+            .into_iter()
+            .collect();
+        assert_eq!(inline.dependencies, want);
+        assert_eq!(resumed.dependencies, want);
+        assert_eq!(inline.external_bases, resumed.external_bases);
+        assert!(resumed.external_bases.is_empty());
+    });
+}
+
+/// Real pack bodies for the inline path: a `PackWriter` v1 pack with raw
+/// (`0x00`) and delta (`0x02`) frames, staged with the inventory rows the
+/// resumable path reads and the index rows both locate paths need.
+/// Delta bases staged in sibling packs for `decode_entries_with` lookups.
+struct StagedBases(BTreeMap<Hash, Vec<u8>>);
+impl mkit_core::pack::DeltaBaseSource for StagedBases {
+    fn base(&mut self, id: &Hash) -> Result<Option<Vec<u8>>, mkit_core::pack::PackError> {
+        Ok(self.0.get(id).cloned())
+    }
+}
+/// Real pack bodies for the inline path: a `PackWriter` pack with raw and
+/// delta frames, staged with the inventory rows the resumable path reads
+/// and the index rows both locate paths need.
+#[allow(clippy::too_many_lines)] // Fixture stages blob, inventory, and index rows.
+async fn stage_member_pack(
+    kv: &MemoryKv,
+    blobs: &MemoryBlobStore,
+    repo: &RepoId,
+    source: &Partition,
+    raw: &[&Object],
+    deltas: &[(&Object, &Object)],
+) -> Hash {
+    use mkit_core::pack::PackWriter;
+    let mut pack_writer = PackWriter::new();
+    for object in raw {
+        let bytes = mkit_core::serialize::serialize(object).unwrap();
+        pack_writer.push_raw(object.id().unwrap(), &bytes).unwrap();
+    }
+    for (object, base) in deltas {
+        let object_bytes = mkit_core::serialize::serialize(object).unwrap();
+        let base_bytes = mkit_core::serialize::serialize(base).unwrap();
+        let stream = mkit_core::delta::encode(&base_bytes, &object_bytes).unwrap();
+        pack_writer
+            .push_delta(&base.id().unwrap(), &stream)
+            .unwrap();
+    }
+    let body = pack_writer.finish().unwrap();
+    let pack = hash(&body);
+    let mut sink = blobs
+        .begin(BlobKey::pack(pack), body.len() as u64)
+        .await
+        .unwrap();
+    sink.write(Bytes::copy_from_slice(&body)).await.unwrap();
+    sink.commit().await.unwrap();
+    // Decode the written pack for the exact frame metadata the index rows
+    // carry; external bases are answered from the staged base objects.
+    let mut bases = StagedBases(
+        deltas
+            .iter()
+            .map(|(_, b)| (b.id().unwrap(), mkit_core::serialize::serialize(b).unwrap()))
+            .collect(),
+    );
+    let mut entries = vec![];
+    mkit_core::pack::decode_entries_with(
+        &body,
+        &mut bases,
+        mkit_core::pack::DecodeLimits::default(),
+        |entry| {
+            entries.push(IndexEntry {
+                object: entry.id,
+                value: IndexValue {
+                    frame_offset: entry.frame_offset,
+                    frame_length: entry.frame_length,
+                    wire_type: entry.wire_type,
+                    decoded_size: entry.bytes.len() as u64,
+                    chain_depth: u32::from(entry.from_delta),
+                    delta_base: deltas
+                        .iter()
+                        .find(|(o, _)| o.id().unwrap() == entry.id)
+                        .map(|(_, b)| b.id().unwrap()),
+                },
+            });
+            Ok(())
+        },
+    )
+    .unwrap();
+    let objects: BTreeMap<Hash, &Object> = raw
+        .iter()
+        .chain(deltas.iter().map(|(o, _)| o))
+        .map(|o| (o.id().unwrap(), *o))
+        .collect();
+    let length = body.len() as u64;
+    for entry in &entries {
+        inventory::stage(
+            kv,
+            &pack,
+            length,
+            &entry.object,
+            objects[&entry.object],
+            entry.value.delta_base,
+            0,
+        )
+        .await
+        .unwrap();
+    }
+    inventory::complete(kv, &pack, length, 0).await.unwrap();
+    for batch in plan_index_rows_direct(&SinglePartition, repo, source, &pack, &entries, 0)
+        .unwrap()
+        .direct
+    {
+        let mut writes = Batch::new();
+        for (k, v) in batch.puts {
+            writes = writes.put(k, v);
+        }
+        kv.apply(&batch.target, writes).await.unwrap();
+    }
+    // Member packs carry a live membership witness for the object reads.
+    kv.apply(
+        &SinglePartition.membership(repo, &crate::BlobKey::pack(pack)),
+        Batch::new().put(
+            keys::membership(&repo.name, &pack),
+            crate::store::publication::Witness {
+                generation: 0,
+                sequence: 0,
+                published: true,
+                held: false,
+                boundary: false,
+            }
+            .encode(),
+        ),
+    )
+    .await
+    .unwrap();
+    pack
+}
+/// A chain pair whose member pack holds one commit head over one tree over
+/// one blob, all raw: the smallest head-bearing pair both paths walk.
+struct PairFixture {
+    root: Hash,
+    pack: Hash,
+}
+async fn head_fixture(
+    kv: &MemoryKv,
+    blobs: &MemoryBlobStore,
+    repo: &RepoId,
+    extra: &[Object],
+    head_kind: Object,
+) -> PairFixture {
+    let source = SinglePartition.ref_shard(repo, "refs/heads/main");
+    let mut members = vec![head_kind];
+    members.extend_from_slice(extra);
+    let members: Vec<&Object> = members.iter().collect();
+    let pack = stage_member_pack(kv, blobs, repo, &source, &members, &[]).await;
+    let node = mkit_core::transfer::encode_packlist(None, &[pack]).unwrap();
+    let root = store_packlist_blob(blobs, &node).await;
+    facts_with(kv, root, None, &[pack]).await;
+    verified(kv, repo, root).await;
+    PairFixture { root, pack }
+}
+fn history_objects() -> (Object, Object, Object) {
+    let blob = Object::Blob(Blob { data: vec![7] });
+    let blob_id = blob.id().unwrap();
+    let tree = Object::Tree(mkit_core::object::Tree {
+        entries: vec![mkit_core::object::TreeEntry {
+            mode: mkit_core::object::EntryMode::Blob,
+            name: b"f".to_vec(),
+            object_hash: blob_id,
+        }],
+    });
+    let tree_id = tree.id().unwrap();
+    let commit = Object::Commit(mkit_core::object::Commit::new_unannotated(
+        tree_id,
+        vec![],
+        mkit_core::object::Identity::ed25519([0; 32]),
+        [0; 32],
+        vec![],
+        0,
+        [0; 64],
+    ));
+    (commit, tree, blob)
+}
+/// Drive the inline and resumable pair-verification paths over the same
+/// staged repository and return their normalized evidence.
+async fn drive_both(
+    kv: &MemoryKv,
+    blobs: &MemoryBlobStore,
+    repo: &RepoId,
+    pair: crate::store::publication::Pair,
+    branch: bool,
+    additions: Vec<Hash>,
+) -> (Result<Advance, ServerError>, Result<Advance, ServerError>) {
+    let source = SinglePartition.ref_shard(repo, "refs/heads/main");
+    let cfg = IndexedConfig::default();
+    let mut inline = advance([0; 32]);
+    inline.value = pair.clone();
+    inline.additions = additions;
+    let additions_before = inline.additions.clone();
+    let inline_result = verify_within(
+        blobs,
+        kv,
+        &SinglePartition,
+        repo,
+        &pair,
+        branch,
+        &mut inline,
+        &crate::pipeline::clearance::Immediate,
+        cfg,
+        &crate::telemetry::NoopMetrics,
+        true,
+        &SliceBudget::new(1_000_000),
+    )
+    .await
+    .map(|()| inline);
+    let mut resumed = advance([0; 32]);
+    resumed.value = pair;
+    resumed.additions = additions_before.clone();
+    let resumed_result = loop {
+        match prepare(
+            kv,
+            &source,
+            &SinglePartition,
+            repo,
+            &mut resumed,
+            cfg,
+            0,
+            &crate::telemetry::NoopMetrics,
+            0,
+            branch,
+        )
+        .await
+        {
+            Ok(true) => break Ok(resumed),
+            Ok(false) => {
+                if resumed.dependencies.is_empty() && resumed.external_bases.is_empty() {
+                    break Ok(resumed);
+                }
+            }
+            Err(error) => break Err(error),
+        }
+    };
+    (inline_result, resumed_result)
+}
+
+/// `SortedUnion` merge: overlapping walk and cleared suppliers count once.
+#[test]
+fn sorted_union_len_counts_overlap_once() {
+    use crate::indexed::publication::sorted_union_len;
+    let a: Vec<Hash> = (0..4u8).map(|n| [n; 32]).collect();
+    let b: Vec<Hash> = (2..6u8).map(|n| [n; 32]).collect();
+    assert_eq!(sorted_union_len(&a, &b), 6);
+    assert_eq!(sorted_union_len(&a, &a), 4);
+    assert_eq!(sorted_union_len(&a, &[]), 4);
+    assert_eq!(sorted_union_len(&[], &[]), 0);
+}
+/// Linear history parity: one commit head over a tree over a blob, all raw
+/// in one member pack listed by the chain.
+#[test]
+fn pair_coverage_inline_and_resumable_agree_on_head_walk() {
+    block_on(async {
+        let kv = MemoryKv::with_clock(std::sync::Arc::new(crate::rt::ManualClock::new(0)));
+        let blobs = MemoryBlobStore::default();
+        let repo = repo();
+        let (commit, tree, blob) = history_objects();
+        let f = head_fixture(&kv, &blobs, &repo, &[tree, blob], commit.clone()).await;
+        let pair = Pair {
+            head: Some(commit.id().unwrap()),
+            packmap: Some(f.root),
+        };
+        let (inline, resumed) = drive_both(&kv, &blobs, &repo, pair, true, vec![f.root]).await;
+        let inline = inline.unwrap();
+        let resumed = resumed.unwrap();
+        let want: Vec<Hash> = BTreeSet::from_iter([f.root, f.pack]).into_iter().collect();
+        assert_eq!(inline.dependencies, want);
+        assert_eq!(resumed.dependencies, want);
+        assert_eq!(inline.external_bases, resumed.external_bases);
+    });
+}
+
+/// Shared subtrees: two commits point at the same tree; the walk must
+/// dedupe it and both paths must agree on the dependency set.
+#[test]
+fn pair_coverage_shared_subtrees_dedupe_identically() {
+    block_on(async {
+        let kv = MemoryKv::with_clock(std::sync::Arc::new(crate::rt::ManualClock::new(0)));
+        let blobs = MemoryBlobStore::default();
+        let repo = repo();
+        let (c1, tree, blob) = history_objects();
+        let c2 = Object::Commit(mkit_core::object::Commit::new_unannotated(
+            tree.id().unwrap(),
+            vec![c1.id().unwrap()],
+            mkit_core::object::Identity::ed25519([1; 32]),
+            [1; 32],
+            b"c2".to_vec(),
+            1,
+            [1; 64],
+        ));
+        let f = head_fixture(&kv, &blobs, &repo, &[tree, blob, c1], c2.clone()).await;
+        let pair = Pair {
+            head: Some(c2.id().unwrap()),
+            packmap: Some(f.root),
+        };
+        let (inline, resumed) = drive_both(&kv, &blobs, &repo, pair, true, vec![f.root]).await;
+        let inline = inline.unwrap();
+        let resumed = resumed.unwrap();
+        let want: Vec<Hash> = BTreeSet::from_iter([f.root, f.pack]).into_iter().collect();
+        assert_eq!(inline.dependencies, want);
+        assert_eq!(resumed.dependencies, want);
+        assert_eq!(inline.external_bases, resumed.external_bases);
+    });
+}
+/// External delta supplier: the head tree's blob is a delta in pack B
+/// whose raw base lives in pack A — an external supplier neither path may
+/// satisfy from this advance's own additions.
+#[test]
+fn pair_coverage_external_delta_supplier_recorded_by_both() {
+    block_on(async {
+        let kv = MemoryKv::with_clock(std::sync::Arc::new(crate::rt::ManualClock::new(0)));
+        let blobs = MemoryBlobStore::default();
+        let repo = repo();
+        let source = SinglePartition.ref_shard(&repo, "refs/heads/main");
+        let base = Object::Blob(Blob {
+            data: vec![1, 2, 3],
+        });
+        let pack_a = stage_member_pack(&kv, &blobs, &repo, &source, &[&base], &[]).await;
+        let target = Object::Blob(Blob {
+            data: vec![1, 2, 3, 4],
+        });
+        let target_id = target.id().unwrap();
+        let tree = Object::Tree(mkit_core::object::Tree {
+            entries: vec![mkit_core::object::TreeEntry {
+                mode: mkit_core::object::EntryMode::Blob,
+                name: b"f".to_vec(),
+                object_hash: target_id,
+            }],
+        });
+        let tree_id = tree.id().unwrap();
+        let commit = Object::Commit(mkit_core::object::Commit::new_unannotated(
+            tree_id,
+            vec![],
+            mkit_core::object::Identity::ed25519([0; 32]),
+            [0; 32],
+            vec![],
+            0,
+            [0; 64],
+        ));
+        let pack_b = stage_member_pack(
+            &kv,
+            &blobs,
+            &repo,
+            &source,
+            &[&commit, &tree],
+            &[(&target, &base)],
+        )
+        .await;
+        let node = mkit_core::transfer::encode_packlist(None, &[pack_a, pack_b]).unwrap();
+        let root = store_packlist_blob(&blobs, &node).await;
+        facts_with(&kv, root, None, &[pack_a, pack_b]).await;
+        verified(&kv, &repo, root).await;
+        let pair = Pair {
+            head: Some(commit.id().unwrap()),
+            packmap: Some(root),
+        };
+        let (inline, resumed) = drive_both(&kv, &blobs, &repo, pair, true, vec![root]).await;
+        let inline = inline.unwrap();
+        let resumed = resumed.unwrap();
+        let deps: Vec<Hash> = BTreeSet::from_iter([root, pack_a, pack_b])
+            .into_iter()
+            .collect();
+        assert_eq!(inline.dependencies, deps);
+        assert_eq!(resumed.dependencies, deps);
+        // Pack A supplies the delta base; it is an external supplier, not a
+        // dependency owned by this advance.
+        assert_eq!(inline.external_bases, vec![pack_a]);
+        assert_eq!(resumed.external_bases, vec![pack_a]);
+    });
+}
+/// Fork boundary: a cleared-set object on the walk is skipped on both
+/// paths; cleared delta suppliers merge into `external_bases` identically.
+#[test]
+fn pair_coverage_fork_boundary_cleared_set_agrees() {
+    block_on(async {
+        let kv = MemoryKv::with_clock(std::sync::Arc::new(crate::rt::ManualClock::new(0)));
+        let blobs = MemoryBlobStore::default();
+        let repo = repo();
+        let cleared_obj = [77; 32];
+        let cleared_supplier = [88; 32];
+        // Boundary rows: cleared objects at set 0, cleared suppliers at 1.
+        let p = SinglePartition.coordinator(&repo.namespace);
+        kv.apply(
+            &p,
+            Batch::new()
+                .put(
+                    keys::fork_set(&repo.name, 0),
+                    crate::Value::new(cleared_obj.to_vec()),
+                )
+                .put(
+                    keys::fork_set(&repo.name, 3),
+                    crate::Value::new(cleared_supplier.to_vec()),
+                ),
+        )
+        .await
+        .unwrap();
+        let (_commit, _tree, blob) = history_objects();
+        // The commit's tree references both the staged blob and the cleared id.
+        let tree = Object::Tree(mkit_core::object::Tree {
+            entries: vec![
+                mkit_core::object::TreeEntry {
+                    mode: mkit_core::object::EntryMode::Blob,
+                    name: b"a".to_vec(),
+                    object_hash: blob.id().unwrap(),
+                },
+                mkit_core::object::TreeEntry {
+                    mode: mkit_core::object::EntryMode::Blob,
+                    name: b"z".to_vec(),
+                    object_hash: cleared_obj,
+                },
+            ],
+        });
+        let commit = Object::Commit(mkit_core::object::Commit::new_unannotated(
+            tree.id().unwrap(),
+            vec![],
+            mkit_core::object::Identity::ed25519([0; 32]),
+            [0; 32],
+            vec![],
+            0,
+            [0; 64],
+        ));
+        let source = SinglePartition.ref_shard(&repo, "refs/heads/main");
+        let member_pack =
+            stage_member_pack(&kv, &blobs, &repo, &source, &[&commit, &tree, &blob], &[]).await;
+        // The chain node is a flagged member: its boundary flag makes the
+        // machine ask for the cleared set.
+        let node = mkit_core::transfer::encode_packlist(None, &[member_pack]).unwrap();
+        let root = store_packlist_blob(&blobs, &node).await;
+        facts_with(&kv, root, None, &[member_pack]).await;
+        verified(&kv, &repo, root).await;
+        kv.apply(
+            &SinglePartition.membership(&repo, &crate::BlobKey::pack(root)),
+            Batch::new().put(
+                keys::membership(&repo.name, &root),
+                crate::store::publication::Witness {
+                    generation: 0,
+                    sequence: 0,
+                    published: true,
+                    held: false,
+                    boundary: true,
+                }
+                .encode(),
+            ),
+        )
+        .await
+        .unwrap();
+        let pair = Pair {
+            head: Some(commit.id().unwrap()),
+            packmap: Some(root),
+        };
+        let (inline, resumed) = drive_both(&kv, &blobs, &repo, pair, true, vec![]).await;
+        let inline = inline.unwrap();
+        let resumed = resumed.unwrap();
+        let deps: Vec<Hash> = BTreeSet::from_iter([root, member_pack])
+            .into_iter()
+            .collect();
+        assert_eq!(inline.dependencies, deps);
+        assert_eq!(resumed.dependencies, deps);
+        // The cleared supplier merges into external suppliers on both paths.
+        assert_eq!(inline.external_bases, vec![cleared_supplier]);
+        assert_eq!(resumed.external_bases, vec![cleared_supplier]);
+    });
+}
+/// A cleared head is still read by both paths (the machine exempts the
+/// pair head from the skip).
+#[test]
+fn pair_coverage_cleared_head_is_still_read_on_both_paths() {
+    block_on(async {
+        let kv = MemoryKv::with_clock(std::sync::Arc::new(crate::rt::ManualClock::new(0)));
+        let blobs = MemoryBlobStore::default();
+        let repo = repo();
+        let (commit, tree, blob) = history_objects();
+        let head_id = commit.id().unwrap();
+        let p = SinglePartition.coordinator(&repo.namespace);
+        kv.apply(
+            &p,
+            Batch::new().put(
+                keys::fork_set(&repo.name, 0),
+                crate::Value::new(head_id.to_vec()),
+            ),
+        )
+        .await
+        .unwrap();
+        let f = head_fixture(&kv, &blobs, &repo, &[tree, blob], commit).await;
+        // Flag the chain node so the boundary answer carries the cleared set.
+        kv.apply(
+            &SinglePartition.membership(&repo, &crate::BlobKey::pack(f.root)),
+            Batch::new().put(
+                keys::membership(&repo.name, &f.root),
+                crate::store::publication::Witness {
+                    generation: 0,
+                    sequence: 0,
+                    published: true,
+                    held: false,
+                    boundary: true,
+                }
+                .encode(),
+            ),
+        )
+        .await
+        .unwrap();
+        let pair = Pair {
+            head: Some(head_id),
+            packmap: Some(f.root),
+        };
+        // The cleared head must still be read: the walk covers it.
+        let (inline, resumed) = drive_both(&kv, &blobs, &repo, pair, true, vec![]).await;
+        let inline = inline.unwrap();
+        let resumed = resumed.unwrap();
+        let deps: Vec<Hash> = BTreeSet::from_iter([f.root, f.pack]).into_iter().collect();
+        assert_eq!(inline.dependencies, deps);
+        assert_eq!(resumed.dependencies, deps);
+    });
+}
+/// Missing object: the head's tree is absent from both indexes — inline
+/// fails closed with the open-closure refusal while the resumable path
+/// records a lag-classified missing stop.
+#[test]
+fn pair_coverage_missing_object_maps_per_path() {
+    block_on(async {
+        let kv = MemoryKv::with_clock(std::sync::Arc::new(crate::rt::ManualClock::new(0)));
+        let blobs = MemoryBlobStore::default();
+        let repo = repo();
+        let missing_tree = [66; 32];
+        let commit = Object::Commit(mkit_core::object::Commit::new_unannotated(
+            missing_tree,
+            vec![],
+            mkit_core::object::Identity::ed25519([0; 32]),
+            [0; 32],
+            vec![],
+            0,
+            [0; 64],
+        ));
+        let source = SinglePartition.ref_shard(&repo, "refs/heads/main");
+        let pack = stage_member_pack(&kv, &blobs, &repo, &source, &[&commit], &[]).await;
+        let node = mkit_core::transfer::encode_packlist(None, &[pack]).unwrap();
+        let root = store_packlist_blob(&blobs, &node).await;
+        facts_with(&kv, root, None, &[pack]).await;
+        verified(&kv, &repo, root).await;
+        let pair = Pair {
+            head: Some(commit.id().unwrap()),
+            packmap: Some(root),
+        };
+        let (inline, resumed) = drive_both(&kv, &blobs, &repo, pair, true, vec![root]).await;
+        assert_eq!(inline.unwrap_err().public_message(), "open closure");
+        let error = resumed.unwrap_err();
+        assert_eq!(
+            error.public_message(),
+            "repository membership not yet visible"
+        );
+        let stored = read_progress(&kv, &repo, root).await;
+        assert!(stored.missing && !stored.missing_base);
+    });
+}
+/// A non-history head is refused closed on the inline path and as the
+/// terminal open-closure verdict on the resumable path.
+#[test]
+fn pair_coverage_non_history_head_refuses_on_both_paths() {
+    block_on(async {
+        let kv = MemoryKv::with_clock(std::sync::Arc::new(crate::rt::ManualClock::new(0)));
+        let blobs = MemoryBlobStore::default();
+        let repo = repo();
+        let blob = Object::Blob(Blob { data: vec![3] });
+        let head = blob.id().unwrap();
+        let f = head_fixture(&kv, &blobs, &repo, &[], blob).await;
+        let pair = Pair {
+            head: Some(head),
+            packmap: Some(f.root),
+        };
+        let (inline, resumed) = drive_both(&kv, &blobs, &repo, pair, true, vec![f.root]).await;
+        assert_eq!(inline.unwrap_err().public_message(), "open closure");
+        assert_eq!(resumed.unwrap_err().public_message(), "open closure");
+    });
+}
+/// Restart test: resuming the stored checkpoint after every slice must
+/// produce the same result as the uninterrupted run.
+#[test]
+fn pair_coverage_resume_after_each_slice_matches_uninterrupted() {
+    block_on(async {
+        let kv = MemoryKv::with_clock(std::sync::Arc::new(crate::rt::ManualClock::new(0)));
+        let repo = repo();
+        let (pack, _last, head, _head_len) = fifty_base_fixture(&kv, &repo).await;
+        let node = mkit_core::transfer::encode_packlist(None, &[pack]).unwrap();
+        let root = store_packlist_blob(&MemoryBlobStore::default(), &node).await;
+        facts_with(&kv, root, None, &[pack]).await;
+        kv.apply(
+            &SinglePartition.membership(&repo, &crate::BlobKey::pack(pack)),
+            Batch::new().put(
+                keys::membership(&repo.name, &pack),
+                crate::store::publication::Witness {
+                    generation: 0,
+                    sequence: 0,
+                    published: true,
+                    held: false,
+                    boundary: false,
+                }
+                .encode(),
+            ),
+        )
+        .await
+        .unwrap();
+        let mut a = advance(root);
+        a.value.head = Some(head);
+        let mut p = progress(&a);
+        // 51 object reads against a 128-call slice cross several boundaries;
+        // each round simulates a timer restart by serializing the row.
+        let mut rounds = 0;
+        while !p.complete {
+            let before = p.calls;
+            slice(
+                &kv,
+                &SinglePartition,
+                &repo,
+                &mut p,
+                &crate::telemetry::NoopMetrics,
+                None,
+            )
+            .await
+            .unwrap();
+            assert!(p.calls - before <= u64::from(SLICE_CALLS));
+            assert!(p.failure.is_none());
+            assert!(p.terminal.is_none());
+            // The serialized checkpoint resumes into the same position.
+            let resumed: Progress =
+                serde_json::from_slice(&serde_json::to_vec(&p).unwrap()).unwrap();
+            assert!(walker_resume(&repo, &resumed).is_ok() || resumed.complete);
+            p = resumed;
+            rounds += 1;
+            assert!(rounds < 20);
+        }
+        assert!(rounds > 1, "the restart must follow a continuation");
+        let want: Vec<Hash> = BTreeSet::from_iter([root, pack]).into_iter().collect();
+        assert_eq!(p.dependencies.into_iter().collect::<Vec<Hash>>(), want);
+        assert!(p.bases.is_empty());
+    });
+}
+
+/// A chain member with no witness row is a missing stop, not an error.
+#[test]
+fn chain_member_row_absent_is_a_missing_stop() {
+    block_on(async {
+        let kv = MemoryKv::with_clock(std::sync::Arc::new(crate::rt::ManualClock::new(0)));
+        let repo = repo();
+        let root = [3; 32];
+        facts(&kv, root, None).await;
+        let mut a = advance(root);
+        a.additions.clear(); // root is a live member, not an addition
+        let mut p = progress(&a);
+        slice(
+            &kv,
+            &SinglePartition,
+            &repo,
+            &mut p,
+            &crate::telemetry::NoopMetrics,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(p.missing && !p.missing_base);
+        assert_eq!(
+            p.result(&mut a, 0, 0, 1).unwrap_err().public_message(),
+            crate::indexed::verify::closure_error(0, 0, 1).public_message()
+        );
+    });
+}
+/// An index row without its inventory entry is a missing stop on the
+/// object path.
+#[test]
+fn object_entry_absent_is_a_missing_stop() {
+    block_on(async {
+        let kv = MemoryKv::with_clock(std::sync::Arc::new(crate::rt::ManualClock::new(0)));
+        let blobs = MemoryBlobStore::default();
+        let repo = repo();
+        let source = SinglePartition.ref_shard(&repo, "refs/heads/main");
+        let (commit, tree, blob) = history_objects();
+        let pack = stage_member_pack(&kv, &blobs, &repo, &source, &[&commit, &tree], &[]).await;
+        // The blob child has an index row but no inventory entry.
+        let entries = vec![IndexEntry {
+            object: blob.id().unwrap(),
+            value: IndexValue {
+                frame_offset: 900,
+                frame_length: 16,
+                wire_type: 0,
+                decoded_size: 11,
+                chain_depth: 0,
+                delta_base: None,
+            },
+        }];
+        for batch in plan_index_rows_direct(&SinglePartition, &repo, &source, &pack, &entries, 0)
+            .unwrap()
+            .direct
+        {
+            let mut writes = Batch::new();
+            for (k, v) in batch.puts {
+                writes = writes.put(k, v);
+            }
+            kv.apply(&batch.target, writes).await.unwrap();
+        }
+        let node = mkit_core::transfer::encode_packlist(None, &[pack]).unwrap();
+        let root = store_packlist_blob(&blobs, &node).await;
+        facts_with(&kv, root, None, &[pack]).await;
+        let mut a = advance(root);
+        a.value.head = Some(commit.id().unwrap());
+        let mut p = progress(&a);
+        while !p.missing {
+            slice(
+                &kv,
+                &SinglePartition,
+                &repo,
+                &mut p,
+                &crate::telemetry::NoopMetrics,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        assert!(!p.missing_base);
+    });
+}
+/// A located delta base without its inventory entry is a missing stop
+/// flagged as a base miss.
+#[test]
+fn base_entry_absent_is_a_missing_base_stop() {
+    block_on(async {
+        let kv = MemoryKv::with_clock(std::sync::Arc::new(crate::rt::ManualClock::new(0)));
+        let blobs = MemoryBlobStore::default();
+        let repo = repo();
+        let source = SinglePartition.ref_shard(&repo, "refs/heads/main");
+        let base_obj = Object::Blob(Blob { data: vec![5] });
+        let target = Object::Blob(Blob { data: vec![6] });
+        // Pack A: index row only — the entry row the Base arm needs is absent.
+        let pack_a = [41; 32];
+        let entries = vec![IndexEntry {
+            object: base_obj.id().unwrap(),
+            value: IndexValue {
+                frame_offset: 12,
+                frame_length: 16,
+                wire_type: 0,
+                decoded_size: 11,
+                chain_depth: 0,
+                delta_base: None,
+            },
+        }];
+        for batch in plan_index_rows_direct(&SinglePartition, &repo, &source, &pack_a, &entries, 0)
+            .unwrap()
+            .direct
+        {
+            let mut writes = Batch::new();
+            for (k, v) in batch.puts {
+                writes = writes.put(k, v);
+            }
+            kv.apply(&batch.target, writes).await.unwrap();
+        }
+        kv.apply(
+            &SinglePartition.membership(&repo, &crate::BlobKey::pack(pack_a)),
+            Batch::new().put(
+                keys::membership(&repo.name, &pack_a),
+                crate::store::publication::Witness {
+                    generation: 0,
+                    sequence: 0,
+                    published: true,
+                    held: false,
+                    boundary: false,
+                }
+                .encode(),
+            ),
+        )
+        .await
+        .unwrap();
+        // Pack B: commit head + the delta target whose base is in pack A.
+        let tree = Object::Tree(mkit_core::object::Tree {
+            entries: vec![mkit_core::object::TreeEntry {
+                mode: mkit_core::object::EntryMode::Blob,
+                name: b"d".to_vec(),
+                object_hash: target.id().unwrap(),
+            }],
+        });
+        let commit = Object::Commit(mkit_core::object::Commit::new_unannotated(
+            tree.id().unwrap(),
+            vec![],
+            mkit_core::object::Identity::ed25519([0; 32]),
+            [0; 32],
+            vec![],
+            0,
+            [0; 64],
+        ));
+        let pack_b = stage_member_pack(
+            &kv,
+            &blobs,
+            &repo,
+            &source,
+            &[&commit, &tree],
+            &[(&target, &base_obj)],
+        )
+        .await;
+        let node = mkit_core::transfer::encode_packlist(None, &[pack_b]).unwrap();
+        let root = store_packlist_blob(&blobs, &node).await;
+        facts_with(&kv, root, None, &[pack_b]).await;
+        let mut a = advance(root);
+        a.value.head = Some(commit.id().unwrap());
+        let mut p = progress(&a);
+        while !p.missing {
+            slice(
+                &kv,
+                &SinglePartition,
+                &repo,
+                &mut p,
+                &crate::telemetry::NoopMetrics,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        assert!(p.missing_base);
+        let _ = pack_a;
+    });
+}
+/// A non-branch pair resumes correctly across slices: the checkpoint binds
+/// `branch=false` and resume must not rebuild it as `true`.
+#[test]
+fn non_branch_pair_resumes_across_slices() {
+    block_on(async {
+        let kv = MemoryKv::with_clock(std::sync::Arc::new(crate::rt::ManualClock::new(0)));
+        let blobs = MemoryBlobStore::default();
+        let repo = repo();
+        let (commit, tree, blob) = history_objects();
+        let head = commit.id().unwrap();
+        let f = head_fixture(&kv, &blobs, &repo, &[tree, blob], commit).await;
+        let mut a = advance(f.root);
+        a.value.head = Some(head);
+        let mut p = progress(&a);
+        p.branch = false;
+        p.walk = Some(hex_encode(&fresh_walker(&p).checkpoint().unwrap()));
+        let mut rounds = 0;
+        while !p.complete {
+            slice(
+                &kv,
+                &SinglePartition,
+                &repo,
+                &mut p,
+                &crate::telemetry::NoopMetrics,
+                None,
+            )
+            .await
+            .unwrap();
+            let resumed: Progress =
+                serde_json::from_slice(&serde_json::to_vec(&p).unwrap()).unwrap();
+            assert!(walker_resume(&repo, &resumed).is_ok() || resumed.complete);
+            p = resumed;
+            rounds += 1;
+            assert!(rounds < 10);
+        }
+        assert!(rounds >= 1);
+        assert_eq!(
+            p.dependencies.into_iter().collect::<Vec<Hash>>(),
+            BTreeSet::from_iter([f.root, f.pack])
+                .into_iter()
+                .collect::<Vec<Hash>>()
+        );
+    });
+}
+
+/// Counts gets against one key: proves a specific row was read.
+struct CountGet<'a> {
+    store: &'a MemoryKv,
+    key: crate::Key,
+    hits: std::sync::atomic::AtomicUsize,
+}
+impl NamespaceStore for CountGet<'_> {
+    fn capabilities(&self) -> crate::store::StoreCapabilities {
+        self.store.capabilities()
+    }
+    async fn get(&self, p: &Partition, k: &crate::Key) -> Result<Option<Value>, StoreError> {
+        if k == &self.key {
+            self.hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.store.get(p, k).await
+    }
+    async fn scan(
+        &self,
+        p: &Partition,
+        start: &crate::Key,
+        end: &crate::Key,
+        after: Option<&crate::Cursor>,
+        limit: u32,
+    ) -> Result<crate::ScanPage, StoreError> {
+        self.store.scan(p, start, end, after, limit).await
+    }
+    async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+        self.store.apply(p, batch).await
+    }
+    async fn stats(&self, p: &Partition) -> Result<crate::PartitionStats, StoreError> {
+        self.store.stats(p).await
+    }
+    async fn probe(&self) -> Result<(), StoreError> {
+        self.store.probe().await
+    }
+}
+/// Counts `denial::page` reads: every chunk-page get carries the
+/// `\0chunks\0` marker in its key bytes.
+struct CountPages<'a> {
+    inner: &'a MemoryKv,
+    pages: std::sync::atomic::AtomicUsize,
+}
+impl NamespaceStore for CountPages<'_> {
+    fn capabilities(&self) -> crate::store::StoreCapabilities {
+        self.inner.capabilities()
+    }
+    async fn get(&self, p: &Partition, k: &crate::Key) -> Result<Option<Value>, StoreError> {
+        if k.as_bytes().windows(8).any(|w| w == b"\0chunks\0") {
+            self.pages.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.inner.get(p, k).await
+    }
+    async fn scan(
+        &self,
+        p: &Partition,
+        start: &crate::Key,
+        end: &crate::Key,
+        after: Option<&crate::Cursor>,
+        limit: u32,
+    ) -> Result<crate::ScanPage, StoreError> {
+        self.inner.scan(p, start, end, after, limit).await
+    }
+    async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+        self.inner.apply(p, batch).await
+    }
+    async fn stats(&self, p: &Partition) -> Result<crate::PartitionStats, StoreError> {
+        self.inner.stats(p).await
+    }
+    async fn probe(&self) -> Result<(), StoreError> {
+        self.inner.probe().await
+    }
+}
+/// A non-history head (`ChunkedBlob`, inventory kind 5) with a non-empty
+/// reference-page set must hit the terminal open-closure verdict without
+/// any reference-page read — the reference refused before touching pages.
+#[test]
+fn non_history_head_never_reads_reference_pages() {
+    block_on(async {
+        let kv = MemoryKv::with_clock(std::sync::Arc::new(crate::rt::ManualClock::new(0)));
+        let blobs = MemoryBlobStore::default();
+        let repo = repo();
+        let chunk = Object::Blob(Blob { data: vec![9] });
+        let chunked = Object::ChunkedBlob(mkit_core::object::ChunkedBlob {
+            total_size: 1,
+            chunk_size: 0,
+            chunks: vec![chunk.id().unwrap()],
+        });
+        let source = SinglePartition.ref_shard(&repo, "refs/heads/main");
+        let pack = stage_member_pack(&kv, &blobs, &repo, &source, &[&chunked, &chunk], &[]).await;
+        let node = mkit_core::transfer::encode_packlist(None, &[pack]).unwrap();
+        let root = store_packlist_blob(&blobs, &node).await;
+        facts_with(&kv, root, None, &[pack]).await;
+        let mut a = advance(root);
+        a.value.head = Some(chunked.id().unwrap());
+        let mut p = progress(&a);
+        let store = CountPages {
+            inner: &kv,
+            pages: std::sync::atomic::AtomicUsize::new(0),
+        };
+        while p.terminal.is_none() && !p.complete {
+            slice(
+                &store,
+                &SinglePartition,
+                &repo,
+                &mut p,
+                &crate::telemetry::NoopMetrics,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(p.terminal, Some(TerminalFailure::OpenClosure));
+        assert_eq!(store.pages.load(std::sync::atomic::Ordering::SeqCst), 0);
+        // Control: a history head with a tree child reads its reference page.
+        let kv2 = MemoryKv::with_clock(std::sync::Arc::new(crate::rt::ManualClock::new(0)));
+        let (commit, tree, blob) = history_objects();
+        let f = head_fixture(&kv2, &blobs, &repo, &[tree, blob], commit.clone()).await;
+        let mut a2 = advance(f.root);
+        a2.value.head = Some(commit.id().unwrap());
+        let mut p2 = progress(&a2);
+        let store2 = CountPages {
+            inner: &kv2,
+            pages: std::sync::atomic::AtomicUsize::new(0),
+        };
+        slice(
+            &store2,
+            &SinglePartition,
+            &repo,
+            &mut p2,
+            &crate::telemetry::NoopMetrics,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(store2.pages.load(std::sync::atomic::Ordering::SeqCst) > 0);
     });
 }

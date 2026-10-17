@@ -13,8 +13,15 @@ use crate::{
     Value,
 };
 use mkit_core::hash::{Hash, hash};
+use mkit_primitives::closure::pair::{
+    BaseFact, ClearedSet, ObjectFact, PackmapNode as PairNode, PairCheck, PairCheckpointCfg,
+    PairLimits, PairRequest, PairResponse, PairResume, PairStep, PairWalker, ResultingPair,
+};
+use mkit_primitives::error::FailureCode;
+use mkit_primitives::evidence::Revision;
+use mkit_primitives::pack_verify::Acquisition;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::BTreeSet;
 
 /// Includes metadata reads; timer settlement is outside this existing allowance.
 pub const SLICE_CALLS: u32 = crate::timers::publication_recheck::MAX_RECHECK_CALLS;
@@ -66,39 +73,34 @@ impl TerminalFailure {
 /// Verified pack state may carry exactly one frozen pair's resumable evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Retained verification progress: the machine checkpoint plus host flags.
+#[allow(clippy::struct_excessive_bools)] // Flags carry distinct verdict axes.
 pub struct Progress {
     binding: Hash,
     value: Pair,
+    /// Whether the write's ref is a branch head; part of the frozen pair.
+    branch: bool,
     generation: u64,
     additions: Vec<Hash>,
-    next_packmap: Option<Hash>,
-    chain: BTreeSet<Hash>,
-    packs: BTreeSet<Hash>,
-    queue: VecDeque<Hash>,
-    visited: BTreeSet<Hash>,
+    /// Hex-encoded local pair-coverage checkpoint while the walk is live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    walk: Option<String>,
+    /// Number of resumed runs; each resume gets a fresh machine generation.
+    #[serde(default)]
+    runs: u64,
+    /// Finalized coverage evidence, written only on completion.
     dependencies: BTreeSet<Hash>,
     bases: BTreeSet<Hash>,
     bytes: u64,
     calls: u64,
     byte_limit: u64,
     depth_limit: u32,
-    base_cursor: Option<BaseCursor>,
     failure: Option<Exhaustion>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     terminal: Option<TerminalFailure>,
     missing: bool,
     missing_base: bool,
     complete: bool,
-    /// The fork's flagged packmap head the chain contains: its cleared set applies.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    boundary: Option<Hash>,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BaseCursor {
-    origin: Hash,
-    next: Hash,
-    depth: u32,
 }
 impl Progress {
     pub(crate) fn validate(&self) -> Result<(), StoreError> {
@@ -113,31 +115,29 @@ impl Progress {
         if hash(&frozen) != self.binding {
             return Err(StoreError::Corrupt("publication binding mismatch".into()));
         }
-        if [
-            self.chain.len(),
-            self.packs.len(),
-            self.queue.len(),
-            self.visited.len(),
-            self.dependencies.len(),
-            self.bases.len(),
-        ]
-        .into_iter()
-        .any(|n| n > MAX_ADVANCE_ITEMS)
+        if self.dependencies.len() > MAX_ADVANCE_ITEMS
+            || self.bases.len() > MAX_ADVANCE_ITEMS
             || self.additions.len() > crate::store::outbox::MAX_TICKETS_PER_ADVANCE
             || self.calls > TOTAL_CALLS + u64::from(SLICE_CALLS)
             || self.bytes > self.byte_limit && self.failure != Some(Exhaustion::DecodeBudget)
             || self.complete
-                && (self.next_packmap.is_some()
-                    || !self.queue.is_empty()
-                    || self.base_cursor.is_some()
+                && (self.walk.is_some()
                     || self.failure.is_some()
                     || self.terminal.is_some()
-                    || self.missing
-                    || self.value.head.is_some_and(|h| !self.visited.contains(&h))
-                    || self.value.packmap.is_some_and(|m| !self.chain.contains(&m))
-                    || !self.chain.is_subset(&self.dependencies)
-                    || !self.packs.is_subset(&self.dependencies))
+                    || self.missing)
         {
+            return Err(StoreError::Corrupt(
+                "invalid publication verification progress".into(),
+            ));
+        }
+        if let Some(walk) = &self.walk {
+            // Corrupt local progress bytes are a corrupt stored row, never a
+            // content verdict.
+            let bytes = hex_decode(walk)
+                .ok_or_else(|| StoreError::Corrupt("invalid pair checkpoint".into()))?;
+            PairWalker::validate_checkpoint(&bytes, checkpoint_cfg())
+                .map_err(|_| StoreError::Corrupt("invalid pair checkpoint".into()))?;
+        } else if !self.complete && self.failure.is_none() && self.terminal.is_none() {
             return Err(StoreError::Corrupt(
                 "invalid publication verification progress".into(),
             ));
@@ -173,6 +173,100 @@ impl Progress {
     }
 }
 
+fn checkpoint_cfg() -> PairCheckpointCfg {
+    PairCheckpointCfg {
+        max_bytes: u32::try_from(MAX_STATE_BYTES).unwrap_or(u32::MAX),
+    }
+}
+/// The machine's limits reproduce every reference cap with the same failure.
+fn walker_limits(progress: &Progress) -> PairLimits {
+    PairLimits {
+        chain: u32::try_from(MAX_ADVANCE_ITEMS).unwrap_or(u32::MAX),
+        packs: u32::try_from(MAX_ADVANCE_ITEMS).unwrap_or(u32::MAX),
+        discovered: u32::try_from(MAX_ADVANCE_ITEMS).unwrap_or(u32::MAX),
+        dependencies: u32::try_from(MAX_ADVANCE_ITEMS).unwrap_or(u32::MAX),
+        suppliers: u32::try_from(MAX_ADVANCE_ITEMS).unwrap_or(u32::MAX),
+        cleared: u32::try_from(crate::fork::MAX_SET_IDS).unwrap_or(u32::MAX),
+        max_delta_depth: progress.depth_limit,
+        // Reference work is bounded by the call and byte ledgers.
+        work: u64::MAX,
+    }
+}
+/// The frozen pair the checkpoint binds to, read from the stored row.
+fn progress_pair(progress: &Progress) -> ResultingPair {
+    ResultingPair {
+        head: progress.value.head,
+        packmap: progress.value.packmap,
+        branch: progress.branch,
+    }
+}
+fn walker_resume(repo: &RepoId, progress: &Progress) -> Result<PairWalker, ServerError> {
+    let walk = progress.walk.clone().ok_or_else(unavailable)?;
+    let bytes = hex_decode(&walk).ok_or_else(unavailable)?;
+    let expected = PairResume {
+        pair: progress_pair(progress),
+        additions: &progress.additions,
+        repository: super::pair_identity(repo),
+        view: Revision(progress.binding),
+        ruleset: super::PAIR_RULESET,
+        limits: walker_limits(progress),
+        honor_cleared: true,
+    };
+    PairWalker::resume(
+        &bytes,
+        checkpoint_cfg(),
+        &expected,
+        progress.runs.saturating_add(1),
+    )
+    .map_err(|_| unavailable())
+}
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push(char::from(HEX[usize::from(b >> 4)]));
+        out.push(char::from(HEX[usize::from(b & 15)]));
+    }
+    out
+}
+fn hex_decode(text: &str) -> Option<Vec<u8>> {
+    let bytes = text.as_bytes();
+    if !bytes.len().is_multiple_of(2) {
+        return None;
+    }
+    let digit = |b: u8| -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            _ => None,
+        }
+    };
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.chunks_exact(2) {
+        out.push(digit(pair[0])? << 4 | digit(pair[1])?);
+    }
+    Some(out)
+}
+/// Machine refusals map to the same step outcomes the reference produced.
+fn machine_step(error: &mkit_primitives::error::Failure, context: Option<PairCheck>) -> Step {
+    match error.code {
+        FailureCode::MissingClosure => Step::Missing { base: false },
+        FailureCode::ExternalBaseAbsent => Step::Missing { base: true },
+        FailureCode::WrongKind => Step::Server(closed()),
+        FailureCode::DeltaChainTooDeep => {
+            Step::Server(ServerError::invalid_argument("delta chain too deep"))
+        }
+        FailureCode::PackmapCycle => Step::Lookup,
+        FailureCode::ResourceLimit => Step::Capacity,
+        _ => {
+            debug_assert!(
+                matches!(context, None | Some(PairCheck::Bound(_))),
+                "host must not feed the machine invalid facts"
+            );
+            Step::Server(unavailable())
+        }
+    }
+}
 // A state that cannot fit is terminal, rather than an alarm that repeats the
 // same oversized frontier forever. Retain binding/counters and the typed cause.
 fn bounded_state(state: &mut state::VerificationV1) -> Value {
@@ -186,12 +280,7 @@ fn bounded_state(state: &mut state::VerificationV1) -> Value {
     } = state
     {
         p.failure.get_or_insert(Exhaustion::Traversal);
-        p.next_packmap = None;
-        p.base_cursor = None;
-        p.chain.clear();
-        p.packs.clear();
-        p.queue.clear();
-        p.visited.clear();
+        p.walk = None;
         p.dependencies.clear();
         p.bases.clear();
         p.complete = false;
@@ -227,9 +316,10 @@ pub(crate) async fn prepare<S: NamespaceStore>(
     now: u64,
     metrics: &dyn crate::Metrics,
     created: u64,
+    branch: bool,
 ) -> Result<bool, ServerError> {
     prepare_with(
-        store, source, shards, repo, advance, cfg, now, metrics, created, None, None,
+        store, source, shards, repo, advance, cfg, now, metrics, created, branch, None, None,
     )
     .await
 }
@@ -247,6 +337,7 @@ pub(crate) async fn prepare_with<S: NamespaceStore>(
     now: u64,
     metrics: &dyn crate::Metrics,
     created: u64,
+    branch: bool,
     request: Option<&SliceBudget>,
     settle: Option<&SliceBudget>,
 ) -> Result<bool, ServerError> {
@@ -283,28 +374,47 @@ pub(crate) async fn prepare_with<S: NamespaceStore>(
         Progress {
             binding: wanted,
             value: advance.value.clone(),
+            branch,
             generation: advance.generation,
             additions: advance.additions.clone(),
-            next_packmap: Some(root),
-            chain: BTreeSet::new(),
-            packs: BTreeSet::new(),
-            queue: VecDeque::from_iter(advance.value.head),
-            visited: BTreeSet::new(),
+            walk: None,
+            runs: 0,
             dependencies: BTreeSet::new(),
             bases: BTreeSet::new(),
             bytes: 0,
             calls: 0,
             byte_limit: cfg.decode_budget,
             depth_limit: cfg.max_delta_chain_depth,
-            base_cursor: None,
             failure: None,
             terminal: None,
             missing: false,
             missing_base: false,
             complete: false,
-            boundary: None,
         }
     };
+    if progress.walk.is_none()
+        && progress.failure.is_none()
+        && progress.terminal.is_none()
+        && !progress.complete
+    {
+        let walker = PairWalker::new(
+            progress_pair(&progress),
+            &progress.additions,
+            super::pair_identity(repo),
+            Revision(progress.binding),
+            super::PAIR_RULESET,
+            walker_limits(&progress),
+            true,
+            progress.runs + 1,
+        )
+        .map_err(|_| Exhaustion::Traversal.error())?;
+        progress.walk = Some(hex_encode(
+            &walker
+                .checkpoint()
+                .map_err(|_| Exhaustion::Traversal.error())?,
+        ));
+        progress.runs += 1;
+    }
     // A retryable read failure still spent work. Persist its safe checkpoint
     // before returning the original storage refusal to the foreground caller.
     let failure_before = progress.failure;
@@ -376,6 +486,10 @@ pub(crate) async fn prepare_with<S: NamespaceStore>(
 /// Why one proof step stopped, typed so classification never reads messages.
 enum Step {
     Server(ServerError),
+    /// A machine-classified content miss; `base` marks a delta-base miss.
+    Missing {
+        base: bool,
+    },
     /// A per-lookup index cap (input limit).
     Lookup,
     /// The retained-evidence item bound (implementation capacity).
@@ -387,18 +501,14 @@ impl From<ServerError> for Step {
     }
 }
 
-fn missing() -> ServerError {
-    ServerError::unavailable("publication membership missing")
-}
-
 /// A packmap node must be a live member; the witness is the row `is_member`
-/// reads, and a fork flags its inherited head in it. `true` for the flag.
+/// reads, and a fork flags its inherited head in it. `None` when absent.
 async fn chain_member<S: NamespaceStore>(
     live: &PairStore<'_, S>,
     shards: &dyn ShardMap,
     repo: &RepoId,
     id: &Hash,
-) -> Result<bool, Step> {
+) -> Result<Option<bool>, Step> {
     let row = live
         .get(
             &shards.membership(repo, &crate::store::BlobKey::pack(*id)),
@@ -407,20 +517,26 @@ async fn chain_member<S: NamespaceStore>(
         .await
         .map_err(|_| unavailable())?;
     let Some(raw) = row else {
-        return Err(missing().into());
+        return Ok(None);
     };
-    Ok(crate::store::publication::Witness::decode(&raw)
-        .map_err(|_| unavailable())?
-        .boundary)
+    Ok(Some(
+        crate::store::publication::Witness::decode(&raw)
+            .map_err(|_| unavailable())?
+            .boundary,
+    ))
 }
 
+/// One machine transition: at most one request is acquired and answered per
+/// call, preserving the reference step accounting and rollback granularity.
+#[allow(clippy::too_many_lines)] // One bounded request dispatch; storage reads stay inline for ordering.
 async fn one<S: NamespaceStore>(
     store: &S,
     shards: &dyn ShardMap,
     repo: &RepoId,
+    walker: &mut PairWalker,
     progress: &mut Progress,
     metrics: &dyn crate::Metrics,
-    cleared: Option<&crate::fork::boundary::Cleared>,
+    request: PairRequest,
 ) -> Result<u64, Step> {
     let additions = progress.additions.clone();
     let live = PairStore {
@@ -430,125 +546,194 @@ async fn one<S: NamespaceStore>(
         packs: None,
         policy: &Immediate,
     };
-    if progress.base_cursor.is_some() {
-        return external_base(store, &live, shards, repo, progress, metrics).await;
-    }
-    if let Some(id) = progress.next_packmap {
-        if !progress.chain.insert(id) {
-            return Err(Step::Lookup);
-        }
-        if !progress.additions.contains(&id) && chain_member(&live, shards, repo, &id).await? {
-            progress.boundary = Some(id);
-        }
-        let (length, prev, packs) = inventory::packlist_facts(store, &id)
-            .await
-            .map_err(|_| unavailable())?;
-        progress.next_packmap = prev;
-        progress.dependencies.insert(id);
-        progress.dependencies.extend(packs.iter().copied());
-        progress.packs.extend(packs);
-        return Ok(length);
-    }
-    let Some(id) = progress.queue.pop_front() else {
-        if let Some(cleared) = cleared {
-            // Inherited external-base packs stay dependencies of the pair.
-            progress.bases.extend(cleared.bases.iter().copied());
-        }
-        progress.complete = true;
-        return Ok(0);
-    };
-    if !progress.visited.insert(id) {
-        return Ok(0);
-    }
-    // The head is always read: its kind is checked below.
-    if Some(id) != progress.value.head && cleared.is_some_and(|cleared| cleared.ids.contains(&id)) {
-        return Ok(0);
-    }
-    let closure = PairStore {
-        store,
-        repo,
-        additions: &progress.additions,
-        packs: Some(&progress.packs),
-        policy: &Immediate,
-    };
-    let located = resolve::locate_split(&closure, shards, repo, &[id], metrics)
-        .await?
-        .remove(&id)
-        .ok_or_else(missing)?
-        .map_err(|_| Step::Lookup)?
-        .ok_or_else(missing)?;
-    inventory::seal(store, &located.pack)
-        .await
-        .map_err(|_| unavailable())?;
-    let row = inventory::entry(store, &located.pack, &id)
-        .await
-        .map_err(|_| unavailable())?
-        .ok_or_else(missing)?;
-    if row.canonical_len != located.value.decoded_size || row.kind == 0 || row.kind == 6 {
-        return Err(unavailable().into());
-    }
-    if Some(id) == progress.value.head && !matches!(row.kind, 3 | 4 | 7) {
-        return Err(closed().into());
-    }
-    progress.dependencies.insert(located.pack);
-    for n in 0..row.references.pages.len() {
-        let children = denial::page(store, &row.references, n).await?;
-        for child in children {
-            if !progress.visited.contains(&child) && !progress.queue.contains(&child) {
-                if progress.visited.len() + progress.queue.len() >= MAX_ADVANCE_ITEMS {
-                    return Err(Step::Capacity);
-                }
-                progress.queue.push_back(child);
+    match request {
+        PairRequest::PackmapNode {
+            request,
+            pack,
+            addition,
+        } => {
+            let mut boundary = false;
+            if !addition {
+                let Some(flagged) = chain_member(&live, shards, repo, &pack).await? else {
+                    walker
+                        .answer(PairResponse::PackmapNode {
+                            request,
+                            pack,
+                            value: Acquisition::Absent,
+                        })
+                        .map_err(|error| machine_step(&error, walker.failure_context()))?;
+                    return Ok(0);
+                };
+                boundary = flagged;
             }
+            let (length, prev, packs) = inventory::packlist_facts(store, &pack)
+                .await
+                .map_err(|_| unavailable())?;
+            walker
+                .answer(PairResponse::PackmapNode {
+                    request,
+                    pack,
+                    value: Acquisition::Present(PairNode {
+                        prev,
+                        packs: &packs,
+                        boundary,
+                    }),
+                })
+                .map_err(|error| machine_step(&error, walker.failure_context()))?;
+            Ok(length)
         }
+        PairRequest::Object {
+            request,
+            object,
+            head,
+            restricted,
+        } => {
+            let closure = PairStore {
+                store,
+                repo,
+                additions: &additions,
+                packs: restricted.then_some(walker.chain_packs()),
+                policy: &Immediate,
+            };
+            let Some(located) = resolve::locate_split(&closure, shards, repo, &[object], metrics)
+                .await?
+                .remove(&object)
+            else {
+                walker
+                    .answer(PairResponse::Object {
+                        request,
+                        object,
+                        value: Acquisition::Absent,
+                    })
+                    .map_err(|error| machine_step(&error, walker.failure_context()))?;
+                return Ok(0);
+            };
+            let Some(located) = located.map_err(|_| Step::Lookup)? else {
+                walker
+                    .answer(PairResponse::Object {
+                        request,
+                        object,
+                        value: Acquisition::Absent,
+                    })
+                    .map_err(|error| machine_step(&error, walker.failure_context()))?;
+                return Ok(0);
+            };
+            inventory::seal(store, &located.pack)
+                .await
+                .map_err(|_| unavailable())?;
+            let Some(row) = inventory::entry(store, &located.pack, &object)
+                .await
+                .map_err(|_| unavailable())?
+            else {
+                walker
+                    .answer(PairResponse::Object {
+                        request,
+                        object,
+                        value: Acquisition::Absent,
+                    })
+                    .map_err(|error| machine_step(&error, walker.failure_context()))?;
+                return Ok(0);
+            };
+            if row.canonical_len != located.value.decoded_size || row.kind == 0 || row.kind == 6 {
+                return Err(unavailable().into());
+            }
+            // Inventory kinds are the wire object tags; unknown values are
+            // not history kinds, matching the reference's head-only check.
+            let kind = match row.kind {
+                2 => mkit_core::object::ObjectType::Tree,
+                3 => mkit_core::object::ObjectType::Commit,
+                4 => mkit_core::object::ObjectType::Remix,
+                5 => mkit_core::object::ObjectType::ChunkedBlob,
+                7 => mkit_core::object::ObjectType::Tag,
+                _ => mkit_core::object::ObjectType::Blob,
+            };
+            // A non-history head fails before any reference page is read, as
+            // the reference did; the machine refuses it without children.
+            let mut children = Vec::new();
+            if !head || matches!(row.kind, 3 | 4 | 7) {
+                for n in 0..row.references.pages.len() {
+                    children.extend(denial::page(store, &row.references, n).await?);
+                }
+            }
+            walker
+                .answer(PairResponse::Object {
+                    request,
+                    object,
+                    value: Acquisition::Present(ObjectFact {
+                        pack: located.pack,
+                        kind,
+                        children: &children,
+                        suppliers: &[],
+                        base: row.base,
+                    }),
+                })
+                .map_err(|error| machine_step(&error, walker.failure_context()))?;
+            Ok(row.canonical_len)
+        }
+        // Each base is a durable boundary, so a valid maximum-depth chain can
+        // span several 128-call slices without restarting the whole object.
+        PairRequest::Base {
+            request, object, ..
+        } => {
+            let Some(selected) = resolve::locate_split(&live, shards, repo, &[object], metrics)
+                .await?
+                .remove(&object)
+            else {
+                walker
+                    .answer(PairResponse::Base {
+                        request,
+                        object,
+                        value: Acquisition::Absent,
+                    })
+                    .map_err(|error| machine_step(&error, walker.failure_context()))?;
+                return Ok(0);
+            };
+            let Some(selected) = selected.map_err(|_| Step::Lookup)? else {
+                walker
+                    .answer(PairResponse::Base {
+                        request,
+                        object,
+                        value: Acquisition::Absent,
+                    })
+                    .map_err(|error| machine_step(&error, walker.failure_context()))?;
+                return Ok(0);
+            };
+            let Some(parent) = inventory::entry(store, &selected.pack, &object)
+                .await
+                .map_err(|_| unavailable())?
+            else {
+                walker
+                    .answer(PairResponse::Base {
+                        request,
+                        object,
+                        value: Acquisition::Absent,
+                    })
+                    .map_err(|error| machine_step(&error, walker.failure_context()))?;
+                return Ok(0);
+            };
+            inventory::seal(store, &selected.pack)
+                .await
+                .map_err(|_| unavailable())?;
+            if parent.canonical_len != selected.value.decoded_size
+                || parent.kind == 0
+                || parent.kind == 6
+            {
+                return Err(unavailable().into());
+            }
+            walker
+                .answer(PairResponse::Base {
+                    request,
+                    object,
+                    value: Acquisition::Present(BaseFact {
+                        pack: selected.pack,
+                        base: parent.base,
+                    }),
+                })
+                .map_err(|error| machine_step(&error, walker.failure_context()))?;
+            Ok(parent.canonical_len)
+        }
+        _ => Err(unavailable().into()),
     }
-    progress.base_cursor = row.base.map(|next| BaseCursor {
-        origin: located.pack,
-        next,
-        depth: 0,
-    });
-    Ok(row.canonical_len)
-}
-
-// Each base is a durable boundary, so a valid maximum-depth chain can span
-// several 128-call slices without restarting the entire canonical object.
-async fn external_base<S: NamespaceStore>(
-    store: &S,
-    live: &PairStore<'_, S>,
-    shards: &dyn ShardMap,
-    repo: &RepoId,
-    progress: &mut Progress,
-    metrics: &dyn crate::Metrics,
-) -> Result<u64, Step> {
-    let cursor = progress.base_cursor.clone().ok_or_else(unavailable)?;
-    if cursor.depth >= progress.depth_limit {
-        return Err(ServerError::invalid_argument("delta chain too deep").into());
-    }
-    let selected = resolve::locate_split(live, shards, repo, &[cursor.next], metrics)
-        .await?
-        .remove(&cursor.next)
-        .ok_or_else(missing)?
-        .map_err(|_| Step::Lookup)?
-        .ok_or_else(missing)?;
-    let parent = inventory::entry(store, &selected.pack, &cursor.next)
-        .await
-        .map_err(|_| unavailable())?
-        .ok_or_else(missing)?;
-    inventory::seal(store, &selected.pack)
-        .await
-        .map_err(|_| unavailable())?;
-    if parent.canonical_len != selected.value.decoded_size || parent.kind == 0 || parent.kind == 6 {
-        return Err(unavailable().into());
-    }
-    if selected.pack != cursor.origin {
-        progress.bases.insert(selected.pack);
-    }
-    progress.base_cursor = parent.base.map(|next| BaseCursor {
-        origin: cursor.origin,
-        next,
-        depth: cursor.depth + 1,
-    });
-    Ok(parent.canonical_len)
 }
 
 struct SliceStore<'a, S> {
@@ -644,40 +829,70 @@ async fn slice_with<S: NamespaceStore>(
         stopped: std::sync::atomic::AtomicBool::new(false),
     };
     let mut bytes = 0u64;
-    let mut cleared = None;
+    let mut walker = Some(walker_resume(repo, progress)?);
+    progress.runs = progress.runs.saturating_add(1);
     while !progress.complete && bytes < SLICE_BYTES {
         // A rollback retains only immutable metadata, never decoded content.
         let before = progress.clone();
+        let before_walker = walker.clone();
         let start = budget.used();
-        // The resumable walk is only reached on a deployment with pack-level
-        // takedown denial (`Pipeline::verify_publication`), the condition the
-        // cleared set is honored under.
-        if progress.boundary.is_some() && cleared.is_none() {
-            let started = budget.used();
-            match crate::fork::boundary::load(&remote, shards, repo).await {
-                Ok(loaded) => cleared = Some(loaded),
-                Err(error) => {
-                    // The load's calls count toward the pair's total, so a
-                    // load that keeps failing ends the verification; a
-                    // corrupt row ends it at once.
-                    let calls = progress
-                        .calls
-                        .saturating_add(u64::from(budget.used() - started));
-                    *progress = before;
-                    progress.calls = calls;
-                    if matches!(
-                        error,
-                        StoreError::Corrupt(_) | StoreError::MalformedReply(_)
-                    ) {
-                        progress.failure = Some(Exhaustion::Traversal);
-                    } else if calls > TOTAL_CALLS {
-                        progress.failure = Some(Exhaustion::IndexCalls);
+        // The cleared set is loaded only when the machine asks for it, after a
+        // flagged chain node, and re-requested once per resumed run.
+        let Some(w) = walker.as_mut() else { break };
+        let result = match w.step() {
+            Err(error) => Err(machine_step(&error, w.failure_context())),
+            Ok(PairStep::Progress) => Ok(0),
+            Ok(PairStep::Covered(coverage)) => {
+                progress.complete = true;
+                progress.walk = None;
+                progress.dependencies = coverage.dependencies().iter().copied().collect();
+                progress.bases = coverage.external_suppliers().iter().copied().collect();
+                Ok(0)
+            }
+            Ok(PairStep::Request(PairRequest::Boundary { request })) => {
+                let request = *request;
+                let started = budget.used();
+                match crate::fork::boundary::load(&remote, shards, repo).await {
+                    Ok(loaded) => {
+                        let objects: Vec<Hash> = loaded.ids.iter().copied().collect();
+                        let suppliers: Vec<Hash> = loaded.bases.iter().copied().collect();
+                        w.answer(PairResponse::Boundary {
+                            request,
+                            value: Acquisition::Present(ClearedSet {
+                                objects: &objects,
+                                suppliers: &suppliers,
+                            }),
+                        })
+                        .map_err(|error| machine_step(&error, w.failure_context()))
+                        .map(|()| 0)
                     }
-                    break;
+                    Err(error) => {
+                        // The load's calls count toward the pair's total, so a
+                        // load that keeps failing ends the verification; a
+                        // corrupt row ends it at once.
+                        let calls = progress
+                            .calls
+                            .saturating_add(u64::from(budget.used() - started));
+                        *progress = before;
+                        progress.calls = calls;
+                        if matches!(
+                            error,
+                            StoreError::Corrupt(_) | StoreError::MalformedReply(_)
+                        ) {
+                            progress.failure = Some(Exhaustion::Traversal);
+                        } else if calls > TOTAL_CALLS {
+                            progress.failure = Some(Exhaustion::IndexCalls);
+                        }
+                        break;
+                    }
                 }
             }
-        }
-        let result = one(&remote, shards, repo, progress, metrics, cleared.as_ref()).await;
+            Ok(PairStep::Request(request)) => {
+                let request = request.clone();
+                one(&remote, shards, repo, w, progress, metrics, request).await
+            }
+            Ok(_) => Err(unavailable().into()),
+        };
         let used = budget.used() - start;
         progress.calls = before.calls.saturating_add(u64::from(used));
         if progress.calls > TOTAL_CALLS {
@@ -701,6 +916,21 @@ async fn slice_with<S: NamespaceStore>(
                     break;
                 }
                 bytes = bytes.saturating_add(length);
+                if !progress.complete && progress.walk.is_some() {
+                    match walker.as_mut().map(|w| w.checkpoint()) {
+                        Some(Ok(bytes)) => progress.walk = Some(hex_encode(&bytes)),
+                        Some(Err(_)) => {
+                            // A state that cannot be serialized is retained-
+                            // capacity exhaustion, like the oversized frontier.
+                            let calls = progress.calls;
+                            *progress = before;
+                            progress.calls = calls;
+                            progress.failure = Some(Exhaustion::Traversal);
+                            break;
+                        }
+                        None => {}
+                    }
+                }
                 if progress.validate().is_err() {
                     *progress = before;
                     progress.failure = Some(Exhaustion::Traversal);
@@ -734,14 +964,19 @@ async fn slice_with<S: NamespaceStore>(
                 progress.failure = Some(Exhaustion::Traversal);
                 break;
             }
-            Err(Step::Server(error))
-                if error.public_message() == "publication membership missing" =>
-            {
+            Err(Step::Missing { base }) => {
                 let calls = progress.calls;
                 *progress = before;
+                walker = before_walker;
                 progress.calls = calls;
-                progress.missing_base = progress.base_cursor.is_some();
-                progress.missing = true;
+                match walker.as_mut().map(|w| w.checkpoint()) {
+                    Some(Ok(bytes)) => {
+                        progress.walk = Some(hex_encode(&bytes));
+                        progress.missing_base = base;
+                        progress.missing = true;
+                    }
+                    _ => progress.failure = Some(Exhaustion::Traversal),
+                }
                 break;
             }
             Err(Step::Server(error)) => {

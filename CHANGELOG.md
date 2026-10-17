@@ -81,6 +81,13 @@ collect the applicable entries between their old and new immutable pins.
   reference `ManualClock` remains supported when `storage-spi` is enabled.
   No protocol bytes or stored state change; no wipe.
 
+- [embedder: stored-format change] The server encodes in-progress resumable
+  publication verification as a versioned pair-coverage checkpoint instead of
+  per-field walk state. In-flight verification rows carry the old encoding and
+  cannot be resumed after upgrade. Store reset: yes, only verification rows
+  carrying in-progress publication progress. Public APIs, wire formats, and
+  all other stored formats are unchanged.
+
 ### Added
 
 - Add bounded all-entry `VerifyDriver` verification to `mkit-primitives`, with
@@ -94,6 +101,15 @@ collect the applicable entries between their old and new immutable pins.
   fixtures, and seeded transition replay. The server checks physical ref and
   publication projections against sealed decisions. Additive ALPHA API; no wire
   or stored-format change, migration, or store reset.
+- Resulting-pair coverage in `mkit-primitives`: `closure::pair::PairWalker` is
+  a sans-IO pull machine over packmap-chain acquisition, reachable-object
+  traversal, membership facts, external delta-base suppliers, and the fork
+  cleared set. `pair_requirement` decides the coverage obligation, `PairLimits`
+  supplies every bound, `PairWalker::checkpoint`/`resume` carry local resumable
+  progress under a corruption-check format, and `PairCoverage` is a sealed
+  artifact. Denial, inspection, publication state, and authorization stay
+  separate host guards. Adds `FailureCode::PackmapCycle`. Additive ALPHA API;
+  no public API break; no wire change.
 
 - `WindowCursor::metadata` returns validated, read-only pack identity and entry
   geometry for binding caller-owned checkpoints. Cursor fields remain private,

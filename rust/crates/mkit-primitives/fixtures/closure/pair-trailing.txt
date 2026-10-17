@@ -1,0 +1,1 @@
+Corrupt pair checkpoint: one trailing body byte beyond the declared lists, checksum recomputed. Decoders must refuse trailing bytes. Domain: mkit-pair-checkpoint:v1.

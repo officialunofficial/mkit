@@ -1,0 +1,1 @@
+Pair checkpoint version 1, walk phase after the boundary answer. Two chain nodes applied; head visited; queue holds 0x0b and 0x0c; cleared ids are not stored and reload on resume. Domain: mkit-pair-checkpoint:v1.

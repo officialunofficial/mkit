@@ -1716,6 +1716,28 @@ its 16-step and batch-operation ceilings. Every boundary remains resumable and
 repeats source and denial checks. This scheduling choice changes neither the
 extraction threshold nor the conditions for Usable.
 
+#### Local pair coverage checkpoint
+
+A **local pair coverage checkpoint** retains an interrupted resulting-pair walk
+so a scheduled verifier can resume it. Its domain is `mkit-pair-checkpoint:v1`,
+checksummed with the same SPEC-CONVENTIONS framing
+`BLAKE3(le16(domain_length) || domain || body)` appended as a trailing 32-byte
+corruption check; the checksum is local corruption detection only and does not
+authenticate the host or origin. An unsupported format version is rejected and
+verification restarts. All integers are little-endian. The body is: version `u8`
+`1`; repository `[32]`; view `[32]`; ruleset `u32`; profile `u8`; flags `u8`
+(bit 0 head present, bit 1 packmap present, bit 2 branch, bit 3 honor-cleared,
+bit 4 boundary seen; other bits invalid); head `[32]` if present; packmap `[32]`
+if present; the eight limits (`u32` ×7 then `u64` work); phase `u8` (`0` chain,
+`1` walk, `2` base); optional next packmap (`0`/`1` tag + `[32]`); optional base
+cursor (tag + origin `[32]` + next `[32]` + depth `u32`); work used `u64`; then
+counted `u32`-prefixed id lists — additions, chain, packs, visited,
+dependencies, and suppliers, each sorted strictly ascending, then the queue in
+walk order, disjoint from visited. Trailing bytes, unsorted or duplicate lists,
+set-relation violations, and any mismatch with the expected pair, additions,
+repository, view, ruleset, limits, or honor-cleared flag are rejected and the
+walk restarts from the beginning.
+
 ### 9.4 Repository-isolated membership checks
 
 A delta base MUST resolve only from an earlier entry in the same pack,
@@ -2883,6 +2905,40 @@ that starts `cleared` and has an eligible prefix. An advance starting
 Published equals live exactly while no advance on that ref is held or
 pending (and no hit awaits resolution). A deployment with only
 synchronous inspectors MUST still maintain the published view.
+
+#### Resulting-pair coverage
+
+Condition 2's coverage obligation decomposes into an exact implementer
+checklist. For an advance writing the live (head, packmap) pair:
+
+| Obligation | Requirement |
+|------------|-------------|
+| Chain packs | Every pack on the packmap chain is already in published membership or added by this advance. |
+| Reachable closure | Every object reachable from the resulting head is contained in at least one chain pack; a non-branch ref's walk is unrestricted, while a branch head's members MUST locate inside chain packs only. |
+| Head kind | A present head MUST be a history kind (Commit, Remix, or Tag); other kinds fail closed. |
+| External delta suppliers | Delta bases outside the chain packs are recorded as external suppliers; they MUST already be in published membership and this advance's own additions MUST NOT satisfy them. |
+
+The coverage requirement applies exactly when at least one verification regime
+is configured (inspection obligations, takedown denial, or a custom
+publication policy) and the write deletes none of its refs. A write that
+deletes any ref is exempt. With none of those regimes configured, an immediate-path
+write is exempt, including the published-source `AdvanceRefs` form — that form
+gets no separate exemption: once any regime is configured the destination
+retains coverage. Direct-child closure evidence never substitutes for
+resulting-pair coverage.
+
+Coverage evidence splits into *dependencies* — the packmap chain, the packs it
+lists, and the packs located members resolve to — and *external suppliers* —
+packs that supplied delta bases for covered members, merged with any cleared-set
+suppliers at a fork boundary. Denial, inspection, and publication checks remain
+separate guards: coverage alone never authorizes publication.
+
+**Reference-server behavior.** The reference implementation bounds the chain,
+listed packs, reachable members, dependencies, and supplier sets to 4,096 items
+each and the fork cleared set to 8,000 objects, bounds retained verification
+state to a fixed byte budget, and walks per slice under the scheduled
+verifier's call ledger. Those numeric caps
+are implementation mechanisms, not protocol promises.
 
 ### 10.3 Every reader surface uses the published view
 

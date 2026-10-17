@@ -1,0 +1,1 @@
+Corrupt pair checkpoint: final checksum byte flipped. Decoders must refuse a checksum mismatch before trusting any field. Domain: mkit-pair-checkpoint:v1.

@@ -1,0 +1,1 @@
+Corrupt pair checkpoint: a base cursor spliced in while the phase says chain, checksum recomputed. A cursor is only valid in the base phase. Domain: mkit-pair-checkpoint:v1.

@@ -1283,7 +1283,171 @@ spec = "SPEC-SERVER.md#direct-child-closure-edges"
 sha256 = "500e5903ac8a8c124d706aca40049228299cd0e81c9d6c294e3dab2e2eec433c"
 semantic_sha256 = "f9157e577165f1dc761fd00100231dfc2ac208491fdc8fabe545cc8aea77d02c"
 
+[[formats]]
+type = "pair-checkpoint"
+format_version = 1
+decoder = "closure::pair::PairWalker::validate_checkpoint"
+fuzz_target = "pair_checkpoint"
+spec = "SPEC-SERVER.md#local-pair-coverage-checkpoint"
+
+[[fixtures]]
+type = "pair-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/pair-minimal.bin"
+semantic = "closure/pair-minimal.txt"
+decode_config = "max_bytes=1048576"
+expected = "ok"
+spec = "SPEC-SERVER.md#local-pair-coverage-checkpoint"
+sha256 = "fe4fcb1ea354e3d78e9b1ecac75391fec206a2cc19387855af8ad6f2931cf42f"
+semantic_sha256 = "e2f0038e5f8c45c3fbfad6d100fa198f5fcb328dcc34fe0d997b73ca45674bbc"
+
+[[fixtures]]
+type = "pair-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/pair-walk.bin"
+semantic = "closure/pair-walk.txt"
+decode_config = "max_bytes=1048576"
+expected = "ok"
+spec = "SPEC-SERVER.md#local-pair-coverage-checkpoint"
+sha256 = "90b377211c4204187bf25ddfe59daeda810a26ef58337ec8cb559b894793b8f1"
+semantic_sha256 = "d7d50c4f2dd6b1a49168d573d7aa43a3fa8089f2879867c8ff87c6e08e5a105a"
+
+[[fixtures]]
+type = "pair-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/pair-base-cursor.bin"
+semantic = "closure/pair-base-cursor.txt"
+decode_config = "max_bytes=1048576"
+expected = "ok"
+spec = "SPEC-SERVER.md#local-pair-coverage-checkpoint"
+sha256 = "3fd2d6cfafee69632d31acb8194e4dcfc16cdc72fef686d3c1a8c651700bd05b"
+semantic_sha256 = "7feae193cda2a33159ed03a8d0927d83cdda6b2df11d50cde7134cd7d22a4487"
+
+[[fixtures]]
+type = "pair-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/pair-boundary.bin"
+semantic = "closure/pair-boundary.txt"
+decode_config = "max_bytes=1048576"
+expected = "ok"
+spec = "SPEC-SERVER.md#local-pair-coverage-checkpoint"
+sha256 = "3ae470cd35609d3ac2a1fa9d3cf20b21195d8efc9be273c442d2e39c8fccbf40"
+semantic_sha256 = "f8cb9b85abe432c6b13589aabcf504a88e436c90f39ab393feff5b67e435474a"
+
+[[fixtures]]
+type = "pair-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/pair-bad-version.bin"
+semantic = "closure/pair-bad-version.txt"
+decode_config = "max_bytes=1048576"
+expected = "InvalidCheckpoint"
+spec = "SPEC-SERVER.md#local-pair-coverage-checkpoint"
+sha256 = "c4dc46783a6cdfa4bd42d5bfa6de39b0b000d5ef6cd9e3104b44e333f3a75cb7"
+semantic_sha256 = "9303e4faf7d8021472a5620500a13d5247f0d4207afbd3e011664ca62658fd17"
+
+[[fixtures]]
+type = "pair-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/pair-bad-flag.bin"
+semantic = "closure/pair-bad-flag.txt"
+decode_config = "max_bytes=1048576"
+expected = "InvalidCheckpoint"
+spec = "SPEC-SERVER.md#local-pair-coverage-checkpoint"
+sha256 = "fcc805eaeaf36d71fb14a186852f8b3c993df7262ab0d05c9bcadae6433bc002"
+semantic_sha256 = "c95ef8334a7007bdd1a59749dd2795618467c94159b012cd7e0a70aac70d53da"
+
+[[fixtures]]
+type = "pair-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/pair-trailing.bin"
+semantic = "closure/pair-trailing.txt"
+decode_config = "max_bytes=1048576"
+expected = "InvalidCheckpoint"
+spec = "SPEC-SERVER.md#local-pair-coverage-checkpoint"
+sha256 = "6097c770a56c923ac4bc698aa5f27d236574bc4b1416fe05b955327ac25e1529"
+semantic_sha256 = "431f3b2c97b1e0657efe488b0dbedfbb334aa08d9384996879d860c18a50adcd"
+
+[[fixtures]]
+type = "pair-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/pair-bad-checksum.bin"
+semantic = "closure/pair-bad-checksum.txt"
+decode_config = "max_bytes=1048576"
+expected = "InvalidCheckpoint"
+spec = "SPEC-SERVER.md#local-pair-coverage-checkpoint"
+sha256 = "67100dc5c5e7073cf5a8df4bf9cf5df2f1b6996cb32102d154ab39c96fb62fc8"
+semantic_sha256 = "ee42694185921ceea6ddcba17860163318e602045ac63db1d2571bb2c41dc97b"
+
+[[fixtures]]
+type = "pair-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/pair-unsorted.bin"
+semantic = "closure/pair-unsorted.txt"
+decode_config = "max_bytes=1048576"
+expected = "InvalidCheckpoint"
+spec = "SPEC-SERVER.md#local-pair-coverage-checkpoint"
+sha256 = "920f59abc3a23a5385895e5a732b89f9cdd69207a9ff7cd56b8c187070d67dca"
+semantic_sha256 = "21fd789c444f0ad11ccc0924e6fd2f048d2e58352fbd70910d0488f3f81399b4"
+
+[[fixtures]]
+type = "pair-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/pair-queue-overlap.bin"
+semantic = "closure/pair-queue-overlap.txt"
+decode_config = "max_bytes=1048576"
+expected = "InvalidCheckpoint"
+spec = "SPEC-SERVER.md#local-pair-coverage-checkpoint"
+sha256 = "d82b8867f0e208589303f468b8c24be545803cd64102c55f4fd83768c27f0068"
+semantic_sha256 = "97782273696a54eb4148d583486ada48b29b9303b6c0433b77ac384bf1857eb1"
+
+[[fixtures]]
+type = "pair-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/pair-count-over.bin"
+semantic = "closure/pair-count-over.txt"
+decode_config = "max_bytes=1048576"
+expected = "InvalidCheckpoint"
+spec = "SPEC-SERVER.md#local-pair-coverage-checkpoint"
+sha256 = "4a2e9b5a326aa0decb70eb687b338e2af096e8192934d736fb239867f996ccbd"
+semantic_sha256 = "aa38d02317ca7fb2eb2b03b681c153a87c454a760f2a416d7d1f08ac0f603f17"
+
+[[fixtures]]
+type = "pair-checkpoint"
+format_version = 1
+ruleset = 1
+profile = "indexed"
+path = "closure/pair-cursor-in-chain.bin"
+semantic = "closure/pair-cursor-in-chain.txt"
+decode_config = "max_bytes=1048576"
+expected = "InvalidCheckpoint"
+spec = "SPEC-SERVER.md#local-pair-coverage-checkpoint"
+
 # decision
+sha256 = "3f0a66dc11a22e63a8ed167976b83a9a375fc4bd0ee68f4ce6dc88e55e572970"
+semantic_sha256 = "c92548d5acdbab8dcb35a568c4141a0a26d280fe071454609d033a85828d79ab"
+
 [[fixtures]]
 type = "decision::ref_write"
 format_version = 1
@@ -1475,7 +1639,7 @@ spec = "SPEC-SERVER §9.9; §10.2"
 type = "failure-codes"
 ruleset = 1
 path = "error/failure-codes.txt"
-sha256 = "a61992f88457817ed2f1fcf5a7f93e2653d869a96c42d3cf2655eaf5651a5328"
+sha256 = "de22011565b86b74124041c8265924b8fac30b823e8ffd9c5d281ca9174005fa"
 spec = "README.md stable failure codes"
 
 
