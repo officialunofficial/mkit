@@ -842,6 +842,37 @@ const ALL_SETS: [u8; 5] = [
     set::MANIFESTS,
 ];
 
+/// Finish accepted clearance after membership installation.
+///
+/// Proof reclamation changes no decision. Completion still requires the exact
+/// accepted inventory before the barrier is removed.
+async fn finish_publish<S: NamespaceStore>(
+    env: &ForkEnv<'_, S>,
+    job: &mut ForkJobV1,
+    budget: &SliceBudget,
+    progress: &mkit_primitives::fork::ForkAdvanceFacts,
+) -> Result<Batch, ForkError> {
+    if job.proof.evidence_pending() && !reclaim_before_clearance(env, &job.dest()?, budget).await? {
+        return Ok(Batch::new());
+    }
+    super::decision::Activation::new(job)?.complete(progress, job)?;
+    job.result.clone_from(&job.accepted);
+    job.phase = Phase::Done;
+    // The walk's scratch sets go; the cleared set and the inherited
+    // base packs stay as the boundary.
+    let committed = Batch::new()
+        .require(Precondition::Equals(
+            keys::fork_barrier(&job.dest()?.name),
+            Value::new(job.binding.to_vec()),
+        ))
+        .delete(keys::fork_barrier(&job.dest()?.name));
+    Ok(sets::discard(
+        committed,
+        &job.dest()?.name,
+        &[set::TREES, set::QUEUE, set::MANIFESTS],
+    ))
+}
+
 /// Reclaim transient evidence while retaining the next unit's call reserve.
 /// Metadata deletion does not mutate the job or advance a fork decision.
 async fn reclaim_before_clearance<S: NamespaceStore>(
@@ -957,29 +988,7 @@ async fn advance<S: NamespaceStore>(
             if !publish::slice(env, job, budget, &progress).await? {
                 return Ok(Batch::new());
             }
-            // Proof reclamation changes no decision. Completion still requires
-            // the exact accepted inventory before the barrier is removed.
-            if job.proof.evidence_pending()
-                && !reclaim_before_clearance(env, &job.dest()?, budget).await?
-            {
-                return Ok(Batch::new());
-            }
-            super::decision::Activation::new(job)?.complete(&progress, job)?;
-            job.result.clone_from(&job.accepted);
-            job.phase = Phase::Done;
-            // The walk's scratch sets go; the cleared set and the inherited
-            // base packs stay as the boundary.
-            let committed = Batch::new()
-                .require(Precondition::Equals(
-                    keys::fork_barrier(&job.dest()?.name),
-                    Value::new(job.binding.to_vec()),
-                ))
-                .delete(keys::fork_barrier(&job.dest()?.name));
-            Ok(sets::discard(
-                committed,
-                &job.dest()?.name,
-                &[set::TREES, set::QUEUE, set::MANIFESTS],
-            ))
+            finish_publish(env, job, budget, &progress).await
         }
         Phase::Done | Phase::Failed => Ok(Batch::new()),
     }
