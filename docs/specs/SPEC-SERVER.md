@@ -1709,6 +1709,15 @@ order, with one page per distinct ID. The complete result includes an exact coun
 Empty sequences have count zero and the zero digest sentinel. Intermediate pages
 or a truncated traversal MUST NOT be presented as a complete set or closure proof.
 
+**Reference-server behavior.** The scheduled verifier may run up to eight durably checkpointed
+Extract selection slices in one callback. Slices share the existing call
+allowance, two-second elapsed cutoff and physical callback deadline; each keeps
+its 16-step and batch-operation ceilings. Every boundary remains resumable and
+repeats source and denial checks. This scheduling choice changes neither the
+extraction threshold nor the conditions for Usable.
+
+#### Local pair coverage checkpoint
+
 A **local pair coverage checkpoint** retains an interrupted resulting-pair walk
 so a scheduled verifier can resume it. Its domain is `mkit-pair-checkpoint:v1`,
 checksummed with the same SPEC-CONVENTIONS framing
@@ -1728,13 +1737,6 @@ walk order, disjoint from visited. Trailing bytes, unsorted or duplicate lists,
 set-relation violations, and any mismatch with the expected pair, additions,
 repository, view, ruleset, limits, or honor-cleared flag are rejected and the
 walk restarts from the beginning.
-
-**Reference-server behavior.** The scheduled verifier may run up to eight durably checkpointed
-Extract selection slices in one callback. Slices share the existing call
-allowance, two-second elapsed cutoff and physical callback deadline; each keeps
-its 16-step and batch-operation ceilings. Every boundary remains resumable and
-repeats source and denial checks. This scheduling choice changes neither the
-extraction threshold nor the conditions for Usable.
 
 ### 9.4 Repository-isolated membership checks
 
