@@ -74,8 +74,9 @@ steps:
       - |
         set -euo pipefail
         # Every command after the workspace build + swtpm setup is attempted
-        # even after a failure: each records into `status` (a failure is never
-        # turned into a success or skipped) and the step exits non-zero at
+        # even after a failure (a `cd` into a missing tree aborts only its
+        # own subshell): each records into `status` — a failure is never
+        # turned into a success or skipped — and the step exits non-zero at
         # the end, so one failing gate can no longer hide the rest of the
         # results.
         status=0

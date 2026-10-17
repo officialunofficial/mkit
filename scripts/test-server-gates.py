@@ -98,10 +98,16 @@ class ServerGates(unittest.TestCase):
                 # record into `failed` — a dropped recorder would silently
                 # swallow that gate's failure.
                 aggregated = False
+                previous = None
                 for line in lines:
                     stripped = line.strip()
                     if not stripped or stripped.startswith("#"):
                         continue
+                    # A subshell whose first body line is `failed=0` is an
+                    # aggregated one: its `cd` must abort loudly, not cascade.
+                    if (previous or "").startswith("( cd ") and stripped == "failed=0":
+                        self.assertTrue(previous.endswith("|| exit 1"),
+                                        f"aggregated subshell cd does not abort loudly: {previous}")
                     if stripped == "failed=0":
                         aggregated = True
                     elif stripped == 'exit "$failed"':
@@ -110,8 +116,9 @@ class ServerGates(unittest.TestCase):
                         self.assertTrue(
                             stripped.endswith("|| failed=1")
                             or stripped == "failed=1"
-                            or re.match(r"(echo|if|elif|else|fi|for|do|done|while)\b", stripped),
+                            or re.match(r"(echo|if|elif|else|fi|for|do|done|while|then|until|case|esac)\b", stripped),
                             f"command in aggregated subshell does not record failure: {stripped}")
+                    previous = stripped
                 self.assertNotIn("allowFailure", step)
                 self.assertNotIn("allowExitCodes", step)
 
