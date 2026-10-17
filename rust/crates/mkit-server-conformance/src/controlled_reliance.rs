@@ -188,7 +188,7 @@ async fn fixture(ctx: &Ctx, control: &ControlClient, gc: bool) -> Result<Fixture
     );
     request.ticket_ids.clone_from(&tickets);
     let operation = sign_unary(&signer, Rpc::AdvanceRefs, &request, |env| {
-        repository.clone_into(&mut env.repository)
+        repository.clone_into(&mut env.repository);
     });
     let query = ObservationQuery {
         repository,
