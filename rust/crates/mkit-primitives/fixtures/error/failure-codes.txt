@@ -26,6 +26,7 @@ PackfileTooShort
 # closure
 MissingClosure
 WrongKind
+PackmapCycle
 
 # infrastructure
 CheckpointNotReady
