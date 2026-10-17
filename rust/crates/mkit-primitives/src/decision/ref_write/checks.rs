@@ -4,7 +4,7 @@ use crate::{
     error::{BoundedDetail, Failure, FailureCode, Location},
 };
 
-pub(super) fn failure(code: FailureCode) -> Failure {
+pub(crate) fn failure(code: FailureCode) -> Failure {
     Failure {
         code,
         location: Location::default(),
@@ -12,7 +12,7 @@ pub(super) fn failure(code: FailureCode) -> Failure {
     }
 }
 
-pub(super) fn bounds(
+pub(crate) fn bounds(
     request: &RefWriteRequest<'_>,
     snapshot: &Snapshot,
     limits: RefDecisionLimits,
@@ -71,6 +71,7 @@ fn fact_count(request: &RefWriteRequest<'_>, snapshot: &Snapshot) -> Result<usiz
             snapshot.policy.is_some(),
             snapshot.admission.is_some(),
             snapshot.accounting.is_some(),
+            snapshot.storage.is_some(),
             snapshot.publication.is_some(),
             request.required.source.is_some(),
             request.presence.is_some(),
@@ -213,7 +214,8 @@ fn reservation_bytes(snapshot: &Snapshot) -> Result<usize, Failure> {
                 crate::decision::ReservationTerminalKind::Aborted { detail, .. } => {
                     add(detail.len())?;
                 }
-                crate::decision::ReservationTerminalKind::Expired => {}
+                crate::decision::ReservationTerminalKind::Expired
+                | crate::decision::ReservationTerminalKind::StorageChanged { .. } => {}
             }
         }
     }
@@ -371,6 +373,10 @@ pub(super) fn matches(guard: &RequiredGuard, current: &Snapshot, now_ms: u64) ->
             repository,
             expected,
         } => *repository == current.repository && current.accounting.as_ref() == Some(expected),
+        RequiredGuard::Storage {
+            repository,
+            expected,
+        } => *repository == current.repository && current.storage.as_ref() == Some(expected),
         RequiredGuard::Publication {
             repository,
             expected,

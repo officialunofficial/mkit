@@ -71,6 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         admission: None,
         accounting: None,
         publication: None,
+        storage: None,
     };
     let limits = RefDecisionLimits {
         facts: 16,

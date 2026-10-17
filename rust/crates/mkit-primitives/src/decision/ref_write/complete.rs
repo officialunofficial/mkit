@@ -38,6 +38,7 @@ pub fn validate_guard_kind(kind: Option<GuardKind>, version: u32) -> Result<Guar
             | GuardKind::Policy
             | GuardKind::Admission
             | GuardKind::Accounting
+            | GuardKind::Storage
             | GuardKind::Publication
             | GuardKind::ValidThrough),
         ) => Ok(kind),
@@ -62,6 +63,7 @@ pub const fn guard_kind(guard: &RequiredGuard) -> GuardKind {
         RequiredGuard::Policy { .. } => GuardKind::Policy,
         RequiredGuard::Admission { .. } => GuardKind::Admission,
         RequiredGuard::Accounting { .. } => GuardKind::Accounting,
+        RequiredGuard::Storage { .. } => GuardKind::Storage,
         RequiredGuard::Publication { .. } => GuardKind::Publication,
         RequiredGuard::ValidThrough { .. } => GuardKind::ValidThrough,
     }
@@ -87,6 +89,7 @@ pub fn effect_guard_kinds(
         || !effects.tickets.is_empty()
         || !effects.publication.is_empty()
         || !effects.accounting.is_empty()
+        || !effects.storage.is_empty()
         || !effects.reservation_transitions.is_empty();
     if !matches!(class, DecisionClass::Apply) && writes {
         return Err(failure(FailureCode::InvalidResponse));
@@ -124,6 +127,9 @@ pub fn effect_guard_kinds(
     if !effects.accounting.is_empty() {
         add(GuardKind::Accounting);
     }
+    if !effects.storage.is_empty() {
+        add(GuardKind::Storage);
+    }
     Ok(kinds)
 }
 
@@ -154,6 +160,7 @@ pub fn required_guard_kinds(
         replay: None,
         publication: Vec::new(),
         accounting: Vec::new(),
+        storage: Vec::new(),
         outcomes: Vec::new(),
     };
     let mutations = match effects.decision() {
@@ -307,6 +314,7 @@ fn same_identity(left: &RequiredGuard, right: &RequiredGuard) -> bool {
         | (G::Denial { repository: a, .. }, G::Denial { repository: b, .. })
         | (G::Policy { repository: a, .. }, G::Policy { repository: b, .. })
         | (G::Accounting { repository: a, .. }, G::Accounting { repository: b, .. })
+        | (G::Storage { repository: a, .. }, G::Storage { repository: b, .. })
         | (G::Publication { repository: a, .. }, G::Publication { repository: b, .. }) => a == b,
         (G::Admission { operation: a, .. }, G::Admission { operation: b, .. }) => a == b,
         // Independent upper bounds compose by taking their minimum.

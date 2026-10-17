@@ -71,6 +71,14 @@ pub struct AccountingEffect {
     /// Operation charge.
     pub operations: u64,
 }
+/// Semantic stored-bytes counter replacement (SPEC-SERVER §6.5.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageEffect {
+    /// Exact repository counter.
+    pub repository: RepositoryId,
+    /// Absolute next counter state.
+    pub next: super::facts::StorageFact,
+}
 /// Logical durable operation outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DurableOutcome {
@@ -100,6 +108,8 @@ pub struct AcceptanceEffects {
     pub publication: Vec<PublicationEffect>,
     /// Accounting charges.
     pub accounting: Vec<AccountingEffect>,
+    /// Stored-bytes counter replacements.
+    pub storage: Vec<StorageEffect>,
     /// Durable outcomes.
     pub outcomes: Vec<DurableOutcome>,
 }

@@ -80,6 +80,16 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Added
 
+- Add portable ticketed-advance and reservation-settlement decisions to
+  `mkit-primitives`: request-ordered ticket validation, upload-proof claims,
+  pending-reservation stability, replay precedence, authority-generation
+  fencing, and the composed ticket-closure, settlement, storage-counting and
+  durable-outcome effects. The defensive `PackMissing` cleanup and standalone
+  reservation settlement share the same portable rules. The reference server
+  decides ticketed advances through them and verifies every sealed guard
+  projects to a physical precondition. Additive ALPHA API; no wire or
+  stored-format change, migration, or store reset.
+
 - Add portable guarded ref and publication decisions to `mkit-primitives`, with
   exact keyed dependencies, refusal-only guards, finite work bounds, semantic
   fixtures, and seeded transition replay. The server checks physical ref and

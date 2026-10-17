@@ -93,6 +93,7 @@ pub fn decide_ref_publication(
                 next,
             }],
             accounting: vec![],
+            storage: vec![],
             outcomes: vec![],
         })
     };

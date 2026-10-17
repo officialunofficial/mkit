@@ -18,11 +18,31 @@ use mkit_core::{
     refs::{RefWriteCondition, validate_ref_name},
 };
 
-struct Attempt<'a> {
-    req: &'a RefWriteRequest<'a>,
+pub(crate) struct Attempt<'a> {
+    pub(crate) req: &'a RefWriteRequest<'a>,
     snapshot: &'a Snapshot,
-    guards: Vec<RequiredGuard>,
-    limits: RefDecisionLimits,
+    pub(crate) guards: Vec<RequiredGuard>,
+    pub(crate) limits: RefDecisionLimits,
+}
+
+impl<'a> Attempt<'a> {
+    pub(crate) fn new(
+        req: &'a RefWriteRequest<'a>,
+        snapshot: &'a Snapshot,
+        limits: RefDecisionLimits,
+    ) -> Result<Self, Failure> {
+        let mut attempt = Self {
+            req,
+            snapshot,
+            guards: Vec::new(),
+            limits,
+        };
+        attempt
+            .guards
+            .try_reserve_exact(limits.guards.min(64) as usize)
+            .map_err(|_| failure(FailureCode::ResourceLimit))?;
+        Ok(attempt)
+    }
 }
 
 /// Decide a single write, paired advance, or exact deletion with all read guards.
@@ -46,16 +66,7 @@ pub fn decide_ref_write(
         return Err(failure(FailureCode::InvalidRefRequest));
     }
     bounds(request, snapshot, limits)?;
-    let mut attempt = Attempt {
-        req: request,
-        snapshot,
-        guards: Vec::new(),
-        limits,
-    };
-    attempt
-        .guards
-        .try_reserve_exact(limits.guards.min(64) as usize)
-        .map_err(|_| failure(FailureCode::ResourceLimit))?;
+    let mut attempt = Attempt::new(request, snapshot, limits)?;
     let decision = if let Some(recorded) = attempt.replay()? {
         recorded
     } else {
@@ -114,7 +125,7 @@ fn invalid_shape(request: &RefWriteRequest<'_>) -> bool {
 }
 
 impl Attempt<'_> {
-    fn add(&mut self, guard: RequiredGuard) -> Result<(), Failure> {
+    pub(crate) fn add(&mut self, guard: RequiredGuard) -> Result<(), Failure> {
         if !self.guards.contains(&guard) {
             if self.guards.len() >= self.limits.guards as usize {
                 return Err(failure(FailureCode::ResourceLimit));
@@ -127,7 +138,11 @@ impl Attempt<'_> {
         Ok(())
     }
 
-    fn reject(&self, code: PermanentCode, message: &str) -> Result<WriteDecision, Failure> {
+    pub(crate) fn reject(
+        &self,
+        code: PermanentCode,
+        message: &str,
+    ) -> Result<WriteDecision, Failure> {
         if message.len() > self.limits.public_message_bytes as usize
             || (message.len() as u64).saturating_mul(2) > self.limits.bytes
         {
@@ -150,7 +165,7 @@ impl Attempt<'_> {
         })
     }
 
-    fn reject_recorded(
+    pub(crate) fn reject_recorded(
         &self,
         code: PermanentCode,
         message: &str,
@@ -167,7 +182,7 @@ impl Attempt<'_> {
         Ok(decision)
     }
 
-    fn replay(&mut self) -> Result<Option<WriteDecision>, Failure> {
+    pub(crate) fn replay(&mut self) -> Result<Option<WriteDecision>, Failure> {
         let Some(replay) = &self.req.replay else {
             return Ok(None);
         };
@@ -215,7 +230,7 @@ impl Attempt<'_> {
         }
     }
 
-    fn context(&mut self) -> Result<Option<WriteDecision>, Failure> {
+    pub(crate) fn context(&mut self) -> Result<Option<WriteDecision>, Failure> {
         // An applicable original acceptance bound also fences a fresh refusal.
         if let Some(decision) = self.validity()? {
             return Ok(Some(decision));
@@ -645,7 +660,7 @@ impl Attempt<'_> {
             .ok_or_else(|| failure(FailureCode::UnavailableInput))
     }
 
-    fn refs(&mut self) -> Result<WriteDecision, Failure> {
+    pub(crate) fn refs(&mut self) -> Result<WriteDecision, Failure> {
         for change in self.req.changes {
             let observed = self.observed(&change.name)?.clone();
             let value = target(&observed);
@@ -745,6 +760,7 @@ impl Attempt<'_> {
             reservation_transitions: Vec::new(),
             publication: Vec::new(),
             accounting: Vec::new(),
+            storage: Vec::new(),
             outcomes: Vec::new(),
         }))
     }

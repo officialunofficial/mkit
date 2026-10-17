@@ -6,9 +6,9 @@
 //! requires fresh acquisition and redecision under the original authorization
 //! and admission binding.
 
-mod checks;
+pub(crate) mod checks;
 mod complete;
-mod decide;
+pub(crate) mod decide;
 mod publication;
 #[cfg(test)]
 mod tests;

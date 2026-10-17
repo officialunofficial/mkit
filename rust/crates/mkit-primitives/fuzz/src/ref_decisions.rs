@@ -92,6 +92,7 @@ pub fn check(data: &[u8]) {
         policy: None,
         admission: None,
         accounting: None,
+        storage: None,
         publication: None,
     };
     let limits = RefDecisionLimits {

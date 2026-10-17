@@ -8,18 +8,20 @@ mod effects;
 mod facts;
 mod guards;
 pub mod ref_write;
+pub mod ticketed;
 
 pub use effects::{
     AcceptanceEffects, AccountingEffect, DurableOutcome, MembershipEffect, PublicationEffect,
-    RefEffect, ReplayTransition, ReservationOutcome, ReservationTransition, TicketTransition,
+    RefEffect, ReplayTransition, ReservationOutcome, ReservationTransition, StorageEffect,
+    TicketTransition,
 };
 pub use facts::{
     AccountingFact, AdmissionFact, AuthorityFact, AuthorityMode, DenialFact, GrantFact,
     LifecycleFact, LifecycleState, MembershipObservation, NamespaceId, Observed, OperationId,
     PermanentCode, PermanentRefusal, PolicyFact, PresenceDelta, PublicationFact, RefFact, RefName,
     RefValue, ReplayFact, ReplayScope, ReplayState, ReservationAbortReason, ReservationAccounting,
-    ReservationFact, ReservationId, ReservationTerminal, ReservationTerminalKind, Snapshot,
-    TerminalResult, TicketFact, TicketId,
+    ReservationFact, ReservationId, ReservationOp, ReservationTerminal, ReservationTerminalKind,
+    Snapshot, StorageFact, TerminalResult, TicketFact, TicketId,
 };
 pub use guards::{GuardKind, RequiredGuard, RequiredSourceFence};
 
