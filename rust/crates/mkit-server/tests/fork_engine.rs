@@ -3839,6 +3839,7 @@ async fn an_authority_move_at_the_physical_activation_commit_installs_no_member(
     let outcome = settlement::outcome(&source, &id).await;
     let signer = SigningKey::from_bytes(&[19; 32]);
     let mut config = Source::config(source.namespace);
+    config.authorizer_role = mkit_server::policy::AuthorizerRole::Authority;
     config.authority_fence = Some(
         AuthorityFence::new(vec![AuthorityKey {
             key_id: "deployment".into(),
