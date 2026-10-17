@@ -73,6 +73,12 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Added
 
+- Add portable guarded ref and publication decisions to `mkit-primitives`, with
+  exact keyed dependencies, refusal-only guards, finite work bounds, semantic
+  fixtures, and seeded transition replay. The server checks physical ref and
+  publication projections against sealed decisions. Additive ALPHA API; no wire
+  or stored-format change, migration, or store reset.
+
 - `WindowCursor::metadata` returns validated, read-only pack identity and entry
   geometry for binding caller-owned checkpoints. Cursor fields remain private,
   and cursor encodings and reader verification behavior are unchanged.

@@ -98,6 +98,9 @@ pub enum FailureCode {
     #[error("UnsupportedCapability")]
     UnsupportedCapability,
     // decision
+    /// Ref operation grammar, names, pairing, or deletion shape is invalid.
+    #[error("InvalidRefRequest")]
+    InvalidRefRequest,
     // fork
     /// Uniform source absence at the final fork proof.
     #[error("ForkSourceNotFound")]
@@ -186,6 +189,8 @@ impl FailureCode {
             Self::InvalidCheckpoint => "InvalidCheckpoint",
             Self::SourceChanged => "SourceChanged",
             Self::UnsupportedCapability => "UnsupportedCapability",
+            // decision
+            Self::InvalidRefRequest => "InvalidRefRequest",
             // fork
             Self::ForkSourceNotFound => "ForkSourceNotFound",
             Self::ForkDestinationNotEmpty => "ForkDestinationNotEmpty",
@@ -278,6 +283,8 @@ mod tests {
             FailureCode::InvalidCheckpoint.as_str(),
             FailureCode::SourceChanged.as_str(),
             FailureCode::UnsupportedCapability.as_str(),
+            // decision
+            FailureCode::InvalidRefRequest.as_str(),
             FailureCode::ForkSourceNotFound.as_str(),
             FailureCode::ForkDestinationNotEmpty.as_str(),
             FailureCode::ForkPermissionDenied.as_str(),

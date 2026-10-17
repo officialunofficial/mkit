@@ -46,6 +46,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 self.meta.capabilities(),
             ),
             authority_generation: None,
+            namespace: op.repo.namespace.clone(),
             repo: &op.repo.name,
             kind: WriteKind::UpdateRef,
             refs: &[],

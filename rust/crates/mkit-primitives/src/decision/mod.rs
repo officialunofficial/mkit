@@ -7,6 +7,7 @@
 mod effects;
 mod facts;
 mod guards;
+pub mod ref_write;
 
 pub use effects::{
     AcceptanceEffects, AccountingEffect, DurableOutcome, MembershipEffect, PublicationEffect,
@@ -86,16 +87,23 @@ pub enum DecisionClass {
 ///
 /// ```compile_fail
 /// use mkit_primitives::decision::Guarded;
-/// let forged = Guarded { decision: (), required: vec![], source_fences: vec![] };
+/// let forged = Guarded { repository: mkit_primitives::evidence::RepositoryId([0; 32]),
+///     decision: (), required: vec![], source_fences: vec![] };
 /// ```
 #[derive(Debug)]
 #[must_use]
 pub struct Guarded<D> {
+    repository: crate::evidence::RepositoryId,
     decision: D,
     required: Vec<RequiredGuard>,
     source_fences: Vec<RequiredSourceFence>,
 }
 impl<D> Guarded<D> {
+    /// Exact destination scope, including decisions with no mutable ref guard.
+    #[must_use]
+    pub const fn repository(&self) -> crate::evidence::RepositoryId {
+        self.repository
+    }
     /// Decision whose effects may only be applied with all requirements.
     #[must_use]
     pub const fn decision(&self) -> &D {

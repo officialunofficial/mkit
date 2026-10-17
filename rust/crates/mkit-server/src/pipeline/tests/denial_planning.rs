@@ -100,6 +100,7 @@ fn run_proved_ticket(
         fork_barrier: false,
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
+        namespace: repo.namespace.clone(),
         repo: &repo.name,
         kind: if expired_ticket {
             WriteKind::AdvanceRefs

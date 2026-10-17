@@ -14,6 +14,7 @@ mod list_repos;
 mod policy;
 mod publication_binding;
 mod ref_admission;
+mod ref_decisions;
 mod ref_policy;
 #[cfg(feature = "remote-hooks")]
 mod remote_hooks;
@@ -203,6 +204,7 @@ fn try_planned_ticket_publication_admitted(
         fork_barrier: false,
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
+        namespace: repo.namespace.clone(),
         repo: &repo.name,
         kind: WriteKind::AdvanceRefs,
         refs: &refs,
@@ -552,6 +554,7 @@ fn maximal_implicit_consume_plans_a_valid_batch() {
         fork_barrier: false,
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
+        namespace: repo.namespace.clone(),
         repo: &repo.name,
         kind: WriteKind::UpdateRef,
         refs: &refs,
@@ -3332,6 +3335,7 @@ fn incapable_authority_planner_request_refuses_generation() {
             authority_store,
             authority_generation: Some(0),
             publication: None,
+            namespace: crate::repo::NamespaceKey::deployment_default(),
             repo: &name,
             kind: WriteKind::UpdateRef,
             refs: &refs,
@@ -3373,6 +3377,7 @@ fn simple_index_batch(
         fork_barrier: false,
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
+        namespace: repo.namespace.clone(),
         repo: &repo.name,
         kind: if refs.len() == 1 {
             WriteKind::UpdateRef
@@ -3540,6 +3545,7 @@ fn plan_cas_any_missing_match_on_snapshot() {
             fork_barrier: false,
             authority_store: AuthorityStore::Guarded,
             authority_generation: None,
+            namespace: crate::repo::NamespaceKey::deployment_default(),
             repo: &name,
             kind: WriteKind::UpdateRef,
             refs: &refs,
@@ -3613,6 +3619,7 @@ fn plan_conflict_writes_only_the_replay_record() {
         fork_barrier: false,
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
+        namespace: crate::repo::NamespaceKey::deployment_default(),
         repo: &name,
         kind: WriteKind::AdvanceRefs,
         refs: &refs,
@@ -3690,6 +3697,7 @@ fn plan_quota_exhaustion_yields_no_batch() {
         fork_barrier: false,
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
+        namespace: crate::repo::NamespaceKey::deployment_default(),
         repo: &name,
         kind: WriteKind::UpdateRef,
         refs: &refs,
@@ -3752,6 +3760,7 @@ proptest! {
                     fork_barrier: false,
             authority_store: AuthorityStore::Guarded,
             authority_generation: None,
+            namespace: crate::repo::NamespaceKey::deployment_default(),
             repo: &name,
             kind: if advance { WriteKind::AdvanceRefs } else { WriteKind::UpdateRef },
             refs,
@@ -4378,6 +4387,7 @@ fn plan_signed_conflict_still_charges_quota() {
         fork_barrier: false,
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
+        namespace: crate::repo::NamespaceKey::deployment_default(),
         repo: &name,
         kind: WriteKind::UpdateRef,
         refs: &refs,
@@ -4445,6 +4455,7 @@ fn plan_prune_fits_the_batch_op_cap() {
         fork_barrier: false,
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
+        namespace: crate::repo::NamespaceKey::deployment_default(),
         repo: &name,
         kind: WriteKind::AdvanceRefs,
         refs: &refs,
@@ -4581,6 +4592,7 @@ fn prune_sampling_is_deterministic_one_in_eight() {
         fork_barrier: false,
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
+        namespace: crate::repo::NamespaceKey::deployment_default(),
         repo: &name,
         kind: WriteKind::UpdateRef,
         refs: &refs,
@@ -5073,6 +5085,7 @@ fn d34_prune_retry_refreshes_the_epoch_even_without_a_counted_replan() {
         fork_barrier: false,
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
+        namespace: crate::repo::NamespaceKey::deployment_default(),
         repo: &repo_name(),
         kind: WriteKind::UpdateRef,
         refs: &refs,
@@ -5207,6 +5220,7 @@ fn leased_epoch_checks_use_the_granted_epoch_and_cap_replay_deadlines() {
             fork_barrier: false,
             authority_store: AuthorityStore::Guarded,
             authority_generation: None,
+            namespace: crate::repo::NamespaceKey::deployment_default(),
             repo: &name,
             kind: WriteKind::UpdateRef,
             refs: &refs,
@@ -5796,6 +5810,7 @@ fn prepared_publication_pair_cannot_survive_a_counterpart_guard_race() {
         fork_barrier: false,
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
+        namespace: repo.namespace.clone(),
         repo: &repo.name,
         kind: WriteKind::UpdateRef,
         refs: &refs,

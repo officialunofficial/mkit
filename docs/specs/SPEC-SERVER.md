@@ -246,6 +246,14 @@ the decision MUST be a guard in the atomic acceptance unit, including external
 delta-base membership read under §9.4. Component placement does not relax that
 unit or original-identity resolution of uncertain outcomes (§3.2).
 
+**Implementation guidance.** A portable decision retains exact scoped facts and
+observation revisions through lowering. Checking guard categories alone does not
+establish completeness: two ref names or absent membership keys remain distinct
+even when they share a revision. An unconditional ref write needs no value guard
+unless another rule depends on that value; admission may depend only on presence.
+The published-source fence in §9.3 remains a separate check before each destination
+apply attempt, rather than an atomic source-at-commit comparison.
+
 ### 3.2 Replay, durability, and recovery
 
 **Protocol requirement.** A committed replay MUST answer with its saved result
