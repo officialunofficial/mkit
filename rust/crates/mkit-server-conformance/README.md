@@ -123,8 +123,12 @@ mkit-server-conformance diff --base-url http://127.0.0.1:8080 \
 `diff` starts a fresh reference server on loopback and drives the same
 canonical fixtures against it and the target. Both test bindings pin business
 time; fixed keys, nonces, and timestamps make each logical operation repeatable.
-Run against disposable instances with no other writers. The reference host
-supports its declared test profile; unsupported profiles fail setup explicitly.
+Run against disposable instances with no other writers. Differential writes use
+an Ed25519 test key whose public seed is 32 bytes of `0x75`, independently of the
+profile's Tier-1 signer seed. A multi-repository target must admit that key's
+owner namespace and the repository named `differential-v1`; a single-repository
+target uses the configured repository. The reference host supports its declared
+test profile; unsupported profiles fail setup explicitly.
 
 Normalization excludes allocated server identifiers, timing fields, and
 `Retry-After` values. Refusal comparison uses protocol error codes. Replay
