@@ -7,15 +7,25 @@
 //! every value it decided on is guarded by a precondition. The pipeline
 //! applies the batch and re-plans when a guard fails.
 
+#[cfg(test)]
+pub(super) mod reference;
+
+mod publication_decision;
+mod ref_decision;
+
 use std::collections::BTreeMap;
 
 use mkit_core::hash::Hash;
 use mkit_core::protocol::AdvanceOutcome;
+#[cfg(test)]
 use mkit_core::refs::RefWriteCondition;
 
 use crate::error::{AbortCause, ServerError};
-use crate::op::{GrantRef, PresenceRequirement, RefUpdate};
+#[cfg(test)]
+use crate::op::PresenceRequirement;
+use crate::op::{GrantRef, RefUpdate};
 use crate::quota::{self, NamespaceCharge, QuotaCharge, QuotaDecision, evaluate_quota};
+#[cfg(test)]
 use crate::refs::{CasDecision, evaluate_condition};
 use crate::replay::{
     ReplayDecision, ReplayRecord, ReplayState, StoredRejection, StoredResult, UpdateRefResult,
@@ -155,6 +165,8 @@ pub(crate) struct ImplicitConsume<'a> {
 pub(crate) struct WriteRequest<'a> {
     /// Metadata inspection and CAS support, derived from the actual store.
     pub(crate) authority_store: AuthorityStore,
+    /// Namespace bound by the host transaction; retained in semantic identities.
+    pub(crate) namespace: crate::repo::NamespaceKey,
     /// The repository whose refs are written.
     pub(crate) repo: &'a RepoName,
     /// Fresh authoritative denial inputs retained across optimistic retries.
@@ -686,7 +698,15 @@ pub(crate) fn plan_write(
             }
             advance.additions = additions;
             advance.operation = operation;
-            crate::store::publication::append(
+            let publication_key = keys::publication(req.repo, &name);
+            let identity = crate::store::repo_storage::identity(&req.namespace, req.repo);
+            let publication_decision = publication_decision::decide(
+                mkit_primitives::evidence::RepositoryId(mkit_core::hash::hash(identity.as_bytes())),
+                snap.get(&publication_key),
+                &advance,
+                req.refs.iter().any(|update| update.new.is_none()),
+            )?;
+            let lowered_publication = crate::store::publication::append(
                 publication.repo,
                 &name,
                 publication.source,
@@ -699,6 +719,13 @@ pub(crate) fn plan_write(
                 &mut outbox,
             )
             .map_err(meta_error)?;
+            publication_decision::check_projection(
+                &publication_decision,
+                snap.get(&publication_key),
+                &pre,
+                &publication_key,
+                &lowered_publication,
+            )?;
         }
         if let Some(pending) = req.pending {
             let record = if conflict {
@@ -823,7 +850,10 @@ fn decide_write_result(
     // still costs an operation and a ledger row, so the charge bounds
     // ledger growth per signer. PRD §5.4's separate `Aborted` transaction
     // is for M3 payment reservations, not this abuse quota.
-    let (outcome, ref_puts) = decide_refs(req, snap, pre)?;
+    let (outcome, ref_puts) = match ref_decision::decide(req, snap)? {
+        Some(decision) => ref_decision::lower(decision, pre)?,
+        None => (None, Vec::new()),
+    };
     let conflict = outcome.is_some();
     let ticket_result = req
         .begin
@@ -956,100 +986,6 @@ pub(crate) fn plan_charge(
     pre.push(guard(key.clone(), snap));
     puts.push(Write::Put(key, codec::encode_quota_state(&state)));
     Ok(())
-}
-
-/// Decide the ref writes in order. On the first conflict, return its
-/// result: only the refs decided so far are guarded.
-fn decide_refs(
-    req: &WriteRequest<'_>,
-    snap: &Snapshot,
-    pre: &mut Vec<Precondition>,
-) -> Result<(Option<StoredResult>, Vec<Write>), ServerError> {
-    let mut puts = Vec::new();
-    for (i, update) in req.refs.iter().enumerate() {
-        let key = keys::ref_key(req.repo, &update.name);
-        let current = snap.get(&key).map(codec::decode_ref_id).transpose();
-        let current = current.map_err(corrupt)?;
-        let resolved = req
-            .resolved_ref_updates
-            .iter()
-            .find(|resolved| resolved.name == update.name);
-        if let Some(requirement) = req
-            .grant
-            .as_ref()
-            .and_then(|grant| grant.presence_requirement.as_ref())
-        {
-            let required = match requirement {
-                PresenceRequirement::Absent(name) if name == &update.name => Some(false),
-                PresenceRequirement::Present(name) if name == &update.name => Some(true),
-                _ => None,
-            };
-            if let Some(required) = required {
-                if current.is_some() != required {
-                    return Err(ServerError::permission_denied(
-                        "write grant rejected: ref scope",
-                    ));
-                }
-                // Custom admission supplies a presence guard for Any; CAS
-                // success/conflict guards the observed row otherwise. Both
-                // fence this same scope check without a duplicate batch op.
-                // Preserve the default's original guard shape.
-                if resolved.is_none() {
-                    pre.push(if required {
-                        Precondition::Present(key.clone())
-                    } else {
-                        Precondition::Absent(key.clone())
-                    });
-                }
-            }
-        }
-        match evaluate_condition(current.as_ref(), &update.condition) {
-            CasDecision::Committed => {
-                if let Some(resolved) = resolved {
-                    if resolved.new != update.new || resolved.prior_present() != current.is_some() {
-                        return Err(ServerError::aborted_retryable(
-                            "ref changed after admission; retry",
-                        )
-                        .with_abort_cause(AbortCause::RefConflict));
-                    }
-                    // Presence, not the target, is the unconditional admission
-                    // fence. Retain it even when a later policy adds exact CAS.
-                    if update.condition == RefWriteCondition::Any {
-                        pre.push(if resolved.prior_present() {
-                            Precondition::Present(key.clone())
-                        } else {
-                            Precondition::Absent(key.clone())
-                        });
-                    }
-                }
-                // Conditional requests guard the exact target. The built-in
-                // default's `Any` path retains its unguarded overwrite.
-                if update.condition != RefWriteCondition::Any {
-                    pre.push(guard(key.clone(), snap));
-                }
-                puts.push(match update.new {
-                    Some(id) => Write::Put(key, codec::encode_ref_id(&id)),
-                    None => Write::Delete(key),
-                });
-            }
-            CasDecision::Conflict(_) => {
-                pre.push(guard(key, snap));
-                let result = match (req.kind, i) {
-                    (WriteKind::UpdateRef, _) => {
-                        StoredResult::UpdateRef(UpdateRefResult::Conflict { current })
-                    }
-                    (WriteKind::AdvanceRefs, 0) => {
-                        StoredResult::AdvanceRefs(AdvanceOutcome::PackmapConflict)
-                    }
-                    // Uploads write no refs.
-                    _ => StoredResult::AdvanceRefs(AdvanceOutcome::HeadConflict),
-                };
-                return Ok((Some(result), Vec::new()));
-            }
-            CasDecision::Invalid(msg) => return Err(ServerError::invalid_argument(msg)),
-        }
-    }
-    Ok((None, puts))
 }
 
 /// The opportunistic prune: every expired replay record, and every stale

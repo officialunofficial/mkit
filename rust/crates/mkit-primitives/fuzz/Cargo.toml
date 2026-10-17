@@ -65,3 +65,12 @@ required-features = ["libfuzzer"]
 test = false
 doc = false
 bench = false
+
+# decision
+[[bin]]
+name = "ref_decisions"
+path = "fuzz_targets/ref_decisions.rs"
+required-features = ["libfuzzer"]
+test = false
+doc = false
+bench = false

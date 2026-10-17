@@ -52,3 +52,6 @@ mod acceptance_seed_tests;
 /// Bounded fork progress and accepted-clearance transitions.
 #[path = "../../tests/support/fork_advance.rs"]
 pub mod fork_advance;
+// decision
+/// Bounded ref transitions checked against an independent CAS oracle.
+pub mod ref_decisions;

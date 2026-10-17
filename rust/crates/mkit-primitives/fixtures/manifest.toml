@@ -754,6 +754,28 @@ expected = "missing"
 spec = "SPEC-SERVER.md#direct-child-closure-edges"
 
 # decision
+[[fixtures]]
+type = "decision::ref_write"
+format_version = 1
+ruleset = "SPEC-TRANSPORT-CONNECT"
+profile = "semantic-cas"
+path = "decision/cas.json"
+semantic = "decision/README.md"
+decode_config = "facts=256,guards=64,bytes=65536,work=100000"
+expected = "per-row semantic decision and exact guard presence"
+spec = "SPEC-TRANSPORT-CONNECT §3; §4; §7.8"
+
+[[fixtures]]
+type = "decision::FailureCode"
+format_version = 1
+ruleset = "SPEC-TRANSPORT-CONNECT"
+profile = "semantic-failures"
+path = "decision/failures.json"
+semantic = "decision/README.md"
+decode_config = "facts=256,guards=64,bytes=65536,work=100000"
+expected = "stable failure code per row"
+spec = "SPEC-TRANSPORT-CONNECT §3; §4; §7.8"
+
 # auth
 [[fixtures]]
 type = "auth::AuthenticatedEnvelope"

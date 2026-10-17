@@ -174,3 +174,15 @@ outcome or settlement.
 The [activation contract](docs/fork-activation.md) explains the complete guard
 matrix and host proof obligations. Run `cargo run -p mkit-primitives --example
 fork_activation` for a bounded membership decision.
+
+## Guarded ref decisions
+
+`decision::ref_write` decides ref updates, paired advances, exact deletions,
+and publication metadata from bounded authoritative observations. Preserve the
+sealed `Guarded<WriteDecision>` through lowering and atomically compare every
+returned dependency with all composed effects. See the [guard matrix and host
+contract](docs/guarded-refs.md) for refusal, replay, source-fence, and completeness
+rules. No physical storage representation enters the decision.
+
+Run `cargo run -p mkit-primitives --example ref_decision` for a complete
+acquired-absence decision and guard-completeness check.

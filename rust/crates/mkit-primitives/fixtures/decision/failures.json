@@ -1,0 +1,26 @@
+[
+  {
+    "case": "invalid-name",
+    "code": "InvalidRefRequest"
+  },
+  {
+    "case": "delete-any",
+    "code": "InvalidRefRequest"
+  },
+  {
+    "case": "missing-observation",
+    "code": "UnavailableInput"
+  },
+  {
+    "case": "duplicate-observation",
+    "code": "InvalidResponse"
+  },
+  {
+    "case": "zero-facts",
+    "code": "ResourceLimit"
+  },
+  {
+    "case": "unknown-guard-version",
+    "code": "UnsupportedCapability"
+  }
+]
