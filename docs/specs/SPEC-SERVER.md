@@ -1709,6 +1709,26 @@ order, with one page per distinct ID. The complete result includes an exact coun
 Empty sequences have count zero and the zero digest sentinel. Intermediate pages
 or a truncated traversal MUST NOT be presented as a complete set or closure proof.
 
+A **local pair coverage checkpoint** retains an interrupted resulting-pair walk
+so a scheduled verifier can resume it. Its domain is `mkit-pair-checkpoint:v1`,
+checksummed with the same SPEC-CONVENTIONS framing
+`BLAKE3(le16(domain_length) || domain || body)` appended as a trailing 32-byte
+corruption check; the checksum is local corruption detection only and does not
+authenticate the host or origin. An unsupported format version is rejected and
+verification restarts. All integers are little-endian. The body is: version `u8`
+`1`; repository `[32]`; view `[32]`; ruleset `u32`; profile `u8`; flags `u8`
+(bit 0 head present, bit 1 packmap present, bit 2 branch, bit 3 honor-cleared,
+bit 4 boundary seen; other bits invalid); head `[32]` if present; packmap `[32]`
+if present; the eight limits (`u32` ×7 then `u64` work); phase `u8` (`0` chain,
+`1` walk, `2` base); optional next packmap (`0`/`1` tag + `[32]`); optional base
+cursor (tag + origin `[32]` + next `[32]` + depth `u32`); work used `u64`; then
+counted `u32`-prefixed id lists — additions, chain, packs, visited,
+dependencies, and suppliers, each sorted strictly ascending, then the queue in
+walk order, disjoint from visited. Trailing bytes, unsorted or duplicate lists,
+set-relation violations, and any mismatch with the expected pair, additions,
+repository, view, ruleset, limits, or honor-cleared flag are rejected and the
+walk restarts from the beginning.
+
 **Reference-server behavior.** The scheduled verifier may run up to eight durably checkpointed
 Extract selection slices in one callback. Slices share the existing call
 allowance, two-second elapsed cutoff and physical callback deadline; each keeps
@@ -2776,6 +2796,39 @@ An advance *k* clears only when all of these conditions hold:
    dependency.
 3. No flagged id in the repository occurs in its inspected set or its
    packs. Such an advance is `held` under §11.3, not merely `pending`.
+
+#### Resulting-pair coverage
+
+Condition 2's coverage obligation decomposes into an exact implementer
+checklist. For an advance writing the live (head, packmap) pair:
+
+| Obligation | Requirement |
+|------------|-------------|
+| Chain packs | Every pack on the packmap chain is already in published membership or added by this advance. |
+| Reachable closure | Every object reachable from the resulting head is contained in at least one chain pack; a non-branch ref's walk is unrestricted, while a branch head's members MUST locate inside chain packs only. |
+| Head kind | A present head MUST be a history kind (Commit, Remix, or Tag); other kinds fail closed. |
+| External delta suppliers | Delta bases outside the chain packs are recorded as external suppliers; they MUST already be in published membership and this advance's own additions MUST NOT satisfy them. |
+
+The coverage requirement applies exactly when at least one verification regime
+is configured (inspection obligations, takedown denial, or a custom
+publication policy) and the write does not delete every touched ref. A
+deletion is exempt. With none of those regimes configured, an immediate-path
+write is exempt, including the published-source `AdvanceRefs` form — that form
+gets no separate exemption: once any regime is configured the destination
+retains coverage. Direct-child closure evidence never substitutes for
+resulting-pair coverage.
+
+Coverage evidence splits into *dependencies* — the packmap chain, the packs it
+lists, and the packs located members resolve to — and *external suppliers* —
+packs that supplied delta bases for covered members, merged with any cleared-set
+suppliers at a fork boundary. Denial, inspection, and publication checks remain
+separate guards: coverage alone never authorizes publication.
+
+**Reference-server behavior.** The reference implementation bounds the chain,
+listed packs, reachable members, dependencies, supplier sets, and cleared set to
+4,096 items each, bounds retained verification state to a fixed byte budget, and
+walks per slice under the scheduled verifier's call ledger. Those numeric caps
+are implementation mechanisms, not protocol promises.
 
 A `hit` advance becomes `resolved` only when its §14 takedown is complete,
 all non-hit obligations are satisfied, and condition 2 holds for its
