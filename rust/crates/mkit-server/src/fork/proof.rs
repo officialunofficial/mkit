@@ -52,6 +52,11 @@ pub struct ProofV1 {
 }
 
 impl ProofV1 {
+    /// Whether this attempt captured transient source observations.
+    pub(super) fn evidence_pending(&self) -> bool {
+        self.evidence != 0
+    }
+
     /// Whether all version captures precede the pack-proof pass.
     pub(super) fn captured(&self) -> bool {
         matches!(
@@ -425,6 +430,106 @@ pub(super) async fn validate_slice<S: NamespaceStore>(
     Ok(true)
 }
 
+/// Reclaim one page of transient source observations after acceptance or a
+/// retained terminal failure. This is metadata hygiene, not a fork decision:
+/// stale authority cannot authorize membership here, and the exact accepted or
+/// terminal job CAS prevents old capture checkpoints from resurrecting evidence.
+/// Row deletion itself is durable progress, including after an uncertain reply.
+/// The timer retains responsibility until an empty final page is established.
+pub(super) async fn cleanup<S: NamespaceStore>(
+    env: &ForkEnv<'_, S>,
+    destination: &crate::RepoId,
+    budget: &SliceBudget,
+) -> Result<bool, ForkError> {
+    if budget.remaining() < 3 {
+        return Ok(false);
+    }
+    let store = Budgeted::new(env.store, budget);
+    let coordinator = env.shards.coordinator(&destination.namespace);
+    let job_key = keys::fork_job(&destination.name);
+    let Some(raw_job) = store.get(&coordinator, &job_key).await? else {
+        return Ok(true);
+    };
+    let job = super::decode_job(&raw_job)?;
+    if job.dest()? != *destination {
+        return Err(corrupt().into());
+    }
+    if job.accepted.is_none() && !job.finished() {
+        return Ok(false);
+    }
+    if job.proof.evidence == 0 {
+        return Ok(true);
+    }
+    let caps = store.capabilities();
+    let limit = crate::store::MAX_BATCH_OPS
+        .checked_sub(caps.reserved_batch_ops)
+        .and_then(|available| available.checked_sub(3))
+        .map(|available| (available / 2).min(16))
+        .filter(|limit| *limit > 0)
+        .ok_or(ForkError::Unavailable(
+            "fork proof cleanup requires batch headroom",
+        ))?;
+    let (start, end) = keys::fork_proof_evidence_range(&destination.name);
+    let page = store
+        .scan(
+            &coordinator,
+            &start,
+            &end,
+            None,
+            u32::try_from(limit).map_err(|_| corrupt())?,
+        )
+        .await?;
+    if page.entries.len() > limit || page.entries.is_empty() && page.next.is_some() {
+        return Err(corrupt().into());
+    }
+    let base = Batch::new()
+        .require(Precondition::Equals(job_key, raw_job))
+        .require(Precondition::NotAfter(
+            env.now().saturating_add(super::CONTENT_WINDOW),
+        ));
+    let mut previous = None;
+    for (key, value) in &page.entries {
+        let Some(keys::ParsedKey::ForkProofEvidence { repo, ordinal }) = keys::parse(key) else {
+            return Err(corrupt().into());
+        };
+        if repo != destination.name
+            || ordinal >= job.proof.evidence
+            || previous.is_some_and(|last| ordinal <= last)
+        {
+            return Err(corrupt().into());
+        }
+        let evidence = decode(value, &job, ordinal)?;
+        Partition::decode(&evidence.partition)?;
+        previous = Some(ordinal);
+    }
+    // A large accepted job plus exact evidence-value guards can exhaust byte
+    // headroom before operation headroom. Shrink the selected prefix using the
+    // backend's real limits; a later tick resumes from the remaining first row.
+    let mut selected = page.entries.len();
+    let (batch, complete) = loop {
+        let mut candidate = base.clone();
+        for (key, value) in &page.entries[..selected] {
+            candidate = candidate
+                .require(Precondition::Equals(key.clone(), value.clone()))
+                .delete(key.clone());
+        }
+        let complete = selected == page.entries.len() && page.next.is_none();
+        match candidate.validate(&caps) {
+            Ok(()) => break (candidate, complete),
+            Err(StoreError::Invalid(_)) if selected > 1 => selected -= 1,
+            Err(error) => return Err(error.into()),
+        }
+    };
+    match store.apply(&coordinator, batch).await? {
+        BatchOutcome::Committed => Ok(complete),
+        BatchOutcome::PreconditionFailed { .. } | BatchOutcome::DeadlinePassed { .. } => Ok(false),
+    }
+}
+
+#[cfg(all(test, feature = "memory"))]
+#[path = "proof_cleanup_tests.rs"]
+mod cleanup_tests;
+
 #[cfg(test)]
 mod policy_tests {
     use super::*;
@@ -521,7 +626,7 @@ mod evidence_tests {
     use futures_executor::block_on;
     use std::sync::Arc;
 
-    fn job() -> ForkJobV1 {
+    pub(super) fn job() -> ForkJobV1 {
         ForkJobV1 {
             binding: [1; 32],
             dest_ns: crate::NamespaceKey::deployment_default().as_str().into(),

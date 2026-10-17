@@ -275,6 +275,14 @@ the sixteen directory revisions, and content-state versions for all registered
 denial subjects, including subjects with no current descriptor. Only after the
 complete proof pass does it validate the captured evidence. Monotonic versions
 close changes away and back across slices; validation never resumes pack proofs.
+After acceptance or a retained failure, the timer deletes transient `fq` evidence
+in bounded pages, including while activation is stalled. Each page compares the
+exact job and evidence rows, respects backend operation and byte headroom, and
+shares the timer call budget. Row deletions are the durable progress cursor;
+restart or an uncertain reply resumes from the remaining rows. `Done` and write
+barrier clearance wait for reclamation to finish. These deletions
+change neither the accepted decision nor membership.
+
 Custom publication policies supply a durable, non-repeating `fork_version` for
 changes to `pack_available`; the default refuses new or unaccepted forks.
 
@@ -305,6 +313,7 @@ has been installed; a failed registered fork retains the barrier permanently.
 | Activation progress | Job CAS and deadline | Recorded authority rows at coordinator checkpoints; local permit or colocated authority guards on physical membership; projects only the accepted binding |
 | Done | Job CAS, deadline, replay and reservation settlement | Recorded authority rows, job CAS, barrier ownership, deadline; removes barrier and retains the saved result |
 | Pre-acceptance refusal | Job CAS, reservation/outbox guards, deadline | Same terminal-abort path; registered failures retain their barrier |
+| Proof metadata reclamation | No reclamation | Accepted or terminal job CAS, exact evidence rows, deadline; no authority guard because it changes no decision or membership |
 
 The job, authority generation, grant epoch, barrier, replay, and reservation live
 in the destination coordinator. Progress reads the job and both fence rows in

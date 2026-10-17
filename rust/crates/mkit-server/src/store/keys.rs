@@ -1066,6 +1066,14 @@ pub fn fork_proof_evidence(repo: &RepoName, ordinal: u32) -> Key {
     )
 }
 
+/// Every transient proof observation for one fork destination.
+#[must_use]
+pub fn fork_proof_evidence_range(repo: &RepoName) -> (Key, Key) {
+    let start = key(TAG_FORK_PROOF_EVIDENCE, &[repo.as_str().as_bytes(), b"\0"]);
+    let end = successor(&start);
+    (start, end)
+}
+
 /// `fj 00 <repo>`: the destination's fork job.
 #[must_use]
 pub fn fork_job(repo: &RepoName) -> Key {

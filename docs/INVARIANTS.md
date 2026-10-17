@@ -2888,7 +2888,10 @@ versions, directory revisions and every registered subject's content-state
 version before proving packs. Validation follows the entire proof pass; a
 changed version refuses uniformly. Versions never repeat, including after
 removal and reinstallation. Custom publication policies must provide a coherent
-`fork_version`; its default refuses new and unaccepted forks.
+`fork_version`; its default refuses new and unaccepted forks. Accepted and
+retained failed jobs reclaim transient proof rows in bounded, restart-safe pages,
+including while activation is stalled. Exact job and evidence guards prevent
+stale capture checkpoints from resurrecting deleted rows.
 
 ## Physical fork activation is fenced before acknowledged moves
 
@@ -2905,7 +2908,9 @@ undo visibility granted by a stale write.
 transition paths. Repository-index mutations atomically increment `fv`; directory
 registration increments `dv`; content mutations increment their existing state
 sequence. `Write::Increment` adds these stamps without a writer snapshot or an
-extra round trip on ordinary writes.
+extra round trip for default reference batches. Custom reserved-operation budgets
+at the batch cap can require another chunk; the ordinary verifier cost probe
+measures those boundaries.
 
 ## Fork registration arbitrates with destination writers
 
