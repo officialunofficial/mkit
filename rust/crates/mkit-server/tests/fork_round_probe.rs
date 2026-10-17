@@ -218,32 +218,38 @@ macro_rules! probe {
 // stage in both modes: six lanes read a page each under one reservation, and
 // larger pages cut the 3,000-file stage to 58 calls. Copy lands at 9 rounds
 // for 500 files and 15 for 3,000.
+//
+// start is 39/13, not 37/11: launch captures the authority row and the source
+// visibility row. Accept is the final source proof after the last staged
+// membership effect (110/81 with denial off, 252/178 with denial on). Publish
+// includes proof-evidence reclamation after that proof (50/25 and 48/23 with
+// denial off; 203/94 with denial on).
 probe!(
     files_500_denial_off,
     500,
     false,
-    "plan_bytes 13/10 start 37/11 Trees 8/8 Register 52/13 Copy 35/9 Count 3/3 Publish 38/15",
-    "192/75 finished=true"
+    "plan_bytes 13/10 start 39/13 Trees 8/8 Register 52/13 Copy 35/9 Count 3/3 Accept 110/81 Publish 50/25",
+    "316/168 finished=true"
 );
 probe!(
     files_3000_denial_off,
     3_000,
     false,
-    "plan_bytes 13/10 start 37/11 Trees 8/8 Register 52/13 Copy 58/15 Count 3/3 Publish 38/15",
-    "215/81 finished=true"
+    "plan_bytes 13/10 start 39/13 Trees 8/8 Register 52/13 Copy 58/15 Count 3/3 Accept 110/81 Publish 48/23",
+    "337/172 finished=true"
 );
 probe!(
     files_500_denial_on,
     500,
     true,
-    "plan_bytes 89/41 start 37/11 Trees 9/9 Walk 14/13 Register 52/13 Copy 35/9 Count 3/3 Publish 190/81",
-    "435/186 finished=true"
+    "plan_bytes 89/41 start 39/13 Trees 9/9 Walk 14/13 Register 52/13 Copy 35/9 Count 3/3 Accept 252/178 Publish 203/94",
+    "702/379 finished=true"
 );
 probe!(
     #[ignore = "large fork fixture; exercised by the ignored-lane CI profile"]
     files_3000_denial_on,
     3_000,
     true,
-    "plan_bytes 89/41 start 37/11 Trees 9/9 Walk 14/13 Register 52/13 Copy 58/15 Count 3/3 Publish 190/81",
-    "458/192 finished=true"
+    "plan_bytes 89/41 start 39/13 Trees 9/9 Walk 14/13 Register 52/13 Copy 58/15 Count 3/3 Accept 252/178 Publish 203/94",
+    "725/385 finished=true"
 );
