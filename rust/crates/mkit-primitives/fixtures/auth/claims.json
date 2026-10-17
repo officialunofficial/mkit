@@ -1,0 +1,258 @@
+[
+  {
+    "different_audience": false,
+    "different_repository": false,
+    "different_signer": false,
+    "different_pack": false,
+    "different_bytes": false,
+    "expected": "verified"
+  },
+  {
+    "different_audience": true,
+    "different_repository": false,
+    "different_signer": false,
+    "different_pack": false,
+    "different_bytes": false,
+    "expected": "ClaimsBindingMismatch"
+  },
+  {
+    "different_audience": false,
+    "different_repository": true,
+    "different_signer": false,
+    "different_pack": false,
+    "different_bytes": false,
+    "expected": "ClaimsBindingMismatch"
+  },
+  {
+    "different_audience": true,
+    "different_repository": true,
+    "different_signer": false,
+    "different_pack": false,
+    "different_bytes": false,
+    "expected": "ClaimsBindingMismatch"
+  },
+  {
+    "different_audience": false,
+    "different_repository": false,
+    "different_signer": true,
+    "different_pack": false,
+    "different_bytes": false,
+    "expected": "ClaimsBindingMismatch"
+  },
+  {
+    "different_audience": true,
+    "different_repository": false,
+    "different_signer": true,
+    "different_pack": false,
+    "different_bytes": false,
+    "expected": "ClaimsBindingMismatch"
+  },
+  {
+    "different_audience": false,
+    "different_repository": true,
+    "different_signer": true,
+    "different_pack": false,
+    "different_bytes": false,
+    "expected": "ClaimsBindingMismatch"
+  },
+  {
+    "different_audience": true,
+    "different_repository": true,
+    "different_signer": true,
+    "different_pack": false,
+    "different_bytes": false,
+    "expected": "ClaimsBindingMismatch"
+  },
+  {
+    "different_audience": false,
+    "different_repository": false,
+    "different_signer": false,
+    "different_pack": true,
+    "different_bytes": false,
+    "expected": "ClaimsBindingMismatch"
+  },
+  {
+    "different_audience": true,
+    "different_repository": false,
+    "different_signer": false,
+    "different_pack": true,
+    "different_bytes": false,
+    "expected": "ClaimsBindingMismatch"
+  },
+  {
+    "different_audience": false,
+    "different_repository": true,
+    "different_signer": false,
+    "different_pack": true,
+    "different_bytes": false,
+    "expected": "ClaimsBindingMismatch"
+  },
+  {
+    "different_audience": true,
+    "different_repository": true,
+    "different_signer": false,
+    "different_pack": true,
+    "different_bytes": false,
+    "expected": "ClaimsBindingMismatch"
+  },
+  {
+    "different_audience": false,
+    "different_repository": false,
+    "different_signer": true,
+    "different_pack": true,
+    "different_bytes": false,
+    "expected": "ClaimsBindingMismatch"
+  },
+  {
+    "different_audience": true,
+    "different_repository": false,
+    "different_signer": true,
+    "different_pack": true,
+    "different_bytes": false,
+    "expected": "ClaimsBindingMismatch"
+  },
+  {
+    "different_audience": false,
+    "different_repository": true,
+    "different_signer": true,
+    "different_pack": true,
+    "different_bytes": false,
+    "expected": "ClaimsBindingMismatch"
+  },
+  {
+    "different_audience": true,
+    "different_repository": true,
+    "different_signer": true,
+    "different_pack": true,
+    "different_bytes": false,
+    "expected": "ClaimsBindingMismatch"
+  },
+  {
+    "different_audience": false,
+    "different_repository": false,
+    "different_signer": false,
+    "different_pack": false,
+    "different_bytes": true,
+    "expected": "ClaimsBindingMismatch"
+  },
+  {
+    "different_audience": true,
+    "different_repository": false,
+    "different_signer": false,
+    "different_pack": false,
+    "different_bytes": true,
+    "expected": "ClaimsBindingMismatch"
+  },
+  {
+    "different_audience": false,
+    "different_repository": true,
+    "different_signer": false,
+    "different_pack": false,
+    "different_bytes": true,
+    "expected": "ClaimsBindingMismatch"
+  },
+  {
+    "different_audience": true,
+    "different_repository": true,
+    "different_signer": false,
+    "different_pack": false,
+    "different_bytes": true,
+    "expected": "ClaimsBindingMismatch"
+  },
+  {
+    "different_audience": false,
+    "different_repository": false,
+    "different_signer": true,
+    "different_pack": false,
+    "different_bytes": true,
+    "expected": "ClaimsBindingMismatch"
+  },
+  {
+    "different_audience": true,
+    "different_repository": false,
+    "different_signer": true,
+    "different_pack": false,
+    "different_bytes": true,
+    "expected": "ClaimsBindingMismatch"
+  },
+  {
+    "different_audience": false,
+    "different_repository": true,
+    "different_signer": true,
+    "different_pack": false,
+    "different_bytes": true,
+    "expected": "ClaimsBindingMismatch"
+  },
+  {
+    "different_audience": true,
+    "different_repository": true,
+    "different_signer": true,
+    "different_pack": false,
+    "different_bytes": true,
+    "expected": "ClaimsBindingMismatch"
+  },
+  {
+    "different_audience": false,
+    "different_repository": false,
+    "different_signer": false,
+    "different_pack": true,
+    "different_bytes": true,
+    "expected": "ClaimsBindingMismatch"
+  },
+  {
+    "different_audience": true,
+    "different_repository": false,
+    "different_signer": false,
+    "different_pack": true,
+    "different_bytes": true,
+    "expected": "ClaimsBindingMismatch"
+  },
+  {
+    "different_audience": false,
+    "different_repository": true,
+    "different_signer": false,
+    "different_pack": true,
+    "different_bytes": true,
+    "expected": "ClaimsBindingMismatch"
+  },
+  {
+    "different_audience": true,
+    "different_repository": true,
+    "different_signer": false,
+    "different_pack": true,
+    "different_bytes": true,
+    "expected": "ClaimsBindingMismatch"
+  },
+  {
+    "different_audience": false,
+    "different_repository": false,
+    "different_signer": true,
+    "different_pack": true,
+    "different_bytes": true,
+    "expected": "ClaimsBindingMismatch"
+  },
+  {
+    "different_audience": true,
+    "different_repository": false,
+    "different_signer": true,
+    "different_pack": true,
+    "different_bytes": true,
+    "expected": "ClaimsBindingMismatch"
+  },
+  {
+    "different_audience": false,
+    "different_repository": true,
+    "different_signer": true,
+    "different_pack": true,
+    "different_bytes": true,
+    "expected": "ClaimsBindingMismatch"
+  },
+  {
+    "different_audience": true,
+    "different_repository": true,
+    "different_signer": true,
+    "different_pack": true,
+    "different_bytes": true,
+    "expected": "ClaimsBindingMismatch"
+  }
+]

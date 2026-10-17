@@ -254,6 +254,42 @@ pub struct VerifiedAuth {
     pub created_at_ms: i64,
 }
 
+impl TryFrom<&mkit_primitives::auth::AuthenticatedEnvelope> for VerifiedAuth {
+    type Error = ServerError;
+
+    /// Convert privately constructed envelope evidence without parsing signed
+    /// fields again. The core commitment remains the only grammar on this path.
+    fn try_from(
+        envelope: &mkit_primitives::auth::AuthenticatedEnvelope,
+    ) -> Result<Self, Self::Error> {
+        use mkit_core::write_auth::ContentCommitment;
+        let commitment = match envelope.commitment() {
+            ContentCommitment::Body(digest) => Commitment::Body(digest),
+            ContentCommitment::Pack { id, len } => Commitment::Pack { id, len },
+            ContentCommitment::Part(part) => Commitment::Part {
+                ticket: part.ticket,
+                index: part.index,
+                subtree: part.subtree,
+                len: part.len,
+            },
+            _ => {
+                return Err(ServerError::unauthenticated(
+                    "malformed auth v2 authorization",
+                ));
+            }
+        };
+        Ok(Self {
+            signer: *envelope.signer(),
+            replay_scope: *envelope.replay_scope(),
+            fingerprint: *envelope.fingerprint(),
+            nonce: envelope.authorized().nonce.clone(),
+            commitment,
+            expires_at_ms: envelope.expires_at_ms(),
+            created_at_ms: envelope.created_at_ms(),
+        })
+    }
+}
+
 impl TryFrom<&Authorized> for VerifiedAuth {
     type Error = ServerError;
 

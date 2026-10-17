@@ -124,8 +124,29 @@ pub enum FailureCode {
     #[error("ForkBindingMismatch")]
     ForkBindingMismatch,
     // auth
+    /// Malformed, mismatched, expired, or incorrectly signed auth envelope.
+    #[error("InvalidEnvelope")]
+    InvalidEnvelope,
+    /// Host-authenticated upload claims do not bind to the request.
+    #[error("ClaimsBindingMismatch")]
+    ClaimsBindingMismatch,
     // replay
     // evidence
+    /// Unsupported acceptance-evidence format.
+    #[error("UnsupportedEvidenceVersion")]
+    UnsupportedEvidenceVersion,
+    /// Evidence ruleset or profile does not match the writer configuration.
+    #[error("EvidenceProfileMismatch")]
+    EvidenceProfileMismatch,
+    /// Noncanonical evidence framing, order, tags, or facts.
+    #[error("NonCanonicalEvidence")]
+    NonCanonicalEvidence,
+    /// Evidence does not match the frozen pack and operation.
+    #[error("EvidenceBindingMismatch")]
+    EvidenceBindingMismatch,
+    /// Head kind or signer metadata does not match the evidence.
+    #[error("EvidenceHeadMismatch")]
+    EvidenceHeadMismatch,
 }
 impl FailureCode {
     /// Stable machine-readable string. Diagnostic Display text is not a parser API.
@@ -171,6 +192,15 @@ impl FailureCode {
             Self::ForkExpired => "ForkExpired",
             Self::ForkQuotaExceeded => "ForkQuotaExceeded",
             Self::ForkBindingMismatch => "ForkBindingMismatch",
+            // auth
+            Self::InvalidEnvelope => "InvalidEnvelope",
+            Self::ClaimsBindingMismatch => "ClaimsBindingMismatch",
+            // evidence
+            Self::UnsupportedEvidenceVersion => "UnsupportedEvidenceVersion",
+            Self::EvidenceProfileMismatch => "EvidenceProfileMismatch",
+            Self::NonCanonicalEvidence => "NonCanonicalEvidence",
+            Self::EvidenceBindingMismatch => "EvidenceBindingMismatch",
+            Self::EvidenceHeadMismatch => "EvidenceHeadMismatch",
         }
     }
 }
@@ -252,6 +282,9 @@ mod tests {
             FailureCode::ForkExpired.as_str(),
             FailureCode::ForkQuotaExceeded.as_str(),
             FailureCode::ForkBindingMismatch.as_str(),
+            // auth
+            FailureCode::InvalidEnvelope.as_str(),
+            FailureCode::ClaimsBindingMismatch.as_str(),
         ];
         let unique: std::collections::BTreeSet<_> = codes.into_iter().collect();
         assert_eq!(unique.len(), codes.len());

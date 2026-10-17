@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use mkit_core::hash::{Hash, from_hex};
+use mkit_primitives::auth::{ClaimsPrincipal, validate_claims_binding};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
@@ -49,13 +50,13 @@ impl TicketClaims {
         repository: &str,
         signer: &Hash,
     ) -> Result<(), ServerError> {
-        if self.audience != audience || self.repository != repository || self.signer != *signer {
-            return Err(ServerError::new(
-                Code::PermissionDenied,
-                "upload ticket binding mismatch",
-            ));
-        }
-        Ok(())
+        self.principal()
+            .check(ClaimsPrincipal {
+                audience,
+                repository,
+                signer,
+            })
+            .map_err(|_| ServerError::new(Code::PermissionDenied, "upload ticket binding mismatch"))
     }
 
     /// Check the request binding after token verification. Ticket, part and
@@ -68,14 +69,27 @@ impl TicketClaims {
         pack_id: &Hash,
         bytes: u64,
     ) -> Result<(), ServerError> {
-        self.check_principal(audience, repository, signer)?;
-        if self.pack_id != *pack_id || self.bytes != bytes {
-            return Err(ServerError::new(
-                Code::PermissionDenied,
-                "upload ticket binding mismatch",
-            ));
+        validate_claims_binding(
+            self.principal(),
+            ClaimsPrincipal {
+                audience,
+                repository,
+                signer,
+            },
+            &self.pack_id,
+            self.bytes,
+            pack_id,
+            bytes,
+        )
+        .map_err(|_| ServerError::new(Code::PermissionDenied, "upload ticket binding mismatch"))
+    }
+
+    fn principal(&self) -> ClaimsPrincipal<'_> {
+        ClaimsPrincipal {
+            audience: &self.audience,
+            repository: &self.repository,
+            signer: &self.signer,
         }
-        Ok(())
     }
 }
 

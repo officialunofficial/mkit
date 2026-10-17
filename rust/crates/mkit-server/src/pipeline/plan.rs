@@ -160,6 +160,8 @@ pub(crate) struct WriteRequest<'a> {
     /// Fresh authoritative denial inputs retained across optimistic retries.
     pub(crate) denial_ids: Option<&'a std::collections::BTreeSet<Hash>>,
     pub(crate) denial_packs: &'a [Hash],
+    /// Guard the destination fork barrier in this write partition.
+    pub(crate) fork_barrier: bool,
     /// What the refs are.
     pub(crate) kind: WriteKind,
     /// Ref writes in decision order: `[update]`, or `[packmap, head]`, so a
@@ -212,6 +214,9 @@ impl WriteRequest<'_> {
     #[must_use]
     pub(crate) fn read_keys(&self) -> Vec<Key> {
         let mut out = Vec::new();
+        if self.fork_barrier {
+            out.push(keys::fork_barrier(self.repo));
+        }
         if self.publication.is_some()
             && let Some(update) = self.refs.first()
         {
@@ -461,6 +466,9 @@ pub(crate) fn plan_write(
         }
         return Ok(Planned::Done(result));
     }
+    if req.fork_barrier && snap.get(&keys::fork_barrier(req.repo)).is_some() {
+        return Err(ServerError::unavailable("fork activation pending; retry"));
+    }
     let tickets = req
         .advance
         .as_ref()
@@ -470,6 +478,9 @@ pub(crate) fn plan_write(
         clock.deadline().min(pending.apply_deadline_ms)
     }));
     let mut pre = vec![deadline.clone()];
+    if req.fork_barrier {
+        pre.push(Precondition::Absent(keys::fork_barrier(req.repo)));
+    }
     let mut puts = Vec::new();
 
     if let Some(lease) = req.lease {

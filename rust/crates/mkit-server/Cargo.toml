@@ -37,6 +37,7 @@ workspace = true
 # the wasm32 graph. Inter-workspace deps need explicit version + path so
 # `cargo publish` accepts them.
 mkit-core = { version = "0.5", path = "../mkit-core", default-features = false }
+mkit-primitives = { version = "0.1", path = "../mkit-primitives", default-features = false }
 mkit-attest = { version = "0.5", path = "../mkit-attest", default-features = false, features = ["grants"] }
 thiserror = "2"
 blake3 = { version = "1", default-features = false }

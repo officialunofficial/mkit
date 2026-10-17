@@ -42,3 +42,9 @@ mod tests {
 pub mod closure;
 /// Authenticated closure page grammars and canonical reencoding.
 pub mod closure_pages;
+// auth
+pub mod auth_claims;
+// acceptance evidence
+pub mod acceptance;
+#[cfg(test)]
+mod acceptance_seed_tests;

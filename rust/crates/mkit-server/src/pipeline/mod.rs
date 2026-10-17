@@ -1196,7 +1196,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         {
             return Err(crate::namespace::owner_statements_refused());
         }
-        let signed = auth::signed_request(&self.cfg.auth, meta);
+        let signed = auth::signed_request(&self.cfg.auth, meta)?;
         // SPEC-WRITE-GRANTS §4.2: a grant header without auth v2 fails on
         // any procedure of every deployment.
         if !signed && (meta.header)("x-write-grant").is_some() {
@@ -1221,7 +1221,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         #[cfg(not(feature = "__test-faults"))]
         let skew = 0;
         let now = self.clock.now_ms().saturating_add(skew);
-        let mut a = auth::authenticate(&self.cfg.auth, meta, now, repo, &expected_repository)?;
+        let mut a = auth::authenticate(
+            &self.cfg.auth,
+            meta,
+            now,
+            repo,
+            &expected_repository,
+            signed,
+        )?;
         if a.principal
             .ed25519()
             .is_some_and(|key| self.cfg.admin_keys.contains(key))
@@ -3343,6 +3350,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             wanted.push(keys::repo_known(&op.repo.name));
         }
         if self.cfg.sharding == Sharding::D34 {
+            if matches!(p, Partition::Coordinator(_)) {
+                wanted.push(keys::fork_barrier(&op.repo.name));
+            }
             wanted.push(keys::epoch_lease());
             if !refs.is_empty() {
                 wanted.push(keys::outbox_sequence());
@@ -3765,6 +3775,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let mut req = WriteRequest {
             denial_ids: Some(denial_ids),
             denial_packs,
+            fork_barrier: false,
             authority_store: plan::AuthorityStore::from_capabilities(self.meta.capabilities()),
             authority_generation: op.authz.authority_generation,
             repo: &op.repo.name,

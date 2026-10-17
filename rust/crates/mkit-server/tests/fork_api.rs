@@ -47,6 +47,8 @@ struct Seen {
     refuse_forks: std::sync::atomic::AtomicBool,
     ops: Mutex<Vec<Operation>>,
     admissions: Mutex<Vec<Admitted>>,
+    /// A one-shot source-policy race inside read authorization.
+    on_source_read: Mutex<Option<Hook>>,
 }
 
 /// An authorizer that records operations and can refuse reads of one name.
@@ -71,7 +73,15 @@ impl Authorizer for Spy {
                     .seen
                     .refuse_forks
                     .load(std::sync::atomic::Ordering::SeqCst));
+        let on_source_read = if op.procedure() == Procedure::ReadRef {
+            self.seen.on_source_read.lock().unwrap().take()
+        } else {
+            None
+        };
         async move {
+            if let Some(hook) = on_source_read {
+                hook().await;
+            }
             if refuse {
                 Err(ServerError::permission_denied("not for you"))
             } else {
@@ -722,6 +732,76 @@ async fn blocked_content_is_the_same_not_found_as_an_absent_source() {
 }
 
 #[tokio::test]
+async fn source_policy_is_captured_before_read_authorization_runs() {
+    let source = Source::build_with("source", 6, denial).await;
+    let mut dest = source.at("forked");
+    let (pipe, seen) = hooked(&source, None, plain_limits(), Some("read-flip"));
+    let (store, repo) = (source.store.clone(), source.repo.clone());
+    let changed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed = changed.clone();
+    *seen.on_source_read.lock().unwrap() = Some(Arc::new(move || {
+        let (store, repo, observed) = (store.clone(), repo.clone(), observed.clone());
+        Box::pin(async move {
+            let shards = mkit_server::pipeline::D34Shards;
+            // The hook saw the original public read authorization. Its return
+            // must not authorize the private policy installed during that call.
+            store
+                .inner
+                .apply(
+                    &shards.coordinator(&repo.namespace),
+                    mkit_server::Batch::new()
+                        .put(
+                            keys::repo_visibility(&repo.name),
+                            codec::encode_repo_visibility(&codec::RepoVisibilityV1 {
+                                visibility: codec::StoredVisibility::Private,
+                                last_created_ms: 0,
+                                last_statement_id: None,
+                                changed_ms: 0,
+                            }),
+                        )
+                        .put(
+                            keys::repo_visibility_revision(&repo.name),
+                            codec::encode_u64(1),
+                        ),
+                )
+                .await
+                .unwrap();
+            observed.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+    }));
+    let nonce = dest.next_nonce();
+    let error = call(&pipe, &dest, nonce, &request(&source))
+        .await
+        .unwrap_err();
+    assert!(changed.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(error.code(), Code::NotFound);
+    assert_eq!(error.public_message(), "source not found");
+    assert!(matches!(
+        reservation(&source, &dest.repo, "read-flip-1").await,
+        Some(ReservationV1::Aborted { .. })
+    ));
+    assert!(
+        mkit_server::fork::read_job(&source.store, source.shards.as_ref(), &dest.repo)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        source
+            .store
+            .inner
+            .get(
+                &source.shards.coordinator(&dest.repo.namespace),
+                &keys::repo_record(&dest.repo.name),
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(quota_ops(&source, &dest.repo).await, None);
+}
+
+#[tokio::test]
 async fn a_source_that_changes_visibility_while_the_hooks_run_refuses_the_fork() {
     let source = Source::build_with("source", 6, denial).await;
     let mut dest = source.at("forked");
@@ -754,8 +834,8 @@ async fn a_source_that_changes_visibility_while_the_hooks_run_refuses_the_fork()
     *source.store.trigger.lock().unwrap() = Some(("o", hook));
     let n = dest.next_nonce();
     let error = call(&pipe, &dest, n, &request(&source)).await.unwrap_err();
-    assert_eq!(error.code(), Code::Unavailable);
-    assert_eq!(error.public_message(), "source changed; retry");
+    assert_eq!(error.code(), Code::NotFound);
+    assert_eq!(error.public_message(), "source not found");
     assert!(matches!(
         reservation(&source, &dest.repo, "flip-1").await,
         Some(ReservationV1::Aborted { .. })
@@ -822,10 +902,14 @@ fn denial_capability_for_test() -> mkit_server::takedown::DenialCapability {
 }
 
 #[tokio::test]
-async fn publish_deadlines_have_retry_after_for_new_and_joining_requests() {
+async fn accepted_result_survives_activation_deadlines_for_new_and_joining_requests() {
     let source = Source::build_with("source", 4, denial).await;
     let dest = source.at("forked");
     let req = request(&source);
+    let (pipe, _) = hooked(&source, None, plain_limits(), Some("activation-deadline"));
+    let coordinator = source.shards.coordinator(&dest.repo.namespace);
+    let mut saved = None;
+    let mut terminal_rows = None;
     for nonce in 1..=2 {
         let clock = source.clock.clone();
         *source.store.trigger.lock().unwrap() = Some((
@@ -837,13 +921,139 @@ async fn publish_deadlines_have_retry_after_for_new_and_joining_requests() {
                 })
             }),
         ));
+        // Acceptance is already terminal even if this request's physical
+        // activation write loses its deadline. A joining nonce sees that result.
+        let result = call(&pipe, &dest, nonce, &req).await.unwrap();
+        let job = mkit_server::fork::read_job(
+            source.store.inner.as_ref(),
+            source.shards.as_ref(),
+            &dest.repo,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+        assert_eq!(job.phase, mkit_server::fork::Phase::Publish);
+        assert_eq!(job.accepted, Some(result.clone()));
+        assert!(job.result.is_none(), "clearance has not completed");
+        if let Some(saved) = &saved {
+            assert_eq!(&result, saved);
+        } else {
+            saved = Some(result);
+        }
+        assert_eq!(
+            source
+                .store
+                .inner
+                .get(&coordinator, &keys::fork_barrier(&dest.repo.name))
+                .await
+                .unwrap(),
+            Some(mkit_server::Value::new(job.binding.to_vec()))
+        );
+        for pack in &job.packs {
+            let partition = source
+                .shards
+                .membership(&dest.repo, &mkit_server::BlobKey::pack(pack.id));
+            for key in [
+                keys::membership(&dest.repo.name, &pack.id),
+                keys::published_member(&dest.repo.name, &pack.id),
+            ] {
+                assert!(
+                    source
+                        .store
+                        .inner
+                        .get(&partition, &key)
+                        .await
+                        .unwrap()
+                        .is_none(),
+                    "a deadline-losing activation must not install membership"
+                );
+            }
+        }
+        let settle = job.settle.as_ref().unwrap();
+        let replay = settle.replay.as_ref().unwrap();
+        let row_keys = [
+            keys::reservation(&settle.rid).unwrap(),
+            keys::replay(&replay.scope),
+        ];
+        let rows = source
+            .store
+            .inner
+            .get_many(&coordinator, &row_keys)
+            .await
+            .unwrap();
+        assert!(rows.iter().all(Option::is_some));
+        assert!(matches!(
+            codec::decode_reservation(rows[0].as_ref().unwrap()).unwrap(),
+            ReservationV1::Committed { .. }
+        ));
+        assert_eq!(
+            codec::decode_replay_record(rows[1].as_ref().unwrap())
+                .unwrap()
+                .state,
+            mkit_server::ReplayState::Committed(mkit_server::StoredResult::Fork)
+        );
+        if let Some(terminal_rows) = &terminal_rows {
+            assert_eq!(&rows, terminal_rows);
+        } else {
+            terminal_rows = Some(rows);
+        }
+    }
+}
+
+#[tokio::test]
+async fn copy_deadlines_have_retry_after_before_acceptance() {
+    let source = Source::build_with("source", 4, denial).await;
+    let dest = source.at("forked");
+    let req = request(&source);
+    for nonce in 1..=2 {
+        let clock = source.clock.clone();
+        *source.store.trigger.lock().unwrap() = Some((
+            "i",
+            Arc::new(move || {
+                let clock = clock.clone();
+                Box::pin(async move {
+                    clock.advance(10_001);
+                })
+            }),
+        ));
         let error = call(source.pipe.as_ref(), &dest, nonce, &req)
             .await
             .unwrap_err();
         assert_eq!(error.code(), Code::Unavailable);
-        assert_eq!(error.public_message(), "fork publish deadline");
-        // The default unavailable status mapping is retained.
+        assert_eq!(error.public_message(), "fork copy deadline");
         assert_eq!(error.http_status(), None);
         assert_eq!(error.headers(), &[("Retry-After".into(), "1".into())]);
+        let job = mkit_server::fork::read_job(
+            source.store.inner.as_ref(),
+            source.shards.as_ref(),
+            &dest.repo,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+        assert_eq!(job.phase, mkit_server::fork::Phase::Copy);
+        assert!(job.accepted.is_none());
+        assert!(job.result.is_none());
+        for pack in &job.packs {
+            let partition = source
+                .shards
+                .membership(&dest.repo, &mkit_server::BlobKey::pack(pack.id));
+            for key in [
+                keys::membership(&dest.repo.name, &pack.id),
+                keys::published_member(&dest.repo.name, &pack.id),
+            ] {
+                assert!(
+                    source
+                        .store
+                        .inner
+                        .get(&partition, &key)
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        }
     }
 }

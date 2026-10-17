@@ -232,6 +232,7 @@
 //! | `auth.v2_clock_lead_bound` | `auth-v2` | created 20 s ahead accepted, 40 s ahead rejected (30 s lead; assumes clocks within ~5 s) |
 //! | `auth.v2_pack_commitment_mismatch` | `auth-v2` | length, id or kind differs from the upload header: any error (no code in the spec yet), nothing stored |
 //! | `auth.v2_gzip_signed_fails_closed` | `auth-v2`, `strict-gzip-auth` | opt-in until the M2 spec decides §9.2: a signature over gzip bytes is rejected and writes nothing |
+//! | `auth.v2_partial_envelope` | `auth-v2` | Each signature trigger alone, and each missing or duplicated signed field, fails closed on reads; addressing and nonce alone remain unsigned |
 //! | `auth.v2_reads_unsigned_ok` | `auth-v2` | M0 reads need no signature |
 //! | `replay.observed_pair_has_saved_result` | `auth-v2`, `replay`, `atomic-advance` | Observed paired acceptance replays after a later pair move, without restoring old refs. |
 //! | `replay.same_op_returns_saved_result_after_ref_moved` | `auth-v2`, `replay` | the `auth_v2.mjs` a, b, a sequence |

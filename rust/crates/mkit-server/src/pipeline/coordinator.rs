@@ -82,6 +82,36 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         Ok(Some(if counted { 0 } else { bytes }))
     }
 
+    async fn registration_visibility(
+        &self,
+        p: &crate::Partition,
+        repo: &crate::RepoName,
+        batch: &mut Batch,
+    ) -> Result<Option<crate::Value>, ServerError> {
+        if self.cfg.sharding != super::Sharding::D34 {
+            return self
+                .meta
+                .get(p, &keys::repo_visibility(repo))
+                .await
+                .map_err(meta_error);
+        }
+        let rows = self
+            .meta
+            .get_many(p, &[keys::repo_visibility(repo), keys::fork_barrier(repo)])
+            .await
+            .map_err(meta_error)?;
+        let [visibility, barrier]: [_; 2] = rows
+            .try_into()
+            .map_err(|_| internal("coordinator registration read"))?;
+        if barrier.is_some() {
+            return Err(ServerError::unavailable("fork activation pending; retry"));
+        }
+        batch
+            .preconditions
+            .push(Precondition::Absent(keys::fork_barrier(repo)));
+        Ok(visibility)
+    }
+
     pub(super) async fn commit_creation(
         &self,
         op: &Operation,
@@ -148,7 +178,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }
             if want.repo {
                 let rv_key = keys::repo_visibility(&op.repo.name);
-                let visibility = self.meta.get(&p, &rv_key).await.map_err(meta_error)?;
+                let visibility = self
+                    .registration_visibility(&p, &op.repo.name, &mut batch)
+                    .await?;
                 batch
                     .preconditions
                     .push(super::lease::observed_guard(rv_key, visibility.as_ref()));

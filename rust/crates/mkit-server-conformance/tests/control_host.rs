@@ -194,42 +194,10 @@ async fn controlled_reference_host_runs_the_two_tier_acceptance_cases() {
         .extend([Feature::MultiRepo, Feature::Tickets]);
     profile.derive_features();
     let host = ControlledHost::start(profile).await.unwrap();
-    let mut skips = std::collections::BTreeMap::from([(
+    let skips = std::collections::BTreeMap::from([(
         "acceptance.kill_recovery".into(),
         "reference host retains volatile memory across pipeline restart; process-kill persistence requires an external host".into(),
     )]);
-    for (case, reason) in [
-        (
-            "fork.destination_gate_before_acceptance",
-            "reference fork destination gate is not implemented",
-        ),
-        (
-            "fork.failed_destination_inert",
-            "reference fork destination gate and per-commit authority fence are not implemented",
-        ),
-        (
-            "fork.acceptance_result_replay_outcome_atomic",
-            "gated fork test binding awaits destination activation and advancing-commit fencing",
-        ),
-        (
-            "fork.authority_at_acceptance",
-            "reference guarded fork authority-fence binding is not yet implemented",
-        ),
-        (
-            "fork.authority_each_progress_commit",
-            "reference fork does not yet compare recorded authority facts at every advancing commit",
-        ),
-    ] {
-        skips.insert(case.into(), reason.into());
-    }
-    for change in ["moved", "unpublished", "visibility_revoked", "denied"] {
-        for phase in ["before_acceptance", "after_acceptance"] {
-            skips.insert(
-                format!("fork.source_{change}_{phase}"),
-                "reference fork lacks a final source proof after all membership staging and before guarded acceptance".into(),
-            );
-        }
-    }
     let target = mkit_server_conformance::wire::WireTarget {
         base_url: host.base_url().parse().unwrap(),
         profile: host.profile().clone(),
@@ -245,7 +213,7 @@ async fn controlled_reference_host_runs_the_two_tier_acceptance_cases() {
                 mkit_server_conformance::wire::Verdict::Pass(_)
             ))
             .count(),
-        7
+        23
     );
     assert_eq!(
         report
@@ -256,7 +224,7 @@ async fn controlled_reference_host_runs_the_two_tier_acceptance_cases() {
                 mkit_server_conformance::wire::Verdict::Skip(_)
             ))
             .count(),
-        14
+        1
     );
     assert_eq!(
         report.cases.len(),

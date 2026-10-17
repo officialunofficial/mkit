@@ -5368,7 +5368,15 @@ request MAY select a protocol decision class, including `fork_acceptance`,
 commit. For `fork_source_proof`, `before_acceptance` means after every
 destination membership effect is staged, before the final source proof is
 obtained. The binding MUST preserve that ordering when it advertises the
-capability. Source-change controls commit the selected source move,
+capability. The additional class `fork_destination_claim` selects the first
+atomic decision excluding competing destination creation or writes.
+`writer_authority_ready` selects ordinary signed write acceptance after reusable
+write authority has been acquired; resumption MUST exercise that retained
+authority. Bindings advertise these classes through
+`decision.fork_destination_claim` and `decision.writer_authority_ready`.
+Race cases use these boundaries to assert one winner without prescribing lease
+representations or requiring a reverse ordering once writer authority is usable.
+Source-change controls commit the selected source move,
 unpublication, read-access revocation, or pack denial before returning; they
 MUST NOT change the destination. This reaches each guarded decision without
 naming engine steps. The runner may request graceful restart or host-supported

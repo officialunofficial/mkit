@@ -1,0 +1,37 @@
+{
+  "description": "Truncated field: truncated-dependency.",
+  "cfg": {
+    "max_envelope_bytes": 4096,
+    "max_operation_bytes": 32,
+    "max_heads": 4,
+    "max_head_bytes": 32,
+    "max_total_head_bytes": 96,
+    "max_external_dependencies": 4,
+    "ruleset_id": 1,
+    "profile_limits_digest": "1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "expected": {
+    "decode": "error",
+    "failure_code": "UnexpectedEof"
+  },
+  "encoded_len": 213,
+  "semantic": {
+    "ruleset_id": 1,
+    "profile_limits_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+    "repository": "2222222222222222222222222222222222222222222222222222222222222222",
+    "operation": "",
+    "epoch": "0",
+    "pack": {
+      "id": "3333333333333333333333333333333333333333333333333333333333333333",
+      "len": "0",
+      "object_count": "0",
+      "delta_count": "0",
+      "object_set_root": "4444444444444444444444444444444444444444444444444444444444444444"
+    },
+    "heads": [],
+    "external_dependencies": [],
+    "membership_generation": "0",
+    "removal_version": "0",
+    "denial_version": "0"
+  }
+}

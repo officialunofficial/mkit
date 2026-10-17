@@ -11,6 +11,7 @@
 //! the destination registration first (takedown sweeps enumerate the
 //! registry).
 
+mod accept;
 pub mod boundary;
 mod closure;
 mod completed;
@@ -27,9 +28,11 @@ mod trace;
 #[cfg(test)]
 mod wave_tests;
 
+pub(crate) use job::start_authorized;
 pub(crate) use plan::read_published;
 
 pub(crate) use crate::store::CONTENT_APPLY_WINDOW_MS as CONTENT_WINDOW;
+pub use accept::{FenceRowsV1, SourceAccessV1};
 pub use completed::CompletedFork;
 pub use job::{
     ForkPlan, ForkTimer, StartOutcome, StepReport, plan_bytes, plan_fork, start, start_planned,
@@ -65,7 +68,8 @@ pub const MAX_SET_IDS: usize = 8_000;
 /// Storage calls one slice may use: the alarm allowance (1,000) minus the
 /// timer's own settlement and a margin.
 pub const SLICE_CALLS: u32 = 600;
-/// An unfinished job (and its admission reservation) expires after this long.
+/// An unaccepted construction and its admission reservation expire after this long.
+/// Accepted clearance remains durable until it completes.
 pub const JOB_TTL_MS: u64 = 24 * 3_600_000;
 /// Packs counted in one coordinator batch (one `RepoStorageChanged`).
 pub const COUNT_BATCH_PACKS: usize = 45;
@@ -391,7 +395,9 @@ pub enum Phase {
     Copy,
     /// Count the packs once against the destination.
     Count,
-    /// Prove and publish membership.
+    /// Prove the staged source and commit the accepted result.
+    Accept,
+    /// Install accepted membership and complete published clearance.
     Publish,
     /// Finished.
     Done,
@@ -505,7 +511,7 @@ pub struct ForkJobV1 {
     pub phase: Phase,
     /// The pack set, packmap head first.
     pub packs: Vec<PackRow>,
-    /// Phase cursor: the next pack (Plan, Trees, Count, Publish).
+    /// Phase cursor: the next pack (Plan, Trees, Count, Accept, Publish).
     pub cursor: u32,
     /// External-base object ids not yet mapped to a pack.
     pub deps: Vec<Hash>,
@@ -524,9 +530,17 @@ pub struct ForkJobV1 {
     pub failure: Option<Failure>,
     /// Admission and replay settlement data, if the request carried any.
     pub settle: Option<SettleV1>,
-    /// The authority facts to re-check at registration, if the request had any.
+    /// The authority facts to compare while advancing, if the request had any.
     pub fence: Option<FenceV1>,
-    /// The lineage anchor once done.
+    /// Exact authority rows guarded by every advancing coordinator commit.
+    pub fence_rows: FenceRowsV1,
+    /// Source policy observations bound by authorization.
+    pub source_access: SourceAccessV1,
+    /// Durable accepted result. The same row binds the complete pack list,
+    /// membership incarnation, byte charge, operation, destination, and fence.
+    /// Acceptance settles admission; publication never changes this result.
+    pub accepted: Option<ForkResult>,
+    /// The lineage anchor once clearance completes.
     pub result: Option<ForkResult>,
 }
 

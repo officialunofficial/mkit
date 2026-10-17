@@ -2,8 +2,12 @@
 
 Pure protocol contracts for pack verification, repository closure, and guarded
 write decisions. Version **0.1.0** is independent of the workspace release train.
-All public APIs are **ALPHA**. The crate provides guarded fork acceptance
+The reference server depends on this crate; publish the required primitives
+version independently before publishing a workspace release that uses it.
+All public APIs are **ALPHA**. Auth-v2 validation and replay classification use
+the existing protocol rules. The crate also provides guarded fork acceptance
 and bounded direct-child closure with authenticated local evidence pages.
+It also defines the bounded acceptance-evidence byte envelope.
 Pack verification and other decision drivers currently expose contracts;
 their implementations land separately.
 
@@ -25,6 +29,7 @@ capability never substitutes for content verification.
 
 Crate API version, normative ruleset, evidence format version, and checkpoint
 format version are separate contracts. Closure state, witness, and missing-set pages use strict version-one formats.
+Acceptance evidence format 1 is separate from in-process artifacts.
 No serialized walker checkpoint is defined. Unsupported state versions and
 lost pages require verification restart; historical readers are not promised. Existing normative wire bytes remain unchanged.
 
@@ -102,3 +107,57 @@ and checked manifest totals. Resource exhaustion never returns a truncated set.
 
 Pages are local evidence, not transport messages or remote attestations. After
 page loss, replay from the same immutable inputs with a fresh generation.
+
+## Authentication and replay
+
+`auth::validate_envelope` delegates raw canonical fields, commitments, time
+bounds, and strict signatures to `mkit_core::write_auth`. Call
+`auth::inspect_headers` on raw header multiplicities first: any field in
+`auth::TRIGGER_HEADER_NAMES` marks an envelope. Repository addressing and an
+idempotency key alone do not. Partial or duplicate envelopes fail closed. Unary
+requests require `x-digest`; upload streams may omit it. Trusted destination
+identity comes from configuration and resolved addressing. Verification grants
+no permission and reserves no nonce.
+
+Envelope expiry is inclusive at ingress. Current host acceptance deadlines
+remain separate; replay never extends envelope validity. Signed reads verify
+fully and bypass the replay ledger.
+
+`replay::classify_replay` returns the saved terminal result by reference. Hosts
+supply successful durable results through `RecordedResult::success`; permanent
+refusals pass the explicit allowlist through `RecordedResult::rejection`.
+Challenges, membership lag, pending verification, and unavailable inspection
+cannot be constructed through the rejection path. A fresh result requires an
+absence guard before reservation or commit. A different fingerprint conflicts;
+nonresumable in-flight work is retryable. Hosts atomically guard replay and
+commit its transitions with their effects.
+
+Claims validation takes borrowed principal and pack bindings after the host
+has authenticated its token. Token encoding, MAC, keys, rotation, expiry,
+current ticket state, and authorization remain host responsibilities. There is
+no portable token encoding or new signing domain.
+
+## Acceptance-evidence decoder inventory
+
+`evidence::acceptance::AcceptanceEvidence` is an immutable canonical envelope
+for authenticated delivery inside one trust domain. `decode(bytes, cfg)` and
+`from_trusted_host(bytes, cfg)` require explicit finite envelope, operation,
+head count, per-head byte, cumulative head-byte, and dependency bounds, plus an
+exact ruleset and profile/limits commitment. There is no unlimited default.
+
+`encode()` borrows the canonical bytes; `encoded_len()` returns their checked
+exact length. `digest()` uses `mkit-acceptance-evidence:v1`, one NUL, and the
+canonical encoding. `check_binding()` compares the writer's frozen pack and
+operation. `recheck_heads()` individually verifies canonical commit, remix,
+and tag ids and signatures using core. No method accepts a write or manufactures
+a verified pack, closure proof, or guarded decision. Origin authentication and
+atomic live guard comparison remain host responsibilities.
+
+The [acceptance-evidence specification](../../../docs/specs/SPEC-ACCEPTANCE-EVIDENCE.md)
+defines every field and compatibility rule. The fixture manifest registers 49
+portable cases with explicit configurations and stable outcomes, including nine
+digest vectors. Tests consume these files read-only. To deliberately regenerate
+an approved format change, run **tools/generate-acceptance-fixtures.py** with
+the Python `blake3` package installed, inspect every changed vector, and update
+the specification and version policy together. The same bounded fuzz body runs
+in stable corpus replay and the scheduled `acceptance_decode` target.

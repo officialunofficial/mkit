@@ -138,20 +138,13 @@ source changes do not invalidate acceptance.
 **Because:** construction may survive a crash or continue after revocation;
 partial construction must not grant repository access.
 
-**Known reference-server gap:** current construction publishes membership before
-terminal acceptance and lacks the destination write gate and fence comparison
-at every advancing commit and acceptance. The conformance runner declares the
-destination-gate and authority-fence cases skipped with those reasons. Existing
-fork construction tests establish resumability, not those missing guarantees.
-The reference implementation also lacks the final source proof at the required
-boundary; per-pack checks do not establish it. Source-change cases are declared
-skips, including the visibility race that currently returns a retryable error
-instead of uniform absence.
-
-**Enforcement:** [SPEC-SERVER §9.9](specs/SPEC-SERVER.md#99-fork) defines the
-conditional protocol requirements. The
+**Reference enforcement:** guarded acceptance, destination exclusion, and
+coordinator fences enforce the destination boundary. Distributed membership
+installation still needs drained permits, and resumed pack proofs still need
+versioned evidence for one coherent source point. The
 [conformance coverage table](../rust/crates/mkit-server-conformance/README.md)
-records the declared gaps; it must not report them as passing.
+records the exercised assertions; passing those cases does not certify these
+remaining requirements.
 
 ## Typed pack evidence retains exact keys and live witness semantics
 
@@ -1605,8 +1598,17 @@ reach `Done`, but only with entries of the verified pack.
 A `None` checkpoint means keep the previous cursor. After a boundary-state `None` (the trailer phase), resuming re-reads at most one window plus the trailer; after a mid-entry `None`, it re-reads every window the unfinished entry spans.
 
 **Because:** a streaming trailer check occurs after entries have been delivered;
-completed-window CVs and the lazy current-window prefix commitment bind the
+completed-window CVs and the incremental current-window prefix commitment bind the
 entries staged across resumes without re-reading completed ranges.
+
+The live prefix state has two fixed-size BLAKE3 hasher slots and a window-relative
+length bounded by 64 MiB. Each checkpoint absorbs only newly consumed bytes;
+repeated checkpoints finalize that state without rereading the prefix. Callers
+that never checkpoint do no prefix hashing. An inline once-cell preserves
+concurrent read-only checkpoint calls. Advancing the reader moves its cached
+incremental state forward and clears the boundary cache. Cold resume
+authenticates the prefix once and reconstructs this state. Only the existing
+explicit subtree commitments and prefix digest enter the cursor encoding.
 
 **If violated:** malformed packs or mismatched cursor/source pairs can publish
 partially verified data.
@@ -2853,6 +2855,49 @@ resend an acknowledged part or advance refs without its upload commitment.
 **Enforced by:** request-policy seam tests and both-backend native push tests,
 including multipart interruption and receipt reuse across fresh instances.
 
+## Fork acceptance precedes membership installation
+
+**Always:** the fork's durable pack list stages the complete inherited set,
+including external-base suppliers. No membership witness is installed until
+`Accept` records the accepted result with its replay and reservation outcome.
+The same row binds the operation, destination, requested visibility, source pair,
+membership generation, pack lengths, byte charge, and exact authority rows.
+The final source pair, policy, and inherited-pack proofs follow preparation.
+Activation repeats destination denial checks and never changes or settles the
+saved result. An accepted job remains recoverable beyond the construction expiry.
+
+**Because:** preparation is not permission to serve content, and a committed
+receipt must survive interrupted clearance and later source changes.
+
+**If violated:** readers could observe an unaccepted fork, an accepted result
+could change after a lost reply, or a reservation could settle twice.
+
+**Enforced by:** `fork::job`, `fork::accept`, `fork::publish`, and the fork engine
+acceptance, settlement, membership-order, source-change, and lost-reply tests.
+The stronger single-ordering-point source proof remains incomplete across
+resumed proof slices.
+
+## Fork registration arbitrates with destination writers
+
+**Always:** registration atomically requires the destination repository record
+and fork barrier to be absent and installs both. Ordinary coordinator mutations
+and lease grants guard barrier absence in their existing atomic batches. A usable
+ref-shard lease implies an already registered repository: the coordinator commits
+that record with the lease grant before the shard can install the lease. Since
+repository registration is never deleted, a previously granted lease makes fork
+registration refuse. Completion removes the barrier atomically with `Done`;
+a failed registered destination retains it permanently.
+
+**Because:** a preflight check alone cannot stop a writer that already captured
+its snapshot, and delaying registration alone permits implicit creation.
+
+**If violated:** a concurrent writer could change the destination during
+construction or an unfinished fork could accept unrelated writes.
+
+**Enforced by:** coordinator creation and lease-grant guards, the direct upload
+planner, and the lease/registration and upload/claim race tests. The extra keys
+join existing batch reads; ordinary writes add no storage round trip.
+
 ## A fork without denial builds no cleared set and carries its plan
 
 **Always:** a fork on a deployment without pack-level takedown denial skips the
@@ -2862,10 +2907,11 @@ no sets to load: if denial is enabled later, the first publication walk visits
 every object and its advance-time proof covers every pack it reaches. A plan
 computed before admission is carried into the job only when it fits one slice
 and the source still publishes the same packmap head and membership generation;
-otherwise the job plans for itself. Per-pack proofs run before and after every
-membership write, the authority fence and reservation are re-checked at every
-advance, and the packmap head's membership rows are written after every other
-member's.
+otherwise the job plans for itself. Source pack proofs run after preparation
+and before acceptance. Activation repeats destination denial proofs around each
+membership write, and the packmap head's rows are written after every other
+member's. Every advancing coordinator commit guards the recorded authority facts;
+pre-acceptance progress also guards the exact pending reservation.
 
 **Because:** nothing reads a cleared set without denial, and the set's walk cost
 repeats inside a request; the plan's result is a function of the pair it read,
@@ -2888,7 +2934,8 @@ pair check, the plan fallback, the publication stage order and the round probe.
 **Always:** after a publication absent guard fails, the driver reads both rows
 again and accepts only the exact pair of witness bytes it intended to write.
 Any foreign value refuses the fork; partial or missing identical rows remain
-retryable. Proofs, the fresh source pair, and all write guards stay in place.
+retryable. The accepted binding, live destination proofs, and local write guards
+stay in place.
 
 **Because:** request and timer drivers can publish the same unit concurrently.
 
@@ -2949,3 +2996,43 @@ checks, phantom-addition and transitive-supplier tests, bounded hostile-fact
 replay, and once-only terminal replay tests. This primitive is not yet adopted
 by the reference server; its existing conformance gaps remain declared until
 the activation integration passes the independent conformance suite.
+
+## Portable auth checks preserve the core grammar and terminal replay rules
+
+**Always:** auth-v2 envelope validation delegates raw canonical fields,
+commitments, destination, time, and strict signatures to the core verifier.
+Header inspection treats any declared signature trigger as envelope presence
+and refuses partial or repeated fields. Repository addressing and an idempotency
+key alone do not indicate a signature. A recorded rejection must use the permanent-code allowlist;
+challenges and transient refusals cannot enter through that constructor.
+
+**Because:** portable servers need one grammar, deterministic header treatment,
+and final-result eligibility independent of token or storage representation.
+
+**If violated:** implementations could disagree on signed bytes, interpret
+ambiguous metadata differently, or retain a retryable refusal as permanent.
+
+**Enforced by:** primitives raw-input parity, header and classifier matrices,
+code fixtures, and stable seeded claims replay. Host adapters must inspect raw
+multiplicities before collapsing headers, authenticate before replay lookup,
+and keep signed reads outside their ledger. The reference adapter applies
+these checks before repository routing in AuthV2 mode, preserves raw header
+presence through verification, and retains the other authentication modes.
+All write methods that emit unsigned client timestamps already require a full
+envelope in AuthV2 mode; the visibility-statement exception emits no timestamps.
+
+## Acceptance evidence does not confer acceptance authority
+
+**Always:** portable evidence is bounded by explicit byte and record caps, binds
+the exact frozen pack and operation, and carries only head and dependency facts.
+Decoding never constructs verified packs, closure proofs, or guarded decisions.
+
+**Because:** verifier and writer processes may share a trust domain while holding
+different immutable pack records and live membership or denial observations.
+
+**If violated:** substituted or replayed evidence could bypass acceptance guards,
+or object-count-sized payloads could exhaust writer memory.
+
+**Enforced by:** `AcceptanceEvidence::decode`, `check_binding`, `recheck_heads`,
+and acceptance-evidence codec, binding, and signature regression tests. The host
+authenticates origin and atomically checks live guards; the library does not.

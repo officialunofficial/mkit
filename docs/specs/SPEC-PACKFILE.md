@@ -523,6 +523,12 @@ Streaming implementations MUST still verify the trailer at end-of-stream
 and retroactively reject partially-stored objects if trailer
 verification fails.
 
+The core window reader keeps a live incremental BLAKE3 digest of the consumed
+current-window prefix. Checkpoints finalize it; cold resume authenticates that
+prefix once and rebuilds it. Completed ranges use explicit subtree commitments,
+and the cursor stores no library hasher state. This bookkeeping does not waive
+the trailer or whole-pack identity checks in §§7–8.
+
 ---
 
 ## 12. Invariants

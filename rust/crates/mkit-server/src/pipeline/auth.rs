@@ -136,13 +136,29 @@ impl Authenticated {
     }
 }
 
-/// Whether `meta`'s request verifies in full under `mode`: under auth v2,
-/// every write but `SetRepoVisibility` (whose statement mode is unsigned
-/// by design, §9.1) and any request carrying an auth header marker.
-pub(crate) fn signed_request(mode: &AuthMode, meta: &RequestMeta<'_>) -> bool {
-    matches!(mode, AuthMode::AuthV2(_))
-        && (meta.procedure.is_write() && meta.procedure != Procedure::SetRepoVisibility
-            || auth_v2::carries_auth_headers(meta.header))
+/// Classify signed requests from raw multiplicities before repository routing.
+/// The presence result remains authoritative even if a transport's single-value
+/// getter drops a malformed value; that request must still reach verification.
+pub(crate) fn signed_request(mode: &AuthMode, meta: &RequestMeta<'_>) -> Result<bool, ServerError> {
+    if !matches!(mode, AuthMode::AuthV2(_)) {
+        return Ok(false);
+    }
+    let counts = std::array::from_fn(|index| {
+        let name = auth_v2::HEADER_NAMES[index];
+        let single = usize::from((meta.header)(name).is_some());
+        meta.header_values
+            .map_or(single, |values| values(name).len().max(single))
+    });
+    let requires_digest = !matches!(
+        meta.procedure,
+        Procedure::UploadPack | Procedure::UploadPart
+    );
+    let presence = mkit_primitives::auth::inspect_headers(&counts, requires_digest)
+        .map_err(|error| ServerError::unauthenticated(error.reason()))?;
+    Ok(
+        meta.procedure.is_write() && meta.procedure != Procedure::SetRepoVisibility
+            || presence == mkit_primitives::auth::EnvelopePresence::Present,
+    )
 }
 
 /// Stage 0 and 1 for `mode` at business time `now_ms`.
@@ -152,6 +168,7 @@ pub(crate) fn authenticate(
     now_ms: i64,
     repo: ResolvedRepo,
     expected_repository: &str,
+    signed: bool,
 ) -> Result<Authenticated, ServerError> {
     let procedure = meta.procedure;
     let presented_grant = (meta.header)("x-write-grant").map(Redacted::new);
@@ -168,9 +185,8 @@ pub(crate) fn authenticate(
             (Principal::BearerHolder, None)
         }
         AuthMode::AuthV2(cfg) => {
-            let must_sign = procedure.is_write() && procedure != Procedure::SetRepoVisibility;
-            if must_sign || auth_v2::carries_auth_headers(meta.header) {
-                // A request carrying any auth v2 marker verifies in full
+            if signed {
+                // A request carrying any signature-triggering field verifies in full
                 // (SPEC-TRANSPORT-CONNECT §7.1); a failure never falls
                 // back to anonymous. Signed reads keep no replay ledger.
                 let auth = verify_auth_v2(cfg, expected_repository, meta, now_ms)?;

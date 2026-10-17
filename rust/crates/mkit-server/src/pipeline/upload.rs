@@ -246,6 +246,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
                 let req = WriteRequest {
                     denial_ids: None,
                     denial_packs: &[],
+                    fork_barrier: pipe.cfg.sharding == super::Sharding::D34,
                     authority_store: super::plan::AuthorityStore::from_capabilities(
                         pipe.meta.capabilities(),
                     ),
@@ -563,6 +564,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
         let req = WriteRequest {
             denial_ids: None,
             denial_packs: &[],
+            fork_barrier: pipe.cfg.sharding == super::Sharding::D34,
             authority_store: super::plan::AuthorityStore::from_capabilities(
                 pipe.meta.capabilities(),
             ),

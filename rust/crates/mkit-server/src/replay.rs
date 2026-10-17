@@ -109,16 +109,7 @@ impl StoredRejection {
     /// `unauthenticated` are re-run instead.
     #[must_use]
     pub const fn is_storable(code: Code) -> bool {
-        matches!(
-            code,
-            Code::InvalidArgument
-                | Code::NotFound
-                | Code::AlreadyExists
-                | Code::PermissionDenied
-                | Code::FailedPrecondition
-                | Code::OutOfRange
-                | Code::Unimplemented
-        )
+        mkit_primitives::replay::PermanentCode::from_code(code.as_str()).is_some()
     }
 
     /// A rejection a retry of the same nonce gets back forever; `None`
@@ -162,14 +153,48 @@ pub enum ReplayDecision {
 /// Classify a request with `fingerprint` against its record, if any.
 #[must_use]
 pub fn classify(existing: Option<&ReplayRecord>, fingerprint: &Hash) -> ReplayDecision {
-    match existing {
-        None => ReplayDecision::New,
-        Some(record) if record.fingerprint != *fingerprint => ReplayDecision::FingerprintMismatch,
-        Some(record) => match &record.state {
-            ReplayState::Committed(result) => ReplayDecision::Return(result.clone()),
-            ReplayState::InFlight { resumable: true } => ReplayDecision::Resume,
-            ReplayState::InFlight { resumable: false } => ReplayDecision::RetryLater,
-        },
+    use mkit_primitives::replay::{self, ReplayObservation};
+    let fact = if let Some(record) = existing {
+        let state = match &record.state {
+            ReplayState::InFlight { resumable } => replay::ReplayStateView::InFlight {
+                resumable: *resumable,
+            },
+            ReplayState::Committed(result) => {
+                let terminal = match result {
+                    StoredResult::Rejected(rejection) => {
+                        let Some(terminal) = replay::RecordedResult::rejection(
+                            result,
+                            rejection.code().as_str(),
+                            false,
+                        ) else {
+                            return ReplayDecision::FingerprintMismatch;
+                        };
+                        terminal
+                    }
+                    StoredResult::UpdateRef(_)
+                    | StoredResult::AdvanceRefs(_)
+                    | StoredResult::BeginUpload(_)
+                    | StoredResult::UploadPack
+                    | StoredResult::RepoVisibility
+                    | StoredResult::Fork => replay::RecordedResult::success(result),
+                };
+                replay::ReplayStateView::Committed(terminal)
+            }
+        };
+        Some(ReplayObservation {
+            fingerprint: record.fingerprint,
+            state,
+        })
+    } else {
+        None
+    };
+    match replay::classify_replay(fact, fingerprint) {
+        replay::ReplayDecision::Fresh => ReplayDecision::New,
+        replay::ReplayDecision::Recorded(result) => ReplayDecision::Return(result.clone()),
+        replay::ReplayDecision::Resume => ReplayDecision::Resume,
+        replay::ReplayDecision::InFlight => ReplayDecision::RetryLater,
+        // Conflicts and future states cannot authorize effects or bypass replay.
+        _ => ReplayDecision::FingerprintMismatch,
     }
 }
 
@@ -289,5 +314,64 @@ mod tests {
             16,
             "every Code is classified"
         );
+    }
+
+    #[test]
+    fn classifier_matches_frozen_reference_for_every_terminal_shape() {
+        fn reference(existing: Option<&ReplayRecord>, fingerprint: &Hash) -> ReplayDecision {
+            match existing {
+                None => ReplayDecision::New,
+                Some(record) if record.fingerprint != *fingerprint => {
+                    ReplayDecision::FingerprintMismatch
+                }
+                Some(record) => match &record.state {
+                    ReplayState::Committed(result) => ReplayDecision::Return(result.clone()),
+                    ReplayState::InFlight { resumable: true } => ReplayDecision::Resume,
+                    ReplayState::InFlight { resumable: false } => ReplayDecision::RetryLater,
+                },
+            }
+        }
+        let results = [
+            StoredResult::UpdateRef(UpdateRefResult::Committed),
+            StoredResult::UpdateRef(UpdateRefResult::Conflict { current: None }),
+            StoredResult::UpdateRef(UpdateRefResult::Conflict {
+                current: Some([3; 32]),
+            }),
+            StoredResult::AdvanceRefs(AdvanceOutcome::Committed),
+            StoredResult::AdvanceRefs(AdvanceOutcome::HeadConflict),
+            StoredResult::AdvanceRefs(AdvanceOutcome::PackmapConflict),
+            StoredResult::BeginUpload(BeginUploadResult::AlreadyPresent),
+            StoredResult::BeginUpload(BeginUploadResult::Ticket {
+                id: [4; 32],
+                part_size: 1,
+                expires_at_ms: 1_000,
+                token: vec![5, 6, 7],
+            }),
+            StoredResult::UploadPack,
+            StoredResult::RepoVisibility,
+            StoredResult::Fork,
+            StoredResult::Rejected(StoredRejection::new(Code::NotFound, "saved refusal").unwrap()),
+        ];
+        let mut states = vec![
+            ReplayState::InFlight { resumable: true },
+            ReplayState::InFlight { resumable: false },
+        ];
+        states.extend(results.into_iter().map(ReplayState::Committed));
+        for state in states {
+            for expires_at_ms in [-1, 0, 1_000, i64::MAX] {
+                let record = ReplayRecord {
+                    fingerprint: FP,
+                    expires_at_ms,
+                    state: state.clone(),
+                };
+                for fingerprint in [FP, [8; 32]] {
+                    assert_eq!(
+                        classify(Some(&record), &fingerprint),
+                        reference(Some(&record), &fingerprint)
+                    );
+                }
+            }
+        }
+        assert_eq!(classify(None, &FP), reference(None, &FP));
     }
 }

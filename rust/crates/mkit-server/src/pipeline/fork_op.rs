@@ -58,14 +58,16 @@ struct SourceFacts {
     visibility: Option<mkit_attest::grant::Visibility>,
     revision: u64,
     stored_bytes: u64,
+    access: fork::SourceAccessV1,
 }
 
 impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// Fork the published tip of `request.source_ref` of the source into the
     /// authenticated repository, which must not exist yet. The result is the
-    /// lineage anchor; while the durable job is still running the answer is
-    /// `unavailable` with a `Retry-After` hint and the same request is
-    /// retried (a new nonce resumes the same job).
+    /// lineage anchor saved at guarded acceptance. Before acceptance the answer
+    /// is `unavailable` with a `Retry-After` hint; the same binding resumes the
+    /// job. Accepted results replay while publication clearance may still be
+    /// pending. Destination writes open only when clearance completes.
     ///
     /// `a` must come from [`Self::authenticate`] with `Procedure::Fork` and
     /// [`ForkRequest::canonical_body`] as the unary body.
@@ -92,7 +94,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     }
 
     /// [`Self::fork_repo`], also returning the success-only admission
-    /// headers (empty unless this very request finished the job).
+    /// headers (empty unless this request started the accepted job).
     ///
     /// # Errors
     /// Those of [`Self::fork_repo`].
@@ -160,12 +162,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         Ok((record, job))
     }
 
-    /// Whether `request` replays a fork that already finished, from the
+    /// Whether `request` replays a fork with an accepted terminal result, from the
     /// stored replay record and the destination's job, without running
     /// anything. `Some` only when the record is committed for this very
     /// signed request and the job agrees with the request on every field it
     /// binds (see [`fork::CompletedFork`]). Any other state, including an
-    /// in-flight or failed job, is `None`: [`Self::fork_repo`] decides.
+    /// unaccepted or failed job, is `None`: [`Self::fork_repo`] decides.
     ///
     /// The answer is a witness and never a result; the result of the fork
     /// always comes from [`Self::fork_repo`]. `a` must come from
@@ -249,7 +251,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             ReplayDecision::New => {}
             ReplayDecision::Return(StoredResult::Fork) => {
                 let result = job
-                    .and_then(|job| job.result)
+                    .and_then(|job| job.accepted)
                     .ok_or_else(|| internal("fork replay without a result"))?;
                 return Ok((result, ResponseMeta::default()));
             }
@@ -266,6 +268,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }
         }
 
+        // Capture policy before authorization so the retained source facts
+        // cannot silently adopt a visibility change during authorization.
+        let source = self.fork_source_facts(&request.source).await?;
         // Source read authorization: the caller must be able to read what it
         // forks, and every refusal looks the same.
         let mut read = Operation::new(
@@ -289,8 +294,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }
             Err(error) => return Err(error),
         }
-        let source = self.fork_source_facts(&request.source).await?;
-
         // Destination write authorization, with the source facts for the hook.
         let mut op = self.identify(
             a,
@@ -315,10 +318,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             if job.binding != fork::binding(&spec) {
                 return Err(ForkError::NotEmpty.error());
             }
-            let report = fork::step(&env, &dest, &SliceBudget::new(SLICE_CALLS))
-                .await
-                .map_err(|error| step_error(&error))?;
-            return Self::fork_answer(report.job, ResponseMeta::default());
+            let job = self.drive_fork_request(&env, &spec).await?;
+            return Self::fork_answer(job, ResponseMeta::default());
         }
         if !op.creation.repo {
             return Err(ForkError::NotEmpty.error());
@@ -387,7 +388,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             Ok(now) if now.visibility == source.visibility && now.revision == source.revision => {
                 Ok(())
             }
-            Ok(_) => Err(ServerError::unavailable("source changed; retry")),
+            Ok(_) => Err(uniform()),
             Err(error) => Err(error),
         };
         if let Err(error) = recheck {
@@ -395,15 +396,23 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .await;
             return Err(error);
         }
-        let started =
-            match fork::start_planned(&env, &spec, Some(settle), Some(fence), planned).await {
-                Ok(started) => started,
-                Err(error) => {
-                    self.abort_fork_reservation(&p, pending.as_ref(), &error.error())
-                        .await;
-                    return Err(error.error());
-                }
-            };
+        let started = match fork::start_authorized(
+            &env,
+            &spec,
+            Some(settle),
+            Some(fence),
+            planned,
+            Some(source.access),
+        )
+        .await
+        {
+            Ok(started) => started,
+            Err(error) => {
+                self.abort_fork_reservation(&p, pending.as_ref(), &error.error())
+                    .await;
+                return Err(error.error());
+            }
+        };
         let ours = matches!(started, StartOutcome::Started(_));
         if !ours && let Some(pending) = &pending {
             // The job exists already: this request's reservation and charges
@@ -411,15 +420,31 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             self.resolve_pending(&p, pending, AbortReason::ReplayRace, String::new())
                 .await;
         }
-        let report = fork::step(&env, &dest, &SliceBudget::new(SLICE_CALLS))
-            .await
-            .map_err(|error| step_error(&error))?;
+        let job = self.drive_fork_request(&env, &spec).await?;
         let meta = if ours {
             response_meta(allowance)
         } else {
             ResponseMeta::default()
         };
-        Self::fork_answer(report.job, meta)
+        Self::fork_answer(job, meta)
+    }
+
+    /// A clearance refusal cannot replace the accepted job's terminal answer.
+    /// Joining requests already passed authorization for this exact fork binding.
+    async fn drive_fork_request(
+        &self,
+        env: &ForkEnv<'_, N>,
+        spec: &fork::ForkSpec,
+    ) -> Result<fork::ForkJobV1, ServerError> {
+        match fork::step(env, &spec.dest, &SliceBudget::new(SLICE_CALLS)).await {
+            Ok(report) => Ok(report.job),
+            Err(error) => fork::read_job(&self.meta, self.shards.as_ref(), &spec.dest)
+                .await
+                .map_err(meta_error)?
+                .map(|(job, _)| job)
+                .filter(|job| fork::CompletedFork::check(job, spec).is_some())
+                .ok_or_else(|| step_error(&error)),
+        }
     }
 
     /// What a request answers about the job it advanced.
@@ -427,7 +452,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         job: fork::ForkJobV1,
         meta: ResponseMeta,
     ) -> Result<(ForkResult, ResponseMeta), ServerError> {
-        match (job.result, job.failure) {
+        match (job.accepted, job.failure) {
             (Some(result), _) => Ok((result, meta)),
             (None, Some(failure)) => Err(failure.error()),
             (None, None) => Err(in_progress()),
@@ -462,6 +487,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             .transpose()
             .map_err(meta_error)?;
         Ok(SourceFacts {
+            access: fork::SourceAccessV1 {
+                visibility: visibility.as_ref().map(|v| v.as_bytes().to_vec()),
+                revision: revision.as_ref().map(|v| v.as_bytes().to_vec()),
+            },
             visibility: self.visibility_applies().then(|| {
                 visibility_of(repo_is_private(
                     stored.as_ref(),

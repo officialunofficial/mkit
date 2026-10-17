@@ -376,8 +376,47 @@ pub const CASES: &[Case] = &[
         features: FORK,
     },
     Case {
+        name: "fork.writer_against_registration",
+        controls: &[
+            "fork.fixture",
+            "fork.invoke",
+            "fork.observe",
+            "fork.destination_gate",
+            "pause.before_acceptance",
+            "decision.fork_destination_claim",
+        ],
+        features: FORK,
+    },
+    Case {
+        name: "fork.writer_against_acceptance",
+        controls: &[
+            "fork.fixture",
+            "fork.invoke",
+            "fork.observe",
+            "fork.destination_gate",
+            "pause.before_acceptance",
+            "decision.fork_acceptance",
+        ],
+        features: FORK,
+    },
+    Case {
+        name: "fork.leased_writer_against_registration",
+        controls: &[
+            "fork.fixture",
+            "fork.invoke",
+            "fork.observe",
+            "fork.destination_gate",
+            "pause.before_acceptance",
+            "decision.writer_authority_ready",
+        ],
+        features: FORK,
+    },
+    Case {
         name: "fork.failed_destination_inert",
         controls: &[
+            "clock.advance",
+            "clock.pin",
+            "restart.graceful",
             "fork.fixture",
             "fork.observe",
             "fork.invoke",
@@ -1214,6 +1253,15 @@ async fn execute_case(name: &str, ctx: Ctx, control: &ControlClient) -> Result<(
         "replay.moves_and_generation" => replay(ctx, control).await,
         "fork.destination_gate_before_acceptance" => {
             crate::controlled_fork::destination_gate_before_acceptance(ctx, control).await
+        }
+        "fork.writer_against_registration" => {
+            crate::controlled_fork::writer_against_registration(ctx, control).await
+        }
+        "fork.writer_against_acceptance" => {
+            crate::controlled_fork::writer_against_acceptance(ctx, control).await
+        }
+        "fork.leased_writer_against_registration" => {
+            crate::controlled_fork::leased_writer_against_registration(ctx, control).await
         }
         "fork.failed_destination_inert" => {
             crate::controlled_fork::failed_destination_inert(ctx, control).await

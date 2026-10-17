@@ -50,6 +50,17 @@ collect the applicable entries between their old and new immutable pins.
   result replay. Acceptance creates no visible membership or destination refs.
   Additive ALPHA API; no wire or stored-format change; no store reset.
 
+- Portable auth-v2 validation, upload-claims binding, and replay classification
+  in `mkit-primitives`, with raw header multiplicity checks, shared vectors,
+  and deterministic claims replay. Hosts retain token formats, key custody,
+  authorization, storage, and atomic application. APIs are additive; no wire
+  or stored-format change or store reset.
+
+- A versioned acceptance-evidence envelope for trusted verifier and writer hosts,
+  with strict bounded decoding, frozen operation binding, canonical digest, and
+  independent head signature rechecking. This adds a library byte contract;
+  existing server paths and stored formats are unchanged. No store reset.
+
 - Add the independently versioned `mkit-primitives` ALPHA contract skeleton.
   It defines opaque verification, closure, and guarded-decision types without
   changing existing runtime paths or wire formats. No migration or store reset.
@@ -115,6 +126,15 @@ collect the applicable entries between their old and new immutable pins.
 - Restore the web terminal's Sandbox SDK pin to 0.12.10, matching the backend
   terminal protocol and restoring the SDK's `xterm` export.
 
+- Auth-v2 servers reject incomplete signed metadata on reads whenever any
+  signature-triggering envelope header is supplied. Repository addressing and
+  an idempotency key alone remain unsigned. Duplicate envelope fields fail
+  closed before routing. Signed reads still bypass replay, and replay never
+  extends envelope validity. The compressed-read check uses the expanded
+  signature-trigger set in every authentication mode. Existing unsigned client
+  writes retain their authentication-mode behavior. No wire schema or stored-format
+  change; no store reset.
+
 - Fork publication absorbs a competing driver's exact witness pair after a
   guard loss. Foreign rows still refuse the fork. Retryable job-step errors
   now carry `Retry-After: 1`, retaining `unavailable` and HTTP 503. Error message
@@ -143,6 +163,10 @@ collect the applicable entries between their old and new immutable pins.
   Embedders can remove their workspace `ruzstd` patch after updating to this
   release. The release pipeline publishes the decoder before the workspace.
   Wire bytes, object budgets, and stored formats are unchanged; no reset.
+
+- Windowed pack checkpoints reuse an incremental BLAKE3 prefix digest.
+  Cold resumes authenticate and rebuild the current prefix once. Cursor bytes,
+  public signatures, refusal order, and final pack integrity checks are unchanged.
 
 - Commonware dependencies accept compatible 2026.x releases. Committed
   lockfiles retain reproducible builds; a weekly and manifest/lockfile PR
@@ -1147,6 +1171,17 @@ collect the applicable entries between their old and new immutable pins.
   URL-token reads, supplied hooks, cold outcome retry and injected slice recovery.
 
 ### Breaking (toward 0.6)
+
+- [embedder: breaking API] [embedder: stored-format change]
+  [embedder: store reset required] Fork jobs retain the authorized source policy,
+  exact authority observations, and accepted result. `Phase::Accept` separates
+  guarded acceptance from published clearance. Acceptance atomically saves replay
+  and settles the reservation; activation never settles it again. Destination
+  writes stay blocked until clearance completes, and failed destinations stay
+  inert. Migration: use `start`, `start_with`, or `start_planned` rather than job
+  literals, handle the new phase in exhaustive matches, and reset pre-production
+  stores before using this format. Source changes after admission use uniform
+  `not_found` instead of the former visibility-change retry response.
 
 - Unstable CLI library API: `remote_dispatch::open_trusted` returns `Remote`
   instead of `Arc<dyn Transport>`. Migration: use `Remote::with_source` to lend

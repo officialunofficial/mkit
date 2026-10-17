@@ -365,6 +365,9 @@ pub enum Request {
         repository: String,
         head: String,
         /// Optional protocol decision class; absent selects ref acceptance.
+        /// `fork_destination_claim` selects first atomic destination exclusion.
+        /// `writer_authority_ready` selects ordinary write acceptance after
+        /// reusable write authority is acquired; resume retains that authority.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         decision_class: Option<String>,
         /// One-based occurrence within this operation's decision class.

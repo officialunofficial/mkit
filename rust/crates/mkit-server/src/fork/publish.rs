@@ -1,6 +1,6 @@
 //! Publishing the inherited membership, last.
 
-use super::{ForkEnv, ForkError, ForkJobV1, plan};
+use super::{ForkEnv, ForkError, ForkJobV1};
 use crate::budget::SliceBudget;
 use crate::indexed::budget::Budgeted;
 use crate::repo::RepoId;
@@ -94,7 +94,7 @@ pub(crate) async fn slice<S: NamespaceStore>(
         // the guarded rows) and the check after it. `job.part` says which.
         let unit = match job.part {
             0 => write_one(env, &store, job, &source, &dest, &id).await,
-            1 => prove(env, &store, &source, &id, job.source_generation).await,
+            1 => clear(env, &store, &dest, &id).await,
             _ => return Err(ForkError::Unavailable("fork publish state")),
         };
         match unit {
@@ -147,7 +147,7 @@ async fn wave<S: NamespaceStore>(
             if stage == WRITES {
                 write_one(env, store, job, source, dest, id).await
             } else {
-                prove(env, store, source, id, job.source_generation).await
+                clear(env, store, dest, id).await
             }
         }))
         .await
@@ -179,17 +179,17 @@ async fn write_one<S: NamespaceStore>(
     env: &ForkEnv<'_, S>,
     store: &Budgeted<'_, S>,
     job: &ForkJobV1,
-    source: &RepoId,
+    _source: &RepoId,
     dest: &RepoId,
     id: &Hash,
 ) -> Result<(), ForkError> {
-    // The source must still publish this exact pair, immediately before the
-    // write: a moved tip fails the fork rather than copy a stale set.
-    let view = plan::read_source(store, env.shards, source, &job.source_ref, &job.tip).await?;
-    if view.packmap != job.packmap || view.generation != job.source_generation {
-        return Err(ForkError::TipChanged);
+    // Installation projects an immutable accepted binding. Source changes
+    // after its final proof are ordered after acceptance, so only the live
+    // destination denial/lifecycle proof is repeated here.
+    if job.accepted.as_ref() != Some(&super::accept::result(job)?) {
+        return Err(ForkError::Unavailable("fork acceptance missing"));
     }
-    prove(env, store, source, id, job.source_generation).await?;
+    clear(env, store, dest, id).await?;
     let witness = Witness {
         generation: super::MEMBERSHIP_GENERATION,
         sequence: 0,
@@ -246,8 +246,8 @@ async fn write_one<S: NamespaceStore>(
     Ok(())
 }
 
-/// The pack-level proof both the plan (to refuse before any write) and the
-/// publish step (immediately around the write) run.
+/// The source proof used by planning and repeated after preparation, before
+/// acceptance. Activation uses the accepted binding and destination checks.
 pub(super) async fn prove<S: NamespaceStore>(
     env: &ForkEnv<'_, S>,
     store: &Budgeted<'_, S>,
@@ -266,8 +266,18 @@ pub(super) async fn prove<S: NamespaceStore>(
     if !member.is_some_and(|w| w.visible(false, generation)) {
         return Err(ForkError::NotFound);
     }
+    clear(env, store, source, id).await
+}
+
+/// Current denial and lifecycle proof for an accepted destination pack.
+async fn clear<S: NamespaceStore>(
+    env: &ForkEnv<'_, S>,
+    store: &Budgeted<'_, S>,
+    repo: &RepoId,
+    id: &Hash,
+) -> Result<(), ForkError> {
     let clear = if env.takedown_denial {
-        denial::require_pack_clear_sealed(store, env.shards, source, id).await
+        denial::require_pack_clear_sealed(store, env.shards, repo, id).await
     } else {
         denial::require_clear(
             &crate::store::DenialReads::new(store, env.takedown_denial),
