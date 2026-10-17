@@ -95,7 +95,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [closure_steps, closure_pages]
+        target: [closure_steps, closure_pages, pair_steps, pair_checkpoint]
     env:
       CARGO_BUILD_JOBS: 3
     steps:

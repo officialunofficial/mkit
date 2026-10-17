@@ -3955,9 +3955,38 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             (!self.inspectors.is_empty())
                 .then_some(&inspection::Immediate as &dyn clearance::PublicationPolicy)
         });
+        // Pair coverage is required exactly when a policy regime exists and no
+        // written ref is deleted; the gate stays identical to the previous
+        // policy.is_some() && all-new condition.
+        let requirement = mkit_primitives::closure::pair::pair_requirement(
+            mkit_primitives::closure::pair::PairConfig {
+                #[cfg(feature = "remote-hooks")]
+                inspectors: !self.inspectors.is_empty(),
+                #[cfg(not(feature = "remote-hooks"))]
+                inspectors: false,
+                takedown: self.cfg.takedown_denial,
+                custom_policy: self.publication_policy.is_some(),
+            },
+            if req.refs.iter().all(|update| update.new.is_some()) {
+                mkit_primitives::closure::pair::PairWrite::Advance
+            } else {
+                mkit_primitives::closure::pair::PairWrite::Deletion
+            },
+        );
+        debug_assert_eq!(
+            matches!(
+                requirement,
+                mkit_primitives::closure::pair::PairRequirement::Required
+            ),
+            policy.is_some() && req.refs.iter().all(|update| update.new.is_some()),
+            "pair requirement must agree with the existing policy gate"
+        );
         if let Some(policy) = policy
             && !req.refs.is_empty()
-            && req.refs.iter().all(|update| update.new.is_some())
+            && matches!(
+                requirement,
+                mkit_primitives::closure::pair::PairRequirement::Required
+            )
         {
             let snapshot = ahead.get_or_insert_with(Snapshot::default);
             let settlement = crate::indexed::budget::Budgeted::new(&self.meta, budget.root());
@@ -4098,6 +4127,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     ms(self.clock.now_ms()),
                     self.metrics.as_ref(),
                     created,
+                    branch,
                     Some(budget.proof()),
                     Some(budget.root()),
                 ))

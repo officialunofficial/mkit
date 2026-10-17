@@ -1,0 +1,1 @@
+Pair checkpoint version 1, chain phase. Resulting pair head=0x0a*32, packmap=0x01*32, branch set; additions [0x01,0x09]; no chain applied; queue holds the head. Domain: mkit-pair-checkpoint:v1.

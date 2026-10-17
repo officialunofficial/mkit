@@ -81,6 +81,9 @@ pub enum FailureCode {
     /// Required object kind mismatch.
     #[error("WrongKind")]
     WrongKind,
+    /// A packmap chain node repeated an earlier node.
+    #[error("PackmapCycle")]
+    PackmapCycle,
     // infrastructure
     /// Caller execution budget exhausted.
     #[error("ResourceLimit")]
@@ -201,6 +204,7 @@ impl FailureCode {
             Self::PackfileTooShort => "PackfileTooShort",
             Self::MissingClosure => "MissingClosure",
             Self::WrongKind => "WrongKind",
+            Self::PackmapCycle => "PackmapCycle",
             Self::ResourceLimit => "ResourceLimit",
             Self::UnavailableInput => "UnavailableInput",
             Self::InvalidResponse => "InvalidResponse",
@@ -300,6 +304,7 @@ mod tests {
             FailureCode::PackfileTooShort.as_str(),
             FailureCode::MissingClosure.as_str(),
             FailureCode::WrongKind.as_str(),
+            FailureCode::PackmapCycle.as_str(),
             FailureCode::ResourceLimit.as_str(),
             FailureCode::UnavailableInput.as_str(),
             FailureCode::InvalidResponse.as_str(),

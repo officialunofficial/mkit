@@ -385,6 +385,10 @@ mod tests {
 pub mod closure;
 /// Authenticated closure page grammars and canonical reencoding.
 pub mod closure_pages;
+/// Adversarial pair-machine transitions with hostile answers and resume.
+pub mod pair;
+/// Local pair-checkpoint decoding under corrupted input.
+pub mod pair_checkpoint;
 // auth
 pub mod auth_claims;
 // acceptance evidence

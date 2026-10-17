@@ -211,6 +211,7 @@ pub mod edges;
 mod journal;
 pub mod limits;
 pub mod output;
+pub mod pair;
 mod walker;
 pub use walker::{
     CanonicalSource, ClosureCheck, ClosureDiagnostics, ClosureFailureContext, ClosurePage,
