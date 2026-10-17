@@ -404,6 +404,7 @@ impl HostState {
         let mut reply = Response::default();
         match request {
             Request::ObservePublication { query } => {
+                self.require_publication()?;
                 reply.publication_observation =
                     Some(self.observe_publication(query).await.map_err(bad)?);
             }
@@ -412,10 +413,12 @@ impl HostState {
                 head,
                 eligible,
             } => {
+                self.require_publication()?;
                 self.set_publication_eligibility(&repository, &head, eligible)
                     .map_err(bad)?;
             }
             Request::DrivePublication { repository, head } => {
+                self.require_publication()?;
                 self.drive_publication(&repository, &head)
                     .await
                     .map_err(bad)?;
@@ -495,6 +498,16 @@ impl HostState {
             }
         }
         Ok(reply)
+    }
+
+    fn require_publication(&self) -> Result<(), (http::StatusCode, String)> {
+        if self.config.indexed.is_none() {
+            return Err((
+                http::StatusCode::NOT_IMPLEMENTED,
+                "requires indexed publication profile".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn advance_clock(&self, delta_ms: u64) -> Result<i64, String> {

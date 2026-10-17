@@ -1110,14 +1110,6 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Breaking (toward 0.6)
 
-- The conformance profile adds `combined-publication`, `gc`, and
-  `async-inspection`, with feature-gated publication and removal-race cases.
-  Test-control messages add typed publication and reliance observations.
-  Migration: exhaustive `Feature` and control-message matches must handle the
-  new variants; declare only implemented optional features. New optional result
-  fields are omitted when absent. No production wire or stored-format change;
-  no wipe.
-
 - Unstable CLI library API: `remote_dispatch::open_trusted` returns `Remote`
   instead of `Arc<dyn Transport>`. Migration: use `Remote::with_source` to lend
   the configured source for a complete repository operation. Existing public

@@ -519,30 +519,49 @@ async fn combined_race(ctx: Ctx, control: &ControlClient) -> CaseResult {
                 ),
                 "combined race returned wrong refusal: {error}"
             );
-            ensure!(
-                after.acceptance.head == recreated.acceptance.head
-                    && after.published_head == recreated.published_head
-                    && after.published_packmap == recreated.published_packmap
-                    && after.deletion_boundary == recreated.deletion_boundary
-                    && after.published_memberships == [false, false]
-                    && after.acceptance.memberships == [false, false]
-                    && after.acceptance.tickets == recreated.acceptance.tickets
-                    && after.acceptance.quota == recreated.acceptance.quota
-                    && after
-                        .acceptance
-                        .replay
-                        .as_ref()
-                        .is_none_or(|r| r.result.as_deref() != Some("advance_committed"))
-                    && after.acceptance.reservations.iter().take(2).eq(recreated
-                        .acceptance
-                        .reservations
-                        .iter()
-                        .take(2)),
-                "failed combined commit exposed candidate: {after:?}"
-            );
+            refused_combination(&recreated, &after)?;
         }
         other => return Err(format!("unexpected combined race result: {other:?}").into()),
     }
+    Ok(())
+}
+
+fn refused_combination(
+    recreated: &PublicationObservation,
+    after: &PublicationObservation,
+) -> CaseResult {
+    ensure!(
+        after.acceptance.head == recreated.acceptance.head
+            && after.acceptance.packmap == recreated.acceptance.packmap
+            && after.live_sequence == recreated.live_sequence
+            && after.published_sequence == recreated.published_sequence
+            && after.published_head == recreated.published_head
+            && after.published_packmap == recreated.published_packmap
+            && after.deletion_boundary == recreated.deletion_boundary
+            && after.published_memberships == [false, false]
+            && after.acceptance.memberships == [false, false]
+            && after.acceptance.tickets == recreated.acceptance.tickets
+            && after.acceptance.quota == recreated.acceptance.quota
+            && after
+                .acceptance
+                .replay
+                .as_ref()
+                .is_none_or(|r| r.result.as_deref() != Some("advance_committed"))
+            && recreated.acceptance.reservations.len() == 3
+            && after.acceptance.reservations.len() == 3
+            && after.acceptance.reservations[2].as_ref().is_none_or(|r| {
+                matches!(
+                    (r.state.as_str(), r.terminal_count),
+                    ("pending", 0) | ("aborted" | "expired", 1)
+                )
+            })
+            && after.acceptance.reservations.iter().take(2).eq(recreated
+                .acceptance
+                .reservations
+                .iter()
+                .take(2)),
+        "failed combined commit exposed candidate: {after:?}"
+    );
     Ok(())
 }
 
@@ -554,5 +573,124 @@ pub(crate) async fn run(name: &str, ctx: Ctx, control: &ControlClient) -> CaseRe
         "publication.combined_acceptance" => combined(ctx, control).await,
         "publication.combined_deletion_race" => combined_race(ctx, control).await,
         _ => unreachable!("registered publication case"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::control::{Observation, ReservationView, TicketView};
+
+    fn refused_snapshot() -> PublicationObservation {
+        PublicationObservation {
+            acceptance: Observation {
+                head: Some("head".into()),
+                packmap: Some("packmap".into()),
+                replay: None,
+                tickets: vec![
+                    Some(TicketView {
+                        state: "live".into()
+                    });
+                    2
+                ],
+                reservations: vec![
+                    Some(ReservationView {
+                        state: "ticketed".into(),
+                        terminal_count: 0,
+                    }),
+                    Some(ReservationView {
+                        state: "ticketed".into(),
+                        terminal_count: 0,
+                    }),
+                    Some(ReservationView {
+                        state: "pending".into(),
+                        terminal_count: 0,
+                    }),
+                ],
+                memberships: vec![false, false],
+                quota: None,
+            },
+            published_head: Some("head".into()),
+            published_packmap: Some("packmap".into()),
+            live_sequence: 3,
+            published_sequence: 3,
+            deletion_boundary: 2,
+            published_memberships: vec![false, false],
+        }
+    }
+
+    #[test]
+    fn refused_combination_allows_only_uncommitted_ref_lifecycle() {
+        let before = refused_snapshot();
+        for reservation in [
+            None,
+            Some(ReservationView {
+                state: "pending".into(),
+                terminal_count: 0,
+            }),
+            Some(ReservationView {
+                state: "aborted".into(),
+                terminal_count: 1,
+            }),
+            Some(ReservationView {
+                state: "expired".into(),
+                terminal_count: 1,
+            }),
+        ] {
+            let mut after = before.clone();
+            after.acceptance.reservations[2] = reservation;
+            assert!(refused_combination(&before, &after).is_ok());
+        }
+        for (state, terminal_count) in [
+            ("pending", 1),
+            ("aborted", 2),
+            ("expired", 2),
+            ("ticketed", 0),
+        ] {
+            let mut after = before.clone();
+            after.acceptance.reservations[2] = Some(ReservationView {
+                state: state.into(),
+                terminal_count,
+            });
+            assert!(refused_combination(&before, &after).is_err());
+        }
+        for len in [0, 1, 2, 4] {
+            let mut after = before.clone();
+            after.acceptance.reservations.resize(len, None);
+            assert!(refused_combination(&before, &after).is_err());
+        }
+    }
+
+    #[test]
+    fn refused_combination_rejects_a_torn_live_pair() {
+        let before = refused_snapshot();
+        let mut after = before.clone();
+        after.acceptance.packmap = Some("candidate-packmap".into());
+        assert!(refused_combination(&before, &after).is_err());
+    }
+
+    #[test]
+    fn refused_combination_rejects_a_committed_ref_reservation() {
+        let before = refused_snapshot();
+        let mut after = before.clone();
+        after.acceptance.reservations[2] = Some(ReservationView {
+            state: "committed".into(),
+            terminal_count: 1,
+        });
+        assert!(refused_combination(&before, &after).is_err());
+    }
+
+    #[test]
+    fn refused_combination_rejects_changed_sequences() {
+        let before = refused_snapshot();
+        for published in [false, true] {
+            let mut after = before.clone();
+            if published {
+                after.published_sequence += 1;
+            } else {
+                after.live_sequence += 1;
+            }
+            assert!(refused_combination(&before, &after).is_err());
+        }
     }
 }
