@@ -2,6 +2,546 @@ schema_version = 1
 # No encoded types or decoders exist in the skeleton. Owners append entries
 # under their module section when the implementation and fixtures land.
 # evidence
+# Acceptance evidence: canonical bytes, finite configurations, and semantic outcomes.
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/bad-magic.bin"
+semantic = "acceptance/bad-magic.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "NonCanonicalEvidence"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/boundary.bin"
+semantic = "acceptance/boundary.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "ok"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/delta-count-exceeds-object-count.bin"
+semantic = "acceptance/delta-count-exceeds-object-count.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "NonCanonicalEvidence"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/dependencies-cap-plus-one.bin"
+semantic = "acceptance/dependencies-cap-plus-one.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "ResourceLimit"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 3, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/dependencies-cap.bin"
+semantic = "acceptance/dependencies-cap.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "ok"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 3, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/dependency-count-overflow.bin"
+semantic = "acceptance/dependency-count-overflow.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "ResourceLimit"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/dependency-count-truncated.bin"
+semantic = "acceptance/dependency-count-truncated.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "UnexpectedEof"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4294967295, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/duplicate-dependencies.bin"
+semantic = "acceptance/duplicate-dependencies.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "NonCanonicalEvidence"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/duplicate-heads.bin"
+semantic = "acceptance/duplicate-heads.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "NonCanonicalEvidence"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/empty-head-bytes.bin"
+semantic = "acceptance/empty-head-bytes.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "NonCanonicalEvidence"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/envelope-cap-plus-one.bin"
+semantic = "acceptance/envelope-cap-plus-one.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "ResourceLimit"
+decode_config = "{\"max_envelope_bytes\": 205, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/envelope-cap.bin"
+semantic = "acceptance/envelope-cap.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "ok"
+decode_config = "{\"max_envelope_bytes\": 206, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/head-bytes-cap-plus-one.bin"
+semantic = "acceptance/head-bytes-cap-plus-one.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "ResourceLimit"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 3, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/head-bytes-cap.bin"
+semantic = "acceptance/head-bytes-cap.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "ok"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 3, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/head-count-overflow.bin"
+semantic = "acceptance/head-count-overflow.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "ResourceLimit"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/head-count-truncated.bin"
+semantic = "acceptance/head-count-truncated.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "UnexpectedEof"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4294967295, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/head-kind-mismatch.bin"
+semantic = "acceptance/head-kind-mismatch.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "NonCanonicalEvidence"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/head-length-overflow.bin"
+semantic = "acceptance/head-length-overflow.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "ResourceLimit"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/head-length-truncated.bin"
+semantic = "acceptance/head-length-truncated.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "UnexpectedEof"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 4294967295, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/heads-cap-plus-one.bin"
+semantic = "acceptance/heads-cap-plus-one.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "ResourceLimit"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 3, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/heads-cap.bin"
+semantic = "acceptance/heads-cap.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "ok"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 3, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/minimal.bin"
+semantic = "acceptance/minimal.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "ok"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/operation-cap-plus-one.bin"
+semantic = "acceptance/operation-cap-plus-one.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "ResourceLimit"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 3, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/operation-cap.bin"
+semantic = "acceptance/operation-cap.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "ok"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 3, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/operation-length-overflow.bin"
+semantic = "acceptance/operation-length-overflow.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "ResourceLimit"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/operation-length-truncated.bin"
+semantic = "acceptance/operation-length-truncated.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "UnexpectedEof"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 4294967295, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/representative.bin"
+semantic = "acceptance/representative.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "ok"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 1024, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 3072, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/total-head-bytes-cap-plus-one.bin"
+semantic = "acceptance/total-head-bytes-cap-plus-one.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "ResourceLimit"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 3, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/total-head-bytes-cap.bin"
+semantic = "acceptance/total-head-bytes-cap.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "ok"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 3, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/trailing-bytes.bin"
+semantic = "acceptance/trailing-bytes.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "NonCanonicalEvidence"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/truncated-dependency.bin"
+semantic = "acceptance/truncated-dependency.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "UnexpectedEof"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/truncated-head-payload.bin"
+semantic = "acceptance/truncated-head-payload.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "UnexpectedEof"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/truncated-head.bin"
+semantic = "acceptance/truncated-head.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "UnexpectedEof"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/truncated-magic.bin"
+semantic = "acceptance/truncated-magic.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "UnexpectedEof"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/truncated-operation-prefix.bin"
+semantic = "acceptance/truncated-operation-prefix.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "UnexpectedEof"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/truncated-pack.bin"
+semantic = "acceptance/truncated-pack.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "UnexpectedEof"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/truncated-profile.bin"
+semantic = "acceptance/truncated-profile.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "UnexpectedEof"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/truncated-repository.bin"
+semantic = "acceptance/truncated-repository.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "UnexpectedEof"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/truncated-version.bin"
+semantic = "acceptance/truncated-version.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "UnexpectedEof"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/truncated-witness.bin"
+semantic = "acceptance/truncated-witness.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "UnexpectedEof"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/unknown-head-kind.bin"
+semantic = "acceptance/unknown-head-kind.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "NonCanonicalEvidence"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/unknown-signature-tag.bin"
+semantic = "acceptance/unknown-signature-tag.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "NonCanonicalEvidence"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/unknown-version.bin"
+semantic = "acceptance/unknown-version.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "UnsupportedEvidenceVersion"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/unordered-dependencies.bin"
+semantic = "acceptance/unordered-dependencies.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "NonCanonicalEvidence"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/unordered-heads.bin"
+semantic = "acceptance/unordered-heads.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "NonCanonicalEvidence"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/wrong-profile.bin"
+semantic = "acceptance/wrong-profile.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "EvidenceProfileMismatch"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/wrong-ruleset.bin"
+semantic = "acceptance/wrong-ruleset.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "EvidenceProfileMismatch"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/zero-signature-tag.bin"
+semantic = "acceptance/zero-signature-tag.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "NonCanonicalEvidence"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
+[[fixtures]]
+type = "AcceptanceEvidence"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance/zero-version.bin"
+semantic = "acceptance/zero-version.json"
+spec = "SPEC-ACCEPTANCE-EVIDENCE#2-canonical-binary-encoding"
+expected = "UnsupportedEvidenceVersion"
+decode_config = "{\"max_envelope_bytes\": 4096, \"max_external_dependencies\": 4, \"max_head_bytes\": 32, \"max_heads\": 4, \"max_operation_bytes\": 32, \"max_total_head_bytes\": 96, \"profile_limits_digest\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"ruleset_id\": 1}"
+
 # pack_verify
 # closure
 [[fixtures]]

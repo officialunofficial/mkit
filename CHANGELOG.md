@@ -50,6 +50,11 @@ collect the applicable entries between their old and new immutable pins.
   authorization, storage, and atomic application. APIs are additive; no wire
   or stored-format change or store reset.
 
+- A versioned acceptance-evidence envelope for trusted verifier and writer hosts,
+  with strict bounded decoding, frozen operation binding, canonical digest, and
+  independent head signature rechecking. This adds a library byte contract;
+  existing server paths and stored formats are unchanged. No store reset.
+
 - Add the independently versioned `mkit-primitives` ALPHA contract skeleton.
   It defines opaque verification, closure, and guarded-decision types without
   changing existing runtime paths or wire formats. No migration or store reset.

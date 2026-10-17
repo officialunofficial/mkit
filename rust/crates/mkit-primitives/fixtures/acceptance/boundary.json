@@ -1,0 +1,47 @@
+{
+  "description": "Maximum u64 values and operation bytes at the configured cap.",
+  "cfg": {
+    "max_envelope_bytes": 4096,
+    "max_operation_bytes": 32,
+    "max_heads": 4,
+    "max_head_bytes": 32,
+    "max_total_head_bytes": 96,
+    "max_external_dependencies": 4,
+    "ruleset_id": 1,
+    "profile_limits_digest": "1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "expected": {
+    "decode": "ok",
+    "failure_code": null,
+    "digest": "fba2715dff7d0345482a8dec13edf251bc8fd28aaf031b9ff7d89a05c02b7011",
+    "recheck_heads": "NonCanonicalObject"
+  },
+  "encoded_len": 309,
+  "semantic": {
+    "ruleset_id": 1,
+    "profile_limits_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+    "repository": "2222222222222222222222222222222222222222222222222222222222222222",
+    "operation": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "epoch": "18446744073709551615",
+    "pack": {
+      "id": "3333333333333333333333333333333333333333333333333333333333333333",
+      "len": "18446744073709551615",
+      "object_count": "18446744073709551615",
+      "delta_count": "18446744073709551615",
+      "object_set_root": "4444444444444444444444444444444444444444444444444444444444444444"
+    },
+    "heads": [
+      {
+        "object_id": "0101010101010101010101010101010101010101010101010101010101010101",
+        "kind": 3,
+        "signer": "5555555555555555555555555555555555555555555555555555555555555555",
+        "signature_result": 1,
+        "canonical_bytes": "03"
+      }
+    ],
+    "external_dependencies": [],
+    "membership_generation": "18446744073709551615",
+    "removal_version": "18446744073709551615",
+    "denial_version": "18446744073709551615"
+  }
+}

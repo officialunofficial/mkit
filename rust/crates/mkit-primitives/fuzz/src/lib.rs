@@ -44,3 +44,7 @@ pub mod closure;
 pub mod closure_pages;
 // auth
 pub mod auth_claims;
+// acceptance evidence
+pub mod acceptance;
+#[cfg(test)]
+mod acceptance_seed_tests;

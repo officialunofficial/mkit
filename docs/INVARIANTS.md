@@ -2975,3 +2975,19 @@ these checks before repository routing in AuthV2 mode, preserves raw header
 presence through verification, and retains the other authentication modes.
 All write methods that emit unsigned client timestamps already require a full
 envelope in AuthV2 mode; the visibility-statement exception emits no timestamps.
+
+## Acceptance evidence does not confer acceptance authority
+
+**Always:** portable evidence is bounded by explicit byte and record caps, binds
+the exact frozen pack and operation, and carries only head and dependency facts.
+Decoding never constructs verified packs, closure proofs, or guarded decisions.
+
+**Because:** verifier and writer processes may share a trust domain while holding
+different immutable pack records and live membership or denial observations.
+
+**If violated:** substituted or replayed evidence could bypass acceptance guards,
+or object-count-sized payloads could exhaust writer memory.
+
+**Enforced by:** `AcceptanceEvidence::decode`, `check_binding`, `recheck_heads`,
+and acceptance-evidence codec, binding, and signature regression tests. The host
+authenticates origin and atomically checks live guards; the library does not.
