@@ -79,6 +79,18 @@ signaled child on stdout; Cargo's JSON output consumed by nextest can hide that
 message. Measure the Linux compiler rather than extrapolating native RSS from
 a different platform.
 
+## Test failure reporting
+
+Every nextest invocation in `ci.yaml` runs with `--no-fail-fast`, overriding the
+default profile's `fail-fast = true` (`rust/.config/nextest.toml`), so one
+failing test reports the run's complete failure set instead of cancelling it.
+Inside the `check` step, each command after the workspace build and TPM setup
+still runs after an earlier failure (a `cd` into a missing tree aborts only
+its own subshell, via `|| exit 1`): failures are recorded and the step exits
+non-zero at the end. Timeouts, retries and
+test selection stay at the default profile's values &mdash; the `ci` profile's
+longer envelopes and retries are not used here.
+
 ## Diagnosing main test failures
 
 At `e3440bd0`, [the macOS test run](https://github.com/officialunofficial/mkit/actions/runs/37141273001)
