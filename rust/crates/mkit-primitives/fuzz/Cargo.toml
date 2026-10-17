@@ -100,6 +100,14 @@ bench = false
 required-features = ["libfuzzer"]
 
 [[bin]]
+name = "verify"
+path = "fuzz_targets/verify.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
 name = "page"
 path = "fuzz_targets/page.rs"
 test = false

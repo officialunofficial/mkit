@@ -259,6 +259,7 @@ impl FramingDriver {
                         trailer_used: f.trailer_used,
                     }),
                     cursor: &cursor,
+                    verify: None,
                 },
                 self.limits,
             )

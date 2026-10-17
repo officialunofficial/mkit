@@ -206,6 +206,7 @@ fn altered(cp: &Checkpoint, change: impl FnOnce(&mut CheckpointMeta)) -> Checkpo
             meta,
             integrity: None,
             cursor: &state.cursor,
+            verify: None,
         },
         meta.limits,
     )
@@ -410,6 +411,7 @@ fn decode_resume_requires_the_cursors_expected_whole_pack_identity() {
             meta: cp.meta(),
             integrity: None,
             cursor: &cursor_bytes,
+            verify: None,
         },
         limits(),
     )

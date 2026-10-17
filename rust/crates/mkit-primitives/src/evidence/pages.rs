@@ -265,6 +265,8 @@ pub(crate) fn kind_byte(kind: PageKind) -> u8 {
         PageKind::Occurrences => 1,
         PageKind::Dependencies => 2,
         PageKind::Closure => 3,
+        PageKind::Heads => 4,
+        PageKind::Ordinals => 5,
     }
 }
 
@@ -274,6 +276,8 @@ pub(crate) fn read_kind(cursor: &mut Cursor<'_, '_>) -> Result<PageKind, Failure
         1 => Ok(PageKind::Occurrences),
         2 => Ok(PageKind::Dependencies),
         3 => Ok(PageKind::Closure),
+        4 => Ok(PageKind::Heads),
+        5 => Ok(PageKind::Ordinals),
         _ => Err(failure(FailureCode::InvalidEvidence)),
     }
 }
@@ -565,6 +569,8 @@ mod tests {
         );
         assert_eq!(HEADER_BYTES, u64::try_from(EMPTY.len()).unwrap());
         assert_eq!(kind_byte(PageKind::Closure), 3);
+        assert_eq!(kind_byte(PageKind::Heads), 4);
+        assert_eq!(kind_byte(PageKind::Ordinals), 5);
     }
 
     #[test]
@@ -574,7 +580,7 @@ mod tests {
             (110, 2, FailureCode::UnsupportedRuleset),
             (114, 2, FailureCode::UnsupportedRuleset),
             (6, 8, FailureCode::SourceChanged),
-            (115, 4, FailureCode::InvalidEvidence),
+            (115, 6, FailureCode::InvalidEvidence),
             (116, 33, FailureCode::InvalidEvidence),
             (117, 17, FailureCode::InvalidEvidence),
         ] {
