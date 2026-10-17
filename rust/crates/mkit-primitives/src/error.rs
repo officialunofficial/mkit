@@ -319,5 +319,15 @@ mod tests {
         ];
         let unique: std::collections::BTreeSet<_> = codes.into_iter().collect();
         assert_eq!(unique.len(), codes.len());
+        let registered: std::collections::BTreeSet<_> =
+            include_str!("../fixtures/error/failure-codes.txt")
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .collect();
+        assert_eq!(
+            unique, registered,
+            "stable code registry must match the API"
+        );
     }
 }
