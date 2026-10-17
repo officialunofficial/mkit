@@ -235,14 +235,8 @@ fn stream_digest_values_preserve_core_acceptance() {
             nonce: fixture["nonce"].as_str().unwrap(),
         };
         let mut h = signed(operation);
-        let baseline = validate_envelope(
-            &h,
-            operation.context,
-            path,
-            expected,
-            operation.created_at,
-        )
-        .unwrap();
+        let baseline =
+            validate_envelope(&h, operation.context, path, expected, operation.created_at).unwrap();
         for digest in [None, Some(""), Some("garbage"), Some("AA")] {
             h.digest = digest.map(str::to_owned);
             let mut counts = [1; 10];
@@ -621,7 +615,7 @@ fn trigger_headers_require_complete_unique_envelopes() {
             missing[index] = 0;
             assert_eq!(
                 inspect_headers(&missing, requires_digest).is_err(),
-                index != 5 || requires_digest,
+                index != 2 && (index != 5 || requires_digest),
                 "missing {}",
                 HEADER_NAMES[index]
             );
@@ -657,4 +651,115 @@ fn fixture_header_presence_matrix() {
         };
         assert_eq!(actual, case["expected"].as_str().unwrap(), "{case}");
     }
+}
+
+#[test]
+fn missing_repository_header_is_addressing_not_an_envelope_failure() {
+    // X-Repository is addressing, not an envelope field: an otherwise complete
+    // envelope still reports Present so host routing classifies its absence.
+    let mut counts = [1; 10];
+    counts[2] = 0;
+    assert_eq!(
+        inspect_headers(&counts, true).unwrap(),
+        EnvelopePresence::Present
+    );
+    // A duplicate repository field remains an envelope multiplicity failure.
+    counts[2] = 2;
+    let failure = inspect_headers(&counts, true).unwrap_err();
+    assert_eq!(failure.code(), FailureCode::InvalidEnvelope);
+    assert_eq!(failure.reason(), "duplicate auth v2 header");
+}
+
+#[test]
+fn missing_header_diagnostics_match_reference_for_unary_and_stream_envelopes() {
+    for (fixture, requires_digest) in [
+        (include_str!("../../fixtures/auth/unary.json"), true),
+        (include_str!("../../fixtures/auth/part.json"), false),
+    ] {
+        let fixture: Value = serde_json::from_str(fixture).unwrap();
+        for index in 0..HEADER_NAMES.len() {
+            let mut h = headers(&fixture);
+            let field = match index {
+                0 => &mut h.version,
+                1 => &mut h.audience,
+                2 => &mut h.repository,
+                3 => &mut h.public_key,
+                4 => &mut h.signature,
+                5 => &mut h.digest,
+                6 => &mut h.commitment,
+                7 => &mut h.created_at,
+                8 => &mut h.expires_at,
+                9 => &mut h.idempotency_key,
+                _ => unreachable!(),
+            };
+            *field = None;
+            let mut counts = [1; 10];
+            counts[index] = 0;
+            if !requires_digest {
+                counts[5] = 0;
+            }
+            if index == 5 && !requires_digest {
+                assert_eq!(
+                    inspect_headers(&counts, false).unwrap(),
+                    EnvelopePresence::Present
+                );
+                continue;
+            }
+            if index == 2 {
+                // Repository addressing is not an envelope field; routing
+                // classifies its absence per deployment mode.
+                assert_eq!(
+                    inspect_headers(&counts, requires_digest).unwrap(),
+                    EnvelopePresence::Present
+                );
+                continue;
+            }
+            let reference = write_auth::verify_headers_with(
+                Context {
+                    audience: fixture["audience"].as_str().unwrap(),
+                    repository: fixture["repository"].as_str().unwrap(),
+                },
+                fixture["procedure"].as_str().unwrap(),
+                if requires_digest {
+                    ExpectedCommitment::Exact(fixture["commitment"].as_str().unwrap())
+                } else {
+                    ExpectedCommitment::PartStream
+                },
+                fixture["created_at"].as_i64().unwrap(),
+                &h,
+            )
+            .unwrap_err()
+            .0;
+            let failure = inspect_headers(&counts, requires_digest).unwrap_err();
+            assert_eq!(failure.code(), FailureCode::InvalidEnvelope);
+            assert_eq!(
+                failure.reason(),
+                reference,
+                "missing {}",
+                HEADER_NAMES[index]
+            );
+        }
+    }
+}
+
+#[test]
+fn missing_header_precedence_keeps_the_duplicate_check_first() {
+    let mut counts = [0; 10];
+    counts[7] = 1;
+    assert_eq!(
+        inspect_headers(&counts, true).unwrap_err().reason(),
+        "auth v2 required"
+    );
+    counts[7] = 2;
+    assert_eq!(
+        inspect_headers(&counts, true).unwrap_err().reason(),
+        "duplicate auth v2 header"
+    );
+    // A missing repository field does not displace the envelope order.
+    counts[7] = 1;
+    counts[2] = 1;
+    assert_eq!(
+        inspect_headers(&counts, true).unwrap_err().reason(),
+        "auth v2 required"
+    );
 }

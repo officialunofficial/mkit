@@ -163,6 +163,13 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Fixed
 
+- Preserve reference diagnostics for partial signed envelopes in the portable
+  auth header precheck, including a missing version, audience, content
+  commitment, validity, signature, idempotency key, or unary body digest. A
+  missing X-Repository stays with routing, which classifies it per deployment
+  (`invalid_argument` on multi, `unauthenticated` on single). Authentication
+  codes, duplicate rejection, and verification order remain unchanged.
+
 - Unfenced multipart and stream writes no longer read the fork permit marker
   during authority activation. That marker is consulted only when fencing is
   enabled, inside the existing activation read. A full coordinator partition
