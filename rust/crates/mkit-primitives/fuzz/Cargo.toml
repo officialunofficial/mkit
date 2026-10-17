@@ -49,3 +49,11 @@ required-features = ["libfuzzer"]
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "acceptance_decode"
+path = "fuzz_targets/acceptance_decode.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]

@@ -54,6 +54,11 @@ collect the applicable entries between their old and new immutable pins.
   authorization, storage, and atomic application. APIs are additive; no wire
   or stored-format change or store reset.
 
+- A versioned acceptance-evidence envelope for trusted verifier and writer hosts,
+  with strict bounded decoding, frozen operation binding, canonical digest, and
+  independent head signature rechecking. This adds a library byte contract;
+  existing server paths and stored formats are unchanged. No store reset.
+
 - Add the independently versioned `mkit-primitives` ALPHA contract skeleton.
   It defines opaque verification, closure, and guarded-decision types without
   changing existing runtime paths or wire formats. No migration or store reset.
@@ -150,6 +155,10 @@ collect the applicable entries between their old and new immutable pins.
   public APIs, and wire formats are unchanged; no store reset is required.
 
 ### Changed
+
+- Windowed pack checkpoints reuse an incremental BLAKE3 prefix digest.
+  Cold resumes authenticate and rebuild the current prefix once. Cursor bytes,
+  public signatures, refusal order, and final pack integrity checks are unchanged.
 
 - Commonware dependencies accept compatible 2026.x releases. Committed
   lockfiles retain reproducible builds; a weekly and manifest/lockfile PR
