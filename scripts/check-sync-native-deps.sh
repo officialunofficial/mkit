@@ -33,7 +33,7 @@ err() {
   fail=1
 }
 
-banned=(zstd zstd-safe zstd-sys aws-lc-rs aws-lc-sys openssl openssl-sys native-tls
+banned=(ruzstd zstd zstd-safe zstd-sys aws-lc-rs aws-lc-sys openssl openssl-sys native-tls
   rustls-native-certs brotli async-compression brotli-decompressor libz-sys hyper-tls h2 connectrpc reqwest)
 
 check_row() {
@@ -63,7 +63,7 @@ check_row() {
     grep -q "^$pkg " <<<"$tree" || err "[$features] the graph lacks $pkg"
   done
   if [ "$want_ruzstd" = yes ]; then
-    grep -q '^ruzstd ' <<<"$tree" || err "[$features] the graph lacks ruzstd"
+    grep -q '^mkit-ruzstd ' <<<"$tree" || err "[$features] the graph lacks mkit-ruzstd"
   fi
   # The graph is not the build: compile the row so a cfg or feature break
   # specific to it cannot merge unnoticed.

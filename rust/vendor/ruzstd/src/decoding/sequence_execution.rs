@@ -54,7 +54,6 @@ pub fn execute_sequences(
 
         seq_sum += seq.ml;
         seq_sum += seq.ll;
-
     }
     if literals_copy_counter < scratch.literals_buffer.len() {
         let rest_literals = &scratch.literals_buffer[literals_copy_counter..];

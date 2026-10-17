@@ -9,7 +9,7 @@
 # keep them out (see crates/mkit-core/Cargo.toml and
 # crates/mkit-attest/Cargo.toml's wasm comments). It also checks the
 # `mkit-core --no-default-features --features pack-ruzstd` graph (the
-# decode-only pure-Rust zstd backend) both contains `ruzstd` and stays
+# decode-only pure-Rust zstd backend) both contains `mkit-ruzstd` and stays
 # C-free. This is a fast `cargo
 # tree` check, not a build: it does not replace
 # `cargo build --target wasm32-unknown-unknown`, only catches a
@@ -22,6 +22,8 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+
+python3 scripts/check-named-ruzstd.py
 
 fail=0
 
@@ -83,10 +85,10 @@ check_tree() {
   done
 }
 
-# `ruzstd` is forbidden in mkit-wasm to make its raw-only decision explicit
+# Both decoder packages are forbidden in mkit-wasm to keep it raw-only
 # (SPEC-DISCLOSURE §7.2); drop it from that list when mkit-wasm opts into
 # `pack-ruzstd`.
-check_tree "mkit-wasm" "rust/crates/mkit-wasm" "" "" blst zstd-sys commonware-runtime commonware-storage tokio ruzstd
+check_tree "mkit-wasm" "rust/crates/mkit-wasm" "" "" blst zstd-sys commonware-runtime commonware-storage tokio ruzstd mkit-ruzstd
 check_tree "apps/repo-worker" "apps/repo-worker" "" "" blst zstd-sys commonware-runtime commonware-storage
 check_tree "mkit-server" "rust/crates/mkit-server" "" "" blst zstd-sys commonware-runtime commonware-storage
 # The remote-hook adapter (WP-3.7): buffa messages, signing and a nonce source,
@@ -97,11 +99,11 @@ check_tree "mkit-server (remote-hooks)" "rust/crates/mkit-server" "--features re
 # wasm-clean; adapters opt in through explicit indexed HTTP configuration.
 check_tree "mkit-server (http-objects)" "rust/crates/mkit-server" "--features http-objects" "" \
   blst zstd-sys commonware-runtime commonware-storage
-# mkit-core's decode-only pure-Rust zstd backend must select `ruzstd` and
+# mkit-core's decode-only pure-Rust zstd backend must select `mkit-ruzstd` and
 # stay C-free. The first consumer that enables it (WP 4.8) adds its own
 # positive check here.
-check_tree "mkit-core (pack-ruzstd)" "rust/crates/mkit-core" "--no-default-features --features pack-ruzstd" "ruzstd" \
-  blst zstd-sys commonware-runtime commonware-storage
+check_tree "mkit-core (pack-ruzstd)" "rust/crates/mkit-core" "--no-default-features --features pack-ruzstd" "mkit-ruzstd" \
+  ruzstd blst zstd-sys commonware-runtime commonware-storage
 
 check_tree "mkit-rpc (hooks)" "rust/crates/mkit-rpc" "--features hooks" "buffa ed25519-dalek" \
     blst zstd-sys commonware-runtime commonware-storage
@@ -114,10 +116,10 @@ check_tree "mkit-rpc (transport-messages)" "rust/crates/mkit-rpc" "--features tr
     blst zstd-sys commonware-runtime commonware-storage tokio connectrpc
 # mkit-client is the runtime-independent protocol client: no async runtime, no
 # HTTP stack, no C compression, with the default pure-Rust zstd decoder.
-check_tree "mkit-client" "rust/crates/mkit-client" "" "buffa mkit-rpc ruzstd" \
-    blst zstd-sys commonware-runtime commonware-storage tokio hyper reqwest connectrpc
+check_tree "mkit-client" "rust/crates/mkit-client" "" "buffa mkit-rpc mkit-ruzstd" \
+    ruzstd blst zstd-sys commonware-runtime commonware-storage tokio hyper reqwest connectrpc
 check_tree "mkit-client (no zstd decoder)" "rust/crates/mkit-client" "--no-default-features" "buffa mkit-rpc" \
-    blst zstd-sys ruzstd commonware-runtime commonware-storage tokio hyper reqwest connectrpc
+    blst zstd-sys ruzstd mkit-ruzstd commonware-runtime commonware-storage tokio hyper reqwest connectrpc
 
 if [ "$fail" -ne 0 ]; then
   echo

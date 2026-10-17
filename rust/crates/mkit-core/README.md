@@ -30,23 +30,11 @@ Optional features (`history-mmr`, `sparse-checkout`, `pack-shards`) gate
 heavier `commonware-*`-backed paths &mdash; see the crate's `Cargo.toml` for what
 each pulls in.
 
-`pack-ruzstd` (pure-Rust zstd decoding, for targets without the C `zstd`)
-relies on a bounded-decode patch to ruzstd 0.9 that is applied only inside this
-repository's workspace. Cargo does not inherit a dependency's patches, so a
-crates.io consumer that enables `pack-ruzstd` must add, in its own workspace,
-until upstream releases the fix:
-
-```toml
-[patch.crates-io]
-ruzstd = { git = "https://github.com/officialunofficial/mkit", tag = "v0.5.0" }
-```
-
-Upstreaming is in progress. Without the patch the feature decodes through
-the unbounded upstream path.
-
-Upstream tracking: [KillingSpark/zstd-rs #124, "Refuse blocks that decode past
-Block_Maximum_Size"](https://github.com/KillingSpark/zstd-rs/pull/124) is open. Keep the patch until a released
-version includes the bound; the tracked PR does not establish released coverage.
+`pack-ruzstd` selects the bounded pure-Rust decoder package `mkit-ruzstd`,
+imported internally as `ruzstd`. The versioned path dependency becomes a named
+registry dependency when this crate is published, so downstream workspaces need
+no Cargo patch. The fork retains upstream's MIT license and attribution.
+See **rust/vendor/ruzstd/VENDORED.md** for the RFC 8878 bounds and upstream status.
 
 ## Merge operations without a filesystem
 

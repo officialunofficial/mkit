@@ -22,10 +22,12 @@ def check():
         name = package.split()[0]
         resolved.setdefault(name, set()).update(features.split(","))
         if name == "ruzstd":
+            raise SystemExit("upstream ruzstd must not appear in the server decoder graph")
+        if name == "mkit-ruzstd":
             decoder.add(package)
     expected = ROOT / "rust/vendor/ruzstd"
     if len(decoder) != 1 or f"({expected})" not in next(iter(decoder)):
-        raise SystemExit("server must resolve the patched vendored decoder")
+        raise SystemExit("server must resolve the named bounded decoder")
     for name in ("mkit-server", "mkit-core"):
         if "pack-ruzstd" not in resolved.get(name, set()):
             raise SystemExit(f"missing {name}/pack-ruzstd")
@@ -34,7 +36,7 @@ def check():
         raise SystemExit(f"wasm decoder graph enables unexpected server features: {sorted(forbidden)}")
     if "pack-zstd" in resolved["mkit-core"]:
         raise SystemExit("wasm decoder graph must use the pure-Rust decoder")
-    print("PASS server -> core pack-ruzstd: vendored decoder, no native/test features")
+    print("PASS server -> core pack-ruzstd: mkit-ruzstd, no native/test features")
 
 
 if __name__ == "__main__":
