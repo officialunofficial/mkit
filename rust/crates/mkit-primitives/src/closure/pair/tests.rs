@@ -1367,39 +1367,7 @@ fn seeded_dag_matches_independent_bfs_oracle() {
         let mut walker = fresh(pair, &[]);
         let coverage = run(&mut walker, &mut host).unwrap();
 
-        // Oracle: breadth-first over the same table with first-occurrence dedupe.
-        let mut order = Vec::new();
-        let mut explored = BTreeSet::new();
-        let mut queue = VecDeque::from([id(1)]);
-        let mut deps = BTreeSet::from([id(1), id(2), id(90)]);
-        deps.extend(packs.iter().copied());
-        let mut suppliers = BTreeSet::new();
-        let mut cursors: VecDeque<(Hash, Hash, u32)> = VecDeque::new();
-        while let Some(object) = queue.pop_front() {
-            if !explored.insert(object) {
-                continue;
-            }
-            let fact = &host.objects[&object];
-            deps.insert(fact.0);
-            suppliers.extend(fact.3.iter().copied());
-            for child in &fact.2 {
-                queue.push_back(*child);
-            }
-            if let Some(base) = fact.4 {
-                cursors.push_back((fact.0, base, 0));
-            }
-            order.push(object);
-        }
-        while let Some((origin, base, depth)) = cursors.pop_front() {
-            assert!(depth < 4);
-            let fact = host.bases[&base];
-            if fact.pack != origin {
-                suppliers.insert(fact.pack);
-            }
-            if let Some(next) = fact.base {
-                cursors.push_back((origin, next, depth + 1));
-            }
-        }
+        let (order, deps, suppliers) = bfs_oracle(&host, &packs);
         let requested: Vec<Hash> = host
             .log
             .iter()
@@ -1420,4 +1388,41 @@ fn seeded_dag_matches_independent_bfs_oracle() {
             "suppliers, case {case}"
         );
     }
+}
+
+/// Oracle: breadth-first over the same table with first-occurrence dedupe.
+fn bfs_oracle(host: &Host, packs: &[Hash]) -> (Vec<Hash>, BTreeSet<Hash>, BTreeSet<Hash>) {
+    let mut order = Vec::new();
+    let mut explored = BTreeSet::new();
+    let mut queue = VecDeque::from([id(1)]);
+    let mut deps = BTreeSet::from([id(1), id(2), id(90)]);
+    deps.extend(packs.iter().copied());
+    let mut suppliers = BTreeSet::new();
+    let mut cursors: VecDeque<(Hash, Hash, u32)> = VecDeque::new();
+    while let Some(object) = queue.pop_front() {
+        if !explored.insert(object) {
+            continue;
+        }
+        let fact = &host.objects[&object];
+        deps.insert(fact.0);
+        suppliers.extend(fact.3.iter().copied());
+        for child in &fact.2 {
+            queue.push_back(*child);
+        }
+        if let Some(base) = fact.4 {
+            cursors.push_back((fact.0, base, 0));
+        }
+        order.push(object);
+    }
+    while let Some((origin, base, depth)) = cursors.pop_front() {
+        assert!(depth < 4);
+        let fact = host.bases[&base];
+        if fact.pack != origin {
+            suppliers.insert(fact.pack);
+        }
+        if let Some(next) = fact.base {
+            cursors.push_back((origin, next, depth + 1));
+        }
+    }
+    (order, deps, suppliers)
 }
