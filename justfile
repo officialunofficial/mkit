@@ -133,7 +133,10 @@ ci-security:
       cargo audit --deny warnings \
         --ignore RUSTSEC-2023-0071 \
         --ignore RUSTSEC-2024-0436 \
-        --ignore RUSTSEC-2025-0055
+        --ignore RUSTSEC-2025-0055 \
+        --ignore RUSTSEC-2026-0370 \
+        --ignore RUSTSEC-2026-0371 \
+        --ignore RUSTSEC-2026-0372
     }
     ( cd rust && run_audit )
     ( cd contrib/signers && run_audit )

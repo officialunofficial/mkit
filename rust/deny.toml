@@ -68,7 +68,7 @@ ignore = [
     # `cargo deny check advisories` confirms with an
     # `advisory-not-detected` warning — this ignore is now dead weight.
 
-    # RUSTSEC-2026-0370 / -0371 / -0372 (all issued 2026-10-16): upstream
+    # RUSTSEC-2026-0370 / -0371 / -0372 (all reported 2026-10-16): upstream
     # folded the standalone zvariant, zvariant_derive and zbus_names crates
     # into zbus 6.0.0 (as `zbus::wire` / `zbus::names`) and filed these
     # informational "unmaintained" advisories itself to push the migration
@@ -91,7 +91,7 @@ ignore = [
     # No maintained upgrade path yet: zbus-secret-service-keyring-store
     # 1.0.1 and secret-service 5.2.0 are the newest releases and still pin
     # zbus 5.x; only a zbus-6-based release of one of them removes this
-    # chain. The lockfile already carries the terminal 5.x releases
+    # chain. The lockfile now carries the terminal 5.x releases
     # (zvariant/zvariant_derive 5.15.1, zbus_names 4.3.5).
     #
     # TODO(2026-11-19): re-check whether zbus-secret-service-keyring-store
