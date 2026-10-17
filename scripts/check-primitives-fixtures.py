@@ -72,7 +72,7 @@ def check(root):
     formats = {}
     for row in manifest.get("formats", []):
         for key in ("type", "format_version", "decoder", "fuzz_target", "spec"):
-            if key not in row or not row[key]:
+            if key not in row or row[key] is None or row[key] == "":
                 raise ValueError(f"missing format metadata: {key}")
         identity = (row["type"], row["format_version"])
         if identity in formats:

@@ -37,6 +37,7 @@ SourceChanged
 UnsupportedCapability
 
 # decision
+InvalidRefRequest
 
 # auth
 InvalidEnvelope
@@ -63,3 +64,4 @@ ForkReservationSettled
 ForkExpired
 ForkQuotaExceeded
 ForkBindingMismatch
+ForkLifecycleUnavailable

@@ -1274,6 +1274,8 @@ semantic = "decision/README.md"
 decode_config = "facts=256,guards=64,bytes=65536,work=100000"
 expected = "per-row semantic decision and exact guard presence"
 spec = "SPEC-TRANSPORT-CONNECT §3; §4; §7.8"
+sha256 = "50d5a9001d59a4fc35a3e3cced0669affe4b55cd3863ff7ed991710c6ea8baee"
+semantic_sha256 = "f495e0291945709651c82986cd69f6c0f81e6a85518fa89d36454be20c85f4a9"
 
 [[fixtures]]
 type = "decision::FailureCode"
@@ -1284,6 +1286,22 @@ path = "decision/failures.json"
 semantic = "decision/README.md"
 decode_config = "facts=256,guards=64,bytes=65536,work=100000"
 expected = "stable failure code per row"
+spec = "SPEC-TRANSPORT-CONNECT §3; §4; §7.8"
+sha256 = "ace7f6007055a0948b588f0258fdb883d6e6e1d7dc0ac4ebd4d6ecf0a3b2221b"
+semantic_sha256 = "f495e0291945709651c82986cd69f6c0f81e6a85518fa89d36454be20c85f4a9"
+
+[[formats]]
+type = "decision::ref_write"
+format_version = 1
+decoder = "decision::ref_write::decide_ref_write"
+fuzz_target = "ref_decisions"
+spec = "SPEC-TRANSPORT-CONNECT §3; §4; §7.8"
+
+[[formats]]
+type = "decision::FailureCode"
+format_version = 1
+decoder = "decision::ref_write::decide_ref_write"
+fuzz_target = "ref_decisions"
 spec = "SPEC-TRANSPORT-CONNECT §3; §4; §7.8"
 
 # auth
@@ -1357,7 +1375,7 @@ decode_config = "core auth-v2 bounds; in-memory semantic input"
 expected = "presence and duplicate matrix"
 spec = "SPEC-TRANSPORT-CONNECT §7.1; §7.6"
 notes = "auth/README.md"
-sha256 = "43aadbbfd4de50ba0ef05a6dfe30e731df0191116ea4572ce3fc8fe73aa63cc4"
+sha256 = "2ac84923a5763da738ac66b25fb6cd826a8cf5826adfa73bb17461d50790e502"
 
 [[contracts]]
 type = "auth-fixture-notes"
@@ -1422,12 +1440,21 @@ semantic = "fork/progress.md"
 decode_config = "semantic; fixed-shape facts; explicit time; construction_expires_ms=100"
 expected = "per-case progress decision"
 spec = "SPEC-SERVER §9.9; §10.2"
+sha256 = "ed241f468b1320adc18fc18cbbb03db7e82680099bd13de5b1f7ae60f84a83e5"
+semantic_sha256 = "9d5ce536af0fd51bf04beec9cbb2f0cb437e6a76d15debcdeb1cb11cd06df6b0"
+
+[[formats]]
+type = "fork.progress"
+format_version = 0
+decoder = "fork::advance::decide_fork_advance"
+fuzz_target = "fork_advance"
+spec = "SPEC-SERVER §9.9; §10.2"
 
 # error
 [[contracts]]
 type = "failure-codes"
 ruleset = 1
 path = "error/failure-codes.txt"
-sha256 = "cf9748645c47f660296db9c978f1c884011797d5b0927f069d925e58d765ab2e"
+sha256 = "a61992f88457817ed2f1fcf5a7f93e2653d869a96c42d3cf2655eaf5651a5328"
 spec = "README.md stable failure codes"
 
