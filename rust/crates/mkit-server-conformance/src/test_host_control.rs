@@ -436,15 +436,7 @@ impl HostState {
                 reply.now_ms = Some(now_ms);
             }
             Request::AdvanceClock { delta_ms } => {
-                let delta = i64::try_from(delta_ms)
-                    .map_err(|_| bad("clock duration out of range".into()))?;
-                let now = self
-                    .clock
-                    .now_ms()
-                    .checked_add(delta)
-                    .ok_or_else(|| bad("clock overflow".into()))?;
-                self.clock.set(now);
-                reply.now_ms = Some(now);
+                reply.now_ms = Some(self.advance_clock(delta_ms).map_err(bad)?);
             }
             Request::Pause {
                 step,
@@ -503,6 +495,18 @@ impl HostState {
             }
         }
         Ok(reply)
+    }
+
+    fn advance_clock(&self, delta_ms: u64) -> Result<i64, String> {
+        let delta =
+            i64::try_from(delta_ms).map_err(|_| "clock duration out of range".to_owned())?;
+        let now = self
+            .clock
+            .now_ms()
+            .checked_add(delta)
+            .ok_or_else(|| "clock overflow".to_owned())?;
+        self.clock.set(now);
+        Ok(now)
     }
 
     fn repository(&self, identity: &str) -> Result<RepoId, String> {
@@ -956,6 +960,27 @@ impl ControlStore {
     }
 }
 
+/// Terminal writes are counted only after the real guarded batch commits.
+fn terminal_reservations(batch: &Batch) -> Vec<String> {
+    batch
+        .writes
+        .iter()
+        .filter_map(|write| {
+            if let Write::Put(key, value) = write
+                && let Some(keys::ParsedKey::Reservation(id)) = keys::parse(key)
+                && let Ok(record) = codec::decode_reservation(value)
+                && !matches!(
+                    record,
+                    codec::ReservationV1::Pending { .. } | codec::ReservationV1::Ticketed { .. }
+                )
+            {
+                return Some(id);
+            }
+            None
+        })
+        .collect()
+}
+
 impl NamespaceStore for ControlStore {
     fn capabilities(&self) -> StoreCapabilities {
         self.inner.capabilities()
@@ -996,24 +1021,7 @@ impl NamespaceStore for ControlStore {
                 .await;
         }
         let guard = self.gate.lock().await;
-        let terminals: Vec<_> = batch
-            .writes
-            .iter()
-            .filter_map(|write| {
-                if let Write::Put(key, value) = write
-                    && let Some(keys::ParsedKey::Reservation(id)) = keys::parse(key)
-                    && let Ok(record) = codec::decode_reservation(value)
-                    && !matches!(
-                        record,
-                        codec::ReservationV1::Pending { .. }
-                            | codec::ReservationV1::Ticketed { .. }
-                    )
-                {
-                    return Some(id);
-                }
-                None
-            })
-            .collect();
+        let terminals = terminal_reservations(&batch);
         let mut accepted_ref_reservation = None;
         if !refs.is_empty() {
             for id in &terminals {

@@ -95,7 +95,7 @@ impl Fixture {
         request.ticket_ids.clone_from(&tickets);
         let signer = self.ctx.v2_signer("main")?;
         let op = sign_unary(&signer, Rpc::AdvanceRefs, &request, |env| {
-            self.repository.clone_into(&mut env.repository)
+            self.repository.clone_into(&mut env.repository);
         });
         let query = PublicationQuery {
             acceptance: ObservationQuery {
@@ -163,10 +163,10 @@ impl Fixture {
             crate::wire::sign::pack_commitment(&pack_id, pack.len() as u64),
         );
         self.repository.clone_into(&mut envelope.repository);
-        let signed = signer.sign(&envelope);
+        let upload_request = signer.sign(&envelope);
         ensure!(
             self.ctx
-                .upload_with(&messages, &signed.headers)
+                .upload_with(&messages, &upload_request.headers)
                 .await?
                 .is_none(),
             "publication fixture upload failed"
@@ -225,7 +225,7 @@ impl Fixture {
         request.delete = Some(true);
         let signer = self.ctx.v2_signer("main")?;
         let op = sign_unary(&signer, Rpc::AdvanceRefs, &request, |env| {
-            self.repository.clone_into(&mut env.repository)
+            self.repository.clone_into(&mut env.repository);
         });
         let reply: AdvanceRefsResponse = want_ok(self.ctx.send(&op).await?, "paired deletion")?;
         ensure!(
@@ -242,7 +242,7 @@ impl Fixture {
         );
         let signer = self.ctx.v2_signer("main")?;
         let op = sign_unary(&signer, Rpc::AdvanceRefs, &request, |env| {
-            self.repository.clone_into(&mut env.repository)
+            self.repository.clone_into(&mut env.repository);
         });
         let reply: AdvanceRefsResponse = want_ok(self.ctx.send(&op).await?, "paired recreation")?;
         ensure!(
@@ -361,10 +361,13 @@ async fn deferred(ctx: Ctx, control: &ControlClient) -> CaseResult {
     let drive = tokio::spawn({
         let control = control.clone();
         let repository = fixture.repository.clone();
-        let head = fixture.head.clone();
+        let branch = fixture.head.clone();
         async move {
             control
-                .command(&Request::DrivePublication { repository, head })
+                .command(&Request::DrivePublication {
+                    repository,
+                    head: branch,
+                })
                 .await
         }
     });
@@ -514,11 +517,11 @@ async fn combined_race(ctx: Ctx, control: &ControlClient) -> CaseResult {
                     && after.acceptance.memberships == [false, false]
                     && after.acceptance.tickets == recreated.acceptance.tickets
                     && after.acceptance.quota == recreated.acceptance.quota
-                    && !after
+                    && after
                         .acceptance
                         .replay
                         .as_ref()
-                        .is_some_and(|r| r.result.as_deref() == Some("advance_committed"))
+                        .is_none_or(|r| r.result.as_deref() != Some("advance_committed"))
                     && after.acceptance.reservations.iter().take(2).eq(recreated
                         .acceptance
                         .reservations

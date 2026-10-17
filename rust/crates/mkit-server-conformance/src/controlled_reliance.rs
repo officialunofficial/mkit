@@ -42,21 +42,85 @@ fn require_external_delta(pack: &[u8]) -> Result<(), Failure> {
     }
 }
 
-async fn fixture(ctx: &Ctx, control: &ControlClient, gc: bool) -> Result<Fixture, Failure> {
-    let signer = ctx.v2_signer("main")?;
-    let head = ctx.head("reliance");
-    // Derive the repository from a genuine signed operation rather than an
-    // implementation-specific repository naming rule.
+async fn upload_candidate(
+    ctx: &Ctx,
+    signer: &crate::wire::sign::Signer,
+    repository: &str,
+    head: &str,
+    prepared: &crate::control::RelianceFixture,
+) -> Result<Vec<Vec<u8>>, Failure> {
+    let candidate_map = from_hex(&prepared.packmap).map_err(|e| e.to_string())?;
+    let base_pack = from_hex(&prepared.base_pack).map_err(|e| e.to_string())?;
+    if prepared.pack.is_empty()
+        || prepared.packmap_pack.is_empty()
+        || prepared.pack.len() > 1_048_576
+        || prepared.packmap_pack.len() > 1_048_576
+        || hash(&prepared.packmap_pack) != candidate_map
+    {
+        return Err("invalid or oversized reliance fixture".into());
+    }
+    let candidate_pack = to_hex(&hash(&prepared.pack));
+    require_external_delta(&prepared.pack)?;
+    if candidate_pack == prepared.base_pack {
+        return Err("candidate must newly rely on a distinct existing member".into());
+    }
+    let packlist = mkit_core::transfer::decode_packlist(&prepared.packmap_pack)
+        .map_err(|e| format!("reliance fixture packmap: {e}"))?;
+    if packlist.prev.is_some()
+        || !packlist.packs.contains(&hash(&prepared.pack))
+        || !packlist.packs.contains(&base_pack)
+    {
+        return Err(
+            "reliance fixture packmap must independently include candidate and base".into(),
+        );
+    }
+    let mut tickets = Vec::new();
+    for pack in [&prepared.pack, &prepared.packmap_pack] {
+        let pack_id = hash(pack);
+        let open = sign_unary(
+            signer,
+            Rpc::BeginUpload,
+            &BeginUploadRequest {
+                r#ref: Some(head.to_owned()),
+                pack_id: Some(pack_id.to_vec()),
+                bytes: Some(pack.len() as u64),
+                ..Default::default()
+            },
+            |env| repository.clone_into(&mut env.repository),
+        );
+        let response: BeginUploadResponse = want_ok(ctx.send(&open).await?, "reliance ticket")?;
+        let Some(BeginResult::Ticket(ticket)) = response.result else {
+            return Err("reliance fixture requires a fresh ticket".into());
+        };
+        tickets.push(ticket.id.ok_or("reliance ticket has no id")?);
+        let mut messages = upload_msgs(pack, 1);
+        if let Some(UploadBody::Header(header)) = &mut messages[0].body {
+            header.ticket_token = ticket.token;
+        }
+        let mut envelope = signer.envelope(
+            Rpc::UploadPack.procedure(),
+            crate::wire::sign::pack_commitment(&pack_id, pack.len() as u64),
+        );
+        repository.clone_into(&mut envelope.repository);
+        let upload_request = signer.sign(&envelope);
+        if let Some(error) = ctx.upload_with(&messages, &upload_request.headers).await? {
+            return Err(format!("reliance fixture upload: {error}").into());
+        }
+    }
+    Ok(tickets)
+}
+
+fn fixture_repository(ctx: &Ctx, signer: &crate::wire::sign::Signer, head: &str) -> String {
     let probe = sign_unary(
-        &signer,
+        signer,
         Rpc::AdvanceRefs,
         &advance_req(
-            (&head, Exp::Missing, &[0; 32]),
+            (head, Exp::Missing, &[0; 32]),
             (&ctx.packmap("reliance"), Exp::Missing, &[0; 32]),
         ),
         |_| {},
     );
-    let repository = if ctx.profile().has(crate::wire::Feature::MultiRepo) {
+    if ctx.profile().has(crate::wire::Feature::MultiRepo) {
         let suffix = to_hex(&hash(ctx.ns().as_bytes()));
         format!(
             "ed25519-{}/reliance-{}",
@@ -65,7 +129,15 @@ async fn fixture(ctx: &Ctx, control: &ControlClient, gc: bool) -> Result<Fixture
         )
     } else {
         probe.header("x-repository").to_owned()
-    };
+    }
+}
+
+async fn fixture(ctx: &Ctx, control: &ControlClient, gc: bool) -> Result<Fixture, Failure> {
+    let signer = ctx.v2_signer("main")?;
+    let head = ctx.head("reliance");
+    // Derive the repository from a genuine signed operation rather than an
+    // implementation-specific repository naming rule.
+    let repository = fixture_repository(ctx, &signer, &head);
     let prepared = control
         .command(&Request::PrepareReliance {
             query: RelianceFixtureQuery {
@@ -100,63 +172,8 @@ async fn fixture(ctx: &Ctx, control: &ControlClient, gc: bool) -> Result<Fixture
             vec![prepared.base_pack.clone(), prepared.base_packmap.clone()],
         )
     } else {
-        let candidate_map = from_hex(&prepared.packmap).map_err(|e| e.to_string())?;
-        let base_pack = from_hex(&prepared.base_pack).map_err(|e| e.to_string())?;
-        if prepared.pack.is_empty()
-            || prepared.packmap_pack.is_empty()
-            || prepared.pack.len() > 1_048_576
-            || prepared.packmap_pack.len() > 1_048_576
-            || hash(&prepared.packmap_pack) != candidate_map
-        {
-            return Err("invalid or oversized reliance fixture".into());
-        }
+        tickets = upload_candidate(ctx, &signer, &repository, &head, &prepared).await?;
         let candidate_pack = to_hex(&hash(&prepared.pack));
-        require_external_delta(&prepared.pack)?;
-        if candidate_pack == prepared.base_pack {
-            return Err("candidate must newly rely on a distinct existing member".into());
-        }
-        let packlist = mkit_core::transfer::decode_packlist(&prepared.packmap_pack)
-            .map_err(|e| format!("reliance fixture packmap: {e}"))?;
-        if packlist.prev.is_some()
-            || !packlist.packs.contains(&hash(&prepared.pack))
-            || !packlist.packs.contains(&base_pack)
-        {
-            return Err(
-                "reliance fixture packmap must independently include candidate and base".into(),
-            );
-        }
-        for pack in [&prepared.pack, &prepared.packmap_pack] {
-            let pack_id = hash(pack);
-            let open = sign_unary(
-                &signer,
-                Rpc::BeginUpload,
-                &BeginUploadRequest {
-                    r#ref: Some(head.clone()),
-                    pack_id: Some(pack_id.to_vec()),
-                    bytes: Some(pack.len() as u64),
-                    ..Default::default()
-                },
-                |env| repository.clone_into(&mut env.repository),
-            );
-            let response: BeginUploadResponse = want_ok(ctx.send(&open).await?, "reliance ticket")?;
-            let Some(BeginResult::Ticket(ticket)) = response.result else {
-                return Err("reliance fixture requires a fresh ticket".into());
-            };
-            tickets.push(ticket.id.ok_or("reliance ticket has no id")?);
-            let mut messages = upload_msgs(pack, 1);
-            if let Some(UploadBody::Header(header)) = &mut messages[0].body {
-                header.ticket_token = ticket.token;
-            }
-            let mut envelope = signer.envelope(
-                Rpc::UploadPack.procedure(),
-                crate::wire::sign::pack_commitment(&pack_id, pack.len() as u64),
-            );
-            repository.clone_into(&mut envelope.repository);
-            let signed = signer.sign(&envelope);
-            if let Some(error) = ctx.upload_with(&messages, &signed.headers).await? {
-                return Err(format!("reliance fixture upload: {error}").into());
-            }
-        }
         (
             prepared.head.clone(),
             prepared.packmap.clone(),
@@ -322,14 +339,14 @@ fn accepted(
         })
         || state.tickets.len() != ticket_count
         || state.tickets.iter().any(|ticket| {
-            !ticket
+            ticket
                 .as_ref()
-                .is_some_and(|ticket| ticket.state == "consumed")
+                .is_none_or(|ticket| ticket.state != "consumed")
         })
         || state.reservations.len() != ticket_count + 1
         || state.reservations.iter().any(|reservation| {
-            !reservation.as_ref().is_some_and(|reservation| {
-                reservation.state == "committed" && reservation.terminal_count == 1
+            reservation.as_ref().is_none_or(|reservation| {
+                reservation.state != "committed" || reservation.terminal_count != 1
             })
         })
     {
@@ -339,6 +356,28 @@ fn accepted(
         .into());
     }
     Ok(())
+}
+
+async fn gc_after_acceptance(
+    ctx: &Ctx,
+    control: &ControlClient,
+    fixture: &Fixture,
+) -> Result<(), Failure> {
+    prepare_drop(control, fixture).await?;
+    let response: AdvanceRefsResponse =
+        want_ok(ctx.send(&fixture.operation).await?, "reliance acceptance")?;
+    if response.outcome != Some(AdvanceOutcome::ADVANCE_OUTCOME_COMMITTED.into()) {
+        return Err("valid reliance fixture did not commit".into());
+    }
+    let gc = drop_member(control, fixture).await?;
+    gc_result(Some(&gc), "conflict")?;
+    let after = observe(control, fixture).await?;
+    accepted(
+        &after,
+        &fixture.head,
+        &fixture.packmap,
+        fixture.query.ticket_ids.len(),
+    )
 }
 
 /// Execute one registry case; all mutations use real wire writes or named
@@ -370,26 +409,23 @@ pub(crate) async fn run(name: &str, ctx: Ctx, control: &ControlClient) -> Result
         );
     }
     if name == "reliance.gc_drop_after_acceptance" {
-        prepare_drop(control, &fixture).await?;
-        let response: AdvanceRefsResponse =
-            want_ok(ctx.send(&fixture.operation).await?, "reliance acceptance")?;
-        if response.outcome != Some(AdvanceOutcome::ADVANCE_OUTCOME_COMMITTED.into()) {
-            return Err("valid reliance fixture did not commit".into());
-        }
-        let gc = drop_member(control, &fixture).await?;
-        gc_result(Some(&gc), "conflict")?;
-        let after = observe(control, &fixture).await?;
-        return accepted(
-            &after,
-            &fixture.head,
-            &fixture.packmap,
-            fixture.query.ticket_ids.len(),
-        );
+        return gc_after_acceptance(&ctx, control, &fixture).await;
     }
+    removal_race(name, &ctx, control, &fixture, &before, gc_case).await
+}
+
+async fn removal_race(
+    name: &str,
+    ctx: &Ctx,
+    control: &ControlClient,
+    fixture: &Fixture,
+    before: &RelianceObservation,
+    gc_case: bool,
+) -> Result<(), Failure> {
     if name == "reliance.gc_drop_before_acceptance" {
         // Capture the original candidate before acceptance planning can clear
         // its mark. A later mark/recheck would be a different GC attempt.
-        prepare_drop(control, &fixture).await?;
+        prepare_drop(control, fixture).await?;
     }
     control
         .command(&Request::Pause {
@@ -417,7 +453,7 @@ pub(crate) async fn run(name: &str, ctx: Ctx, control: &ControlClient) -> Result
     });
     control.wait_paused().await?;
     let gc_committed = if name == "reliance.gc_drop_before_acceptance" {
-        drop_member(control, &fixture).await? == "committed"
+        drop_member(control, fixture).await? == "committed"
     } else if name == "reliance.verdict_hide_delta_base" {
         control
             .command(&Request::HideMember {
@@ -429,7 +465,7 @@ pub(crate) async fn run(name: &str, ctx: Ctx, control: &ControlClient) -> Result
     } else {
         return Err(format!("unknown reliance case {name}").into());
     };
-    let removed = observe(control, &fixture).await?;
+    let removed = observe(control, fixture).await?;
     if removed.usable_memberships
         != if gc_case {
             vec![!gc_committed, true]
@@ -441,13 +477,25 @@ pub(crate) async fn run(name: &str, ctx: Ctx, control: &ControlClient) -> Result
     }
     control.command(&Request::Resume).await?;
     let reply = pending.await.map_err(|e| e.to_string())??;
+    finish_removal(ctx, control, fixture, before, gc_case, gc_committed, reply).await
+}
+
+async fn finish_removal(
+    ctx: &Ctx,
+    control: &ControlClient,
+    fixture: &Fixture,
+    before: &RelianceObservation,
+    gc_case: bool,
+    gc_committed: bool,
+    reply: crate::wire::client::Reply,
+) -> Result<(), Failure> {
     let result = crate::wire::client::decode_unary::<AdvanceRefsResponse>(&reply)?;
     let acceptance_committed = result.as_ref().is_ok_and(|response| {
         response.outcome == Some(AdvanceOutcome::ADVANCE_OUTCOME_COMMITTED.into())
     });
     exactly_one(gc_committed, acceptance_committed)?;
     if !gc_committed {
-        let after = observe(control, &fixture).await?;
+        let after = observe(control, fixture).await?;
         return accepted(
             &after,
             &fixture.head,
@@ -472,7 +520,7 @@ pub(crate) async fn run(name: &str, ctx: Ctx, control: &ControlClient) -> Result
             .into());
         }
     }
-    let after = observe(control, &fixture).await?;
+    let after = observe(control, fixture).await?;
     if after.usable_memberships
         != if gc_case {
             vec![false, true]
