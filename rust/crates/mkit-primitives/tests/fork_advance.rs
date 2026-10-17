@@ -105,7 +105,7 @@ fn advance_guards_every_fixed_shape_field_and_deadline() {
     assert_eq!(guard.decision(), ForkAdvanceDecision::Advance);
     assert!(guard.matches(&original, 100));
     assert!(!guard.matches(&original, 101));
-    let changes: Vec<ForkAdvanceFacts> = (0..13)
+    let mutations: Vec<ForkAdvanceFacts> = (0..13)
         .map(|n| {
             let mut f = original.clone();
             match n {
@@ -126,7 +126,7 @@ fn advance_guards_every_fixed_shape_field_and_deadline() {
             f
         })
         .collect();
-    for changed in changes {
+    for changed in mutations {
         assert!(!guard.matches(&changed, 100));
     }
     let mut changed = original.clone();
