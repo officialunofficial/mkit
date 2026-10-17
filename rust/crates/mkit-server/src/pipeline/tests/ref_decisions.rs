@@ -7,6 +7,7 @@ fn request<'a>(name: &'a RepoName, refs: &'a [RefUpdate]) -> WriteRequest<'a> {
         repo: name,
         denial_ids: None,
         denial_packs: &[],
+        fork_barrier: false,
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
         kind: if refs.len() == 1 {
@@ -168,6 +169,131 @@ fn portable_ref_planner_preserves_authority_quota_and_delete_precedence() {
             }
         }
     }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn portable_ref_planner_preserves_generic_and_noncanonical_shapes() {
+    let name = repo_name();
+    let delete = |condition| RefUpdate {
+        name: HEAD.into(),
+        condition,
+        new: None,
+    };
+    let delete_named = |name: &str, condition| RefUpdate {
+        name: name.into(),
+        condition,
+        new: None,
+    };
+    // Requests the portable contract does not express — unconditional or
+    // MISSING deletes, duplicate refs, unmatched or reversed pairs, mixed
+    // writes, extra updates, and unserved names — keep the generic CAS
+    // decision, guard order, conflict precedence, and outcomes.
+    let cases: Vec<Vec<RefUpdate>> = vec![
+        vec![delete(Any)],
+        vec![delete(Missing)],
+        vec![upd(HEAD, Missing, A), upd(HEAD, Missing, A)],
+        vec![delete(Match(A)), delete(Match(A))],
+        vec![upd(HEAD, Missing, A), upd(PACKMAP, Missing, C)],
+        vec![
+            upd("refs/heads/f", Missing, A),
+            upd("refs/heads/g", Missing, B),
+        ],
+        vec![upd(PACKMAP, Missing, C), delete_named(HEAD, Match(A))],
+        vec![
+            delete_named(HEAD, Match(A)),
+            delete_named(PACKMAP, Match(A)),
+        ],
+        vec![delete(Any), upd(PACKMAP, Missing, C)],
+        vec![
+            upd(HEAD, Missing, A),
+            upd(PACKMAP, Missing, C),
+            upd("refs/heads/g", Missing, B),
+        ],
+        vec![upd("heads/f", Missing, A)],
+        vec![upd("refs/x", Missing, A)],
+    ];
+    let mut comparisons = 0;
+    for refs in cases {
+        for first_current in [None, Some(A), Some(B)] {
+            for second_current in [None, Some(A), Some(B)] {
+                if refs.len() < 2 && second_current.is_some() {
+                    continue;
+                }
+                for third_current in [None, Some(A)] {
+                    if refs.len() < 3 && third_current.is_some() {
+                        continue;
+                    }
+                    // Resolved effects: none, matching, wrong prior, partial
+                    // coverage, and a duplicate name the portable contract
+                    // rejects but the planner's `find` tolerates.
+                    for resolved_mode in 0..5 {
+                        for granted_presence in [None, Some(false), Some(true)] {
+                            let currents = [first_current, second_current, third_current];
+                            let mut values = std::collections::BTreeMap::new();
+                            let mut resolved = Vec::new();
+                            for (position, (update, current)) in
+                                refs.iter().zip(currents).enumerate()
+                            {
+                                if let Some(value) = current {
+                                    values.insert(update.name.clone(), value);
+                                }
+                                if resolved_mode == 0
+                                    || (resolved_mode == 3 && position != 0)
+                                    || resolved
+                                        .iter()
+                                        .any(|r: &ResolvedRefUpdate| r.name == update.name)
+                                {
+                                    continue;
+                                }
+                                let present = if resolved_mode == 2 {
+                                    current.is_none()
+                                } else {
+                                    current.is_some()
+                                };
+                                let effect = match (update.new, present) {
+                                    (Some(_), false) => RefEffect::Create,
+                                    (Some(_), true) => RefEffect::Replace,
+                                    (None, false) => RefEffect::NoChange,
+                                    (None, true) => RefEffect::Delete,
+                                };
+                                resolved.push(ResolvedRefUpdate::new(
+                                    update.name.clone(),
+                                    update.new,
+                                    effect,
+                                ));
+                                if resolved_mode == 4 {
+                                    resolved.push(ResolvedRefUpdate::new(
+                                        update.name.clone(),
+                                        update.new,
+                                        effect,
+                                    ));
+                                }
+                            }
+                            let mut req = request(&name, &refs);
+                            req.resolved_ref_updates = &resolved;
+                            req.grant = granted_presence.map(|present| crate::op::GrantRef {
+                                id: [9; 32],
+                                epoch: 0,
+                                presence_requirement: Some(if present {
+                                    crate::op::PresenceRequirement::Present(HEAD.into())
+                                } else {
+                                    crate::op::PresenceRequirement::Absent(HEAD.into())
+                                }),
+                            });
+                            let values: Vec<_> = values
+                                .into_iter()
+                                .map(|(name, value)| ref_value(&name, value))
+                                .collect();
+                            parity(&req, &snapshot(&req, &values));
+                            comparisons += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(comparisons, 1_395);
 }
 
 #[test]

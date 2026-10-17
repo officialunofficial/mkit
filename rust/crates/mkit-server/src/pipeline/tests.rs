@@ -4520,6 +4520,7 @@ fn fork_barrier_refuses_coordinator_uploads_and_fences_a_racing_claim() {
             fork_barrier: true,
             authority_store: AuthorityStore::Guarded,
             authority_generation: None,
+            namespace: NamespaceKey::deployment_default(),
             repo: &name,
             kind,
             refs: &[],

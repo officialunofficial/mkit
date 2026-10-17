@@ -59,7 +59,7 @@ pub fn decide_ref_write(
     let decision = if let Some(recorded) = attempt.replay()? {
         recorded
     } else {
-        if invalid_shape(request).is_some() {
+        if invalid_shape(request) {
             return Err(failure(FailureCode::InvalidRefRequest));
         }
         match attempt.context()? {
@@ -80,26 +80,26 @@ pub fn decide_ref_write(
     })
 }
 
-fn invalid_shape(request: &RefWriteRequest<'_>) -> Option<&'static str> {
+fn invalid_shape(request: &RefWriteRequest<'_>) -> bool {
     let pair = matches!(
         request.kind,
         RefWriteKind::Advance | RefWriteKind::DeletePair
     );
     if request.changes.len() != if pair { 2 } else { 1 } {
-        return Some("invalid ref operation shape");
+        return true;
     }
     if request
         .changes
         .iter()
         .any(|change| !change.name.0.starts_with("refs/") || !validate_ref_name(&change.name.0))
     {
-        return Some("invalid served ref name");
+        return true;
     }
     if pair {
         let packmap = request.changes[0].name.0.strip_prefix(PACKMAP_REF_PREFIX);
         let head = request.changes[1].name.0.strip_prefix(BRANCH_REF_PREFIX);
         if packmap.is_none() || packmap != head {
-            return Some("packmap ref must match head ref");
+            return true;
         }
     }
     if matches!(
@@ -109,12 +109,12 @@ fn invalid_shape(request: &RefWriteRequest<'_>) -> Option<&'static str> {
         if request.changes.iter().any(|change| {
             change.target.is_some() || !matches!(change.condition, RefWriteCondition::Match(_))
         }) {
-            return Some("delete requires MATCH and no new object id");
+            return true;
         }
     } else if request.changes.iter().any(|change| change.target.is_none()) {
-        return Some("ref update requires a new object id");
+        return true;
     }
-    None
+    false
 }
 
 impl Attempt<'_> {

@@ -211,7 +211,7 @@ fn reservation_bytes(snapshot: &Snapshot) -> Result<usize, Failure> {
                     }
                 }
                 crate::decision::ReservationTerminalKind::Aborted { detail, .. } => {
-                    add(detail.len())?
+                    add(detail.len())?;
                 }
                 crate::decision::ReservationTerminalKind::Expired => {}
             }

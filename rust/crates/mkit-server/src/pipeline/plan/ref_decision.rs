@@ -17,18 +17,31 @@ use mkit_primitives::{
     evidence::{RepositoryId, Revision},
 };
 
-use super::{Snapshot, WriteKind, WriteRequest, corrupt};
+use super::{Snapshot, WriteKind, WriteRequest, corrupt, guard};
 use crate::{
     error::{AbortCause, ServerError},
     op::PresenceRequirement,
+    refs::{CasDecision, evaluate_condition},
     replay::{StoredResult, UpdateRefResult},
     store::{Precondition, Write, codec, keys},
 };
 
 /// The request remains bound to its sealed semantic decision through lowering.
-pub(super) struct RefDecision<'request, 'data> {
-    request: &'request WriteRequest<'data>,
-    guarded: Guarded<WriteDecision>,
+/// Served shapes outside the portable contract — duplicate refs, unmatched or
+/// reversed pairs, and unconditional or `MISSING` deletes — keep the generic
+/// per-ref CAS decision the unextracted planner used.
+pub(super) enum RefDecision<'request, 'data> {
+    /// A canonical served shape decided by the portable contract.
+    Portable {
+        request: &'request WriteRequest<'data>,
+        guarded: Box<Guarded<WriteDecision>>,
+    },
+    /// A noncanonical shape decided by the generic CAS path.
+    Generic {
+        outcome: Option<StoredResult>,
+        guards: Vec<Precondition>,
+        writes: Vec<Write>,
+    },
 }
 
 /// Decode the examined prefix only, preserving first-conflict fault precedence.
@@ -48,19 +61,31 @@ pub(super) fn decide<'request, 'data>(
             target: update.new,
         })
         .collect();
+    // First occurrence wins, matching the planner's `find` per update; the
+    // portable contract rejects duplicate admitted names.
+    let mut seen = std::collections::BTreeSet::new();
     let admitted: Vec<_> = request
         .resolved_ref_updates
         .iter()
+        .filter(|update| seen.insert(update.name.as_str()))
         .map(|update| AdmittedRef {
             name: RefName(update.name.clone()),
             target: update.new,
             prior_present: update.prior_present(),
         })
         .collect();
+    // The portable contract requires the presence guard to name a written ref;
+    // the planner ignores a requirement scoped to a ref the write does not touch.
     let presence = request
         .grant
         .as_ref()
         .and_then(|grant| grant.presence_requirement.as_ref())
+        .filter(|requirement| {
+            let name = match requirement {
+                PresenceRequirement::Absent(name) | PresenceRequirement::Present(name) => name,
+            };
+            request.refs.iter().any(|update| update.name == *name)
+        })
         .map(|requirement| match requirement {
             PresenceRequirement::Absent(name) => (RefName(name.clone()), false),
             PresenceRequirement::Present(name) => (RefName(name.clone()), true),
@@ -76,7 +101,7 @@ pub(super) fn decide<'request, 'data>(
         (1, true) => RefWriteKind::Delete,
         (2, false) => RefWriteKind::Advance,
         (2, true) => RefWriteKind::DeletePair,
-        _ => return Err(super::internal("invalid ref decision shape")),
+        _ => return generic(request, snapshot).map(Some),
     };
     let input = RefWriteRequest {
         repository,
@@ -119,16 +144,124 @@ pub(super) fn decide<'request, 'data>(
         });
         facts.refs.push((RefName(update.name.clone()), observed));
         match decide_ref_write(&input, &facts, limits) {
-            Ok(guarded) => return Ok(Some(RefDecision { request, guarded })),
+            Ok(guarded) => {
+                return Ok(Some(RefDecision::Portable {
+                    request,
+                    guarded: Box::new(guarded),
+                }));
+            }
             Err(failure)
                 if failure.code == FailureCode::UnavailableInput
                     && index + 1 < request.refs.len() => {}
-            Err(failure) => {
-                return Err(super::internal(failure.code.as_str()));
-            }
+            // Any other rejection means the request is outside the portable
+            // contract for this input; the generic CAS keeps the planner's
+            // exact established behavior for it.
+            Err(_) => return generic(request, snapshot).map(Some),
         }
     }
     Err(super::internal("missing portable ref decision"))
+}
+
+/// Generic per-ref CAS decision for served shapes the portable contract does
+/// not express. Reproduces the unextracted planner exactly: grant presence
+/// checks first, then each update in request order — commit guards and writes
+/// on success, the first conflict's guard and outcome otherwise.
+fn generic<'request, 'data>(
+    request: &'request WriteRequest<'data>,
+    snapshot: &Snapshot,
+) -> Result<RefDecision<'request, 'data>, ServerError> {
+    let mut guards = Vec::new();
+    let mut writes = Vec::new();
+    for (i, update) in request.refs.iter().enumerate() {
+        let key = keys::ref_key(request.repo, &update.name);
+        let current = snapshot
+            .get(&key)
+            .map(codec::decode_ref_id)
+            .transpose()
+            .map_err(corrupt)?;
+        let resolved = request
+            .resolved_ref_updates
+            .iter()
+            .find(|resolved| resolved.name == update.name);
+        if let Some(requirement) = request
+            .grant
+            .as_ref()
+            .and_then(|grant| grant.presence_requirement.as_ref())
+        {
+            let required = match requirement {
+                PresenceRequirement::Absent(name) if name == &update.name => Some(false),
+                PresenceRequirement::Present(name) if name == &update.name => Some(true),
+                _ => None,
+            };
+            if let Some(required) = required {
+                if current.is_some() != required {
+                    return Err(ServerError::permission_denied(
+                        "write grant rejected: ref scope",
+                    ));
+                }
+                if resolved.is_none() {
+                    guards.push(if required {
+                        Precondition::Present(key.clone())
+                    } else {
+                        Precondition::Absent(key.clone())
+                    });
+                }
+            }
+        }
+        match evaluate_condition(current.as_ref(), &update.condition) {
+            CasDecision::Committed => {
+                if let Some(resolved) = resolved {
+                    if resolved.new != update.new || resolved.prior_present() != current.is_some() {
+                        return Err(ServerError::aborted_retryable(
+                            "ref changed after admission; retry",
+                        )
+                        .with_abort_cause(AbortCause::RefConflict));
+                    }
+                    if update.condition == mkit_core::refs::RefWriteCondition::Any {
+                        guards.push(if resolved.prior_present() {
+                            Precondition::Present(key.clone())
+                        } else {
+                            Precondition::Absent(key.clone())
+                        });
+                    }
+                }
+                if update.condition != mkit_core::refs::RefWriteCondition::Any {
+                    guards.push(guard(key.clone(), snapshot));
+                }
+                writes.push(match update.new {
+                    Some(id) => Write::Put(key, codec::encode_ref_id(&id)),
+                    None => Write::Delete(key),
+                });
+            }
+            CasDecision::Conflict(_) => {
+                guards.push(guard(key, snapshot));
+                let outcome = match (request.kind, i) {
+                    (WriteKind::UpdateRef, _) => {
+                        StoredResult::UpdateRef(UpdateRefResult::Conflict { current })
+                    }
+                    (WriteKind::AdvanceRefs, 0) => StoredResult::AdvanceRefs(
+                        mkit_core::protocol::AdvanceOutcome::PackmapConflict,
+                    ),
+                    _ => {
+                        StoredResult::AdvanceRefs(mkit_core::protocol::AdvanceOutcome::HeadConflict)
+                    }
+                };
+                return Ok(RefDecision::Generic {
+                    outcome: Some(outcome),
+                    guards,
+                    writes: Vec::new(),
+                });
+            }
+            CasDecision::Invalid(message) => {
+                return Err(ServerError::invalid_argument(message));
+            }
+        }
+    }
+    Ok(RefDecision::Generic {
+        outcome: None,
+        guards,
+        writes,
+    })
 }
 
 /// Lower exact typed ref guards/effects; unsupported categories fail closed.
@@ -136,10 +269,28 @@ pub(super) fn lower(
     decision: RefDecision<'_, '_>,
     preconditions: &mut Vec<Precondition>,
 ) -> Result<(Option<StoredResult>, Vec<Write>), ServerError> {
-    let RefDecision { request, guarded } = decision;
+    let (request, guarded) = match decision {
+        RefDecision::Portable { request, guarded } => (request, guarded),
+        RefDecision::Generic {
+            outcome,
+            guards,
+            writes,
+        } => {
+            preconditions.extend(guards);
+            return Ok((outcome, writes));
+        }
+    };
     let required = lower_guards(request, &guarded)?;
     let result = match guarded.decision() {
         WriteDecision::Apply(effects) => {
+            if !effects.refs.iter().all(|effect| {
+                request
+                    .refs
+                    .iter()
+                    .any(|update| update.name == effect.name.0)
+            }) {
+                return Err(super::internal("portable ref decision out of scope"));
+            }
             let writes = effects
                 .refs
                 .iter()

@@ -52,8 +52,8 @@ pub(super) fn decide(
         publishable: advance.state.publishable(),
         max_unpublished: crate::store::publication::MAX_UNPUBLISHED_ADVANCES,
     };
-    let sealed = decide_ref_publication(&request, &observed).map_err(|_| {
-        crate::pipeline::meta_error(StoreError::Corrupt("advance sequence overflow".into()))
+    let sealed = decide_ref_publication(&request, &observed).map_err(|failure| {
+        crate::pipeline::meta_error(StoreError::Corrupt(failure.code.as_str().into()))
     })?;
     if matches!(sealed.decision(), WriteDecision::Retry(_)) {
         return Err(crate::pipeline::meta_error(StoreError::unavailable(
