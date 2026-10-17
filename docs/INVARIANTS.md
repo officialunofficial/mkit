@@ -1618,6 +1618,23 @@ resume, cursor-binding, released-window, resource-budget, and trailer-split test
 the `mkit-core-wasm-check` v2 differential harness. Caller staging rollback and
 source immutability remain obligations of WP-4.7/4.8; the core reader does not store objects.
 
+## Cursor metadata preserves validation and private state
+
+**Always:** `WindowCursor::metadata` applies the existing cursor geometry and
+frontier validation before returning copied bindings through read-only accessors.
+Inspection leaves cursor bytes unchanged and exposes no constructor or mutable
+cursor state.
+
+**Because:** outer checkpoints must bind opaque reader progress without copying
+the cursor grammar or bypassing its validation.
+
+**If violated:** callers could restore progress under mismatched source geometry
+or mistake a metadata snapshot for source authentication.
+
+**Enforced by:** cursor metadata boundary/round-trip, fixed-byte and invalid-state
+regressions in `pack/window/tests.rs`, plus private-field compile-fail rustdoc
+examples. Source binding and final reader verification remain required.
+
 ## Pack exclusions preserve surviving objects and delta bases
 
 **Always:** a pack rewrite drops every excluded entry and rawifies a surviving

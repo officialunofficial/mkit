@@ -38,6 +38,10 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Added
 
+- `WindowCursor::metadata` returns validated, read-only pack identity and entry
+  geometry for binding caller-owned checkpoints. Cursor fields remain private,
+  and cursor encodings and reader verification behavior are unchanged.
+
 - Add guarded fork acceptance to `mkit-primitives`: bounded full-inventory plans,
   authoritative destination emptiness, final source-proof ordering, exact
   authority and admission guards, terminal reservation settlement, and saved

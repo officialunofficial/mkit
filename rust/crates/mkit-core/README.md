@@ -109,3 +109,14 @@ content id, and its packmap CAS condition, or no node when only the head needs
 to move. The caller owns chain validation, self-contained reset authorization,
 rollover policy, head leases, and I/O. This pure helper adds no runtime or
 transport dependency and is available with default features disabled on wasm32.
+
+
+## Cursor metadata
+
+`pack::window::WindowCursor::metadata()` validates the cursor's existing geometry
+and hash frontiers, then returns an immutable `WindowCursorMetadata` snapshot.
+Use its accessors to compare pack length, acquisition window, logical position,
+payload bytes, version, entry count/index, and expected pack ID with your outer
+checkpoint before restoring the reader. Inspection allocates no buffers and
+preserves cursor bytes. It establishes consistency; the caller still binds the
+immutable source, and the reader verifies reacquired bytes during resume.

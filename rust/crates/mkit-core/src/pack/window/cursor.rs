@@ -8,6 +8,15 @@ use super::{MAX_ENTRIES, MAX_TOTAL_PAYLOAD, PackError, Tree, geometry};
 use crate::hash::{self, Hash};
 
 /// Trusted-at-rest, checksummed entry-boundary state (at most 4 KiB encoded).
+///
+/// Cursor state stays private; inspect validated bindings through [`Self::metadata`].
+///
+/// ```compile_fail
+/// use mkit_core::pack::window::WindowCursor;
+/// fn change(mut cursor: WindowCursor) {
+///     cursor.pack_len = 0;
+/// }
+/// ```
 #[derive(Debug, Clone)]
 pub struct WindowCursor {
     pub(super) pack_len: u64,
@@ -26,7 +35,111 @@ pub struct WindowCursor {
     pub(super) id_tree: Tree,
 }
 
+/// Validated cursor bindings for comparison with a caller-owned checkpoint.
+///
+/// This immutable snapshot establishes cursor consistency, not source authenticity
+/// or verified-object authority. It has no encoded representation or constructor.
+///
+/// ```compile_fail
+/// use mkit_core::pack::window::WindowCursorMetadata;
+/// let _ = WindowCursorMetadata {
+///     pack_len: 44, window_size: 65_536, position: 12, payload_sum: 0,
+///     pack_version: 1, entry_count: 0, entry_index: 0, expected_pack_id: None,
+/// };
+/// ```
+///
+/// ```compile_fail
+/// use mkit_core::pack::window::WindowCursorMetadata;
+/// fn change(mut metadata: WindowCursorMetadata) {
+///     metadata.position = 0;
+/// }
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowCursorMetadata {
+    pack_len: u64,
+    window_size: u64,
+    position: u64,
+    payload_sum: u64,
+    pack_version: u32,
+    entry_count: u32,
+    entry_index: u32,
+    expected_pack_id: Option<Hash>,
+}
+
+impl WindowCursorMetadata {
+    /// Pack length, including its trailer.
+    #[must_use]
+    pub const fn pack_len(&self) -> u64 {
+        self.pack_len
+    }
+
+    /// Configured acquisition window size.
+    #[must_use]
+    pub const fn window_size(&self) -> u64 {
+        self.window_size
+    }
+
+    /// Absolute logical position at the entry boundary.
+    #[must_use]
+    pub const fn position(&self) -> u64 {
+        self.position
+    }
+
+    /// Cumulative encoded payload bytes before this boundary.
+    #[must_use]
+    pub const fn payload_sum(&self) -> u64 {
+        self.payload_sum
+    }
+
+    /// Declared pack wire version.
+    #[must_use]
+    pub const fn pack_version(&self) -> u32 {
+        self.pack_version
+    }
+
+    /// Declared total number of entries.
+    #[must_use]
+    pub const fn entry_count(&self) -> u32 {
+        self.entry_count
+    }
+
+    /// Number of entries consumed before this boundary.
+    #[must_use]
+    pub const fn entry_index(&self) -> u32 {
+        self.entry_index
+    }
+
+    /// Requested whole-pack identity, when supplied by the caller.
+    #[must_use]
+    pub const fn expected_pack_id(&self) -> Option<Hash> {
+        self.expected_pack_id
+    }
+}
+
 impl WindowCursor {
+    /// Validates existing cursor geometry and frontiers, then copies its bindings.
+    ///
+    /// This performs no allocation, encoding, source read, or state mutation.
+    /// Callers compare these fields with their outer checkpoint before resuming;
+    /// the reader still authenticates reacquired bytes during restoration.
+    ///
+    /// # Errors
+    /// Inconsistent cursor state returns [`PackError::PackfileCorrupted`], using
+    /// the same validation as cursor decoding and reader restoration.
+    pub fn metadata(&self) -> Result<WindowCursorMetadata, PackError> {
+        self.validate()?;
+        Ok(WindowCursorMetadata {
+            pack_len: self.pack_len,
+            window_size: self.window_size,
+            position: self.pos,
+            payload_sum: self.payload_sum,
+            pack_version: self.version,
+            entry_count: self.count,
+            entry_index: self.index,
+            expected_pack_id: self.expected,
+        })
+    }
+
     pub(super) fn initial(pack_len: u64, window_size: u64, expected: Option<Hash>) -> Self {
         Self {
             pack_len,
