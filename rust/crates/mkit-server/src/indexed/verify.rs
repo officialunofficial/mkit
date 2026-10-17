@@ -1192,60 +1192,50 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
             .await
             .map_err(|_| storage_failed())?;
         }
-        let plan = index::plan_index_rows_direct(
+        let plan = index::plan_index_rows_direct_with_capabilities(
             shards,
             repo,
             source,
             &pack.ticket.pack_id,
             &pack.entries,
             now,
+            &store.capabilities(),
         )
         .map_err(|_| storage_failed())?;
-        // The planner's byte bound includes the repository proof revision.
-        // A backend may reserve additional apply operations, so split its
-        // direct groups again before adding the deadline and increment.
         for direct in plan.direct {
-            let overhead =
-                1 + usize::from(crate::store::proof_version::index_partition(&direct.target));
-            let direct_puts = crate::store::MAX_BATCH_OPS
-                .checked_sub(store.capabilities().reserved_batch_ops)
-                .and_then(|ops| ops.checked_sub(overhead))
-                .filter(|ops| *ops > 0)
-                .ok_or_else(storage_failed)?
-                .min(crate::store::outbox::MAX_RELAY_PUTS);
-            for puts in direct.puts.chunks(direct_puts) {
-                renew_all_pending(store, source, repo, acquired, clock).await?;
-                let mut batch = Batch::new().require(Precondition::NotAfter(deadline(clock)));
-                let ids =
-                    store.enabled_ids(puts.iter().filter_map(|(key, _)| match keys::parse(key) {
+            renew_all_pending(store, source, repo, acquired, clock).await?;
+            let mut batch = Batch::new().require(Precondition::NotAfter(deadline(clock)));
+            let ids =
+                store.enabled_ids(direct.puts.iter().filter_map(|(key, _)| {
+                    match keys::parse(key) {
                         Some(keys::ParsedKey::ObjectIndex { object, .. }) => Some(object),
                         _ => None,
-                    }));
-                #[cfg(not(feature = "perf-metrics"))]
-                crate::takedown::denial::require_clear_many(store, ids).await?;
-                #[cfg(feature = "perf-metrics")]
-                crate::takedown::denial::require_clear_many_observed(
-                    store,
-                    ids,
-                    clock,
-                    &mut denial_counts.counts,
-                )
-                .await?;
-                if crate::store::proof_version::index_partition(&direct.target) {
-                    batch = batch.increment(keys::fork_index_revision());
-                }
-                for (key, value) in puts {
-                    batch = batch.put(key.clone(), value.clone());
-                }
-                batch
-                    .validate(&store.capabilities())
-                    .map_err(|_| storage_failed())?;
-                if !matches!(
-                    store.apply(&direct.target, batch).await,
-                    Ok(BatchOutcome::Committed)
-                ) {
-                    return Err(super::pending(1_000));
-                }
+                    }
+                }));
+            #[cfg(not(feature = "perf-metrics"))]
+            crate::takedown::denial::require_clear_many(store, ids).await?;
+            #[cfg(feature = "perf-metrics")]
+            crate::takedown::denial::require_clear_many_observed(
+                store,
+                ids,
+                clock,
+                &mut denial_counts.counts,
+            )
+            .await?;
+            if crate::store::proof_version::index_partition(&direct.target) {
+                batch = batch.increment(keys::fork_index_revision());
+            }
+            for (key, value) in direct.puts {
+                batch = batch.put(key, value);
+            }
+            batch
+                .validate(&store.capabilities())
+                .map_err(|_| storage_failed())?;
+            if !matches!(
+                store.apply(&direct.target, batch).await,
+                Ok(BatchOutcome::Committed)
+            ) {
+                return Err(super::pending(1_000));
             }
         }
         // Extract this pack's objects (those it introduced) after its index
