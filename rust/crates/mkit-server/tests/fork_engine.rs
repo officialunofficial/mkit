@@ -3858,10 +3858,9 @@ async fn an_authority_move_at_the_physical_activation_commit_installs_no_member(
             &self,
             _: &mkit_server::Operation,
         ) -> Result<mkit_server::AuthzFacts, mkit_server::ServerError> {
-            Ok(mkit_server::AuthzFacts {
-                authority_generation: Some(0),
-                ..mkit_server::AuthzFacts::default()
-            })
+            let mut facts = mkit_server::AuthzFacts::default();
+            facts.authority_generation = Some(0);
+            Ok(facts)
         }
     }
     let defaults = mkit_server::pipeline::Hooks::new();
