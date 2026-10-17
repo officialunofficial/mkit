@@ -323,8 +323,11 @@ recorded authority rows directly in the physical membership apply.
 Ordinary relay index delivery, native index installation, and fork activation
 append backend-atomic `Write::Increment` mutations to their existing batches.
 Directory registration does the same only for its first immutable pointer.
-These stamps add no storage round trip to ordinary writes; overflow or corrupt
-counter encoding refuses the complete batch. Content-state sequences likewise
+The default reference batch shapes retain their existing storage round trips.
+The stamp consumes one operation: custom reserved-operation or hook budgets
+at the batch cap can require another chunk. The ordinary index boundary probe
+measures this case. Overflow or corrupt counter encoding refuses the complete
+batch. Content-state sequences likewise
 fail on overflow rather than wrap.
 
 Low-level drivers use `ForkEnv::with_publication_policy` and
