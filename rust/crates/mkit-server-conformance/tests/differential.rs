@@ -72,7 +72,11 @@ async fn mutated_atomic_observation_fails_with_a_field_difference() {
             let mut bytes = response.bytes().await.unwrap().to_vec();
             if parts.uri.path() == mkit_server_conformance::control::CONTROL_PATH {
                 let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-                if let Some(reservations) = value["observation"]["reservations"].as_array_mut() {
+                if let Some(reservations) = value
+                    .get_mut("observation")
+                    .and_then(|observation| observation.get_mut("reservations"))
+                    .and_then(serde_json::Value::as_array_mut)
+                {
                     for reservation in reservations {
                         if reservation["state"] == "committed" {
                             reservation["terminal_count"] = 2.into();

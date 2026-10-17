@@ -51,7 +51,9 @@ async fn forward(
     request: axum::extract::Request,
 ) -> axum::response::Response {
     let (parts, body) = request.into_parts();
-    let body = axum::body::to_bytes(body, 1024 * 1024).await.expect("read proxy request");
+    let body = axum::body::to_bytes(body, 1024 * 1024)
+        .await
+        .expect("read proxy request");
     let reply = reqwest::Client::new()
         .request(parts.method, format!("{origin}{}", parts.uri))
         .headers(parts.headers)
@@ -59,5 +61,9 @@ async fn forward(
         .send()
         .await
         .expect("forward proxy request");
-    (reply.status(), reply.bytes().await.expect("read proxy response")).into_response()
+    (
+        reply.status(),
+        reply.bytes().await.expect("read proxy response"),
+    )
+        .into_response()
 }
