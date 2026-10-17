@@ -582,9 +582,8 @@ fn refused_combination(
             && match (original_ref, after.acceptance.reservations[2].as_ref()) {
                 (None, None) => true,
                 (Some(_), None) => false,
-                (None, Some(next)) => valid_ref(next),
                 (Some(prior), Some(next)) if prior.terminal_count == 1 => prior == next,
-                (Some(_), Some(next)) => valid_ref(next),
+                (_, Some(next)) => valid_ref(next),
             }
             && after.acceptance.reservations.iter().take(2).eq(recreated
                 .acceptance
