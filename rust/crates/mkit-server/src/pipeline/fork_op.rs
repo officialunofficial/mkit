@@ -162,12 +162,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         Ok((record, job))
     }
 
-    /// Whether `request` replays a fork that already finished, from the
+    /// Whether `request` replays a fork with an accepted terminal result, from the
     /// stored replay record and the destination's job, without running
     /// anything. `Some` only when the record is committed for this very
     /// signed request and the job agrees with the request on every field it
     /// binds (see [`fork::CompletedFork`]). Any other state, including an
-    /// in-flight or failed job, is `None`: [`Self::fork_repo`] decides.
+    /// unaccepted or failed job, is `None`: [`Self::fork_repo`] decides.
     ///
     /// The answer is a witness and never a result; the result of the fork
     /// always comes from [`Self::fork_repo`]. `a` must come from
@@ -318,10 +318,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             if job.binding != fork::binding(&spec) {
                 return Err(ForkError::NotEmpty.error());
             }
-            let report = fork::step(&env, &dest, &SliceBudget::new(SLICE_CALLS))
-                .await
-                .map_err(|error| step_error(&error))?;
-            return Self::fork_answer(report.job, ResponseMeta::default());
+            let job = self.drive_fork_request(&env, &spec).await?;
+            return Self::fork_answer(job, ResponseMeta::default());
         }
         if !op.creation.repo {
             return Err(ForkError::NotEmpty.error());
@@ -422,13 +420,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             self.resolve_pending(&p, pending, AbortReason::ReplayRace, String::new())
                 .await;
         }
-        let job = match fork::step(&env, &dest, &SliceBudget::new(SLICE_CALLS)).await {
-            Ok(report) => report.job,
-            Err(error) => self
-                .accepted_fork_after_step_error(&spec)
-                .await?
-                .ok_or_else(|| step_error(&error))?,
-        };
+        let job = self.drive_fork_request(&env, &spec).await?;
         let meta = if ours {
             response_meta(allowance)
         } else {
@@ -439,15 +431,20 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
 
     /// A clearance refusal cannot replace the accepted job's terminal answer.
     /// Joining requests already passed authorization for this exact fork binding.
-    async fn accepted_fork_after_step_error(
+    async fn drive_fork_request(
         &self,
+        env: &ForkEnv<'_, N>,
         spec: &fork::ForkSpec,
-    ) -> Result<Option<fork::ForkJobV1>, ServerError> {
-        Ok(fork::read_job(&self.meta, self.shards.as_ref(), &spec.dest)
-            .await
-            .map_err(meta_error)?
-            .map(|(job, _)| job)
-            .filter(|job| fork::CompletedFork::check(job, spec).is_some()))
+    ) -> Result<fork::ForkJobV1, ServerError> {
+        match fork::step(env, &spec.dest, &SliceBudget::new(SLICE_CALLS)).await {
+            Ok(report) => Ok(report.job),
+            Err(error) => fork::read_job(&self.meta, self.shards.as_ref(), &spec.dest)
+                .await
+                .map_err(meta_error)?
+                .map(|(job, _)| job)
+                .filter(|job| fork::CompletedFork::check(job, spec).is_some())
+                .ok_or_else(|| step_error(&error)),
+        }
     }
 
     /// What a request answers about the job it advanced.

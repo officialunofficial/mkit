@@ -428,11 +428,10 @@ impl HostState {
             .ok_or("unknown fork fixture")?;
         let dest = self.repository(&query.destination)?;
         let partition = D34Shards.coordinator(&dest.namespace);
-        let guard = self.store.gate.lock().await;
+        let _guard = self.store.gate.lock().await;
         let reader = ObservationReader {
             host: self,
             partition: partition.clone(),
-            _guard: guard,
         };
         let job = reader
             .read(keys::fork_job(&dest.name))

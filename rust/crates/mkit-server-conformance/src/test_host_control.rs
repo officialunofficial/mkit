@@ -485,24 +485,7 @@ impl HostState {
             Request::Resume => {
                 self.store.barriers.resume();
             }
-            Request::Restart { mode } => {
-                if mode != "graceful" {
-                    return Err((
-                        http::StatusCode::NOT_IMPLEMENTED,
-                        "kill restart unsupported by retained-memory host".into(),
-                    ));
-                }
-                // Retire all issued commands at a deterministic test barrier. A
-                // blocked caller is canceled by the case before restart.
-                self.reset.notify_waiters();
-                self.store.barriers.resume();
-                *self.core.write().await =
-                    build_core(&self.store, &self.blobs, &self.clock, &self.config).map_err(bad)?;
-                self.forks
-                    .restart(&self.store, &self.blobs, &self.clock)
-                    .await
-                    .map_err(bad)?;
-            }
+            Request::Restart { mode } => self.restart_fixture(&mode).await?,
             Request::BumpAuthority { namespace } => {
                 if !self.authority {
                     return Err((
@@ -517,6 +500,26 @@ impl HostState {
             }
         }
         Ok(reply)
+    }
+
+    async fn restart_fixture(&self, mode: &str) -> Result<(), (http::StatusCode, String)> {
+        if mode != "graceful" {
+            return Err((
+                http::StatusCode::NOT_IMPLEMENTED,
+                "kill restart unsupported by retained-memory host".into(),
+            ));
+        }
+        let bad = |message: String| (http::StatusCode::BAD_REQUEST, message);
+        // Retire all issued commands at a deterministic test barrier. A
+        // blocked caller is canceled by the case before restart.
+        self.reset.notify_waiters();
+        self.store.barriers.resume();
+        *self.core.write().await =
+            build_core(&self.store, &self.blobs, &self.clock, &self.config).map_err(bad)?;
+        self.forks
+            .restart(&self.store, &self.blobs, &self.clock)
+            .await
+            .map_err(bad)
     }
 
     fn require_publication(&self) -> Result<(), (http::StatusCode, String)> {
@@ -581,8 +584,15 @@ impl HostState {
             if step == "before_published_clearance" {
                 class != "published_clearance"
             } else {
-                !matches!(class, "ref_acceptance" | "fork_acceptance" | "fork_progress"
-                    | "fork_source_proof" | "fork_destination_claim" | "writer_authority_ready")
+                !matches!(
+                    class,
+                    "ref_acceptance"
+                        | "fork_acceptance"
+                        | "fork_progress"
+                        | "fork_source_proof"
+                        | "fork_destination_claim"
+                        | "writer_authority_ready"
+                )
             }
         }) || occurrence == Some(0)
             || step == "before_published_clearance" && occurrence.is_some_and(|n| n != 1)
