@@ -189,9 +189,11 @@ pointed-to descriptor reads and nested proofs remain serial.
 
 Fork publication and upload admission still skip full pack denial proofs when
 `takedown_denial` is false. The deployment gate and all final guards stay at
-their existing boundaries. Reader paths, hooks, outcomes, wire bytes, stored
-formats, and public APIs do not change. Pack-serving proofs retain their serial
-public entry point; upload admission uses a private write entry point. No store reset is required.
+their existing boundaries. The wave scheduling itself leaves reader paths and hook inputs unchanged.
+Pack-serving proofs retain their serial public entry point; upload admission
+uses a private write entry point. The acceptance and source-evidence changes
+below introduce new stored formats and public construction requirements; see
+the breaking-change migration notes in CHANGELOG.md.
 
 ## Enabling takedown denial after running with it off
 
@@ -267,11 +269,22 @@ proves the source packs after preparation, then compares the exact published
 pair, generation, publication sequence, visibility declaration, and visibility
 revision. Visibility setters retain a monotonic revision under sharded storage,
 including without history tokens, so changes away and back remain detectable.
-Observed source changes answer uniform absence. The resumed pack-proof cursor
-currently has an unresolved ordering gap: pack eligibility can change between
-proof slices without a coherent eligible source point. The enabled
-`final_source_proof_cannot_resume_across_disjoint_pack_eligibility` regression
-demonstrates this case; it must be resolved before claiming conformance.
+Observed source changes answer uniform absence. Before proving packs, the job
+captures source pair and visibility rows, every source index partition's revision,
+the sixteen directory revisions, and content-state versions for all registered
+denial subjects, including subjects with no current descriptor. Only after the
+complete proof pass does it validate the captured evidence. Monotonic versions
+close changes away and back across slices; validation never resumes pack proofs.
+After acceptance or a retained failure, the timer deletes transient `fq` evidence
+in bounded pages, including while activation is stalled. Each page compares the
+exact job and evidence rows, respects backend operation and byte headroom, and
+shares the timer call budget. Row deletions are the durable progress cursor;
+restart or an uncertain reply resumes from the remaining rows. `Done` and write
+barrier clearance wait for reclamation to finish. These deletions
+change neither the accepted decision nor membership.
+
+Custom publication policies supply a durable, non-repeating `fork_version` for
+changes to `pack_available`; the default refuses new or unaccepted forks.
 
 The acceptance commit retains the accepted result with the complete pack set,
 operation binding, destination, visibility, membership incarnation, byte charge,
@@ -297,9 +310,10 @@ has been installed; a failed registered fork retains the barrier permanently.
 | Register | Registry/visibility/authority guards, job CAS, deadline | Also barrier absence and exact pending reservation; installs the barrier atomically |
 | Copy and count progress | Job CAS and deadline | Also recorded authority rows and exact pending reservation |
 | Acceptance | No separate decision | Final source proof, barrier ownership, recorded authority rows, job CAS, pending reservation, replay absence, outcome guards, deadline |
-| Activation progress | Job CAS and deadline | Recorded authority rows at checkpoints; local permit or co-located authority guards on membership; projects only the accepted binding |
+| Activation progress | Job CAS and deadline | Recorded authority rows at coordinator checkpoints; local permit or colocated authority guards on physical membership; projects only the accepted binding |
 | Done | Job CAS, deadline, replay and reservation settlement | Recorded authority rows, job CAS, barrier ownership, deadline; removes barrier and retains the saved result |
 | Pre-acceptance refusal | Job CAS, reservation/outbox guards, deadline | Same terminal-abort path; registered failures retain their barrier |
+| Proof metadata reclamation | No reclamation | Accepted or terminal job CAS, exact evidence rows, deadline; no authority guard because it changes no decision or membership |
 
 The job, authority generation, grant epoch, barrier, replay, and reservation live
 in the destination coordinator. Progress reads the job and both fence rows in
@@ -307,16 +321,32 @@ one `get_many`; authority guards add no storage call. After a precondition loss,
 the next read observes the job and fence together: a moved fence aborts an
 unaccepted attempt, while an unchanged fence retains normal CAS retry handling.
 
-Physical membership installation guards a local permit bound to the accepted
-job and its recorded authority. The coordinator records the permit before local
-installation. Authority and epoch transitions freeze issuance, invalidate every
-registered local permit, and drain the registry before publishing the new fence.
-A local tombstone defeats delayed installations. A later authorized transition
-can finish an abandoned drain before starting its own request. Co-located
-membership applies compare the authority rows directly.
+Physical membership installation uses a local permit bound to the job and its
+recorded fence. Permit issuance is registered in the coordinator before local
+installation. A generation or epoch move freezes issuance, durably drains the
+registry and replaces local permits with revocation tombstones before publishing
+and acknowledging the new fence. Interrupted drains resume from their checkpoint;
+a late activation fails its local atomic guard. Colocated writes compare the
+recorded authority rows directly in the physical membership apply.
 
-Permit rows retain a deadline. Coordinator recovery holds transitions until
-previously issued apply windows have expired, even if restoration lost their
-registry rows. Completed forks drain their permits after removing the write
-barrier. Ordinary lease renewal and authority bootstrap add keys to existing
-snapshots and batches; they add no storage round trip to ordinary writes.
+Ordinary relay index delivery, native index installation, and fork activation
+append backend-atomic `Write::Increment` mutations to their existing batches.
+Directory registration does the same only for its first immutable pointer.
+The default reference batch shapes retain their existing storage round trips.
+The stamp consumes one operation: custom reserved-operation or hook budgets
+at the batch cap can require another chunk. The ordinary index boundary probe
+measures this case. Overflow or corrupt counter encoding refuses the complete
+batch. Content-state sequences likewise
+fail on overflow rather than wrap.
+
+Low-level drivers use `ForkEnv::with_publication_policy` and
+`ForkTimer::with_publication_policy` with the same policy as the pipeline.
+Drain unaccepted work before replacing a policy whose version history cannot
+be preserved. Stored fork, permit and proof formats have no legacy decoder;
+reset existing stores when adopting this revision.
+
+The serving pipeline offers fork only with sharded repository indexes. Low-level
+admission and unaccepted recovery enforce the same source requirement, because
+single-partition membership mutations do not maintain these proof revisions.
+Single-partition ordinary writes keep their existing batches. Completed results
+remain recoverable without a new source proof.

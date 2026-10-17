@@ -120,6 +120,7 @@ async fn measure(files: u32, extract: Option<u64>) -> (u128, u64, u32, u64) {
         marks: Mutex::default(),
     };
     let env = ForkEnv {
+        publication_policy: None,
         store: &timed,
         shards: source.shards.as_ref(),
         clock: source.clock.as_ref(),

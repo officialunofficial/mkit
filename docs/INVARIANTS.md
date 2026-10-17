@@ -158,12 +158,20 @@ source changes do not invalidate acceptance.
 **Because:** construction may survive a crash or continue after revocation;
 partial construction must not grant repository access.
 
-**Reference enforcement:** acceptance, destination exclusion, coordinator fences,
-and drained membership permits enforce the destination boundary. The stronger
-single-point source proof across resumed slices remains incomplete. The
+**Reference mechanism:** the job stages the inherited pack set before guarded
+acceptance, settles its saved result once, and then activates membership.
+Physical activation compares a partition-local permit, or direct authority guards
+when colocated. A fence move freezes permit issuance and durably invalidates all
+issued permits before acknowledgement. Source proof captures mutation versions,
+proves every inherited pack, then validates those versions, so resumed slices
+share one coherent source point. Portable conformance results remain separate
+from this implementation description.
+
+**Enforcement:** [SPEC-SERVER §9.9](specs/SPEC-SERVER.md#99-fork) defines the
+conditional protocol requirements. The
 [conformance coverage table](../rust/crates/mkit-server-conformance/README.md)
-records the exercised assertions; passing those cases does not certify this
-remaining requirement.
+records exercised cases and remaining declared gaps; implementation alone does
+not establish a passing conformance result.
 
 ## Typed pack evidence retains exact keys and live witness semantics
 
@@ -2910,8 +2918,34 @@ could change after a lost reply, or a reservation could settle twice.
 
 **Enforced by:** `fork::job`, `fork::accept`, `fork::publish`, and the fork engine
 acceptance, settlement, membership-order, source-change, and lost-reply tests.
-The stronger single-ordering-point source proof remains incomplete: the enabled
-disjoint-eligibility regression demonstrates an unresolved resumed-proof gap.
+`fork::proof` captures source pair/policy rows, repository-index mutation
+versions, directory revisions and every registered subject's content-state
+version before proving packs. Validation follows the entire proof pass; a
+changed version refuses uniformly. Versions never repeat, including after
+removal and reinstallation. Custom publication policies must provide a coherent
+`fork_version`; its default refuses new and unaccepted forks. Accepted and
+retained failed jobs reclaim transient proof rows in bounded, restart-safe pages,
+including while activation is stalled. Exact job and evidence guards prevent
+stale capture checkpoints from resurrecting deleted rows.
+
+## Physical fork activation is fenced before acknowledged moves
+
+**Always:** membership installation atomically checks its recorded authority facts
+when they share its partition. Otherwise it compares an expiring local permit
+bound to the fork and recorded facts. Generation and epoch moves freeze issuance,
+drain registered permits into local revocation tombstones, and publish the move
+only after invalidation completes. Drain checkpoints survive interrupted work.
+
+**Because:** a coordinator checkpoint after a physical membership write cannot
+undo visibility granted by a stale write.
+
+**Enforced by:** `fork::permit`, local activation guards, and the authority/epoch
+transition paths. Repository-index mutations atomically increment `fv`; directory
+registration increments `dv`; content mutations increment their existing state
+sequence. `Write::Increment` adds these stamps without a writer snapshot or an
+extra round trip for default reference batches. Custom reserved-operation budgets
+at the batch cap can require another chunk; the ordinary verifier cost probe
+measures those boundaries.
 
 ## Fork registration arbitrates with destination writers
 

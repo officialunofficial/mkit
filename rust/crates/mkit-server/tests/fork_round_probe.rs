@@ -83,6 +83,7 @@ async fn engine(files: u32, denial: bool) -> Table {
         dest_visibility: Visibility::Public,
     };
     let env = ForkEnv {
+        publication_policy: None,
         store: &source.store,
         shards: source.shards.as_ref(),
         clock: source.clock.as_ref(),

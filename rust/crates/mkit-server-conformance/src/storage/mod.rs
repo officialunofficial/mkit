@@ -349,6 +349,15 @@ pub(crate) fn model_apply(model: &mut Model, batch: &Batch) {
         match write {
             Write::Put(key, val) => model.insert(key.clone(), val.clone()),
             Write::Delete(key) => model.remove(key),
+            Write::Increment(key) => {
+                let current = model.get(key).map_or(0, |value| {
+                    u64::from_be_bytes(value.as_bytes().try_into().expect("valid model counter"))
+                });
+                let next = current
+                    .checked_add(1)
+                    .expect("model counter does not overflow");
+                model.insert(key.clone(), Value::new(next.to_be_bytes().to_vec()))
+            }
         };
     }
 }

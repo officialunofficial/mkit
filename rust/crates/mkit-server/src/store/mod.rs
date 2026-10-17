@@ -20,6 +20,7 @@ pub use tickets::TicketCaps;
 
 mod content_index;
 mod denial_reads;
+pub(crate) mod proof_version;
 pub use denial_reads::DenialReads;
 mod pending_holder;
 pub use pending_holder::PendingHolderV1;

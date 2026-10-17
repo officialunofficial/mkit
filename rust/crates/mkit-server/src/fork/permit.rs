@@ -545,6 +545,7 @@ mod tests {
                 .unwrap();
             }
             let env = ForkEnv {
+                publication_policy: None,
                 store: &store,
                 shards: &shards,
                 clock: clock.as_ref(),
@@ -651,6 +652,7 @@ mod tests {
             BatchOutcome::Committed
         ));
         let env = ForkEnv {
+            publication_policy: None,
             store: &store,
             shards: &shards,
             clock: clock.as_ref(),
@@ -701,6 +703,7 @@ mod tests {
         }
         block_on(store.apply(&coordinator, initial)).unwrap();
         let env = ForkEnv {
+            publication_policy: None,
             store: &store,
             shards: &shards,
             clock: clock.as_ref(),
@@ -775,6 +778,7 @@ mod tests {
         )
         .unwrap();
         let env = ForkEnv {
+            publication_policy: None,
             store: &store,
             shards: &shards,
             clock: clock.as_ref(),
@@ -837,6 +841,7 @@ mod tests {
             )
             .unwrap();
             let env = ForkEnv {
+                publication_policy: None,
                 store: &store,
                 shards: &shards,
                 clock: clock.as_ref(),

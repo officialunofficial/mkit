@@ -174,6 +174,7 @@ impl NamespaceStore for BatchBytes {
             .chain(batch.writes.iter().map(|write| match write {
                 crate::store::Write::Put(k, v) => k.as_bytes().len() + v.as_bytes().len(),
                 crate::store::Write::Delete(k) => k.as_bytes().len(),
+                crate::store::Write::Increment(k) => k.as_bytes().len() + 8,
             }))
             .sum();
         self.maximum.fetch_max(bytes, Ordering::SeqCst);

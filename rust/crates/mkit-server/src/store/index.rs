@@ -12,7 +12,7 @@ use super::keys::{self, ParsedKey};
 use super::outbox::MAX_RELAY_PUTS;
 use super::{
     BlobKey, Key, MAX_BATCH_BYTES, MAX_KEY_BYTES, MAX_VALUE_BYTES, NamespaceStore, Partition,
-    RangeScan, ScanPage, StoreError, Value,
+    RangeScan, ScanPage, StoreCapabilities, StoreError, Value,
 };
 use crate::pipeline::ShardMap;
 use crate::repo::RepoId;
@@ -121,7 +121,7 @@ pub fn plan_index_rows(
     entries: &[IndexEntry],
     at_ms: u64,
 ) -> Result<IndexPlan, StoreError> {
-    plan_index_rows_inner(shards, repo, source, pack, entries, at_ms, false)
+    plan_index_rows_inner(shards, repo, source, pack, entries, at_ms, (false, 0))
 }
 
 /// Plan direct idempotent upserts for every target partition. Native indexed
@@ -135,7 +135,29 @@ pub fn plan_index_rows_direct(
     entries: &[IndexEntry],
     at_ms: u64,
 ) -> Result<IndexPlan, StoreError> {
-    plan_index_rows_inner(shards, repo, source, pack, entries, at_ms, true)
+    plan_index_rows_inner(shards, repo, source, pack, entries, at_ms, (true, 0))
+}
+
+/// Bound each direct target before grouping so backend apply reserves do not
+/// split every already-full default group into a full group and a tail.
+pub(crate) fn plan_index_rows_direct_with_capabilities(
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    source: &Partition,
+    pack: &Hash,
+    entries: &[IndexEntry],
+    at_ms: u64,
+    caps: &StoreCapabilities,
+) -> Result<IndexPlan, StoreError> {
+    plan_index_rows_inner(
+        shards,
+        repo,
+        source,
+        pack,
+        entries,
+        at_ms,
+        (true, caps.reserved_batch_ops),
+    )
 }
 
 fn plan_index_rows_inner(
@@ -145,7 +167,7 @@ fn plan_index_rows_inner(
     pack: &Hash,
     entries: &[IndexEntry],
     at_ms: u64,
-    direct_all: bool,
+    (direct_all, reserved_ops): (bool, usize),
 ) -> Result<IndexPlan, StoreError> {
     let mut grouped: BTreeMap<Partition, BTreeMap<Key, Value>> = BTreeMap::new();
     for entry in entries {
@@ -159,17 +181,32 @@ fn plan_index_rows_inner(
     let mut plan = IndexPlan::default();
     for (target, rows) in grouped {
         if direct_all || &target == source {
+            let overhead = 1 + usize::from(super::proof_version::index_partition(&target));
+            let put_limit = super::MAX_BATCH_OPS
+                .checked_sub(reserved_ops)
+                .and_then(|ops| ops.checked_sub(overhead))
+                .filter(|ops| *ops > 0)
+                .ok_or_else(|| StoreError::Invalid("no room for a direct index apply".into()))?
+                .min(MAX_RELAY_PUTS);
             let mut puts = Vec::new();
+            // Direct repository-index applies also carry their atomic proof
+            // revision increment; reserve its implicit eight-byte value.
+            let revision_bytes = if super::proof_version::index_partition(&target) {
+                super::keys::fork_index_revision().as_bytes().len() + 8
+            } else {
+                0
+            };
+            let byte_limit = MAX_BATCH_BYTES - revision_bytes;
             let mut bytes = 0;
             for (key, value) in rows {
                 let size = key.as_bytes().len() + value.as_bytes().len();
-                if size > MAX_BATCH_BYTES
+                if size > byte_limit
                     || key.as_bytes().len() > MAX_KEY_BYTES
                     || value.as_bytes().len() > MAX_VALUE_BYTES
                 {
                     return Err(StoreError::Invalid("object index row too large".into()));
                 }
-                if puts.len() == MAX_RELAY_PUTS || bytes + size > MAX_BATCH_BYTES {
+                if puts.len() == put_limit || bytes + size > byte_limit {
                     plan.direct.push(DirectIndexBatch {
                         target: target.clone(),
                         puts: std::mem::take(&mut puts),
@@ -660,9 +697,7 @@ mod tests {
 
     use crate::pipeline::{D34Shards, SinglePartition, WideRepoIndexShards};
     use crate::repo::{NamespaceKey, RepoName};
-    use crate::{
-        Batch, BatchOutcome, Cursor, MemoryKv, PartitionStats, ScanPage, StoreCapabilities,
-    };
+    use crate::{Batch, BatchOutcome, Cursor, MemoryKv, PartitionStats, ScanPage};
 
     #[derive(Debug)]
     struct EmptyPageOnce {
@@ -860,6 +895,58 @@ mod tests {
         ] {
             assert!(codec::encode_object_index(&object, &invalid).is_err());
         }
+    }
+
+    #[test]
+    fn direct_planner_reserves_per_target_operations_before_chunking() {
+        let repo = repo("ordinary");
+        let entries: Vec<_> = (0_u16..192)
+            .map(|i| {
+                let mut object = [0; 32];
+                object[30..].copy_from_slice(&i.to_be_bytes());
+                IndexEntry {
+                    object,
+                    value: raw(u64::from(i)),
+                }
+            })
+            .collect();
+        let mut caps = StoreCapabilities::full();
+        caps.reserved_batch_ops = 3;
+        for (shards, expected) in [
+            (&D34Shards as &dyn ShardMap, vec![95, 95, 2]),
+            (&SinglePartition as &dyn ShardMap, vec![96, 96]),
+        ] {
+            let source = shards.ref_shard(&repo, "refs/heads/main");
+            let plan = plan_index_rows_direct_with_capabilities(
+                shards, &repo, &source, &[9; 32], &entries, 1, &caps,
+            )
+            .unwrap();
+            assert_eq!(
+                plan.direct
+                    .iter()
+                    .map(|batch| batch.puts.len())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            for direct in plan.direct {
+                let mut batch = Batch::new().require(super::super::Precondition::NotAfter(1));
+                if super::super::proof_version::index_partition(&direct.target) {
+                    batch = batch.increment(keys::fork_index_revision());
+                }
+                for (key, value) in direct.puts {
+                    batch = batch.put(key, value);
+                }
+                batch.validate(&caps).unwrap();
+            }
+        }
+        caps.reserved_batch_ops = super::super::MAX_BATCH_OPS;
+        let source = D34Shards.ref_shard(&repo, "refs/heads/main");
+        assert!(matches!(
+            plan_index_rows_direct_with_capabilities(
+                &D34Shards, &repo, &source, &[9; 32], &entries, 1, &caps
+            ),
+            Err(StoreError::Invalid(_))
+        ));
     }
 
     #[test]

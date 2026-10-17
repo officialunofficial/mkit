@@ -19,6 +19,7 @@ mod copy;
 mod job;
 pub(crate) mod permit;
 mod plan;
+mod proof;
 mod publish;
 mod request;
 mod sets;
@@ -39,6 +40,7 @@ pub use job::{
     ForkPlan, ForkTimer, StartOutcome, StepReport, plan_bytes, plan_fork, start, start_planned,
     start_with, step,
 };
+pub use proof::ProofV1;
 pub use request::ForkRequest;
 pub use settle::SettleV1;
 pub use settle::{ChargeV1, ReplayV1};
@@ -266,6 +268,8 @@ pub struct ForkEnv<'a, S> {
     pub shards: &'a dyn ShardMap,
     /// The business clock.
     pub clock: &'a dyn Clock,
+    /// Publication policy used by the serving pipeline.
+    pub publication_policy: Option<&'a dyn crate::pipeline::clearance::PublicationPolicy>,
     /// Whether pack-level takedown denial is on. MUST equal
     /// `PipelineConfig::takedown_denial` of the pipeline that serves the
     /// destination: it selects the pack proof, and the publication walk
@@ -294,6 +298,7 @@ impl<'a, S> ForkEnv<'a, S> {
             store,
             shards: self.shards,
             clock: self.clock,
+            publication_policy: self.publication_policy,
             takedown_denial: self.takedown_denial,
             extract_min_bytes: self.extract_min_bytes,
             limits: self.limits,
@@ -313,10 +318,21 @@ impl<'a, S> ForkEnv<'a, S> {
             store,
             shards,
             clock,
+            publication_policy: None,
             takedown_denial: config.takedown_denial,
             extract_min_bytes: config.indexed.map(|indexed| indexed.extract_min_bytes),
             limits: ForkLimits::default(),
         }
+    }
+
+    /// Share the serving pipeline policy with a fork or timer driver.
+    #[must_use]
+    pub fn with_publication_policy(
+        mut self,
+        policy: Option<&'a dyn crate::pipeline::clearance::PublicationPolicy>,
+    ) -> Self {
+        self.publication_policy = policy;
+        self
     }
 
     pub(crate) fn now(&self) -> u64 {
@@ -548,6 +564,8 @@ pub struct ForkJobV1 {
     pub fence_rows: FenceRowsV1,
     /// Source policy observations bound by authorization.
     pub source_access: SourceAccessV1,
+    /// Durable capture and validation cursors for the final source proof.
+    pub proof: ProofV1,
     /// Durable accepted result. The same row binds the complete pack list,
     /// membership incarnation, byte charge, operation, destination, and fence.
     /// Acceptance settles admission; publication never changes this result.

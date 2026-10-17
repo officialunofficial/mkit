@@ -346,6 +346,7 @@ impl NamespaceStore for Slow {
                     .map(|write| match write {
                         Write::Put(key, value) => key.as_bytes().len() + value.as_bytes().len(),
                         Write::Delete(key) => key.as_bytes().len(),
+                        Write::Increment(key) => key.as_bytes().len() + 8,
                     })
                     .sum::<usize>();
             ledger.max_batch_bytes = ledger.max_batch_bytes.max(bytes);

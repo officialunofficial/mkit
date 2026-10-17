@@ -35,6 +35,29 @@ collect the applicable entries between their old and new immutable pins.
   Authority and epoch setters may return retryable unavailable while a drain
   finishes. Ordinary writes retain their existing storage round trips.
 
+- [embedder: breaking API] Low-level fork admission requires source
+  `RepoIndex` partitions, matching the existing sharded `ForkRepo` deployment
+  requirement. Migration: use the pipeline's sharded map for new forks;
+  completed receipts remain recoverable. No additional store reset.
+
+- [embedder: breaking API] [embedder: stored-format change]
+  [embedder: store reset required] Fork preparation now stages membership until
+  guarded acceptance, which atomically saves replay and settles its reservation.
+  Activation uses revocable local permits; generation/epoch moves invalidate them
+  before acknowledgement. Coherent source proofs retain mutation-version evidence
+  across slices. Migration: reset existing stores; no legacy decode is provided.
+  Configure low-level `ForkEnv` and `ForkTimer` with `with_publication_policy`
+  when using a custom pipeline policy. Implement `PublicationPolicy::fork_version`
+  with a durable, non-repeating version that changes atomically with fork
+  eligibility; the default refuses new and unaccepted forks.
+
+- [embedder: breaking API] Storage `Write::Increment(Key)` and `Batch::increment`
+  atomically advance checked big-endian u64 mutation stamps without another
+  writer round trip. Migration: implement this variant inside each backend's
+  existing atomic apply; absence starts at zero, and malformed values or overflow
+  reject the whole batch. Update exhaustive write matches. Existing stores must
+  be reset with the fork-format change above.
+
 - Conformance profiles declare transport writes, authority RPCs, authority
   fencing, fork, and the relay-lag bound. Results distinguish `NotApplicable`
   from declared `Skip`. Migration: declare offered features and handle the new
@@ -95,8 +118,8 @@ collect the applicable entries between their old and new immutable pins.
 - Protocol acceptance and recovery requirements now distinguish portable
   guarantees from reference-server mechanisms. Fork acceptance requires a final
   source proof after membership staging, with uniform source-race refusal and
-  ordering at the proof; the reference gaps have declared Tier-2 skips. The
-  conformance library and
+  ordering at the proof. Tier-2 assertions report implementation coverage
+  separately from declared skips. The conformance library and
   runner are prepared for the next lockstep crates.io release, with a
   versioned test-only control binding and declared server-control coverage.
   No production wire, runtime, or stored-format change; no wipe.

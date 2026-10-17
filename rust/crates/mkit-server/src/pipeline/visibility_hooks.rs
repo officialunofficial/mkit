@@ -184,7 +184,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         // what is stored, which an earlier planner may already have done.
         pre.retain(|c| !touches(c));
         batch.writes.retain(|w| match w {
-            Write::Put(k, _) | Write::Delete(k) => !counter(k),
+            Write::Put(k, _) | Write::Delete(k) | Write::Increment(k) => !counter(k),
         });
         for (key, stored) in [(&seq_key, stored_seq), (&backlog_key, stored_backlog)] {
             let guarded = batch.preconditions.iter().any(|c| match c {

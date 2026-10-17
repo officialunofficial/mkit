@@ -87,6 +87,9 @@ impl super::clearance::PublicationPolicy for Immediate {
     fn pack_available(&self, _: &crate::repo::RepoId, _: &mkit_core::hash::Hash) -> bool {
         true
     }
+    fn fork_version(&self, _: &crate::repo::RepoId) -> Option<mkit_core::hash::Hash> {
+        Some([0; 32])
+    }
 }
 
 impl<B: crate::store::MultipartBlobStore, N: crate::NamespaceStore, H: super::HookSet>

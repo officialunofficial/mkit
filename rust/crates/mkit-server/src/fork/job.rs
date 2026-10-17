@@ -115,6 +115,7 @@ pub(crate) async fn start_authorized<S: NamespaceStore>(
             Err(ForkError::NotEmpty)
         };
     }
+    super::proof::require_versioned_source(env, &spec.source)?;
     let view = plan::read_source(
         env.store,
         env.shards,
@@ -154,7 +155,9 @@ pub(crate) async fn start_authorized<S: NamespaceStore>(
         (keys::authority_generation(), authority.as_ref()),
         (keys::grant_epoch(), epoch.as_ref()),
     )?;
-    let current_access = super::SourceAccessV1::read(env.store, env.shards, &spec.source).await?;
+    let current_access = super::SourceAccessV1::read(env.store, env.shards, &spec.source)
+        .await?
+        .with_policy(env.publication_policy, &spec.source)?;
     if source_access
         .as_ref()
         .is_some_and(|access| *access != current_access)
@@ -232,6 +235,7 @@ fn new_job(
         fence,
         fence_rows: crate::fork::FenceRowsV1::default(),
         source_access: crate::fork::SourceAccessV1::default(),
+        proof: crate::fork::ProofV1::default(),
         accepted: None,
         result: None,
     }
@@ -838,6 +842,21 @@ const ALL_SETS: [u8; 5] = [
     set::MANIFESTS,
 ];
 
+/// Reclaim transient evidence while retaining the next unit's call reserve.
+/// Metadata deletion does not mutate the job or advance a fork decision.
+async fn reclaim_before_clearance<S: NamespaceStore>(
+    env: &ForkEnv<'_, S>,
+    destination: &RepoId,
+    budget: &SliceBudget,
+) -> Result<bool, ForkError> {
+    while budget.remaining() >= STEP_RESERVE.saturating_add(3) {
+        if super::proof::cleanup(env, destination, budget).await? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// One state's unit of work; returns the coordinator effects to commit with
 /// the updated job row.
 async fn advance<S: NamespaceStore>(
@@ -929,6 +948,11 @@ async fn advance<S: NamespaceStore>(
             if !publish::slice(env, job, budget).await? {
                 return Ok(Batch::new());
             }
+            if job.proof.evidence_pending()
+                && !reclaim_before_clearance(env, &job.dest()?, budget).await?
+            {
+                return Ok(Batch::new());
+            }
             job.result.clone_from(&job.accepted);
             job.phase = Phase::Done;
             // The walk's scratch sets go; the cleared set and the inherited
@@ -963,6 +987,9 @@ pub struct ForkTimer<N> {
     pub takedown_denial: bool,
     /// The extraction threshold, if extraction is deployed.
     pub extract_min_bytes: Option<u64>,
+    /// The same versioned publication policy used by the serving pipeline.
+    pub publication_policy:
+        Option<std::sync::Arc<dyn crate::pipeline::clearance::PublicationPolicy>>,
 }
 
 impl<N> ForkTimer<N> {
@@ -985,7 +1012,19 @@ impl<N> ForkTimer<N> {
             clock,
             takedown_denial,
             extract_min_bytes,
+            publication_policy: None,
         }
+    }
+
+    /// Attach the serving pipeline's coherent publication policy, including
+    /// when recovering in-flight work after executor replacement.
+    #[must_use]
+    pub fn with_publication_policy(
+        mut self,
+        policy: std::sync::Arc<dyn crate::pipeline::clearance::PublicationPolicy>,
+    ) -> Self {
+        self.publication_policy = Some(policy);
+        self
     }
 }
 
@@ -1028,40 +1067,64 @@ impl<S: NamespaceStore, N: NamespaceStore> TimerHandler<S> for ForkTimer<N> {
                 takedown_denial: self.takedown_denial,
                 extract_min_bytes: self.extract_min_bytes,
                 limits: super::ForkLimits::default(),
+                publication_policy: self.publication_policy.as_deref(),
             };
             let budget = SliceBudget::new(SLICE_CALLS);
-            // A refusal before registration deletes the job: its timer ends.
-            let job = keys::fork_job(&dest.name);
-            if ctx.store.get(ctx.partition, &job).await?.is_none() {
+            // Clean one page before driving already accepted work, so denial
+            // or a moved fence cannot starve transient-metadata reclamation.
+            let job_key = keys::fork_job(&dest.name);
+            let Some(raw) = ctx.store.get(ctx.partition, &job_key).await? else {
                 return Ok(Fired::Done(Batch::new()));
+            };
+            let initial = decode_job(&raw)?;
+            let eligible = initial.accepted.is_some() || initial.finished();
+            let mut proof_clean = if eligible && initial.proof.evidence_pending() {
+                super::proof::cleanup(&env, &dest, &budget)
+                    .await
+                    .map_err(|_| StoreError::unavailable("fork source proof cleanup pending"))?
+            } else {
+                eligible
+            };
+            let outcome = step(&env, &dest, &budget).await;
+            // Acceptance or failure first reached during this tick also starts
+            // cleanup, using only the original slice's remaining allowance.
+            if !eligible {
+                proof_clean = super::proof::cleanup(&env, &dest, &budget)
+                    .await
+                    .map_err(|_| StoreError::unavailable("fork source proof cleanup pending"))?;
             }
-            Ok(match step(&env, &dest, &budget).await {
-                Ok(report) if report.job.finished() => {
-                    if report.job.phase == Phase::Done
-                        && !super::permit::release(&env, &report.job)
+            if initial.phase != Phase::Done
+                && matches!(&outcome, Ok(report) if report.job.phase == Phase::Done)
+            {
+                // Publish now establishes complete evidence cleanup before
+                // Done. A false pre-drive page result is no longer current.
+                proof_clean = true;
+            }
+            let retry = |delay| Fired::Reschedule {
+                due_at_ms: ctx.now_ms.saturating_add(delay),
+                value: Value::default(),
+                batch: Batch::new(),
+            };
+            Ok(match outcome {
+                Ok(report) if report.job.finished() && proof_clean => {
+                    if report.job.phase == Phase::Done {
+                        // Existing permit hygiene shares this same allowance.
+                        // Four permit rows cost at most thirteen calls.
+                        if budget.remaining() < 20 {
+                            return Ok(retry(1_000));
+                        }
+                        let store = Budgeted::new(env.store, &budget);
+                        if !super::permit::release(&env.with_store(&store), &report.job)
                             .await
                             .map_err(|_| StoreError::unavailable("fork permit cleanup pending"))?
-                    {
-                        Fired::Reschedule {
-                            due_at_ms: ctx.now_ms.saturating_add(1_000),
-                            value: Value::default(),
-                            batch: Batch::new(),
+                        {
+                            return Ok(retry(1_000));
                         }
-                    } else {
-                        Fired::Done(Batch::new())
                     }
+                    Fired::Done(Batch::new())
                 }
-
-                Ok(_) => Fired::Reschedule {
-                    due_at_ms: ctx.now_ms.saturating_add(1_000),
-                    value: Value::default(),
-                    batch: Batch::new(),
-                },
-                Err(_) => Fired::Reschedule {
-                    due_at_ms: ctx.now_ms.saturating_add(crate::timers::RETRY_BACKOFF_MS),
-                    value: Value::default(),
-                    batch: Batch::new(),
-                },
+                Ok(_) => retry(1_000),
+                Err(_) => retry(crate::timers::RETRY_BACKOFF_MS),
             })
         })
     }

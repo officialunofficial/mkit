@@ -283,7 +283,7 @@ impl ProbeKv {
                 .writes
                 .iter()
                 .map(|write| match write {
-                    Write::Put(k, _) | Write::Delete(k) => tag(k),
+                    Write::Put(k, _) | Write::Delete(k) | Write::Increment(k) => tag(k),
                 })
                 .collect(),
             phase: Phase::PlanSnapshot,
