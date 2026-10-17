@@ -189,9 +189,11 @@ pointed-to descriptor reads and nested proofs remain serial.
 
 Fork publication and upload admission still skip full pack denial proofs when
 `takedown_denial` is false. The deployment gate and all final guards stay at
-their existing boundaries. Reader paths, hooks, outcomes, wire bytes, stored
-formats, and public APIs do not change. Pack-serving proofs retain their serial
-public entry point; upload admission uses a private write entry point. No store reset is required.
+their existing boundaries. The wave scheduling itself leaves reader paths and hook inputs unchanged.
+Pack-serving proofs retain their serial public entry point; upload admission
+uses a private write entry point. The acceptance and source-evidence changes
+below introduce new stored formats and public construction requirements; see
+the breaking-change migration notes in CHANGELOG.md.
 
 ## Enabling takedown denial after running with it off
 
