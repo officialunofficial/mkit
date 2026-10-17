@@ -155,7 +155,9 @@ commands retain TAP output.
 Differential decisions have a 45-second execution budget. The runner honors
 valid pending-verification polling hints clamped to 1–60 seconds. If a mandatory
 wait cannot fit, the JSON case status is `runner_error` and the command exits 2;
-this is inconclusive, not a protocol failure or a match. Rerun against a disposable
+this is inconclusive, not a protocol failure or a match. An already observed
+protocol violation remains `failed` with exit 1 even if a later step or the other
+target reaches this budget. Rerun against a disposable
 fixture whose verification resolves within that budget. The runner never polls
 early to avoid the wait. Ordinary protocol refusals retain their failure result.
 

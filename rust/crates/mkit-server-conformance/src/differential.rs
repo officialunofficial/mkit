@@ -196,9 +196,7 @@ fn compare_traces(
                 }
                 _ => DiffCase {
                     name: (*name).into(),
-                    status: if matches!(left, Err(ScenarioError::Protocol(_)))
-                        || matches!(right, Err(ScenarioError::Protocol(_)))
-                    {
+                    status: if known_protocol_failure(left) || known_protocol_failure(right) {
                         DiffStatus::Failed
                     } else {
                         DiffStatus::RunnerError
@@ -212,6 +210,30 @@ fn compare_traces(
                 },
             })
             .collect(),
+    }
+}
+
+fn known_protocol_failure(result: &Result<BTreeMap<String, Value>, ScenarioError>) -> bool {
+    match result {
+        Err(ScenarioError::Protocol(_)) => true,
+        Ok(trace) => trace.values().any(|value| {
+            value
+                .get("oracle_error")
+                .is_some_and(|error| !error.is_null())
+        }),
+        Err(ScenarioError::Budget(_)) => false,
+    }
+}
+
+fn retain_protocol_failure<T>(
+    result: Result<T, ScenarioError>,
+    known_error: Option<String>,
+) -> Result<T, ScenarioError> {
+    match (result, known_error) {
+        (Err(ScenarioError::Budget(budget)), Some(protocol)) => Err(ScenarioError::Protocol(
+            format!("{protocol}; later runner limitation: {budget}"),
+        )),
+        (result, _) => result,
     }
 }
 
@@ -606,64 +628,68 @@ impl Session {
             self.quota,
         )
         .err();
-        let normalized = normalize(&snapshot, &accepted.fingerprint)?;
-        let mut trace = BTreeMap::new();
-        trace.insert(CASES[0].into(), json!({"outcome": outcome, "before": normalize(&before, &accepted.fingerprint)?, "after": normalized, "oracle_error": acceptance_error}));
-        let replay = self.advance(&accepted).await?;
-        validate_replay_answer(&answer, &replay)?;
-        let replay_snapshot = self.snapshot(&query).await?;
-        if replay_snapshot != snapshot {
-            return Err("replay changed the saved answer or acceptance effects".into());
-        }
-        trace.insert(CASES[1].into(), json!({"outcome": outcome, "observation": normalize(&replay_snapshot, &accepted.fingerprint)?}));
-        let conflict = self.unary(
-            Rpc::AdvanceRefs,
-            &advance_req(
-                (HEAD, Exp::Match(&head), &child),
-                (PACKMAP, Exp::Match(&[0x19; 32]), &packmap),
-            ),
-            "stale-pair",
-        )?;
-        let answer = self.advance(&conflict).await?;
-        let outcome = answer.outcome.map_or(0, |value| value.to_i32());
-        if outcome != 3 {
-            return Err(format!("expected packmap conflict, got outcome {outcome}").into());
-        }
-        let after_conflict = self.snapshot(&query).await?;
-        if after_conflict.head != snapshot.head
-            || after_conflict.packmap != snapshot.packmap
-            || after_conflict.memberships != snapshot.memberships
-            || after_conflict.tickets != snapshot.tickets
-            || after_conflict.reservations != snapshot.reservations
-            || after_conflict.replay != snapshot.replay
-        {
-            return Err("paired CAS conflict changed accepted effects".into());
-        }
-        let conflict_replay = self.advance(&conflict).await?;
-        validate_replay_answer(&answer, &conflict_replay)?;
-        if self.snapshot(&query).await? != after_conflict {
-            return Err("replayed CAS conflict changed authoritative state or quota".into());
-        }
-        trace.insert(CASES[2].into(), json!({"outcome": outcome, "observation": normalize(&after_conflict, &accepted.fingerprint)?}));
-        let mut bad = self.unary(Rpc::AdvanceRefs, &request, "bad-signature")?;
-        bad.headers = bad.headers.with_header("x-signature", "00".repeat(64));
-        let refusal = self
-            .client
-            .unary::<AdvanceRefsResponse>(Rpc::AdvanceRefs, bad.body, &bad.headers.headers)
-            .await?;
-        let code = refusal.err().ok_or("invalid signature was accepted")?.code;
-        if code != "unauthenticated" {
-            return Err(format!("invalid signature refusal class: {code}").into());
-        }
-        let after_refusal = self.snapshot(&query).await?;
-        if after_refusal != after_conflict {
-            return Err("invalid signature changed authoritative state".into());
-        }
-        trace.insert(
-            CASES[3].into(),
-            json!({"code": code, "observation": normalize(&after_refusal, &accepted.fingerprint)?}),
-        );
-        Ok(trace)
+        let known_error = acceptance_error.clone();
+        let result = async {
+            let normalized = normalize(&snapshot, &accepted.fingerprint)?;
+            let mut trace = BTreeMap::new();
+            trace.insert(CASES[0].into(), json!({"outcome": outcome, "before": normalize(&before, &accepted.fingerprint)?, "after": normalized, "oracle_error": acceptance_error}));
+            let replay = self.advance(&accepted).await?;
+            validate_replay_answer(&answer, &replay)?;
+            let replay_snapshot = self.snapshot(&query).await?;
+            if replay_snapshot != snapshot {
+                return Err("replay changed the saved answer or acceptance effects".into());
+            }
+            trace.insert(CASES[1].into(), json!({"outcome": outcome, "observation": normalize(&replay_snapshot, &accepted.fingerprint)?}));
+            let conflict = self.unary(
+                Rpc::AdvanceRefs,
+                &advance_req(
+                    (HEAD, Exp::Match(&head), &child),
+                    (PACKMAP, Exp::Match(&[0x19; 32]), &packmap),
+                ),
+                "stale-pair",
+            )?;
+            let answer = self.advance(&conflict).await?;
+            let outcome = answer.outcome.map_or(0, |value| value.to_i32());
+            if outcome != 3 {
+                return Err(format!("expected packmap conflict, got outcome {outcome}").into());
+            }
+            let after_conflict = self.snapshot(&query).await?;
+            if after_conflict.head != snapshot.head
+                || after_conflict.packmap != snapshot.packmap
+                || after_conflict.memberships != snapshot.memberships
+                || after_conflict.tickets != snapshot.tickets
+                || after_conflict.reservations != snapshot.reservations
+                || after_conflict.replay != snapshot.replay
+            {
+                return Err("paired CAS conflict changed accepted effects".into());
+            }
+            let conflict_replay = self.advance(&conflict).await?;
+            validate_replay_answer(&answer, &conflict_replay)?;
+            if self.snapshot(&query).await? != after_conflict {
+                return Err("replayed CAS conflict changed authoritative state or quota".into());
+            }
+            trace.insert(CASES[2].into(), json!({"outcome": outcome, "observation": normalize(&after_conflict, &accepted.fingerprint)?}));
+            let mut bad = self.unary(Rpc::AdvanceRefs, &request, "bad-signature")?;
+            bad.headers = bad.headers.with_header("x-signature", "00".repeat(64));
+            let refusal = self
+                .client
+                .unary::<AdvanceRefsResponse>(Rpc::AdvanceRefs, bad.body, &bad.headers.headers)
+                .await?;
+            let code = refusal.err().ok_or("invalid signature was accepted")?.code;
+            if code != "unauthenticated" {
+                return Err(format!("invalid signature refusal class: {code}").into());
+            }
+            let after_refusal = self.snapshot(&query).await?;
+            if after_refusal != after_conflict {
+                return Err("invalid signature changed authoritative state".into());
+            }
+            trace.insert(
+                CASES[3].into(),
+                json!({"code": code, "observation": normalize(&after_refusal, &accepted.fingerprint)?}),
+            );
+            Ok(trace)
+        }.await;
+        retain_protocol_failure(result, known_error)
     }
 }
 
@@ -1005,6 +1031,60 @@ mod tests {
                 .cases
                 .iter()
                 .all(|case| case.status == DiffStatus::RunnerError)
+        );
+    }
+
+    #[test]
+    fn observed_protocol_violation_takes_precedence_over_other_target_budget() {
+        let trace: BTreeMap<_, _> = CASES
+            .iter()
+            .map(|name| {
+                (
+                    (*name).into(),
+                    json!({"oracle_error": "missing terminal responsibility"}),
+                )
+            })
+            .collect();
+        for (left, right) in [
+            (
+                Ok(trace.clone()),
+                Err(ScenarioError::Budget("execution bound".into())),
+            ),
+            (
+                Err(ScenarioError::Budget("execution bound".into())),
+                Ok(trace.clone()),
+            ),
+        ] {
+            let report = compare_traces(&left, &right);
+            assert!(
+                !report.runner_error(),
+                "known protocol violation was masked by a runner budget"
+            );
+            assert!(
+                report
+                    .cases
+                    .iter()
+                    .all(|case| case.status == DiffStatus::Failed)
+            );
+        }
+    }
+
+    #[test]
+    fn observed_acceptance_failure_survives_a_later_runner_budget() {
+        let result: Result<(), ScenarioError> =
+            Err(ScenarioError::Budget("execution bound".into()));
+        let retained =
+            retain_protocol_failure(result, Some("missing terminal responsibility".into()));
+        assert!(matches!(retained, Err(ScenarioError::Protocol(_))));
+        let result: Result<(), ScenarioError> =
+            Err(ScenarioError::Budget("execution bound".into()));
+        assert!(matches!(
+            retain_protocol_failure(result, None),
+            Err(ScenarioError::Budget(_))
+        ));
+        assert_eq!(
+            retain_protocol_failure(Ok(42), Some("known error preserved in trace".into())).unwrap(),
+            42
         );
     }
 

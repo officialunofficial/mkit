@@ -159,6 +159,24 @@ async fn diff_embeds_reference_and_emits_json() {
 #[cfg(feature = "reference-runner")]
 #[tokio::test]
 async fn diff_reports_excessive_pending_hint_as_runner_error_without_polling_early() {
+    pending_hint_cli(false).await;
+}
+
+#[cfg(feature = "reference-runner")]
+#[tokio::test]
+async fn diff_preserves_observed_acceptance_failure_before_later_pending_budget() {
+    pending_hint_cli(true).await;
+}
+
+#[cfg(feature = "reference-runner")]
+async fn pending_hint_proxy(
+    upstream: &str,
+    corrupt_accepted_observation: bool,
+) -> (
+    String,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+) {
     use axum::body::{Body, to_bytes};
     use base64::Engine as _;
     use buffa::Message as _;
@@ -169,14 +187,7 @@ async fn diff_reports_excessive_pending_hint_as_runner_error_without_polling_ear
         atomic::{AtomicUsize, Ordering},
     };
 
-    let host = ControlledHost::start(Profile::new(WireAuth::AuthV2 {
-        audience: "http://placeholder.invalid".into(),
-        repository: "default".into(),
-        seed: [0x62; 32],
-    }))
-    .await
-    .unwrap();
-    let upstream = host.base_url().to_owned();
+    let upstream = upstream.to_owned();
     let advances = Arc::new(AtomicUsize::new(0));
     let observed = advances.clone();
     let router = axum::Router::new().fallback(move |request: Request<Body>| {
@@ -184,36 +195,76 @@ async fn diff_reports_excessive_pending_hint_as_runner_error_without_polling_ear
         let observed = observed.clone();
         async move {
             let (parts, body) = request.into_parts();
-            if parts.uri.path().ends_with("/AdvanceRefs") {
-                observed.fetch_add(1, Ordering::SeqCst);
+            let pending = parts.uri.path().ends_with("/AdvanceRefs")
+                && (observed.fetch_add(1, Ordering::SeqCst) > 0 || !corrupt_accepted_observation);
+            if pending {
                 let detail = PendingVerification { retry_after_ms: Some(60_000), ..Default::default() }.encode_to_vec();
                 let error = serde_json::json!({"code":"unavailable", "message":"pending verification", "details":[{"type":"mkit.transport.v1.PendingVerification", "value":base64::engine::general_purpose::STANDARD.encode(detail)}]});
                 return Response::builder().status(503)
                     .header("content-type", "application/json").header("retry-after", "60")
-                    .body(Body::from(error.to_string())).unwrap();
+                    .body(Body::from(error.to_string())).expect("construct typed pending response");
             }
-            let bytes = to_bytes(body, 1024 * 1024).await.unwrap();
+            let bytes = to_bytes(body, 1024 * 1024).await.expect("read bounded proxy request");
             let mut forwarded = reqwest::Client::new().request(parts.method, format!("{upstream}{}", parts.uri));
             for (name, value) in &parts.headers {
                 if name != "host" && name != "content-length" { forwarded = forwarded.header(name, value); }
             }
-            let reply = forwarded.body(bytes).send().await.unwrap();
+            let reply = forwarded.body(bytes).send().await.expect("forward request to reference host");
             let status = reply.status();
             let content_type = reply.headers().get("content-type").cloned();
-            let bytes = reply.bytes().await.unwrap();
+            let mut bytes = reply.bytes().await.expect("read reference response").to_vec();
+            if corrupt_accepted_observation
+                && parts.uri.path() == mkit_server_conformance::control::CONTROL_PATH
+            {
+                let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("decode control response");
+                if let Some(reservations) = value.get_mut("observation")
+                    .and_then(|snapshot| snapshot.get_mut("reservations"))
+                    .and_then(serde_json::Value::as_array_mut)
+                {
+                    for reservation in reservations {
+                        if reservation["state"] == "committed" {
+                            reservation["terminal_count"] = 2.into();
+                        }
+                    }
+                }
+                bytes = serde_json::to_vec(&value).expect("encode mutated control response");
+            }
             let mut response = Response::builder().status(status);
             if let Some(content_type) = content_type { response = response.header("content-type", content_type); }
-            response.body(Body::from(bytes)).unwrap()
+            response.body(Body::from(bytes)).expect("construct forwarded response")
         }
     });
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let proxy_url = format!("http://{}", listener.local_addr().unwrap());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind pending-response proxy");
+    let proxy_url = format!(
+        "http://{}",
+        listener.local_addr().expect("read proxy listener address")
+    );
     let proxy = tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
+        axum::serve(listener, router)
+            .await
+            .expect("serve pending-response proxy");
     });
-    let dir = tempfile::tempdir().unwrap();
+    (proxy_url, advances, proxy)
+}
+
+#[cfg(feature = "reference-runner")]
+async fn pending_hint_cli(corrupt_accepted_observation: bool) {
+    use std::sync::atomic::Ordering;
+
+    let host = ControlledHost::start(Profile::new(WireAuth::AuthV2 {
+        audience: "http://placeholder.invalid".into(),
+        repository: "default".into(),
+        seed: [0x62; 32],
+    }))
+    .await
+    .expect("start native reference host");
+    let (proxy_url, advances, proxy) =
+        pending_hint_proxy(host.base_url(), corrupt_accepted_observation).await;
+    let dir = tempfile::tempdir().expect("create runner profile directory");
     let path = dir.path().join("profile.toml");
-    std::fs::write(&path, profile_text(host.base_url())).unwrap();
+    std::fs::write(&path, profile_text(host.base_url())).expect("write runner profile");
     let started = std::time::Instant::now();
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(50),
@@ -231,22 +282,25 @@ async fn diff_reports_excessive_pending_hint_as_runner_error_without_polling_ear
     .expect("oversized poll hint must fail promptly");
     assert_eq!(
         output.status.code(),
-        Some(2),
+        Some(if corrupt_accepted_observation { 1 } else { 2 }),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("decode runner JSON report");
     assert_eq!(json["version"], 1);
-    assert!(
-        json["cases"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|case| case["status"] == "runner_error")
-    );
+    let cases = json["cases"]
+        .as_array()
+        .expect("runner report has case array");
+    if corrupt_accepted_observation {
+        assert!(cases.iter().any(|case| case["status"] == "failed"));
+        assert!(!cases.iter().any(|case| case["status"] == "runner_error"));
+    } else {
+        assert!(cases.iter().any(|case| case["status"] == "runner_error"));
+    }
     assert_eq!(
         advances.load(Ordering::SeqCst),
-        1,
+        if corrupt_accepted_observation { 2 } else { 1 },
         "no poll may occur before the mandatory delay"
     );
     assert!(started.elapsed() < std::time::Duration::from_secs(20));
