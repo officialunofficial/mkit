@@ -199,6 +199,7 @@ async fn write_one<S: NamespaceStore>(
     }
     .encode();
     let target = env.shards.membership(dest, &BlobKey::pack(*id));
+    let permit = super::permit::prepare(&env.with_store(store), job, &target).await?;
     let (live, published) = (
         keys::membership(&dest.name, id),
         keys::published_member(&dest.name, id),
@@ -210,7 +211,7 @@ async fn write_one<S: NamespaceStore>(
     let rows = store.get_many(&target, &pair).await?;
     match rows.as_slice() {
         [None, None] => {
-            let batch = Batch::new()
+            let mut batch = Batch::new()
                 // Stamped at the write: the check unit that follows (a proof
                 // after the write) is what closes the window between the
                 // proof and the write, however long the proof took.
@@ -221,9 +222,11 @@ async fn write_one<S: NamespaceStore>(
                 .require(Precondition::Absent(published.clone()))
                 .put(live, witness.clone())
                 .put(published, witness.clone());
+            batch.preconditions.extend(permit.guards());
             match store.apply(&target, batch).await? {
                 BatchOutcome::Committed => {}
                 BatchOutcome::PreconditionFailed { .. } => {
+                    super::job::fence_after_loss(&env.with_store(store), job).await?;
                     // Another driver may have published this exact unit.
                     // Accept only its complete, byte-identical witness pair.
                     let rows = store.get_many(&target, &pair).await?;

@@ -3814,6 +3814,108 @@ async fn a_source_change_after_acceptance_does_not_change_the_saved_result_or_cl
 }
 
 #[tokio::test]
+async fn an_authority_move_at_the_physical_activation_commit_installs_no_member() {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use ed25519_dalek::{Signer as _, SigningKey};
+    use mkit_server::authority::{AuthorityFence, AuthorityKey, AuthorityScope};
+    use mkit_server::fork::{FenceV1, ForkError};
+    let source = Source::build("source", 4).await;
+    let id = dest(&source, "forked");
+    let settle = settlement::admit(&source, &id).await;
+    mkit_server::fork::start_with(
+        &env(&source),
+        &spec(&source, "forked"),
+        Some(settle),
+        Some(FenceV1 {
+            authority_generation: Some(0),
+            grant_epoch: Some(0),
+            create_namespace: true,
+        }),
+    )
+    .await
+    .unwrap();
+    stop_at_fork_phase(&source, &env(&source), &id, Phase::Publish).await;
+    let accepted = job_of(&source, &id).await.accepted.unwrap();
+    let outcome = settlement::outcome(&source, &id).await;
+    let signer = SigningKey::from_bytes(&[19; 32]);
+    let mut config = Source::config(source.namespace);
+    config.authority_fence = Some(
+        AuthorityFence::new(vec![AuthorityKey {
+            key_id: "deployment".into(),
+            public_key: *signer.verifying_key().as_bytes(),
+            scope: AuthorityScope::Exact(
+                [mkit_server::namespace::Namespace::SelfCertifying(
+                    source.namespace,
+                )]
+                .into(),
+            ),
+        }])
+        .unwrap(),
+    );
+    let setter = Arc::new(
+        mkit_server::pipeline::Pipeline::new(
+            source.blobs.clone(),
+            source.store.clone(),
+            mkit_server::pipeline::Hooks::new(),
+            config,
+            source.clock.clone(),
+            Arc::new(mkit_server::NoopMetrics),
+        )
+        .unwrap(),
+    );
+    let clock = source.clock.clone();
+    let namespace = source.namespace.to_string();
+    *source.store.trigger.lock().unwrap() = Some((
+        "m",
+        Arc::new(move || {
+            let (setter, clock, namespace, signer) = (
+                setter.clone(),
+                clock.clone(),
+                namespace.clone(),
+                signer.clone(),
+            );
+            Box::pin(async move {
+                let now = clock.now_ms();
+                let body = format!(
+                    "mkit-authority-generation:v1\ndeployment\n{namespace}\n1\n{AUDIENCE}\n{now}\n{}\n{}",
+                    now + 240_000,
+                    "01".repeat(32)
+                );
+                let signature = signer.sign(&mkit_core::hash::hash(body.as_bytes()));
+                let wire = format!(
+                    "{}.{}",
+                    URL_SAFE_NO_PAD.encode(body),
+                    URL_SAFE_NO_PAD.encode(signature.to_bytes())
+                );
+                for _ in 0..64 {
+                    match setter.set_authority_generation(&wire).await {
+                        Ok(generation) => {
+                            assert_eq!(generation, 1);
+                            return;
+                        }
+                        Err(error) if error.code() == mkit_server::Code::Unavailable => {}
+                        Err(error) => panic!("authority move refused: {error:?}"),
+                    }
+                }
+                panic!("authority move did not acknowledge its drained generation");
+            })
+        }),
+    ));
+    assert_eq!(
+        drive(&env(&source), &id).await.unwrap_err(),
+        ForkError::Moved("authority")
+    );
+    assert_eq!(job_of(&source, &id).await.accepted, Some(accepted));
+    assert_eq!(settlement::outcome(&source, &id).await, outcome);
+    for pack in [source.pack, source.packmap] {
+        assert!(
+            member(&source, &id, pack).await.is_none(),
+            "an activation membership write committed after the authority moved"
+        );
+    }
+}
+
+#[tokio::test]
 async fn every_coordinator_progress_commit_compares_the_recorded_authority_rows() {
     use mkit_server::fork::FenceV1;
     use mkit_server::store::adapter_spi::codec;

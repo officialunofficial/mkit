@@ -45,6 +45,10 @@
 //! | counted pack marker (`Coordinator`) | `rn 00 <repo> 00 <pack:32>` | be64 pack bytes |
 //! | fork job (`Coordinator`) | `fj 00 <repo>` | v1 `ForkJobV1` |
 //! | fork write barrier (`Coordinator`) | `fb 00 <repo>` | empty |
+//! | fork permit registry (`Coordinator`) | `fp 00 <repo> 00 <prefix:be16>` | bound expiring permit |
+//! | local fork permit (`RepoIndex`) | `fl 00 <repo>` | active token or revocation tombstone |
+//! | fork permit drain (`Coordinator`) | `fd 00` | durable freeze and cursor |
+//! | fork permits issued (`Coordinator`) | `fs 00` | monotonic marker |
 //! | fork working set or cleared set (`Coordinator`) | `fo 00 <repo> 00 <set:u8>` | binary id list; set 0 cleared commits and trees, 1 tree ids, 2 queue, 3 inherited base packs, 4 chunked-blob manifests |
 //! | grant epoch | `e 00` | be64; absent means 0, never written as 0 |
 //! | epoch lease (ref shard) | `el 00` | codec `EpochLease` |
@@ -222,6 +226,14 @@ pub const TAG_REPO_STORAGE_PACK: &str = "rn";
 pub const TAG_FORK_JOB: &str = "fj";
 /// Destination write barrier during fork activation (`Coordinator`).
 pub const TAG_FORK_BARRIER: &str = "fb";
+/// Registered physical fork membership permits.
+pub const TAG_FORK_PERMIT: &str = "fp";
+/// Membership-local fork permit or revocation tombstone.
+pub const TAG_FORK_PERMIT_LOCAL: &str = "fl";
+/// Durable namespace fork-permit drain.
+pub const TAG_FORK_PERMIT_DRAIN: &str = "fd";
+/// Monotonic namespace marker that fork permits have been issued.
+pub const TAG_FORK_PERMITS_SEEN: &str = "fs";
 /// Repository fork id-set tag (`Coordinator`).
 pub const TAG_FORK_SET: &str = "fo";
 /// Local repository membership tag.
@@ -339,6 +351,14 @@ pub enum ParsedKey {
     ForkJob(RepoName),
     /// `fb 00 <repo>`.
     ForkBarrier(RepoName),
+    /// `fp 00 <repo> 00 <prefix:be16>`.
+    ForkPermit { repo: RepoName, prefix: u16 },
+    /// `fl 00 <repo>`.
+    ForkPermitLocal(RepoName),
+    /// `fd 00`.
+    ForkPermitDrain,
+    /// `fs 00`.
+    ForkPermitsSeen,
     /// `fo 00 <repo> 00 <set>`.
     ForkSet { repo: RepoName, set: u8 },
     /// `rl 00 p/d 00 <repo>`; index values are empty.
@@ -976,6 +996,42 @@ pub fn tickets_per_signer(repo: &RepoName, name: &str, signer: &Hash) -> Result<
     )
 }
 
+/// A coordinator registration for one membership partition.
+#[must_use]
+pub fn fork_permit(repo: &RepoName, prefix: u16) -> Key {
+    key(
+        TAG_FORK_PERMIT,
+        &[repo.as_str().as_bytes(), b"\0", &prefix.to_be_bytes()],
+    )
+}
+/// Every registered membership permit in a coordinator.
+#[must_use]
+pub fn fork_permit_range() -> (Key, Key) {
+    class_range(TAG_FORK_PERMIT)
+}
+/// Every registered membership permit for a destination.
+#[must_use]
+pub fn fork_permit_repo_range(repo: &RepoName) -> (Key, Key) {
+    let start = key(TAG_FORK_PERMIT, &[repo.as_str().as_bytes(), b"\0"]);
+    let end = successor(&start);
+    (start, end)
+}
+/// The membership partition's active permit or revocation tombstone.
+#[must_use]
+pub fn fork_permit_local(repo: &RepoName) -> Key {
+    key(TAG_FORK_PERMIT_LOCAL, &[repo.as_str().as_bytes()])
+}
+/// The namespace's durable freeze and drain checkpoint.
+#[must_use]
+pub fn fork_permit_drain() -> Key {
+    key(TAG_FORK_PERMIT_DRAIN, &[])
+}
+/// Monotonic marker protecting authority bootstrap against issued permits.
+#[must_use]
+pub fn fork_permits_seen() -> Key {
+    key(TAG_FORK_PERMITS_SEEN, &[])
+}
+
 /// `fj 00 <repo>`: the destination's fork job.
 #[must_use]
 pub fn fork_job(repo: &RepoName) -> Key {
@@ -1468,6 +1524,17 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
         b"rr" => ParsedKey::RepoRecord(RepoName::new(text(body)?).ok()?),
         b"fj" => ParsedKey::ForkJob(RepoName::new(text(body)?).ok()?),
         b"fb" => ParsedKey::ForkBarrier(RepoName::new(text(body)?).ok()?),
+        b"fp" => {
+            let (name, suffix) = body.split_at(body.len().checked_sub(3)?);
+            (suffix[0] == 0).then_some(())?;
+            ParsedKey::ForkPermit {
+                repo: RepoName::new(text(name)?).ok()?,
+                prefix: u16::from_be_bytes(suffix[1..].try_into().ok()?),
+            }
+        }
+        b"fl" => ParsedKey::ForkPermitLocal(RepoName::new(text(body)?).ok()?),
+        b"fd" if body.is_empty() => ParsedKey::ForkPermitDrain,
+        b"fs" if body.is_empty() => ParsedKey::ForkPermitsSeen,
         b"fo" => {
             let (name, set) = body.split_at(body.len().checked_sub(2)?);
             (set[0] == 0).then_some(())?;
@@ -1662,6 +1729,53 @@ mod tests {
     }
 
     #[test]
+    fn fork_permit_keys_have_strict_layouts() {
+        let repository = repo("a");
+        let cases = [
+            (
+                fork_permit(&repository, 0x0102),
+                b"fp\0a\0\x01\x02".to_vec(),
+                ParsedKey::ForkPermit {
+                    repo: repository.clone(),
+                    prefix: 0x0102,
+                },
+            ),
+            (
+                fork_permit_local(&repository),
+                b"fl\0a".to_vec(),
+                ParsedKey::ForkPermitLocal(repository.clone()),
+            ),
+            (
+                fork_permit_drain(),
+                b"fd\0".to_vec(),
+                ParsedKey::ForkPermitDrain,
+            ),
+            (
+                fork_permits_seen(),
+                b"fs\0".to_vec(),
+                ParsedKey::ForkPermitsSeen,
+            ),
+        ];
+        for (key, golden, expected) in cases {
+            assert_eq!(key.as_bytes(), golden);
+            assert_eq!(parse(&key), Some(expected));
+        }
+        for malformed in [
+            b"fp\0\0\x01\x02".to_vec(),
+            b"fp\0a\0\x01".to_vec(),
+            b"fp\0a\0\x01\x02\x03".to_vec(),
+            b"fl\0".to_vec(),
+            b"fl\0a\0".to_vec(),
+            b"fd\0x".to_vec(),
+            b"fs\0x".to_vec(),
+        ] {
+            assert_eq!(parse(&Key::new(malformed)), None);
+        }
+        let (start, end) = fork_permit_repo_range(&repository);
+        assert!(start <= fork_permit(&repository, 0) && fork_permit(&repository, u16::MAX) < end);
+        assert!(!(start <= fork_permit(&repo("aa"), 0) && fork_permit(&repo("aa"), 0) < end));
+    }
+    #[test]
     fn timer_retry_metadata_preserves_opaque_reference_and_original_due() {
         let reference = b"\0\xffarbitrary\0reference";
         let initial = timer(17, 255, reference);
@@ -1739,6 +1853,10 @@ mod tests {
             TAG_REPO_STORAGE_PACK,
             TAG_FORK_JOB,
             TAG_FORK_BARRIER,
+            TAG_FORK_PERMIT,
+            TAG_FORK_PERMIT_LOCAL,
+            TAG_FORK_PERMIT_DRAIN,
+            TAG_FORK_PERMITS_SEEN,
             TAG_FORK_SET,
             TAG_RELAY_HIGH_WATER,
             TAG_RELAY_SCAN,

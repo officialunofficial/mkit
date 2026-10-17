@@ -640,6 +640,13 @@ pub(super) async fn step_inner<S: NamespaceStore>(
                 });
             }
             Err(error) => {
+                if before.accepted.is_some()
+                    && accepted_progress_changed(env, &before, &raw).await?
+                {
+                    // Another driver may have completed activation and removed
+                    // its barrier while this driver's physical effect lost.
+                    continue;
+                }
                 let failure = terminal_failure(&before, &error)?;
                 job = before.clone();
                 terminate(env, &mut job, &error, failure).await?
@@ -690,6 +697,60 @@ pub(super) async fn step_inner<S: NamespaceStore>(
             }
         }
     }
+}
+
+/// Retry an accepted clearance refusal only when another driver advanced its job.
+/// An unchanged job retains the original refusal after checking the live fence.
+async fn accepted_progress_changed<S: NamespaceStore>(
+    env: &ForkEnv<'_, S>,
+    job: &ForkJobV1,
+    raw: &Value,
+) -> Result<bool, ForkError> {
+    let dest = job.dest()?;
+    let rows = env
+        .store
+        .get_many(
+            &env.shards.coordinator(&dest.namespace),
+            &[
+                keys::fork_job(&dest.name),
+                keys::authority_generation(),
+                keys::grant_epoch(),
+            ],
+        )
+        .await?;
+    let [current, authority, epoch]: [_; 3] = rows
+        .try_into()
+        .map_err(|_| ForkError::Unavailable("fork progress read"))?;
+    let current = current.ok_or(ForkError::Unavailable("fork job missing"))?;
+    if current != *raw {
+        return Ok(true);
+    }
+    job.fence_rows.check(job, &[authority, epoch])?;
+    Ok(false)
+}
+
+/// Resolve a physical-effect guard loss against the coordinator snapshot.
+/// Reading the job with its fence retains the same CAS-loss observation unit.
+pub(super) async fn fence_after_loss<S: NamespaceStore>(
+    env: &ForkEnv<'_, S>,
+    job: &ForkJobV1,
+) -> Result<(), ForkError> {
+    let dest = job.dest()?;
+    let rows = env
+        .store
+        .get_many(
+            &env.shards.coordinator(&dest.namespace),
+            &[
+                keys::fork_job(&dest.name),
+                keys::authority_generation(),
+                keys::grant_epoch(),
+            ],
+        )
+        .await?;
+    let [_, authority, epoch]: [_; 3] = rows
+        .try_into()
+        .map_err(|_| ForkError::Unavailable("fork progress read"))?;
+    job.fence_rows.check(job, &[authority, epoch])
 }
 
 /// Acceptance is terminal; a clearance refusal never rewrites its receipt.
@@ -968,7 +1029,21 @@ impl<S: NamespaceStore, N: NamespaceStore> TimerHandler<S> for ForkTimer<N> {
                 return Ok(Fired::Done(Batch::new()));
             }
             Ok(match step(&env, &dest, &budget).await {
-                Ok(report) if report.job.finished() => Fired::Done(Batch::new()),
+                Ok(report) if report.job.finished() => {
+                    if report.job.phase == Phase::Done
+                        && !super::permit::release(&env, &report.job)
+                            .await
+                            .map_err(|_| StoreError::unavailable("fork permit cleanup pending"))?
+                    {
+                        Fired::Reschedule {
+                            due_at_ms: ctx.now_ms.saturating_add(1_000),
+                            value: Value::default(),
+                            batch: Batch::new(),
+                        }
+                    } else {
+                        Fired::Done(Batch::new())
+                    }
+                }
 
                 Ok(_) => Fired::Reschedule {
                     due_at_ms: ctx.now_ms.saturating_add(1_000),

@@ -297,7 +297,7 @@ has been installed; a failed registered fork retains the barrier permanently.
 | Register | Registry/visibility/authority guards, job CAS, deadline | Also barrier absence and exact pending reservation; installs the barrier atomically |
 | Copy and count progress | Job CAS and deadline | Also recorded authority rows and exact pending reservation |
 | Acceptance | No separate decision | Final source proof, barrier ownership, recorded authority rows, job CAS, pending reservation, replay absence, outcome guards, deadline |
-| Activation progress | Job CAS and deadline | Also recorded authority rows; projects only the accepted binding |
+| Activation progress | Job CAS and deadline | Recorded authority rows at checkpoints; local permit or co-located authority guards on membership; projects only the accepted binding |
 | Done | Job CAS, deadline, replay and reservation settlement | Recorded authority rows, job CAS, barrier ownership, deadline; removes barrier and retains the saved result |
 | Pre-acceptance refusal | Job CAS, reservation/outbox guards, deadline | Same terminal-abort path; registered failures retain their barrier |
 
@@ -307,9 +307,16 @@ one `get_many`; authority guards add no storage call. After a precondition loss,
 the next read observes the job and fence together: a moved fence aborts an
 unaccepted attempt, while an unchanged fence retains normal CAS retry handling.
 
-Physical membership installation has a separate unresolved authority race:
-its partition-local apply cannot compare the coordinator authority rows. The
-enabled `an_authority_move_at_the_physical_activation_commit_installs_no_member`
-regression demonstrates that a member can install before the coordinator
-checkpoint rejects stale authority. Coordinator fencing alone does not close
-this window.
+Physical membership installation guards a local permit bound to the accepted
+job and its recorded authority. The coordinator records the permit before local
+installation. Authority and epoch transitions freeze issuance, invalidate every
+registered local permit, and drain the registry before publishing the new fence.
+A local tombstone defeats delayed installations. A later authorized transition
+can finish an abandoned drain before starting its own request. Co-located
+membership applies compare the authority rows directly.
+
+Permit rows retain a deadline. Coordinator recovery holds transitions until
+previously issued apply windows have expired, even if restoration lost their
+registry rows. Completed forks drain their permits after removing the write
+barrier. Ordinary lease renewal and authority bootstrap add keys to existing
+snapshots and batches; they add no storage round trip to ordinary writes.
