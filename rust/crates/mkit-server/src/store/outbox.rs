@@ -595,9 +595,9 @@ fn require_unplanned(key: &Key, pre: &[Precondition], writes: &[Write]) -> Resul
         Precondition::Equals(k, _) | Precondition::Absent(k) | Precondition::Present(k) => k == key,
         Precondition::NotAfter(_) => false,
     });
-    let written = writes
-        .iter()
-        .any(|w| matches!(w, Write::Put(k, _) | Write::Delete(k) if k == key));
+    let written = writes.iter().any(
+        |w| matches!(w, Write::Put(k, _) | Write::Delete(k) | Write::Increment(k) if k == key),
+    );
     if guarded || written {
         return Err(StoreError::Invalid(
             "outbox key already planned in batch".into(),
@@ -626,10 +626,9 @@ pub fn plan_ack(
     }
     let key = keys::reservation(rid)?;
     let pending = keys::outcome_pending(oq_seq, rid)?;
-    if writes
-        .iter()
-        .any(|w| matches!(w, Write::Put(k, _) | Write::Delete(k) if k == &key))
-    {
+    if writes.iter().any(
+        |w| matches!(w, Write::Put(k, _) | Write::Delete(k) | Write::Increment(k) if k == &key),
+    ) {
         return Err(StoreError::Invalid(
             "outcome already planned in batch".into(),
         ));
@@ -651,10 +650,15 @@ pub fn plan_ack(
     }
     let position = writes
         .iter()
-        .rposition(|w| matches!(w, Write::Put(k, _) | Write::Delete(k) if k == &backlog_key));
+        .rposition(|w| matches!(w, Write::Put(k, _) | Write::Delete(k) | Write::Increment(k) if k == &backlog_key));
     let mut backlog = match position.map(|i| &writes[i]) {
         Some(Write::Put(_, value)) => codec::decode_backlog(value)?,
         Some(Write::Delete(_)) => Backlog::default(),
+        Some(Write::Increment(_)) => {
+            return Err(StoreError::Invalid(
+                "backlog has an unresolved increment".into(),
+            ));
+        }
         None => observed,
     };
     backlog.rows = backlog

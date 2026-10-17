@@ -1,5 +1,5 @@
 //! Monotonic descriptor locations, reserved before shard-local activation.
-use crate::store::{Cursor, Key, ScanPage};
+use crate::store::{Cursor, Key, ScanPage, keys, proof_version};
 use crate::{Batch, BatchOutcome, NamespaceStore, Partition, Precondition, StoreError, Value};
 use mkit_core::hash::Hash;
 use std::collections::VecDeque;
@@ -46,7 +46,7 @@ pub(crate) async fn reserve<S: NamespaceStore>(
     let result = store
         .apply(
             &p,
-            Batch::new()
+            proof_version::bump(Batch::new(), &keys::denial_directory_revision())
                 .require(Precondition::Absent(k.clone()))
                 .require(Precondition::NotAfter(
                     now.saturating_add(crate::store::CONTENT_APPLY_WINDOW_MS),
@@ -86,6 +86,51 @@ fn validate_page(shard: u16, page: &ScanPage) -> Result<(), StoreError> {
         last = Some(key);
     }
     Ok(())
+}
+
+/// Read one bounded directory page for a fork's source-proof snapshot.
+pub(crate) async fn proof_page<S: NamespaceStore>(
+    store: &S,
+    shard: u16,
+    after: Option<&Cursor>,
+) -> Result<ScanPage, StoreError> {
+    if shard >= DIRECTORY_SHARDS {
+        return Err(corrupt());
+    }
+    let (start, end) = range();
+    let page = store
+        .scan(
+            &Partition::ContentShard(shard),
+            &start,
+            &end,
+            after,
+            PAGE_ROWS,
+        )
+        .await?;
+    validate_page(shard, &page)?;
+    if let Some(after) = after
+        && (page.next.as_ref() == Some(after)
+            || page
+                .entries
+                .first()
+                .is_some_and(|(key, _)| key.as_bytes() <= after.as_bytes()))
+    {
+        return Err(corrupt());
+    }
+    Ok(page)
+}
+
+/// Decode an immutable pointer from a validated source-proof directory page.
+pub(crate) fn proof_subject(key: &Key, raw: &Value) -> Result<Hash, StoreError> {
+    let id = key
+        .as_bytes()
+        .strip_prefix(PREFIX)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(corrupt)?;
+    if *raw != value(&id) {
+        return Err(corrupt());
+    }
+    Ok(id)
 }
 
 /// Strong first pages are joined before any pointed-to descriptor is read.
@@ -254,6 +299,83 @@ mod tests {
         )
         .await
     }
+    #[test]
+    fn fork_proof_pages_validate_subjects_and_shard_bounds() {
+        block_on(async {
+            let store = MemoryKv::with_clock(std::sync::Arc::new(crate::rt::ManualClock::new(0)));
+            let object = [0x80; 32];
+            reserve(&store, &object, 1).await.unwrap();
+            let page = proof_page(&store, 8, None).await.unwrap();
+            assert_eq!(page.entries.len(), 1);
+            assert_eq!(
+                proof_subject(&page.entries[0].0, &page.entries[0].1).unwrap(),
+                object
+            );
+            assert!(proof_subject(&page.entries[0].0, &Value::default()).is_err());
+            assert!(proof_page(&store, DIRECTORY_SHARDS, None).await.is_err());
+            let after = Cursor::new(page.entries[0].0.as_bytes().to_vec());
+            assert!(
+                proof_page(&store, 8, Some(&after))
+                    .await
+                    .unwrap()
+                    .entries
+                    .is_empty()
+            );
+        });
+    }
+
+    #[test]
+    fn directory_revision_advances_once_for_each_new_reservation() {
+        block_on(async {
+            let store = MemoryKv::with_clock(std::sync::Arc::new(crate::rt::ManualClock::new(0)));
+            let first = [0x80; 32];
+            let mut second = first;
+            second[31] = 1;
+            reserve(&store, &first, 1).await.unwrap();
+            reserve(&store, &first, 1).await.unwrap();
+            let revision = keys::denial_directory_revision();
+            let raw = store
+                .get(&partition(&first), &revision)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(crate::store::codec::decode_u64(&raw).unwrap(), 1);
+            reserve(&store, &second, 1).await.unwrap();
+            let raw = store
+                .get(&partition(&first), &revision)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(crate::store::codec::decode_u64(&raw).unwrap(), 2);
+        });
+    }
+
+    #[test]
+    fn exhausted_directory_revision_never_installs_a_new_reservation() {
+        block_on(async {
+            let store = MemoryKv::with_clock(std::sync::Arc::new(crate::rt::ManualClock::new(0)));
+            let object = [0x80; 32];
+            store
+                .apply(
+                    &partition(&object),
+                    Batch::new().put(
+                        keys::denial_directory_revision(),
+                        crate::store::codec::encode_u64(u64::MAX),
+                    ),
+                )
+                .await
+                .unwrap();
+            assert!(reserve(&store, &object, 1).await.is_err());
+            assert!(
+                store
+                    .get(&partition(&object), &key(&object))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        });
+    }
+
     #[test]
     fn crash_before_activation_leaves_discoverable_reservation_for_retry() {
         block_on(async {

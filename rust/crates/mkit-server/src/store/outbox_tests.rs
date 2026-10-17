@@ -150,7 +150,7 @@ fn relay_rows(batch: &Batch) -> Vec<(u64, RelayV1)> {
                 }
                 _ => None,
             },
-            Write::Delete(_) => None,
+            Write::Delete(_) | Write::Increment(_) => None,
         })
         .collect()
 }

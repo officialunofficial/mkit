@@ -115,6 +115,7 @@ pub(crate) async fn start_authorized<S: NamespaceStore>(
             Err(ForkError::NotEmpty)
         };
     }
+    super::proof::require_versioned_source(env, &spec.source)?;
     let view = plan::read_source(
         env.store,
         env.shards,
@@ -154,7 +155,9 @@ pub(crate) async fn start_authorized<S: NamespaceStore>(
         (keys::authority_generation(), authority.as_ref()),
         (keys::grant_epoch(), epoch.as_ref()),
     )?;
-    let current_access = super::SourceAccessV1::read(env.store, env.shards, &spec.source).await?;
+    let current_access = super::SourceAccessV1::read(env.store, env.shards, &spec.source)
+        .await?
+        .with_policy(env.publication_policy, &spec.source)?;
     if source_access
         .as_ref()
         .is_some_and(|access| *access != current_access)
@@ -232,6 +235,7 @@ fn new_job(
         fence,
         fence_rows: crate::fork::FenceRowsV1::default(),
         source_access: crate::fork::SourceAccessV1::default(),
+        proof: crate::fork::ProofV1::default(),
         accepted: None,
         result: None,
     }
@@ -963,6 +967,9 @@ pub struct ForkTimer<N> {
     pub takedown_denial: bool,
     /// The extraction threshold, if extraction is deployed.
     pub extract_min_bytes: Option<u64>,
+    /// The same versioned publication policy used by the serving pipeline.
+    pub publication_policy:
+        Option<std::sync::Arc<dyn crate::pipeline::clearance::PublicationPolicy>>,
 }
 
 impl<N> ForkTimer<N> {
@@ -985,7 +992,19 @@ impl<N> ForkTimer<N> {
             clock,
             takedown_denial,
             extract_min_bytes,
+            publication_policy: None,
         }
+    }
+
+    /// Attach the serving pipeline's coherent publication policy, including
+    /// when recovering in-flight work after executor replacement.
+    #[must_use]
+    pub fn with_publication_policy(
+        mut self,
+        policy: std::sync::Arc<dyn crate::pipeline::clearance::PublicationPolicy>,
+    ) -> Self {
+        self.publication_policy = Some(policy);
+        self
     }
 }
 
@@ -1028,6 +1047,7 @@ impl<S: NamespaceStore, N: NamespaceStore> TimerHandler<S> for ForkTimer<N> {
                 takedown_denial: self.takedown_denial,
                 extract_min_bytes: self.extract_min_bytes,
                 limits: super::ForkLimits::default(),
+                publication_policy: self.publication_policy.as_deref(),
             };
             let budget = SliceBudget::new(SLICE_CALLS);
             // A refusal before registration deletes the job: its timer ends.

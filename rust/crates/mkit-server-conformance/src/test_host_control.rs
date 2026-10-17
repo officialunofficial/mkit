@@ -1158,7 +1158,7 @@ impl NamespaceStore for ControlStore {
             .iter()
             .filter_map(|write| {
                 let key = match write {
-                    Write::Put(key, _) | Write::Delete(key) => key,
+                    Write::Put(key, _) | Write::Delete(key) | Write::Increment(key) => key,
                 };
                 matches!(keys::parse(key), Some(keys::ParsedKey::Ref { .. })).then_some(key.clone())
             })

@@ -51,9 +51,34 @@ pub struct SourceAccessV1 {
     pub visibility: Option<Vec<u8>>,
     /// Exact stored visibility revision, including absence.
     pub revision: Option<Vec<u8>>,
+    /// Coherent external publication-policy version; absent without a policy.
+    pub publication_policy: Option<mkit_core::hash::Hash>,
 }
 
 impl SourceAccessV1 {
+    pub(crate) fn with_policy(
+        mut self,
+        policy: Option<&dyn crate::pipeline::clearance::PublicationPolicy>,
+        source: &crate::RepoId,
+    ) -> Result<Self, ForkError> {
+        self.publication_policy = policy
+            .map(|policy| policy.fork_version(source).ok_or(ForkError::NotFound))
+            .transpose()?;
+        Ok(self)
+    }
+
+    pub(crate) fn check_policy<S>(
+        &self,
+        env: &ForkEnv<'_, S>,
+        source: &crate::RepoId,
+    ) -> Result<(), ForkError> {
+        let current = Self::default().with_policy(env.publication_policy, source)?;
+        if current.publication_policy != self.publication_policy {
+            return Err(ForkError::NotFound);
+        }
+        Ok(())
+    }
+
     pub(crate) async fn read<S: NamespaceStore>(
         store: &S,
         shards: &dyn crate::pipeline::ShardMap,
@@ -80,6 +105,7 @@ impl SourceAccessV1 {
         Ok(Self {
             visibility: visibility.map(|v| v.as_bytes().to_vec()),
             revision: revision.map(|v| v.as_bytes().to_vec()),
+            publication_policy: None,
         })
     }
 }
@@ -149,7 +175,11 @@ pub(super) async fn slice<S: NamespaceStore>(
     {
         return Err(ForkError::NotFound);
     }
-    if SourceAccessV1::read(&store, env.shards, &source).await? != job.source_access {
+    if SourceAccessV1::read(&store, env.shards, &source)
+        .await?
+        .with_policy(env.publication_policy, &source)?
+        != job.source_access
+    {
         return Err(ForkError::NotFound);
     }
     Ok(true)
@@ -162,12 +192,26 @@ pub(super) async fn commit<S: NamespaceStore>(
     budget: &SliceBudget,
     now: u64,
 ) -> Result<Batch, ForkError> {
-    // Registration serializes creation and every usable lease. No writer can
-    // change authoritative emptiness while the operation owns that barrier.
-    super::job::require_empty(env, &job.dest()?, true).await?;
-    if !slice(env, job, budget).await? {
+    super::proof::require_versioned_source(env, &job.source()?)?;
+    if !job.proof.captured() {
+        let (evidence, _) = super::proof::advance_capture(env, job, budget).await?;
+        // Capture is durable before any eligibility observation is proved.
+        return Ok(evidence);
+    }
+    if !job.proof.validation_started() {
+        if !slice(env, job, budget).await? {
+            return Ok(Batch::new());
+        }
+        super::proof::start_validation(job);
+    }
+    if !super::proof::validate_slice(env, job, budget).await? {
         return Ok(Batch::new());
     }
+    // Registration serializes creation and every usable lease. Check final
+    // authoritative emptiness within the existing slice allowance; the barrier
+    // guard keeps it stable through the acceptance commit.
+    let store = Budgeted::new(env.store, budget);
+    super::job::require_empty(&env.with_store(&store), &job.dest()?, true).await?;
     job.accepted = Some(result(job)?);
     job.phase = super::Phase::Publish;
     job.cursor = 0;

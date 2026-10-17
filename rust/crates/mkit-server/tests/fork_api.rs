@@ -622,6 +622,7 @@ async fn a_request_that_loses_the_race_to_start_the_job_releases_its_reservation
         Box::pin(async move {
             let shards = mkit_server::pipeline::D34Shards;
             let env = ForkEnv {
+                publication_policy: None,
                 store: &store,
                 shards: &shards,
                 clock: clock.as_ref(),

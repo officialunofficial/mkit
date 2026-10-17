@@ -338,6 +338,11 @@ impl FsLayoutStore {
                 return Ok(BatchOutcome::PreconditionFailed { index, observed });
             }
         }
+        let mut batch = batch.clone();
+        batch.resolve_increments(
+            |key| self.read(key),
+            |message| StoreError::Corrupt(message.into()),
+        )?;
         for write in &batch.writes {
             match write {
                 Write::Put(key, value) => match self.slot(key)? {
@@ -362,6 +367,7 @@ impl FsLayoutStore {
                         .write_file(&row_path(name), &encode_row(name, value))
                         .map_err(ref_file_error)?,
                 },
+                Write::Increment(_) => unreachable!("increments are resolved before writing rows"),
                 Write::Delete(key) => {
                     match self.slot(key)? {
                         Slot::Ref(name) => refs.delete_ref(name),
@@ -521,6 +527,11 @@ impl NamespaceStore for FsLayoutStore {
                 }
                 Write::Delete(key) => {
                     self.slot(key)?;
+                }
+                Write::Increment(key) => {
+                    if let Slot::Ref(_) = self.slot(key)? {
+                        return Err(StoreError::Invalid("a ref id cannot be incremented".into()));
+                    }
                 }
             }
         }

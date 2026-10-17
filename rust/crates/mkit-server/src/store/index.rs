@@ -160,16 +160,24 @@ fn plan_index_rows_inner(
     for (target, rows) in grouped {
         if direct_all || &target == source {
             let mut puts = Vec::new();
+            // Direct repository-index applies also carry their atomic proof
+            // revision increment; reserve its implicit eight-byte value.
+            let revision_bytes = if super::proof_version::index_partition(&target) {
+                super::keys::fork_index_revision().as_bytes().len() + 8
+            } else {
+                0
+            };
+            let byte_limit = MAX_BATCH_BYTES - revision_bytes;
             let mut bytes = 0;
             for (key, value) in rows {
                 let size = key.as_bytes().len() + value.as_bytes().len();
-                if size > MAX_BATCH_BYTES
+                if size > byte_limit
                     || key.as_bytes().len() > MAX_KEY_BYTES
                     || value.as_bytes().len() > MAX_VALUE_BYTES
                 {
                     return Err(StoreError::Invalid("object index row too large".into()));
                 }
-                if puts.len() == MAX_RELAY_PUTS || bytes + size > MAX_BATCH_BYTES {
+                if puts.len() == MAX_RELAY_PUTS || bytes + size > byte_limit {
                     plan.direct.push(DirectIndexBatch {
                         target: target.clone(),
                         puts: std::mem::take(&mut puts),

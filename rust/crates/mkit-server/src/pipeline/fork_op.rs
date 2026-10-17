@@ -219,6 +219,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             self.clock.as_ref(),
             &self.cfg,
         )
+        .with_publication_policy(self.publication_policy.as_deref())
     }
 
     #[allow(clippy::too_many_lines)] // One request lifecycle: the stages share their locals.
@@ -490,7 +491,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             access: fork::SourceAccessV1 {
                 visibility: visibility.as_ref().map(|v| v.as_bytes().to_vec()),
                 revision: revision.as_ref().map(|v| v.as_bytes().to_vec()),
-            },
+                publication_policy: None,
+            }
+            .with_policy(self.publication_policy.as_deref(), source)
+            .map_err(|error| error.error())?,
             visibility: self.visibility_applies().then(|| {
                 visibility_of(repo_is_private(
                     stored.as_ref(),

@@ -627,6 +627,7 @@ impl TestHost {
         // sharding; its handler's settings must equal the pipeline's.
         let registry = if self.profile.sharding_d34 && self.profile.has(Feature::IndexedMode) {
             registry.register(mkit_server::fork::ForkTimer {
+                publication_policy: None,
                 store: target,
                 shards: Arc::new(mkit_server::pipeline::D34Shards),
                 clock: self.clock.clone(),

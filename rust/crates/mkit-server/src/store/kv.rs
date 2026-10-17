@@ -62,7 +62,7 @@ bytes_newtype!(
     Key
 );
 bytes_newtype!(
-    /// An opaque value. A backend never interprets it.
+    /// An opaque value, except for the eight-byte counter read by [`Write::Increment`].
     Value
 );
 bytes_newtype!(
@@ -101,9 +101,12 @@ pub enum Write {
     Put(Key, Value),
     /// Remove the key; removing an absent key is not an error.
     Delete(Key),
+    /// Add one to an unsigned 64-bit big-endian counter, treating absence as
+    /// zero. A malformed or overflowing counter fails the entire batch.
+    Increment(Key),
 }
 
-/// One atomic, declarative write: preconditions, then puts and deletes in
+/// One atomic, declarative write: preconditions, then writes in
 /// order (a later write to the same key wins). A batch with no writes only
 /// checks.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -142,11 +145,79 @@ impl Batch {
         self
     }
 
-    /// Whether the batch adds data (holds a put): what a full partition
+    /// Append an atomic counter increment.
+    #[must_use]
+    pub fn increment(mut self, key: Key) -> Self {
+        self.writes.push(Write::Increment(key));
+        self
+    }
+
+    /// Whether the batch adds data (holds a put or increment): what a full partition
     /// rejects with [`StoreError::Full`].
     #[must_use]
     pub fn has_put(&self) -> bool {
-        self.writes.iter().any(|w| matches!(w, Write::Put(..)))
+        self.writes
+            .iter()
+            .any(|w| matches!(w, Write::Put(..) | Write::Increment(_)))
+    }
+
+    /// Resolve counter increments inside a backend's atomic check-and-write.
+    ///
+    /// `read` must observe the same atomic unit as the eventual writes. Earlier
+    /// puts, deletes and increments in this batch take precedence over that
+    /// read. Resolution changes this batch only after every increment succeeds;
+    /// the backend must not apply any writes before this method succeeds.
+    ///
+    /// # Errors
+    /// Read failures are propagated. `invalid_counter` maps malformed and
+    /// overflowing counters to the backend's corruption error.
+    #[doc(hidden)]
+    pub fn resolve_increments<E>(
+        &mut self,
+        mut read: impl FnMut(&Key) -> Result<Option<Value>, E>,
+        invalid_counter: impl Fn(&'static str) -> E,
+    ) -> Result<(), E> {
+        if !self
+            .writes
+            .iter()
+            .any(|write| matches!(write, Write::Increment(_)))
+        {
+            return Ok(());
+        }
+        let mut pending = std::collections::BTreeMap::<Key, Option<Value>>::new();
+        let mut resolved = Vec::with_capacity(self.writes.len());
+        for write in &self.writes {
+            match write {
+                Write::Put(key, value) => {
+                    pending.insert(key.clone(), Some(value.clone()));
+                    resolved.push(write.clone());
+                }
+                Write::Delete(key) => {
+                    pending.insert(key.clone(), None);
+                    resolved.push(write.clone());
+                }
+                Write::Increment(key) => {
+                    let current = match pending.get(key) {
+                        Some(value) => value.clone(),
+                        None => read(key)?,
+                    };
+                    let counter = current.as_ref().map_or(Ok(0), |value| {
+                        let bytes: [u8; 8] = value.as_bytes().try_into().map_err(|_| {
+                            invalid_counter("increment counter is not an 8-byte u64")
+                        })?;
+                        Ok(u64::from_be_bytes(bytes))
+                    })?;
+                    let next = counter
+                        .checked_add(1)
+                        .ok_or_else(|| invalid_counter("increment counter overflow"))?;
+                    let value = Value::new(next.to_be_bytes().to_vec());
+                    pending.insert(key.clone(), Some(value.clone()));
+                    resolved.push(Write::Put(key.clone(), value));
+                }
+            }
+        }
+        self.writes = resolved;
+        Ok(())
     }
 
     /// Check the batch against the size limits and a store's capabilities,
@@ -176,16 +247,22 @@ impl Batch {
             }
         }
         let key_preconditions = keys.len();
+        let mut increment_bytes = 0;
         for write in &self.writes {
             match write {
                 Write::Put(k, v) => keys.push((k, Some(v))),
                 Write::Delete(k) => keys.push((k, None)),
+                Write::Increment(k) => {
+                    keys.push((k, None));
+                    increment_bytes += 8;
+                }
             }
         }
-        let total: usize = keys
-            .iter()
-            .map(|(k, v)| k.as_bytes().len() + v.map_or(0, |v| v.as_bytes().len()))
-            .sum();
+        let total: usize = increment_bytes
+            + keys
+                .iter()
+                .map(|(k, v)| k.as_bytes().len() + v.map_or(0, |v| v.as_bytes().len()))
+                .sum::<usize>();
         if total > MAX_BATCH_BYTES {
             return Err(StoreError::Invalid("batch exceeds MAX_BATCH_BYTES".into()));
         }
@@ -373,7 +450,10 @@ pub struct PartitionStats {
 ///
 /// 1. **Declarative batch.** [`Self::apply`] is the only write. A backend
 ///    never evaluates CAS, quota or replay logic: the pipeline plans every
-///    write and guards every value it read with a precondition. Size limits
+///    write and guards every value it read with a precondition. The storage
+///    arithmetic [`Write::Increment`] evaluates its counter inside that same
+///    atomic unit, in write order; corrupt or overflowing counters abort the
+///    entire batch without effects. Size limits
 ///    ([`Batch::validate`]) are checked first, and a violation writes
 ///    nothing.
 /// 2. **Reads are `get`, `has`, `get_many`, `scan` and `scan_many`.** No other query
@@ -688,5 +768,70 @@ impl<S: NamespaceStore + ?Sized> NamespaceStore for &S {
     }
     async fn probe(&self) -> Result<(), StoreError> {
         (**self).probe().await
+    }
+}
+
+#[cfg(test)]
+mod increment_tests {
+    use super::*;
+
+    fn key() -> Key {
+        Key::new(b"counter".to_vec())
+    }
+
+    #[test]
+    fn increments_reserve_an_eight_byte_value_in_batch_limits() {
+        let batch = |spare| {
+            Batch::new()
+                .put(
+                    Key::new(b"a".to_vec()),
+                    Value::new(vec![0; MAX_VALUE_BYTES]),
+                )
+                .put(
+                    Key::new(b"b".to_vec()),
+                    Value::new(vec![0; MAX_VALUE_BYTES - spare]),
+                )
+                .increment(Key::new(b"c".to_vec()))
+        };
+        assert!(batch(11).validate(&StoreCapabilities::full()).is_ok());
+        assert!(matches!(
+            batch(10).validate(&StoreCapabilities::full()),
+            Err(StoreError::Invalid(_))
+        ));
+        assert!(Batch::new().increment(key()).has_put());
+        assert!(matches!(
+            Batch::new()
+                .increment(Key::new(vec![0; MAX_KEY_BYTES + 1]))
+                .validate(&StoreCapabilities::full()),
+            Err(StoreError::Invalid(_))
+        ));
+        let over_ops = Batch {
+            writes: vec![Write::Increment(key()); MAX_BATCH_OPS + 1],
+            ..Batch::new()
+        };
+        assert!(matches!(
+            over_ops.validate(&StoreCapabilities::full()),
+            Err(StoreError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn failed_resolution_preserves_the_original_ordered_batch() {
+        let mut batch = Batch::new()
+            .increment(key())
+            .increment(Key::new(b"bad".to_vec()));
+        let original = batch.clone();
+        let result = batch.resolve_increments(
+            |key| {
+                Ok(if key.as_bytes() == b"bad" {
+                    Some(Value::new(vec![0]))
+                } else {
+                    None
+                })
+            },
+            |message| StoreError::Corrupt(message.into()),
+        );
+        assert!(matches!(result, Err(StoreError::Corrupt(_))));
+        assert_eq!(batch, original);
     }
 }

@@ -229,6 +229,7 @@ fn repo(name: &str) -> RepoId {
 
 fn env<'a>(store: &'a Probe, clock: &'a ManualClock) -> ForkEnv<'a, Probe> {
     ForkEnv {
+        publication_policy: None,
         store,
         shards: &D34Shards,
         clock,
@@ -269,6 +270,7 @@ fn job() -> ForkJobV1 {
         fence: None,
         fence_rows: crate::fork::FenceRowsV1::default(),
         source_access: crate::fork::SourceAccessV1::default(),
+        proof: crate::fork::ProofV1::default(),
         accepted: None,
         result: None,
     }
@@ -508,6 +510,7 @@ async fn empty_waves_preserve_budgeted_error_order_and_charges() {
     let clock = ManualClock::new(0);
     let remote = Budgeted::new(&store, &budget);
     let env = ForkEnv {
+        publication_policy: None,
         store: &remote,
         shards: &D34Shards,
         clock: &clock,
@@ -567,6 +570,7 @@ async fn holder_waves_keep_blocked_precedence_under_an_opaque_inherited_cap() {
     let local_calls = crate::budget::SliceBudget::new(100);
     let remote = Budgeted::new(&parent, &local_calls);
     let env = ForkEnv {
+        publication_policy: None,
         store: &parent,
         shards: &D34Shards,
         clock: &clock,
@@ -610,6 +614,7 @@ async fn holder_waves_keep_a_retrying_block_before_an_aliased_cap() {
     let remote = Budgeted::new(&outer, &local_calls);
     let clock = ManualClock::new(0);
     let env = ForkEnv {
+        publication_policy: None,
         store: &outer,
         shards: &D34Shards,
         clock: &clock,
@@ -660,6 +665,7 @@ async fn register_stats_keep_first_error_with_shared_parent_budget() {
     let wrapped = Budgeted::new(&store, &parent);
     let clock = ManualClock::new(0);
     let env = ForkEnv {
+        publication_policy: None,
         store: &wrapped,
         shards: &D34Shards,
         clock: &clock,
@@ -701,6 +707,7 @@ async fn register_scans_keep_first_error_with_aliased_parent_budget() {
     let wrapped = Budgeted::new(&first, &parent);
     let clock = ManualClock::new(0);
     let env = ForkEnv {
+        publication_policy: None,
         store: &wrapped,
         shards: &D34Shards,
         clock: &clock,
@@ -775,6 +782,7 @@ fn env_with<'a>(
     extract_min_bytes: Option<u64>,
 ) -> ForkEnv<'a, Probe> {
     ForkEnv {
+        publication_policy: None,
         extract_min_bytes,
         ..env(store, clock)
     }
@@ -1113,6 +1121,7 @@ async fn a_wave_narrows_to_the_writes_the_slice_can_pay_for() {
     }
     let mut job = copy_job(600);
     let env = ForkEnv {
+        publication_policy: None,
         shards: &wide,
         ..env_with(&store, &clock, None)
     };

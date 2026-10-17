@@ -378,7 +378,9 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
     fn enqueue(mut batch: Batch, id: &Hash, object: &Hash, kind: u8) -> Batch {
         let row = key(b"todo", id, object);
         batch.writes.retain(|write| match write {
-            crate::Write::Put(key, _) | crate::Write::Delete(key) => key != &row,
+            crate::Write::Put(key, _)
+            | crate::Write::Delete(key)
+            | crate::Write::Increment(key) => key != &row,
         });
         batch.put(row, Value::new(vec![kind]))
     }

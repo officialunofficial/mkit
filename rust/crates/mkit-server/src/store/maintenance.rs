@@ -834,6 +834,7 @@ mod tests {
                 .map(|w| match w {
                     crate::store::Write::Put(k, v) => k.as_bytes().len() + v.as_bytes().len(),
                     crate::store::Write::Delete(k) => k.as_bytes().len(),
+                    crate::store::Write::Increment(k) => k.as_bytes().len() + 8,
                 })
                 .sum();
             self.batches

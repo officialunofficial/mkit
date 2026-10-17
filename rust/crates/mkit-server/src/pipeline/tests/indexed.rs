@@ -592,7 +592,7 @@ fn indexed_seven_ticket_advance_adds_no_batch_rows() {
             );
         }
         assert!(batch.writes.iter().all(|write| {
-            let (Write::Put(key, _) | Write::Delete(key)) = write;
+            let (Write::Put(key, _) | Write::Delete(key) | Write::Increment(key)) = write;
             !matches!(
                 keys::parse(key),
                 Some(keys::ParsedKey::ObjectIndex { .. } | keys::ParsedKey::Verification { .. })
@@ -654,7 +654,7 @@ fn indexed_seven_ticket_advance_adds_no_batch_rows() {
         let counting = if d34 { 1 } else { 12 };
         assert!(actual.preconditions.len() + actual.writes.len() <= expected + counting);
         assert!(actual.writes.iter().all(|write| {
-            let (Write::Put(key, _) | Write::Delete(key)) = write;
+            let (Write::Put(key, _) | Write::Delete(key) | Write::Increment(key)) = write;
             !matches!(
                 keys::parse(key),
                 Some(keys::ParsedKey::ObjectIndex { .. } | keys::ParsedKey::Verification { .. })

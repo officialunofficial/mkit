@@ -42,6 +42,7 @@ fn spec(source: &Source, name: &str) -> ForkSpec {
 
 fn env(source: &Source) -> ForkEnv<'_, Counting> {
     ForkEnv {
+        publication_policy: None,
         store: &source.store,
         shards: source.shards.as_ref(),
         clock: source.clock.as_ref(),
@@ -1169,6 +1170,7 @@ async fn the_kind_16_timer_finishes_a_fork_unattended() {
         .await
         .unwrap();
     let registry = TimerRegistry::new().register(ForkTimer {
+        publication_policy: None,
         store: source.store.clone(),
         shards: source.shards.clone(),
         clock: source.clock.clone(),
@@ -1699,6 +1701,7 @@ async fn a_refused_start_leaves_no_timer_and_a_stale_timer_ends() {
         "the start's timer is still queued"
     );
     let registry = TimerRegistry::new().register(ForkTimer {
+        publication_policy: None,
         store: source.store.clone(),
         shards: source.shards.clone(),
         clock: source.clock.clone(),
@@ -2617,6 +2620,7 @@ async fn a_corrupt_job_row_keeps_its_timer_and_extra_index_rows_are_the_uniform_
         .await
         .unwrap();
     let registry = TimerRegistry::new().register(ForkTimer {
+        publication_policy: None,
         store: source.store.clone(),
         shards: source.shards.clone(),
         clock: source.clock.clone(),
@@ -3101,7 +3105,7 @@ async fn publish_waves_end_where_the_serial_publish_does_and_write_the_head_last
                 .iter()
                 .map(|p| p.id)
                 .find(|id| *key == keys::membership(&waved_id.name, id)),
-            mkit_server::Write::Delete(_) => None,
+            mkit_server::Write::Delete(_) | mkit_server::Write::Increment(_) => None,
         })
         .collect();
     assert_eq!(written.len(), 12, "{written:?}");
@@ -3314,6 +3318,7 @@ async fn a_plan_that_does_not_fit_one_slice_is_made_by_the_job() {
         let outer = SliceBudget::new(limit);
         let capped = mkit_server::indexed::budget::Budgeted::new(&source.store, &outer);
         let env = ForkEnv {
+            publication_policy: None,
             store: &capped,
             shards: source.shards.as_ref(),
             clock: source.clock.as_ref(),

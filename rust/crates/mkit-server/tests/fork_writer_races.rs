@@ -20,6 +20,7 @@ use std::sync::{
 
 fn env(source: &Source) -> ForkEnv<'_, Counting> {
     ForkEnv {
+        publication_policy: None,
         store: &source.store,
         shards: source.shards.as_ref(),
         clock: source.clock.as_ref(),

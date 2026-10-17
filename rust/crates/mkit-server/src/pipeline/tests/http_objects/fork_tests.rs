@@ -15,6 +15,7 @@ fn a_forked_manifest_is_served_after_the_remix_publishes() {
     let packmap = hash(&mkit_core::transfer::encode_packlist(None, &[pack]).unwrap());
     let dest = fx.repo_id("forked");
     let env = ForkEnv {
+        publication_policy: None,
         store: &fx.pipe.meta,
         shards: fx.pipe.shards.as_ref(),
         clock: fx.pipe.clock.as_ref(),
@@ -127,6 +128,7 @@ fn replay_settle(dest: &RepoId, expires_at_ms: i64) -> crate::fork::SettleV1 {
 /// handler; returns the report so callers can assert on `fired`.
 fn fork_tick<H: HookSet>(fx: &Fx<H>, dest: &RepoId) -> crate::timers::RunReport {
     let registry = crate::timers::TimerRegistry::new().register(crate::fork::ForkTimer {
+        publication_policy: None,
         store: crate::store::BorrowedStore(&fx.pipe.meta),
         shards: fx.pipe.shards.clone(),
         clock: fx.clock.clone(),
@@ -181,6 +183,7 @@ fn fork_timer_arms_at_job_creation() {
     let _ = fx.push("room", &d.refs(), d.head(), None);
     drain_relays(&fx, "room");
     let env = ForkEnv {
+        publication_policy: None,
         store: &fx.pipe.meta,
         shards: fx.pipe.shards.as_ref(),
         clock: fx.clock.as_ref(),
@@ -230,6 +233,7 @@ fn a_finished_fork_leaves_one_stale_timer_fire() {
     let _ = fx.push("room", &d.refs(), d.head(), None);
     drain_relays(&fx, "room");
     let env = ForkEnv {
+        publication_policy: None,
         store: &fx.pipe.meta,
         shards: fx.pipe.shards.as_ref(),
         clock: fx.clock.as_ref(),
@@ -284,6 +288,7 @@ fn a_dead_request_is_resumed_by_the_alarm() {
     let _ = fx.push("room", &d.refs(), d.head(), None);
     drain_relays(&fx, "room");
     let env = ForkEnv {
+        publication_policy: None,
         store: &fx.pipe.meta,
         shards: fx.pipe.shards.as_ref(),
         clock: fx.clock.as_ref(),

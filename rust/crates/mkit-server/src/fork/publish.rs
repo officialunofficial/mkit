@@ -223,6 +223,9 @@ async fn write_one<S: NamespaceStore>(
                 .put(live, witness.clone())
                 .put(published, witness.clone());
             batch.preconditions.extend(permit.guards());
+            if crate::store::proof_version::index_partition(&target) {
+                batch = batch.increment(keys::fork_index_revision());
+            }
             match store.apply(&target, batch).await? {
                 BatchOutcome::Committed => {}
                 BatchOutcome::PreconditionFailed { .. } => {
@@ -258,6 +261,12 @@ pub(super) async fn prove<S: NamespaceStore>(
     id: &Hash,
     generation: u64,
 ) -> Result<(), ForkError> {
+    if env
+        .publication_policy
+        .is_some_and(|policy| !policy.pack_available(source, id))
+    {
+        return Err(ForkError::NotFound);
+    }
     let member = store
         .get(
             &env.shards.membership(source, &BlobKey::pack(*id)),

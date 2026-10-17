@@ -31,13 +31,14 @@ impl<'a> RowEdit<'a> {
 
     fn write(&mut self, write: Write) {
         let key = match &write {
-            Write::Put(key, _) | Write::Delete(key) => key,
+            Write::Put(key, _) | Write::Delete(key) | Write::Increment(key) => key,
         };
         // Save the prior value before mutating, so unwinding restores it.
         self.undo.push((key.clone(), self.rows.get(key).cloned()));
         match write {
             Write::Put(key, value) => self.rows.insert(key, value),
             Write::Delete(key) => self.rows.remove(&key),
+            Write::Increment(_) => unreachable!("increments are resolved before editing rows"),
         };
     }
 
@@ -209,7 +210,7 @@ impl NamespaceStore for MemoryKv {
         Ok(ScanPage { entries, next })
     }
 
-    async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+    async fn apply(&self, p: &Partition, mut batch: Batch) -> Result<BatchOutcome, StoreError> {
         batch.validate(&self.caps)?;
         take_fault(&self.fault, MemoryFault::ApplyBefore)?;
         let mut partitions = lock(&self.partitions);
@@ -223,6 +224,10 @@ impl NamespaceStore for MemoryKv {
                 return Ok(failed);
             }
         }
+        batch.resolve_increments(
+            |key| Ok(rows.get(key).cloned()),
+            |message| StoreError::Corrupt(message.into()),
+        )?;
         let adds = batch.has_put();
         let mut edit = RowEdit::new(partitions.entry(p.clone()).or_default(), batch.writes.len());
         for write in batch.writes {
@@ -551,5 +556,158 @@ mod tests {
         let kv = MemoryKv::default().with_fault(MemoryFault::ApplyAfterCommit);
         assert!(matches!(apply(&kv, a()), Err(StoreError::Unavailable(_))));
         assert_eq!(ab(&kv), (Some(v("1")), None));
+    }
+}
+
+#[cfg(test)]
+mod increment_tests {
+    use super::*;
+    use futures_executor::block_on;
+
+    fn partition() -> Partition {
+        Partition::Namespace(crate::NamespaceKey::deployment_default())
+    }
+    fn key(name: &str) -> Key {
+        Key::new(name.as_bytes().to_vec())
+    }
+    fn counter(value: u64) -> Value {
+        Value::new(value.to_be_bytes().to_vec())
+    }
+
+    #[test]
+    fn increments_are_checked_ordered_and_atomic() {
+        block_on(async {
+            let store = MemoryKv::default();
+            let p = partition();
+            let a = key("a");
+            store
+                .apply(&p, Batch::new().increment(a.clone()).increment(a.clone()))
+                .await
+                .unwrap();
+            assert_eq!(store.get(&p, &a).await.unwrap(), Some(counter(2)));
+            store
+                .apply(
+                    &p,
+                    Batch::new()
+                        .put(a.clone(), counter(9))
+                        .increment(a.clone())
+                        .increment(a.clone())
+                        .delete(a.clone())
+                        .increment(a.clone())
+                        .put(a.clone(), counter(5))
+                        .increment(a.clone()),
+                )
+                .await
+                .unwrap();
+            assert_eq!(store.get(&p, &a).await.unwrap(), Some(counter(6)));
+            for invalid in [
+                Value::new(vec![0]),
+                Value::new(vec![0; 9]),
+                counter(u64::MAX),
+            ] {
+                let bad = key("bad");
+                store
+                    .apply(&p, Batch::new().put(bad.clone(), invalid.clone()))
+                    .await
+                    .unwrap();
+                let result = store
+                    .apply(
+                        &p,
+                        Batch::new()
+                            .put(a.clone(), counter(20))
+                            .increment(key("missing"))
+                            .increment(bad.clone())
+                            .delete(a.clone()),
+                    )
+                    .await;
+                assert!(matches!(result, Err(StoreError::Corrupt(_))));
+                assert_eq!(store.get(&p, &a).await.unwrap(), Some(counter(6)));
+                assert_eq!(store.get(&p, &bad).await.unwrap(), Some(invalid));
+                assert!(store.get(&p, &key("missing")).await.unwrap().is_none());
+            }
+            store
+                .apply(
+                    &p,
+                    Batch::new()
+                        .put(a.clone(), counter(u64::MAX - 1))
+                        .increment(a.clone()),
+                )
+                .await
+                .unwrap();
+            assert_eq!(store.get(&p, &a).await.unwrap(), Some(counter(u64::MAX)));
+        });
+    }
+
+    #[test]
+    fn failed_guards_precede_counter_decoding() {
+        block_on(async {
+            let store = MemoryKv::default();
+            let p = partition();
+            let bad = key("bad");
+            let malformed = Value::new(vec![0]);
+            store
+                .apply(&p, Batch::new().put(bad.clone(), malformed.clone()))
+                .await
+                .unwrap();
+            assert_eq!(
+                store
+                    .apply(
+                        &p,
+                        Batch::new()
+                            .require(Precondition::Absent(bad.clone()))
+                            .increment(bad)
+                    )
+                    .await
+                    .unwrap(),
+                BatchOutcome::PreconditionFailed {
+                    index: 0,
+                    observed: Some(malformed)
+                }
+            );
+        });
+    }
+
+    #[test]
+    fn increment_capacity_failure_restores_every_counter() {
+        block_on(async {
+            let store = MemoryKv::default().with_capacity_limit(9);
+            let p = partition();
+            let a = key("a");
+            store
+                .apply(&p, Batch::new().increment(a.clone()))
+                .await
+                .unwrap();
+            assert!(matches!(
+                store
+                    .apply(&p, Batch::new().increment(a.clone()).increment(key("b")))
+                    .await,
+                Err(StoreError::Full)
+            ));
+            assert_eq!(store.get(&p, &a).await.unwrap(), Some(counter(1)));
+            assert!(store.get(&p, &key("b")).await.unwrap().is_none());
+        });
+    }
+
+    #[test]
+    fn concurrent_atomic_increments_do_not_lose_updates() {
+        let store = Arc::new(MemoryKv::default());
+        let threads: Vec<_> = (0..3)
+            .map(|_| {
+                let store = store.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..30 {
+                        block_on(store.apply(&partition(), Batch::new().increment(key("counter"))))
+                            .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(
+            block_on(store.get(&partition(), &key("counter"))).unwrap(),
+            Some(counter(90))
+        );
     }
 }

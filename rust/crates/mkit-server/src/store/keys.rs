@@ -49,6 +49,9 @@
 //! | local fork permit (`RepoIndex`) | `fl 00 <repo>` | active token or revocation tombstone |
 //! | fork permit drain (`Coordinator`) | `fd 00` | durable freeze and cursor |
 //! | fork permits issued (`Coordinator`) | `fs 00` | monotonic marker |
+//! | repository eligibility revision (`RepoIndex`) | `fv 00` | checked be64 |
+//! | denial registration revision (`ContentShard` directory) | `dv 00` | checked be64 |
+//! | source proof evidence (`Coordinator`) | `fq 00 <repo> 00 <ordinal:be32>` | bound observation |
 //! | fork working set or cleared set (`Coordinator`) | `fo 00 <repo> 00 <set:u8>` | binary id list; set 0 cleared commits and trees, 1 tree ids, 2 queue, 3 inherited base packs, 4 chunked-blob manifests |
 //! | grant epoch | `e 00` | be64; absent means 0, never written as 0 |
 //! | epoch lease (ref shard) | `el 00` | codec `EpochLease` |
@@ -234,6 +237,12 @@ pub const TAG_FORK_PERMIT_LOCAL: &str = "fl";
 pub const TAG_FORK_PERMIT_DRAIN: &str = "fd";
 /// Monotonic namespace marker that fork permits have been issued.
 pub const TAG_FORK_PERMITS_SEEN: &str = "fs";
+/// Repository-index eligibility revision.
+pub const TAG_FORK_INDEX_REVISION: &str = "fv";
+/// Denial directory registration revision.
+pub const TAG_DENIAL_DIRECTORY_REVISION: &str = "dv";
+/// Durable fork source-proof observations.
+pub const TAG_FORK_PROOF_EVIDENCE: &str = "fq";
 /// Repository fork id-set tag (`Coordinator`).
 pub const TAG_FORK_SET: &str = "fo";
 /// Local repository membership tag.
@@ -359,6 +368,12 @@ pub enum ParsedKey {
     ForkPermitDrain,
     /// `fs 00`.
     ForkPermitsSeen,
+    /// `fv 00`.
+    ForkIndexRevision,
+    /// `dv 00`.
+    DenialDirectoryRevision,
+    /// `fq 00 <repo> 00 <ordinal:be32>`.
+    ForkProofEvidence { repo: RepoName, ordinal: u32 },
     /// `fo 00 <repo> 00 <set>`.
     ForkSet { repo: RepoName, set: u8 },
     /// `rl 00 p/d 00 <repo>`; index values are empty.
@@ -1032,6 +1047,25 @@ pub fn fork_permits_seen() -> Key {
     key(TAG_FORK_PERMITS_SEEN, &[])
 }
 
+/// Never-reset eligibility revision in each repository index partition.
+#[must_use]
+pub fn fork_index_revision() -> Key {
+    key(TAG_FORK_INDEX_REVISION, &[])
+}
+/// Never-reset registration revision in each denial directory partition.
+#[must_use]
+pub fn denial_directory_revision() -> Key {
+    key(TAG_DENIAL_DIRECTORY_REVISION, &[])
+}
+/// One immutable source-proof observation owned by the guarded fork job.
+#[must_use]
+pub fn fork_proof_evidence(repo: &RepoName, ordinal: u32) -> Key {
+    key(
+        TAG_FORK_PROOF_EVIDENCE,
+        &[repo.as_str().as_bytes(), b"\0", &ordinal.to_be_bytes()],
+    )
+}
+
 /// `fj 00 <repo>`: the destination's fork job.
 #[must_use]
 pub fn fork_job(repo: &RepoName) -> Key {
@@ -1535,6 +1569,16 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
         b"fl" => ParsedKey::ForkPermitLocal(RepoName::new(text(body)?).ok()?),
         b"fd" if body.is_empty() => ParsedKey::ForkPermitDrain,
         b"fs" if body.is_empty() => ParsedKey::ForkPermitsSeen,
+        b"fv" if body.is_empty() => ParsedKey::ForkIndexRevision,
+        b"dv" if body.is_empty() => ParsedKey::DenialDirectoryRevision,
+        b"fq" => {
+            let (name, suffix) = body.split_at(body.len().checked_sub(5)?);
+            (suffix[0] == 0).then_some(())?;
+            ParsedKey::ForkProofEvidence {
+                repo: RepoName::new(text(name)?).ok()?,
+                ordinal: u32::from_be_bytes(suffix[1..].try_into().ok()?),
+            }
+        }
         b"fo" => {
             let (name, set) = body.split_at(body.len().checked_sub(2)?);
             (set[0] == 0).then_some(())?;
@@ -1775,6 +1819,44 @@ mod tests {
         assert!(start <= fork_permit(&repository, 0) && fork_permit(&repository, u16::MAX) < end);
         assert!(!(start <= fork_permit(&repo("aa"), 0) && fork_permit(&repo("aa"), 0) < end));
     }
+
+    #[test]
+    fn fork_proof_keys_have_strict_layouts() {
+        let repository = repo("a");
+        let cases = [
+            (
+                fork_index_revision(),
+                b"fv\0".to_vec(),
+                ParsedKey::ForkIndexRevision,
+            ),
+            (
+                denial_directory_revision(),
+                b"dv\0".to_vec(),
+                ParsedKey::DenialDirectoryRevision,
+            ),
+            (
+                fork_proof_evidence(&repository, 0x0102_0304),
+                b"fq\0a\0\x01\x02\x03\x04".to_vec(),
+                ParsedKey::ForkProofEvidence {
+                    repo: repository,
+                    ordinal: 0x0102_0304,
+                },
+            ),
+        ];
+        for (key, golden, expected) in cases {
+            assert_eq!(key.as_bytes(), golden);
+            assert_eq!(parse(&key), Some(expected));
+        }
+        for malformed in [
+            b"fv\0x".to_vec(),
+            b"dv\0x".to_vec(),
+            b"fq\0\0\x01\x02\x03\x04".to_vec(),
+            b"fq\0a\0\x01\x02\x03".to_vec(),
+            b"fq\0a\0\x01\x02\x03\x04\x05".to_vec(),
+        ] {
+            assert_eq!(parse(&Key::new(malformed)), None);
+        }
+    }
     #[test]
     fn timer_retry_metadata_preserves_opaque_reference_and_original_due() {
         let reference = b"\0\xffarbitrary\0reference";
@@ -1857,6 +1939,9 @@ mod tests {
             TAG_FORK_PERMIT_LOCAL,
             TAG_FORK_PERMIT_DRAIN,
             TAG_FORK_PERMITS_SEEN,
+            TAG_FORK_INDEX_REVISION,
+            TAG_DENIAL_DIRECTORY_REVISION,
+            TAG_FORK_PROOF_EVIDENCE,
             TAG_FORK_SET,
             TAG_RELAY_HIGH_WATER,
             TAG_RELAY_SCAN,

@@ -349,6 +349,7 @@ impl RelayHook for AuditReserveHook {
                 .chain(estimate.writes.iter().map(|write| match write {
                     Write::Put(k, v) => k.as_bytes().len() + v.as_bytes().len(),
                     Write::Delete(k) => k.as_bytes().len(),
+                    Write::Increment(k) => k.as_bytes().len() + 8,
                 }))
                 .sum::<usize>()
                 // Accepted heads need not have canonical JSON spelling. Reserve their raw

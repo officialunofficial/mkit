@@ -259,6 +259,7 @@ pub(super) async fn step<S: NamespaceStore>(
         stats: &trace,
     };
     let env = ForkEnv {
+        publication_policy: None,
         store: &traced,
         shards: env.shards,
         clock: env.clock,
