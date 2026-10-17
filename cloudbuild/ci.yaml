@@ -63,6 +63,7 @@ steps:
       # Drop debuginfo in CI (dominant target/ bloat; CI never opens a debugger).
       - "CARGO_PROFILE_DEV_DEBUG=0"
       - "CARGO_PROFILE_TEST_DEBUG=0"
+      - "CARGO_PROFILE_TEST_CODEGEN_UNITS=256"
       # sccache → GCS. RW mode + bucket; ADC comes from the build SA.
       - "RUSTC_WRAPPER=sccache"
       - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
@@ -182,8 +183,12 @@ steps:
         )
 
         # ── rust/ workspace: tests ──────────────────────────────────────────
+        # The unified server lib-test compiler reaches this worker's memory
+        # limit even alone. Smaller codegen units bound each LLVM module;
+        # serial compilation reserves the remaining headroom for rustc.
+        # Test selection and execution concurrency are unchanged.
         ( cd rust
-          cargo nextest run --locked --workspace --all-features
+          cargo nextest run --locked --workspace --all-features --build-jobs 1
           # Indexed verification with one Extract step per slice (default chains).
           MKIT_TEST_EXTRACT_CHAIN=1 cargo nextest run --locked -p mkit-server --all-features -E 'test(~indexed::)'
 
@@ -259,6 +264,7 @@ steps:
       - "RUST_BACKTRACE=short"
       - "CARGO_PROFILE_DEV_DEBUG=0"
       - "CARGO_PROFILE_TEST_DEBUG=0"
+      - "CARGO_PROFILE_TEST_CODEGEN_UNITS=256"
       - "MKIT_TEST_STRICT=1"
       - "RUSTC_WRAPPER=sccache"
       - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
@@ -269,7 +275,7 @@ steps:
       - |
         set -euo pipefail
         cd rust
-        cargo nextest run --locked --workspace --all-features \
+        cargo nextest run --locked --workspace --all-features --build-jobs 1 \
           --profile ignored-lane --run-ignored ignored-only
         sccache --show-stats
 

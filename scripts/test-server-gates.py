@@ -49,6 +49,20 @@ class ServerGates(unittest.TestCase):
         self.assertIn("entrypoint: python3", guard)
         self.assertIn("args: [scripts/test-server-gates.py, --hosted-only]", guard)
 
+    def test_cloud_workspace_test_compilation_is_serial(self):
+        yaml = (ROOT / "cloudbuild/ci.yaml").read_text()
+        steps = re.split(r"(?m)^  - name: ", yaml)[1:]
+        for step_id in ("check", "ignored-lane"):
+            step, = [s for s in steps if f"\n    id: {step_id}\n" in s]
+            with self.subTest(step=step_id):
+                self.assertRegex(
+                    step,
+                    r"(?m)^ +cargo nextest run --locked --workspace --all-features --build-jobs 1(?: |$)",
+                )
+                self.assertIn('"CARGO_PROFILE_TEST_CODEGEN_UNITS=256"', step)
+                self.assertNotIn("allowFailure", step)
+                self.assertNotIn("allowExitCodes", step)
+
     def test_native_wire_executor_and_gate(self):
         yaml = (ROOT / ".github/workflows/rust.yml").read_text()
         native = section(yaml, "native-wire-conformance:")
@@ -68,7 +82,8 @@ class ServerGates(unittest.TestCase):
 if __name__ == "__main__":
     if "--hosted-only" in sys.argv:
         suite = unittest.defaultTestLoader.loadTestsFromNames([
-            "test_cloud_linux_allocator_executor", "test_native_wire_executor_and_gate"], ServerGates)
+            "test_cloud_linux_allocator_executor", "test_cloud_workspace_test_compilation_is_serial",
+            "test_native_wire_executor_and_gate"], ServerGates)
         result = unittest.TextTestRunner().run(suite)
         sys.exit(not result.wasSuccessful())
     unittest.main()

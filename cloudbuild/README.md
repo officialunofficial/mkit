@@ -62,6 +62,22 @@ needs a maintainer **`/gcbrun`** only for external/fork PRs. See
 | `mkit-geiger-{pr,main}` | `geiger.yaml` | collaborators auto |
 | `mkit-coverage-main` | `coverage.yaml` | main push only |
 
+## Test compilation memory
+
+The workspace's unified `mkit-server` lib-test compiler is killed with signal 9
+near the worker's memory limit, even with one Cargo job and debuginfo disabled.
+`CARGO_PROFILE_TEST_CODEGEN_UNITS=256` splits LLVM code generation into smaller
+modules. Workspace nextest commands also use `--build-jobs 1` to reserve the
+remaining memory for that compiler. Both steps use identical profile settings
+to reuse compiled tests. Test selection and execution concurrency stay unchanged,
+including the required ignored-test lane. The machine type stays unchanged.
+
+When diagnosing a compiler exit without a Rust diagnostic, run the underlying
+`cargo test --no-run` command directly as well as nextest. sccache reports a
+signaled child on stdout; Cargo's JSON output consumed by nextest can hide that
+message. Measure the Linux compiler rather than extrapolating native RSS from
+a different platform.
+
 ## Diagnosing main test failures
 
 At `e3440bd0`, [the macOS test run](https://github.com/officialunofficial/mkit/actions/runs/37141273001)
