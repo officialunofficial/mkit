@@ -257,6 +257,7 @@ mod tests {
             include_bytes!("../../fixtures/evidence/checkpoint-decode.bin").as_slice(),
             include_bytes!("../../fixtures/evidence/checkpoint-complete.bin").as_slice(),
             include_bytes!("../../fixtures/evidence/checkpoint-version.bin").as_slice(),
+            include_bytes!("../../fixtures/evidence/checkpoint-verify.bin").as_slice(),
             include_bytes!("../../fixtures/evidence/checkpoint-corrupt.bin").as_slice(),
         ] {
             checkpoint(bytes);

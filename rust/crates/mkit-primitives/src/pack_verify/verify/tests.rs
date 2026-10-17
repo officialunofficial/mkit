@@ -363,6 +363,68 @@ fn wide_tree_flushes_edge_records_across_bounded_rewrites() {
 }
 
 #[test]
+fn resident_ledger_is_symmetric_across_leaf_flushes() {
+    // 4 KiB pages fit a full leaf but commit one every few edge records; a
+    // leaked spine reservation would grow resident bytes once per commit.
+    let (child_id, child) = blob(b"child");
+    let entries: Vec<TreeEntry> = (0..400)
+        .map(|n| TreeEntry {
+            name: format!("entry-{n:04}").into_bytes(),
+            mode: EntryMode::Blob,
+            object_hash: child_id,
+        })
+        .collect();
+    let (tree_id, tree) = canonical(&Object::Tree(Tree { entries }));
+    let mut writer = PackWriter::new_raw_only();
+    writer.push_raw(child_id, &child).unwrap();
+    writer.push_raw(tree_id, &tree).unwrap();
+    let pack = writer.finish().unwrap();
+    let mut host = Host::new(&pack);
+    let mut limits = limits();
+    limits.page_bytes = 4096;
+    let mut machine =
+        VerifyDriver::new(source(&pack), REPOSITORY, profile(), limits, 17).unwrap();
+    let mut first = None;
+    let mut last = 0;
+    for _ in 0..200_000 {
+        let step = match machine.step() {
+            Ok(step) => step,
+            Err(error) => panic!("{error:?} usage={:?}", machine.usage()),
+        };
+        match step {
+            Step::Request(request) => host.serve(&mut machine, &request).unwrap(),
+            Step::ProvisionalObject(fragment) => {
+                host.fragments
+                    .entry(fragment.ordinal)
+                    .or_default()
+                    .extend_from_slice(fragment.bytes);
+            }
+            Step::RetainEvidence(page) => {
+                let commitment = page.commitment;
+                host.pages.push((commitment, page.bytes.to_vec()));
+                machine.acknowledge_retention(commitment).unwrap();
+            }
+            Step::Progress => (),
+            Step::Complete(_) => break,
+        }
+        if machine.checkpoint().is_ok() {
+            let resident = machine.usage().resident_bytes;
+            if first.is_none() {
+                first = Some(resident);
+            }
+            last = resident;
+        }
+    }
+    let first = first.expect("a drained boundary exists");
+    // Committed leaves release their spine reservation: the ledger may grow
+    // only by the live spines, at most one page of records per sequence.
+    assert!(
+        last <= first + 6 * limits.page_bytes,
+        "resident ledger leaked across flushes: {first} -> {last}"
+    );
+}
+
+#[test]
 fn undersized_page_bytes_refuses_without_losing_inertness() {
     let (a_id, a) = blob(b"alpha");
     let mut writer = PackWriter::new_raw_only();

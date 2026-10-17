@@ -647,18 +647,16 @@ impl VerifyDriver {
                         } else {
                             3
                         };
-                        let charge = range
-                            .len
-                            .checked_mul(passes)
-                            .ok_or_else(|| failure(FailureCode::ResourceLimit))?;
-                        if let Err(error) = self.resources.work(charge) {
-                            self.phase = Phase::Failed;
-                            return Err(error);
-                        }
+                        self.charge_feed(range, passes)?;
                         self.accept_input(range.offset, bytes)
                     }
-                    For::Base => self.accept_base(false, range, bytes),
-                    For::External => self.accept_base(true, range, bytes),
+                    For::Base | For::External => {
+                        // Served base bytes are deserialized, hashed, and
+                        // copied before the entry decodes: the same three
+                        // passes integrity feeds pay.
+                        self.charge_feed(range, 3)?;
+                        self.accept_base(for_ == For::External, range, bytes)
+                    }
                 }
             }
             (
@@ -703,10 +701,26 @@ impl VerifyDriver {
                 let used = self.limits.work.saturating_sub(budget.remaining());
                 self.op = Some(live);
                 let charged = self.resources.work(used);
+                if charged.is_err() {
+                    self.phase = Phase::Failed;
+                }
                 result.and(charged)
             }
             _ => Err(invalid()),
         }
+    }
+
+    /// Charges `range.len * passes` of feed work; exhaustion is terminal.
+    fn charge_feed(&mut self, range: ByteRange, passes: u64) -> Result<(), Failure> {
+        let charge = range
+            .len
+            .checked_mul(passes)
+            .ok_or_else(|| failure(FailureCode::ResourceLimit))?;
+        if let Err(error) = self.resources.work(charge) {
+            self.phase = Phase::Failed;
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn accept_member(&mut self, object: Hash, fact: MemberFact) -> Result<(), Failure> {
@@ -1305,8 +1319,14 @@ impl VerifyDriver {
             }
             Ok(Event::Emit(page)) => {
                 self.op = Some(live);
-                self.resources.reserve(self.limits.page_bytes)?;
                 let len = page.bytes().len() as u64;
+                // Emitted pages were decoded, authenticated, and encoded; the
+                // passes mirror the four framing charges per produced page.
+                self.resources.work(
+                    len.checked_mul(4)
+                        .ok_or_else(|| failure(FailureCode::ResourceLimit))?,
+                )?;
+                self.resources.reserve(self.limits.page_bytes)?;
                 self.resources.evidence(len)?;
                 self.retained = Some(page);
                 Ok(Step::Progress)
@@ -1397,7 +1417,7 @@ impl VerifyDriver {
                         .records
                         .iter()
                         .map(|(_, value)| u64::try_from(value.len()).unwrap_or(u64::MAX))
-                        .sum()
+                        .fold(0, u64::saturating_add)
                 });
                 self.resources.reserve(retained)?;
                 self.sequence_mut(seq)?.set_spine(spine);

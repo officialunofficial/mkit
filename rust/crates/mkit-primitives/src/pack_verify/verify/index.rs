@@ -548,6 +548,7 @@ impl Index {
             .count
             .checked_add(*added)
             .ok_or_else(|| failure(FailureCode::InvalidEvidence))?;
+        *added = 0;
         let root = self.root;
         let spine = track.take().map(|mut track| {
             track.path.reverse();
@@ -694,14 +695,20 @@ impl Index {
         }
         if rest.len() < FANOUT {
             let node_height = parent.height;
-            let page = encode_internal(
+            let page = match encode_internal(
                 self.binding,
                 self.kind,
                 node_height,
                 first,
                 &rest,
                 self.limits,
-            )?;
+            ) {
+                Ok(page) => page,
+                Err(error) => {
+                    path.push(parent);
+                    return Err(error);
+                }
+            };
             parent.first = first;
             parent.rest = rest;
             parent.commitment = page.commitment();
@@ -732,22 +739,32 @@ impl Index {
                 rest: rest[mid..].to_vec(),
                 choice: 0,
             };
-            let left_page = encode_internal(
-                self.binding,
-                self.kind,
-                node_height,
-                left.first,
-                &left.rest,
-                self.limits,
-            )?;
-            let right_page = encode_internal(
-                self.binding,
-                self.kind,
-                node_height,
-                right.first,
-                &right.rest,
-                self.limits,
-            )?;
+            let encoded = (|| {
+                let left_page = encode_internal(
+                    self.binding,
+                    self.kind,
+                    node_height,
+                    left.first,
+                    &left.rest,
+                    self.limits,
+                )?;
+                let right_page = encode_internal(
+                    self.binding,
+                    self.kind,
+                    node_height,
+                    right.first,
+                    &right.rest,
+                    self.limits,
+                )?;
+                Ok::<_, Failure>((left_page, right_page))
+            })();
+            let (left_page, right_page) = match encoded {
+                Ok(pages) => pages,
+                Err(error) => {
+                    path.push(parent);
+                    return Err(error);
+                }
+            };
             left.commitment = left_page.commitment();
             right.commitment = right_page.commitment();
             produced.clear();
