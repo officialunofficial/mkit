@@ -56,7 +56,9 @@ pub enum EnvelopePresence {
 /// Counts follow [`HEADER_NAMES`]. A unary request requires the digest header;
 /// upload streams may omit it. Any [`TRIGGER_HEADER_NAMES`] field marks an
 /// envelope, and a partial or duplicate envelope fails closed rather than
-/// becoming anonymous. Without a trigger, addressing and unsigned replay
+/// becoming anonymous. X-Repository is addressing, not an envelope field: its
+/// absence is classified by host routing, while a duplicate still fails closed.
+/// Without a trigger, addressing and unsigned replay
 /// metadata validation remain host obligations.
 /// The check inspects ten fixed counts without allocation.
 ///
@@ -80,11 +82,10 @@ pub fn inspect_headers(
             reason: "duplicate auth v2 header",
         });
     }
-    // Signed addressing precedes the core verifier. The remaining missing
-    // fields follow verify_headers_with's order and diagnostics. Values still
+    // Missing fields follow verify_headers_with's order and diagnostics;
+    // repository addressing stays with routing. Values still
     // pass through that verifier; this is only a multiplicity check.
     let missing = [
-        (2, "missing X-Repository on a signed request"),
         (0, "auth v2 required"),
         (1, "missing auth v2 header"),
         (6, "missing auth v2 header"),
