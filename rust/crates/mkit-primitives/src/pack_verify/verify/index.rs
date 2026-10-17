@@ -63,23 +63,6 @@ pub(super) struct PathNode {
     choice: usize,
 }
 
-impl PathNode {
-    fn set_child(&mut self, index: usize, child: PageCommitment) {
-        if index == 0 {
-            self.first = child;
-        } else {
-            self.rest[index - 1].child = child;
-        }
-    }
-    fn insert_child(&mut self, index: usize, separator: Hash, child: PageCommitment) {
-        self.rest
-            .insert(index - 1, BranchChild { separator, child });
-    }
-    fn children(&self) -> usize {
-        self.rest.len() + 1
-    }
-}
-
 /// Restored append position: the open leaf, its contents, and its ancestors.
 #[derive(Debug)]
 pub(super) struct Spine {
@@ -490,8 +473,14 @@ impl Index {
                 self.leaf_page(&records[mid..])?,
             );
             let right = records.split_off(mid);
-            produced.push((records[0].0, left_page.commitment()));
-            produced.push((right[0].0, right_page.commitment()));
+            produced.push((
+                records.first().ok_or_else(invalid)?.0,
+                left_page.commitment(),
+            ));
+            produced.push((
+                right.first().ok_or_else(invalid)?.0,
+                right_page.commitment(),
+            ));
             if let Some(track) = track.as_mut() {
                 track.leaf = Some(right_page.commitment());
                 track.records = right;
@@ -506,7 +495,7 @@ impl Index {
             };
         } else {
             let page = self.leaf_page(records)?;
-            produced.push((records[0].0, page.commitment()));
+            produced.push((records.first().ok_or_else(invalid)?.0, page.commitment()));
             if let Some(track) = track.as_mut() {
                 track.leaf = Some(page.commitment());
                 track.records = std::mem::take(records);
@@ -649,33 +638,74 @@ impl Index {
                 Graft::InsertInsert => 1 + usize::from(track.as_ref().is_some_and(|t| t.right)),
             };
         let first_produced = produced.first().copied().ok_or_else(invalid)?;
+        // Encode first, mutate second: the graft applies to copies of the
+        // parent's children so a refused encode leaves the op unchanged.
+        let mut first = parent.first;
+        let mut rest = parent.rest.clone();
         match graft {
-            Graft::Replace => parent.set_child(slot, first_produced.1),
+            Graft::Replace => {
+                if slot == 0 {
+                    first = first_produced.1;
+                } else {
+                    rest[slot - 1].child = first_produced.1;
+                }
+            }
             Graft::ReplaceInsert => {
                 let second = produced.get(1).copied().ok_or_else(invalid)?;
-                parent.set_child(slot, first_produced.1);
-                parent.insert_child(slot + 1, second.0, second.1);
+                if slot == 0 {
+                    first = first_produced.1;
+                } else {
+                    rest[slot - 1].child = first_produced.1;
+                }
+                rest.insert(
+                    slot,
+                    BranchChild {
+                        separator: second.0,
+                        child: second.1,
+                    },
+                );
             }
             Graft::Insert => {
-                parent.insert_child(slot + 1, first_produced.0, first_produced.1);
+                rest.insert(
+                    slot,
+                    BranchChild {
+                        separator: first_produced.0,
+                        child: first_produced.1,
+                    },
+                );
             }
             Graft::InsertInsert => {
                 let second = produced.get(1).copied().ok_or_else(invalid)?;
-                parent.insert_child(slot + 1, first_produced.0, first_produced.1);
-                parent.insert_child(slot + 2, second.0, second.1);
+                rest.insert(
+                    slot,
+                    BranchChild {
+                        separator: first_produced.0,
+                        child: first_produced.1,
+                    },
+                );
+                rest.insert(
+                    slot + 1,
+                    BranchChild {
+                        separator: second.0,
+                        child: second.1,
+                    },
+                );
             }
         }
-        produced.clear();
-        if parent.children() <= FANOUT {
+        if rest.len() < FANOUT {
             let node_height = parent.height;
             let page = encode_internal(
                 self.binding,
                 self.kind,
                 node_height,
-                parent.first,
-                &parent.rest,
+                first,
+                &rest,
                 self.limits,
             )?;
+            parent.first = first;
+            parent.rest = rest;
+            parent.commitment = page.commitment();
+            produced.clear();
             produced.push(([0; 32], page.commitment()));
             queue.push_back(page);
             *graft = Graft::Replace;
@@ -685,21 +715,21 @@ impl Index {
             }
             *height = node_height;
         } else {
-            let mid = parent.children() / 2;
-            let separator = parent.rest[mid - 1].separator;
+            let mid = rest.len().div_ceil(2);
+            let separator = rest[mid - 1].separator;
             let node_height = parent.height;
             let mut left = PathNode {
                 commitment: parent.commitment,
                 height: node_height,
-                first: parent.first,
-                rest: parent.rest[..mid - 1].to_vec(),
+                first,
+                rest: rest[..mid - 1].to_vec(),
                 choice: 0,
             };
             let mut right = PathNode {
                 commitment: parent.commitment,
                 height: node_height,
-                first: parent.rest[mid - 1].child,
-                rest: parent.rest[mid..].to_vec(),
+                first: rest[mid - 1].child,
+                rest: rest[mid..].to_vec(),
                 choice: 0,
             };
             let left_page = encode_internal(
@@ -718,8 +748,11 @@ impl Index {
                 &right.rest,
                 self.limits,
             )?;
-            produced.push(([0; 32], left_page.commitment()));
-            produced.push((separator, right_page.commitment()));
+            left.commitment = left_page.commitment();
+            right.commitment = right_page.commitment();
+            produced.clear();
+            produced.push(([0; 32], left.commitment));
+            produced.push((separator, right.commitment));
             queue.push_back(left_page);
             queue.push_back(right_page);
             *graft = Graft::ReplaceInsert;
@@ -830,34 +863,39 @@ impl Index {
                 Ok(())
             }
             Op::Audit { stack, want, seen } => {
-                let (page, lower, upper) = want.ok_or_else(invalid)?;
-                let view = self.view(bytes, page, budget).inspect_err(|_| {
-                    *want = Some((page, lower, upper));
-                })?;
-                *want = None;
-                if view.height() == 0 {
-                    *seen = seen
-                        .checked_add(u64::from(view.items()))
-                        .ok_or_else(|| failure(FailureCode::InvalidEvidence))?;
-                    return Ok(());
-                }
-                let (first, rest) = Self::children(&view)?;
-                for child in &rest {
-                    if lower.is_some_and(|low| child.separator < low)
-                        || upper.is_some_and(|high| child.separator >= high)
-                    {
-                        return Err(failure(FailureCode::InvalidEvidence));
+                let (page, lower, upper) = want.take().ok_or_else(invalid)?;
+                // Any refused page leaves `want` installed so a retry
+                // re-requests the same node instead of skipping its subtree.
+                let result = (|| {
+                    let view = self.view(bytes, page, budget)?;
+                    if view.height() == 0 {
+                        *seen = seen
+                            .checked_add(u64::from(view.items()))
+                            .ok_or_else(|| failure(FailureCode::InvalidEvidence))?;
+                        return Ok(());
                     }
+                    let (first, rest) = Self::children(&view)?;
+                    for child in &rest {
+                        if lower.is_some_and(|low| child.separator < low)
+                            || upper.is_some_and(|high| child.separator >= high)
+                        {
+                            return Err(failure(FailureCode::InvalidEvidence));
+                        }
+                    }
+                    stack
+                        .try_reserve(rest.len() + 1)
+                        .map_err(|_| failure(FailureCode::ResourceLimit))?;
+                    stack.push((first, lower, rest.first().map(|c| c.separator)));
+                    for (index, child) in rest.iter().enumerate() {
+                        let next = rest.get(index + 1).map(|c| c.separator).or(upper);
+                        stack.push((child.child, Some(child.separator), next));
+                    }
+                    Ok(())
+                })();
+                if result.is_err() {
+                    *want = Some((page, lower, upper));
                 }
-                stack
-                    .try_reserve(rest.len() + 1)
-                    .map_err(|_| failure(FailureCode::ResourceLimit))?;
-                stack.push((first, lower, rest.first().map(|c| c.separator)));
-                for (index, child) in rest.iter().enumerate() {
-                    let next = rest.get(index + 1).map(|c| c.separator).or(upper);
-                    stack.push((child.child, Some(child.separator), next));
-                }
-                Ok(())
+                result
             }
             Op::Rewrite { .. } => Err(invalid()),
         }
@@ -995,16 +1033,24 @@ impl Sequence {
         // A rewrite can emit at most two leaves; bounded batches re-enter
         // through the caller's flush loop until `open` drains.
         let moved = self.open.len().min((2 * FANOUT).saturating_sub(kept));
+        // `open` bytes are charged at append and the spine at each commit;
+        // the op consumes both, so the drained total covers the spine plus
+        // the records moving out of `open` regardless of the merge shape.
+        let mut drained = spine
+            .records
+            .iter()
+            .map(|(_, value)| u64::try_from(value.len()).unwrap_or(u64::MAX))
+            .fold(0, u64::saturating_add);
         let mut records = if fresh {
             Vec::new()
         } else {
             spine.records.clone()
         };
         records.extend(self.open.drain(..moved));
-        self.drained_bytes = records
-            .iter()
-            .map(|(_, value)| u64::try_from(value.len()).unwrap_or(u64::MAX))
-            .sum();
+        for (_, value) in &records[kept..] {
+            drained = drained.saturating_add(u64::try_from(value.len()).unwrap_or(u64::MAX));
+        }
+        self.drained_bytes = drained;
         Index::rewrite(
             Descent {
                 leaf: spine.leaf,

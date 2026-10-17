@@ -434,13 +434,13 @@ impl VerifyDriver {
         }
     }
 
-    fn sequence_mut(&mut self, which: Which) -> &mut Sequence {
+    fn sequence_mut(&mut self, which: Which) -> Result<&mut Sequence, Failure> {
         match which {
-            Which::Ordinals => &mut self.ordinals,
-            Which::Occurrences => &mut self.occurrences,
-            Which::Dependencies => &mut self.dependencies,
-            Which::Heads => &mut self.heads,
-            Which::Objects | Which::Referenced => unreachable!("map index"),
+            Which::Ordinals => Ok(&mut self.ordinals),
+            Which::Occurrences => Ok(&mut self.occurrences),
+            Which::Dependencies => Ok(&mut self.dependencies),
+            Which::Heads => Ok(&mut self.heads),
+            Which::Objects | Which::Referenced => Err(invalid()),
         }
     }
 
@@ -574,6 +574,9 @@ impl VerifyDriver {
     /// and preserve the outstanding retention request.
     pub fn acknowledge_retention(&mut self, commitment: PageCommitment) -> Result<(), Failure> {
         self.release_checkpoint()?;
+        if self.phase == Phase::Failed {
+            return Err(invalid());
+        }
         let retained = self.retained.take().ok_or_else(invalid)?;
         if retained.commitment() != commitment {
             self.retained = Some(retained);
@@ -605,6 +608,9 @@ impl VerifyDriver {
     /// acquisition is `UnavailableInput`; it never proves absence.
     pub fn supply(&mut self, response: Response<'_>) -> Result<(), Failure> {
         self.release_checkpoint()?;
+        if self.phase == Phase::Failed {
+            return Err(invalid());
+        }
         let pending = self.pending.ok_or_else(invalid)?;
         match (pending, response) {
             (
@@ -632,7 +638,25 @@ impl VerifyDriver {
                 }
                 self.pending = None;
                 match for_ {
-                    For::Input => self.accept_input(range.offset, bytes),
+                    For::Input => {
+                        // Decoder feeds copy and commit the window. Prepay one
+                        // additional prefix pass: cold resume re-feeds and
+                        // re-hashes consumed windows.
+                        let passes = if self.phase == Phase::Entries {
+                            4
+                        } else {
+                            3
+                        };
+                        let charge = range
+                            .len
+                            .checked_mul(passes)
+                            .ok_or_else(|| failure(FailureCode::ResourceLimit))?;
+                        if let Err(error) = self.resources.work(charge) {
+                            self.phase = Phase::Failed;
+                            return Err(error);
+                        }
+                        self.accept_input(range.offset, bytes)
+                    }
                     For::Base => self.accept_base(false, range, bytes),
                     For::External => self.accept_base(true, range, bytes),
                 }
@@ -808,11 +832,11 @@ impl VerifyDriver {
         work.base_depth = depth;
         let base_len =
             u64::try_from(bytes.len()).map_err(|_| failure(FailureCode::ResourceLimit))?;
-        self.resources.reserve(base_len)?;
         let mut owned = Vec::new();
         owned
             .try_reserve_exact(bytes.len())
             .map_err(|_| failure(FailureCode::ResourceLimit))?;
+        self.resources.reserve(base_len)?;
         owned.extend_from_slice(bytes);
         work.base_len = base_len;
         work.base_bytes = Some(owned);
@@ -995,6 +1019,8 @@ impl VerifyDriver {
         let kind = object.object_type();
         let canonical_len =
             u64::try_from(bytes.len()).map_err(|_| failure(FailureCode::ResourceLimit))?;
+        // Canonical passes: deserialize, validate, and hash the object once.
+        self.resources.work(canonical_len)?;
         self.decoded = self
             .decoded
             .checked_add(canonical_len)
@@ -1236,7 +1262,7 @@ impl VerifyDriver {
 
     fn advance_flush(&mut self) -> Result<Step<'static>, Failure> {
         for seq in SEQUENCES {
-            let sequence = self.sequence_mut(seq);
+            let sequence = self.sequence_mut(seq)?;
             if sequence.pending() == 0 {
                 continue;
             }
@@ -1322,7 +1348,15 @@ impl VerifyDriver {
                 if !rightmost {
                     return Err(invalid());
                 }
-                let op = self.sequence_mut(seq).graft(descent);
+                // The descended leaf becomes the sequence spine; its record
+                // bytes are resident from here and release with the flush.
+                let spine_bytes = descent
+                    .records
+                    .iter()
+                    .map(|(_, value)| u64::try_from(value.len()).unwrap_or(u64::MAX))
+                    .fold(0, u64::saturating_add);
+                self.resources.reserve(spine_bytes)?;
+                let op = self.sequence_mut(seq)?.graft(descent);
                 self.op = Some(Live {
                     index: seq,
                     op,
@@ -1356,7 +1390,7 @@ impl VerifyDriver {
                 if rightmost {
                     return Err(invalid());
                 }
-                let drained = self.sequence_mut(seq).drained();
+                let drained = self.sequence_mut(seq)?.drained();
                 self.resources.release(drained)?;
                 let retained = spine.as_ref().map_or(0, |spine| {
                     spine
@@ -1366,7 +1400,7 @@ impl VerifyDriver {
                         .sum()
                 });
                 self.resources.reserve(retained)?;
-                self.sequence_mut(seq).set_spine(spine);
+                self.sequence_mut(seq)?.set_spine(spine);
                 if self.phase == Phase::Seal {
                     self.advance_seal()
                 } else {
@@ -1482,7 +1516,7 @@ impl VerifyDriver {
         match stage {
             SealStage::Flush => {
                 for seq in SEQUENCES {
-                    let sequence = self.sequence_mut(seq);
+                    let sequence = self.sequence_mut(seq)?;
                     if sequence.pending() == 0 {
                         continue;
                     }
@@ -1507,7 +1541,7 @@ impl VerifyDriver {
             }
             SealStage::Heads => {
                 // Heads flushes ride the same operation plumbing.
-                let heads = self.sequence_mut(Which::Heads);
+                let heads = self.sequence_mut(Which::Heads)?;
                 if heads.needs_flush() {
                     let op = heads.flush()?;
                     let rightmost = matches!(

@@ -906,7 +906,7 @@ spec = "SPEC-PRIMITIVE-EVIDENCE checkpoint envelope"
 path = "evidence/checkpoint-verify.bin"
 sha256 = "6249432dcd84699ffd1c33b50ad2d61f72d3b5bc1c023de1914ea165e6f8206e"
 semantic = "evidence/checkpoint-verify.json"
-semantic_sha256 = "9a5474ab4c71dec9f6a28630313440e5bcd80b7191ba250a0e85d0309f572d93"
+semantic_sha256 = "be797c4125e6f742f3bc93d567008c5de007b64d7c5f0db9c51e26c40c5b2f8e"
 
 [[fixtures]]
 type = "evidence-page"

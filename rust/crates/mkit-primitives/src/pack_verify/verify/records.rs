@@ -495,6 +495,9 @@ impl DependencyRecord {
     /// # Errors
     /// Wrong version/tag, unknown kind bytes, wrong length.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Failure> {
+        if bytes.len() < 2 {
+            return Err(invalid());
+        }
         let mut budget = Budget::new(128, 0);
         let mut cursor = Cursor::new(bytes, &mut budget);
         if cursor.byte()? != 1 {
