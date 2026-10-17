@@ -1,0 +1,1 @@
+State page version 1; no predecessor; key 0x11 repeated; Blob placeholder, canonical length 0; no payload length; authoritative Absent. Placeholder metadata does not establish an object.

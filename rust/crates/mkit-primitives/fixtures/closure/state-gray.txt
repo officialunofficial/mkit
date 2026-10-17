@@ -1,0 +1,1 @@
+State page version 1; no predecessor; key 0x11 repeated 32 times; Blob, canonical length 19; no payload length; Gray. Domain: mkit-closure-state:v1.

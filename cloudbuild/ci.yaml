@@ -30,6 +30,10 @@ substitutions:
   _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/mkit-ci:rust-1.95.0
 
 options:
+  # The trigger runs this config as a dedicated service account, not the
+  # default Cloud Build account. Cloud Build rejects a custom account with no
+  # log option.
+  logging: CLOUD_LOGGING_ONLY
   # 8 vCPUs keeps clippy+nextest brisk; 100 GB removes the disk pressure that
   # made rust.yml free the Android/.NET/Haskell trees on GitHub's ~14 GB runners.
   machineType: E2_HIGHCPU_8

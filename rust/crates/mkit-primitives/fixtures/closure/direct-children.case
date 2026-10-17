@@ -1,0 +1,11 @@
+# Abstract verified object facts; IDs are the named byte repeated 32 times.
+object 1 Commit 64
+object 2 Tree 6
+object 3 Tree 6
+edge 1 2 Tree 0 Tree
+edge 2 90 TreeEntry 0 Blob
+edge 3 91 TreeEntry 0 Blob
+head 1
+member 90 Blob 10
+member 91 absent
+missing 91

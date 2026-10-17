@@ -1,0 +1,1 @@
+State page version 1; predecessor is state-gray.bin; key 0x11 repeated, Blob length 19, payload length 9; Member. Fact: repository=0x01, incarnation=0x02, object=key, Blob length 19, supplier ID=0x03 length 100 binding=0x04, canonical binding=0x05, revision=0x06, delta depth=7, published=true, held=false. Each byte notation denotes a repeated 32-byte value.

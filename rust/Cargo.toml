@@ -8,6 +8,8 @@ exclude = ["vendor/ruzstd"]
 # default `cargo build` skips them.
 members = [
     "crates/mkit-core",
+    "crates/mkit-primitives",
+    "crates/mkit-primitives/fuzz",
     "crates/mkit-attest",
     "crates/mkit-git-bridge",
     "crates/mkit-keystore",
@@ -60,6 +62,7 @@ authors = ["Official Unofficial, Inc."]
 # `features` flags are set at the consumer site because they vary by
 # crate. Bump in a single commit when the train rolls.
 [workspace.dependencies]
+commonware-macros = { version = "=2026.9.0", default-features = false }
 # default-features = false here matches the strictest consumer
 # (mkit-attest / mkit-core). Consumers that want the default feature
 # set can NOT re-enable it via `workspace = true` — they would need a
@@ -84,7 +87,7 @@ unreachable_pub = "warn"
 # Kani proof harnesses live in `#[cfg(kani)]` modules next to the code
 # they verify (`cargo kani` sets the cfg); declare it so normal builds
 # don't flag it as unexpected.
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)", "cfg(commonware_stability_BETA)", "cfg(commonware_stability_GAMMA)", "cfg(commonware_stability_DELTA)", "cfg(commonware_stability_EPSILON)", "cfg(commonware_stability_RESERVED)"] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

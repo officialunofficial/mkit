@@ -1,0 +1,29 @@
+#!/usr/bin/env python3
+"""Inspect package-rooted target dependencies, excluding host proc macros."""
+import pathlib
+import subprocess
+import sys
+
+root = pathlib.Path(__file__).resolve().parents[1] / "rust"
+banned = {"tokio", "async-std", "smol", "reqwest", "hyper", "sqlx", "rusqlite", "diesel", "mkit-server", "commonware-runtime", "commonware-storage"}
+rows = [("native", features) for features in ([], ["pack-ruzstd"], ["pack-zstd"], ["pack-ruzstd", "pack-zstd"])]
+rows += [("wasm32-unknown-unknown", []), ("wasm32-unknown-unknown", ["pack-ruzstd"])]
+allowlist = {line for line in (root.parent / "scripts/primitives-target-dependencies.txt").read_text().splitlines() if line and not line.startswith("#")}
+for target, features in rows:
+    command = ["cargo", "tree", "--locked", "-p", "mkit-primitives", "--no-default-features", "-e", "normal,build,no-proc-macro", "--prefix", "none"]
+    if target != "native":
+        command += ["--target", target]
+    if features:
+        command += ["--features", ",".join(features)]
+    output = subprocess.check_output(command, cwd=root, text=True)
+    packages = {line.split()[0] for line in output.splitlines() if line.strip()}
+    violations = sorted((packages & banned) | (packages - allowlist))
+    if violations:
+        sys.exit(f"forbidden target dependencies: {violations}")
+    if "pack-zstd" not in features and packages & {"zstd", "zstd-safe", "zstd-sys"}:
+        sys.exit("native decoder enabled outside the native backend row")
+    if ("ruzstd" in packages) != ("pack-ruzstd" in features):
+        sys.exit("pure-Rust decoder feature propagation mismatch")
+    if "mkit-core" not in packages:
+        sys.exit("graph canary failed: mkit-core absent")
+    print(f"primitives graph {target} [{','.join(features) or 'raw'}]: {len(packages)} target/build packages; no server, runtime, HTTP, or database edge")

@@ -30,6 +30,16 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Added
 
+- Add guarded fork acceptance to `mkit-primitives`: bounded full-inventory plans,
+  authoritative destination emptiness, final source-proof ordering, exact
+  authority and admission guards, terminal reservation settlement, and saved
+  result replay. Acceptance creates no visible membership or destination refs.
+  Additive ALPHA API; no wire or stored-format change; no store reset.
+
+- Add the independently versioned `mkit-primitives` ALPHA contract skeleton.
+  It defines opaque verification, closure, and guarded-decision types without
+  changing existing runtime paths or wire formats. No migration or store reset.
+
 - Protocol acceptance and recovery requirements now distinguish portable
   guarantees from reference-server mechanisms. Fork acceptance requires a final
   source proof after membership staging, with uniform source-race refusal and
@@ -38,6 +48,13 @@ collect the applicable entries between their old and new immutable pins.
   runner are prepared for the next lockstep crates.io release, with a
   versioned test-only control binding and declared server-control coverage.
   No production wire, runtime, or stored-format change; no wipe.
+
+- Sans-IO direct-child closure with bounded frontier membership batches, paged
+  visited state, complete missing-set evidence, and exact supplier witnesses.
+  Tree/tag child closure preserves existence-only semantics; chunk integrity
+  covers every consumed manifest. Hosts retain and acknowledge private evidence
+  pages, and replay verification after evidence loss. New local evidence format;
+  no transport change or repository store reset.
 
 - `ReadAccess::declared_visibility` reads the stored visibility declaration
   whether or not the repository record exists, for private-origin locks and

@@ -1,0 +1,1 @@
+First witness page, version 1 with no predecessor. Fact: repository=0x01, incarnation=0x02, object=0x11, Blob length 19, supplier ID=0x03 length 100 binding=0x04, canonical binding=0x05, revision=0x06, delta depth=7, published=true, held=false. Byte notation denotes a repeated 32-byte value. Domain: mkit-closure-witness:v1.

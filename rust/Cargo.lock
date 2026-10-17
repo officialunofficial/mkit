@@ -3403,6 +3403,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "mkit-primitives"
+version = "0.1.0"
+dependencies = [
+ "commonware-macros",
+ "mkit-core",
+ "thiserror 2.0.21",
+ "wasm-bindgen-test",
+]
+
+[[package]]
+name = "mkit-primitives-fuzz"
+version = "0.0.0"
+dependencies = [
+ "libfuzzer-sys",
+ "mkit-core",
+ "mkit-primitives",
+]
+
+[[package]]
 name = "mkit-repo-client"
 version = "0.1.0"
 dependencies = [

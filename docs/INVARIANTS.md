@@ -7,6 +7,43 @@ profile; storage-only groundwork is labeled explicitly. The
 [SPEC-SERVER profile map](specs/SPEC-SERVER.md#1-scope-and-relation-to-spec-transport-connect)
 distinguishes current enforcement from future integration.
 
+## Primitive contracts keep trusted construction private
+
+**Always:** only the owning primitive module can construct `VerifiedPack`,
+`ClosureProof`, or `Guarded<D>`. Caller-supplied membership facts retain exact
+repository, incarnation, source, supplier, and revision bindings. Missing input
+is separate from authoritative absence. Source pre-apply fences remain separate
+from destination atomic guards.
+
+**Because:** type-safe composition must not promote unverified bytes or missing
+facts into acceptance evidence.
+
+**If violated:** callers could bypass verification, cross repository boundaries,
+or apply effects without every required live comparison.
+
+**Enforcement status:** the initial ALPHA skeleton has private fields and
+compile-fail doctests. The closure entry point enforces its semantic checks with bounded state-machine
+tests. Pack verification and decision entry points land with their owners.
+
+## Portable closure completion requires every occurrence and retained page
+
+**Always:** direct-child closure checks every supplied verified object and every
+advanced head. Membership batches use only the requested repository incarnation.
+Every chunk occurrence contributes its verified Blob payload length, including
+surplus manifests and repeated IDs. A later use cannot bypass a new obligation.
+Only acknowledged authenticated pages support visited-state and relied-on member
+proofs. Resource exhaustion and acquisition loss never yield a complete result.
+
+**Because:** head-only traversal misses surplus entries; ID deduplication alone
+can skip file-integrity obligations or erase a supplier dependency.
+
+**If violated:** an incomplete or corrupt consumed set could be accepted, or a
+caller could publish a truncated missing set as a complete diagnostic.
+
+**Enforced by:** `mkit_primitives::closure::ClosureWalker`, its independent seeded
+graph oracle, protocol/adversarial tests, and closure transition fuzz replay.
+Reference-server integration is separate; this primitive grants no visibility.
+
 ## Conformance distinguishes absent features from implementation gaps
 
 **Always:** cases for undeclared protocol features report not applicable with
@@ -2855,3 +2892,30 @@ failed unit publishes partial progress.
 
 **Enforced by:** the fork wave regressions and existing crash, resume, lifecycle,
 and denial-gate tests. See [bounds and latency model](operations/fork-waves.md).
+
+## Primitive fork acceptance separates terminal settlement from visibility
+
+**Always:** `mkit-primitives::fork::decide_fork_acceptance` emits acceptance only
+for a complete bounded full-inventory plan, an exactly bound protected
+reservation and admission debit when granted/applicable, authoritative absence
+otherwise, phantom-safe destination emptiness, and a final
+source proof ordered after the last staged membership effect and before the
+current acceptance attempt. Every relied-on destination fact and revision is
+returned for one atomic comparison. Acceptance records terminal response,
+replay, and outcome responsibility and settles the optional exact reservation
+together.
+It emits no visible membership, destination ref, or permission to write.
+
+**Because:** construction, terminal acceptance, and published clearance have
+different responsibilities. A sampled absence cannot exclude phantom additions;
+a per-pack proof before the last staged effect cannot fence the full source.
+A lost response or a later source move must not repeat a charge or outcome.
+
+**If violated:** an unaccepted fork could become readable, an unauthorized or
+changed plan could be accepted, or retries could settle another reservation.
+
+**Enforced by:** the primitive's semantic fixtures, all-observation mutation
+checks, phantom-addition and transitive-supplier tests, bounded hostile-fact
+replay, and once-only terminal replay tests. This primitive is not yet adopted
+by the reference server; its existing conformance gaps remain declared until
+the activation integration passes the independent conformance suite.
