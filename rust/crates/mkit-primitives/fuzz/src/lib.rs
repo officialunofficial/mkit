@@ -37,3 +37,8 @@ mod tests {
         assert!(first.iter().any(|seed| seed.len() == 32));
     }
 }
+
+/// Adversarial closure-machine transitions with an independent missing-ID oracle.
+pub mod closure;
+/// Authenticated closure page grammars and canonical reencoding.
+pub mod closure_pages;

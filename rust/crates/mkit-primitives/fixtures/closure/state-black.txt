@@ -1,0 +1,1 @@
+State page version 1; predecessor is the exact commitment of state-gray.bin; same key, Blob and length 19; payload length 9; Black. This is an update to the existing bucket head.

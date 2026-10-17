@@ -2,9 +2,10 @@
 
 Pure protocol contracts for pack verification, repository closure, and guarded
 write decisions. Version **0.1.0** is independent of the workspace release train.
-All public APIs are **ALPHA**. The crate provides guarded fork acceptance and
-shared contracts. Pack verification, closure walking, and encoded formats are
-implemented by their owning modules as they become available.
+All public APIs are **ALPHA**. The crate provides guarded fork acceptance
+and bounded direct-child closure with authenticated local evidence pages.
+Pack verification and other decision drivers currently expose contracts;
+their implementations land separately.
 
 Callers own acquisition, immutable byte retention, clocks, execution, and atomic
 commits. The crate has no storage callbacks, runtime, HTTP client, or server
@@ -23,9 +24,9 @@ the native backend. Raw-only and both-backend builds are supported. Backend
 capability never substitutes for content verification.
 
 Crate API version, normative ruleset, evidence format version, and checkpoint
-format version are separate contracts. No checkpoint or evidence encoding is
-defined yet. Future unsupported state versions require restart; historical
-readers are not promised. Existing normative wire bytes remain unchanged.
+format version are separate contracts. Closure state, witness, and missing-set pages use strict version-one formats.
+No serialized walker checkpoint is defined. Unsupported state versions and
+lost pages require verification restart; historical readers are not promised. Existing normative wire bytes remain unchanged.
 
 ```rust
 use mkit_primitives::evidence::{PackSource, SourceBinding};
@@ -44,7 +45,7 @@ variants, associated items, trait members, and re-exports.
 | `limits` | Finite `VerifyLimits::indexed` execution defaults and explicit `IndexedProfile` content ceilings |
 | `evidence` | Repository/source/revision/ruleset bindings, page/proof references, repository-scoped member facts |
 | `pack_verify` | Byte-range requests and bound responses, backpressure events, paged summaries, opaque `VerifiedPack` accessors |
-| `closure` | Batched membership facts, edge obligations, pure `InPackObjectView`, opaque `ClosureProof` accessors |
+| `closure` | `ClosureWalker`, finite `ClosureLimits`, batched requests/replies, pure verified-object view and manifest summaries, opaque closure/missing results, bounded authenticated output page decoders |
 | `fork` | Bounded complete inventory plans, final source fences, guarded acceptance, exact replay and reservation settlement |
 | `decision` | Observations/snapshots, exact guard variants, source fences, semantic effects, decisions, opaque `Guarded<D>` accessors |
 
@@ -56,9 +57,12 @@ the same reservation-terminal payload, keyed by reservation identity rather
 than only operation identity. Nonterminal ticket binding is a separate effect.
 
 The private cursor and budget are infrastructure for future bounded decoders.
-There are zero decoder entry points and zero registered encoded types in this
-skeleton. Checkpoints, authenticated pages, framing vectors, and their fixtures
-land with the framing implementation.
+Closure owns three local encoded page types and three validation/decoding entry
+points: `output::{validate_state_page, decode_witness, decode_missing}`. Every
+entry point takes a finite `PageDecodeCfg`; the internal journal additionally
+uses a fixed 1,024-byte state-page ceiling. Frozen positive and negative bytes
+are registered under the closure section of `fixtures/manifest.toml`.
+`closure_steps` and `closure_pages` share stable replay bodies with libFuzzer.
 
 ## Fork acceptance
 
@@ -78,3 +82,23 @@ resource bounds, replay rules, and verification scope.
 
 Run `cargo run -p mkit-primitives --example fork_acceptance` for a complete
 plan-sealing and acceptance example using deterministic host observations.
+
+## Direct-child closure
+
+Drive `closure::ClosureWalker::new` with the complete verified object view,
+requested heads, repository identity/incarnation, ruleset, finite limits, and a
+fresh run generation. Poll `step`; answer exact acquisition requests and retain
+and acknowledge every page. Only `Closed` or `Missing` is a complete result.
+The API example demonstrates an empty view; real views bind every record and
+manifest summary to their sealed pack-verification artifact, and report
+retained view memory through `InPackObjectView::retained_bytes`.
+
+The proof's `relied_on_members` points to witness pages exposing exact supplier
+packs and membership revisions. Acceptance guards those facts separately from
+publication, external delta-base suppliers, denial, inspection, and authority.
+Direct-child closure does not establish resulting-pair coverage. Tree/tag kind
+hints and cycles are diagnostics; every chunk occurrence requires Blob integrity
+and checked manifest totals. Resource exhaustion never returns a truncated set.
+
+Pages are local evidence, not transport messages or remote attestations. After
+page loss, replay from the same immutable inputs with a fresh generation.

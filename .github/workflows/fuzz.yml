@@ -75,3 +75,40 @@ jobs:
             rust/fuzz/artifacts/**
           if-no-files-found: ignore
           retention-days: 14
+
+  primitives-closure:
+    name: primitives fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [closure_steps, closure_pages]
+    env:
+      CARGO_BUILD_JOBS: 3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: nightly
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16  # v2
+        with:
+          workspaces: rust
+          prefix-key: "primitives-fuzz-${{ matrix.target }}"
+          cache-on-failure: false
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Run bounded closure fuzz target
+        working-directory: rust/crates/mkit-primitives/fuzz
+        run: cargo +nightly fuzz run ${{ matrix.target }} --features libfuzzer -- -max_total_time=60
+      - name: Upload crash artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
+        with:
+          name: primitives-fuzz-crashes-${{ matrix.target }}
+          path: rust/crates/mkit-primitives/fuzz/artifacts/**
+          if-no-files-found: ignore
+          retention-days: 14

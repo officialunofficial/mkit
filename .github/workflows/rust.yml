@@ -82,6 +82,8 @@ jobs:
           cargo nextest run --locked -p mkit-primitives -p mkit-primitives-fuzz -j 3
           cargo nextest run --locked -p mkit-primitives --no-default-features --features pack-zstd -j 3
           cargo hack check --locked -p mkit-primitives --lib --feature-powerset
+          cargo nextest run --locked -p mkit-primitives --no-default-features --test closure_platform -j 3
+          cargo nextest run --locked -p mkit-primitives --all-features --test closure_platform -j 3
           cargo test --locked -p mkit-primitives --doc
           cargo test --locked -p mkit-primitives --no-default-features --doc
       - name: Wasm contracts
@@ -89,6 +91,11 @@ jobs:
         run: |
           cargo check --locked -p mkit-primitives --target wasm32-unknown-unknown
           cargo check --locked -p mkit-primitives --no-default-features --target wasm32-unknown-unknown
+      - name: Install wasm fixture runner
+        run: cargo install wasm-pack --locked --version 0.13.1
+      - name: Execute closure fixtures on 32-bit wasm
+        working-directory: rust/crates/mkit-primitives
+        run: wasm-pack test --node
       - name: Graph, fixtures, and stability
         run: |
           python3 scripts/fmt-primitives.py --check
