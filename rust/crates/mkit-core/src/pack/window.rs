@@ -114,11 +114,47 @@ pub struct WindowReader {
     resume_prefix: Option<Hash>,
     // Fixed-size live state, never serialized. Length is relative to `start`
     // and bounded by the current window (at most 64 MiB).
-    prefix_hasher: crate::hash::Hasher,
-    prefix_len: usize,
+    prefix: LivePrefix,
     last_frame: Option<FrameInfo>,
     #[cfg(test)]
     peak: usize,
+}
+
+// Preserve Send + Sync and checkpoint(&self) without a lock allocation. The
+// once-cell memoizes one boundary; advancing the reader moves its incremental
+// state forward. Both hasher slots are fixed-size and never serialized.
+#[derive(Debug, Default)]
+struct LivePrefix {
+    previous: Prefix,
+    checkpoint: std::sync::OnceLock<Prefix>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct Prefix {
+    hasher: crate::hash::Hasher,
+    len: usize,
+}
+
+impl LivePrefix {
+    fn digest(&self, bytes: &[u8]) -> Option<Hash> {
+        let remaining = bytes.get(self.previous.len..)?;
+        let prefix = self.checkpoint.get_or_init(|| {
+            let mut prefix = self.previous.clone();
+            prefix.hasher.update(remaining);
+            prefix.len = bytes.len();
+            prefix
+        });
+        if prefix.len != bytes.len() {
+            return None;
+        }
+        Some(prefix.hasher.finalize())
+    }
+
+    fn advance(&mut self) {
+        if let Some(prefix) = self.checkpoint.take() {
+            self.previous = prefix;
+        }
+    }
 }
 
 fn us(n: u64) -> Result<usize, PackError> {
@@ -203,8 +239,7 @@ impl WindowReader {
             carry: Vec::new(),
             trailer: [0; 32],
             resume_prefix: None,
-            prefix_hasher: crate::hash::Hasher::new(),
-            prefix_len: 0,
+            prefix: LivePrefix::default(),
             last_frame: None,
             #[cfg(test)]
             peak: 0,
@@ -340,7 +375,7 @@ impl WindowReader {
             return Err(PackError::TooManyObjects(self.state.count));
         }
         self.phase = Phase::Boundary;
-        self.update_prefix()?;
+        self.prefix.advance();
         self.boundary = Some(self.boundary_state());
         Ok(None)
     }
@@ -590,7 +625,7 @@ impl WindowReader {
             .checked_add(1)
             .ok_or(PackError::PackfileTooLarge)?;
         self.phase = Phase::Boundary;
-        self.update_prefix()?;
+        self.prefix.advance();
         self.boundary = Some(self.boundary_state());
         Ok(())
     }
@@ -704,26 +739,14 @@ impl WindowReader {
                 self.phase = Phase::Header;
             }
         }
-        self.prefix_hasher = prefix_hasher;
-        self.prefix_len = prefix_len;
+        self.prefix = LivePrefix {
+            previous: Prefix {
+                hasher: prefix_hasher,
+                len: prefix_len,
+            },
+            checkpoint: std::sync::OnceLock::new(),
+        };
         self.request = None;
-        Ok(())
-    }
-
-    // Absorb only the newly consumed part of the current window. An entry
-    // may span earlier windows; their commitments already live in the trees.
-    fn update_prefix(&mut self) -> Result<(), PackError> {
-        let end = us(self
-            .state
-            .pos
-            .checked_sub(self.start)
-            .ok_or(PackError::PackfileCorrupted)?)?;
-        let bytes = self
-            .window
-            .get(self.prefix_len..end)
-            .ok_or(PackError::PackfileCorrupted)?;
-        self.prefix_hasher.update(bytes);
-        self.prefix_len = end;
         Ok(())
     }
 
@@ -754,8 +777,8 @@ impl WindowReader {
 
     /// A compact checkpoint only at an entry boundary, never within an entry.
     ///
-    /// Finalizes the live incremental prefix digest without rereading bytes.
-    /// Entry boundaries absorb only newly consumed bytes; cold resume verifies
+    /// Absorbs only bytes consumed since the previous checkpoint, then finalizes
+    /// the live incremental prefix digest. Cold resume verifies
     /// and rebuilds the prefix once from the supplied immutable source window.
     /// Completed ranges retain explicit subtree commitments. This does not
     /// replace the final trailer or requested whole-pack identity checks.
@@ -802,11 +825,7 @@ impl WindowReader {
                 return None;
             }
             let end = usize::try_from(prefix_len).ok()?;
-            self.window.get(..end)?;
-            if self.prefix_len != end {
-                return None;
-            }
-            Some(self.prefix_hasher.finalize())
+            self.prefix.digest(self.window.get(..end)?)
         };
         Some(cursor)
     }

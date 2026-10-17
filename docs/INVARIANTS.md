@@ -1561,9 +1561,12 @@ A `None` checkpoint means keep the previous cursor. After a boundary-state `None
 completed-window CVs and the incremental current-window prefix commitment bind the
 entries staged across resumes without re-reading completed ranges.
 
-The live prefix state has one fixed-size BLAKE3 hasher and a window-relative
-length bounded by 64 MiB. Each entry boundary absorbs only newly consumed bytes;
-repeated checkpoints finalize that state without rereading the prefix. Cold resume
+The live prefix state has two fixed-size BLAKE3 hasher slots and a window-relative
+length bounded by 64 MiB. Each checkpoint absorbs only newly consumed bytes;
+repeated checkpoints finalize that state without rereading the prefix. Callers
+that never checkpoint do no prefix hashing. An inline once-cell preserves
+concurrent read-only checkpoint calls. Advancing the reader moves its cached
+incremental state forward and clears the boundary cache. Cold resume
 authenticates the prefix once and reconstructs this state. Only the existing
 explicit subtree commitments and prefix digest enter the cursor encoding.
 

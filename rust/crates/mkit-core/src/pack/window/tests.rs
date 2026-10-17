@@ -1387,8 +1387,13 @@ fn explicit_geometry_carried_compressed_frame_binds_the_released_prefix() {
         ],
     );
     let limits = DecodeLimits::default().with_entry_geometry(16 << 20, 1 << 20);
-    let mut reader =
-        WindowReader::new(pack.len() as u64, WINDOW, limits, Some(hash::hash(&pack))).unwrap();
+    let mut reader = WindowReader::new(
+        u64::try_from(pack.len()).unwrap(),
+        WINDOW,
+        limits,
+        Some(hash::hash(&pack)),
+    )
+    .unwrap();
     let mut entries = 0;
     loop {
         match reader.step().unwrap() {
@@ -1471,9 +1476,9 @@ proptest! {
                         seen += 1;
                         let cursor = warm.checkpoint().unwrap();
                         assert_cursor_reference(&warm, &cursor);
-                        assert!(warm.prefix_len <= usize::try_from(WINDOW).unwrap());
-                        assert_eq!(u64::try_from(warm.prefix_len).unwrap(), warm.state.pos - warm.start);
-                        assert!(std::mem::size_of_val(&warm.prefix_hasher) <= 2048);
+                        assert!(warm.prefix.checkpoint.get().unwrap().len <= usize::try_from(WINDOW).unwrap());
+                        assert_eq!(u64::try_from(warm.prefix.checkpoint.get().unwrap().len).unwrap(), warm.state.pos - warm.start);
+                        assert!(std::mem::size_of_val(&warm.prefix) <= 4096);
                         assert_eq!(cursor.to_bytes(), warm.checkpoint().unwrap().to_bytes());
                         if seen % interval == 0 {
                             let mut cold = WindowReader::resume(&cursor, DecodeLimits::default()).unwrap();
@@ -1534,4 +1539,76 @@ fn window_relative_offsets_fit_32_bits_even_past_4_gib() {
     // Trusted cursor construction above uses synthetic CVs. Reaching the
     // boundary does not grant a completion result with those commitments.
     assert!(matches!(reader.step(), Err(PackError::PackfileCorrupted)));
+}
+
+#[test]
+fn uncheckpointed_entries_do_not_hash_the_live_prefix() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<WindowReader>();
+    let pack = raw_pack(&[vec![0x63; 32], vec![0x75; 64]]);
+    let mut reader = WindowReader::new(
+        u64::try_from(pack.len()).unwrap(),
+        WINDOW,
+        DecodeLimits::default(),
+        Some(hash::hash(&pack)),
+    )
+    .unwrap();
+    let Step::NeedWindow(r) = reader.step().unwrap() else {
+        panic!()
+    };
+    feed_from(&mut reader, &pack, r);
+    assert!(matches!(reader.step().unwrap(), Step::Entry(_)));
+    assert_eq!(reader.prefix.previous.len, 0);
+    let cursor = reader.checkpoint().unwrap();
+    assert_cursor_reference(&reader, &cursor);
+    let hashed = reader.prefix.checkpoint.get().unwrap().len;
+    assert!(matches!(reader.step().unwrap(), Step::Entry(_)));
+    assert_eq!(reader.prefix.previous.len, hashed);
+    assert_cursor_reference(&reader, &reader.checkpoint().unwrap());
+}
+
+#[test]
+fn concurrent_checkpoints_and_interrupted_initialization_match_prefix_bytes() {
+    let pack = raw_pack(&[vec![0x46; 12_345]]);
+    let mut reader = WindowReader::new(
+        u64::try_from(pack.len()).unwrap(),
+        WINDOW,
+        DecodeLimits::default(),
+        Some(hash::hash(&pack)),
+    )
+    .unwrap();
+    let Step::NeedWindow(r) = reader.step().unwrap() else {
+        panic!()
+    };
+    feed_from(&mut reader, &pack, r);
+    assert!(matches!(reader.step().unwrap(), Step::Entry(_)));
+    let expected = reader.checkpoint().unwrap().to_bytes();
+    reader.prefix.checkpoint.take();
+    let barrier = std::sync::Barrier::new(4);
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            let reader = &reader;
+            let expected = &expected;
+            let barrier = &barrier;
+            scope.spawn(move || {
+                barrier.wait();
+                for _ in 0..16 {
+                    assert_eq!(&reader.checkpoint().unwrap().to_bytes(), expected);
+                }
+            });
+        }
+    });
+    reader.prefix.checkpoint.take();
+    assert!(
+        std::panic::catch_unwind(|| {
+            reader
+                .prefix
+                .checkpoint
+                .get_or_init(|| panic!("interrupt private cache initialization"));
+        })
+        .is_err()
+    );
+    assert!(reader.prefix.checkpoint.get().is_none());
+    assert_eq!(reader.checkpoint().unwrap().to_bytes(), expected);
+    assert_cursor_reference(&reader, &reader.checkpoint().unwrap());
 }
