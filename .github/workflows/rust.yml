@@ -96,8 +96,12 @@ jobs:
       - name: Execute closure fixtures on 32-bit wasm
         working-directory: rust/crates/mkit-primitives
         run: wasm-pack test --node
+      - name: Packaged consumer, native and wasm32
+        run: python3 scripts/check-primitives-consumer.py
       - name: Graph, fixtures, and stability
         run: |
+          python3 scripts/test-publish-primitives.py
+          python3 scripts/publish-primitives.py check
           python3 scripts/fmt-primitives.py --check
           python3 scripts/check-primitives-graph.py
           python3 scripts/check-primitives-fixtures.py

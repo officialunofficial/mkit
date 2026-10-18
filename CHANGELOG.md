@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add independent release plumbing for `mkit-primitives`: its own crate
+  changelog, version and train-exclusion guard, a signed-tag
+  `mkit-primitives-vX.Y.Z` publish workflow with an idempotent content-compare
+  policy and a semver baseline, and an out-of-tree consumer check, native and
+  wasm32, that builds the packaged crates and consumes the portable fixtures.
+  Nothing is published by this change; no API, wire or stored-format change.
+
 - Add `decide_clearance` to `mkit-primitives`. It recomputes the contiguous
   published prefix from host-supplied facts and never settles an acceptance
   reservation or records a second terminal outcome. Add
