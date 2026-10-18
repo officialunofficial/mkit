@@ -415,6 +415,16 @@ Error precedence is deterministic across execution strategies:
    produces absence; absence requires an authenticated answer to the exact
    request.
 
+A verifier that checks entries while hashing the source MUST defer an
+entry-level refusal until the trailer and requested whole-pack identity have
+been checked. It selects the first refusal in wire order, using the ordering
+above within an entry. An authenticated absence of an external delta base
+follows the same rule. A whole-source integrity failure takes precedence over
+that deferred refusal. The verifier MAY stop decoding after recording a
+refusal, but MUST finish the integrity checks before reporting a content
+verdict. Unavailable acquisition remains an immediate retryable refusal; it
+does not establish a content verdict or absence.
+
 ### 6.2 Refusal classification
 
 **Protocol requirement.**

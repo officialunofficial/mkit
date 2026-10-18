@@ -1,7 +1,9 @@
 //! End-to-end driver tests over real packs and live acquisition loops.
 use super::*;
 
+mod checkpoints;
 mod compute;
+mod onepass;
 use crate::evidence::{MemberFact, Revision, SourceBinding};
 use mkit_core::{
     delta,
