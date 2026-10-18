@@ -1033,6 +1033,11 @@ impl<
                 && info.atomic_advance == Some(true)
         })
     }
+
+    pub(super) fn write_atomic_advance_status(&self) -> Option<bool> {
+        self.write_info()
+            .map(|info| info.atomic_advance == Some(true))
+    }
 }
 
 #[cfg(test)]

@@ -862,6 +862,13 @@ pub trait Transport: Send + Sync {
     fn supports_atomic_advance(&self) -> bool {
         false
     }
+
+    /// Known atomic-advance capability. Discovery-based transports return
+    /// `None` when discovery failed or was invalid: force pushes must refuse
+    /// rather than assume concurrent writers cannot reset the packmap.
+    fn atomic_advance_status(&self) -> Option<bool> {
+        Some(self.supports_atomic_advance())
+    }
 }
 
 /// Result of [`Transport::advance_refs`] — a two-ref branch advance.

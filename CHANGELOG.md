@@ -91,8 +91,12 @@ collect the applicable entries between their old and new immutable pins.
 
 - `mkit_sync::RetryReason` adds `PackmapChanged` for a force re-plan whose
   transfer exceeds one advance. Migration: handle that variant when matching
-  retry reasons exhaustively. Existing variants and non-force errors are
-  unchanged. No wire or stored-format change; no store reset is required.
+  retry reasons exhaustively. `mkit_sync::PushError` and the CLI's
+  `DispatchError` add `ForceCapabilityUnknown`: handle that refusal in
+  exhaustive matches. Connect force pushes now refuse before uploading if
+  discovery failed or was invalid; reconnect and retry. Existing variants and
+  non-force errors are unchanged. No wire or stored-format change; no store
+  reset is required.
 
 - [embedder: breaking API] Guard completeness for the ALPHA decisions in
   `mkit-primitives`. (1) `TicketedAdvanceRequest::authority_generation` is

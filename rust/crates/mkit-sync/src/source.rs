@@ -91,6 +91,11 @@ pub trait RemoteSource {
     fn supports_atomic_advance(&self) -> bool {
         false
     }
+    /// Known atomic-advance capability; `None` means discovery was unavailable
+    /// or invalid, so a force push must refuse before uploading or publishing.
+    fn atomic_advance_status(&self) -> Option<bool> {
+        Some(self.supports_atomic_advance())
+    }
     /// Select an encodable atomic head condition for a self-contained force
     /// advance. The caller also compares the packmap; dependency plans compare
     /// the observed head as well, even when the endpoint supports `Any`.
@@ -225,6 +230,10 @@ impl RemoteSource for TransportSource<'_> {
     }
     fn supports_atomic_advance(&self) -> bool {
         self.transport.supports_atomic_advance()
+    }
+
+    fn atomic_advance_status(&self) -> Option<bool> {
+        self.transport.atomic_advance_status()
     }
 
     fn atomic_force_head_condition(

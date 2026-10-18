@@ -1119,6 +1119,12 @@ impl Transport for ConnectTransport {
         self.with_client_source(|source| Ok(source.supports_atomic_advance()))
             .unwrap_or(false)
     }
+
+    fn atomic_advance_status(&self) -> Option<bool> {
+        self.with_client_source(|source| Ok(source.atomic_advance_status()))
+            .ok()
+            .flatten()
+    }
 }
 // ---------------------------------------------------------------------------
 // Tests

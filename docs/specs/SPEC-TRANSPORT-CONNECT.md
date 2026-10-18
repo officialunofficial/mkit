@@ -360,6 +360,10 @@ client MUST re-read the packmap and re-plan if it no longer extends the chain
 captured by the plan. Re-planning and publication attempts MUST share the
 existing bounded retry budget. These requirements use the existing fields;
 `UpdateRef` alone cannot carry the packmap dependency.
+If capability discovery failed or was invalid, the client MUST refuse a force
+push before uploading or writing refs. It cannot infer that other clients are
+unable to reset the packmap from its own discovery failure. A valid discovery
+response explicitly disabling atomic advance retains the non-atomic path.
 
 A conflict is carried as a **successful** RPC with `outcome !=
 ADVANCE_OUTCOME_COMMITTED`, not a Connect error &mdash; unlike `UpdateRef`,

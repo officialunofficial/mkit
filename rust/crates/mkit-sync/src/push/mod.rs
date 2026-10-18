@@ -318,6 +318,9 @@ fn run_steps(
     on_step: &mut dyn FnMut(Hash) -> Result<(), PushError>,
 ) -> Result<usize, PushError> {
     let limits = tx.upload_limits();
+    if matches!(condition, refs::RefWriteCondition::Any) && tx.atomic_advance_status().is_none() {
+        return Err(PushError::ForceCapabilityUnknown);
+    }
     let mut single = |plan| {
         push_step_recovering(
             tx,

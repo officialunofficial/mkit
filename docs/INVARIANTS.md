@@ -3341,6 +3341,8 @@ in the same atomic advance as the head, including empty and idempotent plans.
 A dependent plan also compares the observed head. A changed chain must extend
 the captured immutable node before its uploaded packs can be reused; otherwise
 the push re-plans. Publication and re-planning share eight attempts per step.
+Failed or invalid discovery must refuse force publication before uploading;
+it cannot establish that concurrent clients cannot reset the chain.
 
 **Because:** an unconditional head write or an append onto an unrelated reset
 can lose the objects and delta bases the plan omitted. Separately read refs can

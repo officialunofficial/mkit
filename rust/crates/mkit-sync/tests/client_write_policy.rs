@@ -368,6 +368,81 @@ impl Drop for FaultServer {
 }
 
 #[test]
+fn force_push_refuses_unknown_discovery_before_reads_or_writes_on_both_backends() {
+    for client_backend in [false, true] {
+        for code in [None, Some("not_found"), Some("unimplemented")] {
+            let server = FaultServer::new(2, move |index, request| {
+                if index == 0 {
+                    assert!(request.path.ends_with("/GetServerInfo"));
+                    return code.map_or_else(
+                        || ok(&proto::GetServerInfoResponse::default()),
+                        |code| WireResponse {
+                            status: 404,
+                            content_type: "application/json",
+                            body: format!(r#"{{"code":"{code}"}}"#).into_bytes(),
+                        },
+                    );
+                }
+                // A non-force push still reaches exactly its existing head
+                // read even after the same discovery failure was cached.
+                assert!(request.path.ends_with("/ReadRef"));
+                WireResponse {
+                    status: 400,
+                    content_type: "application/json",
+                    body: br#"{"code":"invalid_argument"}"#.to_vec(),
+                }
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let layout = RepoLayout::single(dir.path());
+            ObjectStore::init(&layout).unwrap();
+            let store = ObjectStore::open(&layout).unwrap();
+            let run = |source: &dyn RemoteSource| {
+                let push = |condition| {
+                    mkit_sync::push::push_branch_steps(
+                        source,
+                        &store,
+                        "main",
+                        [8; 32],
+                        condition,
+                        64,
+                        mkit_core::pack::MAX_TOTAL_PAYLOAD,
+                        &mkit_sync::PushControl::default(),
+                        &mut |_| panic!("nothing was published"),
+                    )
+                };
+                // A cached miss must not be reinterpreted as known false.
+                assert!(!source.supports_atomic_advance());
+                for _ in 0..2 {
+                    assert!(matches!(
+                        push(RefWriteCondition::Any),
+                        Err(mkit_sync::PushError::ForceCapabilityUnknown)
+                    ));
+                }
+                assert!(matches!(
+                    push(RefWriteCondition::Missing),
+                    Err(mkit_sync::PushError::Sync(mkit_sync::SyncError::Source(_)))
+                ));
+            };
+            if client_backend {
+                let http = NativeHttp::new().unwrap();
+                let signer = Dalek::new(WRITER_SEED);
+                let client = mkit_client::Client::signed(
+                    &http,
+                    destination(&server.origin, "default"),
+                    &signer,
+                    &NativeClock,
+                );
+                run(&ClientSource::new(&client, &http));
+            } else {
+                let tx = transport(&server.origin, "default", WRITER_SEED);
+                run(&TransportSource::new(&tx));
+            }
+            assert_eq!(server.requests.lock().unwrap().len(), 2);
+        }
+    }
+}
+
+#[test]
 fn fault_server_reads_requests_while_an_earlier_connection_is_idle() {
     let server = FaultServer::new(1, |_, request| {
         assert_eq!(request.path, "/probe");

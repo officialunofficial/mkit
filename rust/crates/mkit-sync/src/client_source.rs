@@ -379,6 +379,10 @@ impl<
         self.write_supports_atomic_advance()
     }
 
+    fn atomic_advance_status(&self) -> Option<bool> {
+        self.write_atomic_advance_status()
+    }
+
     fn list_branches(&self) -> Result<Vec<Ref>, SourceError> {
         self.list_branches_with_page_limit(mkit_core::ref_listing::MAX_PAGES)
     }

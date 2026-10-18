@@ -234,6 +234,11 @@ pub enum DispatchError {
     /// Nothing was published.
     #[error("{0}")]
     PushNotAuthorized(String),
+    /// Force push refused before upload because discovery was unavailable.
+    #[error(
+        "force push requires successful atomic-advance capability discovery; reconnect and retry"
+    )]
+    ForceCapabilityUnknown,
     /// A split push failed after publishing some advances. `head` is the last
     /// advance this push published, a first-parent ancestor of the local tip
     /// (another pusher may have moved the branch since); re-running the push
@@ -1556,6 +1561,7 @@ impl From<mkit_sync::PushError> for DispatchError {
             },
             P::PushSplitLimit(message) => Self::PushSplitLimit(message),
             P::PushNotAuthorized(message) => Self::PushNotAuthorized(message),
+            P::ForceCapabilityUnknown => Self::ForceCapabilityUnknown,
             P::SplitInterrupted {
                 branch,
                 head,

@@ -151,6 +151,10 @@ contention returns `PushError::PackmapContended`. A dependent plan compares both
 observed refs so a reset back to an identical packmap digest is safe. The
 superseded JSON HTTP endpoint uses its existing head `Match`/`Missing` condition
 alongside the packmap guard; it does not use the ordered `Any` fallback.
+Connect sources whose capability discovery failed or was invalid refuse force
+pushes with `PushError::ForceCapabilityUnknown` before uploading. Reconnect and
+retry discovery. Explicitly non-atomic transports retain their existing push
+behavior; failed discovery is not evidence that a server is non-atomic.
 
 `PushReport` contains the completed ref count, advance count, and optional
 single-branch tip. `PushError` preserves push-specific refusals and carries
