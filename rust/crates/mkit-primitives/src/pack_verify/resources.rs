@@ -100,6 +100,13 @@ impl Resources {
         Ok(())
     }
 
+    /// Resident bytes still unreserved under the ceiling.
+    pub(super) const fn available(&self) -> u64 {
+        self.limits
+            .resident_bytes
+            .saturating_sub(self.usage.resident_bytes)
+    }
+
     pub(super) fn release(&mut self, bytes: u64) -> Result<(), Failure> {
         self.usage.resident_bytes = self
             .usage

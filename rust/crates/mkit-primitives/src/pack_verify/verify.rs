@@ -1203,6 +1203,8 @@ impl VerifyDriver {
             .and_then(WindowReader::trailer)
             .ok_or_else(invalid)?;
         self.reader = None;
+        // No entry boundary remains, so a pending checkpoint request lapses.
+        self.armed = false;
         // Decoding finished; deferred signature selection fires here,
         // before any further evidence work.
         if self.signature_failure.is_some() {

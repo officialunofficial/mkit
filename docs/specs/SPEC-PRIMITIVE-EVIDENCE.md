@@ -140,6 +140,8 @@ next checkpoint exists, so a host persists the new checkpoint before
 processing the release that its existence permits. Execution ceilings on
 retained evidence count the pages a host currently holds (handed out and not
 released), not every page ever produced; the work ceiling stays cumulative.
+Completion ends the obligation: the host MAY discard every page of the run,
+including pages it was never told to release.
 
 A missing or unavailable retained page is acquisition failure. It MUST NOT
 produce a membership, nonmembership, or completion result. Recovery may discard
@@ -446,10 +448,11 @@ exactly: a record with one set and not the other is invalid. Unsigned
 records carry all-zero `signer` and `signing_digest`; any nonzero value
 under signature `none` is invalid.
 
-Ordered sequences pack leaves full-first: each leaf holds 16 records before the
-next begins, so a sequence root depends only on the record stream and never on
-how appends were batched, flushed, or interleaved with checkpoints. The object
-and referenced indexes split an overfull leaf evenly.
+Ordered sequences grow one leaf at a time: a leaf holds 16 records before the
+next begins, and every internal split lands where appending the records singly
+would put it. A sequence root therefore depends only on the record stream and
+never on how appends were batched, flushed, or interleaved with checkpoints.
+The object and referenced indexes split an overfull leaf evenly.
 
 The **object record** (120 bytes, kind `objects`) is written once per
 distinct object, at its first wire occurrence:

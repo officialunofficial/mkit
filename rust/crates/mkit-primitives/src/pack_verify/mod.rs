@@ -183,7 +183,8 @@ pub enum Step<'a> {
     RetainEvidence(EvidencePage<'a>),
     /// A page the host retained is no longer reachable from the driver's roots
     /// or from its latest checkpoint; the host may drop it. No reply is needed,
-    /// and the run never asks for it again.
+    /// and the run never asks for it again. Completion ends the obligation:
+    /// the host may discard every page of the run, released or not.
     ReleasePage(PageCommitment),
     /// Bounded internal progress; call again.
     Progress,

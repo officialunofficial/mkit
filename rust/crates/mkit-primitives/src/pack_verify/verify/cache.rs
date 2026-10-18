@@ -131,7 +131,9 @@ impl PageCache {
             return Ok(());
         }
         let len = Self::resident_len(&bytes)?;
-        resources.reserve(len.checked_add(ENTRY_OVERHEAD).ok_or_else(invalid)?)?;
+        let charge = len.checked_add(ENTRY_OVERHEAD).ok_or_else(invalid)?;
+        self.make_room(resources, charge)?;
+        resources.reserve(charge)?;
         let tick = self.tick()?;
         self.recency.insert(tick, commitment.digest);
         self.dirty.insert(tick, commitment.digest);
@@ -159,29 +161,36 @@ impl PageCache {
         bytes: &[u8],
     ) -> Result<(), Failure> {
         let len = Self::resident_len(bytes)?;
-        let mut owned = Vec::new();
-        owned
-            .try_reserve_exact(bytes.len())
-            .map_err(|_| failure(FailureCode::ResourceLimit))?;
-        owned.extend_from_slice(bytes);
-        let tick = self.tick()?;
-        if let Some(entry) = self.entries.get_mut(&commitment.digest) {
-            if entry.commitment != commitment || entry.state == State::Gone {
+        let known = match self.entries.get(&commitment.digest) {
+            Some(entry) if entry.commitment != commitment || entry.state == State::Gone => {
                 return Err(invalid());
             }
-            if entry.bytes.is_some() {
-                return Ok(());
-            }
-            resources.reserve(len)?;
-            entry.bytes = Some(owned);
-            entry.tick = tick;
-            self.recency.insert(tick, commitment.digest);
-            self.resident += len;
-            return Ok(());
+            Some(entry) if entry.bytes.is_some() => return Ok(()),
+            Some(_) => true,
+            None => false,
+        };
+        let charge = if known {
+            len
+        } else {
+            len.checked_add(ENTRY_OVERHEAD).ok_or_else(invalid)?
+        };
+        // Charge before allocating, and give the charge back if allocation fails.
+        self.make_room(resources, charge)?;
+        resources.reserve(charge)?;
+        let mut owned = Vec::new();
+        if owned.try_reserve_exact(bytes.len()).is_err() {
+            resources.release(charge)?;
+            return Err(failure(FailureCode::ResourceLimit));
         }
-        resources.reserve(len.checked_add(ENTRY_OVERHEAD).ok_or_else(invalid)?)?;
+        owned.extend_from_slice(bytes);
+        let tick = self.tick()?;
         self.recency.insert(tick, commitment.digest);
         self.resident += len;
+        if let Some(entry) = self.entries.get_mut(&commitment.digest) {
+            entry.bytes = Some(owned);
+            entry.tick = tick;
+            return Ok(());
+        }
         self.entries.insert(
             commitment.digest,
             Entry {
@@ -194,6 +203,34 @@ impl PageCache {
                 tick,
             },
         );
+        Ok(())
+    }
+
+    /// Drops clean pages, least recently used first, until `need` more bytes
+    /// fit under the resident ceiling. The cache therefore shrinks before it
+    /// ever starves the rest of the run; dirty pages stay, since handing one to
+    /// the host frees nothing until the host acknowledges it.
+    fn make_room(&mut self, resources: &mut Resources, need: u64) -> Result<(), Failure> {
+        while resources.available() < need {
+            let victim = self
+                .recency
+                .iter()
+                .find(|(_, digest)| {
+                    self.entries
+                        .get(*digest)
+                        .is_some_and(|entry| entry.state == State::Held)
+                })
+                .map(|(tick, digest)| (*tick, *digest));
+            let Some((tick, digest)) = victim else {
+                break;
+            };
+            self.recency.remove(&tick);
+            let entry = self.entries.get_mut(&digest).ok_or_else(invalid)?;
+            let bytes = entry.bytes.take().ok_or_else(invalid)?;
+            let len = Self::resident_len(&bytes)?;
+            self.resident -= len;
+            resources.release(len)?;
+        }
         Ok(())
     }
 
@@ -274,15 +311,23 @@ impl PageCache {
         let Some((&order, &digest)) = self.dirty.iter().next() else {
             return Ok(None);
         };
-        let entry = self.entries.get_mut(&digest).ok_or_else(invalid)?;
-        let bytes = entry.bytes.as_ref().ok_or_else(invalid)?;
-        let len = Self::resident_len(bytes)?;
-        let mut copy = Vec::new();
-        copy.try_reserve_exact(bytes.len())
-            .map_err(|_| failure(FailureCode::ResourceLimit))?;
-        copy.extend_from_slice(bytes);
+        let len = {
+            let entry = self.entries.get(&digest).ok_or_else(invalid)?;
+            Self::resident_len(entry.bytes.as_ref().ok_or_else(invalid)?)?
+        };
+        // Charge the copy before allocating it.
+        self.make_room(resources, len)?;
         resources.evidence(len)?;
         resources.reserve(len)?;
+        let entry = self.entries.get_mut(&digest).ok_or_else(invalid)?;
+        let bytes = entry.bytes.as_ref().ok_or_else(invalid)?;
+        let mut copy = Vec::new();
+        if copy.try_reserve_exact(bytes.len()).is_err() {
+            resources.release(len)?;
+            resources.release_evidence(len)?;
+            return Err(failure(FailureCode::ResourceLimit));
+        }
+        copy.extend_from_slice(bytes);
         entry.state = State::Held;
         self.dirty.remove(&order);
         Ok(Some(Retained {
@@ -601,6 +646,32 @@ mod tests {
         assert!(cache.reference(a).is_err());
         assert!(cache.supersede(&mut res, a).is_err());
         assert!(cache.take(a).is_none());
+    }
+
+    #[test]
+    fn a_short_budget_drops_clean_pages_before_refusing_a_new_one() {
+        let mut res = Resources::new(VerifyLimits {
+            resident_bytes: 4 << 20,
+            ..VerifyLimits::indexed()
+        })
+        .unwrap();
+        let mut cache = PageCache::new(1 << 20, 0);
+        let (a, b) = (page(1, 100), page(2, 100));
+        insert(&mut cache, &mut res, a);
+        let handed = cache.take_dirty(&mut res).unwrap().unwrap();
+        res.release(handed.bytes.len() as u64).unwrap();
+        // Short by 50 bytes for the next page until the clean one goes.
+        let spare = 100 + ENTRY_OVERHEAD - 50;
+        res.reserve(res.available() - spare).unwrap();
+        insert(&mut cache, &mut res, b);
+        assert!(cache.take(a).is_none(), "the clean page made room");
+        assert!(cache.take(b).is_some());
+        // Dirty pages are never dropped to make room: the next one is refused.
+        let c = page(3, 100);
+        assert_eq!(
+            cache.insert(&mut res, c, bytes(c)).unwrap_err().code,
+            FailureCode::ResourceLimit
+        );
     }
 
     #[test]

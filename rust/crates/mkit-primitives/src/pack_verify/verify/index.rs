@@ -130,8 +130,6 @@ pub(super) enum Op {
         stage: RewriteStage,
         /// Rebuilt right-edge spine when the caller asked for one.
         track: Option<Track>,
-        /// Whether the leaf level packs full-first (append) or splits evenly.
-        append: bool,
         /// Committed pages this rewrite replaced; none is reachable from the
         /// new root. Reported only once the new root is committed.
         replaced: Vec<PageCommitment>,
@@ -378,14 +376,13 @@ impl Index {
     /// Begins a rewrite of the leaf reached by `descent` holding `records`,
     /// propagating commitment changes to the root. `insert` appends a fresh
     /// leaf at the right edge instead of replacing `descent.leaf`. `track`
-    /// rebuilds the append spine of the written leaf and packs leaves
-    /// full-first, so the tree shape never depends on how appends batch.
+    /// rebuilds the append spine of the written leaf.
     pub(super) fn rewrite(
         descent: Descent,
         records: Vec<(Hash, Vec<u8>)>,
         insert: bool,
         added: u64,
-        append: bool,
+        track: bool,
     ) -> Op {
         Op::Rewrite {
             graft: if insert {
@@ -403,13 +400,12 @@ impl Index {
             height: 0,
             pending_root: None,
             stage: RewriteStage::Leaf,
-            track: append.then(|| Track {
+            track: track.then(|| Track {
                 right: false,
                 path: Vec::new(),
                 leaf: None,
                 records,
             }),
-            append,
             replaced: Vec::new(),
         }
     }
@@ -499,7 +495,6 @@ impl Index {
             track,
             stage,
             outstanding,
-            append,
             replaced,
             prior,
             ..
@@ -510,9 +505,7 @@ impl Index {
         // Encode first, mutate second: a refused encode must leave the op
         // exactly as it was so the failure can retry or unwind cleanly.
         if records.len() > FANOUT {
-            // Appends fill the first leaf, so the shape is independent of how
-            // many records one rewrite carries; keyed inserts split evenly.
-            let mid = if *append { FANOUT } else { records.len() / 2 };
+            let mid = records.len() / 2;
             let (left_page, right_page) = (
                 self.leaf_page(&records[..mid])?,
                 self.leaf_page(&records[mid..])?,
@@ -1183,9 +1176,13 @@ impl Sequence {
     fn rewrite_op(&mut self, spine: Spine) -> Op {
         let fresh = spine.records.len() >= FANOUT;
         let kept = if fresh { 0 } else { spine.records.len() };
-        // A rewrite can emit at most two leaves; bounded batches re-enter
-        // through the caller's flush loop until `open` drains.
-        let moved = self.open.len().min((2 * FANOUT).saturating_sub(kept));
+        // One rewrite completes the open leaf or starts exactly one new leaf,
+        // and the caller's flush loop re-enters until `open` drains. Growing
+        // the tree one leaf at a time makes every internal split land where
+        // appending the records singly would put it, so a sequence root
+        // depends only on its record stream, never on how flushes batched it.
+        let capacity = if fresh { FANOUT } else { FANOUT - kept };
+        let moved = self.open.len().min(capacity);
         // `open` bytes are charged at append and the spine at each commit;
         // the op consumes both, so the drained total covers the spine plus
         // the records moving out of `open` regardless of the merge shape.

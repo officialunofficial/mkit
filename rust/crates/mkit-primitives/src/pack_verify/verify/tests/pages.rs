@@ -254,6 +254,26 @@ fn wide_tree_pack(entries: usize) -> Vec<u8> {
     writer.finish().unwrap()
 }
 
+/// One shared child and `trees` distinct trees of `entries` edges each, so
+/// every tree entry appends a batch of dependency records.
+fn many_wide_trees(trees: usize, entries: usize) -> Vec<u8> {
+    let (child_id, child) = blob(b"child");
+    let mut writer = PackWriter::new_raw_only();
+    writer.push_raw(child_id, &child).unwrap();
+    for tree_index in 0..trees {
+        let entries: Vec<TreeEntry> = (0..entries)
+            .map(|n| TreeEntry {
+                name: format!("t{tree_index:03}-e{n:03}").into_bytes(),
+                mode: EntryMode::Blob,
+                object_hash: child_id,
+            })
+            .collect();
+        let (tree_id, tree) = canonical(&Object::Tree(Tree { entries }));
+        writer.push_raw(tree_id, &tree).unwrap();
+    }
+    writer.finish().unwrap()
+}
+
 fn duplicate_pack() -> Vec<u8> {
     let mut writer = PackWriter::new_raw_only();
     for round in 0..3 {
@@ -456,11 +476,12 @@ fn roots_are_independent_of_cache_size_retention_and_flush_timing() {
     }
 }
 
-/// Recorded on the previous write-through driver. Object,
-/// occurrence, ordinal, and head roots are unchanged; the dependency root
-/// changes only where one entry emitted 17 to 31 dependency records into a
-/// partly filled leaf (`wide-tree-20`, `wide-tree-25`), because leaves now
-/// fill first instead of splitting evenly per flush.
+/// Recorded on the previous write-through driver. Object, occurrence,
+/// ordinal, and head roots are unchanged. The dependency root changes only
+/// where one entry emitted 17 or more dependency records at once
+/// (`wide-tree-20`, `wide-tree-25`, `wide-tree-400`): those flushes used to
+/// split a leaf evenly or graft two leaves at once, while the tree now grows
+/// one leaf at a time, exactly as if the records were appended singly.
 #[test]
 fn roots_match_the_write_through_driver() {
     let cases: [(&str, Vec<u8>, [&str; 5]); 8] = [
@@ -538,7 +559,8 @@ fn roots_match_the_write_through_driver() {
             [
                 "c902f6571d9c4d7f35e150d99a12757c7ef0daf2f87aa8ec1dc43fa038ea2f66",
                 "f13035dfbd6d22bec018d0634c5c156c9f90d7451c67419693a0fb120b8143fd",
-                "cb5b773ef0fe4c5bf19d255dd016787017914fd02ea1309d9dea673db9649ca3",
+                // Write-through: cb5b773ef0fe4c5bf19d255dd016787017914fd02ea1309d9dea673db9649ca3.
+                "371024c7a819bc6a7554e74c56329bcf4ff2ced77dc9258aa341aab595911d59",
                 "e2d038a43f5cf494b6bd6e89da3dbea9e9b93e8ee92980fea10f32b2ca1851d8",
                 "7917f8100fe78b488a0b125f5086f02bb354f87e7c3dc562dcd7384872ca0d63",
             ],
@@ -680,6 +702,46 @@ fn pages_a_checkpoint_reaches_survive_until_the_next_checkpoint_exists() {
     assert_eq!(roots_of(&verified), roots_of(&expected));
     let finished = pump(&mut machine, &mut host, &mut released, |_| false).unwrap();
     assert_eq!(roots_of(&finished), roots_of(&expected));
+}
+
+#[test]
+fn dependency_root_is_independent_of_how_flushes_batch_the_stream() {
+    // 30 entries of 30 edges each: batches of 17 or more land on leaf and
+    // parent boundaries all along a sequence with more than 50 leaves.
+    let pack = many_wide_trees(30, 30);
+    let (_, expected) = drive(&pack, &mut start(&pack, limits()));
+    assert_eq!(expected.dependencies().count, 900);
+    let expected = roots_of(&expected);
+    let (_, tiny) = drive(&pack, &mut start(&pack, tiny_cache()));
+    assert_eq!(roots_of(&tiny), expected, "tiny cache");
+    // A checkpoint at every entry boundary flushes after every entry, which
+    // is how the earlier write-through driver batched.
+    let mut host = Host::new(&pack);
+    let mut machine = start(&pack, limits());
+    let mut released = 0;
+    for ordinal in 1..=31 {
+        run_to_boundary(&mut machine, &mut host, &mut released, ordinal);
+        let _ = boundary_checkpoint(&mut machine, &mut host);
+    }
+    let verified = pump(&mut machine, &mut host, &mut released, |_| false).unwrap();
+    assert_eq!(
+        roots_of(&verified),
+        expected,
+        "checkpoint at every boundary"
+    );
+    // Flushing every third entry batches differently again.
+    let mut host = Host::new(&pack);
+    let mut machine = start(&pack, limits());
+    for ordinal in (3..=30).step_by(3) {
+        run_to_boundary(&mut machine, &mut host, &mut released, ordinal);
+        let _ = boundary_checkpoint(&mut machine, &mut host);
+    }
+    let verified = pump(&mut machine, &mut host, &mut released, |_| false).unwrap();
+    assert_eq!(
+        roots_of(&verified),
+        expected,
+        "checkpoint every third entry"
+    );
 }
 
 #[test]
