@@ -15,6 +15,23 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Breaking (toward 0.6)
 
+- [embedder: stored-format change] All-entry verification checkpoints use
+  envelope version 3 with explicit hash frontiers, an authenticated remaining
+  suffix, and bounded deferred refusal state. Migration: discard unsupported
+  verification checkpoints and restart from the immutable source. Framing
+  checkpoints retain version 1. No pack or object bytes change, and no
+  repository store reset is required.
+
+- [embedder: breaking API] The ALPHA decision facts now model the exact ticket
+  and pending-reservation observations. Migration: replace `TicketFact.authority`
+  with `authority_generation: Option<u64>`, replace `upload` with
+  `upload_session: Option<Vec<u8>>`, and supply the reservation-derived `ticket`
+  identity. Replace `ReservationFact::Pending.operation`/`expires_ms` with
+  `created_ms`, `reconcile_ms`, and `op: ReservationOp`; retain operation identity
+  in the request. Add `storage: None` to `Snapshot` and an empty `storage` vector
+  to `AcceptanceEffects` when counting is disabled. Handle `GuardKind::Storage`
+  and `ReservationTerminalKind::StorageChanged` in exhaustive consumers.
+  Wire and stored formats are unchanged; no store reset is required.
 - [embedder: breaking API] [embedder: stored-format change] Scheduled
   verification job headers add optional `VerifyJobV1::integrity` progress.
   Migration: use `VerifyJobV1::new`, or initialize `integrity: None` in job
@@ -27,7 +44,7 @@ collect the applicable entries between their old and new immutable pins.
   initialize the new count in struct literals and read typed
   `DependencyRecord` values from the combined dependency sequence to distinguish
   graph edges from external bases. Verification checkpoints use envelope
-  version 2; framing checkpoints retain version 1. Restart unsupported disposable
+  version 3; framing checkpoints retain version 1. Restart unsupported disposable
   checkpoints from their immutable source. Pack and object bytes are unchanged;
   no repository store reset is required.
 
@@ -96,6 +113,28 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Added
 
+- Verify pack integrity and canonical entries in one acquisition pass.
+  Entry-boundary checkpoints resume without reacquiring the consumed prefix;
+  integrity failures retain precedence over deferred entry refusals.
+
+- Add portable ticketed-advance and reservation-settlement decisions to
+  `mkit-primitives`: request-ordered ticket validation, upload-proof claims,
+  pending-reservation stability, replay precedence, authority-generation
+  fencing, and the composed ticket-closure, settlement, storage-counting and
+  durable-outcome effects. The defensive `PackMissing` cleanup and standalone
+  reservation settlement share the same portable rules. The reference server
+  decides ticketed advances through them and verifies every sealed guard
+  projects to a physical precondition. No wire or stored-format change or
+  store reset; source migrations are listed under Breaking.
+
+- Add optional caller-owned compute scheduling to `mkit-primitives` pack
+  verification. Immutable jobs and opaque outputs bind the run, frame, inputs,
+  operation, and shared memory/work permits. Raw Blob jobs can overlap;
+  ordinal merge preserves serial evidence and refusals. Other objects and
+  deltas remain dependency barriers, and serial execution stays the default.
+  Additive ALPHA API; no protocol bytes, checkpoint format, or store reset.
+
+
 - Add bounded all-entry `VerifyDriver` verification to `mkit-primitives`, with
   canonical object identity, earlier-entry and repository-scoped external delta
   bases, individual signatures, authenticated paged evidence, and cold resume.
@@ -125,6 +164,10 @@ collect the applicable entries between their old and new immutable pins.
   Recorded authority and exact pending reservation guards retain their commit
   boundaries. Accepted clearance preserves its saved result and never repeats
   settlement. Additive ALPHA API; no wire or stored-format change; no reset.
+
+- Add bounded in-process acceptance-evidence export with canonical signed head
+  checks, exact closure witness-chain authentication, and cross-artifact binding.
+  Evidence format 1 is unchanged; no migration or store reset.
 
 - Add guarded fork acceptance to `mkit-primitives`: bounded full-inventory plans,
   authoritative destination emptiness, final source-proof ordering, exact
@@ -1289,6 +1332,17 @@ collect the applicable entries between their old and new immutable pins.
   URL-token reads, supplied hooks, cold outcome retry and injected slice recovery.
 
 ### Breaking (toward 0.6)
+
+- [embedder: breaking API] The ALPHA decision facts now model the exact ticket
+  and pending-reservation observations. Migration: replace `TicketFact.authority`
+  with `authority_generation: Option<u64>`, replace `upload` with
+  `upload_session: Option<Vec<u8>>`, and supply the reservation-derived `ticket`
+  identity. Replace `ReservationFact::Pending.operation`/`expires_ms` with
+  `created_ms`, `reconcile_ms`, and `op: ReservationOp`; retain operation identity
+  in the request. Add `storage: None` to `Snapshot` and an empty `storage` vector
+  to `AcceptanceEffects` when counting is disabled. Handle `GuardKind::Storage`
+  and `ReservationTerminalKind::StorageChanged` in exhaustive consumers.
+  Wire and stored formats are unchanged; no store reset is required.
 
 - [embedder: breaking API] [embedder: stored-format change]
   [embedder: store reset required] Fork jobs retain the authorized source policy,

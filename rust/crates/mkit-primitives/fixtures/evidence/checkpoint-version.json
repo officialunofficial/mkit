@@ -1,9 +1,9 @@
 {
-  "blake3": "f3b5dac517caaf71f1dc7aef602c7485b59dff8934660cd3c03025d6e6f2d66e",
+  "blake3": "3eaea41e5cad2391c48444b631023ec2ccd5270afcd7daaeb6c55d80f2c282bd",
   "description": "Unsupported envelope version with an otherwise valid recomputed checksum.",
   "encoded_bytes": 369,
   "expected": "InvalidCheckpoint",
-  "format_version": 3,
+  "format_version": 4,
   "generation": 17,
   "ordinal": 0,
   "pack_id": "115769ad53d3d620942422bc750e94f4ee9c21c5594ed40db29d02808a9757c9",

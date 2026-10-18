@@ -378,3 +378,252 @@ fn publication_lowering_matches_frozen_planner_including_partial_deletion() {
         }
     }
 }
+
+/// A ticketed advance through the composed decision must produce the same
+/// physical batch (or error) as the frozen reference planner: pending
+/// stability, replay answers, ticket rows, reservation closures, storage
+/// counting and outbox rows all compared byte-for-byte.
+#[allow(clippy::too_many_lines)] // One sweep nests every fate/pending/replay dimension.
+#[test]
+fn ticketed_advance_parity_sweep() {
+    use crate::store::{ReservationV1, codec, codec::TicketV1};
+    let repo = repo();
+    let single = SinglePartition;
+    let d34 = D34Shards;
+    let signer = [7; 32];
+    let mut cases = 0_u32;
+    // ticket row fates in request order
+    for (count_storage, partitioned) in [(false, false), (true, false), (true, true)] {
+        let shards: &dyn ShardMap = if partitioned { &d34 } else { &single };
+        for source_at_coordinator in [false, true] {
+            let source = if source_at_coordinator {
+                shards.coordinator(&repo.namespace)
+            } else {
+                shards.ref_shard(&repo, HEAD)
+            };
+            for fate in 0..7_u8 {
+                for replay_case in 0..4_u8 {
+                    for pending_case in 0..3_u8 {
+                        for generation in [None, Some(0), Some(1)] {
+                            let reservations = ["s:parity-0", "s:parity-1"];
+                            let ids: Vec<_> = reservations
+                                .iter()
+                                .map(|rid| crate::store::tickets::ticket_id(rid))
+                                .collect();
+                            let mut tickets: Vec<_> = ids
+                                .iter()
+                                .zip(&reservations)
+                                .enumerate()
+                                .map(|(i, (_id, rid))| {
+                                    let mut pack_id = [0; 32];
+                                    pack_id[0] = 0x40 + u8::try_from(i).unwrap();
+                                    TicketV1 {
+                                        authority_generation: Some(0),
+                                        repo: repo.name.clone(),
+                                        ref_name: HEAD.into(),
+                                        signer,
+                                        pack_id,
+                                        bytes: 32 + i as u64,
+                                        part_size: 8 * 1024 * 1024,
+                                        created_at_ms: (T0 - 1_000) as u64,
+                                        expires_at_ms: (T0 + 60_000) as u64,
+                                        reservation_id: (*rid).to_owned(),
+                                        upload_session: None,
+                                    }
+                                })
+                                .collect();
+                            let mut ticket_present = [true, true];
+                            match fate {
+                                // Second ticket expired but decodable.
+                                1 => {
+                                    tickets[1].created_at_ms = 0;
+                                    tickets[1].expires_at_ms = 1;
+                                }
+                                // Second ticket signed by someone else.
+                                2 => tickets[1].signer = [9; 32],
+                                // First ticket row absent.
+                                3 => ticket_present[0] = false,
+                                // 4: second reservation row holds a pending write.
+                                // 5: second reservation row absent.
+                                6 => {
+                                    tickets[0].created_at_ms = 0;
+                                    tickets[0].expires_at_ms = 1;
+                                }
+                                _ => {}
+                            }
+                            let advance = advance::AdvanceWrite {
+                                ids: &ids,
+                                signer,
+                                head_ref: HEAD,
+                                repo_id: &repo,
+                                repository: REPO,
+                                source: &source,
+                                shards,
+                                count_storage,
+                            };
+                            let refs = [upd(PACKMAP, Missing, B), upd(HEAD, Missing, C)];
+                            let replay = replay();
+                            let pending_value =
+                                codec::encode_reservation(&ReservationV1::Pending {
+                                    repository: REPO.into(),
+                                    created_at_ms: ms(T0),
+                                    reconcile_at_ms: ms(T0) + 60_000,
+                                    op: codec::PendingOp::Write,
+                                    procedure: codec::StoredProcedure::AdvanceRefs,
+                                });
+                            let pending = reservation::PendingGuard {
+                                rid: "s:parity-pending".into(),
+                                key: keys::reservation("s:parity-pending").unwrap(),
+                                value: pending_value.clone(),
+                                apply_deadline_ms: ms(T0) + 10_000,
+                                repository: REPO.into(),
+                                procedure: codec::StoredProcedure::AdvanceRefs,
+                            };
+                            let mut req = request(&repo.name, &refs);
+                            req.kind = WriteKind::AdvanceRefs;
+                            req.advance = Some(advance.clone());
+                            req.authority_generation = generation;
+                            req.replay = (replay_case > 0).then_some(replay);
+                            req.pending = match pending_case {
+                                1 | 2 => Some(&pending),
+                                _ => None,
+                            };
+                            let mut snap = snapshot(&req, &[]);
+                            for (i, ticket) in tickets.iter().enumerate() {
+                                if ticket_present[i] {
+                                    snap.insert(
+                                        keys::ticket(&ids[i]),
+                                        Some(codec::encode_ticket(ticket)),
+                                    );
+                                }
+                            }
+                            for key in advance::detail_keys(&snap, &advance).unwrap() {
+                                if !snap.contains(&key) {
+                                    snap.insert(key, None);
+                                }
+                            }
+                            for (i, ticket) in tickets.iter().enumerate() {
+                                if !ticket_present[i] {
+                                    continue;
+                                }
+                                snap.insert(
+                                    keys::ticket_index(&repo.name, HEAD, &ticket.pack_id, &signer)
+                                        .unwrap(),
+                                    Some(codec::encode_ref_id(&ids[i])),
+                                );
+                                let reservation = match (fate, i) {
+                                    (4, 1) => ReservationV1::Pending {
+                                        repository: REPO.into(),
+                                        created_at_ms: ms(T0),
+                                        reconcile_at_ms: ms(T0) + 60_000,
+                                        op: codec::PendingOp::Write,
+                                        procedure: codec::StoredProcedure::AdvanceRefs,
+                                    },
+                                    (5, 1) => {
+                                        snap.insert(
+                                            keys::reservation(&ticket.reservation_id).unwrap(),
+                                            None,
+                                        );
+                                        continue;
+                                    }
+                                    _ => ReservationV1::Ticketed { ticket_id: ids[i] },
+                                };
+                                snap.insert(
+                                    keys::reservation(&ticket.reservation_id).unwrap(),
+                                    Some(codec::encode_reservation(&reservation)),
+                                );
+                            }
+                            snap.insert(
+                                keys::tickets_per_ref(&repo.name, HEAD).unwrap(),
+                                Some(codec::encode_u64(ids.len() as u64)),
+                            );
+                            snap.insert(
+                                keys::tickets_per_signer(&repo.name, HEAD, &signer).unwrap(),
+                                Some(codec::encode_u64(ids.len() as u64)),
+                            );
+                            if count_storage {
+                                snap.insert(
+                                    keys::repo_storage(&repo.name),
+                                    Some(crate::store::repo_storage::initial_counter()),
+                                );
+                            }
+                            match replay_case {
+                                0 => req.replay = None,
+                                1 => {}
+                                2 => snap.insert(
+                                    keys::replay(&replay.scope),
+                                    Some(codec::encode_replay_record(
+                                        &crate::replay::ReplayRecord {
+                                            fingerprint: replay.fingerprint,
+                                            expires_at_ms: replay.expires_at_ms,
+                                            state: crate::replay::ReplayState::InFlight {
+                                                resumable: false,
+                                            },
+                                        },
+                                    )),
+                                ),
+                                _ => snap.insert(
+                                    keys::replay(&replay.scope),
+                                    Some(codec::encode_replay_record(
+                                        &crate::replay::ReplayRecord {
+                                            fingerprint: if fate == 0 {
+                                                replay.fingerprint
+                                            } else {
+                                                [0xf0; 32]
+                                            },
+                                            expires_at_ms: replay.expires_at_ms,
+                                            state: crate::replay::ReplayState::Committed(
+                                                crate::replay::StoredResult::AdvanceRefs(
+                                                    mkit_core::protocol::AdvanceOutcome::Committed,
+                                                ),
+                                            ),
+                                        },
+                                    )),
+                                ),
+                            }
+                            if pending_case == 1 {
+                                snap.insert(pending.key.clone(), Some(pending.value.clone()));
+                            } else if pending_case == 2 {
+                                snap.insert(
+                                    pending.key.clone(),
+                                    Some(codec::encode_reservation(&ReservationV1::Pending {
+                                        repository: REPO.into(),
+                                        created_at_ms: ms(T0) + 7,
+                                        reconcile_at_ms: ms(T0) + 60_000,
+                                        op: codec::PendingOp::Write,
+                                        procedure: codec::StoredProcedure::AdvanceRefs,
+                                    })),
+                                );
+                            }
+                            parity(&req, &snap);
+                            // Competing faults preserve the reference's examined prefix:
+                            // pending/replay, ticket order, then ref order.
+                            for key in [
+                                keys::ref_key(&repo.name, HEAD),
+                                keys::ticket(&ids[1]),
+                                keys::reservation(reservations[1]).unwrap(),
+                                keys::repo_storage(&repo.name),
+                            ] {
+                                let mut corrupt = snap.clone();
+                                corrupt.insert(key, Some(Value::new(vec![0xff])));
+                                parity(&req, &corrupt);
+                            }
+                            let mut conflict = snap.clone();
+                            conflict.insert(
+                                keys::ref_key(&repo.name, PACKMAP),
+                                Some(codec::encode_ref_id(&A)),
+                            );
+                            conflict.insert(
+                                keys::ref_key(&repo.name, HEAD),
+                                Some(Value::new(vec![0xff])),
+                            );
+                            parity(&req, &conflict);
+                            cases += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(cases, 1512);
+}

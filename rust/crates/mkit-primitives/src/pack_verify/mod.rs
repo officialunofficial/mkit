@@ -60,11 +60,17 @@ pub enum ObjectPurpose {
     /// Check a referenced object's kind or canonical length.
     Reference,
 }
-/// One bounded acquisition request. Initially only one may be outstanding.
+/// One bounded host request. Acquisition requests remain singular; compute
+/// requests use the separately configured bounded caller capacity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use]
 #[non_exhaustive]
 pub enum Request {
+    /// Execute immutable library-created work with caller-owned scheduling.
+    Compute {
+        /// Exact job identity, operation, commitments, and reserved permits.
+        job: verify::ComputeRequest,
+    },
     /// Read exactly this range from this immutable source.
     Bytes {
         /// Request identity.

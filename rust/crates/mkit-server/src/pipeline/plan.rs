@@ -12,6 +12,7 @@ pub(super) mod reference;
 
 mod publication_decision;
 mod ref_decision;
+pub(super) mod ticketed_decision;
 
 use std::collections::BTreeMap;
 
@@ -461,31 +462,44 @@ pub(crate) fn plan_write(
             "authority fencing requires transactional metadata",
         ));
     }
+    // The composed ticketed decision covers pending stability, replay and
+    // ticket rows for an advance the portable contract serves.
+    let ticketed = ticketed_decision::decide(req, snap, clock);
+    if let Some(decided) = &ticketed
+        && let Some(answer) = decided.verdict()
+    {
+        return answer;
+    }
     // A racing retry may read ticket/reservation rows after its initial
     // replay observation. Resolve the committed answer before ticket planning.
-    if let Some(pending) = req.pending
-        && snap.get(&pending.key) != Some(&pending.value)
-    {
-        return Err(ServerError::unavailable(
-            "admission reservation changed; retry",
-        ));
-    }
-    if let Some(result) = replayed_write(req, snap)? {
-        if req.pending.is_some() {
-            return Err(ServerError::aborted_retryable(
-                "operation already in flight; retry",
+    if ticketed.is_none() {
+        if let Some(pending) = req.pending
+            && snap.get(&pending.key) != Some(&pending.value)
+        {
+            return Err(ServerError::unavailable(
+                "admission reservation changed; retry",
             ));
         }
-        return Ok(Planned::Done(result));
+        if let Some(result) = replayed_write(req, snap)? {
+            if req.pending.is_some() {
+                return Err(ServerError::aborted_retryable(
+                    "operation already in flight; retry",
+                ));
+            }
+            return Ok(Planned::Done(result));
+        }
     }
     if req.fork_barrier && snap.get(&keys::fork_barrier(req.repo)).is_some() {
         return Err(ServerError::unavailable("fork activation pending; retry"));
     }
-    let tickets = req
-        .advance
-        .as_ref()
-        .map(|advance| super::advance::validate(snap, advance, clock.business_now_ms))
-        .transpose()?;
+    let tickets = match &ticketed {
+        Some(decided) => Some(decided.tickets.clone()),
+        None => req
+            .advance
+            .as_ref()
+            .map(|advance| super::advance::validate(snap, advance, clock.business_now_ms))
+            .transpose()?,
+    };
     let deadline = Precondition::NotAfter(req.pending.map_or(clock.deadline(), |pending| {
         clock.deadline().min(pending.apply_deadline_ms)
     }));
@@ -569,6 +583,12 @@ pub(crate) fn plan_write(
         }) {
             return Err(crate::authority::moved());
         }
+        if ticketed
+            .as_ref()
+            .is_some_and(ticketed_decision::Decided::epoch_moved)
+        {
+            return Err(crate::authority::moved());
+        }
         if req.lease.is_none() {
             pre.push(guard(keys::authority_generation(), snap));
         }
@@ -596,7 +616,7 @@ pub(crate) fn plan_write(
     plan_namespace(req, snap, clock, &mut pre, &mut puts)?;
 
     let (on_commit, ref_puts, conflict) =
-        decide_write_result(req, snap, clock, &mut pre, &mut puts)?;
+        decide_write_result(req, snap, clock, &mut pre, &mut puts, ticketed.as_ref())?;
     if conflict && req.replay.is_none() && req.charges.is_empty() && req.pending.is_none() {
         return Ok(Planned::Done(on_commit));
     }
@@ -785,6 +805,12 @@ pub(crate) fn plan_write(
         None => None,
     };
 
+    // Every sealed ticketed guard must be discharged by an emitted
+    // precondition; the composed decision lowered nothing of its own.
+    if let Some(decided) = &ticketed {
+        ticketed_decision::check(decided, req, &pre)?;
+    }
+
     let budget = MAX_BATCH_OPS.saturating_sub(pre.len() + puts.len());
     let prune = plan_prune(req, snap, &deadline, budget)?;
     // Prune deletes go first: a later write to the same key wins.
@@ -839,6 +865,7 @@ fn decide_write_result(
     clock: &PlanClock,
     pre: &mut Vec<Precondition>,
     puts: &mut Vec<Write>,
+    ticketed: Option<&ticketed_decision::Decided>,
 ) -> Result<(StoredResult, Vec<Write>, bool), ServerError> {
     if req.kind != WriteKind::UploadCommit
         && let Some(rejection) = req.rejection
@@ -850,9 +877,12 @@ fn decide_write_result(
     // still costs an operation and a ledger row, so the charge bounds
     // ledger growth per signer. PRD §5.4's separate `Aborted` transaction
     // is for M3 payment reservations, not this abuse quota.
-    let (outcome, ref_puts) = match ref_decision::decide(req, snap)? {
-        Some(decision) => ref_decision::lower(decision, pre)?,
-        None => (None, Vec::new()),
+    let (outcome, ref_puts) = match ticketed {
+        Some(decided) => ticketed_decision::lower_refs(decided, req, pre)?,
+        None => match ref_decision::decide(req, snap)? {
+            Some(decision) => ref_decision::lower(decision, pre)?,
+            None => (None, Vec::new()),
+        },
     };
     let conflict = outcome.is_some();
     let ticket_result = req

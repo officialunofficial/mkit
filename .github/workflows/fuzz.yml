@@ -32,6 +32,8 @@ jobs:
       matrix:
         target: [delta, pack, tree, software_key_record, rpc_decode, git_commit_parse, git_tag_parse, git_tree_parse, merkle_packlist, merkle_proof, sparse_verify, disclosure_decode, verify_disclosure, pack_entries, verify_closure, grant_parse, epoch_visibility_parse, span_decode, verify_span]
         include:
+          - target: compute_schedule
+            directory: rust/crates/mkit-primitives/fuzz
           - target: acceptance_decode
             directory: rust/crates/mkit-primitives/fuzz
     steps:

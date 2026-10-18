@@ -265,6 +265,19 @@ whose expectation is not `MATCH` or whose new ID is nonempty
 changes — keep the reference server's generic per-ref CAS decision, and the
 portable decision answers a typed refusal for them.
 
+**Reference-server behavior.** The portable ticketed decision answers the
+signed `AdvanceRefs` form: a ref pair consumed with one or more upload
+tickets — pending-reservation stability, replay precedence, ticket
+validation in request order, authority-generation fencing, the embedded ref
+decision, and the ticket-closure, reservation-settlement, storage-counting
+and durable-outcome effects it composes (§6.3, §6.5, §9.3). The separate
+defensive abort for a ticket whose pack never landed and a standalone
+reservation settlement share the same portable rules. A ticketed request
+that is unsigned or carries no replay binding, that was rejected before
+planning, or that holds a fork barrier keeps the reference path. If stored
+observations cannot be projected, the reference path retains its original
+pending/replay and first-failure precedence, including corruption diagnostics.
+
 ### 3.2 Replay, durability, and recovery
 
 **Protocol requirement.** A committed replay MUST answer with its saved result

@@ -1,0 +1,20 @@
+{
+  "scenario": "caller-compute-ordinal-merge",
+  "payloads": [
+    "first",
+    "second",
+    "first",
+    "third"
+  ],
+  "max_jobs": 3,
+  "schedules": [
+    "fifo",
+    "lifo",
+    "seeded"
+  ],
+  "expected": {
+    "entries": 4,
+    "objects": 3,
+    "delta_entries": 0
+  }
+}

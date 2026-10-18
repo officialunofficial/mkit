@@ -1719,6 +1719,7 @@ fn cursor_metadata_preserves_frozen_encoding() {
     let cursor = WindowCursor::from_bytes(&bytes).unwrap();
     let metadata = cursor.metadata().unwrap();
     assert_eq!(metadata.pack_len(), 189);
+    assert_eq!(metadata.acquired_end(), None);
     assert_eq!(metadata.window_size(), 1 << 20);
     assert_eq!(metadata.position(), 31);
     assert_eq!(metadata.payload_sum(), 14);
@@ -1740,4 +1741,463 @@ fn cursor_metadata_preserves_frozen_encoding() {
             .unwrap(),
         metadata
     );
+}
+
+#[test]
+fn exact_checkpoints_resume_without_consumed_prefix_reads() {
+    for tail in [1, 13, 32, 65_490, 65_500] {
+        let pack = synthetic(
+            1,
+            &[(0, vec![7; 13]), (0, vec![8; 70_000]), (0, vec![9; tail])],
+        );
+        for expected in [None, Some(hash::hash(&pack))] {
+            let mut reader =
+                WindowReader::new(pack.len() as u64, WINDOW, DecodeLimits::default(), expected)
+                    .unwrap();
+            loop {
+                match reader.step().unwrap() {
+                    Step::NeedWindow(request) => feed_from(&mut reader, &pack, request),
+                    Step::Entry(_) => {
+                        let cursor = reader.checkpoint_exact().unwrap();
+                        let position = cursor.metadata().unwrap().position();
+                        let bytes = cursor.to_bytes();
+                        assert_eq!(bytes[0], 2);
+                        let cursor = WindowCursor::from_bytes(&bytes).unwrap();
+                        assert_eq!(cursor.to_bytes(), bytes);
+                        let mut resumed =
+                            WindowReader::resume(&cursor, DecodeLimits::default()).unwrap();
+                        let mut first = true;
+                        loop {
+                            match resumed.step().unwrap() {
+                                Step::NeedWindow(request) => {
+                                    assert!(request.offset >= position);
+                                    if first {
+                                        assert_eq!(request.offset, position);
+                                        first = false;
+                                    }
+                                    feed_exact(&mut resumed, &pack, request);
+                                }
+                                Step::Entry(_) => {
+                                    assert!(resumed.checkpoint_exact().is_some());
+                                }
+                                Step::Done(_) => {
+                                    assert_eq!(
+                                        resumed.trailer(),
+                                        Some(hash::hash(&pack[..pack.len() - 32]))
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Step::Done(_) => break,
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn exact_checkpoint_rejects_changed_unconsumed_suffix() {
+    let pack = synthetic(1, &[(0, vec![1; 17]), (0, vec![2; 200])]);
+    let mut reader = WindowReader::new(
+        pack.len() as u64,
+        WINDOW,
+        DecodeLimits::default(),
+        Some(hash::hash(&pack)),
+    )
+    .unwrap();
+    let Step::NeedWindow(request) = reader.step().unwrap() else {
+        panic!()
+    };
+    feed_from(&mut reader, &pack, request);
+    assert!(matches!(reader.step().unwrap(), Step::Entry(_)));
+    let cursor = reader.checkpoint_exact().unwrap();
+    let mut resumed = WindowReader::resume(&cursor, DecodeLimits::default()).unwrap();
+    let Step::NeedWindow(request) = resumed.step().unwrap() else {
+        panic!()
+    };
+    let mut suffix = pack[usize::try_from(request.offset).unwrap()
+        ..usize::try_from(request.offset + request.len).unwrap()]
+        .to_vec();
+    suffix[0] ^= 1;
+    assert!(matches!(
+        resumed.feed_owned(request.offset, suffix),
+        Err(PackError::PackfileCorrupted)
+    ));
+}
+
+#[test]
+fn integrity_drain_after_framing_error_reads_each_window_once() {
+    let mut pack = synthetic(1, &[(0, vec![2; usize::try_from(WINDOW).unwrap() * 2])]);
+    pack[12] = 0xff;
+    let split = pack.len() - 32;
+    let trailer = hash::hash(&pack[..split]);
+    pack[split..].copy_from_slice(&trailer);
+    for corrupt in [false, true] {
+        let mut bytes = pack.clone();
+        if corrupt {
+            bytes[split] ^= 1;
+        }
+        let mut reader = WindowReader::new(
+            bytes.len() as u64,
+            WINDOW,
+            DecodeLimits::default(),
+            Some(hash::hash(&bytes)),
+        )
+        .unwrap();
+        let Step::NeedWindow(request) = reader.step().unwrap() else {
+            panic!()
+        };
+        feed_from(&mut reader, &bytes, request);
+        assert!(matches!(
+            reader.step(),
+            Err(PackError::InvalidEntryType(0xff))
+        ));
+        assert_eq!(reader.trailer(), None);
+        let mut offset = WINDOW;
+        loop {
+            match reader.integrity_step() {
+                Ok(Step::NeedWindow(request)) => {
+                    assert_eq!(request.offset, offset);
+                    offset += request.len;
+                    feed_from(&mut reader, &bytes, request);
+                }
+                Ok(Step::Done(_)) => {
+                    assert!(!corrupt);
+                    assert_eq!(reader.trailer(), Some(trailer));
+                    break;
+                }
+                Err(PackError::PackfileCorrupted) => {
+                    assert!(corrupt);
+                    assert_eq!(reader.trailer(), None);
+                    break;
+                }
+                other => panic!("unexpected integrity action: {other:?}"),
+            }
+        }
+        assert_eq!(offset, bytes.len() as u64);
+    }
+}
+
+fn feed_exact(reader: &mut WindowReader, pack: &[u8], request: WindowRequest) {
+    let begin = usize::try_from(request.offset).unwrap();
+    let end = usize::try_from(request.offset + request.len).unwrap();
+    reader
+        .feed_owned(request.offset, pack[begin..end].to_vec())
+        .unwrap();
+}
+
+#[test]
+fn exact_checkpoint_drain_resumes_at_acquired_frontier() {
+    let mut pack = synthetic(
+        1,
+        &[(0, vec![5; usize::try_from(WINDOW).unwrap() * 3 - 30])],
+    );
+    pack[12] = 0xff;
+    let split = pack.len() - 32;
+    let digest = hash::hash(&pack[..split]);
+    pack[split..].copy_from_slice(&digest);
+    let mut reader = WindowReader::new_one_pass(
+        pack.len() as u64,
+        WINDOW,
+        DecodeLimits::default(),
+        Some(hash::hash(&pack)),
+    )
+    .unwrap();
+    let Step::NeedWindow(request) = reader.step().unwrap() else {
+        panic!()
+    };
+    feed_exact(&mut reader, &pack, request);
+    assert!(reader.step().is_err());
+    let mut acquired_end = WINDOW;
+    loop {
+        let action = reader.integrity_step().unwrap();
+        let cursor = reader.checkpoint_exact().unwrap();
+        assert!(cursor.metadata().unwrap().exact());
+        assert!(cursor.metadata().unwrap().integrity_only());
+        assert_eq!(
+            cursor.metadata().unwrap().acquired_end(),
+            Some(acquired_end)
+        );
+        assert_eq!(cursor.metadata().unwrap().position(), 12);
+        let cursor = WindowCursor::from_bytes(&cursor.to_bytes()).unwrap();
+        reader = WindowReader::resume(&cursor, DecodeLimits::default()).unwrap();
+        match action {
+            Step::NeedWindow(_) => {
+                let Step::NeedWindow(request) = reader.integrity_step().unwrap() else {
+                    panic!()
+                };
+                assert_eq!(request.offset, acquired_end);
+                acquired_end += request.len;
+                feed_exact(&mut reader, &pack, request);
+            }
+            Step::Done(_) => {
+                assert!(matches!(reader.integrity_step().unwrap(), Step::Done(_)));
+                assert_eq!(reader.trailer(), Some(digest));
+                assert_eq!(acquired_end, pack.len() as u64);
+                break;
+            }
+            Step::Entry(_) => panic!(),
+        }
+    }
+}
+
+#[test]
+fn exact_cursor_geometry_is_strict() {
+    let pack = synthetic(1, &[(0, vec![1; 17]), (0, vec![2; 70_000])]);
+    let mut reader = WindowReader::new_one_pass(
+        pack.len() as u64,
+        WINDOW,
+        DecodeLimits::default(),
+        Some(hash::hash(&pack)),
+    )
+    .unwrap();
+    let Step::NeedWindow(request) = reader.step().unwrap() else {
+        panic!()
+    };
+    feed_exact(&mut reader, &pack, request);
+    assert!(matches!(reader.step().unwrap(), Step::Entry(_)));
+    let cursor = reader.checkpoint_exact().unwrap();
+    let mutations: &[fn(&mut WindowCursor)] = &[
+        |cursor| cursor.exact.as_mut().unwrap().end -= 1,
+        |cursor| cursor.exact.as_mut().unwrap().end = 0,
+        |cursor| cursor.exact.as_mut().unwrap().end = cursor.pack_len + 1,
+        |cursor| cursor.exact.as_mut().unwrap().suffix = None,
+        |cursor| cursor.window_prefix = Some([0; 32]),
+        |cursor| cursor.exact.as_mut().unwrap().trailer[31] = 1,
+        |cursor| cursor.trailer_tree.stack.clear(),
+    ];
+    for mutate in mutations {
+        let mut invalid = cursor.clone();
+        mutate(&mut invalid);
+        assert!(invalid.metadata().is_err());
+        assert!(WindowCursor::from_bytes(&invalid.to_bytes()).is_err());
+    }
+    let mut bytes = cursor.to_bytes();
+    bytes[0] = 3;
+    let checksum = hash::hash(&bytes[..bytes.len() - 32]);
+    let end = bytes.len();
+    bytes[end - 32..].copy_from_slice(&checksum);
+    assert!(WindowCursor::from_bytes(&bytes).is_err());
+}
+
+#[test]
+fn exact_checkpoint_at_window_edge_and_split_trailer() {
+    for payload in [
+        usize::try_from(WINDOW).unwrap() - 17,
+        usize::try_from(WINDOW).unwrap() - 30,
+        usize::try_from(WINDOW).unwrap() - 49,
+    ] {
+        let pack = synthetic(1, &[(0, vec![4; payload])]);
+        let mut reader = WindowReader::new_one_pass(
+            pack.len() as u64,
+            WINDOW,
+            DecodeLimits::default(),
+            Some(hash::hash(&pack)),
+        )
+        .unwrap();
+        loop {
+            match reader.step().unwrap() {
+                Step::NeedWindow(request) => feed_exact(&mut reader, &pack, request),
+                Step::Entry(_) => {
+                    let cursor = reader.checkpoint_exact().unwrap();
+                    let position = cursor.metadata().unwrap().position();
+                    reader = WindowReader::resume(
+                        &WindowCursor::from_bytes(&cursor.to_bytes()).unwrap(),
+                        DecodeLimits::default(),
+                    )
+                    .unwrap();
+                    let Step::NeedWindow(request) = reader.step().unwrap() else {
+                        panic!()
+                    };
+                    assert_eq!(request.offset, position);
+                    feed_exact(&mut reader, &pack, request);
+                }
+                Step::Done(_) => {
+                    let cursor = reader.checkpoint_exact().unwrap();
+                    let position = cursor.metadata().unwrap().position();
+                    let mut resumed =
+                        WindowReader::resume(&cursor, DecodeLimits::default()).unwrap();
+                    loop {
+                        match resumed.step().unwrap() {
+                            Step::NeedWindow(request) => {
+                                assert!(request.offset >= position);
+                                feed_exact(&mut resumed, &pack, request);
+                            }
+                            Step::Done(_) => break,
+                            Step::Entry(_) => panic!(),
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(any(feature = "pack-zstd", feature = "pack-ruzstd"))]
+#[test]
+fn one_pass_carried_compressed_entry_never_reacquires_a_window() {
+    let raw = vec![0x42; 4096];
+    let mut encoded = u32::try_from(raw.len()).unwrap().to_le_bytes().to_vec();
+    encoded.extend_from_slice(&[0x28, 0xb5, 0x2f, 0xfd, 0, 0x68]);
+    let block = (u32::try_from(raw.len()).unwrap() << 3) | 1;
+    encoded.extend_from_slice(&block.to_le_bytes()[..3]);
+    encoded.extend_from_slice(&raw);
+    let pack = synthetic(
+        2,
+        &[
+            (0, vec![0x31; usize::try_from(WINDOW).unwrap() - 100]),
+            (3, encoded),
+        ],
+    );
+    let limits = DecodeLimits::default().with_entry_geometry(16 << 20, 1 << 20);
+    let mut reader =
+        WindowReader::new_one_pass(pack.len() as u64, WINDOW, limits, Some(hash::hash(&pack)))
+            .unwrap();
+    let mut acquired = 0;
+    let mut entries = 0;
+    loop {
+        match reader.step().unwrap() {
+            Step::NeedWindow(request) => {
+                assert_eq!(request.offset, acquired);
+                acquired += request.len;
+                feed_exact(&mut reader, &pack, request);
+            }
+            Step::Entry(_) => {
+                entries += 1;
+                let work = reader.exact_checkpoint_work();
+                let cursor = reader.checkpoint_exact().unwrap();
+                assert_eq!(work, reader.end - cursor.metadata().unwrap().position());
+                if entries == 2 {
+                    assert!(!reader.window.is_empty());
+                    let mut resumed = WindowReader::resume(&cursor, limits).unwrap();
+                    let position = cursor.metadata().unwrap().position();
+                    loop {
+                        match resumed.step().unwrap() {
+                            Step::NeedWindow(request) => {
+                                assert!(request.offset >= position);
+                                feed_exact(&mut resumed, &pack, request);
+                            }
+                            Step::Done(_) => break,
+                            Step::Entry(_) => panic!(),
+                        }
+                    }
+                }
+            }
+            Step::Done(_) => break,
+        }
+    }
+    assert_eq!(entries, 2);
+    assert_eq!(acquired, pack.len() as u64);
+}
+
+#[test]
+fn exact_cursor_encoding_is_digest_pinned() {
+    let pack = synthetic(1, &[(0, vec![1; 17]), (0, vec![2; 200])]);
+    let mut reader = WindowReader::new_one_pass(
+        pack.len() as u64,
+        WINDOW,
+        DecodeLimits::default(),
+        Some(hash::hash(&pack)),
+    )
+    .unwrap();
+    let Step::NeedWindow(request) = reader.step().unwrap() else {
+        panic!()
+    };
+    feed_exact(&mut reader, &pack, request);
+    assert!(matches!(reader.step().unwrap(), Step::Entry(_)));
+    let cursor = reader.checkpoint_exact().unwrap();
+    assert_eq!(
+        cursor.metadata().unwrap().acquired_end(),
+        Some(pack.len() as u64)
+    );
+    assert!(
+        cursor.metadata().unwrap().acquired_end().unwrap() > cursor.metadata().unwrap().position()
+    );
+    let encoded = cursor.to_bytes();
+    assert_eq!(encoded.len(), 263);
+    assert_eq!(
+        hash::to_hex(&hash::hash(&encoded)),
+        "379bc66d6ceba26c1199d3222fd05afff32adef2fb76b26cd0be31628d3a7c1b"
+    );
+    assert_eq!(
+        WindowCursor::from_bytes(&encoded).unwrap().to_bytes(),
+        encoded
+    );
+}
+
+#[test]
+fn batching_boundary_binds_only_its_retained_window() {
+    let pack = synthetic(
+        1,
+        &[(0, vec![1; 17]), (0, vec![2; 23]), (0, vec![3; 70_000])],
+    );
+    let mut reader = WindowReader::new_one_pass(
+        pack.len() as u64,
+        WINDOW,
+        DecodeLimits::default(),
+        Some(hash::hash(&pack)),
+    )
+    .unwrap();
+    let Step::NeedWindow(request) = reader.step().unwrap() else {
+        panic!()
+    };
+    feed_exact(&mut reader, &pack, request);
+    assert!(matches!(reader.step().unwrap(), Step::Entry(_)));
+    let boundary = reader.checkpoint_boundary().unwrap();
+    assert!(reader.next_entry_fits_window());
+    assert!(matches!(reader.step().unwrap(), Step::Entry(_)));
+    assert!(!reader.next_entry_fits_window());
+    let cursor = reader.checkpoint_exact_at(&boundary).unwrap();
+    assert_eq!(cursor.metadata().unwrap().position(), 34);
+    assert_eq!(reader.exact_checkpoint_work_at(&boundary), WINDOW - 34);
+    // Batches must settle before stepping into the next acquisition.
+    let Step::NeedWindow(request) = reader.step().unwrap() else {
+        panic!()
+    };
+    assert!(reader.checkpoint_exact_at(&boundary).is_none());
+    feed_exact(&mut reader, &pack, request);
+    assert!(reader.checkpoint_exact_at(&boundary).is_none());
+    assert_eq!(reader.exact_checkpoint_work_at(&boundary), 0);
+    let mut resumed = WindowReader::resume(&cursor, DecodeLimits::default()).unwrap();
+    let mut entries = 0;
+    loop {
+        match resumed.step().unwrap() {
+            Step::NeedWindow(request) => {
+                assert!(request.offset >= 34);
+                feed_exact(&mut resumed, &pack, request);
+            }
+            Step::Entry(_) => entries += 1,
+            Step::Done(_) => break,
+        }
+    }
+    assert_eq!(entries, 2);
+}
+
+#[test]
+fn batching_boundary_rejects_another_unverified_prefix() {
+    let pack = synthetic(1, &[(0, vec![1; 17]), (0, vec![2; 70_000])]);
+    let mut changed = pack.clone();
+    changed[20] ^= 1;
+    let expected = Some(hash::hash(&pack));
+    let readers = [&pack[..], &changed[..]].map(|bytes| {
+        let mut reader = WindowReader::new_one_pass(
+            bytes.len() as u64,
+            WINDOW,
+            DecodeLimits::default(),
+            expected,
+        )
+        .unwrap();
+        let Step::NeedWindow(request) = reader.step().unwrap() else {
+            panic!()
+        };
+        feed_exact(&mut reader, bytes, request);
+        assert!(matches!(reader.step().unwrap(), Step::Entry(_)));
+        reader
+    });
+    let boundary = readers[0].checkpoint_boundary().unwrap();
+    assert!(readers[0].checkpoint_exact_at(&boundary).is_some());
+    assert!(readers[1].checkpoint_exact_at(&boundary).is_none());
 }

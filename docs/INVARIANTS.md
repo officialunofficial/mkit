@@ -25,6 +25,46 @@ or apply effects without every required live comparison.
 compile-fail doctests. The closure entry point enforces its semantic checks with bounded state-machine
 tests. Pack verification and decision entry points land with their owners.
 
+## Compute completion order never chooses verification evidence
+
+**Always:** caller-owned jobs bind the immutable source, repository, run,
+ordinal, inputs, operation, and byte/work permits. Only library-created outputs
+can return. Results and evidence merge in ordinal order; stale outputs change
+no counters. Serial execution remains the default. Outstanding and completed
+but unmerged work stays inside one shared resident ceiling.
+
+**Because:** worker timing cannot select a different refusal, bypass delta-base
+ordering, or release input/output memory before the driver consumes it.
+
+**If violated:** a late completion could seal another run, an earlier malformed
+entry could be hidden by a later parser failure, or worker ownership could
+exceed the advertised memory bound.
+
+**Enforced by:** `pack_verify::verify` raw-Blob admission escrows, dependency
+barriers, opaque jobs/outputs, ordinal merge, drained checkpoints, schedule
+parity tests, allocation probes, and the bounded compute-schedule fuzz oracle.
+
+## All-entry verification shares one acquisition stream with integrity
+
+**Always:** `VerifyDriver` hashes each acquired pack range while framing and
+decoding entries. An uninterrupted successful run acquires exactly the pack
+length, apart from separately requested canonical delta bases. Entry refusals
+and authenticated external-base absence remain deferred behind final trailer
+and whole-pack identity checks. The bounded state holds only the first entry
+refusal; signature failures retain their separate decode-first precedence.
+Unavailable input remains immediately retryable and never becomes absence.
+
+**Because:** remote sources must not pay for a second integrity pass, and
+provisional decoding must preserve the integrity-first refusal contract.
+
+**If violated:** acquisition cost doubles, a corruption verdict changes with
+execution strategy, or a provisional object could become trusted too early.
+
+**Enforced by:** `VerifyDriver` deferred-refusal drain, the public acquisition
+table and competing-fault regressions in `verify_onepass`, exact-boundary resume
+tests, and the `verify_onepass_heap` allocation epoch. Only terminal
+`Step::Complete` constructs a `VerifiedPack`.
+
 ## Portable closure completion requires every occurrence and retained page
 
 **Always:** direct-child closure checks every supplied verified object and every
@@ -1695,6 +1735,16 @@ incremental state forward and clears the boundary cache. Cold resume
 authenticates the prefix once and reconstructs this state. Only the existing
 explicit subtree commitments and prefix digest enter the cursor encoding.
 
+The opt-in one-pass reader keeps acquired windows through carried-frame decode.
+Its exact-boundary cursor instead retains explicit subtree frontiers through
+the acquired end, the collected trailer, and a commitment to the unconsumed
+suffix. Cold resume requests that suffix from the entry boundary and verifies
+it without hashing it into the frontiers again. Integrity-only drain checkpoints
+resume at the acquired end. Both forms keep private hash-library memory out of
+their encodings. Exact checkpoint creation charges suffix hashing as work;
+decoder reservations use the next frame's actual wire geometry and scratch
+requirement before allocation.
+
 **If violated:** malformed packs or mismatched cursor/source pairs can publish
 partially verified data.
 
@@ -3221,6 +3271,26 @@ keys and categories. The server checks ref and publication projections before
 committing its physical batch. Host policy acquisition and other effect groups
 retain their existing boundaries; these checks do not assert that every host
 policy path has moved into the portable module.
+
+## Acceptance export binds sealed artifacts before carrying their facts
+
+**Always:** in-process evidence export compares object-set roots, ruleset/profile
+bindings, and repository identity. It verifies canonical signed heads and the
+closure's original requested head sequence before sorting envelope records. It
+authenticates every relied-on witness page and requires exact count and chain
+termination before emitting bounded distinct supplier IDs.
+
+**Because:** privately constructed artifacts from different operations or a partial
+witness chain cannot jointly establish the facts carried to an acceptance writer.
+
+**If violated:** substituted heads, truncated dependencies, or unrelated proofs
+could be reported as facts from one verified operation.
+
+**Enforcement status:** bounded export helper regressions, frozen closure-root
+vectors, and a sealed-artifact export test cover head checks, witness-chain
+authentication, budgets, binding, and real `VerifiedPack`/`ClosureProof` input.
+Decision parity awaits the acceptance-decision lanes. No live guard or remote
+authentication responsibility moves into this constructor.
 
 ## Scheduled entry refusals follow complete source integrity
 

@@ -50,6 +50,16 @@ pub fn verify(data: &[u8]) {
     verify_model::exercise(data);
 }
 
+/// Exercises caller-driven compute schedules against the serial verification oracle.
+///
+/// # Panics
+/// Panics if scheduling changes evidence, refusals, or ordered output events.
+pub fn compute_schedule(data: &[u8]) {
+    if data.len() <= MAX_INPUT_BYTES {
+        verify_model::exercise_compute(data);
+    }
+}
+
 /// Exercises the strict page decoder with finite shared operation limits.
 ///
 /// # Panics
@@ -435,3 +445,6 @@ pub mod fork_advance;
 // decision
 /// Bounded ref transitions checked against an independent CAS oracle.
 pub mod ref_decisions;
+
+/// Bounded ticketed advance, cleanup, and reservation settlement replay.
+pub mod ticketed;

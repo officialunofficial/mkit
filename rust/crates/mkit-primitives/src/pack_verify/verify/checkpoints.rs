@@ -1,19 +1,20 @@
 //! Checkpoint ownership and strict drained-boundary snapshots for verify runs.
 //!
-//! A verify checkpoint exists only at a fully committed entry boundary: every
-//! buffered record is under its sequence root, no operation or acquisition is
-//! outstanding, and the window cursor is resumable. Resuming audits every
-//! committed index against caller-retained pages before entry decoding
-//! continues; lost pages fail as `UnavailableInput`, never as absence.
+//! A normal verify checkpoint exists at a fully committed entry boundary.
+//! Its exact cursor preserves acquired hash frontiers without rereading a
+//! consumed prefix. Resume authenticates every committed evidence index before
+//! decoding continues; lost pages fail as `UnavailableInput`, never as absence.
+//! Integrity-only drains retain the first refusal and acquired hash frontiers;
+//! their evidence indices are inert and cannot produce verified artifacts.
 use super::{
-    Failure, FailureCode, IntegrityPass, Live, PackSource, Phase, RepositoryId, Resources, Step,
-    Then, VerifyDriver, Which, WindowReader, failure,
+    Failure, FailureCode, Live, PackSource, Phase, RepositoryId, Resources, Step, Then,
+    VerifyDriver, Which, WindowReader, failure,
     index::{Index, Sequence},
     kind_of,
 };
 use crate::evidence::checkpoint::{
-    self, Checkpoint, CheckpointMeta, CheckpointPhase, CheckpointView, IndexCheckpoint,
-    VerifyCheckpoint,
+    self, Checkpoint, CheckpointMeta, CheckpointPhase, CheckpointView, DeferredFailure,
+    IndexCheckpoint, VerifyCheckpoint,
 };
 use crate::limits::{EvidenceLimits, IndexedProfile, VerifyLimits};
 use mkit_core::pack::window::WindowCursor;
@@ -34,7 +35,9 @@ impl VerifyDriver {
     /// satisfy new acquisitions. Cumulative work, evidence, and peak accounting
     /// survive restart; restored allocations are charged again. Before entry
     /// decoding continues, every committed evidence index is authenticated
-    /// page by page against the caller's retained-page store.
+    /// page by page against the caller's retained-page store. Integrity-only
+    /// snapshots resume only hashing and their deferred terminal refusal;
+    /// partial evidence records are discarded and never audited or sealed.
     ///
     /// # Errors
     /// Refuses changed sources, repositories, profiles or limits, reused run
@@ -56,7 +59,7 @@ impl VerifyDriver {
             || meta.profile != profile
             || meta.limits != limits
             || meta.generation == generation
-            || meta.phase != CheckpointPhase::Decode
+            || !matches!(meta.phase, CheckpointPhase::Decode | CheckpointPhase::Drain)
         {
             return Err(failure(FailureCode::InvalidCheckpoint));
         }
@@ -64,11 +67,22 @@ impl VerifyDriver {
             .checkpoint_bytes
             .checked_add(8192)
             .ok_or_else(|| failure(FailureCode::ResourceLimit))?;
-        let integrity_reservation = IntegrityPass::reservation(source.len)?;
         let mut resources = Resources::resume(limits, meta.usage)?;
         resources.reserve(std::mem::size_of::<Self>() as u64)?;
-        resources.reserve(integrity_reservation)?;
         resources.reserve(workspace)?;
+        let state = checkpoint.decode(limits)?;
+        let acquired_hash_end = WindowCursor::from_bytes(&state.cursor)
+            .map_err(|_| failure(FailureCode::InvalidCheckpoint))?
+            .metadata()
+            .map_err(|_| failure(FailureCode::InvalidCheckpoint))?
+            .acquired_end()
+            .ok_or_else(|| failure(FailureCode::InvalidCheckpoint))?;
+        let integrity_work = source
+            .len
+            .checked_sub(acquired_hash_end)
+            .and_then(|remaining| remaining.checked_mul(3))
+            .ok_or_else(|| failure(FailureCode::InvalidCheckpoint))?;
+        resources.protect_work(integrity_work)?;
         resources.work(
             (checkpoint.bytes().len() as u64)
                 .checked_mul(4)
@@ -76,13 +90,13 @@ impl VerifyDriver {
                 .ok_or_else(|| failure(FailureCode::ResourceLimit))?,
         )?;
         let mut machine = Self::new(source, repository, profile, limits, generation)?;
-        let state = checkpoint.decode(limits)?;
         let verify = state
             .verify
             .ok_or_else(|| failure(FailureCode::InvalidCheckpoint))?;
         machine.restore_decode(&meta, &state.cursor, &verify, &mut resources)?;
         resources.release(workspace)?;
         machine.resources = resources;
+        machine.acquired_hash_end = acquired_hash_end;
         machine.header = meta.header;
         machine.sequence = meta.sequence;
         machine.ordinal = meta.ordinal;
@@ -95,12 +109,15 @@ impl VerifyDriver {
         machine.edges = verify.edges;
         machine.external_lookups = verify.external_lookups;
         machine.signature_failure = verify.signature_failure;
+        machine.deferred_failure = verify.deferred_failure.map(DeferredFailure::failure);
         machine.roots.clear();
-        machine.op = Some(Live {
-            index: AUDIT_ORDER[0],
-            op: machine.index_mut(AUDIT_ORDER[0]).audit(),
-            then: Then::Audit { next: 1 },
-        });
+        if machine.phase == Phase::Entries {
+            machine.op = Some(Live {
+                index: AUDIT_ORDER[0],
+                op: machine.index_mut(AUDIT_ORDER[0]).audit(),
+                then: Then::Audit { next: 1 },
+            });
+        }
         Ok(machine)
     }
 
@@ -111,8 +128,6 @@ impl VerifyDriver {
         verify: &VerifyCheckpoint,
         resources: &mut Resources,
     ) -> Result<(), Failure> {
-        self.integrity = None;
-        resources.release(self.integrity_reservation)?;
         resources.reserve(self.decoder_reservation)?;
         let cursor = WindowCursor::from_bytes(cursor_bytes)
             .map_err(|_| failure(FailureCode::InvalidCheckpoint))?;
@@ -127,10 +142,13 @@ impl VerifyDriver {
             .ok_or_else(|| failure(FailureCode::InvalidCheckpoint))?;
         if view.pack_len() != self.source.len
             || view.window_size() != self.limits.acquisition_bytes
-            || view.position() != position
-            || view.payload_sum() != meta.payload
+            || !view.exact()
+            || view.integrity_only() != (meta.phase == CheckpointPhase::Drain)
+            || (meta.phase == CheckpointPhase::Decode
+                && (view.position() != position
+                    || view.payload_sum() != meta.payload
+                    || u64::from(view.entry_index()) != meta.ordinal))
             || Some((view.pack_version(), view.entry_count())) != meta.header
-            || u64::from(view.entry_index()) != meta.ordinal
             || view.expected_pack_id() != Some(self.source.id)
         {
             return Err(failure(FailureCode::InvalidCheckpoint));
@@ -187,7 +205,11 @@ impl VerifyDriver {
             verify.heads.commitment,
             verify.heads.count,
         )?;
-        self.phase = Phase::Entries;
+        self.phase = if meta.phase == CheckpointPhase::Drain {
+            Phase::Drain
+        } else {
+            Phase::Entries
+        };
         Ok(())
     }
 
@@ -218,12 +240,14 @@ impl VerifyDriver {
         Ok(())
     }
 
-    /// Encodes a snapshot at a fully committed entry boundary.
+    /// Encodes a snapshot at an entry boundary or during integrity-only draining.
     ///
     /// Every buffered record must be under its sequence root: the boundary is
     /// reached only right after a flush finished at an entry end. The borrowed
     /// output remains charged until the next mutable call. Persist it in
-    /// trusted storage together with every acknowledged evidence page.
+    /// trusted storage together with every acknowledged evidence page. A drain
+    /// carries only committed index roots: discarded partial records cannot
+    /// affect its terminal refusal and never establish verified status.
     ///
     /// # Errors
     /// `CheckpointNotReady` preserves progress outside the drained boundary:
@@ -232,32 +256,38 @@ impl VerifyDriver {
     /// Exhaustion is `ResourceLimit`.
     pub fn checkpoint(&mut self) -> Result<&Checkpoint, Failure> {
         self.release_checkpoint()?;
-        if self.phase != Phase::Entries
+        let draining = self.phase == Phase::Drain;
+        if !matches!(self.phase, Phase::Entries | Phase::Drain)
+            || !self.compute_checkpointable()
             || self.work.is_some()
             || self.op.is_some()
             || self.pending.is_some()
             || self.retained.is_some()
-            || !self.roots.is_empty()
+            || (!draining && !self.roots.is_empty())
             || self.reader.is_none()
-            || [
-                &self.ordinals,
-                &self.occurrences,
-                &self.dependencies,
-                &self.heads,
-            ]
-            .iter()
-            .any(|sequence| sequence.pending() != 0)
+            || (!draining
+                && [
+                    &self.ordinals,
+                    &self.occurrences,
+                    &self.dependencies,
+                    &self.heads,
+                ]
+                .iter()
+                .any(|sequence| sequence.pending() != 0))
         {
             return Err(failure(FailureCode::CheckpointNotReady));
         }
         let reservation = self.checkpoint_reservation()?;
         self.resources.reserve(reservation)?;
         let result = (|| {
-            self.resources.work(3 * 8192)?;
+            let suffix_work = self.checkpoint_cursor_work();
+            self.resources.work(
+                suffix_work
+                    .checked_add(3 * 8192)
+                    .ok_or_else(|| failure(FailureCode::ResourceLimit))?,
+            )?;
             let cursor = self
-                .reader
-                .as_ref()
-                .and_then(WindowReader::checkpoint)
+                .checkpoint_cursor()
                 .ok_or_else(|| failure(FailureCode::CheckpointNotReady))?
                 .to_bytes();
             let mut usage = self.resources.usage();
@@ -280,7 +310,11 @@ impl VerifyDriver {
                         profile: self.profile,
                         generation: self.generation,
                         sequence: self.sequence,
-                        phase: CheckpointPhase::Decode,
+                        phase: if draining {
+                            CheckpointPhase::Drain
+                        } else {
+                            CheckpointPhase::Decode
+                        },
                         header: self.header,
                         ordinal: self.ordinal,
                         payload: self.payload,
@@ -303,6 +337,7 @@ impl VerifyDriver {
                         edges: self.edges,
                         external_lookups: self.external_lookups,
                         signature_failure: self.signature_failure,
+                        deferred_failure: self.deferred_failure.as_ref().map(DeferredFailure::from),
                     }),
                 },
                 self.limits,

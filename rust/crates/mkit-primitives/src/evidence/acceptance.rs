@@ -10,6 +10,11 @@ use mkit_core::{
     object::{Object, ObjectType},
 };
 
+mod verified;
+pub use verified::{
+    AcceptanceEvidenceBinding, AcceptanceEvidenceBuildCfg, AcceptanceEvidenceInput,
+};
+
 /// Evidence format version, independent of crate and ruleset versions.
 pub const FORMAT_VERSION: u16 = 1;
 /// Permanent digest domain; followed by one NUL byte and canonical encoding.
@@ -315,22 +320,7 @@ impl AcceptanceEvidence {
     /// Refuses malformed canonical objects, metadata/id mismatches, or bad signatures.
     pub fn recheck_heads(&self) -> Result<()> {
         for head in self.heads() {
-            let object = mkit_core::serialize::deserialize(head.canonical_bytes)
-                .map_err(|_| failure(FailureCode::NonCanonicalObject))?;
-            let (kind, signer) = match &object {
-                Object::Commit(c) => (ObjectType::Commit, c.signer),
-                Object::Remix(c) => (ObjectType::Remix, c.signer),
-                Object::Tag(c) => (ObjectType::Tag, c.signer),
-                _ => return Err(failure(FailureCode::EvidenceHeadMismatch)),
-            };
-            if kind != head.kind || signer != head.signer {
-                return Err(failure(FailureCode::EvidenceHeadMismatch));
-            }
-            if mkit_core::object::id_from_object(&object, head.canonical_bytes) != head.object_id {
-                return Err(failure(FailureCode::ObjectHashMismatch));
-            }
-            mkit_core::sign::verify_object_signature(&object)
-                .map_err(|_| failure(FailureCode::BadSignature))?;
+            checked_head(head.canonical_bytes, Some(head))?;
         }
         Ok(())
     }
@@ -392,6 +382,35 @@ impl AcceptanceEvidence {
             .chunks_exact(32)
             .filter_map(|b| b.try_into().ok())
     }
+}
+
+fn checked_head<'a>(bytes: &'a [u8], expected: Option<HeadFact<'_>>) -> Result<HeadFact<'a>> {
+    let object = mkit_core::serialize::deserialize(bytes)
+        .map_err(|_| failure(FailureCode::NonCanonicalObject))?;
+    let (kind, signer) = match &object {
+        Object::Commit(c) => (ObjectType::Commit, c.signer),
+        Object::Remix(c) => (ObjectType::Remix, c.signer),
+        Object::Tag(c) => (ObjectType::Tag, c.signer),
+        _ => return Err(failure(FailureCode::EvidenceHeadMismatch)),
+    };
+    let object_id = mkit_core::object::id_from_object(&object, bytes);
+    if let Some(expected) = expected {
+        if kind != expected.kind || signer != expected.signer {
+            return Err(failure(FailureCode::EvidenceHeadMismatch));
+        }
+        if object_id != expected.object_id {
+            return Err(failure(FailureCode::ObjectHashMismatch));
+        }
+    }
+    mkit_core::sign::verify_object_signature(&object)
+        .map_err(|_| failure(FailureCode::BadSignature))?;
+    Ok(HeadFact {
+        object_id,
+        kind,
+        signer,
+        signature_result: SignatureResult::Valid,
+        canonical_bytes: bytes,
+    })
 }
 
 fn cap(actual: usize, maximum: u32) -> Result<()> {

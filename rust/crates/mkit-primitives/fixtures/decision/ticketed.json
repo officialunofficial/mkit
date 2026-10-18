@@ -1,0 +1,9 @@
+[
+  {"case":"accept","decision":"apply","tickets":1,"settlements":1,"outcomes":1},
+  {"case":"cleanup","decision":"apply","tickets":1,"settlements":1,"outcomes":1,"reason":"PackMissing"},
+  {"case":"settle","decision":"apply","tickets":0,"settlements":1,"outcomes":1,"reason":"Internal"},
+  {"case":"replay","decision":"recorded","tickets":0,"settlements":0,"outcomes":0},
+  {"case":"proof-refused","decision":"reject","tickets":0,"settlements":1,"outcomes":1,"reason":"Internal"},
+  {"case":"proof-late","decision":"reject","tickets":0,"settlements":1,"outcomes":1,"reason":"Unspecified"},
+  {"case":"pending","decision":"retry","tickets":0,"settlements":0,"outcomes":0}
+]

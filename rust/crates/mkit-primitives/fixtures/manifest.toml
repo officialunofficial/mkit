@@ -32,7 +32,7 @@ spec = "SPEC-PRIMITIVE-EVIDENCE"
 
 [[formats]]
 type = "verify-checkpoint"
-format_version = 2
+format_version = 3
 decoder = "evidence::checkpoint::Checkpoint::from_bytes"
 fuzz_target = "checkpoint"
 spec = "SPEC-PRIMITIVE-EVIDENCE"
@@ -800,9 +800,9 @@ decode_config = "indexed-checkpoint"
 expected = "InvalidCheckpoint"
 spec = "SPEC-PRIMITIVE-EVIDENCE checkpoint envelope"
 path = "evidence/checkpoint-version.bin"
-sha256 = "1ab054518a61715896408cdfca8495098584bffc3de366a00491d62523fdadee"
+sha256 = "a32a7332f1e2e169b4e2f97806fff486a71ef06fb6c42af6dab8117a8ae104d3"
 semantic = "evidence/checkpoint-version.json"
-semantic_sha256 = "ecf76fedd558f33954a0d9991ca6571c0af8d6ce8a26ecf6bb33934ad9f9282a"
+semantic_sha256 = "12c2448de56f95e96a1defcd53030acfd2457ac965aee34936738b8750c179a3"
 
 [[fixtures]]
 type = "framing-checkpoint"
@@ -897,16 +897,16 @@ semantic_sha256 = "e700621a5049b9fe2d53c480863fd1171840fab31cf44605684edd683b2cc
 
 [[fixtures]]
 type = "verify-checkpoint"
-format_version = 2
+format_version = 3
 ruleset = 1
 profile = "indexed"
 decode_config = "indexed-checkpoint"
 expected = "Checkpoint"
 spec = "SPEC-PRIMITIVE-EVIDENCE checkpoint envelope"
 path = "evidence/checkpoint-verify.bin"
-sha256 = "6249432dcd84699ffd1c33b50ad2d61f72d3b5bc1c023de1914ea165e6f8206e"
+sha256 = "9e664310c1bc6ce3e07c8d29d6588f32e52b54302e46f81d0f942623c19100a8"
 semantic = "evidence/checkpoint-verify.json"
-semantic_sha256 = "be797c4125e6f742f3bc93d567008c5de007b64d7c5f0db9c51e26c40c5b2f8e"
+semantic_sha256 = "efb97f33a85b434849fcb189673e3a23faa3eed96b888c1b71c78352fc7c94a9"
 
 [[fixtures]]
 type = "evidence-page"
@@ -946,6 +946,20 @@ path = "evidence/proof-multilevel-absence.bin"
 sha256 = "e3f20e2d3ef43b750772653b11084b4476e7f6295b66e5cf45ecd7b7a263686b"
 semantic = "evidence/proof-multilevel-absence.json"
 semantic_sha256 = "fdaf4e0392f890e6140fa2134a46febfd73bdeab9a5b876ea3416b1546baa207"
+
+# Semantic export vectors; no new evidence encoding.
+[[contracts]]
+type = "AcceptanceEvidence::from_verified"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance-export/heads-root.json"
+semantic = "acceptance-export/README.md"
+spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+expected = "exact closure head roots, preserving order and duplicate occurrences"
+decode_config = "in-memory export; at most 3 head occurrences; 96 id bytes"
+sha256 = "9d4b94758bedcf8ab307f772b19d7047be44b60935cbbd73ffe77a88da278c58"
+semantic_sha256 = "d53497f36f3318de521280162169c2baf425e88a382214a5bbc4149f7dfd4a0c"
 
 # pack_verify
 [[formats]]
@@ -1643,6 +1657,27 @@ sha256 = "de22011565b86b74124041c8265924b8fac30b823e8ffd9c5d281ca9174005fa"
 spec = "README.md stable failure codes"
 
 
+# ticketed decisions
+[[fixtures]]
+type = "decision::ticketed"
+format_version = 1
+ruleset = "SPEC-SERVER"
+profile = "semantic-ticketed"
+path = "decision/ticketed.json"
+semantic = "decision/ticketed.md"
+decode_config = "facts=256,guards=64,bytes=65536,work=100000"
+expected = "exact decision, terminal identity, settlement and outcome per row"
+spec = "SPEC-SERVER §6.3; §9.3; SPEC-TRANSPORT-CONNECT §4"
+sha256 = "932cf65dd1e1601bd978018c1f02db9bbeba1b43a772e22a632081fef585ee8a"
+semantic_sha256 = "17a49068263dbcb9002d8f40cd5187cf75cddfe025ba5db2fae8e6dfa8d1a6a2"
+
+[[formats]]
+type = "decision::ticketed"
+format_version = 1
+decoder = "decision::ticketed::decide_ticketed_advance"
+fuzz_target = "ref_decisions"
+spec = "SPEC-SERVER §6.3; §9.3; SPEC-TRANSPORT-CONNECT §4"
+
 # verify
 [[formats]]
 type = "verify-record"
@@ -1806,3 +1841,10 @@ path = "evidence/verify-record-external-version.bin"
 sha256 = "ddfbfce8027b3218b1dc1cd968648094a06a15feece161924949995aa81b236a"
 semantic = "evidence/verify-record-external-version.json"
 semantic_sha256 = "d63ab9d7d11ce11a95ccad6a979900d28df0ba4722aa14afe1c2da4a2e22270c"
+
+[[contracts]]
+type = "ComputeScheduling"
+ruleset = 1
+path = "compute/schedules.json"
+sha256 = "41588192367ab296f262753a415f4bae6af2f94dbcea581f7c45c0cc59ffacd5"
+spec = "SPEC-PRIMITIVE-EVIDENCE#412-caller-owned-computation"

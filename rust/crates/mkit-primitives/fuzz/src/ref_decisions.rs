@@ -19,6 +19,7 @@ use mkit_primitives::{
 /// accepts a mutated dependency, exceeds its limits, or changes on repetition.
 #[allow(clippy::too_many_lines)]
 pub fn check(data: &[u8]) {
+    super::ticketed::check(data);
     let byte = |i| data.get(i).copied().unwrap_or(0);
     let old = [3; 32];
     let new = [4; 32];
@@ -92,6 +93,7 @@ pub fn check(data: &[u8]) {
         policy: None,
         admission: None,
         accounting: None,
+        storage: None,
         publication: None,
     };
     let limits = RefDecisionLimits {

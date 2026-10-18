@@ -36,7 +36,7 @@ pub(super) struct AdvanceWrite<'a> {
 
 impl AdvanceWrite<'_> {
     /// The counter is in this batch's own partition.
-    fn counts_inline(&self) -> bool {
+    pub(super) fn counts_inline(&self) -> bool {
         self.count_storage && *self.source == self.shards.coordinator(&self.repo_id.namespace)
     }
 }
@@ -118,7 +118,7 @@ fn detail_keys_for<'a>(
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Proof {
+pub(super) enum Proof {
     Ready,
     MarkerMissing,
     PackMissing,
@@ -130,7 +130,7 @@ enum Proof {
 /// race drops it so the next pass HEADs again. Entries die with the request.
 #[derive(Default)]
 pub(super) struct TicketHeads {
-    proofs: std::collections::BTreeMap<Hash, (TicketV1, Result<Proof, ServerError>)>,
+    pub(super) proofs: std::collections::BTreeMap<Hash, (TicketV1, Result<Proof, ServerError>)>,
 }
 
 async fn ticket_proofs<B: crate::BlobStore>(
@@ -298,7 +298,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         heads: &mut TicketHeads,
     ) -> Result<Option<super::StoredResult>, ServerError> {
         let OpKind::AdvanceRefs {
-            head, tickets: ids, ..
+            head,
+            packmap,
+            tickets: ids,
         } = &op.kind
         else {
             return Ok(None);
@@ -380,14 +382,32 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 return Ok(None);
             };
             // Later tickets cannot supersede the first request-order failure.
-            let lost = (0..=first_failure)
-                .filter(|&i| {
-                    // A row that failed validation this pass may keep a stale proof from an
-                    // earlier pass; only a currently valid ticket can be aborted.
-                    rows[i].is_ok()
-                        && matches!(heads.proofs.get(&ids[i]), Some((_, Ok(Proof::PackMissing))))
-                })
-                .collect::<Vec<_>>();
+            // The semantic cleanup decision picks the abortable set; the
+            // reference filter stays as the fallback for shapes the contract
+            // declines.
+            let lost = super::plan::ticketed_decision::cleanup_lost(
+                auth,
+                &advance,
+                head,
+                packmap,
+                &rows,
+                heads,
+                snap,
+                business_now,
+            )?
+            .unwrap_or_else(|| {
+                (0..=first_failure)
+                    .filter(|&i| {
+                        // A row that failed validation this pass may keep a stale proof from an
+                        // earlier pass; only a currently valid ticket can be aborted.
+                        rows[i].is_ok()
+                            && matches!(
+                                heads.proofs.get(&ids[i]),
+                                Some((_, Ok(Proof::PackMissing)))
+                            )
+                    })
+                    .collect::<Vec<_>>()
+            });
             if lost.is_empty() {
                 return Err(answer);
             }

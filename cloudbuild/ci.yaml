@@ -95,8 +95,8 @@ steps:
           cargo check --locked -p mkit-primitives --all-features --all-targets
           cargo nextest run --locked -p mkit-primitives --no-default-features --test framing_backends --test framing_vectors -j 3 --no-tests=fail
           cargo nextest run --locked -p mkit-primitives --all-features --test framing_backends --test framing_vectors -j 3 --no-tests=fail
-          cargo nextest run --locked -p mkit-primitives --no-default-features --lib -E 'test(resume_tests::)' -j 3 --no-tests=fail
-          cargo nextest run --locked -p mkit-primitives --all-features --lib -E 'test(resume_tests::)' -j 3 --no-tests=fail
+          cargo nextest run --locked -p mkit-primitives --no-default-features --lib -E 'test(resume_tests::) | test(pack_verify::verify::tests::compute::)' -j 3 --no-tests=fail
+          cargo nextest run --locked -p mkit-primitives --all-features --lib -E 'test(resume_tests::) | test(pack_verify::verify::tests::compute::)' -j 3 --no-tests=fail
           cargo test --locked -p mkit-primitives --doc
           cargo test --locked -p mkit-primitives --no-default-features --doc
           RUSTDOCFLAGS=-Dwarnings cargo doc --locked -p mkit-primitives --all-features --no-deps
@@ -151,7 +151,7 @@ steps:
       - "CARGO_PROFILE_TEST_DEBUG=0"
       - "CARGO_PROFILE_TEST_CODEGEN_UNITS=256"
       # sccache → GCS. RW mode + bucket; ADC comes from the build SA.
-      - "RUSTC_WRAPPER=sccache"
+      - "RUSTC_WRAPPER=/tmp/mkit-ci-rustc"
       - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
       - "SCCACHE_GCS_RW_MODE=READ_WRITE"
       - "SCCACHE_GCS_KEY_PREFIX=ci"
@@ -159,6 +159,31 @@ steps:
       - -c
       - |
         set -euo pipefail
+        # sccache replaces Cargo's jobserver, including for uncached binaries.
+        # Preserve the serial compiler bound for the linked server lib-test.
+        cat > /tmp/mkit-ci-rustc <<'SH'
+        #!/bin/bash
+        set -euo pipefail
+        if [[ " $* " == *" --crate-name mkit_server "* &&
+              " $* " == *" crates/mkit-server/src/lib.rs "* &&
+              " $* " == *" --test "* &&
+              " $* " == *" --emit=dep-info,link "* ]]; then
+          exec "$@"
+        fi
+        # Cargo's JSON renderer drops raw stdout, including sccache's signal
+        # diagnostics. Copy it to stderr on failure and preserve the exit code.
+        output=$(mktemp)
+        trap 'rm -f "$output"' EXIT
+        status=0
+        sccache "$@" >"$output" || status=$?
+        cat "$output"
+        if [ "$status" -ne 0 ]; then
+          cat "$output" >&2
+        fi
+        exit "$status"
+        SH
+        chmod +x /tmp/mkit-ci-rustc
+
         # Every command after the workspace build + swtpm setup is attempted
         # even after a failure (a `cd` into a missing tree aborts only its
         # own subshell, via `|| exit 1`): each records into `status` — a
@@ -181,20 +206,9 @@ steps:
         # tests drive contrib/signers/target/debug/mkit-sign-file and only fall
         # back to building it on-the-fly when missing.
         #
-        # mkit-sign-tpm's integration test needs a real or simulated TPM 2.0
-        # device. Cloud Build's VM exposes a real vTPM at /dev/tpm0 (Shielded
-        # VM), which the binary's `tcti()` falls back to whenever `TCTI` /
-        # `TPM2TOOLS_TCTI` are unset — but that device is the VM's own
-        # Secure-Boot/measured-boot TPM, not a scratch TPM for tests, so
-        # writing arbitrary persistent objects to it is unsupported and
-        # produces "inconsistent attributes" errors. Run an ephemeral swtpm
-        # simulator instead (README's documented dev recipe) so the test
-        # gets a clean, disposable TPM state every build, matching local dev.
-        # Lowercase bash variable names here, not upper-snake-case — Cloud
-        # Build's dynamicSubstitutions scanner treats a bare dollar-prefixed
-        # upper-snake-case token as an attempted substitution reference and
-        # fails the build if it isn't a declared one (see the escaping note
-        # in cloudbuild/security.yaml).
+        # TPM tests use disposable swtpm state, never the host's measured-boot
+        # /dev/tpm0. Wait for both simulator ports before initializing it below.
+        # Lowercase variables avoid Cloud Build's substitution scanner.
         swtpm_state_dir=$(mktemp -d)
         swtpm socket --tpmstate dir="$swtpm_state_dir" --tpm2 \
           --server type=tcp,port=2321 --ctrl type=tcp,port=2322 \
@@ -282,9 +296,10 @@ steps:
         ) || status=1
 
         # ── rust/ workspace: tests ──────────────────────────────────────────
-        # The unified server lib-test compiler reaches this worker's memory
-        # limit even alone. Smaller codegen units bound each LLVM module;
-        # serial compilation reserves the remaining headroom for rustc.
+        # The unified server lib-test needs Cargo's single-job jobserver;
+        # sccache substitutes CPU-count parallelism and exhausts memory.
+        # The wrapper above bypasses it only for that linked test target.
+        # Smaller codegen units and serial Cargo builds remain required.
         # Test selection and execution concurrency are unchanged.
         ( cd rust || exit 1
           failed=0

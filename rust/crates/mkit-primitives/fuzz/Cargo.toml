@@ -130,3 +130,11 @@ test = false
 doc = false
 bench = false
 required-features = ["libfuzzer"]
+
+[[bin]]
+name = "compute_schedule"
+path = "fuzz_targets/compute_schedule.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]

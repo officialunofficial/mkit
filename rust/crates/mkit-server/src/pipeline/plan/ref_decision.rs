@@ -390,6 +390,7 @@ fn ref_snapshot(repository: RepositoryId) -> RefSnapshot {
         admission: None,
         accounting: None,
         publication: None,
+        storage: None,
     }
 }
 
@@ -427,7 +428,7 @@ fn push_value(
 /// Emit each processed update's guards in request order. The reference guards
 /// every update it evaluates, so a repeated name contributes once per slot; a
 /// conflict bounds the processed prefix at the first failing condition.
-fn lower_ref_slots(
+pub(super) fn lower_ref_slots(
     request: &WriteRequest<'_>,
     guarded: &Guarded<WriteDecision>,
     required: &mut Vec<Precondition>,
