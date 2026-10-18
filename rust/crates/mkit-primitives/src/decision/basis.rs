@@ -155,13 +155,16 @@ impl AcceptanceBasis {
             return Err(failure(FailureCode::EvidenceBindingMismatch));
         }
         let repository = proof.repository();
-        let mut facts = witness_facts(proof, witness_pages, cfg)?;
         // The supplied list must be exactly what the verification received,
         // re-requests included, so an omitted, extra or altered base is an error
-        // rather than a missing guard.
-        if ExternalBases::of(external_bases)? != verified.external_bases() {
+        // rather than a missing guard. The count is compared before any hashing.
+        let sealed = verified.external_bases();
+        if u64::try_from(external_bases.len()).ok() != Some(sealed.count)
+            || ExternalBases::of(external_bases)? != sealed
+        {
             return Err(failure(FailureCode::EvidenceBindingMismatch));
         }
+        let mut facts = witness_facts(proof, witness_pages, cfg)?;
         merge_external_bases(&mut facts, external_bases, repository, cfg)?;
         let mut guards = Vec::new();
         guards
@@ -377,12 +380,19 @@ fn merge_external_bases(
     cfg: &BasisCfg,
 ) -> Result<(), Failure> {
     let max = cfg.max_dependencies.min(MAX_BASIS_DEPENDENCIES) as usize;
+    let mut index: BTreeMap<Hash, usize> = facts
+        .iter()
+        .enumerate()
+        .map(|(at, fact)| (fact.object, at))
+        .collect();
     for base in bases {
         if base.repository != repository {
             return Err(failure(FailureCode::EvidenceBindingMismatch));
         }
-        match facts.iter().find(|fact| fact.object == base.object) {
-            Some(prior) if prior != base => return Err(failure(FailureCode::InvalidResponse)),
+        match index.get(&base.object) {
+            Some(&at) if facts[at] != *base => {
+                return Err(failure(FailureCode::InvalidResponse));
+            }
             Some(_) => {}
             None => {
                 if facts.len() >= max {
@@ -391,6 +401,7 @@ fn merge_external_bases(
                 facts
                     .try_reserve(1)
                     .map_err(|_| failure(FailureCode::ResourceLimit))?;
+                index.insert(base.object, facts.len());
                 facts.push(base.clone());
             }
         }

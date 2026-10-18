@@ -802,7 +802,7 @@ spec = "SPEC-PRIMITIVE-EVIDENCE checkpoint envelope"
 path = "evidence/checkpoint-version.bin"
 sha256 = "686f823a14875f7d0d4a8a675ebbbd84a506e06266ee34fe25b3f5b8550d3985"
 semantic = "evidence/checkpoint-version.json"
-semantic_sha256 = "12c2448de56f95e96a1defcd53030acfd2457ac965aee34936738b8750c179a3"
+semantic_sha256 = "22f760144a2a17f7b7d7c5850d952932ea16d70136891a6c5a56fef279979806"
 
 [[fixtures]]
 type = "framing-checkpoint"

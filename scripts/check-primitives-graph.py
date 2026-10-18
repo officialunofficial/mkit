@@ -40,16 +40,18 @@ def primitives_features(package, target=None):
                "--prefix", "none", "-f", "{p} {f}", "-i", "mkit-primitives"]
     if target:
         command += ["--target", target]
-    try:
-        output = subprocess.check_output(command, cwd=root, text=True, stderr=subprocess.DEVNULL)
-    except subprocess.CalledProcessError:
+    done = subprocess.run(command, cwd=root, text=True, capture_output=True)
+    if done.returncode == 0:
+        return done.stdout
+    if "did not match any packages" in done.stderr:
         return None  # the package does not depend on mkit-primitives
-    return output
+    sys.exit(f"cargo tree failed for {package}: {done.stderr.strip()}")
 
 
-control = primitives_features("mkit-primitives-fuzz")
-if control is None or FEATURE not in control:
-    sys.exit(f"graph canary failed: {FEATURE} not visible through the fuzz crate")
+for target in (None, "wasm32-unknown-unknown"):
+    control = primitives_features("mkit-primitives-fuzz", target)
+    if control is None or FEATURE not in control:
+        sys.exit(f"graph canary failed: {FEATURE} not visible through the fuzz crate ({target or 'native'})")
 for package in shipped:
     for target in (None, "wasm32-unknown-unknown"):
         output = primitives_features(package, target)

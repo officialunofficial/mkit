@@ -278,9 +278,9 @@ envelope decoding alone does not perform those resume checks.
 `format_version:u16 = 4` appends one verify-state section after `core_cursor`
 and before `checksum`. The section exists exactly when the version is 4 and
 the phase is decode or integrity drain. Version 1 remains the framing-only
-format and carries no section. Version 2 is unsupported; discard that
+format and carries no section. Versions 2 and 3 are unsupported; discard that
 reconstructible state and restart from the immutable source. Every earlier
-field keeps the §4.1 v1 layout except for the additional phase value. A version-3
+field keeps the §4.1 v1 layout except for the additional phase value. A version-4
 envelope has no separate integrity frontier and uses the exact-boundary core
 cursor described below. Its `verified_pack_trailer` remains zero until final
 integrity acceptance.
@@ -349,7 +349,11 @@ Consistency rules for decode phase, all of which resume MUST check before progre
   fact the verification accepted, re-requests included, where `record` is the
   external dependency record encoding with consumed ordinal and child zeroed.
   The sealed `VerifiedPack` carries the same pair, so a host recomputes it from
-  the facts it supplied and an omitted or altered base is detectable.
+  the facts it supplied. This detects accidental omission or alteration; the
+  sum is not collision-resistant against a list chosen by an adversary, and the
+  host that supplies the list is trusted. A host that resumes from a checkpoint
+  persists the facts it supplied together with each checkpoint, and a count of
+  zero requires a zero sum.
 - `decoded` fits both the encoded execution limits and the encoded content
   profile; `edges` and `external_lookups` fit the encoded execution limits.
 - A present `signature_failure` ordinal is below `consumed_entries`.
@@ -627,8 +631,11 @@ commitment (count and wrapping hash sum) over every external member fact it
 accepted, re-requests included, and seals it in the verified pack and in the
 checkpoint. The sealed-artifact constructor takes the host's list of supplied
 facts and refuses (`EvidenceBindingMismatch`) unless its recomputed commitment
-equals the sealed one, so an omitted, extra or altered base is an error; it then
-collapses duplicates to one guard per object. The resulting-pair coverage's
+equals the sealed one, so an omitted, extra or altered base is an error (the list
+includes every re-request); it then collapses identical duplicates to one guard
+per object. Two different facts for one object, for instance a membership
+revision that moved between a base's requests, are `InvalidResponse`: the
+host re-verifies against a stable view. The resulting-pair coverage's
 dependency and supplier id sets carry no member facts; they stay with the
 clearance decision's dependency witnesses, and the constructor validates the
 coverage's repository, view and ruleset only.

@@ -421,6 +421,7 @@ fn validate_verify(m: &CheckpointMeta, verify: &VerifyCheckpoint) -> Result<(), 
         || verify.decoded > m.profile.decoded_bytes
         || verify.edges > m.limits.dependency_edges
         || verify.external_lookups > m.limits.external_lookups
+        || (verify.external_lookups == 0 && verify.external_sum != [0; 32])
         || verify
             .signature_failure
             .is_some_and(|(_, ordinal)| ordinal >= m.ordinal)
@@ -1219,6 +1220,21 @@ mod tests {
         let cursor = WindowCursor::from_bytes(&state.cursor).unwrap();
         assert!(cursor.metadata().unwrap().exact());
         assert_eq!(&bytes[4..6], &4_u16.to_le_bytes());
+        // A zero external-base count requires a zero sum.
+        let mut forged = state.verify.unwrap();
+        forged.external_sum = [1; 32];
+        let forged = encode(
+            &CheckpointView {
+                meta: state.meta,
+                integrity: state.integrity.as_ref().map(IntegrityState::view),
+                cursor: &state.cursor,
+                verify: Some(forged),
+            },
+            limits,
+        );
+        assert!(
+            forged.is_err() || Checkpoint::from_bytes(forged.unwrap().bytes(), limits).is_err()
+        );
         // The unshipped verification format is replaced, never legacy-decoded.
         let rechecksum = |mut body: Vec<u8>| {
             let checksum = domain_digest(DOMAIN, &body);

@@ -863,14 +863,15 @@ impl VerifyDriver {
             sum: self.external_sum,
         };
         bases.add(&fact)?;
-        self.external_lookups = external_lookups;
-        self.external_sum = bases.sum;
         self.pending = None;
         let canonical_len = fact.canonical_len;
         let binding = fact.canonical_binding;
         let work = self.work.as_mut().ok_or_else(invalid)?;
         work.fact = Some(fact);
         let request = self.request_id()?;
+        // Counted exactly when accepted: after the last fallible step.
+        self.external_lookups = external_lookups;
+        self.external_sum = bases.sum;
         let pending = Pending::Bytes {
             request,
             source: ByteSource::Canonical {

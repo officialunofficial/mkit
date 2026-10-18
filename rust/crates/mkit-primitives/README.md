@@ -237,7 +237,7 @@ separate version-one formats.
 | Framing record v1 | `FrameRecord::from_bytes` | Fixed 58 bytes, checked frame geometry, no allocation |
 | Closure state/witness/missing pages v1 | `closure::output::{validate_state_page, decode_witness, decode_missing}` | `PageDecodeCfg`, fixed 1,024-byte internal journal cap |
 | Acceptance evidence v1 | `AcceptanceEvidence::decode` | Explicit `AcceptanceEvidenceDecodeCfg` envelope, operation, head and dependency caps |
-| Checkpoint v1 and v3 | `Checkpoint::from_bytes` | `VerifyLimits`, 518 values per frontier, 4096-byte core cursor |
+| Checkpoint v1 and v4 | `Checkpoint::from_bytes` | `VerifyLimits`, 518 values per frontier, 4096-byte core cursor |
 
 The fixture manifest registers encoded formats, canonical bytes, semantic
 sidecars, expected outcomes, decoder names, and fuzz targets. Its read-only

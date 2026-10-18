@@ -55,8 +55,9 @@ collect the applicable entries between their old and new immutable pins.
   variant is replaced by `Verified(&[AcceptanceBasis])`: pass one basis per
   accepted pack, built with `AcceptanceBasis::from_verified` (sealed pack,
   closure proof, witness pages and the external delta-base facts you supplied
-  during verification, which must reproduce the pack's sealed external-base
-  commitment, `VerifiedPack::external_bases()`), `from_evidence` (decoded `AcceptanceEvidence`) or
+  during verification, every re-request included, which must reproduce the
+  pack's sealed `ExternalBases` commitment, `VerifiedPack::external_bases()`),
+  `from_evidence` (decoded `AcceptanceEvidence`) or
   `attested_by_host(HostAttestation)` (a host that verified with its own
   pipeline; it derives guards only from the fields it carries). The decision adds
   the basis guards to its guard set, so `RequiredGuard` gains
