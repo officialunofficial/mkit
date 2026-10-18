@@ -43,6 +43,9 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 webpki-roots = { version = "1", optional = true }
 http = { version = "1", optional = true }
 http-body-util = { version = "0.1", optional = true }
+# Counts connection establishments so a stale pooled connection is told apart
+# from a fresh one.
+tower-service = { version = "0.3", optional = true }
 bytes = { version = "1", optional = true }
 # gzip, pure-Rust backend. The only content coding the channel speaks.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"], optional = true }
@@ -66,7 +69,7 @@ client = ["dep:mkit-client", "dep:futures-executor"]
 connect-native = [
     "client",
     "dep:tokio", "dep:hyper", "dep:hyper-util", "dep:hyper-rustls", "dep:rustls",
-    "dep:webpki-roots", "dep:http", "dep:http-body-util", "dep:bytes", "dep:flate2",
+    "dep:webpki-roots", "dep:http", "dep:http-body-util", "dep:tower-service", "dep:bytes", "dep:flate2",
     "dep:getrandom",
 ]
 

@@ -241,6 +241,14 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Fixed
 
+- The native HTTP channel (`mkit-sync` `connect-native`, and so `mkit-client`
+  over it) no longer fails a read when the server closes a pooled keep-alive
+  connection just as the request is written to it. A read RPC (or GET/HEAD)
+  that fails with a closed-before-response error on a reused connection is
+  resent once on a fresh one. Signed writes, unknown procedures, streaming
+  uploads and failures on a fresh connection are never resent by the channel;
+  a write still surfaces the transient connection error so the caller can
+  retry with its signed identity.
 - Preserve reference diagnostics for partial signed envelopes in the portable
   auth header precheck, including a missing version, audience, content
   commitment, validity, signature, idempotency key, or unary body digest. A
