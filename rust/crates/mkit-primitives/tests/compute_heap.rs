@@ -72,6 +72,47 @@ fn complete_batch(
     held_outputs
 }
 
+fn serve_input(
+    machine: &mut VerifyDriver,
+    request: &Request,
+    pack: &[u8],
+    pages: &[(PageCommitment, usize, usize)],
+    arena: &[u8],
+) -> bool {
+    match request {
+        Request::Bytes {
+            request,
+            source,
+            range,
+        } => {
+            assert!(matches!(source, ByteSource::Pack(_)));
+            let start = usize::try_from(range.offset).unwrap();
+            let end = start + usize::try_from(range.len).unwrap();
+            machine
+                .supply(Response::Bytes {
+                    request: *request,
+                    source: *source,
+                    range: *range,
+                    value: Acquisition::Present(&pack[start..end]),
+                })
+                .unwrap();
+            true
+        }
+        Request::EvidencePage { request, page } => {
+            let (_, offset, len) = pages.iter().find(|(known, _, _)| known == page).unwrap();
+            machine
+                .supply(Response::EvidencePage {
+                    request: *request,
+                    page: *page,
+                    value: Acquisition::Present(&arena[*offset..*offset + *len]),
+                })
+                .unwrap();
+            false
+        }
+        _ => panic!("unexpected input request in raw Blob allocation probe"),
+    }
+}
+
 #[test]
 fn shared_ceiling_covers_queued_jobs_completed_outputs_and_window_crossings() {
     // All source and host-retention storage exists before the allocation epoch.
@@ -115,34 +156,10 @@ fn shared_ceiling_covers_queued_jobs_completed_outputs_and_window_crossings() {
                 jobs.push(machine.take_compute(job).unwrap());
                 max_jobs = max_jobs.max(jobs.len());
             }
-            Step::Request(Request::Bytes {
-                request,
-                source,
-                range,
-            }) => {
-                assert!(matches!(source, ByteSource::Pack(_)));
+            Step::Request(request) => {
                 assert!(jobs.is_empty() && outputs.is_empty());
-                let start = usize::try_from(range.offset).unwrap();
-                let end = start + usize::try_from(range.len).unwrap();
-                machine
-                    .supply(Response::Bytes {
-                        request,
-                        source,
-                        range,
-                        value: Acquisition::Present(&pack[start..end]),
-                    })
-                    .unwrap();
-                pack_requests += 1;
-            }
-            Step::Request(Request::EvidencePage { request, page }) => {
-                let (_, offset, len) = pages.iter().find(|(known, _, _)| *known == page).unwrap();
-                machine
-                    .supply(Response::EvidencePage {
-                        request,
-                        page,
-                        value: Acquisition::Present(&arena[*offset..*offset + *len]),
-                    })
-                    .unwrap();
+                pack_requests +=
+                    usize::from(serve_input(&mut machine, &request, &pack, &pages, &arena));
             }
             Step::Progress => {
                 max_outputs = max_outputs.max(complete_batch(
