@@ -1048,7 +1048,9 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
                 for frame in &frames {
                     if staged_owner.get(&frame.id) == Some(&ticket.pack_id)
                         && checked.insert(frame.id)
-                        && verify_object_signature(&staged[&frame.id].1).is_err()
+                        && staged
+                            .get(&frame.id)
+                            .is_some_and(|(_, object, _)| verify_object_signature(object).is_err())
                     {
                         return Err(reject_content(
                             store,

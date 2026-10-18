@@ -58,7 +58,7 @@ collect the applicable entries between their old and new immutable pins.
   bytes, manifest total) when the closure completes rather than at the fault,
   and treats held or unpublished members as absent. Migration: expect the
   fault from the final `step`, after any `Missing` verdict would have been
-  reported. `FailureCode` gains `ExternalDeltaChainTooDeep`; the deferred
+  reported. `PackDecodeCursor::new` no longer returns an entry-geometry cap; `resume` reports it when it reaches that frame (migration: handle the cap from `resume`). `FailureCode` gains `ExternalDeltaChainTooDeep`; the deferred
   refusal checkpoint table appends tag 20, so discard unsupported
   verification checkpoints and restart. No repository store reset is required.
 

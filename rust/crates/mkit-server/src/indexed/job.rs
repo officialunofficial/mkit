@@ -1917,7 +1917,18 @@ where
             {
                 // Denial is a policy check: it follows every content refusal
                 // already decided, including a bad signature (SPEC-PACKFILE 6.1).
-                Stop::Reject("bad signature")
+                // Integrity comes first: until the source is authenticated the
+                // stop is deferred as a denial, and the retried entry reports
+                // the signature once the completed marker exists.
+                if job
+                    .integrity
+                    .as_ref()
+                    .is_some_and(|check| check.complete(job.pack_len, self.pack))
+                {
+                    Stop::Reject("bad signature")
+                } else {
+                    Stop::Outcome(Outcome::Blocked)
+                }
             } else {
                 Stop::Outcome(Outcome::Blocked)
             }

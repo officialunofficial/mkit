@@ -468,7 +468,8 @@ may record it and replay it) or *transient* (it depends on repository state,
 time, a deployment limit or resources, so it is re-run, never replayed).
 Malformed content, integrity failures, bad signatures and a delta chain too
 deep inside the pack alone are permanent. Wire or profile ceilings,
-decoded-byte budgets, an external base's depth, membership misses and every
+decoded-byte budgets (a format-intrinsic per-object ceiling such as the
+decompression limit is a property of the bytes and permanent), an external base's depth, membership misses and every
 execution or acquisition failure are transient. The in-pack decoded-byte
 budget is a deployment limit and is transient. The reference classification is
 `FailureCode::persistence` in `mkit-primitives`; a membership miss is

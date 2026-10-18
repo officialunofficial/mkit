@@ -376,6 +376,21 @@ fn denial_follows_integrity_and_every_content_refusal() {
     let outcome = assert_parity(&[&corrupt], head, false, |rig| block(rig, &blob_id), |_| {});
     assert_eq!(outcome.message, "object hash mismatch");
     assert_eq!(outcome.persisted, [Some(mismatch())]);
+    // Integrity also precedes a bad signature that outranks denial.
+    let unsigned_corrupt = {
+        let mut bytes = repaired(pack.clone(), pack.len() - 33);
+        *bytes.last_mut().unwrap() ^= 1;
+        bytes
+    };
+    let outcome = assert_parity(
+        &[&unsigned_corrupt],
+        head,
+        false,
+        |rig| block(rig, &blob_id),
+        |_| {},
+    );
+    assert_eq!(outcome.message, "object hash mismatch");
+    assert_eq!(outcome.persisted, [Some(mismatch())]);
     // So is a bad signature, whichever object of the pack is denied.
     let signature = pack.len() - 33;
     let unsigned = repaired(pack.clone(), signature);

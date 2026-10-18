@@ -1916,7 +1916,7 @@ budget is a deployment limit: it is reported but never persisted as `Rejected`.
 Known scheduled-path divergence: the scheduled verifier reads denial per admitted
 batch so that no row of a denied object is written, hence a denied object in an
 earlier batch is reported (`permission_denied`, `object blocked`, not persisted)
-ahead of a content refusal in a later entry, where inline verification reports
+ahead of a content refusal or a bad signature in a later batch, where inline verification reports
 the content refusal. Denial still follows integrity and every refusal found
 up to and including its own batch. The divergence ends when scheduled
 verification runs on the driver. Corrupt bytes of a stored delta base are `unavailable` (`member content
