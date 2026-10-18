@@ -736,6 +736,13 @@ fn pages_a_checkpoint_reaches_survive_until_the_next_checkpoint_exists() {
     );
     let held: Set<Hash> = page_map(&host).into_keys().collect();
     assert!(second_reach.is_subset(&held));
+    // Pages only the first checkpoint reached are gone now.
+    let exclusive: Vec<_> = first_reach.difference(&second_reach).collect();
+    assert!(
+        !exclusive.is_empty(),
+        "nothing was exclusive to the first checkpoint"
+    );
+    assert!(exclusive.iter().all(|digest| !held.contains(*digest)));
     let verified = crash_and_resume(&pack, &host, &second, 31);
     assert_eq!(roots_of(&verified), roots_of(&expected));
     let finished = pump(&mut machine, &mut host, &mut released, |_| false).unwrap();
@@ -1039,10 +1046,14 @@ fn the_resident_ceiling_is_never_passed_whatever_the_budget() {
             resident_pages: 4,
             ..limits()
         };
-        let Ok(mut machine) = VerifyDriver::new(source(&pack), REPOSITORY, profile(), budget, 17)
-        else {
-            refused += 1;
-            continue;
+        let mut machine = match VerifyDriver::new(source(&pack), REPOSITORY, profile(), budget, 17)
+        {
+            Ok(machine) => machine,
+            Err(error) => {
+                assert_eq!(error.code, FailureCode::ResourceLimit, "{megabytes} MiB");
+                refused += 1;
+                continue;
+            }
         };
         let outcome = Host::new(&pack).finish(&mut machine);
         match outcome {
