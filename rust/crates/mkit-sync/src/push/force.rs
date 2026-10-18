@@ -23,6 +23,17 @@ pub(super) struct Snapshot {
     pub head: Option<Hash>,
 }
 
+pub(super) fn checked_upload_limits(
+    tx: &PushContext<'_>,
+    condition: RefWriteCondition,
+) -> Result<UploadLimits, PushError> {
+    let limits = tx.upload_limits();
+    if matches!(condition, RefWriteCondition::Any) && tx.atomic_advance_status().is_none() {
+        return Err(PushError::ForceCapabilityUnknown);
+    }
+    Ok(limits)
+}
+
 pub(super) fn snapshot(
     tx: &PushContext<'_>,
     branch: &str,

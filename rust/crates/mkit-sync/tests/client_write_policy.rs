@@ -406,7 +406,7 @@ fn force_push_refuses_unknown_discovery_before_reads_or_writes_on_all_connect_so
                         condition,
                         64,
                         mkit_core::pack::MAX_TOTAL_PAYLOAD,
-                        &mkit_sync::PushControl::default(),
+                        &mkit_sync::push::PushControl::default(),
                         &mut |_| panic!("nothing was published"),
                     )
                 };
