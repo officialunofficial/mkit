@@ -25,6 +25,25 @@ or apply effects without every required live comparison.
 compile-fail doctests. The closure entry point enforces its semantic checks with bounded state-machine
 tests. Pack verification and decision entry points land with their owners.
 
+## Compute completion order never chooses verification evidence
+
+**Always:** caller-owned jobs bind the immutable source, repository, run,
+ordinal, inputs, operation, and byte/work permits. Only library-created outputs
+can return. Results and evidence merge in ordinal order; stale outputs change
+no counters. Serial execution remains the default. Outstanding and completed
+but unmerged work stays inside one shared resident ceiling.
+
+**Because:** worker timing cannot select a different refusal, bypass delta-base
+ordering, or release input/output memory before the driver consumes it.
+
+**If violated:** a late completion could seal another run, an earlier malformed
+entry could be hidden by a later parser failure, or worker ownership could
+exceed the advertised memory bound.
+
+**Enforced by:** `pack_verify::verify` raw-Blob admission escrows, dependency
+barriers, opaque jobs/outputs, ordinal merge, drained checkpoints, schedule
+parity tests, allocation probes, and the bounded compute-schedule fuzz oracle.
+
 ## Portable closure completion requires every occurrence and retained page
 
 **Always:** direct-child closure checks every supplied verified object and every

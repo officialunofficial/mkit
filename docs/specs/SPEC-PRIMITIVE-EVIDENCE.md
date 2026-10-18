@@ -303,6 +303,21 @@ stored chaining values; their incomplete hash work is replayed. A root exists
 exactly when its stream is complete. The trailer stream covers source length
 minus 32 bytes. Unused bytes of the partial trailer MUST be zero.
 
+#### 4.1.2 Caller-owned computation
+
+Compute descriptors and outputs are process-local execution state, not encoded
+checkpoint or evidence records. An implementation exposing such jobs MUST bind
+them to the source, run generation, frame ordinal and placement, operation,
+input commitments, and resource permits. It MUST merge completed work in the
+same verification order regardless of worker completion order. Stale
+completions MUST NOT advance a resumed run or change its charged counters.
+
+A checkpoint MUST NOT capture outstanding compute work, completed outputs that
+have not merged, or a read-ahead frame beyond its committed ordinal. The host
+retires old jobs before replacing their resource envelope. A fresh generation
+prevents stale acceptance; it does not reclaim caller-owned worker memory.
+These requirements add no encoded fields or format version.
+
 ### 4.2 Ordered frame evidence
 
 **Protocol requirement.**
