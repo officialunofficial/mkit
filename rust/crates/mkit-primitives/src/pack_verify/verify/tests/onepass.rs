@@ -641,3 +641,143 @@ fn hashing_work_is_protected_from_entry_work_exhaustion() {
         }
     }
 }
+
+fn seal_budget_pack() -> Vec<u8> {
+    let mut writer = PackWriter::new_raw_only();
+    for byte in 0..15 {
+        let (id, bytes) = blob(&[byte; 20]);
+        writer.push_raw(id, &bytes).unwrap();
+    }
+    let children: Vec<_> = (32..48).map(|byte| blob(&[byte; 20])).collect();
+    let object = Object::Tree(Tree {
+        entries: children
+            .iter()
+            .enumerate()
+            .map(|(index, (id, _))| TreeEntry {
+                name: format!("{index:02}").into_bytes(),
+                mode: EntryMode::Blob,
+                object_hash: *id,
+            })
+            .collect(),
+    });
+    let (id, bytes) = canonical(&object);
+    writer.push_raw(id, &bytes).unwrap();
+    for (id, bytes) in children {
+        writer.push_raw(id, &bytes).unwrap();
+    }
+    writer.finish().unwrap()
+}
+
+fn seal_budget_run(pack: &[u8], cap: u64, mode: Option<u64>, resume_last: bool) -> (u64, bool) {
+    let budget = VerifyLimits {
+        work: cap,
+        ..limits()
+    };
+    let mut machine = VerifyDriver::new(source(pack), REPOSITORY, profile(), budget, 17).unwrap();
+    if mode.is_some() {
+        machine = machine.with_compute(ComputeConfig { max_jobs: 3 }).unwrap();
+    }
+    let mut host = Host::new(pack);
+    let mut jobs = Vec::new();
+    let mut random = mode.unwrap_or(0);
+    let mut resumed = false;
+    let mut last_page_before = 0;
+    loop {
+        match machine
+            .step()
+            .expect("verification must reach the selected page supply")
+        {
+            Step::Request(Request::Compute { job }) => {
+                jobs.push(machine.take_compute(job).unwrap());
+            }
+            Step::Request(request) => {
+                if matches!(request, Request::EvidencePage { .. }) && machine.phase == Phase::Seal {
+                    last_page_before = machine.usage().work;
+                }
+                let phase = machine.phase;
+                if let Err(error) = host.serve(&mut machine, &request) {
+                    assert_eq!(phase, Phase::Seal);
+                    assert_eq!(error.code, FailureCode::ResourceLimit);
+                    assert!(!resume_last || resumed);
+                    assert_eq!(
+                        machine.step().unwrap_err().code,
+                        FailureCode::InvalidResponse
+                    );
+                    assert_eq!(
+                        host.serve(&mut machine, &request).unwrap_err().code,
+                        FailureCode::InvalidResponse
+                    );
+                    return (last_page_before, false);
+                }
+            }
+            Step::ProvisionalObject(fragment) => host
+                .fragments
+                .entry(fragment.ordinal)
+                .or_default()
+                .extend_from_slice(fragment.bytes),
+            Step::RetainEvidence(page) => {
+                let commitment = page.commitment;
+                host.pages.push((commitment, page.bytes.to_vec()));
+                machine.acknowledge_retention(commitment).unwrap();
+            }
+            Step::Progress => complete_selected_jobs(&mut machine, &mut jobs, mode, &mut random),
+            Step::Complete(verified) => {
+                assert_eq!(verified.counts().entries, 32);
+                assert!(!resume_last || resumed);
+                return (last_page_before, true);
+            }
+        }
+        if resume_last
+            && !resumed
+            && machine.ordinal == 32
+            && machine.work.is_none()
+            && let Ok(checkpoint) = machine.checkpoint()
+        {
+            let checkpoint = Checkpoint::from_bytes(checkpoint.bytes(), budget).unwrap();
+            machine =
+                VerifyDriver::resume(source(pack), REPOSITORY, profile(), budget, 18, &checkpoint)
+                    .unwrap();
+            if mode.is_some() {
+                machine = machine.with_compute(ComputeConfig { max_jobs: 3 }).unwrap();
+            }
+            resumed = true;
+        }
+    }
+}
+
+fn complete_selected_jobs(
+    machine: &mut VerifyDriver,
+    jobs: &mut Vec<ComputeJob>,
+    mode: Option<u64>,
+    random: &mut u64,
+) {
+    while !jobs.is_empty() {
+        let index = match mode {
+            Some(0) => 0,
+            Some(1) => jobs.len() - 1,
+            _ => {
+                *random = random
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                usize::try_from(*random % u64::try_from(jobs.len()).unwrap()).unwrap()
+            }
+        };
+        assert_eq!(
+            machine.supply_compute(jobs.remove(index).run()).unwrap(),
+            ComputeDisposition::Accepted
+        );
+    }
+}
+
+#[test]
+fn sealing_page_work_exhaustion_is_terminal() {
+    let pack = seal_budget_pack();
+    for mode in [None, Some(0), Some(1), Some(7)] {
+        for resume_last in [false, true] {
+            let (cap, complete) = seal_budget_run(&pack, limits().work, mode, resume_last);
+            assert!(complete);
+            assert!(cap > 0);
+            assert!(!seal_budget_run(&pack, cap, mode, resume_last).1);
+        }
+    }
+}

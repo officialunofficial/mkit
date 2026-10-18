@@ -725,8 +725,14 @@ impl VerifyDriver {
                     .feed(&mut live.op, bytes, &mut budget);
                 let used = self.limits.work.saturating_sub(budget.remaining());
                 self.op = Some(live);
-                let charged = self.resources.work(used);
-                match result.and(charged) {
+                if let Err(error) = self.resources.work(used) {
+                    if self.phase == Phase::Entries {
+                        return self.defer_failure(error);
+                    }
+                    self.phase = Phase::Failed;
+                    return Err(error);
+                }
+                match result {
                     Err(error) if self.phase == Phase::Entries && Self::entry_refusal(&error) => {
                         self.defer_failure(error)
                     }
