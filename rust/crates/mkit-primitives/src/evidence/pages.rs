@@ -38,6 +38,10 @@ impl EncodedPage {
     pub const fn commitment(&self) -> PageCommitment {
         self.commitment
     }
+    /// Moves the canonical bytes out so a cache can own them without a copy.
+    pub(crate) fn into_parts(self) -> (Vec<u8>, PageCommitment) {
+        (self.bytes, self.commitment)
+    }
 }
 
 /// Encodes a strictly ordered leaf with explicit finite allocation/work limits.

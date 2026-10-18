@@ -10,15 +10,16 @@ pub struct VerifyLimits {
     pub acquisition_bytes: u64,
     /// Peak simultaneous primitive-owned bytes, including worker scratch.
     pub resident_bytes: u64,
-    /// Maximum bytes per retained evidence page.
+    /// Maximum bytes per evidence page.
     pub page_bytes: u64,
-    /// Maximum simultaneously resident evidence pages.
+    /// Page-cache size in `page_bytes` units: the driver caches at most
+    /// `page_bytes * resident_pages` bytes of pages, charged at actual sizes.
     pub resident_pages: u32,
     /// Maximum checkpoint envelope bytes.
     pub checkpoint_bytes: u64,
-    /// Cumulative retained evidence bytes.
+    /// Evidence bytes the host holds at once: pages handed to it, not released.
     pub evidence_bytes: u64,
-    /// Cumulative retained page count.
+    /// Evidence pages the host holds at once: pages handed to it, not released.
     pub evidence_pages: u64,
     /// Cumulative decoded canonical bytes.
     pub decoded_bytes: u64,

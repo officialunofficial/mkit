@@ -242,6 +242,7 @@ fn run(
                 host.pages.push((commitment, page.bytes.to_vec()));
                 driver.acknowledge_retention(commitment)
             }
+            Step::ReleasePage(_) => Ok(()),
             Step::Complete(verified) => {
                 return (Ok(verified.counts().entries), host, snapshots, peak);
             }
