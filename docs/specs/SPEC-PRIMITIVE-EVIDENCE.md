@@ -579,6 +579,58 @@ the `dep_start`/`dep_count` + `ext_start`/`ext_count` spans let a consumer
 attribute every dependency record to its owning object or occurrence without
 rescanning the sequence.
 
+### 4.4 Acceptance basis and trust boundary
+
+**Protocol requirement.**
+
+A ticketed acceptance decision MUST be taken over at least one sealed acceptance
+basis. There is no caller-assertable "verification satisfied" input: a decision
+without a basis is `Pending` or `Refused`, never accepted. A basis is owned,
+bound to one repository, and cannot be constructed or deserialized outside the
+crate. The decision refuses (`InvalidResponse`) a basis for another repository
+and any valid ticket whose pack (identity and exact length) no basis covers: a
+basis built from one verified pack never accepts another pack's ticket, and an
+advance that consumes several packs supplies one basis per pack. The decision
+adds every basis's guards to its guard set, and contradictory guards are an
+error.
+
+A basis has exactly three constructors. Each derives guards of the same
+`RequiredGuard` vocabulary (membership, publication, denial and binding
+guards), so a host lowers any of them through one path; the sealed-artifact
+constructor derives the dependency guards and the roots, the evidence constructor
+three guards, and an attestation only the guards its present fields name.
+
+| Constructor | Derives |
+|---|---|
+| From sealed `VerifiedPack`, `ClosureProof` and the proof's witness chain, plus the external delta-base facts the host supplied during verification | A `Membership` guard (the exact member fact) and a `DependencyPublication` guard (the supplier's published and held state for that object) for every relied-on closure witness and every external delta base, one global denial version, and a root binding over the pack id and length, the object-set root and the closure root (heads root and witness-chain root). The pack and proof must agree on object-set root and ruleset; an optional pair coverage must agree on repository, view and ruleset and is validated only. A missing, extra, reordered or unauthenticated witness page is `InvalidResponse`; an external base for another repository is a binding mismatch; one object with two different facts is `InvalidResponse`; an exhausted allowance (at most 4096 distinct dependencies) is `ResourceLimit`, never a truncated set. |
+| From decoded `AcceptanceEvidence` (decide-at-writer) | Exactly three guards: one repository-scoped membership witness over the pair (generation, removal version), compared atomically with exact match on both fields; one global denial version, compared exactly; and a root binding, the evidence digest. |
+| From a host attestation (`attested_by_host`) | Only the guards for the fields the attestation carries: an optional membership witness, optional global denial version, optional root, and any observed dependency facts. |
+
+Evidence format 1 is unchanged. Each of its fields is covered: ruleset and
+profile digest by decode; repository, operation and epoch by `check_binding`
+(the host's frozen-record obligation); pack id and exact length by `check_binding`
+and by the decision's pack-coverage rule; head signatures by `recheck_heads`; the
+membership witness and denial version by their typed guards; and every remaining
+field (object and delta counts, object-set root, head records, dependency ids)
+by the root binding, which binds the whole canonical envelope.
+
+**Limits of the sealed-artifact constructor.** The external delta bases a pack
+relied on were answered by the host while the pack was verified, and the
+verification evidence pages are scoped to that run, so the primitive cannot
+re-derive them afterwards: the host passes the facts it supplied, and
+completeness against the sealed dependency sequence is the host's obligation.
+The resulting-pair coverage's dependency and supplier id sets carry no member
+facts; they stay with the clearance decision's dependency witnesses.
+
+**Trust boundary.** The sealed-artifact and evidence constructors establish
+what their artifacts establish. A host attestation establishes nothing: the host
+asserts, on its own authority, that it verified the pack's integrity and closure
+with its own pipeline, and the library cannot check that. The decision derives
+guards only from the attestation's present fields. Any mutable fact the
+attestation does not carry remains a guard the host owns and enforces outside
+this guard set. The attestation is the only explicit trust path into a
+ticketed acceptance and is intentionally greppable.
+
 ## 5. Version history
 
 | Format | Version | Policy |

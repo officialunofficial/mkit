@@ -145,6 +145,8 @@ mkit-transport-file = { version = "0.5", path = "../mkit-transport-file", option
 send_wrapper = { version = "0.6", features = ["futures"] }
 
 [dev-dependencies]
+# Fabricates a sealed pack for the closure differential tests only.
+mkit-primitives = { version = "0.1", path = "../mkit-primitives", default-features = false, features = ["synthetic-artifacts"] }
 futures-executor = "0.3"
 sha2 = "0.11"
 # Mints secp256k1 EIP-191 owner grants for the `0x` namespace pipeline test.

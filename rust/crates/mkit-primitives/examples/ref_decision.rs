@@ -72,6 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         accounting: None,
         publication: None,
         storage: None,
+        basis: vec![],
     };
     let limits = RefDecisionLimits {
         facts: 16,

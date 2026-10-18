@@ -420,4 +420,11 @@ pub struct Snapshot {
     pub storage: Option<Observed<StorageFact>>,
     /// Complete publication observation.
     pub publication: Option<Observed<PublicationFact>>,
+    /// The basis guards (membership witness, denial version, root binding)
+    /// as the host re-read them from its store, expressed as the guards those
+    /// current values would produce. It is the live value, never a copy of the
+    /// guards a decision required: a guard compares equal only while the
+    /// store still yields it. Dependency membership and publication guards
+    /// compare against [`Self::members`] instead.
+    pub basis: Vec<super::RequiredGuard>,
 }

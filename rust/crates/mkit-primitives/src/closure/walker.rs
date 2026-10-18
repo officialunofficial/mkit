@@ -10,7 +10,7 @@ use super::{
 use crate::{
     error::{BoundedDetail, Failure, FailureCode, Location},
     evidence::{MemberFact, PageCommitment, RepositoryId, Revision, RulesetBinding},
-    pack_verify::{Acquisition, EvidenceSequence, RequestId},
+    pack_verify::{Acquisition, EvidenceSequence, RequestId, VerifiedPack},
 };
 use mkit_core::{
     hash::{Hash, ZERO},
@@ -215,7 +215,8 @@ struct PendingPage {
 
 /// Sans-IO direct-child closure over a supplied immutable verified-object view.
 ///
-/// The view's full root must be bound to sealed pack verification by acceptance.
+/// The view must agree with the sealed `VerifiedPack` passed to `new`, which
+/// supplies the object-set root and ruleset.
 /// Membership facts are trusted host observations in exactly the requested
 /// repository and incarnation. No result grants authorization or publication.
 /// Lost state can be recovered by replaying retained pages, or by starting a new
@@ -223,7 +224,7 @@ struct PendingPage {
 ///
 /// ```
 /// use mkit_primitives::{closure::*, closure::limits::ClosureLimits, error::Failure,
-///     evidence::{RepositoryId, Revision, RulesetBinding, RulesetId, ProfileId}};
+///     pack_verify::VerifiedPack, evidence::{RepositoryId, Revision, RulesetBinding, RulesetId, ProfileId}};
 /// struct Empty;
 /// impl InPackObjectView for Empty {
 ///     fn object_set_root(&self) -> [u8;32] { [0;32] }
@@ -233,18 +234,22 @@ struct PendingPage {
 ///     fn edge(&self, _: &[u8;32], _:u64) -> Result<Option<ObjectEdge>,Failure> { Ok(None) }
 ///     fn object_at(&self, _:u64) -> Result<Option<InPackObject>,Failure> { Ok(None) }
 /// }
-/// let mut walker=ClosureWalker::new(Empty, &[], RepositoryId([1;32]), Revision([2;32]),
-///     RulesetBinding {ruleset:RulesetId(1),profile:ProfileId::Indexed},
-///     ClosureLimits::indexed(), 1)?;
-/// let proof=loop {
-///     match walker.step()? {
-///         ClosureStep::Progress => {},
-///         ClosureStep::Closed(proof) => break proof,
-///         _ => return Err("unexpected acquisition in an empty view".into()),
-///     }
-/// };
-/// assert_eq!(proof.coverage(),Coverage::DirectChildren);
-/// # Ok::<(),Box<dyn std::error::Error>>(())
+/// // `verified` is the sealed result of the verify driver for the pack whose
+/// // objects `Empty` serves; its root and ruleset must match the view's.
+/// fn close(verified: &VerifiedPack) -> Result<(), Box<dyn std::error::Error>> {
+///     let rules = RulesetBinding {ruleset:RulesetId(1),profile:ProfileId::Indexed};
+///     let mut walker=ClosureWalker::new(Empty, verified, &[], RepositoryId([1;32]),
+///         Revision([2;32]), rules, ClosureLimits::indexed(), 1)?;
+///     let proof=loop {
+///         match walker.step()? {
+///             ClosureStep::Progress => {},
+///             ClosureStep::Closed(proof) => break proof,
+///             _ => return Err("unexpected acquisition in an empty view".into()),
+///         }
+///     };
+///     assert_eq!(proof.coverage(),Coverage::DirectChildren);
+///     Ok(())
+/// }
 /// ```
 #[derive(Debug)]
 #[must_use]
@@ -291,10 +296,15 @@ pub struct ClosureWalker<V> {
 impl<V: InPackObjectView> ClosureWalker<V> {
     /// Start a run over every supplied object, including surplus manifests, and heads.
     ///
+    /// The object-set root and ruleset come from `verified`; the view must
+    /// agree with both.
+    ///
     /// # Errors
-    /// Returns `ResourceLimit` for invalid or insufficient finite allowances.
+    /// Returns `ResourceLimit` for invalid or insufficient finite allowances and
+    /// `EvidenceBindingMismatch` when the view or ruleset differs from `verified`.
     pub fn new(
         view: V,
+        verified: &VerifiedPack,
         heads: &[Hash],
         repository: RepositoryId,
         revision: Revision,
@@ -303,7 +313,13 @@ impl<V: InPackObjectView> ClosureWalker<V> {
         generation: u64,
     ) -> Result<Self, Failure> {
         let object_count = view.object_count();
-        let object_set_root = view.object_set_root();
+        // The object-set root comes from the sealed verification, not from the
+        // host-implemented view: a view answering with another root, or under
+        // another ruleset, cannot seal a proof for this pack.
+        let object_set_root = verified.object_set_root();
+        if view.object_set_root() != object_set_root || verified.ruleset() != ruleset {
+            return Err(failure(FailureCode::EvidenceBindingMismatch));
+        }
         if limits.items > 10_000_000 || limits.membership_batch == 0 || object_count > limits.items
         {
             return Err(failure(FailureCode::ResourceLimit));

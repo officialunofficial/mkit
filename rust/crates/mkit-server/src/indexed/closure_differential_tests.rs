@@ -93,15 +93,22 @@ impl Fixture {
         }
     }
     fn walker(&self) -> Verdict {
+        let view = self.view();
+        let rules = RulesetBinding {
+            ruleset: RulesetId(1),
+            profile: ProfileId::Indexed,
+        };
+        let verified = mkit_primitives::pack_verify::VerifiedPack::synthetic_for_tests(
+            view.object_set_root(),
+            rules,
+        );
         let mut walker = ClosureWalker::new(
-            self.view(),
+            view,
+            &verified,
             &[self.head],
             REPOSITORY,
             REVISION,
-            RulesetBinding {
-                ruleset: RulesetId(1),
-                profile: ProfileId::Indexed,
-            },
+            rules,
             ClosureLimits::indexed(),
             1,
         )

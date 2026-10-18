@@ -266,7 +266,8 @@ plan-sealing and acceptance example using deterministic host observations.
 
 ## Direct-child closure
 
-Drive `closure::ClosureWalker::new` with the complete verified object view,
+Drive `closure::ClosureWalker::new` with the complete verified object view, the
+sealed `VerifiedPack` that supplies its object-set root and ruleset,
 requested heads, repository identity/incarnation, ruleset, finite limits, and a
 fresh run generation. Poll `step`; answer exact acquisition requests and retain
 and acknowledge every page. Only `Closed` or `Missing` is a complete result.

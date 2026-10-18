@@ -16,7 +16,7 @@ use mkit_primitives::{
         MemberFact, PackSource, ProfileId, RepositoryId, Revision, RulesetBinding, RulesetId,
         SourceBinding,
     },
-    pack_verify::Acquisition,
+    pack_verify::{Acquisition, VerifiedPack},
 };
 
 const REPOSITORY: RepositoryId = RepositoryId([1; 32]);
@@ -174,15 +174,18 @@ fn run(data: &[u8]) -> (Outcome, Counts) {
         membership_batch: 4,
         work: 10_000,
     };
+    let rules = RulesetBinding {
+        ruleset: RulesetId(1),
+        profile: ProfileId::Indexed,
+    };
+    let verified = VerifiedPack::synthetic_for_tests(graph.object_set_root(), rules);
     let mut walker = ClosureWalker::new(
         graph.clone(),
+        &verified,
         &[id(0)],
         REPOSITORY,
         REVISION,
-        RulesetBinding {
-            ruleset: RulesetId(1),
-            profile: ProfileId::Indexed,
-        },
+        rules,
         limits,
         1,
     )

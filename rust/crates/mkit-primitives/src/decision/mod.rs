@@ -4,6 +4,7 @@
 //! The host compares every atomic guard and commits every effect together.
 //! Source fences are separate pre-apply checks on each destination attempt.
 
+mod basis;
 mod clearance;
 mod effects;
 #[cfg(test)]
@@ -13,6 +14,9 @@ mod guards;
 pub mod ref_write;
 pub mod ticketed;
 
+pub use basis::{
+    AcceptanceBasis, BASIS_DIGEST_DOMAIN, BasisCfg, HostAttestation, MAX_BASIS_DEPENDENCIES,
+};
 pub use clearance::{
     ClearanceAdvance, ClearanceDecision, ClearanceFacts, ClearanceLifecycle, ClearanceLimits,
     ClearanceMoment, ClearanceState, CombinedAcceptance, DependencyWitness, GuardedClearance,
@@ -116,7 +120,31 @@ pub struct Guarded<D> {
     required: Vec<RequiredGuard>,
     source_fences: Vec<RequiredSourceFence>,
 }
+/// The owned parts of a [`Guarded`] decision, for a host that lowers them.
+#[derive(Debug)]
+#[must_use]
+#[non_exhaustive]
+pub struct Lowering<D> {
+    /// Exact destination scope.
+    pub repository: crate::evidence::RepositoryId,
+    /// Decision whose effects may only be applied with all requirements.
+    pub decision: D,
+    /// Every required atomic comparison.
+    pub required: Vec<RequiredGuard>,
+    /// Separate pre-apply fences.
+    pub source_fences: Vec<RequiredSourceFence>,
+}
 impl<D> Guarded<D> {
+    /// Consume the decision into its owned parts, so effects cannot be taken
+    /// without the guards that travel with them.
+    pub fn into_lowering(self) -> Lowering<D> {
+        Lowering {
+            repository: self.repository,
+            decision: self.decision,
+            required: self.required,
+            source_fences: self.source_fences,
+        }
+    }
     /// Exact destination scope, including decisions with no mutable ref guard.
     #[must_use]
     pub const fn repository(&self) -> crate::evidence::RepositoryId {

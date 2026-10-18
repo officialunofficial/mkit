@@ -16,17 +16,17 @@
 use mkit_core::hash::hash;
 use mkit_primitives::{
     decision::{
-        AuthorityFact, AuthorityMode, Guarded, NamespaceId, Observed, OperationId, PermanentCode,
-        PermanentRefusal, RefName, ReplayFact, ReplayScope, ReplayState, RequiredGuard,
-        ReservationFact, ReservationId, ReservationOp, RetryReason, Snapshot as Facts, StorageFact,
-        TerminalResult, TicketFact, TicketId, WriteDecision,
+        AcceptanceBasis, AuthorityFact, AuthorityMode, Guarded, HostAttestation, NamespaceId,
+        Observed, OperationId, PermanentCode, PermanentRefusal, RefName, ReplayFact, ReplayScope,
+        ReplayState, RequiredGuard, ReservationFact, ReservationId, ReservationOp, RetryReason,
+        Snapshot as Facts, StorageFact, TerminalResult, TicketFact, TicketId, WriteDecision,
         ref_write::{
             AdmittedRef, AuthorityBinding, MembershipWindow, RefChange, RefDecisionLimits,
             RefReplay, RefRequirements, RefWriteKind, RefWriteRequest, check_guard_completeness,
         },
         ticketed::{
             PendingBinding, StorageAccounting, TicketClaim, TicketedAdvanceRequest, UploadProof,
-            decide_ticketed_advance,
+            VerificationVerdict, decide_ticketed_advance,
         },
     },
     error::FailureCode,
@@ -44,6 +44,23 @@ use crate::{
 };
 
 const EPOCH_MOVED: &str = "namespace authority generation changed";
+
+/// The server verified the pack with its own pipeline (SPEC-SERVER §9.4, §10.2),
+/// so its ticketed acceptance rests on the host's attestation alone, filled from
+/// facts it already holds and adding no read. It carries no membership witness,
+/// denial version, dependency fact, root or pack claim: the server's denial
+/// guard is the §14.2 plan-time proof window, and it keeps no repository
+/// membership witness, so the attestation contributes no guard.
+fn host_basis(repository: RepositoryId) -> AcceptanceBasis {
+    AcceptanceBasis::attested_by_host(HostAttestation {
+        repository,
+        packs: Vec::new(),
+        root: None,
+        membership: None,
+        denial_version: None,
+        dependencies: Vec::new(),
+    })
+}
 
 /// The composed decision plus the decoded ticket rows the reference
 /// consumption lowering replays.
@@ -235,6 +252,7 @@ fn try_decide(
         accounting: None,
         publication: None,
         storage: None,
+        basis: Vec::new(),
     };
     // A stored row that cannot be decoded is left out of the facts, not turned
     // into an answer: the decision asks for it only if it reaches that row, and
@@ -346,10 +364,11 @@ fn try_decide(
                 }
             }
         };
+    let basis = host_basis(write.repository);
     let request = TicketedAdvanceRequest {
         write,
         tickets: &claims,
-        verification: mkit_primitives::decision::ticketed::VerificationVerdict::Satisfied,
+        verification: VerificationVerdict::Verified(std::slice::from_ref(&basis)),
         storage,
         pending,
     };
@@ -1026,6 +1045,7 @@ pub(in crate::pipeline) fn cleanup_lost(
         accounting: None,
         publication: None,
         storage: None,
+        basis: Vec::new(),
     };
     let mut claims = Vec::with_capacity(advance.ids.len());
     for (i, row) in rows.iter().enumerate() {
@@ -1074,10 +1094,11 @@ pub(in crate::pipeline) fn cleanup_lost(
             .reservations
             .push((rid, reservation_observed(snap, &key)?));
     }
+    let basis = host_basis(write.repository);
     let request = TicketedAdvanceRequest {
         write,
         tickets: &claims,
-        verification: mkit_primitives::decision::ticketed::VerificationVerdict::Satisfied,
+        verification: VerificationVerdict::Verified(std::slice::from_ref(&basis)),
         storage: StorageAccounting::Disabled,
         pending: None,
     };

@@ -14,7 +14,7 @@ use crate::{
         MemberFact, PackSource, PageCommitment, ProfileId, RepositoryId, Revision, RulesetBinding,
         RulesetId, SourceBinding,
     },
-    pack_verify::Acquisition,
+    pack_verify::{Acquisition, VerifiedPack},
 };
 use mkit_core::{
     hash::Hash,
@@ -24,6 +24,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 const REPO: RepositoryId = RepositoryId([41; 32]);
 const VIEW: Revision = Revision([42; 32]);
+fn synthetic(root: Hash) -> VerifiedPack {
+    VerifiedPack::synthetic_for_tests(root, rules())
+}
 fn rules() -> RulesetBinding {
     RulesetBinding {
         ruleset: RulesetId(1),
@@ -294,7 +297,17 @@ fn walker(
     limits: ClosureLimits,
     generation: u64,
 ) -> Result<ClosureWalker<View>, Failure> {
-    ClosureWalker::new(view, heads, REPO, VIEW, rules(), limits, generation)
+    let verified = synthetic(view.object_set_root());
+    ClosureWalker::new(
+        view,
+        &verified,
+        heads,
+        REPO,
+        VIEW,
+        rules(),
+        limits,
+        generation,
+    )
 }
 fn run(view: View, heads: &[Hash], limits: ClosureLimits) -> Result<ResultSummary, Failure> {
     let mut host = Host::with_view(&view);
@@ -958,9 +971,18 @@ fn changing_view_root_count_or_retained_memory_never_seals_old_work() {
             count: Rc::clone(&count),
             memory: Rc::clone(&memory),
         };
-        let mut machine =
-            ClosureWalker::new(view, &[], REPO, VIEW, rules(), ClosureLimits::indexed(), 1)
-                .unwrap();
+        let verified = synthetic(view.object_set_root());
+        let mut machine = ClosureWalker::new(
+            view,
+            &verified,
+            &[],
+            REPO,
+            VIEW,
+            rules(),
+            ClosureLimits::indexed(),
+            1,
+        )
+        .unwrap();
         assert!(matches!(machine.step().unwrap(), ClosureStep::Progress));
         match mutation {
             0 => root.set(id(2)),
@@ -1143,4 +1165,38 @@ fn unavailable_membership_is_never_an_absence() {
         }))
         .unwrap_err();
     assert_eq!(failure.code, FailureCode::UnavailableInput);
+}
+
+#[test]
+fn the_walker_takes_its_object_set_root_and_ruleset_from_the_verified_pack() {
+    let view = View::default();
+    let root = view.object_set_root();
+    let start = |verified: &VerifiedPack, ruleset: RulesetBinding| {
+        ClosureWalker::new(
+            View::default(),
+            verified,
+            &[],
+            REPO,
+            VIEW,
+            ruleset,
+            ClosureLimits::indexed(),
+            1,
+        )
+        .map(|_| ())
+    };
+    assert!(start(&synthetic(root), rules()).is_ok());
+    let mut other = root;
+    other[0] ^= 1;
+    assert_eq!(
+        start(&synthetic(other), rules()).unwrap_err().code,
+        FailureCode::EvidenceBindingMismatch
+    );
+    let foreign = RulesetBinding {
+        ruleset: RulesetId(2),
+        ..rules()
+    };
+    assert_eq!(
+        start(&synthetic(root), foreign).unwrap_err().code,
+        FailureCode::EvidenceBindingMismatch
+    );
 }

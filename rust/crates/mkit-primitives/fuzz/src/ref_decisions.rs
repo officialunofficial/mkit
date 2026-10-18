@@ -95,6 +95,7 @@ pub fn check(data: &[u8]) {
         accounting: None,
         storage: None,
         publication: None,
+        basis: vec![],
     };
     let limits = RefDecisionLimits {
         facts: 16,

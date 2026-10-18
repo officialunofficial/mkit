@@ -322,6 +322,7 @@ fn keyed<T>(expected: &Observed<T>, scope_ok: impl FnOnce(&T) -> bool) -> bool {
     }
 }
 
+#[allow(clippy::too_many_lines)] // One arm per guard category keeps the comparison exhaustive.
 pub(super) fn matches(guard: &RequiredGuard, current: &Snapshot, now_ms: u64) -> bool {
     match guard {
         RequiredGuard::RefValue {
@@ -413,6 +414,29 @@ pub(super) fn matches(guard: &RequiredGuard, current: &Snapshot, now_ms: u64) ->
             expected,
         } => *repository == current.repository && current.publication.as_ref() == Some(expected),
         RequiredGuard::ValidThrough { instant_ms } => now_ms <= *instant_ms,
+        RequiredGuard::MembershipWitness { repository, .. } => {
+            *repository == current.repository && current.basis.contains(guard)
+        }
+        RequiredGuard::DependencyPublication {
+            repository,
+            object,
+            supplier,
+            published,
+            held,
+        } => {
+            *repository == current.repository
+                && current.members.iter().any(|member| {
+                    member.object == *object
+                        && matches!(&member.observed, Observed::Present { value, .. }
+                            if value.repository == *repository
+                                && value.supplier.id == *supplier
+                                && value.published == *published
+                                && value.held == *held)
+                })
+        }
+        RequiredGuard::DenialVersion { .. } | RequiredGuard::Binding { .. } => {
+            current.basis.contains(guard)
+        }
     }
 }
 
@@ -442,4 +466,20 @@ pub(super) fn ambiguous(current: &Snapshot) -> bool {
                     .iter()
                     .any(|(other, _)| other == key)
             })
+        || basis_ambiguous(&current.basis)
+}
+
+/// The live basis view holds only witness, denial-version and binding guards,
+/// and never two contradictory ones for one identity.
+fn basis_ambiguous(basis: &[RequiredGuard]) -> bool {
+    basis.iter().enumerate().any(|(i, guard)| {
+        !matches!(
+            guard,
+            RequiredGuard::MembershipWitness { .. }
+                | RequiredGuard::DenialVersion { .. }
+                | RequiredGuard::Binding { .. }
+        ) || basis[..i]
+            .iter()
+            .any(|other| !super::complete::compatible(other, guard))
+    })
 }

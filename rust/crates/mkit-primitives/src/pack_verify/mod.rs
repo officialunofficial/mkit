@@ -292,6 +292,46 @@ impl VerifiedPack {
             heads,
         }
     }
+    /// A pack that no verification produced, for tests of consumers only.
+    ///
+    /// Only the `synthetic-artifacts` feature (or this crate's own tests) exposes it.
+    /// It fabricates a sealed artifact; production code must never enable it.
+    #[cfg(any(test, feature = "synthetic-artifacts"))]
+    #[doc(hidden)]
+    pub fn synthetic_for_tests(object_set_root: Hash, ruleset: RulesetBinding) -> Self {
+        let sequence = EvidenceSequence {
+            root: [0; 32],
+            count: 0,
+        };
+        Self::seal(
+            PackSource {
+                id: [0; 32],
+                len: 0,
+                binding: crate::evidence::SourceBinding([0; 32]),
+            },
+            PackCounts {
+                entries: 0,
+                objects: 0,
+                delta_entries: 0,
+                wire_payload_bytes: 0,
+                decoded_bytes: 0,
+            },
+            1,
+            [0; 32],
+            ruleset,
+            IndexedProfile {
+                pack_bytes: 1 << 30,
+                decoded_bytes: 4 << 30,
+                delta_depth: 50,
+            },
+            VerifyLimits::indexed(),
+            object_set_root,
+            sequence,
+            sequence,
+            sequence,
+            sequence,
+        )
+    }
     /// Requested and computed whole-pack identity; equality is established at sealing.
     #[must_use]
     pub const fn pack_id(&self) -> Hash {

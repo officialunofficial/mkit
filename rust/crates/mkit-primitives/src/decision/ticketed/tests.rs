@@ -11,6 +11,7 @@ use crate::decision::{
     ReservationTerminal, ReservationTerminalKind, RetryReason, Snapshot, StorageEffect,
     StorageFact, TerminalResult, TicketFact, TicketId, TicketTransition, WriteDecision,
 };
+use crate::decision::{AcceptanceBasis, HostAttestation};
 use crate::error::FailureCode;
 use crate::evidence::{PackSource, RepositoryId, Revision, SourceBinding};
 use mkit_core::hash::Hash;
@@ -141,13 +142,27 @@ fn snapshot(changes: &[RefChange], ticket_bytes: &[u8]) -> Snapshot {
         accounting: None,
         publication: None,
         storage: None,
+        basis: vec![],
     }
+}
+fn attested_bases() -> &'static [AcceptanceBasis] {
+    static BASIS: std::sync::OnceLock<[AcceptanceBasis; 1]> = std::sync::OnceLock::new();
+    BASIS.get_or_init(|| {
+        [AcceptanceBasis::attested_by_host(HostAttestation {
+            repository: REPO,
+            packs: Vec::new(),
+            root: None,
+            membership: None,
+            denial_version: None,
+            dependencies: Vec::new(),
+        })]
+    })
 }
 fn request<'a>(changes: &'a [RefChange], claims: &'a [TicketClaim]) -> TicketedAdvanceRequest<'a> {
     TicketedAdvanceRequest {
         write: write(changes),
         tickets: claims,
-        verification: VerificationVerdict::Satisfied,
+        verification: VerificationVerdict::Verified(attested_bases()),
         storage: StorageAccounting::Disabled,
         pending: None,
     }
@@ -467,7 +482,7 @@ fn verification_verdicts_gate_and_fences_refuse() {
     ));
     // A ticket issued under a superseded authority generation refuses, and the
     // guarded authority observation is what the generation is compared with.
-    req.verification = VerificationVerdict::Satisfied;
+    req.verification = VerificationVerdict::Verified(attested_bases());
     let generation = Revision([7; 32]);
     req.write.required.authority = Some(AuthorityBinding {
         namespace: NamespaceId([7; 32]),
@@ -1237,7 +1252,7 @@ struct Scenario {
     changes: [RefChange; 2],
     claims: Vec<TicketClaim>,
     snap: Snapshot,
-    verification: VerificationVerdict,
+    verification: VerificationVerdict<'static>,
     bound: Option<AuthorityBinding>,
 }
 type Tweak = fn(&mut Scenario);
@@ -1274,7 +1289,7 @@ impl Scenario {
                 claim(0x11, UploadProof::Ready),
             ],
             snap,
-            verification: VerificationVerdict::Satisfied,
+            verification: VerificationVerdict::Verified(attested_bases()),
             bound: Some(AuthorityBinding {
                 namespace: NamespaceId([7; 32]),
                 mode: AuthorityMode::Authority,
@@ -1603,4 +1618,293 @@ fn settlement_of_a_ticketed_reservation_closes_or_fences_its_ticket() {
         .code,
         FailureCode::InvalidResponse
     );
+}
+
+mod basis {
+    use super::*;
+    use crate::decision::{GuardKind, fact_harness::basis_mutations, ref_write::guard_kind};
+    use crate::evidence::MemberFact;
+    use crate::evidence::acceptance::MembershipWitness;
+    use mkit_core::object::ObjectType;
+
+    fn member() -> MemberFact {
+        MemberFact {
+            repository: REPO,
+            incarnation: REV,
+            object: [0x61; 32],
+            kind: ObjectType::Commit,
+            canonical_len: 90,
+            supplier: PackSource {
+                id: [0x62; 32],
+                len: 400,
+                binding: SourceBinding([0x63; 32]),
+            },
+            canonical_binding: SourceBinding([0x64; 32]),
+            revision: Revision([0x65; 32]),
+            delta_depth: 1,
+            published: true,
+            held: false,
+        }
+    }
+    fn attestation() -> HostAttestation {
+        HostAttestation {
+            repository: REPO,
+            packs: Vec::new(),
+            root: Some([0x31; 32]),
+            membership: Some(MembershipWitness {
+                generation: 3,
+                removal_version: 4,
+            }),
+            denial_version: Some(9),
+            dependencies: vec![member()],
+        }
+    }
+    /// The live view a host would hold if the facts of `basis` were current.
+    fn live(snap: &Snapshot, basis: &AcceptanceBasis) -> Snapshot {
+        let mut live = snap.clone();
+        for guard in basis.guards() {
+            match guard {
+                RequiredGuard::Membership {
+                    object, expected, ..
+                } => live.members.push(decision::MembershipObservation {
+                    object: *object,
+                    observed: expected.clone(),
+                }),
+                // Publication standing is read from the member rows above.
+                RequiredGuard::DependencyPublication { .. } => {}
+                other => live.basis.push(other.clone()),
+            }
+        }
+        live
+    }
+    fn decide_with(
+        basis: &AcceptanceBasis,
+        snap: &Snapshot,
+    ) -> Result<decision::Guarded<WriteDecision>, crate::error::Failure> {
+        let changes = pair();
+        let claims = [claim(0x42, UploadProof::Ready)];
+        let mut req = request(&changes, &claims);
+        req.verification = VerificationVerdict::Verified(std::slice::from_ref(basis));
+        decide_ticketed_advance(&req, snap, limits())
+    }
+
+    #[test]
+    fn a_basis_contributes_exactly_its_guards() {
+        let basis = AcceptanceBasis::attested_by_host(attestation());
+        let snap = live(&snapshot(&pair(), &[0x42]), &basis);
+        let guarded = decide_with(&basis, &snap).unwrap();
+        for guard in basis.guards() {
+            assert!(guarded.required_guards().contains(guard), "{guard:?}");
+        }
+        assert!(guards_match(&guarded, &snap, NOW));
+        let kinds: Vec<_> = basis.guards().iter().map(guard_kind).collect();
+        for kind in [
+            GuardKind::Membership,
+            GuardKind::Denial,
+            GuardKind::Publication,
+            GuardKind::Binding,
+        ] {
+            assert!(kinds.contains(&kind), "{kind:?}");
+        }
+        // An attestation without fields contributes no guard at all.
+        let bare = AcceptanceBasis::attested_by_host(HostAttestation {
+            repository: REPO,
+            packs: Vec::new(),
+            root: None,
+            membership: None,
+            denial_version: None,
+            dependencies: Vec::new(),
+        });
+        assert!(bare.guards().is_empty());
+    }
+
+    #[test]
+    fn every_basis_derived_fact_is_guarded() {
+        let original = attestation();
+        let basis = AcceptanceBasis::attested_by_host(original.clone());
+        let snap = live(&snapshot(&pair(), &[0x42]), &basis);
+        let guarded = decide_with(&basis, &snap).unwrap();
+        let mutations = basis_mutations(&original);
+        assert!(mutations.len() >= 20, "{}", mutations.len());
+        for (name, mutated) in mutations {
+            let next = AcceptanceBasis::attested_by_host(mutated);
+            // Changing any attested fact changes the guards derived from it...
+            assert_ne!(next.guards(), basis.guards(), "{name}");
+            // ...and the live view of the changed fact fails the original guards.
+            // A fact the original never relied on may be added without effect.
+            if name.ends_with("added") {
+                continue;
+            }
+            let moved = live(&snapshot(&pair(), &[0x42]), &next);
+            assert!(!guards_match(&guarded, &moved, NOW), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_basis_for_another_repository_is_refused() {
+        let basis = AcceptanceBasis::attested_by_host(HostAttestation {
+            repository: RepositoryId([9; 32]),
+            ..attestation()
+        });
+        let snap = snapshot(&pair(), &[0x42]);
+        assert_eq!(
+            decide_with(&basis, &snap).unwrap_err().code,
+            FailureCode::InvalidResponse
+        );
+    }
+
+    #[test]
+    fn a_basis_for_another_repository_is_refused_before_any_answer() {
+        let basis = AcceptanceBasis::attested_by_host(HostAttestation {
+            repository: RepositoryId([9; 32]),
+            ..attestation()
+        });
+        let changes = pair();
+        let claims = [claim(0x42, UploadProof::Ready)];
+        // A refused ticket answers before the verification verdict is consulted.
+        let mut req = request(&changes, &claims);
+        req.verification = VerificationVerdict::Verified(std::slice::from_ref(&basis));
+        let mut snap = snapshot(&changes, &[0x42]);
+        snap.tickets[0].1 = Observed::Absent(REV);
+        assert_eq!(
+            decide_ticketed_advance(&req, &snap, limits())
+                .unwrap_err()
+                .code,
+            FailureCode::InvalidResponse
+        );
+    }
+
+    #[test]
+    fn an_unsatisfied_verification_adds_no_basis_guard() {
+        let basis = AcceptanceBasis::attested_by_host(attestation());
+        let changes = pair();
+        let claims = [claim(0x42, UploadProof::Ready)];
+        let mut req = request(&changes, &claims);
+        req.verification = VerificationVerdict::Pending;
+        let snap = snapshot(&changes, &[0x42]);
+        let guarded = decide_ticketed_advance(&req, &snap, limits()).unwrap();
+        assert!(
+            basis
+                .guards()
+                .iter()
+                .all(|g| !guarded.required_guards().contains(g))
+        );
+    }
+
+    #[test]
+    fn the_live_basis_view_must_be_unambiguous_and_publication_must_name_its_object() {
+        let basis = AcceptanceBasis::attested_by_host(attestation());
+        let snap = live(&snapshot(&pair(), &[0x42]), &basis);
+        let guarded = decide_with(&basis, &snap).unwrap();
+        assert!(guards_match(&guarded, &snap, NOW));
+        // Two contradictory denial versions in the live view are ambiguous.
+        let mut ambiguous = snap.clone();
+        ambiguous
+            .basis
+            .push(RequiredGuard::DenialVersion { version: 10 });
+        assert!(!guards_match(&guarded, &ambiguous, NOW));
+        // Dependency guards are not read from the basis list.
+        let mut misfiled = snap.clone();
+        misfiled.basis.push(
+            basis
+                .guards()
+                .iter()
+                .find(|g| matches!(g, RequiredGuard::DependencyPublication { .. }))
+                .unwrap()
+                .clone(),
+        );
+        assert!(!guards_match(&guarded, &misfiled, NOW));
+        // Another object from the same supplier does not satisfy the guard.
+        let mut unrelated = snap.clone();
+        for observation in &mut unrelated.members {
+            observation.object = [0x77; 32];
+        }
+        assert!(!guards_match(&guarded, &unrelated, NOW));
+    }
+
+    #[test]
+    fn a_basis_covers_only_the_packs_it_names() {
+        let ticket = ticket_fact(0x42).pack;
+        let named = |id, len| {
+            AcceptanceBasis::attested_by_host(HostAttestation {
+                packs: vec![PackSource {
+                    id,
+                    len,
+                    binding: SourceBinding([0; 32]),
+                }],
+                ..attestation()
+            })
+        };
+        let snap = snapshot(&pair(), &[0x42]);
+        let covering = named(ticket.id, ticket.len);
+        let guarded = decide_with(&covering, &snap);
+        assert!(guarded.is_ok());
+        // Another pack identity, or the same pack at another length, is refused.
+        for basis in [
+            named([0x01; 32], ticket.len),
+            named(ticket.id, ticket.len + 1),
+        ] {
+            let snap = snapshot(&pair(), &[0x42]);
+            assert_eq!(
+                decide_with(&basis, &snap).unwrap_err().code,
+                FailureCode::InvalidResponse
+            );
+        }
+        // Several bases together cover several tickets; an unnamed claim is the
+        // host's explicit choice and covers any pack.
+        let changes = pair();
+        let claims = [
+            claim(0x42, UploadProof::Ready),
+            claim(0x43, UploadProof::Ready),
+        ];
+        let other = ticket_fact(0x43).pack;
+        let both = [covering, named(other.id, other.len)];
+        let mut req = request(&changes, &claims);
+        req.verification = VerificationVerdict::Verified(&both);
+        let snap = snapshot(&changes, &[0x42, 0x43]);
+        assert!(decide_ticketed_advance(&req, &snap, limits()).is_ok());
+        req.verification = VerificationVerdict::Verified(&both[..1]);
+        assert_eq!(
+            decide_ticketed_advance(&req, &snap, limits())
+                .unwrap_err()
+                .code,
+            FailureCode::InvalidResponse
+        );
+        // No basis at all is not a verification.
+        req.verification = VerificationVerdict::Verified(&[]);
+        assert_eq!(
+            decide_ticketed_advance(&req, &snap, limits())
+                .unwrap_err()
+                .code,
+            FailureCode::InvalidResponse
+        );
+    }
+
+    #[test]
+    fn contradictory_dependencies_are_an_error() {
+        let mut other = member();
+        other.revision = Revision([0x66; 32]);
+        let basis = AcceptanceBasis::attested_by_host(HostAttestation {
+            dependencies: vec![member(), other],
+            ..attestation()
+        });
+        let snap = snapshot(&pair(), &[0x42]);
+        assert_eq!(
+            decide_with(&basis, &snap).unwrap_err().code,
+            FailureCode::InvalidResponse
+        );
+    }
+
+    #[test]
+    fn into_lowering_keeps_effects_with_their_guards() {
+        let basis = AcceptanceBasis::attested_by_host(attestation());
+        let snap = live(&snapshot(&pair(), &[0x42]), &basis);
+        let guarded = decide_with(&basis, &snap).unwrap();
+        let guards = guarded.required_guards().to_vec();
+        let decision = guarded.decision().clone();
+        let parts = guarded.into_lowering();
+        assert_eq!(parts.required, guards);
+        assert_eq!(parts.decision, decision);
+        assert_eq!(parts.repository, REPO);
+    }
 }

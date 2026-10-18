@@ -18,6 +18,8 @@ workspace = true
 default = ["pack-ruzstd"]
 pack-ruzstd = ["mkit-core/pack-ruzstd"]
 pack-zstd = ["mkit-core/pack-zstd"]
+# Fabricates sealed artifacts for consumer tests; never enable in production.
+synthetic-artifacts = []
 
 [dependencies]
 mkit-core = { path = "../mkit-core", version = "0.5", default-features = false }

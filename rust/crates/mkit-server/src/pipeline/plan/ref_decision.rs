@@ -429,6 +429,7 @@ fn ref_snapshot(repository: RepositoryId) -> RefSnapshot {
         accounting: None,
         publication: None,
         storage: None,
+        basis: Vec::new(),
     }
 }
 

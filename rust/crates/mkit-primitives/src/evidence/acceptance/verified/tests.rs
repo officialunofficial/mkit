@@ -95,8 +95,10 @@ impl InPackObjectView for EmptyView {
 }
 fn closed(heads: &[(Hash, ObjectType, Hash)]) -> (ClosureProof, Vec<Vec<u8>>) {
     let ids: Vec<_> = heads.iter().map(|h| h.0).collect();
+    let verified = VerifiedPack::synthetic_for_tests(EmptyView.object_set_root(), rules());
     let mut walker = ClosureWalker::new(
         EmptyView,
+        &verified,
         &ids,
         REPOSITORY,
         VIEW,
@@ -722,8 +724,10 @@ fn closure_over(
     ruleset: RulesetBinding,
     members: &BTreeMap<Hash, MemberFact>,
 ) -> (ClosureProof, Vec<Vec<u8>>) {
+    let verified = VerifiedPack::synthetic_for_tests(view.object_set_root(), ruleset);
     let mut walker = ClosureWalker::new(
         view,
+        &verified,
         heads,
         REPOSITORY,
         VIEW,
@@ -1002,4 +1006,264 @@ fn envelope_cap_refuses_before_encode() {
         .code,
         FailureCode::ResourceLimit
     );
+}
+
+mod basis {
+    use super::*;
+    use crate::decision::ref_write::guard_kind;
+    use crate::decision::{AcceptanceBasis, BasisCfg, GuardKind, RequiredGuard};
+
+    fn cfg() -> BasisCfg {
+        let build = config();
+        BasisCfg {
+            max_witness_pages: build.max_witness_pages,
+            max_total_witness_bytes: build.max_total_witness_bytes,
+            max_dependencies: 8,
+            witness_page: build.witness_page,
+        }
+    }
+    fn verified() -> VerifiedPack {
+        VerifiedPack::synthetic_for_tests([0x44; 32], rules())
+    }
+    fn kinds(basis: &AcceptanceBasis) -> Vec<GuardKind> {
+        let mut kinds = Vec::new();
+        for guard in basis.guards() {
+            let kind = guard_kind(guard);
+            if !kinds.contains(&kind) {
+                kinds.push(kind);
+            }
+        }
+        kinds
+    }
+    fn external_base(object: u8) -> MemberFact {
+        MemberFact {
+            repository: REPOSITORY,
+            incarnation: VIEW,
+            object: [object; 32],
+            kind: ObjectType::Blob,
+            canonical_len: 64,
+            supplier: PackSource {
+                id: [0x99; 32],
+                len: 512,
+                binding: SourceBinding([0x98; 32]),
+            },
+            canonical_binding: SourceBinding([0x97; 32]),
+            revision: Revision([0x96; 32]),
+            delta_depth: 0,
+            published: true,
+            held: false,
+        }
+    }
+    fn derive(
+        verified: &VerifiedPack,
+        proof: &ClosureProof,
+        pages: &[&[u8]],
+        bases: &[MemberFact],
+        cfg: &BasisCfg,
+    ) -> Result<AcceptanceBasis> {
+        AcceptanceBasis::from_verified(verified, proof, None, 9, pages.iter().copied(), bases, cfg)
+    }
+    fn all(pages: &[Vec<u8>]) -> Vec<&[u8]> {
+        pages.iter().map(Vec::as_slice).collect()
+    }
+
+    #[test]
+    fn from_verified_guards_every_relied_on_dependency_the_denial_and_the_roots() {
+        let (proof, pages) = proof_with_three_members();
+        let basis = derive(
+            &verified(),
+            &proof,
+            &all(&pages),
+            &[external_base(0x10)],
+            &cfg(),
+        )
+        .unwrap();
+        assert_eq!(basis.repository(), REPOSITORY);
+        let count = |f: fn(&RequiredGuard) -> bool| basis.guards().iter().filter(|g| f(g)).count();
+        // Three closure witnesses plus one external delta base.
+        assert_eq!(count(|g| matches!(g, RequiredGuard::Membership { .. })), 4);
+        assert_eq!(
+            count(|g| matches!(g, RequiredGuard::DependencyPublication { .. })),
+            4
+        );
+        assert_eq!(
+            count(|g| matches!(g, RequiredGuard::DenialVersion { version: 9 })),
+            1
+        );
+        assert_eq!(count(|g| matches!(g, RequiredGuard::Binding { .. })), 1);
+        assert_eq!(basis.guards().len(), 10);
+        // The evidence-backed basis draws on a subset of the same guard kinds.
+        let evidence = AcceptanceBasis::from_evidence(&representative());
+        for kind in kinds(&evidence) {
+            assert!(kinds(&basis).contains(&kind), "{kind:?}");
+        }
+        // The pack the basis covers is the sealed pack, by identity and length.
+        let sealed = verified();
+        assert!(basis.covers(&sealed.pack_id(), sealed.len()));
+        assert!(!basis.covers(&sealed.pack_id(), sealed.len() + 1));
+        assert!(!basis.covers(&[0x42; 32], sealed.len()));
+    }
+
+    #[test]
+    fn from_verified_roots_bind_the_pack_and_the_closure() {
+        let (proof, pages) = proof_with_three_members();
+        let digest = |basis: &AcceptanceBasis| {
+            basis.guards().iter().find_map(|g| match g {
+                RequiredGuard::Binding { digest } => Some(*digest),
+                _ => None,
+            })
+        };
+        let base = derive(&verified(), &proof, &all(&pages), &[], &cfg()).unwrap();
+        // A different closure (other heads and witnesses) binds a different root.
+        let (other, other_pages) = closed(&[([1; 32], ObjectType::Commit, [0x77; 32])]);
+        let other_basis = derive(&verified(), &other, &all(&other_pages), &[], &cfg()).unwrap();
+        assert_ne!(digest(&base), digest(&other_basis));
+        // A pack whose object-set root differs from the proof's is refused.
+        let foreign = VerifiedPack::synthetic_for_tests([0x45; 32], rules());
+        assert_eq!(
+            derive(&foreign, &proof, &all(&pages), &[], &cfg())
+                .unwrap_err()
+                .code,
+            FailureCode::EvidenceBindingMismatch
+        );
+        // So is a pack verified under another ruleset.
+        let other_rules = RulesetBinding {
+            ruleset: RulesetId(2),
+            ..rules()
+        };
+        let reruled = VerifiedPack::synthetic_for_tests([0x44; 32], other_rules);
+        assert_eq!(
+            derive(&reruled, &proof, &all(&pages), &[], &cfg())
+                .unwrap_err()
+                .code,
+            FailureCode::EvidenceBindingMismatch
+        );
+    }
+
+    #[test]
+    fn from_verified_refuses_bad_witness_streams_and_never_truncates() {
+        let (proof, pages) = proof_with_three_members();
+        let pages = all(&pages);
+        let go = |pages: &[&[u8]], cfg: &BasisCfg| derive(&verified(), &proof, pages, &[], cfg);
+        assert!(go(&pages, &cfg()).is_ok());
+        // Missing, extra and reordered pages fail closed.
+        assert_eq!(
+            go(&pages[..2], &cfg()).unwrap_err().code,
+            FailureCode::InvalidResponse
+        );
+        let mut extra = pages.clone();
+        extra.push(pages[0]);
+        assert_eq!(
+            go(&extra, &cfg()).unwrap_err().code,
+            FailureCode::InvalidResponse
+        );
+        let mut reordered = pages.clone();
+        reordered.swap(0, 1);
+        assert!(go(&reordered, &cfg()).is_err());
+        // Every allowance refuses rather than truncating.
+        let total: u64 = pages.iter().map(|b| b.len() as u64).sum();
+        let mut tight = cfg();
+        tight.max_total_witness_bytes = total;
+        tight.witness_page.max_bytes = pages.iter().map(|b| b.len() as u64).max().unwrap();
+        tight.witness_page.max_work = tight.witness_page.max_bytes;
+        tight.max_dependencies = 3;
+        assert!(go(&pages, &tight).is_ok());
+        for which in 0..5 {
+            let mut limited = tight;
+            match which {
+                0 => limited.max_dependencies = 2,
+                1 => limited.max_witness_pages = 2,
+                2 => limited.max_total_witness_bytes = total - 1,
+                3 => limited.witness_page.max_bytes -= 1,
+                _ => limited.witness_page.max_work -= 1,
+            }
+            assert_eq!(
+                go(&pages, &limited).unwrap_err().code,
+                FailureCode::ResourceLimit,
+                "allowance {which}"
+            );
+        }
+    }
+
+    #[test]
+    fn external_bases_are_scoped_deduplicated_and_never_contradictory() {
+        let (proof, pages) = proof_with_three_members();
+        let pages = all(&pages);
+        let go = |bases: &[MemberFact]| derive(&verified(), &proof, &pages, bases, &cfg());
+        // A base from another repository is refused.
+        let mut foreign = external_base(0x10);
+        foreign.repository = RepositoryId([0x23; 32]);
+        assert_eq!(
+            go(&[foreign]).unwrap_err().code,
+            FailureCode::EvidenceBindingMismatch
+        );
+        // The same base twice guards once; the same object seen both as a
+        // closure witness and as a base must agree exactly.
+        let once = go(&[external_base(0x10)]).unwrap();
+        assert_eq!(
+            go(&[external_base(0x10), external_base(0x10)])
+                .unwrap()
+                .guards(),
+            once.guards()
+        );
+        let mut conflicting = external_base(0x10);
+        conflicting.held = true;
+        assert_eq!(
+            go(&[external_base(0x10), conflicting]).unwrap_err().code,
+            FailureCode::InvalidResponse
+        );
+        let mut as_witness = external_base(1);
+        as_witness.revision = Revision([0x11; 32]);
+        assert_eq!(
+            go(&[as_witness]).unwrap_err().code,
+            FailureCode::InvalidResponse
+        );
+    }
+
+    #[test]
+    fn from_evidence_yields_exactly_three_guards_and_each_field_moves_one() {
+        let evidence = representative();
+        let basis = AcceptanceBasis::from_evidence(&evidence);
+        assert_eq!(basis.repository(), evidence.repository());
+        let pack = evidence.pack();
+        assert!(basis.covers(&pack.id, pack.len));
+        assert!(!basis.covers(&pack.id, pack.len + 1));
+        let witness = evidence.witness();
+        assert_eq!(
+            basis.guards(),
+            [
+                RequiredGuard::MembershipWitness {
+                    repository: evidence.repository(),
+                    generation: witness.generation,
+                    removal_version: witness.removal_version,
+                },
+                RequiredGuard::DenialVersion {
+                    version: evidence.denial_version(),
+                },
+                RequiredGuard::Binding {
+                    digest: evidence.digest(),
+                },
+            ]
+        );
+        // The last 24 bytes are generation, removal version and denial version.
+        let bytes = evidence.encode().to_vec();
+        for offset in [24, 16, 8] {
+            let mut moved = bytes.clone();
+            let at = moved.len() - offset;
+            moved[at] ^= 1;
+            let decoded = AcceptanceEvidence::decode(&moved, &config().envelope).unwrap();
+            let next = AcceptanceBasis::from_evidence(&decoded);
+            assert_ne!(next.guards(), basis.guards(), "offset {offset}");
+        }
+        // Any other byte, here the replay epoch, changes the root binding.
+        let mut moved = bytes;
+        let epoch_at = 4 + 2 + 4 + 32 + 32 + 4 + evidence.operation().len();
+        moved[epoch_at] ^= 1;
+        let decoded = AcceptanceEvidence::decode(&moved, &config().envelope).unwrap();
+        assert_eq!(decoded.epoch() ^ evidence.epoch(), 1);
+        assert_ne!(
+            AcceptanceBasis::from_evidence(&decoded).guards(),
+            basis.guards()
+        );
+    }
 }

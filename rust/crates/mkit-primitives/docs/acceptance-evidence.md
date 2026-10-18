@@ -5,7 +5,10 @@ than deriving or accepting a caller count. A sealed-artifact integration test
 drives `VerifyDriver` and `ClosureWalker` over a written pack, exports evidence,
 and checks decode, binding, and head reverification.
 
-Evidence format 1 remains unchanged. `AcceptanceEvidence::from_verified` borrows
+Evidence format 1 remains unchanged. A writer derives the evidence's guards with
+`AcceptanceBasis::from_evidence`: the witness pair, the denial version and the
+envelope digest (SPEC-PRIMITIVE-EVIDENCE 4.4); every other field is checked by
+decode, `check_binding` or `recheck_heads`, or bound by the digest. `AcceptanceEvidence::from_verified` borrows
 a `VerifiedPack` and `ClosureProof`; it neither constructs them nor gives them a
 wire representation. The verifier-side export performs work proportional to the
 witness chain. The writer receives only bounded heads and distinct supplier IDs.
