@@ -37,8 +37,9 @@ collect the applicable entries between their old and new immutable pins.
   (was `ChangedFacts`) and `MembershipNotVisible` (was `Unavailable`); map the
   first to a ref conflict and the second to a retryable `unavailable`.
   (4) `ForkRefusal::LifecycleUnavailable` is removed; activation and completion
-  return `Withhold(ForkWithheld::LifecycleUnavailable)`, which never refuses the
-  saved result, and fork acceptance reports an authority fence that cannot be
+  return `Withhold(ForkWithheld::LifecycleUnavailable)` (a new variant of
+  `ForkActivationDecision` and `ForkCompletionDecision`: add the arm to exhaustive
+  matches), which never refuses the saved result, and fork acceptance reports an authority fence that cannot be
   compared atomically as retryable `UnavailableInput` (was `UnsupportedCapability`).
   Wire and stored formats are unchanged; no store reset is required.
 - [embedder: breaking API] Decision behavior now matches its guards. A ticketed

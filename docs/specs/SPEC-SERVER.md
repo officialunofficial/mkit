@@ -289,9 +289,15 @@ authority observation when authority fencing applies. A ref that moved after
 custom admission answers `aborted` "ref changed after admission; retry" with the
 ref-conflict abort cause, exactly as the unticketed path does. A stored
 fast-forward refusal decided on an `ANY` expectation commits only while the ref
-still holds the value the check pinned; the membership rows that an ancestry or
-closure check read live in the paged, sharded object index and stay covered by
-the §9.4 lag window and the §14.2 proof window instead of a batch comparison.
+still holds the value the check pinned. If the ref moves, the stored refusal
+fails its guard, the write is re-planned, and the request ends as retryable write
+contention; the client's retry is decided afresh. The membership rows that an
+ancestry or closure check read live in the paged, sharded object index and stay
+covered by the §9.4 lag window and the §14.2 blocklist commit window instead of a
+batch comparison. A stored built-in refusal relies on the admission-time grant
+and authority checks of the same request rather than on a batch comparison of
+the grant epoch. The defensive abort of tickets whose pack is missing compares
+the ticket rows it closes and every earlier ticket row that fixed its boundary.
 
 **Reference-server behavior.** One fact has one class at every portable decision.
 "Before a result is saved" covers the ref write, the ticketed advance and fork

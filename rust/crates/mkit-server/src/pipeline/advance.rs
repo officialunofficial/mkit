@@ -410,7 +410,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     Err(err) => Some((i, err.clone())),
                 }
             });
-            let Some((_, answer)) = first_failure else {
+            let Some((first_failure, answer)) = first_failure else {
                 return Ok(None);
             };
             // Later tickets cannot supersede the first request-order failure.
@@ -446,6 +446,18 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             )
             .map_err(meta_error)?;
             let mut ticket_guards = Vec::new();
+            // The abort set depends on every ticket row up to the first failure,
+            // not only on the rows it closes (the portable cleanup guards them
+            // all), so the batch compares the examined rows it does not close.
+            for (i, id) in ids.iter().enumerate().take(first_failure + 1) {
+                if !lost.contains(&i) {
+                    let key = keys::ticket(id);
+                    batch.preconditions.push(match snap.get(&key) {
+                        Some(raw) => Precondition::Equals(key, raw.clone()),
+                        None => Precondition::Absent(key),
+                    });
+                }
+            }
             for i in lost {
                 let (id, t) = (&ids[i], rows[i].as_ref().expect("lost pack has a ticket"));
                 let index = keys::ticket_index(&t.repo, &t.ref_name, &t.pack_id, &t.signer)

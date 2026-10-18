@@ -239,30 +239,13 @@ fn try_decide(
     // A stored row that cannot be decoded is left out of the facts, not turned
     // into an answer: the decision asks for it only if it reaches that row, and
     // an earlier pending, replay, ticket or ref answer keeps its precedence.
-    // If it does reach the row, the first decode failure (in acquisition
-    // order) is the diagnostic.
+    // If it does reach the row, the first decode failure is the diagnostic;
+    // rows are acquired in the order the decision consults them (replay,
+    // tickets, refs, then the reservations and counter they imply).
     let mut unreadable: Option<ServerError> = None;
     let mut defer = |error: ServerError| {
         unreadable.get_or_insert(error);
     };
-    for update in req.refs {
-        let key = keys::ref_key(req.repo, &update.name);
-        if !snap.contains(&key) {
-            return Err(internal("unacquired ref observation"));
-        }
-        match snap.get(&key).map(codec::decode_ref_id).transpose() {
-            Ok(current) => facts.refs.push((
-                RefName(update.name.clone()),
-                current.map_or(Observed::Absent(Revision([0; 32])), |value| {
-                    Observed::Present {
-                        value,
-                        revision: Revision(value),
-                    }
-                }),
-            )),
-            Err(error) => defer(corrupt(error)),
-        }
-    }
     if let Some(replay) = req.replay {
         let key = keys::replay(&replay.scope);
         match snap.get(&key) {
@@ -314,6 +297,25 @@ fn try_decide(
             proof: UploadProof::Ready,
             counted,
         });
+    }
+    // Refs are consulted after the ticket rows, so their decode failure ranks after.
+    for update in req.refs {
+        let key = keys::ref_key(req.repo, &update.name);
+        if !snap.contains(&key) {
+            return Err(internal("unacquired ref observation"));
+        }
+        match snap.get(&key).map(codec::decode_ref_id).transpose() {
+            Ok(current) => facts.refs.push((
+                RefName(update.name.clone()),
+                current.map_or(Observed::Absent(Revision([0; 32])), |value| {
+                    Observed::Present {
+                        value,
+                        revision: Revision(value),
+                    }
+                }),
+            )),
+            Err(error) => defer(corrupt(error)),
+        }
     }
     // Reservation observations: each ticket's bound row plus the admission's.
     let mut reservation_keys = Vec::new();
