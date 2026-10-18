@@ -4,7 +4,7 @@
 //! deterministic builders exercise composition; they do not establish provenance.
 use mkit_core::hash::Hasher;
 use mkit_primitives::{
-    decision::{LifecycleFact, LifecycleState, Observed, RefName},
+    decision::{LifecycleFact, LifecycleState, Observed, RefName, guards_hold},
     evidence::{RepositoryId, Revision},
     fork::{
         ForkActivationDecision, ForkActivationFacts, ForkActivationLimits, ForkAdvanceFacts,
@@ -103,6 +103,7 @@ pub fn proof() -> ForkClearanceProof {
         pack: [7; 32],
         apply_attempt: revision(12),
         valid_through_ms: 200,
+        denial_revision: revision(13),
     }
 }
 /// Build facts borrowing exact immutable result and caller-owned observations.
@@ -359,21 +360,17 @@ pub fn fuzz_fork_advance(data: &[u8]) {
     let first = decide_fork_activation(&facts, case.now, case.limits);
     let second = decide_fork_activation(&facts, case.now, case.limits);
     assert_eq!(
-        first
-            .as_ref()
-            .map(mkit_primitives::fork::GuardedForkActivation::decision),
-        second
-            .as_ref()
-            .map(mkit_primitives::fork::GuardedForkActivation::decision)
+        first.as_ref().map(|g| *g.decision()),
+        second.as_ref().map(|g| *g.decision())
     );
     let progress = decide_fork_advance(&case.advance, case.now);
     assert_eq!(
-        progress.decision(),
-        decide_fork_advance(&case.advance, case.now).decision()
+        *progress.decision(),
+        *decide_fork_advance(&case.advance, case.now).decision()
     );
     if let Ok(guard) = first {
-        assert!(guard.matches(&facts, case.now));
-        if guard.decision() == ForkActivationDecision::Install {
+        assert!(guards_hold(&guard, &facts.guards(), case.now));
+        if *guard.decision() == ForkActivationDecision::Install {
             case.assert_install_eligible();
         }
     }

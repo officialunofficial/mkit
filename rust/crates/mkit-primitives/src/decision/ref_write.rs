@@ -13,6 +13,7 @@ mod publication;
 #[cfg(test)]
 mod tests;
 
+pub(super) use complete::compatible;
 pub use complete::{
     GUARD_REQUIREMENTS_VERSION, check_guard_completeness, effect_guard_kinds, guard_kind,
     required_guard_kinds, validate_guard_kind,
@@ -20,7 +21,7 @@ pub use complete::{
 pub use decide::decide_ref_write;
 pub use publication::{RefPublication, decide_ref_publication};
 
-use super::{AuthorityMode, NamespaceId, RefName, RequiredSourceFence, Snapshot};
+use super::{AuthorityMode, NamespaceId, PublishedSourceFence, RefName, Snapshot};
 use crate::evidence::{RepositoryId, Revision};
 use mkit_core::{hash::Hash, refs::RefWriteCondition};
 
@@ -177,7 +178,7 @@ pub struct RefRequirements<'a> {
     /// Whether the resulting publication state was relied on.
     pub publication: bool,
     /// Separate published-source pre-apply fence, repeated on every attempt.
-    pub source: Option<&'a RequiredSourceFence>,
+    pub source: Option<&'a PublishedSourceFence>,
     /// Existing business validity cap; no scheduling allowance is invented here.
     pub valid_through_ms: Option<u64>,
 }

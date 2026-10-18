@@ -791,7 +791,13 @@ fn seal(
     let source_fences = if matches!(decision, WriteDecision::ReturnRecorded(_)) {
         Vec::new()
     } else {
-        attempt.req.required.source.into_iter().cloned().collect()
+        attempt
+            .req
+            .required
+            .source
+            .into_iter()
+            .map(|fence| crate::decision::RequiredSourceFence::Published(Box::new(fence.clone())))
+            .collect()
     };
     Guarded {
         repository,

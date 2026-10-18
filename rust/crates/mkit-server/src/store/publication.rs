@@ -7,7 +7,8 @@ use std::collections::BTreeSet;
 use mkit_core::hash::Hash;
 use mkit_primitives::decision::{
     ClearanceAdvance, ClearanceDecision, ClearanceFacts, ClearanceLifecycle, ClearanceLimits,
-    ClearanceMoment, ClearanceState, OperationId, PriorPublication, decide_clearance,
+    ClearanceMoment, ClearanceState, GuardRow, Guarded, OperationId, PriorPublication,
+    RequiredGuard, decide_clearance,
 };
 use mkit_primitives::evidence::{RepositoryId, Revision};
 use serde::{Deserialize, Serialize};
@@ -416,11 +417,16 @@ pub async fn read<S: NamespaceStore>(
 }
 
 /// Bounded read of every value that can advance the pointer. No projection is used.
+///
+/// `state_raw` is the stored publication row `state` was decoded from: the
+/// clearance decision's prior revision is that row's content digest, and the
+/// caller's apply compares the same row (see [`clear`]).
 pub async fn prefix<S: NamespaceStore>(
     store: &S,
     source: &Partition,
     repo: &RepoName,
     name: &str,
+    state_raw: &Value,
     state: &Publication,
     changed: &Advance,
 ) -> Result<(u64, Pair), StoreError> {
@@ -443,7 +449,9 @@ pub async fn prefix<S: NamespaceStore>(
         ));
     }
     let mut decoded = Vec::with_capacity(wanted.len());
+    let mut revisions = Vec::with_capacity(wanted.len());
     for (sequence, raw) in (state.published + 1..=state.sequence).zip(rows) {
+        revisions.push(row_revision(raw.as_ref()));
         let current = if changed.sequence == sequence {
             changed.clone()
         } else {
@@ -462,7 +470,13 @@ pub async fn prefix<S: NamespaceStore>(
     if !decoded.iter().any(|row| row.sequence == changed.sequence) {
         return Ok(stored_prefix(state, &decoded));
     }
-    clearance_prefix(state, changed, &decoded)
+    clearance_prefix(
+        row_revision(Some(state_raw)),
+        state,
+        changed,
+        &decoded,
+        &revisions,
+    )
 }
 
 fn stored_prefix(state: &Publication, decoded: &[Advance]) -> (u64, Pair) {
@@ -476,30 +490,74 @@ fn stored_prefix(state: &Publication, decoded: &[Advance]) -> (u64, Pair) {
     result
 }
 
+/// Request-local observation token of a stored row: its content digest. A
+/// missing row has the all-zero token, which no stored row can collide with
+/// except by a digest preimage.
+fn row_revision(row: Option<&Value>) -> Revision {
+    Revision(row.map_or([0; 32], |value| mkit_core::hash::hash(value.as_bytes())))
+}
+
+/// How the apply in [`clear`] discharges one guard of the clearance decision.
+///
+/// The final batch compares the publication row and the changed advance row
+/// exactly. Every retained suffix row is written only by [`append`] and
+/// [`clear`], and both rewrite the guarded publication row in the same batch,
+/// so a suffix row cannot move without failing the publication-row comparison
+/// (pinned by `every_advance_writer_rewrites_the_publication_row`). Dependency
+/// witnesses are not supplied to the decision: they live in other partitions or
+/// under other refs' publication rows and are checked by the dependency walk
+/// before the apply, within the batch's `NotAfter` window (SPEC-SERVER 14.4).
+fn account_for(decision: &Guarded<ClearanceDecision>) -> Result<(), StoreError> {
+    for guard in decision.required_guards() {
+        match guard {
+            RequiredGuard::Row {
+                row:
+                    GuardRow::ClearancePrior
+                    | GuardRow::ClearanceChanged(_)
+                    | GuardRow::ClearanceSuffix(_)
+                    | GuardRow::ClearanceLifecycleProfile,
+                ..
+            } => {}
+            // A guard this lowering does not know is never silently dropped.
+            _ => {
+                return Err(StoreError::Corrupt(
+                    "unaccounted publication clearance guard".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn clearance_prefix(
+    prior: Revision,
     state: &Publication,
     changed: &Advance,
     decoded: &[Advance],
+    revisions: &[Revision],
 ) -> Result<(u64, Pair), StoreError> {
     let obligations: Vec<Vec<ClearanceState>> = decoded
         .iter()
         .map(|advance| advance.obligations.iter().map(obligation_state).collect())
         .collect();
-    let revisions: Vec<Vec<Revision>> = obligations
+    let obligation_revisions: Vec<Vec<Revision>> = obligations
         .iter()
         .map(|states| vec![Revision([0; 32]); states.len()])
         .collect();
     let views: Vec<ClearanceAdvance<'_>> = decoded
         .iter()
         .zip(obligations.iter())
-        .zip(revisions.iter())
-        .map(|((advance, states), revisions)| clearance_advance(advance, states, revisions))
+        .zip(obligation_revisions.iter())
+        .zip(revisions)
+        .map(|(((advance, states), obligation_revisions), revision)| {
+            clearance_advance(advance, states, obligation_revisions, *revision)
+        })
         .collect();
     let changed_view = views
         .iter()
         .find(|view| view.sequence == changed.sequence)
         .cloned()
-        .unwrap_or_else(|| clearance_advance(changed, &[], &[]));
+        .unwrap_or_else(|| clearance_advance(changed, &[], &[], Revision([0; 32])));
     let facts = ClearanceFacts {
         repository: RepositoryId([0; 32]),
         moment: ClearanceMoment::Recheck,
@@ -510,7 +568,7 @@ fn clearance_prefix(
             deletion_boundary: state.boundary,
             head: state.value.head,
             packmap: state.value.packmap,
-            revision: Revision([0; 32]),
+            revision: prior,
         },
         previous_state: obligation_state_from(changed.state),
         changed: changed_view,
@@ -521,6 +579,7 @@ fn clearance_prefix(
     };
     let verdict = decide_clearance(&facts, &ClearanceLimits::reference())
         .map_err(|_| StoreError::Corrupt("publication prefix decision refused".into()))?;
+    account_for(&verdict)?;
     Ok(match verdict.decision() {
         ClearanceDecision::AdvancePrefix {
             published_prefix,
@@ -541,7 +600,8 @@ fn clearance_prefix(
 fn clearance_advance<'a>(
     advance: &'a Advance,
     obligations: &'a [ClearanceState],
-    revisions: &'a [Revision],
+    obligation_revisions: &'a [Revision],
+    revision: Revision,
 ) -> ClearanceAdvance<'a> {
     ClearanceAdvance {
         sequence: advance.sequence,
@@ -554,10 +614,10 @@ fn clearance_advance<'a>(
         dependencies: &[],
         external_suppliers: &[],
         obligations,
-        obligation_revisions: revisions,
+        obligation_revisions,
         takedown_complete: advance.state == Clearance::Resolved,
         flagged: false,
-        revision: Revision([0; 32]),
+        revision,
     }
 }
 

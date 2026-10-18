@@ -363,7 +363,10 @@ authority, applicable grant epoch, and pre-acceptance reservation protection.
 `decide_fork_activation` returns membership installation, exact replay, or a
 guarded refusal. `decide_fork_completion` authorizes the final owned write-barrier
 release only after complete accepted progress. These decisions emit no terminal
-outcome or settlement.
+outcome or settlement. Like the ref decisions, they return `decision::Guarded<D>`
+with owned typed guards, and `decide_clearance` does too; `decision::guards_hold`
+compares them against the live guards a host derives with each facts type's
+`guards` method.
 
 The [activation contract](docs/fork-activation.md) explains the complete guard
 matrix and host proof obligations. Run `cargo run -p mkit-primitives --example

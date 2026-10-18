@@ -1,5 +1,5 @@
 use mkit_core::hash::Hasher;
-use mkit_primitives::decision::{LifecycleState, Observed, RefName};
+use mkit_primitives::decision::{LifecycleState, Observed, RefName, guards_hold};
 use mkit_primitives::error::FailureCode;
 use mkit_primitives::evidence::{RepositoryId, Revision};
 use mkit_primitives::fork::*;
@@ -72,6 +72,7 @@ fn proof() -> ForkClearanceProof {
         pack: [7; 32],
         apply_attempt: rev(12),
         valid_through_ms: 200,
+        denial_revision: rev(13),
     }
 }
 fn limits() -> ForkActivationLimits {
@@ -103,13 +104,12 @@ fn facts<'a>(
 fn advance_guards_every_fixed_shape_field_and_samples_construction_expiry() {
     let original = progress();
     let guard = decide_fork_advance(&original, 100);
-    assert_eq!(guard.decision(), ForkAdvanceDecision::Advance);
-    assert_eq!(guard.evaluated_at_ms(), 100);
-    assert!(guard.matches(&original));
+    assert_eq!(*guard.decision(), ForkAdvanceDecision::Advance);
+    assert!(guards_hold(&guard, &original.guards(), 0));
     // Starting at the inclusive boundary is eligible; a new phase after it
     // refuses. The original decision does not invent a later commit deadline.
     assert_eq!(
-        decide_fork_advance(&original, 101).decision(),
+        *decide_fork_advance(&original, 101).decision(),
         ForkAdvanceDecision::Refuse(ForkAdvanceRefusal::Expired)
     );
     let mutations: Vec<ForkAdvanceFacts> = (0..13)
@@ -134,17 +134,17 @@ fn advance_guards_every_fixed_shape_field_and_samples_construction_expiry() {
         })
         .collect();
     for changed in mutations {
-        assert!(!guard.matches(&changed));
+        assert!(!guards_hold(&guard, &changed.guards(), 0));
     }
     let mut changed = original.clone();
     changed.reservation.as_mut().unwrap().expected = rev(99);
-    assert!(!guard.matches(&changed));
+    assert!(!guards_hold(&guard, &changed.guards(), 0));
     changed = original.clone();
     changed.grant_epoch = None;
-    assert!(!guard.matches(&changed));
+    assert!(!guards_hold(&guard, &changed.guards(), 0));
     changed = original.clone();
     changed.reservation = None;
-    assert!(!guard.matches(&changed));
+    assert!(!guards_hold(&guard, &changed.guards(), 0));
 }
 #[test]
 fn authority_precedes_epoch_and_reservation_and_terminal_replay_never_advances() {
@@ -153,27 +153,27 @@ fn authority_precedes_epoch_and_reservation_and_terminal_replay_never_advances()
     f.grant_epoch.as_mut().unwrap().current = ForkObservation::Absent;
     f.reservation.as_mut().unwrap().current = ForkObservation::Absent;
     assert_eq!(
-        decide_fork_advance(&f, 101).decision(),
+        *decide_fork_advance(&f, 101).decision(),
         ForkAdvanceDecision::Refuse(ForkAdvanceRefusal::AuthorityMoved)
     );
     f.authority = f.recorded_authority;
     assert_eq!(
-        decide_fork_advance(&f, 101).decision(),
+        *decide_fork_advance(&f, 101).decision(),
         ForkAdvanceDecision::Refuse(ForkAdvanceRefusal::EpochMoved)
     );
     f.grant_epoch = None;
     assert_eq!(
-        decide_fork_advance(&f, 101).decision(),
+        *decide_fork_advance(&f, 101).decision(),
         ForkAdvanceDecision::Refuse(ForkAdvanceRefusal::Expired)
     );
     assert_eq!(
-        decide_fork_advance(&f, 100).decision(),
+        *decide_fork_advance(&f, 100).decision(),
         ForkAdvanceDecision::Refuse(ForkAdvanceRefusal::ReservationSettled)
     );
     for phase in [ForkAdvancePhase::Complete, ForkAdvancePhase::Failed] {
         f.progress.phase = phase;
         assert_eq!(
-            decide_fork_advance(&f, 101).decision(),
+            *decide_fork_advance(&f, 101).decision(),
             ForkAdvanceDecision::Terminal
         );
     }
@@ -184,17 +184,16 @@ fn accepted_clearance_outlives_expiry_and_reservation_pruning() {
     f.progress.phase = ForkAdvancePhase::Accepted;
     f.reservation.as_mut().unwrap().current = ForkObservation::Absent;
     let guard = decide_fork_advance(&f, u64::MAX);
-    assert_eq!(guard.decision(), ForkAdvanceDecision::Advance);
-    assert_eq!(guard.evaluated_at_ms(), u64::MAX);
-    assert!(guard.matches(&f));
+    assert_eq!(*guard.decision(), ForkAdvanceDecision::Advance);
+    assert!(guards_hold(&guard, &f.guards(), 0));
     f.reservation = None;
     assert_eq!(
-        decide_fork_advance(&f, u64::MAX).decision(),
+        *decide_fork_advance(&f, u64::MAX).decision(),
         ForkAdvanceDecision::Advance
     );
     f.authority = ForkObservation::Present(rev(9));
     assert_eq!(
-        decide_fork_advance(&f, u64::MAX).decision(),
+        *decide_fork_advance(&f, u64::MAX).decision(),
         ForkAdvanceDecision::Refuse(ForkAdvanceRefusal::AuthorityMoved)
     );
 }
@@ -206,7 +205,7 @@ fn exact_witness_pair_is_idempotent_and_foreign_rows_are_never_replaced() {
     let proof = proof();
     let mut unit = unit();
     assert_eq!(
-        decide_fork_activation(&facts(&advance, &result, &unit, &proof), 200, limits())
+        *decide_fork_activation(&facts(&advance, &result, &unit, &proof), 200, limits())
             .unwrap()
             .decision(),
         ForkActivationDecision::Install
@@ -214,7 +213,7 @@ fn exact_witness_pair_is_idempotent_and_foreign_rows_are_never_replaced() {
     unit.live = Some(unit.expected);
     unit.published = Some(unit.expected);
     assert_eq!(
-        decide_fork_activation(&facts(&advance, &result, &unit, &proof), 200, limits())
+        *decide_fork_activation(&facts(&advance, &result, &unit, &proof), 200, limits())
             .unwrap()
             .decision(),
         ForkActivationDecision::Replay
@@ -236,7 +235,7 @@ fn exact_witness_pair_is_idempotent_and_foreign_rows_are_never_replaced() {
                 changed.published = Some(foreign);
             }
             assert_eq!(
-                decide_fork_activation(&facts(&advance, &result, &changed, &proof), 200, limits())
+                *decide_fork_activation(&facts(&advance, &result, &changed, &proof), 200, limits())
                     .unwrap()
                     .decision(),
                 ForkActivationDecision::Refuse(ForkRefusal::DestinationNotEmpty)
@@ -258,14 +257,14 @@ fn partial_pair_error_precedence_distinguishes_guard_loss() {
             unit.published = Some(unit.expected);
         }
         assert_eq!(
-            decide_fork_activation(&facts(&advance, &result, &unit, &proof), 0, limits())
+            *decide_fork_activation(&facts(&advance, &result, &unit, &proof), 0, limits())
                 .unwrap()
                 .decision(),
             ForkActivationDecision::Refuse(ForkRefusal::DestinationNotEmpty)
         );
         unit.context = ForkPairContext::AfterGuardLoss;
         assert_eq!(
-            decide_fork_activation(&facts(&advance, &result, &unit, &proof), 0, limits())
+            *decide_fork_activation(&facts(&advance, &result, &unit, &proof), 0, limits())
                 .unwrap()
                 .decision(),
             ForkActivationDecision::RetryPartial
@@ -281,8 +280,8 @@ fn missing_expired_wrongly_scoped_and_mutated_proofs_fail_closed() {
     let unit = unit();
     let original = facts(&advance, &result, &unit, &proof);
     let guard = decide_fork_activation(&original, 200, limits()).unwrap();
-    assert!(guard.matches(&original, 200));
-    assert!(!guard.matches(&original, 201));
+    assert!(guards_hold(&guard, &original.guards(), 200));
+    assert!(!guards_hold(&guard, &original.guards(), 201));
     let mut missing = original.clone();
     missing.proof = None;
     assert_eq!(
@@ -297,7 +296,7 @@ fn missing_expired_wrongly_scoped_and_mutated_proofs_fail_closed() {
             .code,
         FailureCode::UnavailableInput
     );
-    for field in 0..6 {
+    for field in 0..7 {
         let mut changed = proof.clone();
         match field {
             0 => changed.destination.0[0] ^= 1,
@@ -305,10 +304,11 @@ fn missing_expired_wrongly_scoped_and_mutated_proofs_fail_closed() {
             2 => changed.progress_revision = rev(99),
             3 => changed.pack[0] ^= 1,
             4 => changed.apply_attempt = rev(99),
+            5 => changed.denial_revision = rev(99),
             _ => changed.valid_through_ms += 1,
         }
         let altered = facts(&advance, &result, &unit, &changed);
-        assert!(!guard.matches(&altered, 200));
+        assert!(!guards_hold(&guard, &altered.guards(), 200));
         if field < 4 {
             assert_eq!(
                 decide_fork_activation(&altered, 0, limits())
@@ -360,12 +360,12 @@ fn malicious_inventory_result_and_witness_facts_cannot_authorize_membership() {
     let mut f = facts(&advance, &result, &unit, &proof);
     f.accepted_result = Some(&changed);
     assert_eq!(
-        decide_fork_activation(&f, 0, limits()).unwrap().decision(),
+        *decide_fork_activation(&f, 0, limits()).unwrap().decision(),
         ForkActivationDecision::Refuse(ForkRefusal::BindingMismatch)
     );
     f.accepted_result = None;
     assert_eq!(
-        decide_fork_activation(&f, 0, limits()).unwrap().decision(),
+        *decide_fork_activation(&f, 0, limits()).unwrap().decision(),
         ForkActivationDecision::Refuse(ForkRefusal::BindingMismatch)
     );
 }
@@ -414,8 +414,8 @@ fn completion_requires_exact_inventory_progress_barrier_and_never_settles() {
         expected_barrier_owner: advance.binding,
     };
     let guard = decide_fork_completion(&original, limits()).unwrap();
-    assert_eq!(guard.decision(), ForkCompletionDecision::Complete);
-    assert!(guard.matches(&original));
+    assert_eq!(*guard.decision(), ForkCompletionDecision::Complete);
+    assert!(guards_hold(&guard, &original.guards(), 0));
     for field in 0..6 {
         let mut changed = original.clone();
         match field {
@@ -426,9 +426,9 @@ fn completion_requires_exact_inventory_progress_barrier_and_never_settles() {
             4 => changed.completed_cursor -= 1,
             _ => changed.completed_part = 1,
         }
-        assert!(!guard.matches(&changed));
+        assert!(!guards_hold(&guard, &changed.guards(), 0));
         assert_eq!(
-            decide_fork_completion(&changed, limits())
+            *decide_fork_completion(&changed, limits())
                 .unwrap()
                 .decision(),
             ForkCompletionDecision::Refuse(ForkRefusal::BindingMismatch)
@@ -442,10 +442,10 @@ fn completion_requires_exact_inventory_progress_barrier_and_never_settles() {
         advance: &moved_checkpoint,
         ..original.clone()
     };
-    assert!(!guard.matches(&moved));
+    assert!(!guards_hold(&guard, &moved.guards(), 0));
     // A new checkpoint can still complete units finished before this commit.
     assert_eq!(
-        decide_fork_completion(&moved, limits()).unwrap().decision(),
+        *decide_fork_completion(&moved, limits()).unwrap().decision(),
         ForkCompletionDecision::Complete
     );
     moved_checkpoint.progress.cursor = 3;
@@ -454,7 +454,7 @@ fn completion_requires_exact_inventory_progress_barrier_and_never_settles() {
         ..original.clone()
     };
     assert_eq!(
-        decide_fork_completion(&backwards, limits())
+        *decide_fork_completion(&backwards, limits())
             .unwrap()
             .decision(),
         ForkCompletionDecision::Refuse(ForkRefusal::BindingMismatch)
@@ -467,7 +467,7 @@ fn completion_requires_exact_inventory_progress_barrier_and_never_settles() {
         ..original
     };
     assert_eq!(
-        decide_fork_completion(&replay, limits())
+        *decide_fork_completion(&replay, limits())
             .unwrap()
             .decision(),
         ForkCompletionDecision::Replay
@@ -498,7 +498,7 @@ fn every_saved_result_component_is_immutable_at_activation() {
         let mut f = facts(&advance, &result, &unit, &proof);
         f.accepted_result = Some(&changed);
         assert_eq!(
-            decide_fork_activation(&f, 0, limits()).unwrap().decision(),
+            *decide_fork_activation(&f, 0, limits()).unwrap().decision(),
             ForkActivationDecision::Refuse(ForkRefusal::BindingMismatch)
         );
     }
@@ -515,21 +515,21 @@ fn accepted_refusal_and_terminal_failure_need_no_invented_clearance_proof() {
     f.proof = None;
     f.accepted_result = None;
     assert_eq!(
-        decide_fork_activation(&f, 0, limits()).unwrap().decision(),
+        *decide_fork_activation(&f, 0, limits()).unwrap().decision(),
         ForkActivationDecision::Refuse(ForkRefusal::BindingMismatch)
     );
     advance.authority = ForkObservation::Present(rev(99));
     let mut f = facts(&advance, &result, &unit, &proof);
     f.proof = None;
     assert_eq!(
-        decide_fork_activation(&f, 0, limits()).unwrap().decision(),
+        *decide_fork_activation(&f, 0, limits()).unwrap().decision(),
         ForkActivationDecision::Defer(ForkAdvanceRefusal::AuthorityMoved)
     );
     advance.progress.phase = ForkAdvancePhase::Failed;
     let mut f = facts(&advance, &result, &unit, &proof);
     f.proof = None;
     assert_eq!(
-        decide_fork_activation(&f, 0, limits()).unwrap().decision(),
+        *decide_fork_activation(&f, 0, limits()).unwrap().decision(),
         ForkActivationDecision::Refuse(ForkRefusal::BindingMismatch)
     );
 }
@@ -580,7 +580,7 @@ fn managed_lifecycle_requires_acquisition_active_incarnation_and_exact_revision(
     let mut original = facts(&advance, &result, &unit, &proof);
     original.lifecycle = managed_lifecycle(LifecycleState::Active);
     let guard = decide_fork_activation(&original, 0, limits()).unwrap();
-    assert_eq!(guard.decision(), ForkActivationDecision::Install);
+    assert_eq!(*guard.decision(), ForkActivationDecision::Install);
     for change in 0..7 {
         let mut changed = original.clone();
         let ForkLifecycleProtection::Managed {
@@ -606,18 +606,18 @@ fn managed_lifecycle_requires_acquisition_active_incarnation_and_exact_revision(
                 }
             }
         }
-        assert!(!guard.matches(&changed, 0));
+        assert!(!guards_hold(&guard, &changed.guards(), 0));
         let decision = decide_fork_activation(&changed, 0, limits());
         if change == 0 {
             assert_eq!(decision.unwrap_err().code, FailureCode::UnavailableInput);
         } else if change == 5 {
             assert_eq!(
-                decision.unwrap().decision(),
+                *decision.unwrap().decision(),
                 ForkActivationDecision::Install
             );
         } else {
             assert_eq!(
-                decision.unwrap().decision(),
+                *decision.unwrap().decision(),
                 ForkActivationDecision::Withhold(ForkWithheld::LifecycleUnavailable)
             );
         }
@@ -642,7 +642,7 @@ fn managed_lifecycle_withholds_completion_but_never_changes_completed_replay() {
         expected_barrier_owner: advance.binding,
     };
     let guard = decide_fork_completion(&original, limits()).unwrap();
-    assert_eq!(guard.decision(), ForkCompletionDecision::Complete);
+    assert_eq!(*guard.decision(), ForkCompletionDecision::Complete);
     for current in [
         None,
         Some(Observed::Absent(rev(20))),
@@ -661,13 +661,13 @@ fn managed_lifecycle_withholds_completion_but_never_changes_completed_replay() {
             },
             ..original.clone()
         };
-        assert!(!guard.matches(&changed));
+        assert!(!guards_hold(&guard, &changed.guards(), 0));
         let decision = decide_fork_completion(&changed, limits());
         if current.is_none() {
             assert_eq!(decision.unwrap_err().code, FailureCode::UnavailableInput);
         } else {
             assert_eq!(
-                decision.unwrap().decision(),
+                *decision.unwrap().decision(),
                 ForkCompletionDecision::Withhold(ForkWithheld::LifecycleUnavailable)
             );
         }
@@ -678,7 +678,7 @@ fn managed_lifecycle_withholds_completion_but_never_changes_completed_replay() {
             ..changed
         };
         assert_eq!(
-            decide_fork_completion(&replay, limits())
+            *decide_fork_completion(&replay, limits())
                 .unwrap()
                 .decision(),
             ForkCompletionDecision::Replay
@@ -716,7 +716,7 @@ fn fact_class_table_rows_for_fork_decisions() {
     for state in [LifecycleState::Deleting, LifecycleState::Deleted] {
         facts.lifecycle = managed_lifecycle(state);
         assert_eq!(
-            decide_fork_activation(&facts, 0, limits())
+            *decide_fork_activation(&facts, 0, limits())
                 .unwrap()
                 .decision(),
             ForkActivationDecision::Withhold(ForkWithheld::LifecycleUnavailable)

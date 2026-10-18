@@ -50,6 +50,27 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Breaking (toward 0.6)
 
+- [embedder: breaking API] Fork acceptance, progress, activation, completion and
+  published-clearance decisions converge on `decision::Guarded<D>` with owned,
+  typed `RequiredGuard`s. `GuardedFork`, `GuardedForkAdvance`,
+  `GuardedForkActivation`, `GuardedForkCompletion` and `GuardedClearance` are
+  removed, with their borrowed `required_guards()` snapshots, `matches`,
+  `valid_through_ms`, `evaluated_at_ms` and `source_fence`. Migration: take the
+  decision from `Guarded::decision()` (a reference; dereference the `Copy`
+  enums), lower `required_guards()` (new `RequiredGuard::Row`, `GuardRow` and
+  `GuardKind::{Fork, Clearance}`; handle them in exhaustive consumers, and treat
+  an unknown guard as a failure, never a drop), read the final source proof with
+  `fork::fork_source_proof` (now `RequiredSourceFence::Fork`), and compare with
+  `decision::guards_hold` against the live guards from each facts type's new
+  `guards()` method. A preparing `decide_fork_advance` that advances carries the
+  construction expiry as a `ValidThrough` guard, and `ForkClearanceProof` has a
+  new required `denial_revision` that activation guards. `RefRequirements::source`
+  takes `PublishedSourceFence` (the former `RequiredSourceFence` struct), and
+  `RequiredSourceFence` is now a non-exhaustive enum. `ForkPlan` gains a
+  `commitment()`. The reference server's publication prefix now passes the real
+  row revisions to `decide_clearance` and accounts for every guard it returns;
+  wire and stored formats are unchanged and no wipe is required.
+
 - [embedder: breaking API] Sealed acceptance basis for ticketed acceptance in
   `mkit-primitives`. `VerificationVerdict` gains a lifetime and its `Satisfied`
   variant is replaced by `Verified(&[AcceptanceBasis])`: pass one basis per

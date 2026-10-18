@@ -41,11 +41,23 @@ calls the acceptance entry point with deterministic typed host observations.
 
 ## Guard matrix
 
-`GuardedFork::required_guards` borrows the complete destination snapshot.
-Compare every acquired observation, including its revision, with all effects in
-one atomic unit. `matches` is a pure comparison aid; it does not acquire or
-commit anything. The host scopes the snapshot by the repository, request,
-reservation, and replay identity returned with the decision.
+Every fork decision returns a `decision::Guarded<D>`, the same wrapper the ref
+and ticketed decisions use. Its `required_guards` are owned, typed
+`RequiredGuard` values, one per acquired observation: the typed authority,
+grant and repository (lifecycle) guards, and `RequiredGuard::Row` for the
+fork-specific rows (job, emptiness, name, permission, admission, quota,
+reservation, replay, the apply attempt, durable progress, authority and epoch
+fences, the retained accepted result, the membership unit, the destination
+clearance proof and the denial revision behind it). A `Row` carries the
+observation revision and a commitment to every field of the fact value, so a
+value that moved without a revision change still fails the comparison.
+`ForkFacts::guards` (and the same method on the advance, activation, completion
+and clearance facts) derives the live guards from freshly acquired facts, and
+`decision::guards_hold` is the pure reference comparison. Compare every guard,
+including its revision, with all effects in one atomic unit. Business expiry
+and the proof deadline are `ValidThrough` guards. The final source proof is a
+separate pre-apply `RequiredSourceFence::Fork`; `fork_source_proof` returns it.
+Nothing here acquires or commits anything.
 
 | Dependency | Exact required fact | Boundary and mutation evidence |
 |---|---|---|
@@ -106,12 +118,14 @@ and reachable from the packmap root. Checked sums reject overflow. Scratch is
 at most one `usize` and one byte per pack, reserved fallibly. The existing
 sorted-pack digest streams through core's BLAKE3 implementation.
 
-Decisions borrow observations, proofs, and the sealed response. Plan sealing
+Decisions borrow observations, proofs, and the sealed response; the returned
+guards are owned. Plan sealing
 reserves one response branch string fallibly, bounded by the branch limit.
 Host input memory and host-restored terminal records belong to the caller. Full-plan equality, branch comparisons, and proof checks have
 an explicit finite work allowance. Every retained plan and terminal branch
 is charged before returning a guarded decision, including refusal snapshots. Output contains one decision, at most one
-acceptance or joining settlement, and the fixed-shape borrowed guard snapshot.
+acceptance or joining settlement, and a fixed number of owned guards (at most
+fifteen for acceptance).
 There is no hidden I/O, traversal callback, clock read, or runtime fan-out.
 
 The semantic fixture inventory is read-only. The fuzz target is

@@ -640,6 +640,14 @@ dependency and supplier id sets carry no member facts; they stay with the
 clearance decision's dependency witnesses, and the constructor validates the
 coverage's repository, view and ruleset only.
 
+The commitment protects against accidental host omission, not against an
+adversarial host. Its count and sum are not collision-resistant against a list
+the host chooses, and a host that can lie about the list can equally skip the
+decision or supply a basis it did not verify: the host that supplies the
+external facts is inside the trust boundary below. Treat a mismatch as a
+host defect to repair, and never as evidence that an honest verification took
+place.
+
 **Trust boundary.** The sealed-artifact and evidence constructors establish
 what their artifacts establish. A host attestation establishes nothing: the host
 asserts, on its own authority, that it verified the pack's integrity and closure

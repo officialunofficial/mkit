@@ -8,8 +8,8 @@ use crate::replay::{
 use crate::{
     decision::{
         AcceptanceEffects, Guarded, LifecycleState, Observed, PermanentCode, PermanentRefusal,
-        RefEffect, RefValue, ReplayState, ReplayTransition, RequiredGuard, RetryReason, Snapshot,
-        TerminalResult, WriteDecision,
+        RefEffect, RefValue, ReplayState, ReplayTransition, RequiredGuard, RequiredSourceFence,
+        RetryReason, Snapshot, TerminalResult, WriteDecision,
     },
     error::{Failure, FailureCode},
 };
@@ -81,7 +81,12 @@ pub fn decide_ref_write(
     let source_fences = if matches!(decision, WriteDecision::ReturnRecorded(_)) {
         Vec::new()
     } else {
-        request.required.source.into_iter().cloned().collect()
+        request
+            .required
+            .source
+            .into_iter()
+            .map(|fence| RequiredSourceFence::Published(Box::new(fence.clone())))
+            .collect()
     };
     Ok(Guarded {
         repository: request.repository,

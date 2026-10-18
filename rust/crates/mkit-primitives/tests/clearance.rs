@@ -4,7 +4,7 @@ use mkit_core::hash::Hash;
 use mkit_primitives::decision::{
     ClearanceAdvance, ClearanceDecision, ClearanceFacts, ClearanceLifecycle, ClearanceLimits,
     ClearanceMoment, ClearanceState, DependencyWitness, Observed, OperationId, PriorPublication,
-    decide_clearance,
+    decide_clearance, guards_hold,
 };
 use mkit_primitives::error::FailureCode;
 use mkit_primitives::evidence::{RepositoryId, Revision};
@@ -109,7 +109,7 @@ fn contiguous_cleared_prefix_advances_and_stops_at_pending() {
             deletion_boundary: 0,
         }
     );
-    assert!(decided.matches(&input));
+    assert!(guards_hold(&decided, &input.guards(), 0));
 }
 
 #[test]
@@ -269,7 +269,7 @@ fn mutated_snapshot_does_not_match_and_managed_lifecycle_fails_closed() {
     let decided = decide_clearance(&input, &ClearanceLimits::reference()).unwrap();
     let mut moved = input.clone();
     moved.prior.revision = rev(8);
-    assert!(!decided.matches(&moved));
+    assert!(!guards_hold(&decided, &moved.guards(), 0));
 
     let mut managed = input.clone();
     managed.lifecycle = ClearanceLifecycle::Managed {

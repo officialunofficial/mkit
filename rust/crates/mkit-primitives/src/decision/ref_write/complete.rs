@@ -41,7 +41,9 @@ pub fn validate_guard_kind(kind: Option<GuardKind>, version: u32) -> Result<Guar
             | GuardKind::Storage
             | GuardKind::Publication
             | GuardKind::ValidThrough
-            | GuardKind::Binding),
+            | GuardKind::Binding
+            | GuardKind::Fork
+            | GuardKind::Clearance),
         ) => Ok(kind),
         None => Err(failure(FailureCode::UnsupportedCapability)),
     }
@@ -72,6 +74,7 @@ pub const fn guard_kind(guard: &RequiredGuard) -> GuardKind {
         }
         RequiredGuard::ValidThrough { .. } => GuardKind::ValidThrough,
         RequiredGuard::Binding { .. } => GuardKind::Binding,
+        RequiredGuard::Row { row, .. } => row.kind(),
     }
 }
 
@@ -359,6 +362,18 @@ fn same_identity(left: &RequiredGuard, right: &RequiredGuard) -> bool {
             G::MembershipWitness { repository: b, .. },
         ) => a == b,
         (G::Admission { operation: a, .. }, G::Admission { operation: b, .. }) => a == b,
+        (
+            G::Row {
+                repository: a,
+                row: x,
+                ..
+            },
+            G::Row {
+                repository: b,
+                row: y,
+                ..
+            },
+        ) => a == b && x == y,
         (G::DenialVersion { .. }, G::DenialVersion { .. }) => true,
         // Bindings of distinct packs coexist; one digest has one identity.
         (G::Binding { digest: a }, G::Binding { digest: b }) => a == b,

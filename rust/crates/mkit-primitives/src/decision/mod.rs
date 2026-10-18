@@ -6,6 +6,7 @@
 
 mod basis;
 mod clearance;
+pub(crate) mod commit;
 mod effects;
 #[cfg(test)]
 pub(crate) mod fact_harness;
@@ -19,8 +20,8 @@ pub use basis::{
 };
 pub use clearance::{
     ClearanceAdvance, ClearanceDecision, ClearanceFacts, ClearanceLifecycle, ClearanceLimits,
-    ClearanceMoment, ClearanceState, CombinedAcceptance, DependencyWitness, GuardedClearance,
-    PriorPublication, decide_accept_and_clear, decide_clearance,
+    ClearanceMoment, ClearanceState, CombinedAcceptance, DependencyWitness, PriorPublication,
+    decide_accept_and_clear, decide_clearance,
 };
 
 pub use effects::{
@@ -36,7 +37,7 @@ pub use facts::{
     ReservationFact, ReservationId, ReservationOp, ReservationTerminal, ReservationTerminalKind,
     Snapshot, StorageFact, TerminalResult, TicketFact, TicketId,
 };
-pub use guards::{GuardKind, RequiredGuard, RequiredSourceFence};
+pub use guards::{GuardKind, GuardRow, PublishedSourceFence, RequiredGuard, RequiredSourceFence};
 
 /// Transient decision outcome; never durable replay.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,6 +136,23 @@ pub struct Lowering<D> {
     pub source_fences: Vec<RequiredSourceFence>,
 }
 impl<D> Guarded<D> {
+    /// Assemble a decision of another decision family with its owned guards.
+    ///
+    /// The caller derives the guards from distinct rows, so no two guards can
+    /// share an identity; tests of each family assert it.
+    pub(crate) fn from_parts(
+        repository: crate::evidence::RepositoryId,
+        decision: D,
+        required: Vec<RequiredGuard>,
+        source_fences: Vec<RequiredSourceFence>,
+    ) -> Self {
+        Self {
+            repository,
+            decision,
+            required,
+            source_fences,
+        }
+    }
     /// Consume the decision into its owned parts, so effects cannot be taken
     /// without the guards that travel with them.
     pub fn into_lowering(self) -> Lowering<D> {
@@ -165,4 +183,23 @@ impl<D> Guarded<D> {
     pub fn source_fences(&self) -> &[RequiredSourceFence] {
         &self.source_fences
     }
+}
+
+/// Reference comparison of a decision's guards against the live guards a host
+/// derives from its current facts (each facts type offers a `guards` method).
+///
+/// A guard holds when the live view yields exactly it; `ValidThrough` holds
+/// while `now_ms` is within the bound. A live view that contradicts itself
+/// holds nothing. This acquires and commits nothing: a real adapter performs
+/// the comparison inside its transaction.
+#[must_use]
+pub fn guards_hold<D>(guarded: &Guarded<D>, live: &[RequiredGuard], now_ms: u64) -> bool {
+    live.iter().enumerate().all(|(i, guard)| {
+        live[..i]
+            .iter()
+            .all(|other| ref_write::compatible(other, guard))
+    }) && guarded.required_guards().iter().all(|guard| match guard {
+        RequiredGuard::ValidThrough { instant_ms } => now_ms <= *instant_ms,
+        _ => live.contains(guard),
+    })
 }

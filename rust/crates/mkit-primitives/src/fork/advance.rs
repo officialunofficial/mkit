@@ -9,8 +9,8 @@
 //! protection is explicit: managed profiles supply acquired lifecycle facts.
 //! Current source state is deliberately absent: acceptance fixed the result.
 
-use super::{ForkRefusal, ForkResult, ForkWithheld};
-use crate::decision::{LifecycleFact, LifecycleState, Observed};
+use super::{ForkRefusal, ForkResult, ForkWithheld, guards};
+use crate::decision::{Guarded, LifecycleFact, LifecycleState, Observed};
 use crate::error::{BoundedDetail, Failure, FailureCode, Location};
 use crate::evidence::{RepositoryId, Revision};
 use mkit_core::hash::{Hash, Hasher};
@@ -120,39 +120,6 @@ pub enum ForkAdvanceDecision {
     /// Before acceptance this may terminate; after acceptance it only defers clearance.
     Refuse(ForkAdvanceRefusal),
 }
-/// Private permission bound to the complete borrowed snapshot.
-#[derive(Debug)]
-#[must_use]
-pub struct GuardedForkAdvance<'a> {
-    decision: ForkAdvanceDecision,
-    facts: &'a ForkAdvanceFacts,
-    evaluated_at_ms: u64,
-}
-impl<'a> GuardedForkAdvance<'a> {
-    /// Decision requiring every returned comparison.
-    #[must_use]
-    pub const fn decision(&self) -> ForkAdvanceDecision {
-        self.decision
-    }
-    /// Exact guards to lower into the coordinator atomic unit.
-    #[must_use]
-    pub const fn required_guards(&self) -> &'a ForkAdvanceFacts {
-        self.facts
-    }
-    /// Host-supplied phase-start time used to evaluate construction eligibility.
-    /// It is not a deadline to lower into a later commit.
-    #[must_use]
-    pub const fn evaluated_at_ms(&self) -> u64 {
-        self.evaluated_at_ms
-    }
-    /// Compare exact acquired facts at the host's atomic boundary.
-    /// Construction eligibility was sampled at phase start; independently
-    /// required reservation, authority, and physical apply fences still apply.
-    #[must_use]
-    pub fn matches(&self, current: &ForkAdvanceFacts) -> bool {
-        self.facts == current
-    }
-}
 /// Compare already acquired authority observations before any progress work.
 /// The epoch is compared only where original authorization depended on it.
 #[must_use]
@@ -170,12 +137,16 @@ pub fn decide_fork_authority(
     }
 }
 /// Decide an advancing coordinator commit from exact already acquired facts.
-/// `now_ms` is the sampled phase-start time. Construction expiry controls
-/// eligibility to start that phase, not the later commit time. The host retains
-/// its independently required commit deadlines and exact acquired-fact guards.
-/// Terminal jobs return before fence checks, matching immutable replay semantics.
+///
+/// `now_ms` is the sampled phase-start time. Terminal jobs return before fence
+/// checks, matching immutable replay semantics. The returned [`Guarded`] owns
+/// the typed guards of [`ForkAdvanceFacts::guards`]. An `Advance` that starts a
+/// preparing phase also carries the construction expiry as a `ValidThrough`
+/// guard, so a commit ordered after the original lifetime fails the comparison
+/// and the redecision answers `Expired`. An accepted phase ignores that bound.
+/// The host retains its independently required physical apply deadlines.
 #[must_use = "compare every required guard before advancing"]
-pub fn decide_fork_advance(facts: &ForkAdvanceFacts, now_ms: u64) -> GuardedForkAdvance<'_> {
+pub fn decide_fork_advance(facts: &ForkAdvanceFacts, now_ms: u64) -> Guarded<ForkAdvanceDecision> {
     let phase = facts.progress.phase;
     let decision = if matches!(phase, ForkAdvancePhase::Complete | ForkAdvancePhase::Failed) {
         ForkAdvanceDecision::Terminal
@@ -197,11 +168,16 @@ pub fn decide_fork_advance(facts: &ForkAdvanceFacts, now_ms: u64) -> GuardedFork
     } else {
         ForkAdvanceDecision::Advance
     };
-    GuardedForkAdvance {
+    let valid_through = (decision == ForkAdvanceDecision::Advance
+        && phase == ForkAdvancePhase::Preparing)
+        .then_some(facts.construction_expires_ms);
+    guards::seal(
+        facts.destination,
         decision,
-        facts,
-        evaluated_at_ms: now_ms,
-    }
+        facts.guards(),
+        valid_through,
+        None,
+    )
 }
 /// Exact semantic membership witness. No storage encoding is specified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -294,6 +270,10 @@ pub struct ForkClearanceProof {
     pub apply_attempt: Revision,
     /// Last inclusive application time of this proof.
     pub valid_through_ms: u64,
+    /// Revision of the destination denial observation this proof was acquired
+    /// under. An activation guards it, so a denial change after the proof fails
+    /// the comparison instead of installing a denied pack.
+    pub denial_revision: Revision,
 }
 /// Borrowed fixed-shape activation facts; no complete graph is reconstructed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -339,36 +319,6 @@ pub enum ForkActivationDecision {
     /// Exact binding, terminal state, or foreign witness prevents activation.
     Refuse(ForkRefusal),
 }
-/// Private activation permission with the entire snapshot and proof fence.
-#[derive(Debug)]
-#[must_use]
-pub struct GuardedForkActivation<'a> {
-    decision: ForkActivationDecision,
-    facts: &'a ForkActivationFacts<'a>,
-    valid_through_ms: u64,
-}
-impl<'a> GuardedForkActivation<'a> {
-    /// Membership-only decision requiring all guards and host proof duties.
-    #[must_use]
-    pub const fn decision(&self) -> ForkActivationDecision {
-        self.decision
-    }
-    /// Exact borrowed facts to compare at the effect boundary.
-    #[must_use]
-    pub const fn required_guards(&self) -> &'a ForkActivationFacts<'a> {
-        self.facts
-    }
-    /// Inclusive proof deadline.
-    #[must_use]
-    pub const fn valid_through_ms(&self) -> u64 {
-        self.valid_through_ms
-    }
-    /// Exact comparison. Does not implement the host's proof protocol.
-    #[must_use]
-    pub fn matches(&self, current: &ForkActivationFacts<'_>, now_ms: u64) -> bool {
-        self.facts == current && now_ms <= self.valid_through_ms
-    }
-}
 fn fail(code: FailureCode) -> Failure {
     Failure {
         code,
@@ -409,7 +359,7 @@ pub fn decide_fork_activation<'a>(
     facts: &'a ForkActivationFacts<'a>,
     now_ms: u64,
     limits: ForkActivationLimits,
-) -> Result<GuardedForkActivation<'a>, Failure> {
+) -> Result<Guarded<ForkActivationDecision>, Failure> {
     check_result_bounds(facts.expected_result, facts.accepted_result, limits)?;
     let count = facts.inherited_packs.len() as u64;
     let work = count
@@ -425,25 +375,29 @@ pub fn decide_fork_activation<'a>(
     {
         Some(ForkActivationDecision::Refuse(ForkRefusal::BindingMismatch))
     } else if let ForkAdvanceDecision::Refuse(reason) =
-        decide_fork_advance(facts.advance, now_ms).decision()
+        *decide_fork_advance(facts.advance, now_ms).decision()
     {
         Some(ForkActivationDecision::Defer(reason))
     } else {
         None
     };
-    if let Some(decision) = early {
-        return Ok(GuardedForkActivation {
+    let sealed = |decision, valid_through_ms| {
+        guards::seal(
+            facts.advance.destination,
             decision,
-            facts,
-            valid_through_ms: u64::MAX,
-        });
+            facts.guards(),
+            valid_through_ms,
+            None,
+        )
+    };
+    if let Some(decision) = early {
+        return Ok(sealed(decision, None));
     }
     if !lifecycle_available(&facts.lifecycle)? {
-        return Ok(GuardedForkActivation {
-            decision: ForkActivationDecision::Withhold(ForkWithheld::LifecycleUnavailable),
-            facts,
-            valid_through_ms: u64::MAX,
-        });
+        return Ok(sealed(
+            ForkActivationDecision::Withhold(ForkWithheld::LifecycleUnavailable),
+            None,
+        ));
     }
     check_activation_inventory(facts)?;
     let proof = facts
@@ -483,11 +437,7 @@ pub fn decide_fork_activation<'a>(
     } else {
         ForkActivationDecision::Refuse(ForkRefusal::DestinationNotEmpty)
     };
-    Ok(GuardedForkActivation {
-        decision,
-        facts,
-        valid_through_ms: proof.valid_through_ms,
-    })
+    Ok(sealed(decision, Some(proof.valid_through_ms)))
 }
 
 /// Final coordinator clearance facts after all membership write/check units.
@@ -528,30 +478,6 @@ pub enum ForkCompletionDecision {
     /// Exact acceptance, progress, or barrier ownership did not match.
     Refuse(ForkRefusal),
 }
-/// Private permission to finish the published clearance under exact guards.
-#[derive(Debug)]
-#[must_use]
-pub struct GuardedForkCompletion<'a> {
-    decision: ForkCompletionDecision,
-    facts: &'a ForkCompletionFacts<'a>,
-}
-impl<'a> GuardedForkCompletion<'a> {
-    /// Coordinator-only completion decision.
-    #[must_use]
-    pub const fn decision(&self) -> ForkCompletionDecision {
-        self.decision
-    }
-    /// Exact complete snapshot to compare atomically.
-    #[must_use]
-    pub const fn required_guards(&self) -> &'a ForkCompletionFacts<'a> {
-        self.facts
-    }
-    /// Reference comparison; never substitutes for the host's atomic unit.
-    #[must_use]
-    pub fn matches(&self, current: &ForkCompletionFacts<'_>) -> bool {
-        self.facts == current
-    }
-}
 fn check_result_bounds(
     expected: &ForkResult,
     accepted: Option<&ForkResult>,
@@ -578,7 +504,7 @@ fn check_result_bounds(
 pub fn decide_fork_completion<'a>(
     facts: &'a ForkCompletionFacts<'a>,
     limits: ForkActivationLimits,
-) -> Result<GuardedForkCompletion<'a>, Failure> {
+) -> Result<Guarded<ForkCompletionDecision>, Failure> {
     check_result_bounds(facts.expected_result, facts.accepted_result, limits)?;
     let phase = facts.advance.progress.phase;
     let decision = if facts.accepted_result != Some(facts.expected_result) {
@@ -606,5 +532,11 @@ pub fn decide_fork_completion<'a>(
     } else {
         ForkCompletionDecision::Complete
     };
-    Ok(GuardedForkCompletion { decision, facts })
+    Ok(guards::seal(
+        facts.advance.destination,
+        decision,
+        facts.guards(),
+        None,
+        None,
+    ))
 }

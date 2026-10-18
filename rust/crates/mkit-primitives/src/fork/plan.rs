@@ -58,6 +58,7 @@ pub struct ForkPlan {
     pub(super) packs: Vec<ForkInventory>,
     pub(super) result: ForkResult,
     pub(super) edges: u64,
+    pub(super) commitment: Hash,
 }
 
 impl ForkPlan {
@@ -170,11 +171,13 @@ impl ForkPlan {
             pack_digest: digest.finalize(),
             destination_generation: binding.destination_generation,
         };
+        let commitment = Self::compute_commitment(&binding, &packs, &result);
         Ok(Self {
             binding,
             packs,
             result,
             edges,
+            commitment,
         })
     }
 

@@ -7,13 +7,14 @@ use harness::{
 };
 use mkit_primitives::{
     decision::{
-        AuthorityMode, GrantFact, LifecycleFact, LifecycleState, NamespaceId, Observed, OperationId,
+        AuthorityMode, GrantFact, Guarded, LifecycleFact, LifecycleState, NamespaceId, Observed,
+        OperationId, RequiredGuard, guards_hold,
     },
     error::FailureCode,
     evidence::{RepositoryId, Revision},
     fork::{
         FinalForkSourceProof, ForkDecision, ForkJobState, ForkPlan, ForkRefusal, ForkReplay,
-        ForkReservation, ForkTerminal, ForkVisibility, GuardedFork, decide_fork_acceptance,
+        ForkReservation, ForkTerminal, ForkVisibility, decide_fork_acceptance, fork_source_proof,
     },
 };
 
@@ -26,7 +27,7 @@ fn value<T>(fact: &mut Option<Observed<T>>) -> &mut T {
         _ => panic!("fixture must be present"),
     }
 }
-fn outcome(result: Result<GuardedFork<'_>, mkit_primitives::error::Failure>) -> String {
+fn outcome(result: Result<Guarded<ForkDecision<'_>>, mkit_primitives::error::Failure>) -> String {
     match result {
         Err(failure) => failure.code.as_str().into(),
         Ok(guarded) => match guarded.decision() {
@@ -147,7 +148,7 @@ fn every_atomic_guard_and_expiry_rejects_mutation() {
     let s = proof(&p);
     let guarded = decide_fork_acceptance(&p, &request, &f, Some(&s), 1, LIMITS)
         .expect("valid deterministic fixture");
-    assert!(guarded.matches(&f, 1));
+    assert!(guards_hold(&guarded, &f.guards(), 1));
     let names = [
         "job",
         "phantom-safe emptiness",
@@ -168,13 +169,17 @@ fn every_atomic_guard_and_expiry_rejects_mutation() {
         let mut changed = f.clone();
         assert!(mutate_guard(&mut changed, index));
         assert!(
-            !guarded.matches(&changed, 1),
+            !guards_hold(&guarded, &changed.guards(), 1),
             "missing atomic guard: {name}"
         );
     }
-    assert!(guarded.matches(&f, 90));
-    assert!(!guarded.matches(&f, 91));
-    assert_eq!(guarded.valid_through_ms(), Some(90));
+    assert!(guards_hold(&guarded, &f.guards(), 90));
+    assert!(!guards_hold(&guarded, &f.guards(), 91));
+    assert!(
+        guarded
+            .required_guards()
+            .contains(&RequiredGuard::ValidThrough { instant_ms: 90 })
+    );
 }
 
 #[test]
@@ -191,7 +196,7 @@ fn phantom_additions_cannot_hide_behind_previously_absent_rows() {
     if let Some(Observed::Present { revision, .. }) = &mut phantom.emptiness {
         *revision = Revision([2; 32]);
     }
-    assert!(!guarded.matches(&phantom, 1));
+    assert!(!guards_hold(&guarded, &phantom.guards(), 1));
     value(&mut phantom.emptiness).visible_members = 1;
     assert_eq!(
         outcome(decide_fork_acceptance(
@@ -266,7 +271,7 @@ fn terminal_acceptance_is_once_only_and_replay_survives_later_source_loss() {
         );
         assert_eq!(value(&mut f.clone().emptiness).visible_members, 0);
         assert!(!value(&mut f.clone().emptiness).writes_enabled);
-        assert_eq!(guarded.source_fence(), Some(&s));
+        assert_eq!(fork_source_proof(&guarded), Some(&s));
         result = ForkTerminal::Accepted(Box::new(effects.result().clone()));
     }
     // A reference atomic lowering: one accepted record, one saved replay, one
@@ -284,7 +289,7 @@ fn terminal_acceptance_is_once_only_and_replay_survives_later_source_loss() {
         assert!(
             matches!(replay.decision(), ForkDecision::ReturnRecorded { result: saved, replay_race: None } if **saved == result)
         );
-        assert!(replay.source_fence().is_none());
+        assert!(fork_source_proof(&replay).is_none());
         assert_eq!(f.quota, quota);
     }
     // Outcome acknowledgement may remove the reservation. It cannot cause a
@@ -321,7 +326,7 @@ fn joining_reservation_is_exact_and_never_settles_original_attempt() {
     changed.reservation = observed(ForkReservation::Settled(ForkTerminal::Refused(
         ForkRefusal::Expired,
     )));
-    assert!(!join.matches(&changed, 1));
+    assert!(!guards_hold(&join, &changed.guards(), 1));
 }
 
 #[test]
@@ -541,9 +546,9 @@ fn source_movement_after_the_final_proof_is_not_a_destination_atomic_guard() {
     later_source.proof_point = 13;
     later_source.readable = false;
     later_source.packs[2].denied = true;
-    assert!(guarded.matches(&f, 2));
-    assert_eq!(guarded.source_fence(), Some(&captured));
-    assert_ne!(guarded.source_fence(), Some(&later_source));
+    assert!(guards_hold(&guarded, &f.guards(), 2));
+    assert_eq!(fork_source_proof(&guarded), Some(&captured));
+    assert_ne!(fork_source_proof(&guarded), Some(&later_source));
 }
 
 #[test]

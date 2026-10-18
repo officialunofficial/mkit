@@ -437,6 +437,10 @@ pub(super) fn matches(guard: &RequiredGuard, current: &Snapshot, now_ms: u64) ->
         RequiredGuard::DenialVersion { .. } | RequiredGuard::Binding { .. } => {
             current.basis.contains(guard)
         }
+        // Fork and clearance rows belong to other decision families; a ref
+        // snapshot holds none of them, so they never compare equal here. Use
+        // `guards_hold` against the live guards of the family's own facts.
+        RequiredGuard::Row { .. } => false,
     }
 }
 

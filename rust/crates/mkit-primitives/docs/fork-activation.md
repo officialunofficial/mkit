@@ -45,12 +45,17 @@ A preflight authority read alone does not discharge this requirement.
 | Completion | Exact accepted result and complete progress; operation-owned destination write barrier and current authority guarded with the final job transition |
 | Failed construction | No advancement or visibility permission; retain the inert destination and its saved failure |
 
-Construction expiry is sampled when a preparation phase starts, preserving the
-reference driver's eligibility boundary. It is not a new commit deadline.
-The host separately retains exact pending reservation comparisons, authority
-fences, full job CAS, and physical apply deadlines. An eligible phase may finish
-after its construction eligibility bound; starting another preparation phase
-then refuses.
+Every decision above returns a `decision::Guarded<D>` with owned, typed guards
+(see the guard matrix in [fork acceptance](fork.md)). A preparation `Advance`
+carries the construction expiry as a `ValidThrough` guard: eligibility is still
+sampled when the phase starts, but a commit ordered after the original lifetime
+now fails the comparison and the redecision answers `Expired`. An accepted
+phase ignores the bound, so clearance outlives expiry. An activation `Install`
+carries the proof deadline as a `ValidThrough` guard and guards the destination
+denial revision the proof was acquired under (`ForkClearanceProof::denial_revision`),
+so a denial change after the proof fails the comparison instead of installing a
+denied pack. The host separately retains exact pending reservation comparisons,
+authority fences, full job CAS, and physical apply deadlines.
 
 After acceptance, reservation expiry, outcome acknowledgement, and permitted
 replay pruning do not cancel recovery responsibility. Clearance remains

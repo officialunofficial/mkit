@@ -54,7 +54,7 @@ fn portable_progress_cases_pin_decisions_and_precedence() {
             }),
             construction_expires_ms: 100,
         };
-        let decision = decide_fork_advance(&facts, now.parse().expect("fixture time")).decision();
+        let decision = *decide_fork_advance(&facts, now.parse().expect("fixture time")).decision();
         let expected_decision = match *expected {
             "Advance" => ForkAdvanceDecision::Advance,
             "Terminal" => ForkAdvanceDecision::Terminal,

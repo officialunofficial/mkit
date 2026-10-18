@@ -478,6 +478,7 @@ impl<T: NamespaceStore> PublicationRecheck<T> {
                 ctx.partition,
                 &repo.name,
                 &name,
+                state_raw,
                 &state,
                 &changed,
             )

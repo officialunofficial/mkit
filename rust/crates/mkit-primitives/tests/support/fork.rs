@@ -2,7 +2,7 @@
 use mkit_primitives::{
     decision::{
         AuthorityFact, AuthorityMode, LifecycleFact, LifecycleState, NamespaceId, Observed,
-        OperationId, PublicationFact, RefName, ReplayScope, ReservationId,
+        OperationId, PublicationFact, RefName, ReplayScope, ReservationId, guards_hold,
     },
     evidence::{RepositoryId, Revision},
     fork::{
@@ -320,7 +320,7 @@ pub fn fuzz_fork_acceptance(data: &[u8]) {
                     && !p.eligibility.held
                     && !p.superseded)
             );
-            assert!(guarded.matches(&facts, now));
+            assert!(guards_hold(&guarded, &facts.guards(), now));
             assert!(now <= 90);
         }
     }

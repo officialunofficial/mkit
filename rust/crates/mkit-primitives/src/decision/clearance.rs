@@ -9,10 +9,12 @@
 
 use mkit_core::hash::Hash;
 
+use super::commit::Commit;
 use super::ref_write::RefDecisionLimits;
 use super::ticketed::{TicketedAdvanceRequest, decide_ticketed_advance};
 use super::{
-    Guarded, LifecycleFact, LifecycleState, Observed, OperationId, Snapshot, WriteDecision,
+    GuardRow, Guarded, LifecycleFact, LifecycleState, Observed, OperationId, RequiredGuard,
+    Snapshot, WriteDecision,
 };
 use crate::closure::pair::PairCoverage;
 use crate::error::{BoundedDetail, Failure, FailureCode, Location};
@@ -183,6 +185,176 @@ pub struct ClearanceFacts<'a> {
     pub deleted: bool,
 }
 
+fn state_tag(state: ClearanceState) -> u8 {
+    match state {
+        ClearanceState::Pending => 0,
+        ClearanceState::Cleared => 1,
+        ClearanceState::Held => 2,
+        ClearanceState::Hit => 3,
+        ClearanceState::Resolved => 4,
+    }
+}
+
+impl ClearanceAdvance<'_> {
+    /// Commitment to every field of the advance, including its row revision.
+    #[must_use]
+    pub fn commitment(&self) -> Hash {
+        let mut c = Commit::new("clearance-advance");
+        c.u64(self.sequence)
+            .u64(self.generation)
+            .hash(&self.operation.0)
+            .opt_hash(self.head.as_ref())
+            .opt_hash(self.packmap.as_ref())
+            .u8(state_tag(self.state))
+            .hashes(self.additions)
+            .hashes(self.dependencies)
+            .hashes(self.external_suppliers)
+            .u64(self.obligations.len() as u64);
+        for state in self.obligations {
+            c.u8(state_tag(*state));
+        }
+        c.u64(self.obligation_revisions.len() as u64);
+        for revision in self.obligation_revisions {
+            c.revision(revision);
+        }
+        c.bool(self.takedown_complete)
+            .bool(self.flagged)
+            .revision(&self.revision);
+        c.finish()
+    }
+}
+
+impl PriorPublication {
+    /// Commitment to the prior publication identity.
+    #[must_use]
+    pub fn commitment(&self) -> Hash {
+        let mut c = Commit::new("clearance-prior");
+        c.u64(self.generation)
+            .u64(self.sequence)
+            .u64(self.published_prefix)
+            .u64(self.deletion_boundary)
+            .opt_hash(self.head.as_ref())
+            .opt_hash(self.packmap.as_ref());
+        c.finish()
+    }
+}
+
+impl DependencyWitness {
+    /// Commitment to the witnessed standing of one pack.
+    #[must_use]
+    pub fn commitment(&self) -> Hash {
+        let mut c = Commit::new("clearance-witness");
+        c.hash(&self.object)
+            .bool(self.present)
+            .bool(self.published)
+            .bool(self.held)
+            .u64(self.generation);
+        c.finish()
+    }
+}
+
+impl ClearanceFacts<'_> {
+    /// The guards these facts yield: the prior publication row, the changed
+    /// advance with the moment it is decided at, every suffix advance, every
+    /// dependency witness, and the lifecycle observation of a managed profile.
+    ///
+    /// A host that re-acquires the facts at its atomic boundary derives the
+    /// live guards with this method and compares them with `guards_hold`.
+    #[must_use]
+    pub fn guards(&self) -> Vec<RequiredGuard> {
+        let repository = self.repository;
+        let row = |row, value, revision| RequiredGuard::Row {
+            repository,
+            row,
+            expected: Observed::Present { value, revision },
+        };
+        let mut out = vec![
+            row(
+                GuardRow::ClearancePrior,
+                self.prior.commitment(),
+                self.prior.revision,
+            ),
+            {
+                let mut c = Commit::new("clearance-changed");
+                c.hash(&self.changed.commitment())
+                    .u8(match self.moment {
+                        ClearanceMoment::Acceptance => 0,
+                        ClearanceMoment::Recheck => 1,
+                    })
+                    .u8(state_tag(self.previous_state))
+                    .bool(self.deleted);
+                row(
+                    GuardRow::ClearanceChanged(self.changed.sequence),
+                    c.finish(),
+                    self.changed.revision,
+                )
+            },
+        ];
+        for advance in self.suffix {
+            out.push(row(
+                GuardRow::ClearanceSuffix(advance.sequence),
+                advance.commitment(),
+                advance.revision,
+            ));
+        }
+        // A dependency or supplier with no witness is decided as unsatisfied, so
+        // its absence is guarded too: a witness that appears later moves the
+        // decision and must fail the comparison.
+        let needed = self
+            .changed
+            .dependencies
+            .iter()
+            .filter(|id| !self.changed.additions.contains(id))
+            .chain(self.changed.external_suppliers);
+        for object in needed {
+            if !self.witnesses.iter().any(|w| w.object == *object)
+                && !out.iter().any(|g| {
+                    matches!(g, RequiredGuard::Row { row: GuardRow::ClearanceWitness(o), .. } if o == object)
+                })
+            {
+                out.push(RequiredGuard::Row {
+                    repository,
+                    row: GuardRow::ClearanceWitness(*object),
+                    expected: Observed::Absent(Revision([0; 32])),
+                });
+            }
+        }
+        for witness in self.witnesses {
+            out.push(row(
+                GuardRow::ClearanceWitness(witness.object),
+                witness.commitment(),
+                witness.revision,
+            ));
+        }
+        let mut c = Commit::new("clearance-lifecycle-profile");
+        match &self.lifecycle {
+            ClearanceLifecycle::NotOffered => {
+                c.u8(0);
+            }
+            ClearanceLifecycle::Managed {
+                expected_incarnation,
+                current,
+            } => {
+                c.u8(1)
+                    .revision(expected_incarnation)
+                    .bool(current.is_some());
+                if let Some(expected) = current {
+                    out.push(RequiredGuard::Repository {
+                        id: repository,
+                        expected: expected.clone(),
+                    });
+                }
+            }
+        }
+        out.push(row(
+            GuardRow::ClearanceLifecycleProfile,
+            c.finish(),
+            Revision([0; 32]),
+        ));
+        out
+    }
+}
+
 /// Finite host ceilings. They are not protocol constants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClearanceLimits {
@@ -228,29 +400,12 @@ pub enum ClearanceDecision {
     },
 }
 
-/// Permission to apply the decision only while every supplied fact still matches.
-#[derive(Debug)]
-#[must_use]
-pub struct GuardedClearance<'a> {
-    decision: ClearanceDecision,
-    facts: &'a ClearanceFacts<'a>,
-}
-
-impl GuardedClearance<'_> {
-    /// Decision. It does not consume tickets or settle a reservation.
-    #[must_use]
-    pub const fn decision(&self) -> &ClearanceDecision {
-        &self.decision
-    }
-
-    /// Compare the exact snapshot before apply. A mismatch requires a new decision.
-    #[must_use]
-    pub fn matches(&self, current: &ClearanceFacts<'_>) -> bool {
-        self.facts == current
-    }
-}
-
 /// Decide published clearance from facts the host already acquired.
+///
+/// The returned [`Guarded`] owns the typed guards of [`ClearanceFacts::guards`]:
+/// the prior publication, the advance, every retained suffix advance and every
+/// dependency witness, each by revision and commitment, plus the lifecycle
+/// observation when the profile is managed.
 ///
 /// # Errors
 ///
@@ -260,7 +415,7 @@ impl GuardedClearance<'_> {
 pub fn decide_clearance<'a>(
     facts: &'a ClearanceFacts<'a>,
     limits: &ClearanceLimits,
-) -> Result<GuardedClearance<'a>, Failure> {
+) -> Result<Guarded<ClearanceDecision>, Failure> {
     validate(facts, limits)?;
     let decision = if facts.deleted {
         deletion(facts)?
@@ -269,18 +424,23 @@ pub fn decide_clearance<'a>(
     } else {
         recheck(facts)?
     };
-    Ok(GuardedClearance { decision, facts })
+    Ok(Guarded::from_parts(
+        facts.repository,
+        decision,
+        facts.guards(),
+        Vec::new(),
+    ))
 }
 
 /// Acceptance and clearance decided as one unit.
 #[derive(Debug)]
 #[must_use]
-pub struct CombinedAcceptance<'a> {
+pub struct CombinedAcceptance {
     acceptance: Guarded<WriteDecision>,
-    clearance: Option<GuardedClearance<'a>>,
+    clearance: Option<Guarded<ClearanceDecision>>,
 }
 
-impl<'a> CombinedAcceptance<'a> {
+impl CombinedAcceptance {
     /// The acceptance decision, unchanged. It alone owns ticket consumption, the
     /// terminal result, and reservation settlement.
     pub const fn acceptance(&self) -> &Guarded<WriteDecision> {
@@ -290,7 +450,7 @@ impl<'a> CombinedAcceptance<'a> {
     /// Clearance riding in the same unit. `None` unless acceptance applies; a
     /// replay, conflict, refusal, or retry never publishes.
     #[must_use]
-    pub const fn clearance(&self) -> Option<&GuardedClearance<'a>> {
+    pub const fn clearance(&self) -> Option<&Guarded<ClearanceDecision>> {
         self.clearance.as_ref()
     }
 }
@@ -311,13 +471,13 @@ impl<'a> CombinedAcceptance<'a> {
 /// are not an acceptance-moment, non-deletion view of the same repository and
 /// operation; clearance failures pass through.
 #[must_use = "compare every supplied fact before applying"]
-pub fn decide_accept_and_clear<'a>(
+pub fn decide_accept_and_clear(
     request: &TicketedAdvanceRequest<'_>,
     snapshot: &Snapshot,
     ref_limits: RefDecisionLimits,
-    facts: &'a ClearanceFacts<'a>,
+    facts: &ClearanceFacts<'_>,
     limits: &ClearanceLimits,
-) -> Result<CombinedAcceptance<'a>, Failure> {
+) -> Result<CombinedAcceptance, Failure> {
     let write = &request.write;
     if facts.moment != ClearanceMoment::Acceptance
         || facts.deleted

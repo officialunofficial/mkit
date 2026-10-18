@@ -229,6 +229,10 @@ pub struct EvidenceSequence {
 ///
 /// The host that supplied the facts can recompute it from its own list, so an
 /// omitted, extra or altered base is detectable without any retained page.
+///
+/// It protects against accidental host omission, not an adversarial host: the
+/// count and sum are not collision-resistant against a list the host chooses,
+/// and a host that can lie about the list can skip the decision anyway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExternalBases {
     /// Number of facts received.

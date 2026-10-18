@@ -117,8 +117,10 @@ impl AcceptanceBasis {
     /// `external_bases` is every membership fact the host supplied while the
     /// pack was verified, re-requests included, in any order. It is recomputed
     /// against the verifier's sealed commitment (count and hash sum), so an
-    /// omitted, extra or altered base is `EvidenceBindingMismatch`. Duplicates
-    /// then collapse to one guard per object. `coverage`, when given, must
+    /// omitted, extra or altered base is `EvidenceBindingMismatch`. The
+    /// commitment protects against accidental host omission, not an adversarial
+    /// host: a host that can lie about the list can skip the decision anyway.
+    /// Duplicates then collapse to one guard per object. `coverage`, when given, must
     /// describe the same repository, view and ruleset as the proof; it is
     /// validated only and contributes no guard. Two witnesses that disagree on
     /// one supplier's published or held state are inconsistent observations
