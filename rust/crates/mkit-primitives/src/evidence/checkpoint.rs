@@ -24,7 +24,7 @@ const MAGIC: &[u8; 4] = b"MKCP";
 const VERSION: u16 = 1;
 const VERSION_VERIFY: u16 = 3;
 mod refusal;
-pub(crate) use refusal::DeferredFailure;
+pub(crate) use refusal::{DeferredFailure, deferrable};
 const SUBTREE: u64 = 8 << 20;
 const MAX_CVS: usize = 518;
 const MAX_PACK: u64 = MAX_TOTAL_PAYLOAD + MAX_ENTRIES as u64 * 5 + 44;

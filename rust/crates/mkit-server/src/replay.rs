@@ -166,12 +166,8 @@ pub fn classify(existing: Option<&ReplayRecord>, fingerprint: &Hash) -> ReplayDe
                         // allowlist always accepts it. Were that ever to change,
                         // the stored code is still returned as recorded: the
                         // client's nonce is not a different operation.
-                        replay::RecordedResult::rejection(
-                            result,
-                            rejection.code().as_str(),
-                            false,
-                        )
-                        .unwrap_or_else(|| replay::RecordedResult::success(result))
+                        replay::RecordedResult::rejection(result, rejection.code().as_str(), false)
+                            .unwrap_or_else(|| replay::RecordedResult::success(result))
                     }
                     StoredResult::UpdateRef(_)
                     | StoredResult::AdvanceRefs(_)

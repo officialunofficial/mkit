@@ -38,7 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   completed integrity marker is kept for the rest of Decode, so a membership
   wait never rescans the source. The closure walker treats held and
   unpublished members as absent and reports a file-integrity fault only after
-  every absent object. `mkit-primitives` adds `FailureCode::persistence`,
+  every absent object. The driver checks depth before decoding, reports corrupt stored-base bytes as `UnavailableInput`, and reports an external depth overflow as `ExternalDeltaChainTooDeep` (a chain mixing in-pack and external links is reported by its direct base). `mkit-primitives` adds `FailureCode::persistence`,
   `classify_membership_miss` and `FailureCode::ExternalDeltaChainTooDeep`. No
   wire or repository stored-format change; no read-probe change.
 

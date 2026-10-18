@@ -281,20 +281,35 @@ fn chain(links: usize, bad_tail: bool) -> (Vec<u8>, Hash) {
 fn depth_is_checked_before_the_entry_is_decoded() {
     // Cap 2: the fourth link is one past it, and its delta rebuilds garbage.
     let (pack, head) = chain(4, true);
-    let outcome = assert_parity(&[&pack], head, false, |_| {}, |rig| {
-        rig.cfg.max_delta_chain_depth = 2;
-    });
+    let outcome = assert_parity(
+        &[&pack],
+        head,
+        false,
+        |_| {},
+        |rig| {
+            rig.cfg.max_delta_chain_depth = 2;
+        },
+    );
     assert_eq!(outcome.message, "delta chain too deep");
     assert_eq!(
         outcome.persisted,
-        [Some(("invalid_argument".into(), "delta chain too deep".into()))]
+        [Some((
+            "invalid_argument".into(),
+            "delta chain too deep".into()
+        ))]
     );
     assert_driver(&pack, &outcome, profile(2, 2 << 30));
     // Within the cap the same garbage is a content refusal.
     let (pack, head) = chain(3, true);
-    let outcome = assert_parity(&[&pack], head, false, |_| {}, |rig| {
-        rig.cfg.max_delta_chain_depth = 2;
-    });
+    let outcome = assert_parity(
+        &[&pack],
+        head,
+        false,
+        |_| {},
+        |rig| {
+            rig.cfg.max_delta_chain_depth = 2;
+        },
+    );
     assert_eq!(outcome.persisted, [Some(mismatch())]);
     assert_driver(&pack, &outcome, profile(2, 2 << 30));
 }
@@ -310,9 +325,15 @@ fn a_later_frame_cap_does_not_outrank_an_earlier_content_refusal() {
         .push_raw(oversized.id().unwrap(), &serialize(&oversized).unwrap())
         .unwrap();
     let pack = writer.finish().unwrap();
-    let outcome = assert_parity(&[&pack], oversized.id().unwrap(), false, |_| {}, |rig| {
-        rig.limits.window_bytes = 4 << 20;
-    });
+    let outcome = assert_parity(
+        &[&pack],
+        oversized.id().unwrap(),
+        false,
+        |_| {},
+        |rig| {
+            rig.limits.window_bytes = 4 << 20;
+        },
+    );
     assert_eq!(outcome.message, "object hash mismatch");
     assert_eq!(outcome.persisted, [Some(mismatch())]);
     assert_driver(&pack, &outcome, profile(50, 2 << 30));
@@ -322,9 +343,15 @@ fn a_later_frame_cap_does_not_outrank_an_earlier_content_refusal() {
         .push_raw(oversized.id().unwrap(), &serialize(&oversized).unwrap())
         .unwrap();
     let pack = writer.finish().unwrap();
-    let outcome = assert_parity(&[&pack], oversized.id().unwrap(), false, |_| {}, |rig| {
-        rig.limits.window_bytes = 4 << 20;
-    });
+    let outcome = assert_parity(
+        &[&pack],
+        oversized.id().unwrap(),
+        false,
+        |_| {},
+        |rig| {
+            rig.limits.window_bytes = 4 << 20;
+        },
+    );
     assert_eq!(outcome.message, "pack exceeds indexed decode budget");
     assert_eq!(outcome.persisted, [None]);
 }
@@ -376,7 +403,10 @@ fn tickets_are_judged_in_ticket_order_with_per_pack_precedence_inside() {
     // A bad signature in the first pack outranks a decode error in the second.
     let outcome = assert_parity(&[&unsigned, &broken], head, false, |_| {}, |_| {});
     assert_eq!(outcome.message, "bad signature");
-    assert_eq!(outcome.persisted[0].as_ref().map(|r| r.1.as_str()), Some("bad signature"));
+    assert_eq!(
+        outcome.persisted[0].as_ref().map(|r| r.1.as_str()),
+        Some("bad signature")
+    );
     // And the other way round: the first ticket's decode error wins.
     let outcome = assert_parity(&[&broken, &unsigned], head, false, |_| {}, |_| {});
     assert_eq!(outcome.message, "object hash mismatch");
@@ -398,10 +428,15 @@ fn corrupt_stored_base_bytes_are_unavailable_never_a_client_refusal() {
         let pack_id = hash(&stored);
         super::super::tests::upload(&rig.blobs, &stored);
         let mut frame = None;
-        decode_entries_with(&stored, &mut NoExternalBases, DecodeLimits::default(), |entry| {
-            frame = Some((entry.frame_offset, entry.frame_length, entry.wire_type));
-            Ok(())
-        })
+        decode_entries_with(
+            &stored,
+            &mut NoExternalBases,
+            DecodeLimits::default(),
+            |entry| {
+                frame = Some((entry.frame_offset, entry.frame_length, entry.wire_type));
+                Ok(())
+            },
+        )
         .unwrap();
         let (frame_offset, frame_length, wire_type) = frame.unwrap();
         let value = crate::store::index::IndexValue {
@@ -453,9 +488,15 @@ fn corrupt_stored_base_bytes_are_unavailable_never_a_client_refusal() {
 #[test]
 fn the_in_pack_decode_budget_is_a_limit_never_a_persisted_rejection() {
     let (pack, head) = tree_pack(12, 3_000);
-    let outcome = assert_parity(&[&pack], head, false, |_| {}, |rig| {
-        rig.cfg.decode_budget = 20_000;
-    });
+    let outcome = assert_parity(
+        &[&pack],
+        head,
+        false,
+        |_| {},
+        |rig| {
+            rig.cfg.decode_budget = 20_000;
+        },
+    );
     assert_eq!(outcome.message, "pack exceeds indexed decode budget");
     assert_eq!(outcome.persisted, [None]);
     assert_driver(&pack, &outcome, profile(50, 20_000));

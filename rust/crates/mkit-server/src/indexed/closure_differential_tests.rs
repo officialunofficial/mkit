@@ -535,9 +535,7 @@ fn public_walker_and_servers_report_a_missing_object_before_a_file_fault() {
 #[test]
 fn public_walker_and_servers_agree_on_head_kinds() {
     for object in [
-        Object::Blob(Blob {
-            data: vec![1; 100],
-        }),
+        Object::Blob(Blob { data: vec![1; 100] }),
         Object::Tree(Tree { entries: vec![] }),
     ] {
         let head = object.id().unwrap();

@@ -483,9 +483,9 @@ impl<V: InPackObjectView> ClosureWalker<V> {
         {
             self.defer_only(failure(FailureCode::NonCanonicalObject));
         }
-        self.finish_popped(frame)
+        self.finish_popped(&frame)
     }
-    fn finish_popped(&mut self, frame: Frame) -> Result<(), Failure> {
+    fn finish_popped(&mut self, frame: &Frame) -> Result<(), Failure> {
         if let Some(object) = frame.object {
             self.phase = Phase::Process;
             self.frames

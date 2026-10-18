@@ -73,48 +73,57 @@ impl<V: InPackObjectView> ClosureWalker<V> {
                     source,
                     value,
                 },
-            ) if *expected == request && *bound == source => {
-                let bytes = present(value)?;
-                if bytes.len() as u64 != source.len() {
-                    return Err(failure(FailureCode::InvalidResponse));
-                }
-                charge(
-                    &mut self.decoded,
-                    bytes.len() as u64,
-                    self.limits.decoded_bytes,
-                )?;
-                self.charge(bytes.len() as u64)?;
-                let CanonicalSource::Member(fact) = source;
-                let verified = verify_blob(fact.object, bytes);
-                if !matches!(self.phase, Phase::Visit(_)) {
-                    return Err(failure(FailureCode::InvalidResponse));
-                }
-                self.request = None;
-                // A bad chunk is a file-integrity fault: deferred behind any
-                // absent object, and recorded without a payload length.
-                let len = match verified {
-                    Ok(len) => {
-                        self.chunk(len as u64);
-                        Some(len as u64)
-                    }
-                    Err(fault) => {
-                        self.defer(fault);
-                        None
-                    }
-                };
-                self.complete_visit();
-                self.put(
-                    fact.object,
-                    &Record {
-                        kind: fact.kind,
-                        canonical_len: fact.canonical_len,
-                        state: State::Member(fact),
-                        blob_payload_len: len,
-                    },
-                )
-            }
+            ) if *expected == request && *bound == source => self.accept_canonical(source, value),
             _ => Err(failure(FailureCode::InvalidResponse)),
         }
+    }
+}
+
+impl<V: InPackObjectView> ClosureWalker<V> {
+    /// Verify exact canonical bytes for one outstanding chunk request.
+    fn accept_canonical(
+        &mut self,
+        source: CanonicalSource,
+        value: Acquisition<&[u8]>,
+    ) -> Result<(), Failure> {
+        let bytes = present(value)?;
+        if bytes.len() as u64 != source.len() {
+            return Err(failure(FailureCode::InvalidResponse));
+        }
+        charge(
+            &mut self.decoded,
+            bytes.len() as u64,
+            self.limits.decoded_bytes,
+        )?;
+        self.charge(bytes.len() as u64)?;
+        let CanonicalSource::Member(fact) = source;
+        let verified = verify_blob(fact.object, bytes);
+        if !matches!(self.phase, Phase::Visit(_)) {
+            return Err(failure(FailureCode::InvalidResponse));
+        }
+        self.request = None;
+        // A bad chunk is a file-integrity fault: deferred behind any
+        // absent object, and recorded without a payload length.
+        let len = match verified {
+            Ok(len) => {
+                self.chunk(len as u64);
+                Some(len as u64)
+            }
+            Err(fault) => {
+                self.defer(fault);
+                None
+            }
+        };
+        self.complete_visit();
+        self.put(
+            fact.object,
+            &Record {
+                kind: fact.kind,
+                canonical_len: fact.canonical_len,
+                state: State::Member(fact),
+                blob_payload_len: len,
+            },
+        )
     }
 }
 

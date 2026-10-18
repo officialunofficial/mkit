@@ -2145,7 +2145,8 @@ fn pair_coverage_missing_object_maps_per_path() {
         assert!(stored.missing && !stored.missing_base);
         // Only after the window does it open the closure, on both paths.
         let after = IndexedConfig::default().relay_lag_bound_ms;
-        let (inline, resumed) = drive_both_at(&kv, &blobs, &repo, pair, true, vec![root], after).await;
+        let (inline, resumed) =
+            drive_both_at(&kv, &blobs, &repo, pair, true, vec![root], after).await;
         for error in [inline.unwrap_err(), resumed.unwrap_err()] {
             assert_eq!(error.public_message(), "open closure");
         }
