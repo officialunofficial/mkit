@@ -76,6 +76,39 @@ edges from external base facts. Missing retained evidence is unavailable input;
 it cannot establish absence or completion. Repository closure and live write
 authorization remain separate checks.
 
+## Schedule pure compute
+
+`VerifyDriver::new` executes serially. Opt in with
+`driver.with_compute(ComputeConfig { max_jobs: 3 })?`. The finite capacity is
+one through sixteen outstanding jobs, including completed outputs awaiting
+merge. When `Request::Compute { job }` appears, call `take_compute(job)` once,
+move the returned `ComputeJob` to your worker, execute `run()`, and return its
+opaque `ComputeOutput` through `supply_compute`. The crate starts no threads.
+Repeated polling preserves an untaken request; a taken job remains outstanding
+until its output returns. Retrying a lost job requires restarting the run.
+
+Each descriptor binds the immutable source, repository, generation, request
+sequence, frame ordinal and placement, validated delta base, operation, and
+memory/work permits. The authenticated whole-pack identity and frame placement
+commit the input; jobs are local state with no serialized format. Current-run
+mismatches refuse without advancing. Stale generations and retired or duplicate
+outputs are ignored without budget changes. Results, fragments, and evidence
+merge in ordinal order, preserving the serial artifact and refusal precedence.
+
+Independent raw Blob entries can overlap within the current acquisition window.
+Other objects, deltas, new windows, parser refusals, and completion form barriers.
+A delta resolves its eligible predecessor before its job is issued. Admission
+reserves input, scratch, and output ownership until ordinal commit, protects
+bounded Blob index-commit headroom, and escrows worst-case work. Tight budgets
+drain the queue instead of refusing optional overlap. Completed outputs retain
+their charge while an earlier job is outstanding. Signature checks remain
+individual. No checkpoint can contain an outstanding job or read-ahead frame.
+
+Retire or drop all jobs and outputs before replacing a driver's resource
+envelope. A new generation rejects old completions but does not free memory
+still owned by your old workers. Resume uses the same checkpoint format and
+starts serially; opt in again after `VerifyDriver::resume` if desired.
+
 ## Decode bounded evidence
 
 `encode_leaf` and `encode_internal` construct canonical pages; `BranchChild`

@@ -7,6 +7,12 @@
 //! every signature have been checked; only the terminal [`Step::Complete`]
 //! seals a `VerifiedPack`.
 mod checkpoints;
+mod compute;
+mod scheduling;
+pub use compute::{
+    ComputeConfig, ComputeDisposition, ComputeJob, ComputeOperation, ComputeOutput, ComputePermits,
+    ComputeRequest,
+};
 mod index;
 pub mod records;
 #[cfg(test)]
@@ -39,7 +45,6 @@ use mkit_core::{
         window::{FrameInfo, Step as CoreStep, WindowReader},
     },
     serialize::deserialize,
-    sign::{commit_signing_hash, remix_signing_hash, tag_signing_hash, verify_object_signature},
 };
 use records::{
     DependencyRecord, Domain, HeadRecord, ObjectRecord, OccurrenceRecord, OrdinalRecord, Signature,
@@ -163,6 +168,8 @@ enum Stage {
     Base,
     /// Decode, canonical validation, signature, and edge extraction.
     Decode,
+    /// Wait for the library-created worker output.
+    Compute,
     /// Emit provisional canonical fragments.
     Fragments,
     /// Objects-map descend for the decoded id.
@@ -286,6 +293,7 @@ pub struct VerifyDriver {
     decoder_reservation: u64,
     complete: Option<VerifiedPack>,
     checkpoint: Option<Checkpoint>,
+    scheduler: Option<Box<scheduling::Scheduler>>,
 }
 
 /// A single-entry delta-base provider holding collected, verified base bytes.
@@ -395,6 +403,7 @@ impl VerifyDriver {
             decoder_reservation,
             complete: None,
             checkpoint: None,
+            scheduler: None,
         };
         driver
             .roots
@@ -516,6 +525,11 @@ impl VerifyDriver {
             self.resources.evidence(len)?;
             self.retained = Some(page);
             return self.retention_event();
+        }
+        if self.phase == Phase::Entries
+            && let Some(request) = self.compute_request()
+        {
+            return Ok(request);
         }
         // Provisional fragments borrow the in-flight entry; emit them ahead of
         // the `'static` phase match so the terminal-failure flag can settle.
@@ -863,6 +877,7 @@ impl VerifyDriver {
         self.trailer = pass.verify()?;
         self.integrity = None;
         self.resources.release(self.integrity_reservation)?;
+        self.loan_compute_control()?;
         self.resources.reserve(self.decoder_reservation)?;
         self.reader = Some(
             WindowReader::new(
@@ -887,100 +902,107 @@ impl VerifyDriver {
         if self.work.is_some() {
             return self.advance_work();
         }
+        if self.scheduler.is_some() {
+            return self.advance_scheduled();
+        }
         let reader = self.reader.as_mut().ok_or_else(invalid)?;
-        let next = match reader.step() {
-            Ok(step) => step,
-            Err(error) => return Err(map_core(&error)),
-        };
-        match next {
+        match reader.step().map_err(|error| map_core(&error))? {
             CoreStep::NeedWindow(range) => self.request_input(range.offset, range.len),
             CoreStep::Entry(entry) => {
-                self.resources.work(1)?;
                 let info = reader.last_frame().ok_or_else(invalid)?;
-                let ordinal = self.ordinal;
-                let base = match &entry {
-                    PackEntry::Delta { base, .. } => Some(*base),
-                    PackEntry::Raw { .. } => None,
-                };
-                self.ordinal = ordinal
-                    .checked_add(1)
-                    .ok_or_else(|| failure(FailureCode::ResourceLimit))?;
-                self.payload = self
-                    .payload
-                    .checked_add(
-                        info.length
-                            .checked_sub(5)
-                            .ok_or_else(|| failure(FailureCode::InvalidResponse))?,
-                    )
-                    .ok_or_else(|| failure(FailureCode::PackfileTooLarge))?;
-                self.work = Some(Work {
-                    entry: Some(entry),
-                    info,
-                    ordinal,
-                    stage: if base.is_some() {
-                        Stage::Base
-                    } else {
-                        Stage::Decode
-                    },
-                    base,
-                    fact: None,
-                    base_depth: 0,
-                    base_bytes: None,
-                    base_len: 0,
-                    object: None,
-                    id: [0; 32],
-                    bytes: Vec::new(),
-                    kind: ObjectType::Blob,
-                    canonical_len: 0,
-                    depth: 0,
-                    signature: Signature::None,
-                    signer: [0; 32],
-                    digest: [0; 32],
-                    first: false,
-                    descent: None,
-                    dep_start: 0,
-                    dep_count: 0,
-                    ext_start: 0,
-                    ext_count: 0,
-                    emitted: 0,
-                    edge_total: 0,
-                    edge_next: 0,
-                    chunk_total: 0,
-                    chunk_count: 0,
-                });
-                self.advance_work()
+                self.start_entry(entry, info)
             }
-            CoreStep::Done(summary) => {
-                if self.header != Some((summary.version, summary.entry_count))
-                    || self.ordinal != u64::from(summary.entry_count)
-                {
-                    return Err(failure(FailureCode::SourceChanged));
-                }
-                self.reader = None;
-                // Decoding finished; deferred signature selection fires here,
-                // before any further evidence work.
-                if self.signature_failure.is_some() {
-                    return Err(failure(FailureCode::BadSignature));
-                }
-                self.phase = Phase::Seal;
-                self.seal = Some(Seal {
-                    next: 0,
-                    stage: SealStage::Flush,
-                    candidate: [0; 32],
-                    kind: ObjectType::Blob,
-                    first_ordinal: 0,
-                    page: PageCommitment {
-                        digest: [0; 32],
-                        kind: PageKind::Objects,
-                        len: 0,
-                        items: 0,
-                    },
-                    position: 0,
-                });
-                Ok(Step::Progress)
-            }
+            CoreStep::Done(summary) => self.entries_done(summary.version, summary.entry_count),
             _ => Err(invalid()),
         }
+    }
+
+    fn start_entry(
+        &mut self,
+        entry: PackEntry<'static>,
+        info: FrameInfo,
+    ) -> Result<Step<'static>, Failure> {
+        self.resources.work(1)?;
+        let ordinal = self.ordinal;
+        let base = match &entry {
+            PackEntry::Delta { base, .. } => Some(*base),
+            PackEntry::Raw { .. } => None,
+        };
+        self.ordinal = ordinal
+            .checked_add(1)
+            .ok_or_else(|| failure(FailureCode::ResourceLimit))?;
+        self.payload = self
+            .payload
+            .checked_add(
+                info.length
+                    .checked_sub(5)
+                    .ok_or_else(|| failure(FailureCode::InvalidResponse))?,
+            )
+            .ok_or_else(|| failure(FailureCode::PackfileTooLarge))?;
+        self.work = Some(Work {
+            entry: Some(entry),
+            info,
+            ordinal,
+            stage: if base.is_some() {
+                Stage::Base
+            } else {
+                Stage::Decode
+            },
+            base,
+            fact: None,
+            base_depth: 0,
+            base_bytes: None,
+            base_len: 0,
+            object: None,
+            id: [0; 32],
+            bytes: Vec::new(),
+            kind: ObjectType::Blob,
+            canonical_len: 0,
+            depth: 0,
+            signature: Signature::None,
+            signer: [0; 32],
+            digest: [0; 32],
+            first: false,
+            descent: None,
+            dep_start: 0,
+            dep_count: 0,
+            ext_start: 0,
+            ext_count: 0,
+            emitted: 0,
+            edge_total: 0,
+            edge_next: 0,
+            chunk_total: 0,
+            chunk_count: 0,
+        });
+        self.advance_work()
+    }
+
+    fn entries_done(&mut self, version: u32, entry_count: u32) -> Result<Step<'static>, Failure> {
+        if self.header != Some((version, entry_count)) || self.ordinal != u64::from(entry_count) {
+            return Err(failure(FailureCode::SourceChanged));
+        }
+        self.reader = None;
+        // Decoding finished; deferred signature selection fires here,
+        // before any further evidence work.
+        if self.signature_failure.is_some() {
+            return Err(failure(FailureCode::BadSignature));
+        }
+        self.phase = Phase::Seal;
+        self.seal = Some(Seal {
+            next: 0,
+            stage: SealStage::Flush,
+            candidate: [0; 32],
+            kind: ObjectType::Blob,
+            first_ordinal: 0,
+            page: PageCommitment {
+                digest: [0; 32],
+                kind: PageKind::Objects,
+                len: 0,
+                items: 0,
+            },
+            position: 0,
+        });
+        Ok(Step::Progress)
     }
 
     fn advance_work(&mut self) -> Result<Step<'static>, Failure> {
@@ -988,6 +1010,7 @@ impl VerifyDriver {
         match stage {
             Stage::Base => self.begin_base(),
             Stage::Decode => self.finish_decode(),
+            Stage::Compute => self.finish_compute(),
             Stage::Fragments => Ok(Step::Progress),
             Stage::ObjectDescend => self.begin_object_descend(),
             Stage::Records => self.append_records(),
@@ -995,6 +1018,7 @@ impl VerifyDriver {
             Stage::Referenced => self.advance_referenced(),
             Stage::Flush => self.advance_flush(),
             Stage::Done => {
+                self.retire_compute()?;
                 self.work = None;
                 Ok(Step::Progress)
             }
@@ -1016,6 +1040,9 @@ impl VerifyDriver {
     }
 
     fn finish_decode(&mut self) -> Result<Step<'static>, Failure> {
+        if self.scheduler.is_some() {
+            return self.dispatch_entry();
+        }
         let work = self.work.as_mut().ok_or_else(invalid)?;
         let entry = work.entry.take().ok_or_else(invalid)?;
         let mut bases = OneBase {
@@ -1027,6 +1054,17 @@ impl VerifyDriver {
         let base_len = work.base_len;
         self.resources.release(base_len)?;
         let object = deserialize(&bytes).map_err(|_| failure(FailureCode::NonCanonicalObject))?;
+        self.finish_canonical(id, bytes, object, None)
+    }
+
+    fn finish_canonical(
+        &mut self,
+        id: Hash,
+        bytes: Vec<u8>,
+        object: Object,
+        signature: Option<Result<compute::SignatureFacts, Failure>>,
+    ) -> Result<Step<'static>, Failure> {
+        let work = self.work.as_mut().ok_or_else(invalid)?;
         let kind = object.object_type();
         let canonical_len =
             u64::try_from(bytes.len()).map_err(|_| failure(FailureCode::ResourceLimit))?;
@@ -1056,32 +1094,16 @@ impl VerifyDriver {
         if depth > self.profile.delta_depth {
             return Err(failure(FailureCode::DeltaChainTooDeep));
         }
-        let domain = Domain::for_kind(kind);
-        let (signature, signer, digest) = match &object {
-            Object::Commit(commit) => (
-                verify_object_signature(&object).is_ok(),
-                commit.signer,
-                commit_signing_hash(commit).map_err(|_| invalid())?,
-            ),
-            Object::Remix(remix) => (
-                verify_object_signature(&object).is_ok(),
-                remix.signer,
-                remix_signing_hash(remix).map_err(|_| invalid())?,
-            ),
-            Object::Tag(tag) => (
-                verify_object_signature(&object).is_ok(),
-                tag.signer,
-                tag_signing_hash(tag).map_err(|_| invalid())?,
-            ),
-            _ => (true, [0; 32], [0; 32]),
+        let facts = match signature {
+            Some(facts) => facts?,
+            None => compute::signature_facts(&object)?,
         };
-        let signature = if domain == Domain::None {
-            Signature::None
-        } else if signature {
-            Signature::Valid
-        } else {
-            Signature::Invalid
-        };
+        let compute::SignatureFacts {
+            signature,
+            signer,
+            digest,
+            ..
+        } = facts;
         if signature == Signature::Invalid
             && self.signature_failure.is_none_or(|(prior, _)| id < prior)
         {
@@ -1615,6 +1637,7 @@ impl VerifyDriver {
     fn finish_seal(&mut self) -> Result<Step<'static>, Failure> {
         self.seal = None;
         self.resources.release(self.decoder_reservation)?;
+        self.reclaim_compute_control()?;
         let counts = PackCounts {
             entries: self.ordinal,
             objects: self.ordinals.committed(),
