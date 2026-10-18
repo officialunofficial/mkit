@@ -136,10 +136,38 @@ fn failure(code: FailureCode) -> Failure {
 impl AcceptanceEvidence {
     /// Decode canonical bytes with explicit limits, without authenticating their origin.
     ///
+    /// Decoding performs no trust step: it does not authenticate the sender. The
+    /// host must establish that the complete envelope came from its trusted verifier
+    /// in the same trust domain. It is not a remote attestation, and a digest alone
+    /// provides no authentication. The writer must check the frozen binding and live
+    /// membership/denial guards.
+    ///
     /// The caller budgets its already allocated input separately. The decoder retains
     /// exactly one envelope copy and constant metadata. Work is linear in input bytes
     /// and record counts; no pack pages or object-set members are accessed.
     /// Nested object validity and head metadata are checked by [`Self::recheck_heads`].
+    ///
+    /// # Examples
+    /// ```
+    /// use mkit_primitives::evidence::{RepositoryId, RulesetId, acceptance::{
+    ///     AcceptanceEvidence, AcceptanceEvidenceDecodeCfg,
+    /// }};
+    /// let cfg = AcceptanceEvidenceDecodeCfg {
+    ///     max_envelope_bytes: 206, max_operation_bytes: 0, max_heads: 0,
+    ///     max_head_bytes: 0, max_total_head_bytes: 0,
+    ///     max_external_dependencies: 0, ruleset_id: RulesetId(1),
+    ///     profile_limits_digest: [0; 32],
+    /// };
+    /// // Minimal envelope: empty operation, heads, and dependencies.
+    /// let mut bytes = vec![0; 206];
+    /// bytes[..4].copy_from_slice(b"MKAE");
+    /// bytes[4..6].copy_from_slice(&1_u16.to_le_bytes());
+    /// bytes[6..10].copy_from_slice(&1_u32.to_le_bytes());
+    /// let evidence = AcceptanceEvidence::decode(&bytes, &cfg)?;
+    /// evidence.check_binding(&[0; 32], 0, &RepositoryId([0; 32]), &[], 0)?;
+    /// assert_eq!(evidence.encode(), bytes);
+    /// # Ok::<(), mkit_primitives::error::Failure>(())
+    /// ```
     ///
     /// # Errors
     /// Rejects oversize, unsupported, truncated, unordered, duplicate, contradictory,
@@ -229,41 +257,6 @@ impl AcceptanceEvidence {
             witness,
             denial_version,
         })
-    }
-
-    /// Decode evidence supplied through an authenticated trusted-host boundary.
-    ///
-    /// This method does not authenticate the sender. The host must establish that
-    /// the complete envelope came from its trusted verifier in the same trust domain.
-    /// It is not a remote attestation. A digest alone provides no authentication.
-    /// The writer must check the frozen binding and live membership/denial guards.
-    ///
-    /// # Examples
-    /// ```
-    /// use mkit_primitives::evidence::{RepositoryId, RulesetId, acceptance::{
-    ///     AcceptanceEvidence, AcceptanceEvidenceDecodeCfg,
-    /// }};
-    /// let cfg = AcceptanceEvidenceDecodeCfg {
-    ///     max_envelope_bytes: 206, max_operation_bytes: 0, max_heads: 0,
-    ///     max_head_bytes: 0, max_total_head_bytes: 0,
-    ///     max_external_dependencies: 0, ruleset_id: RulesetId(1),
-    ///     profile_limits_digest: [0; 32],
-    /// };
-    /// // Minimal envelope: empty operation, heads, and dependencies.
-    /// let mut bytes = vec![0; 206];
-    /// bytes[..4].copy_from_slice(b"MKAE");
-    /// bytes[4..6].copy_from_slice(&1_u16.to_le_bytes());
-    /// bytes[6..10].copy_from_slice(&1_u32.to_le_bytes());
-    /// let evidence = AcceptanceEvidence::from_trusted_host(&bytes, &cfg)?;
-    /// evidence.check_binding(&[0; 32], 0, &RepositoryId([0; 32]), &[], 0)?;
-    /// assert_eq!(evidence.encode(), bytes);
-    /// # Ok::<(), mkit_primitives::error::Failure>(())
-    /// ```
-    ///
-    /// # Errors
-    /// Returns the same strict format and budget failures as [`Self::decode`].
-    pub fn from_trusted_host(bytes: &[u8], cfg: &AcceptanceEvidenceDecodeCfg) -> Result<Self> {
-        Self::decode(bytes, cfg)
     }
 
     /// Exact canonical encoding, with no embedded digest and no allocation.

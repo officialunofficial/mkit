@@ -181,7 +181,15 @@ must trust retained checkpoints or authenticate the complete envelope and its
 bindings. Resume must validate expected context, cursor consistency, and
 retained evidence before advancing. Active decoder and hash-library memory is
 never a persisted checkpoint format. All-entry verification checkpoints at
-acknowledged entry boundaries under a fresh generation. Resume compares core
+acknowledged entry boundaries under a fresh generation. A refused
+`checkpoint()` arms the request; at the next drained entry boundary the driver
+flushes buffered records and retains every page the host does not yet hold,
+then reports readiness with `Progress`. Call `checkpoint()` again before the
+next mutable call, and persist the result before stepping on: pages only the
+previous checkpoint reached are released afterwards (`Step::ReleasePage`).
+Evidence pages belong to the run; an ephemeral run
+(`VerifyDriver::new_with_retention`) never checkpoints and leaves the host only
+the pages its cache evicts. Resume compares core
 cursor metadata with every outer binding and audits retained evidence. Its
 explicit hash-tree frontiers include the already-acquired window; a commitment
 binds the remaining suffix. Resume fetches only that suffix, starting at the
@@ -228,8 +236,8 @@ separate version-one formats.
 | Proof v1 | `proof::verify_path` | One shared `EvidenceLimits` budget, at most 33 pages |
 | Framing record v1 | `FrameRecord::from_bytes` | Fixed 58 bytes, checked frame geometry, no allocation |
 | Closure state/witness/missing pages v1 | `closure::output::{validate_state_page, decode_witness, decode_missing}` | `PageDecodeCfg`, fixed 1,024-byte internal journal cap |
-| Acceptance evidence v1 | `AcceptanceEvidence::decode` and `from_trusted_host` | Explicit `AcceptanceEvidenceDecodeCfg` envelope, operation, head and dependency caps |
-| Checkpoint v1 | `Checkpoint::from_bytes` | `VerifyLimits`, 518 values per frontier, 4096-byte core cursor |
+| Acceptance evidence v1 | `AcceptanceEvidence::decode` | Explicit `AcceptanceEvidenceDecodeCfg` envelope, operation, head and dependency caps |
+| Checkpoint v1 and v3 | `Checkpoint::from_bytes` | `VerifyLimits`, 518 values per frontier, 4096-byte core cursor |
 
 The fixture manifest registers encoded formats, canonical bytes, semantic
 sidecars, expected outcomes, decoder names, and fuzz targets. Its read-only
@@ -326,8 +334,7 @@ no portable token encoding or new signing domain.
 ## Acceptance-evidence decoder inventory
 
 `evidence::acceptance::AcceptanceEvidence` is an immutable canonical envelope
-for authenticated delivery inside one trust domain. `decode(bytes, cfg)` and
-`from_trusted_host(bytes, cfg)` require explicit finite envelope, operation,
+for authenticated delivery inside one trust domain. `decode(bytes, cfg)` requires explicit finite envelope, operation,
 head count, per-head byte, cumulative head-byte, and dependency bounds, plus an
 exact ruleset and profile/limits commitment. There is no unlimited default.
 

@@ -4,6 +4,7 @@ use super::*;
 mod checkpoints;
 mod compute;
 mod onepass;
+mod pages;
 use crate::evidence::{MemberFact, Revision, SourceBinding};
 use mkit_core::{
     delta,
@@ -40,6 +41,34 @@ fn source(pack: &[u8]) -> PackSource {
 
 fn driver(pack: &[u8]) -> VerifyDriver {
     VerifyDriver::new(source(pack), REPOSITORY, profile(), limits(), 17).unwrap()
+}
+
+/// Takes a checkpoint at the current drained boundary. The first refused call
+/// arms the request; the driver then retains the remaining pages itself.
+fn boundary_checkpoint(machine: &mut VerifyDriver, host: &mut Host) -> Checkpoint {
+    for _ in 0..1_000 {
+        match machine.checkpoint() {
+            Ok(checkpoint) => {
+                return Checkpoint::from_bytes(checkpoint.bytes(), limits()).unwrap();
+            }
+            Err(error) => assert_eq!(error.code, FailureCode::CheckpointNotReady),
+        }
+        match machine.step().unwrap() {
+            Step::RetainEvidence(page) => {
+                let commitment = page.commitment;
+                host.pages.push((commitment, page.bytes.to_vec()));
+                machine.acknowledge_retention(commitment).unwrap();
+            }
+            Step::ReleasePage(page) => host.pages.retain(|(held, _)| *held != page),
+            // Flushing may need a page the cache evicted.
+            Step::Request(request @ Request::EvidencePage { .. }) => {
+                host.serve(machine, &request).unwrap();
+            }
+            Step::Progress => (),
+            other => panic!("boundary work needs only pages, got {other:?}"),
+        }
+    }
+    panic!("the boundary never became ready")
 }
 
 fn canonical(object: &Object) -> (Hash, Vec<u8>) {
@@ -161,7 +190,7 @@ impl Host {
                     self.pages.push((commitment, page.bytes.to_vec()));
                     machine.acknowledge_retention(commitment)?;
                 }
-                Step::Progress => (),
+                Step::Progress | Step::ReleasePage(_) => (),
                 Step::Complete(pack) => return Ok(pack),
             }
         }
@@ -338,7 +367,7 @@ fn unavailable_canonical_base_is_retryable_unavailable_input() {
                 host.pages.push((commitment, page.bytes.to_vec()));
                 machine.acknowledge_retention(commitment).unwrap();
             }
-            Step::Progress => (),
+            Step::Progress | Step::ReleasePage(_) => (),
             Step::Complete(pack) => break pack,
         }
         assert!(refusals <= 8, "canonical fetch never recovered");
@@ -413,7 +442,7 @@ fn resident_ledger_is_symmetric_across_leaf_flushes() {
                 host.pages.push((commitment, page.bytes.to_vec()));
                 machine.acknowledge_retention(commitment).unwrap();
             }
-            Step::Progress => (),
+            Step::Progress | Step::ReleasePage(_) => (),
             Step::Complete(_) => break,
         }
         if machine.checkpoint().is_ok() {
@@ -461,7 +490,7 @@ fn undersized_page_bytes_refuses_without_losing_inertness() {
                     break;
                 }
             }
-            Ok(Step::Progress) => (),
+            Ok(Step::Progress | Step::ReleasePage(_)) => (),
             Ok(Step::Complete(_)) => panic!("verification completed with unusable page size"),
             Err(error) => {
                 refused = Some(error.code);
@@ -650,7 +679,7 @@ fn wrong_stale_and_malformed_replies_keep_requests_stable() {
                 let commitment = page.commitment;
                 machine.acknowledge_retention(commitment).unwrap();
             }
-            Step::Progress => (),
+            Step::Progress | Step::ReleasePage(_) => (),
             _ => panic!(),
         }
     };
@@ -708,7 +737,7 @@ fn retention_backpressure_blocks_checkpointing_until_acknowledged() {
     loop {
         match machine.step().unwrap() {
             Step::Request(request) => host.serve(&mut machine, &request).unwrap(),
-            Step::ProvisionalObject(_) | Step::Progress => (),
+            Step::ProvisionalObject(_) | Step::Progress | Step::ReleasePage(_) => (),
             Step::Complete(_) => break,
             Step::RetainEvidence(page) => {
                 let (commitment, page_bytes) = (page.commitment, page.bytes.to_vec());
@@ -768,7 +797,7 @@ fn mid_decode_checkpoint_resumes_through_page_audit() {
                 host.pages.push((commitment, page.bytes.to_vec()));
                 machine.acknowledge_retention(commitment).unwrap();
             }
-            Step::Progress => (),
+            Step::Progress | Step::ReleasePage(_) => (),
             Step::Complete(_) => panic!("pack finished before a snapshot"),
         }
         if machine.ordinal == 1 && snapshot.is_none() {
@@ -825,7 +854,7 @@ fn resumed_run_refuses_lost_evidence_pages() {
                 host.pages.push((commitment, page.bytes.to_vec()));
                 machine.acknowledge_retention(commitment).unwrap();
             }
-            Step::Progress => (),
+            Step::Progress | Step::ReleasePage(_) => (),
             Step::Complete(_) => panic!("pack finished before a snapshot"),
         }
         if machine.ordinal == 1 && snapshot.is_none() {
@@ -866,7 +895,7 @@ fn reused_generation_and_changed_bindings_refuse_resume() {
     let snapshot = loop {
         match machine.step().unwrap() {
             Step::Request(request) => host.serve(&mut machine, &request).unwrap(),
-            Step::ProvisionalObject(_) | Step::Progress => (),
+            Step::ProvisionalObject(_) | Step::Progress | Step::ReleasePage(_) => (),
             Step::RetainEvidence(page) => {
                 let commitment = page.commitment;
                 host.pages.push((commitment, page.bytes.to_vec()));

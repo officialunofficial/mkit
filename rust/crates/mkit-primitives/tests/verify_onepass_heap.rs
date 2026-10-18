@@ -102,7 +102,7 @@ fn server_sized_acquisitions_fit_the_measured_allocation_ceiling() {
                     })
                     .unwrap();
             }
-            Step::ProvisionalObject(_) | Step::Progress => (),
+            Step::ProvisionalObject(_) | Step::Progress | Step::ReleasePage(_) => (),
             Step::RetainEvidence(page) => {
                 let commitment = page.commitment;
                 let len = page.bytes.len();

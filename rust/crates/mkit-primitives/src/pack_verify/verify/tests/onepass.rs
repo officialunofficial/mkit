@@ -35,7 +35,7 @@ fn success_acquires_each_pack_byte_once() {
                 host.pages.push((commitment, page.bytes.to_vec()));
                 machine.acknowledge_retention(commitment).unwrap();
             }
-            Step::Progress => (),
+            Step::Progress | Step::ReleasePage(_) => (),
             Step::Complete(_) => break,
         }
     }
@@ -135,7 +135,7 @@ fn fault_result(pack: &[u8], parallel: bool, resume_ordinal: Option<u64>) -> Fai
                 host.pages.push((commitment, page.bytes.to_vec()));
                 machine.acknowledge_retention(commitment).unwrap();
             }
-            Step::Progress => (),
+            Step::Progress | Step::ReleasePage(_) => (),
             Step::Complete(_) => panic!("fault accepted"),
         }
         if !resumed
@@ -237,14 +237,12 @@ fn first_committed_compute_entry_checkpoints_without_serializing_later_jobs() {
                 host.pages.push((commitment, page.bytes.to_vec()));
                 machine.acknowledge_retention(commitment).unwrap();
             }
-            Step::Progress => (),
+            Step::Progress | Step::ReleasePage(_) => (),
             Step::Complete(_) => panic!("completed with unsupplied later jobs"),
         }
         if machine.ordinal == 1 && machine.work.is_none() {
-            let checkpoint = machine
-                .checkpoint()
-                .expect("first committed batch entry is durable");
-            break Checkpoint::from_bytes(checkpoint.bytes(), limits()).unwrap();
+            // The first committed entry is durable while later jobs run.
+            break boundary_checkpoint(&mut machine, &mut host);
         }
     };
     assert_eq!(
@@ -307,7 +305,7 @@ fn finish_after_committed_boundary(
                 host.pages.push((commitment, page.bytes.to_vec()));
                 machine.acknowledge_retention(commitment).unwrap();
             }
-            Step::Progress => (),
+            Step::Progress | Step::ReleasePage(_) => (),
             Step::Complete(verified) => {
                 assert_eq!(verified.counts().entries, entries);
                 break;
@@ -364,7 +362,7 @@ fn unavailable_external_acquisition_stays_retryable_before_integrity_verdict() {
                 host.pages.push((commitment, page.bytes.to_vec()));
                 machine.acknowledge_retention(commitment).unwrap();
             }
-            Step::Progress => (),
+            Step::Progress | Step::ReleasePage(_) => (),
             _ => panic!("external base must be acquired first"),
         }
     }
@@ -405,7 +403,7 @@ fn deferred_framing_fault_checkpoints_hash_progress_without_prefix_acquisition()
                         host.pages.push((commitment, page.bytes.to_vec()));
                         machine.acknowledge_retention(commitment).unwrap();
                     }
-                    Step::Progress => (),
+                    Step::Progress | Step::ReleasePage(_) => (),
                     Step::Complete(_) => panic!("framing fault accepted"),
                 }
                 if machine.phase == Phase::Drain {
@@ -439,7 +437,7 @@ fn deferred_framing_fault_checkpoints_hash_progress_without_prefix_acquisition()
                         }
                         host.serve(&mut resumed, &request).unwrap();
                     }
-                    Ok(Step::Progress) => (),
+                    Ok(Step::Progress | Step::ReleasePage(_)) => (),
                     _ => panic!("integrity-only resume emitted entry data"),
                 }
             };
@@ -479,12 +477,11 @@ fn changed_resume_suffix_makes_the_driver_terminal() {
                 host.pages.push((commitment, page.bytes.to_vec()));
                 machine.acknowledge_retention(commitment).unwrap();
             }
-            Step::Progress => (),
+            Step::Progress | Step::ReleasePage(_) => (),
             Step::Complete(_) => panic!("first boundary skipped"),
         }
         if machine.ordinal == 1 && machine.work.is_none() {
-            let checkpoint = machine.checkpoint().unwrap();
-            break Checkpoint::from_bytes(checkpoint.bytes(), limits()).unwrap();
+            break boundary_checkpoint(&mut machine, &mut host);
         }
     };
     let mut resumed = VerifyDriver::resume(
@@ -536,7 +533,7 @@ fn changed_resume_suffix_makes_the_driver_terminal() {
                 break;
             }
             Step::Request(request) => host.serve(&mut resumed, &request).unwrap(),
-            Step::Progress => (),
+            Step::Progress | Step::ReleasePage(_) => (),
             _ => panic!("entry emitted before suffix authentication"),
         }
     }
@@ -581,6 +578,7 @@ fn hash_only_budget_outcome(pack: &[u8], mode: Option<u64>, resume: bool) -> Fai
                 host.pages.push((commitment, page.bytes.to_vec()));
                 machine.acknowledge_retention(commitment).unwrap();
             }
+            Ok(Step::ReleasePage(_)) => (),
             Ok(Step::Progress) => {
                 while !jobs.is_empty() {
                     let index = match mode {
@@ -675,8 +673,11 @@ fn seal_budget_run(
     resume_last: bool,
     malformed_at: Option<u64>,
 ) -> (u64, bool) {
+    // A one-page cache evicts constantly, so the seal still fetches pages.
     let budget = VerifyLimits {
         work: cap,
+        page_bytes: 4096,
+        resident_pages: 1,
         ..limits()
     };
     let mut machine = VerifyDriver::new(source(pack), REPOSITORY, profile(), budget, 17).unwrap();
@@ -750,6 +751,7 @@ fn seal_budget_run(
                 machine.acknowledge_retention(commitment).unwrap();
             }
             Step::Progress => complete_selected_jobs(&mut machine, &mut jobs, mode, &mut random),
+            Step::ReleasePage(_) => (),
             Step::Complete(verified) => {
                 assert_eq!(verified.counts().entries, 32);
                 assert!(!resume_last || resumed);

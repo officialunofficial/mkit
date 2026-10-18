@@ -15,9 +15,9 @@ pub struct ResourceUsage {
     pub resident_bytes: u64,
     /// Largest simultaneous resident charge.
     pub peak_resident_bytes: u64,
-    /// All emitted page bytes, including replaced pages.
+    /// Bytes of evidence pages the host holds: handed to it and not yet released.
     pub evidence_bytes: u64,
-    /// All emitted pages, including replaced pages.
+    /// Evidence pages the host holds: handed to it and not yet released.
     pub evidence_pages: u64,
     /// Cumulative charged work; replay consumes work again.
     pub work: u64,
@@ -100,6 +100,13 @@ impl Resources {
         Ok(())
     }
 
+    /// Resident bytes still unreserved under the ceiling.
+    pub(super) const fn available(&self) -> u64 {
+        self.limits
+            .resident_bytes
+            .saturating_sub(self.usage.resident_bytes)
+    }
+
     pub(super) fn release(&mut self, bytes: u64) -> Result<(), Failure> {
         self.usage.resident_bytes = self
             .usage
@@ -150,9 +157,27 @@ impl Resources {
         Ok(())
     }
 
+    /// Counts a page handed to the host against the live-page ceilings.
     pub(super) fn evidence(&mut self, bytes: u64) -> Result<(), Failure> {
         let next_bytes = add(self.usage.evidence_bytes, bytes, self.limits.evidence_bytes)?;
         let next_pages = add(self.usage.evidence_pages, 1, self.limits.evidence_pages)?;
+        self.usage.evidence_bytes = next_bytes;
+        self.usage.evidence_pages = next_pages;
+        Ok(())
+    }
+
+    /// Uncounts a page the host was told to drop.
+    pub(super) fn release_evidence(&mut self, bytes: u64) -> Result<(), Failure> {
+        let next_bytes = self
+            .usage
+            .evidence_bytes
+            .checked_sub(bytes)
+            .ok_or_else(exhausted)?;
+        let next_pages = self
+            .usage
+            .evidence_pages
+            .checked_sub(1)
+            .ok_or_else(exhausted)?;
         self.usage.evidence_bytes = next_bytes;
         self.usage.evidence_pages = next_pages;
         Ok(())
@@ -221,6 +246,25 @@ mod tests {
         assert_eq!(resumed.usage().peak_resident_bytes, 512);
         assert_eq!(resumed.usage().work, 19);
         assert!(resumed.evidence(1).is_err());
+    }
+
+    #[test]
+    fn released_evidence_frees_the_live_page_ceiling() {
+        let limits = VerifyLimits {
+            evidence_pages: 2,
+            ..VerifyLimits::indexed()
+        };
+        let mut resources = Resources::new(limits).unwrap();
+        resources.evidence(100).unwrap();
+        resources.evidence(50).unwrap();
+        assert!(resources.evidence(1).is_err());
+        resources.release_evidence(100).unwrap();
+        assert_eq!(resources.usage().evidence_pages, 1);
+        assert_eq!(resources.usage().evidence_bytes, 50);
+        resources.evidence(7).unwrap();
+        // Releasing more than was ever counted is a ledger defect.
+        assert!(resources.release_evidence(1 << 20).is_err());
+        assert_eq!(resources.usage().evidence_pages, 2);
     }
 
     #[test]

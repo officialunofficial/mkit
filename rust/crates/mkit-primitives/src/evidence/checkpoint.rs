@@ -213,7 +213,9 @@ fn validate_meta(m: &CheckpointMeta, version: u16) -> Result<(), Failure> {
     validate_limits(m.limits)?;
     // Version 1 stores one occurrences page per frame, so its retention chain
     // length equals the entry ordinal. Version 3 retains paged index output;
-    // its retention count only tracks cumulative emitted pages.
+    // its retention count tracks cumulative acknowledged pages, of which the
+    // host still holds `usage.evidence_pages`: it may already have released
+    // the rest, including the last one acknowledged.
     if m.ruleset.ruleset != RulesetId(1)
         || m.ruleset.profile != ProfileId::Indexed
         || !(44..=MAX_PACK).contains(&m.source.len)
@@ -225,7 +227,8 @@ fn validate_meta(m: &CheckpointMeta, version: u16) -> Result<(), Failure> {
         || m.usage.evidence_bytes > m.limits.evidence_bytes
         || m.usage.evidence_pages > m.limits.evidence_pages
         || m.usage.work > m.limits.work
-        || m.usage.evidence_pages != m.retention_count
+        || (version == VERSION && m.usage.evidence_pages != m.retention_count)
+        || (version != VERSION && m.usage.evidence_pages > m.retention_count)
         || (version == VERSION && m.retention_count != m.ordinal)
         || m.last_retained.is_some() != (m.retention_count != 0)
     {
@@ -240,7 +243,7 @@ fn validate_meta(m: &CheckpointMeta, version: u16) -> Result<(), Failure> {
         if !shaped
             || page.len == 0
             || page.len > m.limits.page_bytes
-            || page.len > m.usage.evidence_bytes
+            || (version == VERSION && page.len > m.usage.evidence_bytes)
         {
             return Err(invalid());
         }
@@ -1189,9 +1192,9 @@ mod tests {
             ),
             (83, 1, 15)
         );
-        assert_eq!(state.meta.retention_count, 9);
-        assert_eq!(state.meta.usage.evidence_pages, 9);
-        assert_eq!(state.meta.usage.evidence_bytes, 1556);
+        assert_eq!(state.meta.retention_count, 6);
+        assert_eq!(state.meta.usage.evidence_pages, 6);
+        assert_eq!(state.meta.usage.evidence_bytes, 1187);
         let page = state.meta.last_retained.unwrap();
         assert_eq!(
             (page.kind, page.len, page.items),

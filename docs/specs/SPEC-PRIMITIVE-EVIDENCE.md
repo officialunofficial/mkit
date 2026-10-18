@@ -125,6 +125,24 @@ machine MUST NOT advance a dependent checkpoint, root, or completion until the
 host acknowledges that commitment. Wrong, unsolicited, stale, or duplicate
 acknowledgments are host-protocol misuse.
 
+**Page lifetime.** Evidence pages are scoped to one verification run. They are
+reconstructible: re-verifying the same source reproduces every page and root
+byte for byte, and nothing reads a page after the run's terminal completion.
+The sealed result carries root digests and counts only. A machine MAY hold
+pages it produced without handing them to the host, and MAY drop one it never
+handed out once the committed roots stop reaching it. It MUST hand the host,
+and obtain acknowledgment for, every page reachable from a checkpoint's roots
+before that checkpoint exists. A machine that produced a page the host holds
+MUST tell the host when neither the machine's committed roots nor its latest
+checkpoint reach the page, and MUST NOT request it afterwards. The host MAY
+then discard it. Pages the latest checkpoint reaches stay available until the
+next checkpoint exists, so a host persists the new checkpoint before
+processing the release that its existence permits. Execution ceilings on
+retained evidence count the pages a host currently holds (handed out and not
+released), not every page ever produced; the work ceiling stays cumulative.
+Completion ends the obligation: the host MAY discard every page of the run,
+including pages it was never told to release.
+
 A missing or unavailable retained page is acquisition failure. It MUST NOT
 produce a membership, nonmembership, or completion result. Recovery may discard
 dependent progress and re-verify from a safe boundary. A nonmembership answer
@@ -243,10 +261,11 @@ entry count and trailer boundary.
 For a format version 1 checkpoint, acknowledged page count MUST equal consumed
 entry count and cumulative evidence page count. A last retained commitment
 exists exactly when this count is nonzero; it names one occurrence record. A
-format version 3 checkpoint instead requires the acknowledged page count to
-equal the cumulative committed page count across all six evidence indexes, and
-its last retained commitment may name any committed evidence page kind (see
-4.1.1). Cumulative usage MUST fit the encoded limits. The source length MUST
+format version 3 checkpoint instead records the cumulative acknowledged page
+count, which MUST be at least the number of pages the host still holds
+(`evidence_pages`; released pages leave that count), and its last retained
+commitment may name any acknowledged evidence page kind, including one the host
+has since released (see 4.1.1). Cumulative usage MUST fit the encoded limits. The source length MUST
 fit both protocol and content-profile ceilings. Resume additionally compares the envelope with the
 caller's expected source, repository, ruleset, limits, and run binding, and
 checks core cursor metadata against the outer phase and counters. Successful
@@ -338,7 +357,11 @@ performed work or a separate encoded field.
 Cold verify resume re-authenticates every committed evidence page through
 caller-supplied page requests before continuing; a lost page is unavailable
 input, never absence. The retained set is not serialized into the envelope
-beyond its root commitments.
+beyond its root commitments. A checkpoint exists only at a drained entry
+boundary where every buffered record sits under its sequence root and the host
+holds every page the roots reach; a machine MAY defer that work until a
+checkpoint is requested. A run that declares it will never resume MAY refuse
+checkpoints and need not hand the host any page it did not evict.
 
 Integrity-drain phase cannot produce an acceptance artifact or resume entry
 decoding. Committed occurrence, object, ordinal, head, and delta counts MUST
@@ -425,6 +448,12 @@ tag→`3`, every other kind→`0` — and domain `none` and signature `none` agr
 exactly: a record with one set and not the other is invalid. Unsigned
 records carry all-zero `signer` and `signing_digest`; any nonzero value
 under signature `none` is invalid.
+
+Ordered sequences grow one leaf at a time: a leaf holds 16 records before the
+next begins, and every internal split lands where appending the records singly
+would put it. A sequence root therefore depends only on the record stream and
+never on how appends were batched, flushed, or interleaved with checkpoints.
+The object and referenced indexes split an overfull leaf evenly.
 
 The **object record** (120 bytes, kind `objects`) is written once per
 distinct object, at its first wire occurrence:
@@ -557,7 +586,7 @@ rescanning the sequence.
 | Page | 1 | Initial source-bound canonical page envelope; kinds 4–5 added with verify. |
 | Proof | 1 | Exact routed root-to-leaf page path. |
 | Frame record | 1 | Ordered framing-only retention chain. |
-| Checkpoint | 1, 3 | Framing uses 1; one-pass verification uses 3 with exact-boundary hashing and deferred refusal. Version 2 is unsupported; restart. |
+| Checkpoint | 1, 3 | Framing uses 1; one-pass verification uses 3 with exact-boundary hashing and deferred refusal; its usage counts the pages the host holds. Version 2 is unsupported; restart. |
 | Verify records | 1 | All-entry object, occurrence, ordinal, head, and dependency evidence. |
 
 ## 6. Test vectors
@@ -575,6 +604,8 @@ wrong kind/height, cap exhaustion, trailing bytes, and bounded nested work.
 | Decoding cannot create trusted acceptance evidence | Separate private artifact construction (§1). |
 | Every page belongs to one exact source and ruleset | Committed binding and expected context (§2). |
 | Missing input never proves absence | Authenticated route to a leaf (§3). |
-| Checkpoints reference acknowledged retained state | Retention backpressure (§3). |
+| Checkpoints reference acknowledged retained state | Retention backpressure and checkpoint boundary (§3, §4.1). |
+| A host never loses a page its latest checkpoint reaches | Release deferred until the next checkpoint exists (§3). |
+| Sequence roots are independent of flush timing | Full-first leaf packing (§4.3). |
 | Restart cannot reset cumulative execution charges | Bound counters and replay accounting (§4). |
 | Unsupported disposable formats never guess compatibility | Strict refusal and restart (§1). |
