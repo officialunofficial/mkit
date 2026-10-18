@@ -41,3 +41,7 @@ ed25519-dalek = { version = "3", default-features = false, features = ["alloc", 
 [[bench]]
 name = "compute"
 harness = false
+
+[[bench]]
+name = "entry_cost"
+harness = false

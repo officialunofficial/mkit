@@ -270,18 +270,29 @@ impl Index {
     }
 
     /// Authenticates supplied page bytes against the exact expected commitment.
+    ///
+    /// `resident` pages come from the driver's cache, which only holds bytes
+    /// the driver encoded itself or already authenticated against this exact
+    /// commitment. Those skip the digest, not the structural and budget checks.
     fn view<'a>(
         &self,
         bytes: &'a [u8],
         want: PageCommitment,
         budget: &mut Budget,
+        resident: bool,
     ) -> Result<PageView<'a>, Failure> {
         if bytes.len() as u64 != want.len {
             return Err(invalid());
         }
-        let view = PageView::decode(bytes, self.binding, self.limits, budget)?;
-        view.authenticate(want, budget)?;
-        Ok(view)
+        if resident {
+            let view = PageView::decode_resident(bytes, self.binding, self.limits, budget)?;
+            view.authenticate_resident(want, budget)?;
+            Ok(view)
+        } else {
+            let view = PageView::decode(bytes, self.binding, self.limits, budget)?;
+            view.authenticate(want, budget)?;
+            Ok(view)
+        }
     }
 
     /// Encodes one leaf page from bounded records.
@@ -390,7 +401,7 @@ impl Index {
             } else {
                 Graft::Replace
             },
-            records: records.clone(),
+            records,
             prior: descent.leaf,
             path: descent.path,
             added,
@@ -404,7 +415,8 @@ impl Index {
                 right: false,
                 path: Vec::new(),
                 leaf: None,
-                records,
+                // Replaced by the committed leaf records when the leaf level encodes.
+                records: Vec::new(),
             }),
             replaced: Vec::new(),
         }
@@ -871,6 +883,28 @@ impl Index {
         bytes: &[u8],
         budget: &mut Budget,
     ) -> Result<(), Failure> {
+        self.feed_page(op, bytes, budget, false)
+    }
+
+    /// Supplies a page the driver's cache held. Its digest was established
+    /// when it entered the cache, so it is not hashed again; every other
+    /// check and charge is identical to [`Self::feed`].
+    pub(super) fn feed_resident(
+        &mut self,
+        op: &mut Op,
+        bytes: &[u8],
+        budget: &mut Budget,
+    ) -> Result<(), Failure> {
+        self.feed_page(op, bytes, budget, true)
+    }
+
+    fn feed_page(
+        &mut self,
+        op: &mut Op,
+        bytes: &[u8],
+        budget: &mut Budget,
+        resident: bool,
+    ) -> Result<(), Failure> {
         match op {
             Op::Descend {
                 state,
@@ -884,7 +918,7 @@ impl Index {
                 let DescendState::Need(want) = *state else {
                     return Err(invalid());
                 };
-                let view = self.view(bytes, want, budget)?;
+                let view = self.view(bytes, want, budget, resident)?;
                 // A committed child sits exactly one level below its parent
                 // and inside the interval its parent routes to it.
                 if expected.is_some_and(|height| view.height() != height) {
@@ -931,7 +965,7 @@ impl Index {
                 let visit = want.take().ok_or_else(invalid)?;
                 // Any refused page leaves `want` installed so a retry
                 // re-requests the same node instead of skipping its subtree.
-                let result = self.audit_page(visit, bytes, budget, stack, seen);
+                let result = self.audit_page(visit, bytes, budget, stack, seen, resident);
                 if result.is_err() {
                     *want = Some(visit);
                 }
@@ -949,6 +983,7 @@ impl Index {
         budget: &mut Budget,
         stack: &mut Vec<Visit>,
         seen: &mut u64,
+        resident: bool,
     ) -> Result<(), Failure> {
         let Visit {
             page,
@@ -956,7 +991,7 @@ impl Index {
             upper,
             height,
         } = visit;
-        let view = self.view(bytes, page, budget)?;
+        let view = self.view(bytes, page, budget, resident)?;
         if height.is_some_and(|expected| view.height() != expected) {
             return Err(failure(FailureCode::InvalidEvidence));
         }
