@@ -953,6 +953,9 @@ impl RemoteSource for HostSource<'_> {
     fn supports_atomic_advance(&self) -> bool {
         self.0.supports_atomic_advance()
     }
+    fn atomic_advance_status(&self) -> Option<bool> {
+        self.0.atomic_advance_status()
+    }
     fn repository_address(&self) -> Option<(String, String)> {
         self.0.repository_address()
     }

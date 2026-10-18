@@ -368,8 +368,8 @@ impl Drop for FaultServer {
 }
 
 #[test]
-fn force_push_refuses_unknown_discovery_before_reads_or_writes_on_both_backends() {
-    for client_backend in [false, true] {
+fn force_push_refuses_unknown_discovery_before_reads_or_writes_on_all_connect_sources() {
+    for backend in 0..3 {
         for code in [None, Some("not_found"), Some("unimplemented")] {
             let server = FaultServer::new(2, move |index, request| {
                 if index == 0 {
@@ -423,7 +423,7 @@ fn force_push_refuses_unknown_discovery_before_reads_or_writes_on_both_backends(
                     Err(mkit_sync::PushError::Sync(mkit_sync::SyncError::Source(_)))
                 ));
             };
-            if client_backend {
+            if backend == 0 {
                 let http = NativeHttp::new().unwrap();
                 let signer = Dalek::new(WRITER_SEED);
                 let client = mkit_client::Client::signed(
@@ -435,7 +435,11 @@ fn force_push_refuses_unknown_discovery_before_reads_or_writes_on_both_backends(
                 run(&ClientSource::new(&client, &http));
             } else {
                 let tx = transport(&server.origin, "default", WRITER_SEED);
-                run(&TransportSource::new(&tx));
+                if backend == 1 {
+                    run(&TransportSource::new(&tx));
+                } else {
+                    tx.with_source(run).unwrap();
+                }
             }
             assert_eq!(server.requests.lock().unwrap().len(), 2);
         }
