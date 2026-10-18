@@ -284,13 +284,15 @@ impl Index {
         if bytes.len() as u64 != want.len {
             return Err(invalid());
         }
-        let view = PageView::decode(bytes, self.binding, self.limits, budget)?;
         if resident {
+            let view = PageView::decode_resident(bytes, self.binding, self.limits, budget)?;
             view.authenticate_resident(want, budget)?;
+            Ok(view)
         } else {
+            let view = PageView::decode(bytes, self.binding, self.limits, budget)?;
             view.authenticate(want, budget)?;
+            Ok(view)
         }
-        Ok(view)
     }
 
     /// Encodes one leaf page from bounded records.

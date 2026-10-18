@@ -247,6 +247,24 @@ struct Seal {
     first_ordinal: u64,
     page: PageCommitment,
     position: u64,
+    /// Work counter when the current ordinal descent began.
+    ordinal_started: u64,
+    /// Records following the last ordinal looked up, from the same leaf.
+    leaf: Option<SealLeaf>,
+}
+
+/// The ordinal leaf the seal last descended to. Ordinals are dense and the
+/// index is immutable during sealing, so the next ordinals sit in the same
+/// leaf and need no descent of their own.
+#[derive(Debug)]
+struct SealLeaf {
+    /// Not yet used records, in key order.
+    records: VecDeque<(Hash, Vec<u8>)>,
+    /// Work the descent that reached this leaf charged; charged again for
+    /// each lookup the leaf serves, so accounting equals a fresh descent.
+    charge: u64,
+    /// Resident bytes reserved for the records.
+    reserved: u64,
 }
 
 /// How a verification run treats the evidence pages it produces.
@@ -1210,6 +1228,8 @@ impl VerifyDriver {
                 items: 0,
             },
             position: 0,
+            ordinal_started: 0,
+            leaf: None,
         });
         Ok(Step::Progress)
     }
@@ -1707,7 +1727,13 @@ impl VerifyDriver {
                 });
                 self.drive_op()
             }
-            Then::SealOrdinal => self.seal_ordinal(&descent),
+            Then::SealOrdinal => {
+                // Keep the leaf first: sealing the object starts the next
+                // descent, whose charges must not count toward this one.
+                let mut descent = descent;
+                self.keep_ordinal_leaf(&mut descent);
+                self.seal_ordinal(&descent)
+            }
             Then::SealObject => self.seal_object(&descent),
             Then::SealReferenced => self.seal_referenced(&descent),
             _ => Err(invalid()),
@@ -1800,8 +1826,72 @@ impl VerifyDriver {
         Ok(Step::Progress)
     }
 
+    /// Keeps the records after the looked-up ordinal for the lookups that follow.
+    fn keep_ordinal_leaf(&mut self, descent: &mut Descent) {
+        self.drop_ordinal_leaf();
+        let Some(seal) = self.seal.as_ref() else {
+            return;
+        };
+        let charge = self
+            .resources
+            .usage()
+            .work
+            .saturating_sub(seal.ordinal_started);
+        if !descent.found || descent.position + 1 >= descent.records.len() {
+            return;
+        }
+        let rest = descent.records.split_off(descent.position + 1);
+        let reserved = rest.iter().fold(0_u64, |sum, (_, value)| {
+            sum.saturating_add(32 + u64::try_from(value.len()).unwrap_or(u64::MAX))
+        });
+        // The leaf is an optimisation: without room, descend as before.
+        if self.resources.reserve(reserved).is_err() {
+            return;
+        }
+        if let Some(seal) = self.seal.as_mut() {
+            seal.leaf = Some(SealLeaf {
+                records: rest.into(),
+                charge,
+                reserved,
+            });
+        }
+    }
+
+    fn drop_ordinal_leaf(&mut self) {
+        if let Some(leaf) = self.seal.as_mut().and_then(|seal| seal.leaf.take()) {
+            let _ = self.resources.release(leaf.reserved);
+        }
+    }
+
+    /// The value of ordinal `next` when the kept leaf holds it, charging what a
+    /// descent to it would have charged.
+    fn kept_ordinal(&mut self, next: u64) -> Result<Option<Vec<u8>>, Failure> {
+        let Some(leaf) = self.seal.as_mut().and_then(|seal| seal.leaf.as_mut()) else {
+            return Ok(None);
+        };
+        if leaf.records.front().map(|(key, _)| *key) != Some(ordinal_key(next)) {
+            self.drop_ordinal_leaf();
+            return Ok(None);
+        }
+        let charge = leaf.charge;
+        let (_, value) = leaf.records.pop_front().ok_or_else(invalid)?;
+        let freed = 32 + u64::try_from(value.len()).map_err(|_| resource())?;
+        leaf.reserved -= freed;
+        let empty = leaf.records.is_empty();
+        self.resources.release(freed)?;
+        if empty {
+            self.drop_ordinal_leaf();
+        }
+        self.resources.work(charge)?;
+        Ok(Some(value))
+    }
+
     fn seal_ordinal(&mut self, descent: &Descent) -> Result<Step<'static>, Failure> {
         let value = descent.value().ok_or_else(invalid)?;
+        self.seal_ordinal_value(value)
+    }
+
+    fn seal_ordinal_value(&mut self, value: &[u8]) -> Result<Step<'static>, Failure> {
         let record =
             OrdinalRecord::from_bytes(value).map_err(|_| failure(FailureCode::InvalidEvidence))?;
         let seal = self.seal.as_mut().ok_or_else(invalid)?;
@@ -1886,6 +1976,12 @@ impl VerifyDriver {
                     return self.finish_seal();
                 }
                 let next = seal.next;
+                if let Some(value) = self.kept_ordinal(next)? {
+                    return self.seal_ordinal_value(&value);
+                }
+                if let Some(seal) = self.seal.as_mut() {
+                    seal.ordinal_started = self.resources.usage().work;
+                }
                 self.op = Some(Live {
                     index: Which::Ordinals,
                     op: self.ordinals.index().descend(ordinal_key(next)),
@@ -1897,6 +1993,7 @@ impl VerifyDriver {
     }
 
     fn finish_seal(&mut self) -> Result<Step<'static>, Failure> {
+        self.drop_ordinal_leaf();
         self.seal = None;
         self.cache.clear(&mut self.resources)?;
         self.resources.release(self.decoder_reservation)?;

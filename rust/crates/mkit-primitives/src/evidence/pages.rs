@@ -17,6 +17,8 @@ pub const PAGE_FANOUT: u16 = 16;
 /// Largest encoded page in this format.
 pub const MAX_PAGE_BYTES: u64 = 1 << 20;
 pub(crate) const HEADER_BYTES: u64 = 123;
+/// Cursor takes [`PageView::decode`] spends on the fixed header.
+const HEADER_TAKES: u64 = 13;
 pub(crate) const PAGE_DOMAIN: &[u8] = b"mkit-evidence-page:v1";
 
 /// Owned canonical page bytes; construction grants no verification authority.
@@ -358,6 +360,61 @@ impl<'a> PageView<'a> {
         }
         Ok(())
     }
+    /// Decodes a page whose payload an earlier [`Self::decode`] already
+    /// validated: it checks the header and binding, skips the per-record pass,
+    /// and charges `budget` exactly what [`Self::decode`] would have charged.
+    /// The accessors still parse and bound-check the payload they return.
+    pub(crate) fn decode_resident(
+        bytes: &'a [u8],
+        expected: EvidenceBinding,
+        limits: EvidenceLimits,
+        budget: &mut Budget,
+    ) -> Result<Self, Failure> {
+        let len = u64::try_from(bytes.len()).map_err(|_| failure(FailureCode::ResourceLimit))?;
+        if len > limits.page_bytes.min(MAX_PAGE_BYTES) {
+            return Err(failure(FailureCode::ResourceLimit));
+        }
+        // The header is read against a scratch budget; the real one is charged
+        // the exact total below.
+        let mut scratch = Budget::new(u64::MAX, 0);
+        let mut cursor = Cursor::new(bytes, &mut scratch);
+        if cursor.array::<4>()? != *b"MKEP" {
+            return Err(failure(FailureCode::InvalidEvidence));
+        }
+        if cursor.u16()? != 1 {
+            return Err(failure(FailureCode::UnsupportedEvidenceVersion));
+        }
+        if read_binding(&mut cursor)? != expected {
+            return Err(failure(FailureCode::SourceChanged));
+        }
+        let kind = read_kind(&mut cursor)?;
+        let height = cursor.byte()?;
+        let items = cursor.u16()?;
+        if height > 32 || items > PAGE_FANOUT || (height > 0 && items == 0) {
+            return Err(failure(FailureCode::InvalidEvidence));
+        }
+        let payload_len = u64::from(cursor.u32()?);
+        let payload = cursor.take(payload_len)?;
+        cursor.finish()?;
+        // One take per header field, then per record: key, length and value
+        // for a leaf; separator and the four commitment fields for a branch.
+        let items_work = u64::from(items);
+        let body = if height == 0 {
+            3 * items_work
+        } else {
+            5 * items_work - 1
+        };
+        budget.charge(len + HEADER_TAKES + body, 0)?;
+        Ok(Self {
+            bytes,
+            binding: expected,
+            kind,
+            height,
+            items,
+            payload,
+        })
+    }
+
     /// Decodes one complete canonical page under a finite shared operation budget.
     ///
     /// # Errors
@@ -561,6 +618,46 @@ mod tests {
                 ruleset: INDEXED_RULESET,
                 profile: ProfileId::Indexed,
             },
+        }
+    }
+
+    #[test]
+    fn resident_decode_charges_exactly_what_a_full_decode_charges() {
+        let limits = EvidenceLimits::indexed();
+        let values: Vec<Vec<u8>> = (0..16_u8).map(|n| vec![n; 7 * usize::from(n)]).collect();
+        let mut pages = vec![EMPTY.to_vec()];
+        let mut leaves = Vec::new();
+        for count in 1..=16_usize {
+            let records: Vec<LeafRecord<'_>> = (0..count)
+                .map(|n| LeafRecord {
+                    key: [u8::try_from(n).unwrap() + 1; 32],
+                    value: &values[n],
+                })
+                .collect();
+            let leaf = encode_leaf(binding(), PageKind::Objects, &records, limits).unwrap();
+            leaves.push(leaf.commitment());
+            pages.push(leaf.into_parts().0);
+        }
+        for count in 1..=15_usize {
+            let rest: Vec<BranchChild> = (1..=count)
+                .map(|n| BranchChild {
+                    separator: [u8::try_from(n).unwrap(); 32],
+                    child: leaves[n],
+                })
+                .collect();
+            let page =
+                encode_internal(binding(), PageKind::Objects, 1, leaves[0], &rest, limits).unwrap();
+            pages.push(page.into_parts().0);
+        }
+        for bytes in &pages {
+            let (mut full, mut resident) = (
+                Budget::new(limits.work, limits.allocated_bytes),
+                Budget::new(limits.work, limits.allocated_bytes),
+            );
+            let a = PageView::decode(bytes, binding(), limits, &mut full).unwrap();
+            let b = PageView::decode_resident(bytes, binding(), limits, &mut resident).unwrap();
+            assert_eq!(full.remaining(), resident.remaining());
+            assert_eq!((a.kind(), a.height(), a.items()), (b.kind(), b.height(), b.items()));
         }
     }
 

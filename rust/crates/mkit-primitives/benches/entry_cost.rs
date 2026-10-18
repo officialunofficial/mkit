@@ -1,6 +1,6 @@
 //! Per-entry cost of `VerifyDriver` against the core window reader.
 //!
-//! Prints microseconds per entry (best of several runs, single thread). The
+//! Prints microseconds per entry (median of several runs, single thread). The
 //! fan-out rows run every issued compute job inline on the calling thread, so
 //! they measure the CPU cost of the job machinery rather than thread wakeups.
 //! The host retains every encoded page in a `HashMap` keyed by digest, answers
@@ -163,14 +163,16 @@ fn reader(bytes: &[u8]) -> u32 {
     }
 }
 
-fn best<T>(runs: u32, mut f: impl FnMut() -> T) -> f64 {
-    (0..runs)
+fn median<T>(runs: u32, mut f: impl FnMut() -> T) -> f64 {
+    let mut times: Vec<f64> = (0..runs)
         .map(|_| {
             let start = Instant::now();
             black_box(f());
             start.elapsed().as_secs_f64()
         })
-        .fold(f64::MAX, f64::min)
+        .collect();
+    times.sort_by(f64::total_cmp);
+    times[times.len() / 2]
 }
 
 fn main() {
@@ -199,7 +201,7 @@ fn main() {
             pack(3000, |i| 32 + (i as usize % 5) * 150),
             15,
         ),
-        ("150MiB", 150, pack(150, |_| 1 << 20), 3),
+        ("150MiB", 150, pack(150, |_| 1 << 20), 5),
     ];
     println!(
         "{:<12} {:>9} {:>9} {:>9} {:>9}",
@@ -210,9 +212,9 @@ fn main() {
             continue;
         }
         let per = f64::from(*count) / 1e6;
-        let core = best(*runs, || reader(bytes)) / per;
-        let serial = best(*runs, || verify(bytes, 0)) / per;
-        let fan = best(*runs, || verify(bytes, 4)) / per;
+        let core = median(*runs, || reader(bytes)) / per;
+        let serial = median(*runs, || verify(bytes, 0)) / per;
+        let fan = median(*runs, || verify(bytes, 4)) / per;
         println!(
             "{name:<12} {core:>9.2} {serial:>9.2} {fan:>9.2} {:>8.2}x",
             serial / core
