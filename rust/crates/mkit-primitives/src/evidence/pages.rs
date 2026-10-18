@@ -363,7 +363,9 @@ impl<'a> PageView<'a> {
     /// Decodes a page whose payload an earlier [`Self::decode`] already
     /// validated: it checks the header and binding, skips the per-record pass,
     /// and charges `budget` exactly what [`Self::decode`] would have charged.
-    /// The accessors still parse and bound-check the payload they return.
+    /// Only for bytes that already passed [`Self::decode`] (the driver's cache
+    /// holds nothing else); the accessors parse the payload they return but
+    /// do not repeat the ordering and geometry checks.
     pub(crate) fn decode_resident(
         bytes: &'a [u8],
         expected: EvidenceBinding,
@@ -374,6 +376,16 @@ impl<'a> PageView<'a> {
         if len > limits.page_bytes.min(MAX_PAGE_BYTES) {
             return Err(failure(FailureCode::ResourceLimit));
         }
+        debug_assert!(
+            Self::decode(
+                bytes,
+                expected,
+                limits,
+                &mut Budget::new(u64::MAX, u64::MAX)
+            )
+            .is_ok(),
+            "resident page failed full validation"
+        );
         // The header is read against a scratch budget; the real one is charged
         // the exact total below.
         let mut scratch = Budget::new(u64::MAX, 0);
@@ -659,6 +671,36 @@ mod tests {
             assert_eq!(full.remaining(), resident.remaining());
             assert_eq!((a.kind(), a.height(), a.items()), (b.kind(), b.height(), b.items()));
         }
+    }
+
+    #[test]
+    fn resident_decode_and_authentication_refuse_what_decode_refuses() {
+        let limits = EvidenceLimits::indexed();
+        let mut other = binding();
+        other.repository = RepositoryId([1; 32]);
+        for (bytes, expected, code) in [
+            (EMPTY.to_vec(), other, FailureCode::SourceChanged),
+            (EMPTY[..EMPTY.len() - 1].to_vec(), binding(), FailureCode::UnexpectedEof),
+        ] {
+            let full = PageView::decode(&bytes, expected, limits, &mut Budget::new(1 << 20, 0));
+            assert_eq!(full.unwrap_err().code, code);
+        }
+        let mut budget = Budget::new(1 << 20, 0);
+        let view = PageView::decode(EMPTY, binding(), limits, &mut budget).unwrap();
+        let wrong = view.commitment();
+        for mutate in [
+            |c: &mut PageCommitment| c.kind = PageKind::Heads,
+            |c: &mut PageCommitment| c.len += 1,
+            |c: &mut PageCommitment| c.items += 1,
+        ] {
+            let mut expected = wrong;
+            mutate(&mut expected);
+            assert_eq!(
+                view.authenticate_resident(expected, &mut budget).unwrap_err().code,
+                FailureCode::EvidenceMismatch
+            );
+        }
+        assert!(view.authenticate_resident(view.commitment(), &mut budget).is_ok());
     }
 
     const EMPTY: &[u8] = include_bytes!("../../fixtures/evidence/page-empty.bin");

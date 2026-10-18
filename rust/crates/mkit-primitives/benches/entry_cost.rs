@@ -180,17 +180,6 @@ fn main() {
         .skip(1)
         .find(|arg| !arg.starts_with('-'))
         .unwrap_or_default();
-    if let Some(secs) = std::env::var("ENTRY_COST_LOOP")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-    {
-        let bytes = pack(3000, |i| 32 + (i as usize % 5) * 150);
-        let until = Instant::now() + std::time::Duration::from_secs(secs);
-        while Instant::now() < until {
-            black_box(verify(&bytes, 0));
-        }
-        return;
-    }
     let packs: Vec<(&str, u32, Vec<u8>, u32)> = vec![
         ("1-entry", 1, pack(1, |_| 128), 200),
         ("24-entry", 24, pack(24, |_| 128), 100),

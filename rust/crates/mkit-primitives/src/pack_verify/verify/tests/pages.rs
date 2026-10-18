@@ -360,6 +360,23 @@ fn ninety_six_blob_pack_costs_the_host_only_its_final_pages() {
 }
 
 #[test]
+fn ordinal_leaf_reuse_changes_neither_work_nor_residency_nor_roots() {
+    // Several ordinal leaves, a cache small enough to evict, and a tight
+    // resident ceiling: each lookup the kept leaf serves must charge what a
+    // descent would, and the reservation must be fully returned.
+    let pack = raw_blobs(200, 300);
+    let outcome = |disabled: bool| {
+        super::super::NO_ORDINAL_LEAF.with(|flag| flag.set(disabled));
+        let mut machine = start(&pack, tiny_cache());
+        let (_, verified) = drive(&pack, &mut machine);
+        super::super::NO_ORDINAL_LEAF.with(|flag| flag.set(false));
+        let usage = machine.usage();
+        (usage.work, usage.resident_bytes, roots_of(&verified))
+    };
+    assert_eq!(outcome(false), outcome(true));
+}
+
+#[test]
 fn live_page_cap_counts_held_pages_not_every_page_ever_produced() {
     // Write-through emitted about 7 pages per object here, so this pack
     // exceeded a cap that its held pages now fit under easily.

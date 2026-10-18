@@ -253,6 +253,12 @@ struct Seal {
     leaf: Option<SealLeaf>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test switch: seal every ordinal with its own descent.
+    static NO_ORDINAL_LEAF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// The ordinal leaf the seal last descended to. Ordinals are dense and the
 /// index is immutable during sealing, so the next ordinals sit in the same
 /// leaf and need no descent of their own.
@@ -1829,6 +1835,10 @@ impl VerifyDriver {
     /// Keeps the records after the looked-up ordinal for the lookups that follow.
     fn keep_ordinal_leaf(&mut self, descent: &mut Descent) {
         self.drop_ordinal_leaf();
+        #[cfg(test)]
+        if NO_ORDINAL_LEAF.with(std::cell::Cell::get) {
+            return;
+        }
         let Some(seal) = self.seal.as_ref() else {
             return;
         };
@@ -1844,8 +1854,11 @@ impl VerifyDriver {
         let reserved = rest.iter().fold(0_u64, |sum, (_, value)| {
             sum.saturating_add(32 + u64::try_from(value.len()).unwrap_or(u64::MAX))
         });
-        // The leaf is an optimisation: without room, descend as before.
-        if self.resources.reserve(reserved).is_err() {
+        // The leaf is an optimisation: keep it only with ample headroom, so
+        // it never crowds out later reservations; otherwise descend as before.
+        if self.resources.available() < reserved.saturating_mul(8)
+            || self.resources.reserve(reserved).is_err()
+        {
             return;
         }
         if let Some(seal) = self.seal.as_mut() {
@@ -1859,7 +1872,8 @@ impl VerifyDriver {
 
     fn drop_ordinal_leaf(&mut self) {
         if let Some(leaf) = self.seal.as_mut().and_then(|seal| seal.leaf.take()) {
-            let _ = self.resources.release(leaf.reserved);
+            let released = self.resources.release(leaf.reserved);
+            debug_assert!(released.is_ok(), "ordinal leaf reservation underflow");
         }
     }
 
