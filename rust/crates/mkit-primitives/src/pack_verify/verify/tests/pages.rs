@@ -378,7 +378,10 @@ fn ordinal_leaf_reuse_changes_neither_work_nor_residency_nor_roots() {
     assert!(hits > 150, "the kept leaf served only {hits} lookups");
     super::super::ORDINAL_LEAF_HITS.with(|hits| hits.set(0));
     assert_eq!(reused, outcome(true));
-    assert_eq!(super::super::ORDINAL_LEAF_HITS.with(std::cell::Cell::get), 0);
+    assert_eq!(
+        super::super::ORDINAL_LEAF_HITS.with(std::cell::Cell::get),
+        0
+    );
 }
 
 #[test]

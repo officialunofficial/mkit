@@ -670,7 +670,10 @@ mod tests {
             let a = PageView::decode(bytes, binding(), limits, &mut full).unwrap();
             let b = PageView::decode_resident(bytes, binding(), limits, &mut resident).unwrap();
             assert_eq!(full.remaining(), resident.remaining());
-            assert_eq!((a.kind(), a.height(), a.items()), (b.kind(), b.height(), b.items()));
+            assert_eq!(
+                (a.kind(), a.height(), a.items()),
+                (b.kind(), b.height(), b.items())
+            );
         }
     }
 
@@ -681,7 +684,11 @@ mod tests {
         other.repository = RepositoryId([1; 32]);
         for (bytes, expected, code) in [
             (EMPTY.to_vec(), other, FailureCode::SourceChanged),
-            (EMPTY[..EMPTY.len() - 1].to_vec(), binding(), FailureCode::UnexpectedEof),
+            (
+                EMPTY[..EMPTY.len() - 1].to_vec(),
+                binding(),
+                FailureCode::UnexpectedEof,
+            ),
         ] {
             let full = PageView::decode(&bytes, expected, limits, &mut Budget::new(1 << 20, 0));
             assert_eq!(full.unwrap_err().code, code);
@@ -700,11 +707,16 @@ mod tests {
             let mut expected = wrong;
             mutate(&mut expected);
             assert_eq!(
-                view.authenticate_resident(expected, &mut budget).unwrap_err().code,
+                view.authenticate_resident(expected, &mut budget)
+                    .unwrap_err()
+                    .code,
                 FailureCode::EvidenceMismatch
             );
         }
-        assert!(view.authenticate_resident(view.commitment(), &mut budget).is_ok());
+        assert!(
+            view.authenticate_resident(view.commitment(), &mut budget)
+                .is_ok()
+        );
     }
 
     const EMPTY: &[u8] = include_bytes!("../../fixtures/evidence/page-empty.bin");
