@@ -323,6 +323,7 @@ pub fn decide_accept_and_clear<'a>(
     {
         return Err(invalid());
     }
+    bind_acceptance(request, snapshot, facts)?;
     let acceptance = decide_ticketed_advance(request, snapshot, ref_limits)?;
     let clearance = if matches!(acceptance.decision(), WriteDecision::Apply(_)) {
         Some(decide_clearance(facts, limits)?)
@@ -335,6 +336,46 @@ pub fn decide_accept_and_clear<'a>(
     })
 }
 
+/// The clearance advance must be the write being accepted: the canonical
+/// packmap/head pair, and the publication state the acceptance snapshot guards.
+fn bind_acceptance(
+    request: &TicketedAdvanceRequest<'_>,
+    snapshot: &Snapshot,
+    facts: &ClearanceFacts<'_>,
+) -> Result<(), Failure> {
+    let [packmap, head] = request.write.changes else {
+        return Err(invalid());
+    };
+    let Some(observed) = &snapshot.publication else {
+        return Err(unavailable());
+    };
+    let prior = &facts.prior;
+    let publication_matches = match observed {
+        Observed::Present { value, .. } => {
+            value.sequence == prior.sequence
+                && value.published_prefix == prior.published_prefix
+                && value.deletion_boundary == prior.deletion_boundary
+                && value.head == prior.head
+                && value.packmap == prior.packmap
+        }
+        // No publication row yet: the prior identity must be the empty one.
+        Observed::Absent(_) => {
+            prior.sequence == 0
+                && prior.published_prefix == 0
+                && prior.deletion_boundary == 0
+                && prior.head.is_none()
+                && prior.packmap.is_none()
+        }
+    };
+    if facts.changed.packmap != packmap.target
+        || facts.changed.head != head.target
+        || !publication_matches
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 fn deletion(facts: &ClearanceFacts<'_>) -> Result<ClearanceDecision, Failure> {
     let sequence = facts.prior.sequence.checked_add(1).ok_or_else(resource)?;
     if facts.changed.sequence != sequence {
@@ -342,6 +383,8 @@ fn deletion(facts: &ClearanceFacts<'_>) -> Result<ClearanceDecision, Failure> {
     }
     Ok(ClearanceDecision::AdvancePrefix {
         published_prefix: sequence,
+        // A deletion carries no component of its own: it keeps a prior value only
+        // where the deletion advance also names that component.
         head: facts.changed.head.and(facts.prior.head),
         packmap: facts.changed.packmap.and(facts.prior.packmap),
         deletion_boundary: sequence,
@@ -386,7 +429,12 @@ fn recheck(facts: &ClearanceFacts<'_>) -> Result<ClearanceDecision, Failure> {
         let publishable = if record.sequence == facts.changed.sequence {
             facts.changed.state.publishable() && eligible(&facts.changed, facts)?
         } else {
+            // Only the changed record gets dependency and lifecycle checks; the
+            // host retained the others under them. Cheap local facts still apply.
             record.state.publishable()
+                && !record.flagged
+                && obligations_publishable(record)
+                && (record.state != ClearanceState::Resolved || record.takedown_complete)
         };
         records.push(PrefixStep {
             sequence: record.sequence,
@@ -451,7 +499,7 @@ fn eligible(advance: &ClearanceAdvance<'_>, facts: &ClearanceFacts<'_>) -> Resul
     if advance.state == ClearanceState::Resolved && !advance.takedown_complete {
         return Ok(false);
     }
-    if !lifecycle_allows(&facts.lifecycle)? {
+    if !lifecycle_allows(&facts.lifecycle, facts.moment)? {
         return Ok(false);
     }
     if !dependencies_visible(advance, facts.witnesses) {
@@ -464,13 +512,29 @@ fn obligations_publishable(advance: &ClearanceAdvance<'_>) -> bool {
     advance.obligations.iter().all(|state| state.publishable())
 }
 
-fn lifecycle_allows(protection: &ClearanceLifecycle) -> Result<bool, Failure> {
+fn lifecycle_allows(
+    protection: &ClearanceLifecycle,
+    moment: ClearanceMoment,
+) -> Result<bool, Failure> {
     match protection {
         ClearanceLifecycle::NotOffered => Ok(true),
-        ClearanceLifecycle::Managed { current, .. } => match current {
+        ClearanceLifecycle::Managed {
+            expected_incarnation,
+            current,
+        } => match current {
             None => Err(unavailable()),
             Some(Observed::Absent(_)) => Ok(false),
-            Some(Observed::Present { value, .. }) => Ok(value.state == LifecycleState::Active),
+            Some(Observed::Present { value, .. }) => {
+                if value.incarnation != *expected_incarnation {
+                    // A retained claim bound to another incarnation is contradictory.
+                    return if moment == ClearanceMoment::Recheck {
+                        Err(invalid())
+                    } else {
+                        Ok(false)
+                    };
+                }
+                Ok(value.state == LifecycleState::Active)
+            }
         },
     }
 }
@@ -515,18 +579,25 @@ fn validate(facts: &ClearanceFacts<'_>, limits: &ClearanceLimits) -> Result<(), 
     if facts.witnesses.len() > limits.max_items {
         return Err(resource());
     }
+    // One witness per object: a conflicting second entry must not be able to
+    // satisfy a dependency another entry denies.
+    let mut seen = std::collections::BTreeSet::new();
+    if !facts.witnesses.iter().all(|w| seen.insert(w.object)) {
+        return Err(invalid());
+    }
+    let changed = &facts.changed;
+    let lookups = (changed.dependencies.len() as u64)
+        .saturating_mul(changed.additions.len() as u64 + facts.witnesses.len() as u64)
+        .saturating_add(
+            (changed.external_suppliers.len() as u64).saturating_mul(facts.witnesses.len() as u64),
+        );
     let mut work = limits.max_work;
     charge(
         &mut work,
-        facts.suffix.len() as u64
-            + facts.witnesses.len() as u64
-            + facts.changed.dependencies.len() as u64
-            + facts.changed.external_suppliers.len() as u64,
+        lookups
+            .saturating_add(facts.suffix.len() as u64)
+            .saturating_add(facts.witnesses.len() as u64),
     )?;
-    if facts.changed.obligation_revisions.len() != facts.changed.obligations.len() {
-        return Err(invalid());
-    }
-    let _ = work;
     Ok(())
 }
 
@@ -564,6 +635,9 @@ fn expect_suffix(facts: &ClearanceFacts<'_>, limits: &ClearanceLimits) -> Result
 }
 
 fn bound_advance(advance: &ClearanceAdvance<'_>, limits: &ClearanceLimits) -> Result<(), Failure> {
+    if advance.obligation_revisions.len() != advance.obligations.len() {
+        return Err(invalid());
+    }
     if advance.additions.len() > limits.max_items
         || advance.dependencies.len() > limits.max_items
         || advance.external_suppliers.len() > limits.max_items

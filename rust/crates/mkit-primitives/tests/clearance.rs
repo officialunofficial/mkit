@@ -356,3 +356,78 @@ fn hostile(byte: u8) -> Result<ClearanceDecision, FailureCode> {
         .map(|guard| guard.decision().clone())
         .map_err(|error| error.code)
 }
+
+#[test]
+fn conflicting_witnesses_and_foreign_incarnation_fail_closed() {
+    let pack = [id(1)];
+    let supplier = [id(5)];
+    let changed = advance(1, ClearanceState::Cleared, &pack, &pack, &supplier);
+    let witnesses = [witness(id(5), true), witness(id(5), false)];
+    let input = facts(
+        ClearanceMoment::Acceptance,
+        prior(0, 0),
+        changed.clone(),
+        &[],
+        &witnesses,
+    );
+    assert_eq!(
+        decide_clearance(&input, &ClearanceLimits::reference())
+            .unwrap_err()
+            .code,
+        FailureCode::InvalidResponse
+    );
+
+    let witnesses = [witness(id(5), true)];
+    let mut managed = facts(
+        ClearanceMoment::Acceptance,
+        prior(0, 0),
+        changed,
+        &[],
+        &witnesses,
+    );
+    managed.lifecycle = ClearanceLifecycle::Managed {
+        expected_incarnation: rev(1),
+        current: Some(Observed::Present {
+            value: mkit_primitives::decision::LifecycleFact {
+                incarnation: rev(2),
+                state: mkit_primitives::decision::LifecycleState::Active,
+            },
+            revision: rev(2),
+        }),
+    };
+    assert!(matches!(
+        decide_clearance(&managed, &ClearanceLimits::reference())
+            .unwrap()
+            .decision(),
+        ClearanceDecision::Retain { .. }
+    ));
+}
+
+#[test]
+fn lookup_work_is_charged_and_flagged_suffix_records_withhold() {
+    let many: Vec<Hash> = (0..=255).map(id).collect();
+    let changed = advance(1, ClearanceState::Cleared, &many, &many, &[]);
+    let input = facts(ClearanceMoment::Acceptance, prior(0, 0), changed, &[], &[]);
+    let tight = ClearanceLimits {
+        max_work: 1000,
+        ..ClearanceLimits::reference()
+    };
+    assert_eq!(
+        decide_clearance(&input, &tight).unwrap_err().code,
+        FailureCode::ResourceLimit
+    );
+
+    let mut flagged = advance(1, ClearanceState::Cleared, &[], &[], &[]);
+    flagged.flagged = true;
+    let next = advance(2, ClearanceState::Cleared, &[], &[], &[]);
+    let suffix = [flagged, next.clone()];
+    let input = facts(ClearanceMoment::Recheck, prior(0, 2), next, &suffix, &[]);
+    assert!(matches!(
+        decide_clearance(&input, &ClearanceLimits::reference())
+            .unwrap()
+            .decision(),
+        ClearanceDecision::Retain {
+            published_prefix: 0
+        }
+    ));
+}

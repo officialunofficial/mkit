@@ -629,3 +629,59 @@ fn fully_published_maximum_sequence_has_an_empty_prefix() {
         );
     });
 }
+
+#[test]
+fn clearance_prefix_equals_the_stored_state_walk_for_validated_rows() {
+    use super::{
+        Advance, Clearance, Obligation, Pair, Publication, clearance_prefix, stored_prefix,
+    };
+    let states = [
+        Clearance::Pending,
+        Clearance::Cleared,
+        Clearance::Held,
+        Clearance::Hit,
+        Clearance::Resolved,
+    ];
+    for a in states {
+        for b in states {
+            for c in states {
+                let advances: Vec<Advance> = [a, b, c]
+                    .into_iter()
+                    .zip(1u64..)
+                    .map(|(state, sequence)| Advance {
+                        sequence,
+                        generation: 1,
+                        value: Pair {
+                            head: Some([u8::try_from(sequence).unwrap(); 32]),
+                            packmap: Some([u8::try_from(sequence).unwrap() + 10; 32]),
+                        },
+                        additions: vec![],
+                        dependencies: vec![],
+                        external_bases: vec![],
+                        obligations: vec![Obligation {
+                            id: [u8::try_from(sequence).unwrap(); 32],
+                            state,
+                        }],
+                        state,
+                        operation: [7; 32],
+                    })
+                    .collect();
+                let state = Publication {
+                    sequence: 3,
+                    published: 0,
+                    boundary: 0,
+                    generation: 1,
+                    value: Pair::default(),
+                };
+                for changed in &advances {
+                    assert_eq!(
+                        clearance_prefix(&state, changed, &advances).unwrap(),
+                        stored_prefix(&state, &advances),
+                        "{a:?} {b:?} {c:?} changed {}",
+                        changed.sequence
+                    );
+                }
+            }
+        }
+    }
+}

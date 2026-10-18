@@ -1063,13 +1063,53 @@ mod combined {
         }
     }
 
+    fn with_publication(mut snap: Snapshot) -> Snapshot {
+        snap.publication = Some(Observed::Absent(REV));
+        snap
+    }
+
+    #[test]
+    fn clearance_must_bind_to_the_accepted_write_and_publication() {
+        let changes = pair();
+        let claims = [claim(0x10, UploadProof::Ready)];
+        let req = request(&changes, &claims);
+        let snap = with_publication(snapshot(&changes, &[0x10]));
+        let good = || facts(advance(ClearanceState::Cleared, OperationId([6; 32])));
+        let mut head = good();
+        head.changed.head = Some([9; 32]);
+        let mut packmap = good();
+        packmap.changed.packmap = None;
+        let mut moved = good();
+        moved.prior.sequence = 3;
+        for input in [head, packmap, moved] {
+            let err = decide_accept_and_clear(
+                &req,
+                &snap,
+                limits(),
+                &input,
+                &ClearanceLimits::reference(),
+            )
+            .unwrap_err();
+            assert_eq!(err.code, FailureCode::InvalidResponse);
+        }
+        let err = decide_accept_and_clear(
+            &req,
+            &snapshot(&changes, &[0x10]),
+            limits(),
+            &good(),
+            &ClearanceLimits::reference(),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, FailureCode::UnavailableInput);
+    }
+
     #[test]
     fn clearance_rides_apply_and_leaves_acceptance_unchanged() {
         let changes = pair();
         let claims = [claim(0x10, UploadProof::Ready)];
         let mut req = request(&changes, &claims);
         req.pending = Some(pending_binding(0x70));
-        let mut snap = snapshot(&changes, &[0x10]);
+        let mut snap = with_publication(snapshot(&changes, &[0x10]));
         snap.reservations.push((
             ReservationId([0x70; 32]),
             pending_binding(0x70).expected.clone(),
@@ -1098,7 +1138,7 @@ mod combined {
         let changes = pair();
         let claims = [claim(0x10, UploadProof::Ready)];
         let req = request(&changes, &claims);
-        let snap = snapshot(&changes, &[0x10]);
+        let snap = with_publication(snapshot(&changes, &[0x10]));
         let input = facts(advance(ClearanceState::Pending, OperationId([6; 32])));
         let both =
             decide_accept_and_clear(&req, &snap, limits(), &input, &ClearanceLimits::reference())
@@ -1120,7 +1160,7 @@ mod combined {
         let changes = pair();
         let claims = [claim(0x10, UploadProof::MarkerMissing)];
         let req = request(&changes, &claims);
-        let snap = snapshot(&changes, &[0x10]);
+        let snap = with_publication(snapshot(&changes, &[0x10]));
         let input = facts(advance(ClearanceState::Cleared, OperationId([6; 32])));
         let both =
             decide_accept_and_clear(&req, &snap, limits(), &input, &ClearanceLimits::reference())
@@ -1137,7 +1177,7 @@ mod combined {
         let changes = pair();
         let claims = [claim(0x10, UploadProof::Ready)];
         let req = request(&changes, &claims);
-        let snap = snapshot(&changes, &[0x10]);
+        let snap = with_publication(snapshot(&changes, &[0x10]));
         let good = || facts(advance(ClearanceState::Cleared, OperationId([6; 32])));
         let mut other_op = good();
         other_op.changed.operation = OperationId([9; 32]);
