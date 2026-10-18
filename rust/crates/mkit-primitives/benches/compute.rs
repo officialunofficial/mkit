@@ -174,7 +174,8 @@ fn main() {
             baseline = Some(artifact);
         }
         println!(
-            "pack_verify::compute/objects={count}/caller_width={width} peak_jobs={peak} peak_resident_bytes={resident_bytes} steps={steps} elapsed_ns={}",
+            "{}::verify/objects={count} caller_width={width} peak_jobs={peak} peak_resident_bytes={resident_bytes} steps={steps} elapsed_ns={}",
+            module_path!(),
             elapsed.as_nanos()
         );
     }
