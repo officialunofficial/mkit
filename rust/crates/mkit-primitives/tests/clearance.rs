@@ -431,3 +431,17 @@ fn lookup_work_is_charged_and_flagged_suffix_records_withhold() {
         }
     ));
 }
+
+#[test]
+fn large_valid_dependency_sets_fit_the_reference_work_ceiling() {
+    let many: Vec<Hash> = (0..2048u16)
+        .map(|n| {
+            let mut raw = [0; 32];
+            raw[..2].copy_from_slice(&n.to_be_bytes());
+            raw
+        })
+        .collect();
+    let changed = advance(1, ClearanceState::Cleared, &many, &many, &[]);
+    let input = facts(ClearanceMoment::Acceptance, prior(0, 0), changed, &[], &[]);
+    assert!(decide_clearance(&input, &ClearanceLimits::reference()).is_ok());
+}

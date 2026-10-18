@@ -1081,7 +1081,9 @@ mod combined {
         packmap.changed.packmap = None;
         let mut moved = good();
         moved.prior.sequence = 3;
-        for input in [head, packmap, moved] {
+        let mut stale = good();
+        stale.prior.revision = Revision([0x55; 32]);
+        for input in [head, packmap, moved, stale] {
             let err = decide_accept_and_clear(
                 &req,
                 &snap,

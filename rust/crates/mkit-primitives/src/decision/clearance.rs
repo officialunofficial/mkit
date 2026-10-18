@@ -195,13 +195,14 @@ pub struct ClearanceLimits {
 }
 
 impl ClearanceLimits {
-    /// Reference ceilings: 64 outstanding advances and 4,096 items.
+    /// Reference ceilings: 64 outstanding advances, 4,096 items, and enough work
+    /// for 4,096 dependencies against 4,096 additions plus 4,096 witnesses.
     #[must_use]
     pub const fn reference() -> Self {
         Self {
             max_advances: 64,
             max_items: 4096,
-            max_work: 65_536,
+            max_work: 1 << 26,
         }
     }
 }
@@ -304,7 +305,9 @@ impl<'a> CombinedAcceptance<'a> {
 ///
 /// # Errors
 ///
-/// Acceptance failures pass through. `InvalidResponse` when the clearance facts
+/// Acceptance failures pass through. The binding runs first, so an unbound or
+/// unobserved publication refuses even where acceptance would replay or conflict.
+/// `InvalidResponse` when the clearance facts
 /// are not an acceptance-moment, non-deletion view of the same repository and
 /// operation; clearance failures pass through.
 #[must_use = "compare every supplied fact before applying"]
@@ -351,16 +354,18 @@ fn bind_acceptance(
     };
     let prior = &facts.prior;
     let publication_matches = match observed {
-        Observed::Present { value, .. } => {
-            value.sequence == prior.sequence
+        Observed::Present { value, revision } => {
+            *revision == prior.revision
+                && value.sequence == prior.sequence
                 && value.published_prefix == prior.published_prefix
                 && value.deletion_boundary == prior.deletion_boundary
                 && value.head == prior.head
                 && value.packmap == prior.packmap
         }
         // No publication row yet: the prior identity must be the empty one.
-        Observed::Absent(_) => {
-            prior.sequence == 0
+        Observed::Absent(revision) => {
+            *revision == prior.revision
+                && prior.sequence == 0
                 && prior.published_prefix == 0
                 && prior.deletion_boundary == 0
                 && prior.head.is_none()
