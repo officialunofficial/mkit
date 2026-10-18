@@ -557,6 +557,12 @@ impl ObjectSink for BulkSink<'_> {
             .map_err(|e| BridgeError::Source(format!("bulk write: {e}")))
     }
 
+    fn reuse_object(&mut self, h: &Hash) -> Result<Vec<Hash>, BridgeError> {
+        self.bw
+            .reuse_object(h)
+            .map_err(|e| BridgeError::Source(format!("bulk reuse: {e}")))
+    }
+
     fn kind_of(&self, h: &Hash) -> Option<ObjectType> {
         self.store.read_object(h).ok().map(|o| o.object_type())
     }
@@ -707,6 +713,7 @@ fn translate_upstream(
     let mut skipped: Vec<(String, String)> = Vec::new();
     let mut all_pairs: Vec<(Sha1Id, Hash)> = Vec::new();
     let mut normalized = false;
+    let mut depth_memo = DepthMemo::default();
 
     for uref in &upstream_refs {
         // Ref-name legality on the mkit side (grammar + tags).
@@ -749,13 +756,14 @@ fn translate_upstream(
             map: &mut sha_map,
             retain_raw: &mut retain,
             options: ImportOptions { fork_mode },
-            depth_memo: DepthMemo::default(),
+            depth_memo: std::mem::take(&mut depth_memo),
         };
         // Pairs are caller-owned and persisted EVEN when the ref
         // refuses: the sink already wrote those objects, and a later
         // ref sharing the history memo-hits without re-emitting them.
         let mut ref_pairs: Vec<(Sha1Id, Hash)> = Vec::new();
         let result = imp.import_commits(&order, &uref.id, &mut ref_pairs, &mut normalized);
+        depth_memo = imp.depth_memo;
         all_pairs.extend_from_slice(&ref_pairs);
         match result {
             Ok(head) => {

@@ -140,6 +140,7 @@ pub struct BulkWriter<'a> {
     store: &'a ObjectStore,
     dirs: std::collections::HashSet<PathBuf>,
     files: std::collections::HashSet<PathBuf>,
+    refreshed: std::collections::HashSet<Hash>,
 }
 
 impl BulkWriter<'_> {
@@ -160,6 +161,7 @@ impl BulkWriter<'_> {
         if bytes.len() > MAX_RAW_OBJECT_SIZE {
             return Err(StoreError::ObjectTooLarge);
         }
+        let _guard = self.store.lock_writer()?;
         let h = object_id_from_bytes(bytes);
         let final_path = self.store.path_for(&h);
         // VERIFY-skip an existing object: content addressing makes
@@ -175,7 +177,7 @@ impl BulkWriter<'_> {
         // `refresh_mtime`) is rewritten like a torn file.
         if let Ok(existing) = fs::read(&final_path)
             && existing == bytes
-            && refresh_mtime(&final_path).is_ok()
+            && (self.refreshed.contains(&h) || refresh_mtime(&final_path).is_ok())
         {
             // The bytes may have matched out of the PAGE CACHE of a
             // crashed session's unsynced write — byte equality is not a
@@ -183,6 +185,7 @@ impl BulkWriter<'_> {
             // content fsync at commit.
             self.dirs.insert(shard_dir.to_path_buf());
             self.files.insert(final_path);
+            self.refreshed.insert(h);
             return Ok(h);
         }
         // `self.dirs` already records every shard this session has
@@ -203,7 +206,31 @@ impl BulkWriter<'_> {
         // durability (the shard dir fsync) is deferred to commit.
         crate::atomic::write_content_synced(&final_path, bytes)?;
         self.dirs.insert(shard_dir.to_path_buf());
+        self.refreshed.insert(h);
         Ok(h)
+    }
+
+    /// Refresh a cached object's grace window and return its immediate history
+    /// references without re-hashing it. The import map already identifies the
+    /// object; this is retention bookkeeping, not an integrity check.
+    /// Missing objects or malformed reference metadata refuse reuse. Visit the
+    /// returned references too, including chunks absent from the git map.
+    ///
+    /// # Panics
+    /// Object paths always have a shard parent; panics if that internal
+    /// path-layout invariant is violated.
+    pub fn reuse_object(&mut self, h: &Hash) -> StoreResult<Vec<Hash>> {
+        let _guard = self.store.lock_writer()?;
+        let children = self.store.cached_children(h)?;
+        let path = self.store.path_for(h);
+        if !self.refreshed.contains(h) {
+            refresh_mtime(&path)?;
+            self.refreshed.insert(*h);
+        }
+        self.dirs
+            .insert(path.parent().expect("object path has parent").to_path_buf());
+        self.files.insert(path);
+        Ok(children)
     }
 
     /// Make the session durable: fsync the CONTENTS of any pre-existing
@@ -212,7 +239,7 @@ impl BulkWriter<'_> {
     /// then every touched shard directory (renames become durable).
     pub fn commit(self) -> StoreResult<()> {
         for file in &self.files {
-            fs::OpenOptions::new().write(true).open(file)?.sync_all()?;
+            sync_reused_file(file)?;
         }
         for dir in &self.dirs {
             crate::atomic::sync_dir(dir)?;
@@ -267,7 +294,14 @@ impl ObjectStore {
         // Reject a repository that does not declare merkle object
         // addressing — a pre-merkle repo would mis-read every Tree /
         // ChunkedBlob (and thus every Commit) under the new id scheme.
-        match fs::read_to_string(layout.format_file()) {
+        let read_format = || -> io::Result<String> {
+            let mut file = File::open(layout.format_file())?;
+            file.lock_shared()?;
+            let mut value = String::new();
+            file.read_to_string(&mut value)?;
+            Ok(value)
+        };
+        match read_format() {
             Ok(s) if s.trim() == FORMAT_VALUE => {}
             Ok(s) => {
                 return Err(StoreError::IncompatibleRepoFormat {
@@ -451,6 +485,7 @@ impl ObjectStore {
             store: self,
             dirs: std::collections::HashSet::new(),
             files: std::collections::HashSet::new(),
+            refreshed: std::collections::HashSet::new(),
         }
     }
 
@@ -698,6 +733,57 @@ impl ObjectStore {
         })
     }
 
+    // `format` is immutable after init and never unlinked. Reuse it as a
+    // kernel-lock anchor, so exclusion needs no new on-disk state. Each guard
+    // owns a separately opened handle; dropping it (including process death)
+    // releases the lock. Object bytes never leave their canonical path.
+    fn lock_writer(&self) -> io::Result<File> {
+        let file = File::open(self.objects_root.with_file_name(FORMAT_FILE))?;
+        file.lock_shared()?;
+        Ok(file)
+    }
+
+    fn cached_children(&self, h: &Hash) -> StoreResult<Vec<Hash>> {
+        use crate::object::ObjectType;
+        if matches!(self.object_type(h)?, ObjectType::Blob | ObjectType::Delta) {
+            return Ok(Vec::new());
+        }
+        let object = serialize::deserialize(&self.read_raw(h)?)?;
+        Ok(crate::ops::graph::children(
+            &object,
+            crate::ops::graph::ClosureMode::History,
+        ))
+    }
+
+    /// Final grace-window check and unlink, excluded from concurrent bulk
+    /// refreshes. Contention or uncertain age keeps the object. A crash before
+    /// unlink leaves the canonical file; afterwards only an old orphan is gone.
+    pub(crate) fn prune_if_old(&self, h: &Hash, now: u64, grace: u64) -> StoreResult<Option<u64>> {
+        self.prune_if_old_with_hook(h, now, grace, || {})
+    }
+
+    fn prune_if_old_with_hook(
+        &self,
+        h: &Hash,
+        now: u64,
+        grace: u64,
+        before_unlink: impl FnOnce(),
+    ) -> StoreResult<Option<u64>> {
+        let guard = File::open(self.objects_root.with_file_name(FORMAT_FILE))?;
+        if guard.try_lock().is_err() {
+            return Ok(None);
+        }
+        let Ok(meta) = self.object_metadata(h) else {
+            return Ok(None);
+        };
+        if !old_enough(&meta, now, grace) {
+            return Ok(None);
+        }
+        before_unlink();
+        self.remove_object(h)?;
+        Ok(Some(meta.len()))
+    }
+
     /// Delete object `h` from the store. Idempotent: a missing object is
     /// not an error (it may have been pruned already).
     ///
@@ -710,6 +796,25 @@ impl ObjectStore {
             Err(e) => Err(StoreError::Io(e)),
         }
     }
+}
+
+pub(crate) fn old_enough(meta: &fs::Metadata, now: u64, grace: u64) -> bool {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .is_some_and(|mtime| now.saturating_sub(mtime.as_secs()) >= grace)
+}
+
+fn sync_reused_file(path: &Path) -> io::Result<()> {
+    let mut options = fs::OpenOptions::new();
+    if cfg!(unix) {
+        options.read(true);
+    } else {
+        // Windows FlushFileBuffers requires GENERIC_WRITE. Do not silently
+        // accept a failed content flush or change object permissions.
+        options.write(true);
+    }
+    options.open(path)?.sync_all()
 }
 
 /// Shared by [`ObjectStore::read`] and [`ObjectStore::read_object`]: both
@@ -836,9 +941,9 @@ impl ObjectSink for ObjectStore {
 ///   `mtime` after a crash cannot lose a reachable object.
 /// - Cost: one `open` + `futimens` (plus `close`) per dedup hit.
 ///
-/// This does not close gc's own window between reading an object's
-/// `mtime` and unlinking it (`ops::gc::run_gc`): a refresh that lands
-/// inside it still loses the object.
+/// Callers hold the shared format-file lock until refresh or rewrite is
+/// complete; gc holds its exclusive counterpart over its final age check
+/// and unlink, so a successful refresh cannot target a detached inode.
 pub(crate) fn refresh_mtime(path: &Path) -> io::Result<()> {
     #[cfg(test)]
     if FAIL_REFRESH.get() {
@@ -1243,6 +1348,23 @@ mod tests {
 mod bulk_writer_tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn bulk_writer_reuses_read_only_object() {
+        let td = tempfile::tempdir().unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(td.path())).unwrap();
+        let bytes = b"existing read-only object";
+        let h = store.write(bytes).unwrap();
+        let path = store.path_for(&h);
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&path, permissions).unwrap();
+        let mut writer = store.bulk_writer();
+        assert_eq!(writer.write(bytes).unwrap(), h);
+        writer.commit().unwrap();
+        assert_eq!(store.read(&h).unwrap(), bytes);
+    }
+
     #[test]
     fn bulk_writer_round_trips_and_rewrites() {
         let td = tempfile::tempdir().unwrap();
@@ -1360,9 +1482,6 @@ mod dedup_mtime_tests {
         });
     }
 
-    /// Writable object files only: `BulkWriter::commit` re-opens a
-    /// re-used object for writing to fsync it, which a read-only object
-    /// file refuses (independent of the mtime refresh).
     #[test]
     fn bulk_writer_dedup_refreshes_mtime() {
         assert_dedup_refreshes(|s, b| {
@@ -1371,5 +1490,89 @@ mod dedup_mtime_tests {
             bw.commit().unwrap();
             h
         });
+    }
+}
+
+#[cfg(test)]
+mod sweep_crash_tests {
+    use super::*;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    fn sweep_crash_child() {
+        let Some(root) = std::env::var_os("MKIT_SWEEP_CRASH_ROOT") else {
+            return;
+        };
+        let layout = RepoLayout::single(Path::new(&root));
+        let store = ObjectStore::open(&layout).unwrap();
+        let h = object_id_from_bytes(b"crash sweep candidate");
+        store
+            .prune_if_old_with_hook(&h, u64::MAX, 10, || {
+                fs::write(Path::new(&root).join("checked"), b"ready").unwrap();
+                loop {
+                    std::thread::park();
+                }
+            })
+            .unwrap();
+        panic!("child should be killed before unlink");
+    }
+
+    #[test]
+    fn crash_after_final_check_leaves_object_for_next_gc() {
+        let td = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(td.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        crate::refs::init(&layout).unwrap();
+        let bytes = b"crash sweep candidate";
+        let h = store.write(bytes).unwrap();
+        let control = store.write(b"unrefreshed crash orphan").unwrap();
+        for h in [h, control] {
+            File::open(store.path_for(&h))
+                .unwrap()
+                .set_modified(UNIX_EPOCH)
+                .unwrap();
+        }
+        let mut child = ChildGuard(
+            Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "store::sweep_crash_tests::sweep_crash_child"])
+                .env("MKIT_SWEEP_CRASH_ROOT", td.path())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let start = Instant::now();
+        while !td.path().join("checked").exists() {
+            assert!(
+                start.elapsed() < Duration::from_secs(30),
+                "child did not reach final check"
+            );
+            assert!(child.0.try_wait().unwrap().is_none(), "child exited early");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+        let reopened = ObjectStore::open(&layout).unwrap();
+        assert_eq!(reopened.read(&h).unwrap(), bytes);
+        let mut writer = reopened.bulk_writer();
+        writer.write(bytes).unwrap();
+        writer.commit().unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let report = crate::ops::gc::run_gc(&reopened, &layout, now, 10, false).unwrap();
+        assert!(reopened.contains(&h), "refreshed survivor lost: {report:?}");
+        assert!(!reopened.contains(&control));
+        assert_eq!(report.pruned, 1);
     }
 }

@@ -96,6 +96,7 @@ ones a spec reader is most likely to look for.
 | SPEC-GC fail-closed requirement | `UnreadableAborts` | exhaustive | `mutLenient` |
 | SPEC-GC recovery log, SPEC-CONCURRENCY §3.2 | `SupersededRetained`, `LockExclusion` | exhaustive | `mutNoRecord`, `mutNoKeepLast`, `mutNoLock` |
 | SPEC-GC "Concurrent writers and the grace window" | writer outside gc's locks cannot lose an object when every newly reachable object has `T - mtime < GRACE` (`gcPushBounded`); dedup hits that refresh mtime (`gcPushFastFreshen`, the code since MKIT-55) are safe | exhaustive with at most 2 producer rewrites and no corrupt source (9.5M and 11.9M states); bounded (length 8) | `mutBoundedLax` (the bound is tight), `gcPushFast` (pre-MKIT-55 code) |
+| SPEC-GC final sweep exclusion and process crashes | `sweepFixed::All` (`NoDangling`, `NoRecentPruned`, `NoLivePruned`, `NoLeakedLock`) | exhaustive (4,832 states, one object and writer, clock 0..5, grace 2); bounded (length 12) | `sweepSplit`, `sweepNoLock`, `sweepNoRefresh`; `sweepSlow` and `sweepGrace0` retain the timing restriction |
 | SPEC-GC progress | `NoLeakedLock`, `NoStuckPush` | exhaustive | `mutLeakLock`, `mutStuckPush` |
 | Server `ContentIndex` GC ordering (R-64; no spec text yet) | `NoReachableLoss`, `NoLiveDelete`, `DeletingClears`, `UploadCanStep` | exhaustive; bounded (length 16) | `ciBytesFirst`, `ciShortTtl`, `ciMutNoDeletingGuard`, `ciMutNoSeqGuard`, `ciMutNoResume`, `ciMutNoGiveUp` |
 

@@ -7,6 +7,26 @@ profile; storage-only groundwork is labeled explicitly. The
 [SPEC-SERVER profile map](specs/SPEC-SERVER.md#1-scope-and-relation-to-spec-transport-connect)
 distinguishes current enforcement from future integration.
 
+## Cached imports and gc agree on object retention
+
+**Always:** gc's final age check and unlink exclude bulk refresh/write on the
+same store. A cached import refreshes every object in its stored history
+closure, including chunk leaves, once per run before publication; missing
+cached objects refuse publication. The strict per-object grace bound remains
+required for writers outside gc's worktree locks.
+
+**Because:** a stale candidate read or a skipped cached descendant must not
+turn a successful reuse into a dangling ref.
+
+**If violated:** gc can delete an object after its writer refreshed it, or
+prune an old descendant hidden behind a map-cache hit.
+
+**Enforcement status:** shared/exclusive locks on the immutable format file,
+`ObjectStore::prune_if_old`, `BulkWriter::reuse_object`, and import-run memoization.
+Deterministic sweep interleaving, killed-sweeper restart, read-only reuse and
+cached chunk-closure refresh regressions cover the boundaries. SPEC-GC states
+the remaining zero-grace and long-import restrictions.
+
 ## Primitive contracts keep trusted construction private
 
 **Always:** only the owning primitive module can construct `VerifiedPack`,

@@ -307,6 +307,17 @@ pub fn run_gc(
     grace_secs: u64,
     dry_run: bool,
 ) -> Result<GcReport, GcRootsError> {
+    run_gc_with_hook(store, layout, now_secs, grace_secs, dry_run, |_| {})
+}
+
+fn run_gc_with_hook(
+    store: &ObjectStore,
+    layout: &RepoLayout,
+    now_secs: u64,
+    grace_secs: u64,
+    dry_run: bool,
+    mut before_prune: impl FnMut(&Hash),
+) -> Result<GcReport, GcRootsError> {
     // Refuse to delete through a symlinked store: if `.mkit` or
     // `.mkit/objects` is a symlink, `remove_object` would unlink the
     // link target's files — potentially outside the repo. (Dry runs are
@@ -335,19 +346,19 @@ pub fn run_gc(
             report.kept_recent += 1;
             continue;
         };
-        let age_known_old = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .is_some_and(|mtime| now_secs.saturating_sub(mtime) >= grace_secs);
+        let age_known_old = crate::store::old_enough(&meta, now_secs, grace_secs);
         if !age_known_old {
             report.kept_recent += 1;
             continue;
         }
-        let len = meta.len();
+        let mut len = meta.len();
         if !dry_run {
-            store.remove_object(&h)?;
+            before_prune(&h);
+            let Some(reclaimed) = store.prune_if_old(&h, now_secs, grace_secs)? else {
+                report.kept_recent += 1;
+                continue;
+            };
+            len = reclaimed;
         }
         report.pruned += 1;
         report.bytes_reclaimed += len;
@@ -858,5 +869,42 @@ mod tests {
         fs::write(md.heads_dir().join(".main.tmp.123.4"), b"garbage").unwrap();
         let roots = collect_roots(&md).unwrap();
         assert!(roots.contains(&c), "real ref still collected past cruft");
+    }
+}
+
+#[cfg(test)]
+mod sweep_interleaving_tests {
+    use super::*;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn refresh_between_candidate_check_and_unlink_is_kept() {
+        let td = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(td.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        crate::refs::init(&layout).unwrap();
+        let bytes = b"old orphan reused by concurrent import";
+        let h = store.write(bytes).unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        std::fs::File::open(store.path_for(&h))
+            .unwrap()
+            .set_modified(UNIX_EPOCH + Duration::from_secs(now - 100))
+            .unwrap();
+        let report = run_gc_with_hook(&store, &layout, now, 10, false, |candidate| {
+            assert_eq!(candidate, &h);
+            let mut writer = store.bulk_writer();
+            writer.write(bytes).unwrap();
+            writer.commit().unwrap();
+        })
+        .unwrap();
+        assert!(
+            store.contains(&h),
+            "refreshed object was pruned: {report:?}"
+        );
+        assert_eq!(report.pruned, 0);
+        assert_eq!(report.kept_recent, 1);
     }
 }

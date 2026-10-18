@@ -150,35 +150,31 @@ whose `mtime` cannot be read (`ops::gc::run_gc`). An implementation MUST
 read `now` no later than the start of the mark; the safety condition
 below depends on it.
 
-**Hazard: an object whose `mtime` is not refreshed.** Object writes
-are content-addressed and idempotent. When the object's file already
-exists (for `BulkWriter::write`, with the same bytes),
-`ObjectStore::write`, `WriteBatch` and `BulkWriter::write` return without
-rewriting it. `BulkWriter::write`, the writer git import uses, first sets
-the object's `mtime` to the current time, and rewrites the object if it
-cannot (MKIT-55). `ObjectStore::write` and `WriteBatch` leave `mtime`
-alone: their callers hold `worktree.lock`, which gc also takes, so they
-never race a sweep. An object that a
-writer does not write at all because it already has it (a git import
-skips every object its map cache already translated) is left with its
-old `mtime`. So when a concurrent writer's closure includes an object that
-already exists as an old unreachable object (such as a commit superseded
-by a rewrite whose recovery-log entry has expired, then pushed again, or
-a blob identical to one in such a commit) and the writer does not write
-it, this interleaving loses it however quickly the writer runs:
+**Reference-server behavior.** Bulk writes refresh the on-disk `mtime`
+of byte-equal existing objects, rewriting on a failed refresh. Git import
+also refreshes the full stored history closure on a translation-map hit,
+including chunks that have no separate map entry. Successful writes and
+cached reuse are memoized across every ref in one import run: each cached
+object is refreshed at most once, without re-hashing its contents. Missing
+objects or malformed cached reference metadata abort import before ref publication. Native
+`ObjectStore::write` and `WriteBatch` callers still rely on gc's worktree
+locks and do not need an mtime refresh.
 
-1. The writer skips the object, so its `mtime` stays old.
-2. gc reads `now` and computes its live set; the object is unreachable.
-3. gc's sweep sees `now - mtime >= grace` and deletes the object.
-4. The writer publishes a ref whose closure contains the object.
+The sweep's preliminary metadata read is advisory. Its final age check and
+unlink hold an exclusive kernel lock on the existing, immutable common-dir
+`format` file. Bulk writes and cached reuse hold the corresponding shared
+lock across their presence check, refresh and any rewrite. If refresh wins,
+the final check sees the new mtime; if unlink wins, a later write recreates
+the object and cached reuse refuses the missing object. Lock contention or
+uncertain metadata keeps the candidate. The lock order is specified by
+SPEC-CONCURRENCY.
 
-The published ref now dangles. The next `mkit gc` aborts with
-`ObjectNotFound` ("Fail-closed requirement"), so no further object is
-lost, but the deleted object is not recovered. The Quint model in
-`formal/quint/gc` reproduces this as the `gcPushFast` instance (a write
-that keeps the old `mtime`) and the `fastPushDedupLossTest` scenario;
-`gcPushFastFreshen`, a write that refreshes it as `BulkWriter` now
-does, is safe.
+Objects are never renamed out of the canonical namespace during a sweep.
+A crash before unlink leaves the object there, and the kernel releases the
+lock. A subsequent open can read it and a subsequent gc applies the same
+root and age checks. A crash after unlink has removed only an old,
+unreachable candidate; a lost directory update may retain that candidate,
+which is safe. No trash namespace or persistent sweep journal is needed.
 
 **Safety condition (normative).** Let a writer that does not hold gc's
 locks publish a ref at instant `T`. The publication cannot lose an object
@@ -204,15 +200,16 @@ delete an object at the boundary (the model's `mutBoundedLax` mutant and
   the writer relies on had its `mtime` set within that window.
 - `--grace-secs 0` is never safe against a concurrent writer outside gc's
   lock set.
-- `BulkWriter`, the only object writer outside gc's lock set, refreshes
-  `mtime` on a dedup hit, so an object a git import writes meets the
-  condition when its write-to-publish window is
-  shorter than `grace`, unless the refresh lands after gc's sweep read
-  the old `mtime` and before it unlinks the object (`ops::gc::run_gc`
-  does not do the two atomically). A git import does not write objects its map cache
-  already covers, so it does not meet the condition for such an object.
-  Operators MUST NOT run `mkit gc` concurrently with git imports into the
-  same repository unless the condition is otherwise guaranteed.
+- Git import refreshes every object it makes newly reachable, including
+  map-cache hits and their stored closure. Concurrent gc is safe when the
+  time from each object's write or first reuse to publication is strictly
+  shorter than `grace`, with a coherent filesystem clock. The split
+  metadata-read/unlink race is excluded by the format-file lock.
+- Operators MUST exclude concurrent gc when using zero grace or when an
+  import can exceed that per-object interval (including a stalled import).
+  Once-per-run refresh does not renew the grace window during a long run.
+  Clock rollback or timestamp precision that violates the strict on-disk
+  bound also falls outside this guarantee.
 
 ## Invariants
 
@@ -226,7 +223,7 @@ delete an object at the boundary (the model's `mutBoundedLax` mutant and
 | A crash cannot persist a ref rewrite while losing its recovery entry | `record` fsyncs the log file and its parent directory before returning ("Recovery log") |
 | A producer append cannot race an `expire` rewrite and vanish | callers hold the repo lock; gc runs expire → collect roots → prune under the same lock ("Recovery log") |
 | Recently-orphaned objects survive a gc run | unreachable objects younger than the grace window (default 14 days) are skipped ("Status") |
-| A writer outside gc's lock set never publishes a dangling ref | only when every object its publication makes newly reachable has an on-disk `mtime` within `grace` of the publication; a dedup hit refreshes `mtime`, but an object a git import skips via its map cache keeps its old `mtime`, so this is not guaranteed today ("Concurrent writers and the grace window") |
+| A writer outside gc's lock set never publishes a dangling ref | when every newly reachable object has an on-disk `mtime` strictly within `grace` of publication; import refreshes writes and complete cached closures, and the final sweep check is excluded from refresh ("Concurrent writers and the grace window") |
 | An unset ref never pins an object | the all-zero hash is excluded from roots ("Retention roots") |
 
 The load-bearing rule is the fail-closed requirement: every guarantee

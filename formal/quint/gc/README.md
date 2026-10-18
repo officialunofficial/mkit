@@ -1,6 +1,6 @@
 # Garbage collection, the recovery log and the server GC primitive (formal verification effort)
 
-Two Quint models.
+Three Quint models.
 
 - `gc.qnt` models `mkit gc` as specified in
   [SPEC-GC](../../../docs/specs/SPEC-GC.md): retention roots, the fail-closed
@@ -11,8 +11,12 @@ Two Quint models.
   It is aligned with `rust/crates/mkit-core/src/ops/gc.rs` (`collect_roots`,
   `live_objects`, `run_gc`), `ops/recovery.rs` (`record`, `expire`,
   `is_retained`), `store.rs` (`ObjectStore::write`, `BulkWriter::write`,
-  `object_metadata`, `remove_object`) and `rust/crates/mkit-cli/src/commands/gc.rs`,
+  `object_metadata`, `prune_if_old`) and `rust/crates/mkit-cli/src/commands/gc.rs`,
   `tag.rs`, `attest.rs`.
+- `sweepRace.qnt` refines the atomic sweep in `gc.qnt`: it separates the
+  initial metadata read, exclusive lock, final metadata read, unlink and lock
+  release. A writer holds a shared lock across its read and refresh or write.
+  It covers process death before and after unlink, and cached-object reuse.
 - `contentIndex.qnt` models the server-side GC primitive,
   `rust/crates/mkit-server/src/store/content_index.rs` ("GC ordering (R-64)",
   steps 1 to 4), against an upload of the same blob
@@ -25,8 +29,9 @@ Two Quint models.
 | File | Contents |
 |---|---|
 | `gc.qnt` | `gcCore` is the state machine. `gc` is the conforming instance (supported deployment) with scenario tests. `gcGrace0` is the same with `--grace-secs 0`. `gcPush*` add a concurrent writer outside gc's lock set. `gcTag*` add a later root publish under the lock. `mut*` are mutants. |
+| `sweepRace.qnt` | One loose object, one writer and one gc. `sweepFixed` checks the final re-stat under an exclusive lock. Mutants expose a stale read, missing exclusion, missing refresh, expired grace and zero grace. |
 | `contentIndex.qnt` | `ciCore` is the state machine. `ciHoldFirst` and `ciShortTtlGrace` are safe orderings; `ciBytesFirst`, `ciShortTtl` are unsafe caller orderings; `ciMut*` are mutants of the primitive. |
-| `check.sh` | Reruns every check with its expected outcome. `APALACHE=1` adds the bounded Apalache runs, `TLC=1` the exhaustive TLC runs. `ONLY=gc`/`ONLY=ci` picks a model, `SEL=regex` picks checks. |
+| `check.sh` | Reruns every check with its expected outcome. `APALACHE=1` adds the bounded Apalache runs, `TLC=1` the exhaustive TLC runs. `ONLY=gc`/`ONLY=ci`/`ONLY=sweep` picks a model, `SEL=regex` picks checks. |
 
 ## Tool pins (verification toolchain)
 
@@ -134,7 +139,7 @@ object and deletes an old one in its closure), `CanaryNoTagPublished`.
 |---|---|---|
 | `gcPushRaw`, `gcPushRawFreshen` | none | `NoDangling` and `NoLivePruned` violated: the writer writes at t, gc runs with `now ≥ t + GRACE`, the writer then publishes |
 | `gcPushFast` | publish < GRACE after the write | Violated even with a zero-duration writer: 5 is an old orphan, the write is a dedup hit that keeps mtime 0 (`fastPushDedupLossTest`). The implementation before MKIT-55 |
-| `gcPushFastFreshen` | as above, mtime refreshed on dedup | Safe. The implementation since MKIT-55, except gc's mtime-read-then-unlink window (below) |
+| `gcPushFastFreshen` | as above, mtime refreshed on dedup | Safe in the atomic abstraction; `sweepFixed` checks the split-read implementation |
 | `gcPushBounded` | at publish time T, every object the tip makes newly reachable is present with `T - mtime < GRACE` (on-disk mtime) | Safe |
 | `mutBoundedLax` | the same with `T - mtime <= GRACE` | Violated (`boundaryLossTest`): the bound is tight |
 
@@ -147,13 +152,53 @@ the boundary, `gcPushFast`, `gcPushRaw*`), not proved in general. It works
 because gc reads `now` before its mark, so a gc whose mark precedes the
 publish has `now ≤ T`, and the other roots are frozen during a gc run
 (producers are excluded, expire precedes mark). The writer's duration bounds
-this only when a dedup hit refreshes mtime (`gcPushFastFreshen`), which the
-object writers do since MKIT-55. The model's `GcSweep(o)` reads o's mtime and
-deletes o in one step; `run_gc` reads `object_metadata` and later calls
-`remove_object`, so a refresh that lands between the two still loses the
-object. That window is not modelled, and closing it needs a gc-side change.
+this only when a dedup hit refreshes mtime (`gcPushFastFreshen`).
+The root model's `GcSweep(o)` reads o's mtime and deletes o in one step.
+`sweepRace.qnt` checks the refinement to the implementation's separate
+metadata reads and unlink: a final re-stat under an exclusive store lock
+excludes the writer's shared lock across refresh or write. The initial
+unlocked metadata read only selects candidates.
 `--grace-secs 0` is never safe against such a writer. This is the condition
 SPEC-GC now states as normative.
+
+### Split metadata read and unlink (`sweepRace.qnt`)
+
+The focused model starts with one old unreferenced loose object. Gc records
+`now` and whether the object is live, reads its mtime without the store lock,
+and selects a candidate. It then takes the exclusive store lock, re-reads
+mtime and unlinks only if the object is still old. A single writer takes the
+shared lock across the existing-file read and refresh (including map-cache
+reuse), or across an atomic new-object write. Ref publication occurs after
+the shared lock is released. A busy lock or failed final metadata read keeps
+the candidate. The one-writer bound abstracts exclusion between gc and any
+shared holder; it does not establish writer throughput or fairness.
+
+| Instance | Difference | Expected result |
+|---|---|---|
+| `sweepFixed` | final re-stat and unlink hold the exclusive lock; writer refreshes; publish < GRACE after touch | `All` holds |
+| `sweepSplit` | final check reuses the unlocked stale result | `NoDangling` and `NoRecentPruned` violated |
+| `sweepNoLock` | final re-stat and unlink lack exclusion | `NoDangling` and `NoRecentPruned` violated |
+| `sweepNoRefresh` | existing object keeps its old mtime, as an unrefreshed cache hit would | `NoDangling` violated |
+| `sweepSlow` | publish may occur at or beyond GRACE after touch | `NoDangling` violated |
+| `sweepGrace0` | GRACE = 0, no time need pass | `NoDangling` violated |
+
+`refreshBetweenReadAndUnlinkTest` and `staleReadLossTest` run the same
+interleaving against the fix and the stale-check mutant. The missing-lock
+mutant refreshes after the final check. `crashBeforeUnlinkTest` releases the
+kernel lock with the canonical object present; `crashAfterUnlinkTest`
+releases it after an old unmarked object was removed and a later writer
+recreates the object. No trash path or recovery namespace exists. Writer
+process death likewise releases its shared lock. Filesystem power-loss
+semantics, lock API portability and fsync ordering require the Rust tests
+and code review; this model checks process death and interleaving only.
+
+`NoRecentPruned` forbids a deletion within GRACE of the actual on-disk mtime
+at deletion time. `NoLivePruned`, `NoDangling` and `NoLeakedLock` complete
+`All`. Canaries require pruning, publication after pruning (with a later
+rewrite), and crashes on both sides of unlink to remain reachable.
+Bounds: one object, one import run, arbitrarily repeated gc runs, clock 0..5,
+GRACE = 2 except the zero-grace instance. This refines the object-level step
+in `gc.qnt`; it does not add the full root DAG to the small race model.
 
 ### Later root publish under the lock (`gcTagRoot`, `gcTagClosure`)
 
@@ -175,14 +220,14 @@ a closure present under the lock stays present until the publish.
 - **git-bridge import:** `mkit git import`/`fetch`/`pull` writes loose objects
   through `BulkWriter` and publishes tags and remote-tracking refs under
   `git-<remote>.lock` only (git_import.rs), outside gc's lock set.
-  Since MKIT-55 `BulkWriter::write` refreshes the mtime of a byte-equal
-  existing object, so for the objects it writes the importer is
-  `gcPushFastFreshen` (`gcPushFast` before MKIT-55; `gcPushRaw*` if its
-  write-to-publish window can exceed GRACE). The model's writer writes every
-  object of its tip. The importer does not: an object its map cache already
-  translated is not written at all and keeps its old mtime, which is the
-  `gcPushFast` behaviour for that object. SPEC-GC keeps the operator rule
-  against running gc concurrently with a git import for this reason.
+  `BulkWriter::write` refreshes the mtime of a byte-equal existing object;
+  map-cache reuse now refreshes through the same path, once per object per
+  import run. The final locked gc re-stat closes the read/unlink race.
+  With a write-or-refresh-to-publish interval strictly shorter than GRACE,
+  this is `gcPushFastFreshen`, refined by `sweepFixed`. A run that exceeds
+  that interval still has the `gcPushRawFreshen` residue; zero grace is unsafe
+  against an import even when no time passes. Refreshing once per run does
+  not extend the grace window throughout a long import.
 - **File-transport and served pushes do not race `mkit gc` on this branch.**
   `FileTransport` and `mkit serve`/`mkit-server` (`FsBlobStore`,
   `FsLayoutStore`) store `<root>/packs/<64-hex>` and `<root>/refs/...`.
@@ -256,6 +301,24 @@ The R-64 driver's root re-check and relay watermark wait are not modelled
 
 ## Results
 
+**Split-sweep refinement (2026-10-18).** The default `./check.sh` run
+exits 0: every existing root-model and ContentIndex check, all six focused
+scenario modules, the fixed invariant and four focused canaries match their
+expected outcomes. `ONLY=sweep TLC=1 ./check.sh` also exits 0. TLC exhausts
+4,832 distinct states for `sweepFixed::All` with no violation; all six unsafe
+variants/checks produce the expected named violations. The fixed model uses
+one object, one writer, clock 0..5 and GRACE = 2.
+
+Apalache 0.62.2 checks `sweepFixed::All` through length 12 successfully.
+It finds the expected violations for `sweepSplit::NoDangling`,
+`sweepNoLock::NoRecentPruned`, `sweepNoRefresh::NoDangling`,
+`sweepSlow::NoDangling` and `sweepGrace0::NoDangling` at respective bounds
+12, 11, 12, 12 and 10. These are bounded results, not an unbounded proof.
+The zero-grace and long-import counterexamples retain the narrower operator
+restriction in SPEC-GC; they do not expose a new split-sweep residue.
+
+Historical results for the unchanged root and ContentIndex models follow.
+
 All results below are from the final state of `gc.qnt`, `contentIndex.qnt`
 and `check.sh` on 2026-09-26. Times are wall clock on the shared host.
 
@@ -328,7 +391,7 @@ per check on the shared host (`GC_DEPTH=10` restores the old bound).
 ## Commands
 
 ```
-./check.sh                  # quint typecheck/test/run, both models (~3 min)
+./check.sh                  # quint typecheck/test/run, all models
 APALACHE=1 ./check.sh       # + Apalache 0.62.2 (~2 h on the shared host)
 TLC=1 ./check.sh            # + TLC from the Apalache jar (~50 min)
 ONLY=ci TLC=1 APALACHE=1 ./check.sh   # ContentIndex model only (~2 min)

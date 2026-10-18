@@ -8,6 +8,7 @@
 #   TLC=1 ./check.sh         + exhaustive TLC on the finite instances
 #   ONLY=ci ./check.sh       only the ContentIndex model (contentIndex.qnt)
 #   ONLY=gc ./check.sh       only the repository gc model (gc.qnt)
+#   ONLY=sweep ./check.sh    only the loose-store read/unlink race model
 #   SEL='regex' ...          only the run/apalache/tlc checks whose
 #                            "module::invariant" matches (quint test still runs)
 #
@@ -49,7 +50,7 @@ bad() { note "$1" "UNEXPECTED: $2"; fails=$((fails + 1)); }
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-# FILE and CORE select the model: gc.qnt/gcCore or contentIndex.qnt/ciCore.
+# FILE and CORE select the model and its imported core module.
 FILE=gc.qnt CORE=gcCore
 
 # quint run: $1 module, $2 invariant, $3 expect ok|violation
@@ -286,6 +287,40 @@ if [[ ${TLC:-0} == 1 ]]; then
   tlc ciMutNoSeqGuard NoLiveDelete violation
   tlc ciMutNoResume DeletingClears violation
   tlc ciMutNoGiveUp UploadCanStep violation
+fi
+fi
+
+# =============================================================================
+# sweepRace.qnt: split check/unlink, refresh exclusion, and process crashes
+# =============================================================================
+if [[ $ONLY == all || $ONLY == sweep ]]; then
+FILE=sweepRace.qnt CORE=sweepCore
+quint typecheck "$FILE"
+for m in sweepFixed sweepSplit sweepNoLock sweepNoRefresh sweepSlow sweepGrace0; do
+  quint test "$FILE" --main "$m" >/dev/null && note "test $m" ok || bad "test $m" failed
+done
+qrun sweepFixed All ok
+for c in CanaryNoPrune CanaryNoPublishAfterPrune CanaryNoCrashBefore CanaryNoCrashAfter; do
+  qrun sweepFixed "$c" violation
+done
+# Mutant failures are pinned by deterministic tests above; random sampling
+# rarely reaches the full split-check race. TLC/Apalache check them below.
+if [[ ${APALACHE:-0} == 1 ]]; then
+  apa sweepFixed All "${SWEEP_DEPTH:-12}" ok
+  apa sweepSplit NoDangling 12 violation
+  apa sweepNoLock NoRecentPruned 11 violation
+  apa sweepNoRefresh NoDangling 12 violation
+  apa sweepSlow NoDangling 12 violation
+  apa sweepGrace0 NoDangling 10 violation
+fi
+if [[ ${TLC:-0} == 1 ]]; then
+  tlc sweepFixed All ok
+  tlc sweepSplit NoDangling violation
+  tlc sweepSplit NoRecentPruned violation
+  tlc sweepNoLock NoRecentPruned violation
+  tlc sweepNoRefresh NoDangling violation
+  tlc sweepSlow NoDangling violation
+  tlc sweepGrace0 NoDangling violation
 fi
 fi
 

@@ -41,6 +41,7 @@ document points here.
 | `refs-<ref>.lock` | common dir, keyed on the full ref path | per-ref | every direct on-disk ref mutation: Any, Missing, Match, delete, tags, remote refs and batch writes (`mkit_core::refs::cas_lock_name`) | SPEC-REFS §5.1 |
 | `<root>/.mkit/refs/.lock` | transport root | per-repo, **local to the file transport only** | the file transport's own Any/Missing/Match critical sections (`mkit-transport-file`'s `RefLock`) | SPEC-TRANSPORT, §3.1 (this document) |
 | `git-<remote>.lock` | common dir, keyed on the git bridge remote name | per-bridge-state | one `mkit git import`/`fetch`/`pull` import phase or `mkit git export` against that remote's bridge state dir (`mkit-cli`'s `git_import::import_into`, `git::export`) | §4 (this document) |
+| shared/exclusive `format` handle | existing immutable common-dir `format` file | per-repo, short object-store critical section | shared during a bulk write or cached reuse and during format validation; exclusive during gc's final age check and unlink | SPEC-GC, §3.4 (this document) |
 | `git-import-key.lock` | common dir | per-repo | first-time generation of the shared git-import signing key (`git_import::load_or_create_import_key`) | §4 (this document) |
 | `serve.lock` | common dir | per-repo, **detection only, not a critical-section lock** | held **shared** for its whole lifetime by every live server process on the root: `mkit serve` (stdin SSH-frame, its only mode) and any server embedding `mkit-server`'s filesystem layout (which also holds `server.lock` exclusively, so one such server serves a root at a time); taken exclusive without waiting by a starting `mkit serve` only to sweep crashed uploads' temp files; probed non-blocking-exclusive by `worktree.lock`/`worktrees.lock` acquisition to warn when a root is concurrently served (MKIT-11/#655) | §3.1 (this document) |
 
@@ -161,6 +162,20 @@ The exact durable state machine and generation semantics are
 SPEC-HISTORY-PROOF §4. Legacy event-journal APIs remain explicit low-level
 interfaces and do not establish first-parent ancestry.
 
+### 3.4 Object refresh versus local gc
+
+The common-dir `format` file is immutable after initialization and MUST NOT
+be replaced or unlinked while the repository is in use. Independently opened
+handles take shared locks for bulk writes, cached reuse and format validation.
+Gc takes a nonblocking exclusive lock for each final age-check/unlink;
+contention keeps the object. No object changes namespace while this lock is
+held, so process death requires no persistent sweep recovery.
+
+This lock is innermost: acquire it after any registry, worktree, git-remote,
+history or ref locks already held. Its holder MUST NOT acquire another
+repository lock. Bulk commit does not hold it while publishing refs. The
+existing local-filesystem locking assumptions apply.
+
 ## 4. Global lock order and per-command lock sets
 
 A process that takes more than one lock from §2 MUST acquire them in
@@ -186,6 +201,11 @@ process MUST NOT acquire either bridge lock while it holds `worktrees.lock`,
 a `worktree.lock`, a `refs-history-<branch>.lock`, or a `refs-<ref>.lock`. `mkit git pull`
 releases `git-<remote>.lock` when its import phase returns, before its
 fast-forward acquires `worktree.lock`.
+
+The short-lived shared/exclusive `format` lock (§3.4) is innermost in
+both chains. Holders acquire no further repository locks; gc never waits
+for its exclusive acquisition. Per-command sets below omit this implicit
+object-store lock.
 
 The file transport's `<root>/.mkit/refs/.lock` serializes every write condition
 within that transport. It is not composed with the local chain above; the
@@ -222,9 +242,10 @@ the history lock):
 | `mkit git pull` (fast-forward phase), after the import phase released `git-<remote>.lock` | this tree's `worktree.lock`, then (history-mmr) `refs-history-<branch>.lock`, then the branch's `refs-<ref>.lock` (`git_import::fast_forward_current`) |
 
 A process that violates this order and blocks on two locks acquired in
-opposite order by two racing processes will each time out independently
+opposite order by two racing processes normally time out independently
 (`repo_lock`'s default 5s timeout) rather than deadlock indefinitely &mdash;
-but SHOULD NOT rely on the timeout as a substitute for correct
+the format-file shared lock has no timeout. Processes SHOULD NOT rely on
+lock timeouts as a substitute for correct
 ordering; a timed-out multi-lock command leaves its already-acquired
 locks released (RAII drop) but may leave mid-sequence on-disk state
 requiring the caller to retry.
