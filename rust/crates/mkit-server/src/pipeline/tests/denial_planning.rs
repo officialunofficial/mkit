@@ -139,6 +139,7 @@ fn run_proved_ticket(
         }),
         implicit: None,
         rejection: None,
+        denial_ref: None,
         publication: None,
         pending,
     };

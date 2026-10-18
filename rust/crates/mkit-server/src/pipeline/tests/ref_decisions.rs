@@ -29,6 +29,7 @@ fn request<'a>(name: &'a RepoName, refs: &'a [RefUpdate]) -> WriteRequest<'a> {
         advance: None,
         implicit: None,
         rejection: None,
+        denial_ref: None,
         publication: None,
         pending: None,
     }
@@ -392,6 +393,10 @@ fn ticketed_advance_parity_sweep() {
     let d34 = D34Shards;
     let signer = [7; 32];
     let mut cases = 0_u32;
+    let changed = [
+        ResolvedRefUpdate::new(PACKMAP.into(), Some(B), RefEffect::Replace),
+        ResolvedRefUpdate::new(HEAD.into(), Some(C), RefEffect::Replace),
+    ];
     // ticket row fates in request order
     for (count_storage, partitioned) in [(false, false), (true, false), (true, true)] {
         let shards: &dyn ShardMap = if partitioned { &d34 } else { &single };
@@ -596,6 +601,27 @@ fn ticketed_advance_parity_sweep() {
                                 );
                             }
                             parity(&req, &snap);
+                            if fate == 0
+                                && replay_case < 2
+                                && pending_case == 0
+                                && generation != Some(1)
+                            {
+                                // The admitted refs no longer match the snapshot (admission
+                                // saw both refs present; neither is). The ticketed decision
+                                // must answer exactly like the reference planner: a retryable
+                                // ref conflict, never an in-flight replay race.
+                                req.resolved_ref_updates = &changed;
+                                parity(&req, &snap);
+                                let error = plan_write(&req, &snap, &clock_at(5, None))
+                                    .expect_err("admitted ref changed after admission");
+                                assert_eq!(error.code(), Code::Aborted);
+                                assert_eq!(
+                                    error.public_message(),
+                                    "ref changed after admission; retry"
+                                );
+                                assert_eq!(error.abort_cause(), Some(AbortCause::RefConflict));
+                                req.resolved_ref_updates = &[];
+                            }
                             // Competing faults preserve the reference's examined prefix:
                             // pending/replay, ticket order, then ref order.
                             for key in [
@@ -626,4 +652,48 @@ fn ticketed_advance_parity_sweep() {
         }
     }
     assert_eq!(cases, 1512);
+}
+
+#[test]
+fn recorded_policy_denial_commits_only_while_its_pinned_ref_value_holds() {
+    let name = repo_name();
+    let rejection = crate::replay::StoredRejection::new(
+        Code::PermissionDenied,
+        "non-fast-forward update not allowed on this ref",
+    )
+    .unwrap();
+    for pinned in [Some(A), None] {
+        let mut req = request(&name, &[]);
+        req.kind = WriteKind::UpdateRef;
+        req.replay = Some(replay());
+        req.rejection = Some(&rejection);
+        req.denial_ref = Some((HEAD, pinned));
+        let snap = snapshot(&req, &[]);
+        let Planned::Apply(plan) = plan_write(&req, &snap, &clock_at(5, None)).unwrap() else {
+            panic!("a recorded denial commits its replay record");
+        };
+        let key = keys::ref_key(&name, HEAD);
+        let expected = pinned.map_or(Precondition::Absent(key.clone()), |value| {
+            Precondition::Equals(key.clone(), codec::encode_ref_id(&value))
+        });
+        assert!(
+            plan.batch.preconditions.contains(&expected),
+            "the stored refusal must compare the ref value it was decided on"
+        );
+        assert!(
+            plan.batch
+                .writes
+                .iter()
+                .all(|write| !matches!(write, Write::Put(k, _) | Write::Delete(k) if *k == key)),
+            "a denial never writes the ref"
+        );
+        parity(&req, &snap);
+        // Without a pinned value (an explicit MATCH or MISSING expectation, or a
+        // signer rule) no ref row is compared.
+        req.denial_ref = None;
+        let Planned::Apply(unpinned) = plan_write(&req, &snap, &clock_at(5, None)).unwrap() else {
+            panic!("a recorded denial commits its replay record");
+        };
+        assert!(!unpinned.batch.preconditions.contains(&expected));
+    }
 }

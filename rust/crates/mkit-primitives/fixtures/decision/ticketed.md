@@ -10,8 +10,10 @@ is Ready except in cleanup, where it is PackMissing. Storage counting is disable
 
 Accept consumes one ticket and emits its committed reservation and durable
 outcome with the exact pair and byte counts. Cleanup emits only a PackMissing
-abort with detail `pack missing`. Settle emits Internal with empty detail;
-repeating with the terminal observed emits no second settlement or outcome.
+abort with detail `pack missing`. Settle of the ticket-bound reservation emits Internal with empty detail and
+closes the bound ticket in the same effects, so the ticket cannot later write a
+second terminal outcome; repeating with the terminal observed emits no second
+settlement, outcome or ticket close.
 Replay returns the saved empty Applied result before revalidating tickets.
 Proof-refused uses invalid_argument (`invalid pack`), while proof-late uses
 failed_precondition (`proof arrived too late`). Both attach the exact pending

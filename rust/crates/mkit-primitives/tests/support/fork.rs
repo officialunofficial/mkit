@@ -1,8 +1,8 @@
 //! Bounded fork decision fuzz body and deterministic supplied-fact builders.
 use mkit_primitives::{
     decision::{
-        AuthorityFact, AuthorityMode, LifecycleFact, LifecycleState, Observed, OperationId,
-        PublicationFact, RefName, ReplayScope, ReservationId,
+        AuthorityFact, AuthorityMode, LifecycleFact, LifecycleState, NamespaceId, Observed,
+        OperationId, PublicationFact, RefName, ReplayScope, ReservationId,
     },
     evidence::{RepositoryId, Revision},
     fork::{
@@ -95,6 +95,7 @@ pub fn attempt(id: u8) -> ForkAttempt {
         fingerprint: [id; 32],
         expires_ms: 100,
         authority: AuthorityFact {
+            namespace: NamespaceId([7; 32]),
             mode: AuthorityMode::Authority,
             generation: REV,
             ready: true,

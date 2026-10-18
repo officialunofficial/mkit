@@ -16,13 +16,13 @@
 use mkit_core::hash::hash;
 use mkit_primitives::{
     decision::{
-        Guarded, Observed, OperationId, PermanentCode, PermanentRefusal, RefName, ReplayFact,
-        ReplayScope, ReplayState, RequiredGuard, ReservationFact, ReservationId, ReservationOp,
-        RetryReason, Snapshot as Facts, StorageFact, TerminalResult, TicketFact, TicketId,
-        WriteDecision,
+        AuthorityFact, AuthorityMode, Guarded, NamespaceId, Observed, OperationId, PermanentCode,
+        PermanentRefusal, RefName, ReplayFact, ReplayScope, ReplayState, RequiredGuard,
+        ReservationFact, ReservationId, ReservationOp, RetryReason, Snapshot as Facts, StorageFact,
+        TerminalResult, TicketFact, TicketId, WriteDecision,
         ref_write::{
-            AdmittedRef, MembershipWindow, RefChange, RefDecisionLimits, RefReplay,
-            RefRequirements, RefWriteKind, RefWriteRequest, check_guard_completeness,
+            AdmittedRef, AuthorityBinding, MembershipWindow, RefChange, RefDecisionLimits,
+            RefReplay, RefRequirements, RefWriteKind, RefWriteRequest, check_guard_completeness,
         },
         ticketed::{
             PendingBinding, StorageAccounting, TicketClaim, TicketedAdvanceRequest, UploadProof,
@@ -35,7 +35,7 @@ use mkit_primitives::{
 
 use super::{PlanClock, Planned, Snapshot, WriteRequest, corrupt};
 use crate::{
-    error::ServerError,
+    error::{AbortCause, ServerError},
     op::PresenceRequirement,
     pipeline::{internal, meta_error, ms},
     replay::StoredResult,
@@ -55,6 +55,8 @@ pub(super) struct Decided {
     recorded: Option<StoredResult>,
     /// Semantic reservation id → its store key, for guard projection.
     reservation_keys: Vec<(ReservationId, Key)>,
+    /// The row the planner guards for the authority fence, when one applies.
+    authority_key: Option<Key>,
 }
 
 impl Decided {
@@ -66,9 +68,14 @@ impl Decided {
             WriteDecision::Retry(RetryReason::Unavailable) => Some(Err(ServerError::unavailable(
                 "admission reservation changed; retry",
             ))),
-            WriteDecision::Retry(_) => Some(Err(ServerError::aborted_retryable(
-                "operation already in flight; retry",
-            ))),
+            // The admitted ref moved: the reference reports it at the ref
+            // position, after the grant, authority and layout fences.
+            WriteDecision::Retry(RetryReason::AdmittedRefChanged) => None,
+            WriteDecision::Retry(RetryReason::InFlight) => Some(Err(
+                ServerError::aborted_retryable("operation already in flight; retry"),
+            )),
+            // No input of the ticketed adapter can produce these.
+            WriteDecision::Retry(_) => Some(Err(internal("unexpected ticketed retry"))),
             WriteDecision::ReturnRecorded(_) => {
                 let recorded = self
                     .recorded
@@ -110,16 +117,13 @@ fn refusal_error(refusal: &PermanentRefusal) -> ServerError {
 
 /// Decide the ticketed-advance fragment. `None` keeps the unextracted
 /// planner: non-ticketed writes, and shapes the contract does not serve.
+/// A decode or decision failure is the answer; the primitive is the authority.
 pub(super) fn decide(
     req: &WriteRequest<'_>,
     snap: &Snapshot,
     clock: &PlanClock,
-) -> Option<Decided> {
-    // Decoding is speculative and has no effects. If a later row cannot be
-    // projected, let the reference path examine its original prefix: a replay,
-    // changed pending reservation or earlier refusal can precede that row.
-    // This also preserves physical corruption diagnostics for unsupported facts.
-    try_decide(req, snap, clock).ok().flatten()
+) -> Result<Option<Decided>, ServerError> {
+    try_decide(req, snap, clock)
 }
 
 #[allow(clippy::too_many_lines)] // One decode-and-decide pass builds every observation in snapshot order.
@@ -185,6 +189,7 @@ fn try_decide(
         fingerprint: replay.fingerprint,
         expires_ms: ms(replay.expires_at_ms),
     });
+    let fence = authority_fence(req, snap);
     let write = RefWriteRequest {
         repository,
         operation: req.replay.map(|replay| OperationId(replay.scope)),
@@ -197,7 +202,7 @@ fn try_decide(
         ancestry: &[],
         now_ms,
         required: RefRequirements {
-            authority: None,
+            authority: fence.as_ref().map(|fence| fence.binding.clone()),
             grant: None,
             incarnation: None,
             policy: None,
@@ -220,7 +225,7 @@ fn try_decide(
         replay: None,
         tickets: Vec::new(),
         reservations: Vec::new(),
-        authority: None,
+        authority: fence.as_ref().map(|fence| fence.observed.clone()),
         grant: None,
         lifecycle: None,
         members: Vec::new(),
@@ -231,67 +236,77 @@ fn try_decide(
         publication: None,
         storage: None,
     };
+    // A stored row that cannot be decoded is left out of the facts, not turned
+    // into an answer: the decision asks for it only if it reaches that row, and
+    // an earlier pending, replay, ticket or ref answer keeps its precedence.
+    // If it does reach the row, the first decode failure (in acquisition
+    // order) is the diagnostic.
+    let mut unreadable: Option<ServerError> = None;
+    let mut defer = |error: ServerError| {
+        unreadable.get_or_insert(error);
+    };
     for update in req.refs {
         let key = keys::ref_key(req.repo, &update.name);
         if !snap.contains(&key) {
             return Err(internal("unacquired ref observation"));
         }
-        let observed = snap
-            .get(&key)
-            .map(codec::decode_ref_id)
-            .transpose()
-            .map_err(corrupt)?
-            .map_or(Observed::Absent(Revision([0; 32])), |value| {
-                Observed::Present {
-                    value,
-                    revision: Revision(value),
-                }
-            });
-        facts.refs.push((RefName(update.name.clone()), observed));
+        match snap.get(&key).map(codec::decode_ref_id).transpose() {
+            Ok(current) => facts.refs.push((
+                RefName(update.name.clone()),
+                current.map_or(Observed::Absent(Revision([0; 32])), |value| {
+                    Observed::Present {
+                        value,
+                        revision: Revision(value),
+                    }
+                }),
+            )),
+            Err(error) => defer(corrupt(error)),
+        }
     }
     if let Some(replay) = req.replay {
         let key = keys::replay(&replay.scope);
-        let observed = match snap.get(&key) {
-            None => Observed::Absent(Revision([0; 32])),
-            Some(raw) => {
-                let record = codec::decode_replay_record(raw).map_err(corrupt)?;
-                Observed::Present {
-                    revision: Revision(hash(raw.as_bytes())),
-                    value: ReplayFact {
-                        fingerprint: record.fingerprint,
-                        expires_ms: ms(record.expires_at_ms),
-                        state: replay_state(&record),
-                    },
+        match snap.get(&key) {
+            None => facts.replay = Some(Observed::Absent(Revision([0; 32]))),
+            Some(raw) => match codec::decode_replay_record(raw) {
+                Ok(record) => {
+                    facts.replay = Some(Observed::Present {
+                        revision: Revision(hash(raw.as_bytes())),
+                        value: ReplayFact {
+                            scope: ReplayScope(replay.scope),
+                            fingerprint: record.fingerprint,
+                            expires_ms: ms(record.expires_at_ms),
+                            state: replay_state(&record),
+                        },
+                    });
                 }
-            }
-        };
-        facts.replay = Some(observed);
+                Err(error) => defer(corrupt(error)),
+            },
+        }
     }
     let mut claims = Vec::with_capacity(advance.ids.len());
     let mut rows = Vec::with_capacity(advance.ids.len());
     for id in advance.ids {
         let key = keys::ticket(id);
-        let (observed, counted) = match snap.get(&key) {
-            None => (Observed::Absent(Revision([0; 32])), false),
-            Some(raw) => {
-                let decoded = codec::decode_ticket(raw).map_err(meta_error)?;
-                if tickets::ticket_id(&decoded.reservation_id) != *id {
-                    return Err(internal("ticket reservation id mismatch"));
+        let mut counted = false;
+        match snap.get(&key) {
+            None => facts
+                .tickets
+                .push((TicketId(*id), Observed::Absent(Revision([0; 32])))),
+            Some(raw) => match decode_ticket_row(id, raw) {
+                Ok(decoded) => {
+                    counted = snap.get(&counted_key(advance, &decoded)).is_some();
+                    facts.tickets.push((
+                        TicketId(*id),
+                        Observed::Present {
+                            revision: Revision(hash(raw.as_bytes())),
+                            value: ticket_fact(id, &decoded, advance),
+                        },
+                    ));
+                    rows.push(decoded);
                 }
-                keys::reservation(&decoded.reservation_id)
-                    .map_err(|_| internal("invalid ticket reservation id"))?;
-                let counted = snap.get(&counted_key(advance, &decoded)).is_some();
-                rows.push(decoded.clone());
-                (
-                    Observed::Present {
-                        revision: Revision(hash(raw.as_bytes())),
-                        value: ticket_fact(id, &decoded, advance),
-                    },
-                    counted,
-                )
-            }
-        };
-        facts.tickets.push((TicketId(*id), observed));
+                Err(error) => defer(error),
+            },
+        }
         claims.push(TicketClaim {
             ticket: TicketId(*id),
             // Proof rows were verified by `ticket_decision` before planning;
@@ -306,22 +321,35 @@ fn try_decide(
         let id = ReservationId(hash(decoded.reservation_id.as_bytes()));
         let key = keys::reservation(&decoded.reservation_id).map_err(meta_error)?;
         reservation_keys.push((id.clone(), key.clone()));
-        facts
-            .reservations
-            .push((id, reservation_observed(snap, &key)?));
+        match reservation_observed(snap, &key) {
+            Ok(observed) => facts.reservations.push((id, observed)),
+            Err(error) => defer(error),
+        }
     }
     let pending = req
         .pending
         .map(|pending| pending_binding(snap, clock, pending, &mut facts, &mut reservation_keys))
         .transpose()?;
-    let storage = storage_accounting(req, snap, clock, advance, &mut facts, &mut reservation_keys)?;
+    let storage =
+        match storage_accounting(req, snap, clock, advance, &mut facts, &mut reservation_keys) {
+            Ok(storage) => storage,
+            Err(error) => {
+                defer(error);
+                // The counter row is unreadable; the placeholder is never decided on
+                // because `facts.storage` stays unacquired.
+                StorageAccounting::Inline {
+                    observed: Observed::Absent(Revision([0; 32])),
+                    outcome: ReservationId([0; 32]),
+                    occurred_ms: clock.plan_time_ms,
+                }
+            }
+        };
     let request = TicketedAdvanceRequest {
         write,
         tickets: &claims,
         verification: mkit_primitives::decision::ticketed::VerificationVerdict::Satisfied,
         storage,
         pending,
-        authority_generation: req.authority_generation,
     };
     let limits = RefDecisionLimits {
         facts: 64,
@@ -330,15 +358,91 @@ fn try_decide(
         work: 262_144,
         public_message_bytes: 512,
     };
-    let guarded =
-        decide_ticketed_advance(&request, &facts, limits).map_err(|f| failure_error(&f))?;
+    let guarded = match decide_ticketed_advance(&request, &facts, limits) {
+        Ok(guarded) => guarded,
+        // The decision reached a fact that could not be decoded.
+        Err(failure) if failure.code == FailureCode::UnavailableInput && unreadable.is_some() => {
+            return Err(unreadable.unwrap_or_else(|| failure_error(&failure)));
+        }
+        Err(failure) => return Err(failure_error(&failure)),
+    };
     let recorded = recorded_result(req, snap);
     Ok(Some(Decided {
         guarded: Box::new(guarded),
         tickets: rows,
         recorded,
         reservation_keys,
+        authority_key: fence.map(|fence| fence.key),
     }))
+}
+
+/// Decode a ticket row and check that it is the one its key names.
+fn decode_ticket_row(
+    id: &mkit_core::hash::Hash,
+    raw: &crate::store::Value,
+) -> Result<TicketV1, ServerError> {
+    let decoded = codec::decode_ticket(raw).map_err(meta_error)?;
+    if tickets::ticket_id(&decoded.reservation_id) != *id {
+        return Err(internal("ticket reservation id mismatch"));
+    }
+    keys::reservation(&decoded.reservation_id)
+        .map_err(|_| internal("invalid ticket reservation id"))?;
+    Ok(decoded)
+}
+
+/// The authority fence the planner enforces, as the portable binding and the
+/// observation of the row it guards.
+struct Fence {
+    binding: AuthorityBinding,
+    observed: Observed<AuthorityFact>,
+    key: Key,
+}
+
+/// An unreadable fence input is not decided here: the planner reports the same
+/// condition at its own position, so the decision simply carries no binding.
+fn authority_fence(req: &WriteRequest<'_>, snap: &Snapshot) -> Option<Fence> {
+    let generation = req.authority_generation?;
+    let (key, current) = if let Some(lease) = req.lease {
+        (keys::epoch_lease(), lease.value.authority_generation?)
+    } else {
+        let current = snap
+            .get(&keys::authority_generation())
+            .map(codec::decode_u64)
+            .transpose()
+            .ok()?
+            .unwrap_or(0);
+        (keys::authority_generation(), current)
+    };
+    let namespace = NamespaceId(hash(req.namespace.as_str().as_bytes()));
+    // An absent guarded row is generation zero; its revision is the all-zero
+    // sentinel, and the planner's matching precondition is an absence check.
+    let revision = snap
+        .get(&key)
+        .map_or(Revision([0; 32]), |raw| Revision(hash(raw.as_bytes())));
+    Some(Fence {
+        binding: AuthorityBinding {
+            namespace: namespace.clone(),
+            mode: AuthorityMode::Authority,
+            generation: generation_revision(generation),
+        },
+        observed: Observed::Present {
+            value: AuthorityFact {
+                namespace,
+                mode: AuthorityMode::Authority,
+                generation: generation_revision(current),
+                ready: true,
+            },
+            revision,
+        },
+        key,
+    })
+}
+
+/// A generation as the portable authority revision.
+fn generation_revision(generation: u64) -> Revision {
+    let mut bytes = [0; 32];
+    bytes[24..].copy_from_slice(&generation.to_be_bytes());
+    Revision(bytes)
 }
 
 /// The marker or membership row `plan_consumption` reads for `new_to_repo`.
@@ -375,7 +479,7 @@ fn ticket_fact(
         created_ms: t.created_at_ms,
         expires_ms: t.expires_at_ms,
         reservation: ReservationId(hash(t.reservation_id.as_bytes())),
-        authority_generation: t.authority_generation,
+        authority_generation: t.authority_generation.map(generation_revision),
         upload_session: t.upload_session.clone(),
     }
 }
@@ -550,9 +654,11 @@ fn pending_binding(
     // The fresh observation the sealed guard fences, and the expected row
     // admission wrote. A changed row retries before any ticket work.
     reservation_keys.push((id.clone(), pending.key.clone()));
-    facts
-        .reservations
-        .push((id.clone(), reservation_observed(snap, &pending.key)?));
+    // A current row that cannot be decoded is certainly not the row admission
+    // wrote, which is exactly "changed" to the reference's byte comparison.
+    let current =
+        reservation_observed(snap, &pending.key).unwrap_or(Observed::Absent(Revision([0xff; 32])));
+    facts.reservations.push((id.clone(), current));
     Ok(PendingBinding {
         reservation: id,
         expected,
@@ -663,10 +769,10 @@ fn recorded_result(req: &WriteRequest<'_>, snap: &Snapshot) -> Option<StoredResu
 
 /// A decision-crate failure means the host contract broke: missing or wrongly
 /// scoped observations, or a shape the wire would never emit.
-fn failure_error(failure: &mkit_primitives::error::Failure) -> ServerError {
+pub(super) fn failure_error(failure: &mkit_primitives::error::Failure) -> ServerError {
     match failure.code {
         FailureCode::UnavailableInput => ServerError::unavailable("ticketed input not acquired"),
-        _ => internal("portable ticketed decision failed"),
+        _ => internal("portable decision failed"),
     }
 }
 
@@ -726,6 +832,12 @@ pub(super) fn lower_refs(
                 };
             Ok((Some(result), Vec::new()))
         }
+        // The admitted ref moved after custom admission: the reference's
+        // exact answer, with the conflict abort cause.
+        WriteDecision::Retry(RetryReason::AdmittedRefChanged) => Err(
+            ServerError::aborted_retryable("ref changed after admission; retry")
+                .with_abort_cause(AbortCause::RefConflict),
+        ),
         _ => Err(internal("ticketed decision not terminal here")),
     }
 }
@@ -745,7 +857,25 @@ pub(super) fn check(
         .cloned()
         .collect();
     check_guard_completeness(guarded, &discharged)
-        .map_err(|failure| internal(failure.code.as_str()))
+        .map_err(|failure| internal(failure.code.as_str()))?;
+    // The semantic membership additions are exactly the packs the reference
+    // lowering (`plan_consumption` / `plan_membership`) adds for these tickets.
+    if let WriteDecision::Apply(effects) = guarded.decision() {
+        let semantic: std::collections::BTreeSet<_> = effects
+            .membership
+            .iter()
+            .map(|added| added.pack.id)
+            .collect();
+        let lowered: std::collections::BTreeSet<_> = decided
+            .tickets
+            .iter()
+            .map(|ticket| ticket.pack_id)
+            .collect();
+        if semantic != lowered {
+            return Err(internal("ticketed membership additions differ"));
+        }
+    }
+    Ok(())
 }
 
 impl Decided {
@@ -796,6 +926,17 @@ impl Decided {
                 let key = keys::replay(&scope.0);
                 row_projects(key, expected, conditions)
             }
+            RequiredGuard::Authority { expected, .. } => {
+                self.authority_key
+                    .as_ref()
+                    .is_some_and(|key| match expected {
+                        // The absent-row sentinel: generation zero guarded by absence.
+                        Observed::Present { revision, .. } if *revision == Revision([0; 32]) => {
+                            conditions.contains(&Precondition::Absent(key.clone()))
+                        }
+                        _ => row_projects(key.clone(), expected, conditions),
+                    })
+            }
             _ => false,
         }
     }
@@ -815,10 +956,8 @@ fn row_projects<T>(key: Key, expected: &Observed<T>, conditions: &[Precondition]
 }
 
 /// The defensive `PackMissing` abort decided semantically: returns the
-/// request positions `ticket_decision` may close. `None` leaves the
-/// reference filter in place — the caller keeps behavior for shapes the
-/// contract does not serve or a semantic refusal the reference planner
-/// would not reach.
+/// request positions `ticket_decision` may close. A decision failure is the
+/// answer; the primitive is the authority.
 #[allow(clippy::too_many_arguments)] // The callsite passes its own locals through.
 #[allow(clippy::too_many_lines)] // One observation pass plus the cleanup decision in callsite order.
 pub(in crate::pipeline) fn cleanup_lost(
@@ -830,7 +969,7 @@ pub(in crate::pipeline) fn cleanup_lost(
     heads: &crate::pipeline::advance::TicketHeads,
     snap: &Snapshot,
     business_now: i64,
-) -> Result<Option<Vec<usize>>, ServerError> {
+) -> Result<Vec<usize>, ServerError> {
     use crate::pipeline::advance::Proof;
     let repository = RepositoryId(hash(
         repo_storage::identity(&advance.repo_id.namespace, &advance.repo_id.name).as_bytes(),
@@ -939,7 +1078,6 @@ pub(in crate::pipeline) fn cleanup_lost(
         verification: mkit_primitives::decision::ticketed::VerificationVerdict::Satisfied,
         storage: StorageAccounting::Disabled,
         pending: None,
-        authority_generation: None,
     };
     let limits = RefDecisionLimits {
         facts: 64,
@@ -948,17 +1086,16 @@ pub(in crate::pipeline) fn cleanup_lost(
         work: 262_144,
         public_message_bytes: 512,
     };
-    let Ok(guarded) = mkit_primitives::decision::ticketed::decide_ticket_cleanup(
+    let guarded = mkit_primitives::decision::ticketed::decide_ticket_cleanup(
         &request,
         "ticket pack missing after upload",
         ms(business_now),
         &facts,
         limits,
-    ) else {
-        return Ok(None);
-    };
+    )
+    .map_err(|failure| failure_error(&failure))?;
     let WriteDecision::Apply(effects) = &guarded.decision() else {
-        return Ok(Some(Vec::new()));
+        return Ok(Vec::new());
     };
     let mut lost = Vec::with_capacity(effects.tickets.len());
     for transition in &effects.tickets {
@@ -967,7 +1104,7 @@ pub(in crate::pipeline) fn cleanup_lost(
         };
         lost.push(index);
     }
-    Ok(Some(lost))
+    Ok(lost)
 }
 
 #[cfg(test)]

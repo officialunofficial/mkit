@@ -1625,7 +1625,7 @@ semantic = "fork/acceptance.md"
 decode_config = "semantic; packs=3; edges=4; branch_bytes=128; index_entries=30; inherited_bytes=300; work=4096"
 expected = "per-case decision or stable code"
 spec = "SPEC-SERVER §9.9"
-sha256 = "ad07b73e73ece3f25c09cdc8ddf0501f9597ea7a7d572d78fde622dc0eb2c62b"
+sha256 = "a8e7345ad85467c7395660dd543a8ba2607299b5311eef17900641d7f44120da"
 semantic_sha256 = "b4761fe5ef453f3dec3d0caaa2a096122b571e5bd2a86d4a56b5a9684b451e44"
 
 [[fixtures]]
@@ -1668,8 +1668,8 @@ semantic = "decision/ticketed.md"
 decode_config = "facts=256,guards=64,bytes=65536,work=100000"
 expected = "exact decision, terminal identity, settlement and outcome per row"
 spec = "SPEC-SERVER §6.3; §9.3; SPEC-TRANSPORT-CONNECT §4"
-sha256 = "932cf65dd1e1601bd978018c1f02db9bbeba1b43a772e22a632081fef585ee8a"
-semantic_sha256 = "17a49068263dbcb9002d8f40cd5187cf75cddfe025ba5db2fae8e6dfa8d1a6a2"
+sha256 = "1ba02b79846175690fcd30862413a7761db578ce0000a945db45de9de42b9d47"
+semantic_sha256 = "c712a5033a129f5c6f91fa031c5841d7d2e24c66fad1b59ae34c079208e0741d"
 
 [[formats]]
 type = "decision::ticketed"

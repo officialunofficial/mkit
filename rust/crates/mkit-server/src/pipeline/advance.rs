@@ -181,6 +181,23 @@ fn reservation<'a>(snap: &'a Snapshot, id: &Hash, t: &TicketV1) -> Result<&'a Va
     Ok(raw)
 }
 
+/// A ticketed conflict stores its answer, which is only valid while every
+/// ticket row the decision examined is unchanged (they were all valid, or the
+/// request would have been refused first). Compare each row exactly.
+pub(super) fn guard_examined_tickets(
+    snap: &Snapshot,
+    advance: &AdvanceWrite<'_>,
+    pre: &mut Vec<Precondition>,
+) {
+    for id in advance.ids {
+        let key = keys::ticket(id);
+        pre.push(match snap.get(&key) {
+            Some(raw) => Precondition::Equals(key, raw.clone()),
+            None => Precondition::Absent(key),
+        });
+    }
+}
+
 /// Append ticket closure, terminal outcomes and membership to the same ref batch.
 #[allow(clippy::too_many_arguments)] // One atomic fragment has explicit input and output slices.
 pub(super) fn plan_consumption(
@@ -281,6 +298,21 @@ pub(super) fn plan_consumption(
             writes,
         )
         .map_err(meta_error)?;
+        if advance.counts_inline() {
+            // Each pack's `new_to_repo` is its marker observation, and a marker
+            // appears only in a batch that also moves this counter. A batch that
+            // adds no bytes would otherwise leave that observation unguarded, so
+            // the exact counter row is compared whether or not it changes.
+            let counter = keys::repo_storage(&advance.repo_id.name);
+            if !pre.iter().any(
+                |condition| matches!(condition, Precondition::Equals(key, _) if *key == counter),
+            ) {
+                pre.push(match snap.get(&counter) {
+                    Some(raw) => Precondition::Equals(counter, raw.clone()),
+                    None => Precondition::Absent(counter),
+                });
+            }
+        }
     }
     Ok(())
 }
@@ -378,13 +410,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     Err(err) => Some((i, err.clone())),
                 }
             });
-            let Some((first_failure, answer)) = first_failure else {
+            let Some((_, answer)) = first_failure else {
                 return Ok(None);
             };
             // Later tickets cannot supersede the first request-order failure.
-            // The semantic cleanup decision picks the abortable set; the
-            // reference filter stays as the fallback for shapes the contract
-            // declines.
+            // The semantic cleanup decision picks the abortable set.
             let lost = super::plan::ticketed_decision::cleanup_lost(
                 auth,
                 &advance,
@@ -394,20 +424,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 heads,
                 snap,
                 business_now,
-            )?
-            .unwrap_or_else(|| {
-                (0..=first_failure)
-                    .filter(|&i| {
-                        // A row that failed validation this pass may keep a stale proof from an
-                        // earlier pass; only a currently valid ticket can be aborted.
-                        rows[i].is_ok()
-                            && matches!(
-                                heads.proofs.get(&ids[i]),
-                                Some((_, Ok(Proof::PackMissing)))
-                            )
-                    })
-                    .collect::<Vec<_>>()
-            });
+            )?;
             if lost.is_empty() {
                 return Err(answer);
             }

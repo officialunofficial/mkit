@@ -9,7 +9,7 @@
 //! protection is explicit: managed profiles supply acquired lifecycle facts.
 //! Current source state is deliberately absent: acceptance fixed the result.
 
-use super::{ForkRefusal, ForkResult};
+use super::{ForkRefusal, ForkResult, ForkWithheld};
 use crate::decision::{LifecycleFact, LifecycleState, Observed};
 use crate::error::{BoundedDetail, Failure, FailureCode, Location};
 use crate::evidence::{RepositoryId, Revision};
@@ -334,6 +334,8 @@ pub enum ForkActivationDecision {
     RetryPartial,
     /// Current authority prevents advancement; retain accepted result.
     Defer(ForkAdvanceRefusal),
+    /// A destination fact withholds visibility; the accepted result is unchanged.
+    Withhold(ForkWithheld),
     /// Exact binding, terminal state, or foreign witness prevents activation.
     Refuse(ForkRefusal),
 }
@@ -438,7 +440,7 @@ pub fn decide_fork_activation<'a>(
     }
     if !lifecycle_available(&facts.lifecycle)? {
         return Ok(GuardedForkActivation {
-            decision: ForkActivationDecision::Refuse(ForkRefusal::LifecycleUnavailable),
+            decision: ForkActivationDecision::Withhold(ForkWithheld::LifecycleUnavailable),
             facts,
             valid_through_ms: u64::MAX,
         });
@@ -521,6 +523,8 @@ pub enum ForkCompletionDecision {
     Replay,
     /// Authority movement withholds completion without changing acceptance.
     Defer(ForkAdvanceRefusal),
+    /// A destination fact withholds completion without changing acceptance.
+    Withhold(ForkWithheld),
     /// Exact acceptance, progress, or barrier ownership did not match.
     Refuse(ForkRefusal),
 }
@@ -598,7 +602,7 @@ pub fn decide_fork_completion<'a>(
     } else if facts.expected_barrier_owner != facts.advance.binding {
         ForkCompletionDecision::Refuse(ForkRefusal::BindingMismatch)
     } else if !lifecycle_available(&facts.lifecycle)? {
-        ForkCompletionDecision::Refuse(ForkRefusal::LifecycleUnavailable)
+        ForkCompletionDecision::Withhold(ForkWithheld::LifecycleUnavailable)
     } else {
         ForkCompletionDecision::Complete
     };

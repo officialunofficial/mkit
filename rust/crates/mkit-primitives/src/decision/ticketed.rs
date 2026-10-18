@@ -47,9 +47,14 @@ pub struct TicketClaim {
     pub proof: UploadProof,
     /// Whether the pack already counts toward the repository's stored bytes:
     /// its counter marker when counting inline, its membership otherwise.
-    /// This advisory observation selects only the outcome's
-    /// `new_to_repository` field; it is deliberately unguarded, matching the
-    /// reference planner.
+    ///
+    /// Under `StorageAccounting::Inline` the marker appears only in a batch
+    /// that also moves the counter, so the decision guards the exact counter
+    /// row (`RequiredGuard::Storage`) and that guard covers this value. Under
+    /// `Relay` and `Disabled` there is no counter in this partition to guard:
+    /// the value is an advisory membership observation that selects only the
+    /// outcome's `new_to_repository` field, and the coordinator's
+    /// `StorageChanged` outcome stays authoritative.
     pub counted: bool,
 }
 
@@ -101,6 +106,11 @@ pub struct PendingBinding {
 
 /// Bounded ticketed-advance decision input.
 ///
+/// Authority fencing is requested through `write.required.authority`: when it
+/// is set, every consumed ticket must carry the bound generation, and the
+/// decision guards the authority observation. Without it, tickets are not
+/// generation-checked.
+///
 /// `write.kind` is `RefWriteKind::Advance` over the canonical
 /// `refs/mkit/packmap/<x>`/`refs/heads/<x>` pair whenever `tickets` is
 /// non-empty; the wire admits no other ticketed shape (SPEC-TRANSPORT-CONNECT
@@ -118,7 +128,4 @@ pub struct TicketedAdvanceRequest<'a> {
     pub storage: StorageAccounting,
     /// Original admission reservation pending settlement.
     pub pending: Option<PendingBinding>,
-    /// Trusted authority generation under authorization, when fenced; every
-    /// consumed ticket must have been issued under it.
-    pub authority_generation: Option<u64>,
 }
