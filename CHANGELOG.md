@@ -44,12 +44,15 @@ collect the applicable entries between their old and new immutable pins.
   `VerifyDriver::new_with_retention(.., PageRetention::Ephemeral)`, which
   refuses checkpoints with `UnsupportedCapability` and keeps final pages out of
   the host. Cached pages count against `resident_bytes` at their actual sizes, up
-  to `page_bytes * resident_pages` (4 MiB by default); clean cached pages are
-  dropped first when the budget runs short. Object, occurrence, ordinal, and
-  head roots are unchanged. The dependency root differs from earlier runs only
-  where one entry emits 17 or more dependency records at once: sequences now
-  grow one leaf at a time, so every root equals the tree built by appending
-  the records singly and no longer depends on how flushes or checkpoints batch
+  to `page_bytes * resident_pages` (4 MiB by default, against the earlier
+  single 1 MiB retention reservation); the cache sheds its own clean pages
+  when its own growth would not fit, but other reservations do not, so a
+  caller with a tight `resident_bytes` should lower `resident_pages`. Object,
+  occurrence, ordinal, and head roots are unchanged. The dependency root
+  differs from earlier runs wherever one entry's dependency records cross a
+  leaf boundary (an entry with two or more records can): sequences now grow
+  one leaf at a time, so every root equals the tree built by appending the
+  records singly and no longer depends on how flushes or checkpoints batch
   them. Verify checkpoints stay version 3 and `retention_count` now counts
   cumulative acknowledgements, at least the pages still held. Pack and object
   bytes are unchanged; no repository store reset is required.

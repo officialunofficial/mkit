@@ -477,14 +477,17 @@ fn roots_are_independent_of_cache_size_retention_and_flush_timing() {
 }
 
 /// Recorded on the previous write-through driver. Object, occurrence,
-/// ordinal, and head roots are unchanged. The dependency root changes only
-/// where one entry emitted 17 or more dependency records at once
-/// (`wide-tree-20`, `wide-tree-25`, `wide-tree-400`): those flushes used to
-/// split a leaf evenly or graft two leaves at once, while the tree now grows
-/// one leaf at a time, exactly as if the records were appended singly.
+/// ordinal, and head roots are unchanged. The dependency root changes
+/// wherever one entry's dependency records cross a leaf boundary
+/// (`wide-tree-20`, `wide-tree-25`, `wide-tree-400`, `trees-30x3`,
+/// `trees-40x5`): those flushes used to split a leaf evenly or graft two
+/// leaves at once, while the tree now grows one leaf at a time, exactly as if
+/// the records were appended singly. Entries whose records never cross a
+/// boundary (`trees-30x2`, single-edge trees) keep their root.
 #[test]
+#[allow(clippy::too_many_lines)] // a table of recorded digests
 fn roots_match_the_write_through_driver() {
-    let cases: [(&str, Vec<u8>, [&str; 5]); 8] = [
+    let cases: [(&str, Vec<u8>, [&str; 5]); 11] = [
         (
             "blobs-24",
             raw_blobs(24, 8192),
@@ -563,6 +566,41 @@ fn roots_match_the_write_through_driver() {
                 "371024c7a819bc6a7554e74c56329bcf4ff2ced77dc9258aa341aab595911d59",
                 "e2d038a43f5cf494b6bd6e89da3dbea9e9b93e8ee92980fea10f32b2ca1851d8",
                 "7917f8100fe78b488a0b125f5086f02bb354f87e7c3dc562dcd7384872ca0d63",
+            ],
+        ),
+        (
+            "trees-30x2",
+            many_wide_trees(30, 2),
+            [
+                "28a73205dda5520ae91069da05d415d26dd43aa7e55e7d22f02a530f11a68a38",
+                "c394c17bcd3ffe387493c2a07629b061d938e3535a61ae81d5e8b367c1453d6d",
+                "39c31ccd9a12dc659e9f2fcd66ca1becca09477286b3aa203ae79fa08c0ea49b",
+                "dccbe945490a586032ade3fb2b523727a1764677af62f34abfdacfe1924563ea",
+                "699709c82baeba829abd49b550526ad03528de91df769d6eb18b0da49cc8d100",
+            ],
+        ),
+        (
+            "trees-30x3",
+            many_wide_trees(30, 3),
+            [
+                "27580cbe70242634d08bde4caab9abcd66566c492d7318c47238efe42ec2c00b",
+                "fa9ab118f389d387af547156340461af79213e606c43d9c41d972bccb48a148d",
+                // Write-through: 79ad6b0aaa05f0c805ae7f852683bf1747c0e5b8e508493d64e43cdf2845d0df.
+                "5e7a9ac947b5fada0a56d5eeeebfb1e0c4de9e011bd78b8a66b75d3f0c5357c2",
+                "1e7d8ffa121a3c725847850fbed3a87b614ac2b75ba2766b2e7e132f3fd26284",
+                "4bfebe9331d44baafc723f7388582b58ac81bed9bb807582160fadec7a45df47",
+            ],
+        ),
+        (
+            "trees-40x5",
+            many_wide_trees(40, 5),
+            [
+                "b56795459c188617925d6e87b87fafadef306c48160c0aba690b81cb8d194c96",
+                "8ba491b8e60264c00f2753e3dc0d65e1841c244333c143787f0d38becd066804",
+                // Write-through: ee53fc55af92a6f576d9d4edc36eacaf738a36cc3f3730d01724ab8e1e3d64d7.
+                "4b2a8afe3697b27cbb918025ec45e48920e828f0c07fe2ce4a90f59b5ceace8f",
+                "28b3e247644887334c758be20e24c991ee1825787d09559335a77afd01019a32",
+                "793ee0c038ce83626fad7b0216fb6dfafc1bcc55a4de842157155e9288044ae9",
             ],
         ),
         (

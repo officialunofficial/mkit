@@ -315,10 +315,14 @@ impl PageCache {
             let entry = self.entries.get(&digest).ok_or_else(invalid)?;
             Self::resident_len(entry.bytes.as_ref().ok_or_else(invalid)?)?
         };
-        // Charge the copy before allocating it.
+        // Charge the copy before allocating it, and give every charge back if
+        // either the second charge or the allocation fails.
         self.make_room(resources, len)?;
-        resources.evidence(len)?;
         resources.reserve(len)?;
+        if let Err(error) = resources.evidence(len) {
+            resources.release(len)?;
+            return Err(error);
+        }
         let entry = self.entries.get_mut(&digest).ok_or_else(invalid)?;
         let bytes = entry.bytes.as_ref().ok_or_else(invalid)?;
         let mut copy = Vec::new();
