@@ -22,6 +22,7 @@ mod traversal;
 
 /// Exact immutable canonical source requested for a file-integrity check.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CanonicalSource {
     /// Repository member used as a chunk, with exact supplier and source version.
     Member(MemberFact),
@@ -36,6 +37,7 @@ impl CanonicalSource {
 /// One host acquisition. Repeated polling returns the same outstanding request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use]
+#[non_exhaustive]
 pub enum ClosureRequest {
     /// One frontier batch, never a per-ID callback loop.
     Membership(MembershipRequest),
@@ -57,6 +59,7 @@ pub enum ClosureRequest {
 /// An exact answer to the outstanding acquisition.
 #[derive(Debug)]
 #[must_use]
+#[non_exhaustive]
 pub enum ClosureResponse<'a> {
     /// Complete, ordered answers for one membership frontier.
     Membership(MembershipResponse),
@@ -100,6 +103,7 @@ pub struct ClosureDiagnostics {
 }
 /// Semantic check active at a failure, allowing a host to preserve its refusal mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ClosureCheck {
     /// Advanced-head kind or membership obligation.
     Head,
@@ -126,6 +130,7 @@ pub struct ClosureFailureContext {
 /// Pull-machine outcome. Only terminal results establish complete checks.
 #[derive(Debug)]
 #[must_use]
+#[non_exhaustive]
 pub enum ClosureStep<'a> {
     /// Supply facts or bytes for the exact outstanding request.
     Request(&'a ClosureRequest),

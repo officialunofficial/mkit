@@ -19,11 +19,7 @@ pub const MAX_INPUT_BYTES: usize = 64 * 1024;
 /// Complete sorted inherited set for the small semantic fixture.
 pub const PACKS: [[u8; 32]; 2] = [[7; 32], [8; 32]];
 /// Finite ceilings, including both branch comparisons and inventory hashing.
-pub const LIMITS: ForkActivationLimits = ForkActivationLimits {
-    packs: 4,
-    branch_bytes: 128,
-    work: 1024,
-};
+pub const LIMITS: ForkActivationLimits = ForkActivationLimits::new(4, 128, 1024);
 /// Deterministic logical observation identity, with no durable encoding.
 #[must_use]
 pub const fn revision(n: u8) -> Revision {
@@ -32,27 +28,25 @@ pub const fn revision(n: u8) -> Revision {
 /// Accepted job with an expired construction deadline and prunable protection.
 #[must_use]
 pub fn advance() -> ForkAdvanceFacts {
-    ForkAdvanceFacts {
-        binding: [1; 32],
-        destination: RepositoryId([2; 32]),
-        progress: ForkProgress {
-            phase: ForkAdvancePhase::Accepted,
-            cursor: 0,
-            part: 0,
-            revision: revision(3),
-        },
-        recorded_authority: ForkObservation::Absent,
-        authority: ForkObservation::Absent,
-        grant_epoch: Some(ForkEpochFence {
-            recorded: ForkObservation::Present(revision(4)),
-            current: ForkObservation::Present(revision(4)),
-        }),
-        reservation: Some(ForkReservationFence {
-            reservation: mkit_primitives::decision::ReservationId([5; 32]),
-            expected: revision(5),
-            current: ForkObservation::Present(revision(5)),
-        }),
-        construction_expires_ms: 100,
+    {
+        let mut v = ForkAdvanceFacts::new(
+            [1; 32],
+            RepositoryId([2; 32]),
+            ForkProgress::new(ForkAdvancePhase::Accepted, 0, 0, revision(3)),
+            100,
+        );
+        v.recorded_authority = ForkObservation::Absent;
+        v.authority = ForkObservation::Absent;
+        v.grant_epoch = Some(ForkEpochFence::new(
+            ForkObservation::Present(revision(4)),
+            ForkObservation::Present(revision(4)),
+        ));
+        v.reservation = Some(ForkReservationFence::new(
+            mkit_primitives::decision::ReservationId([5; 32]),
+            revision(5),
+            ForkObservation::Present(revision(5)),
+        ));
+        v
     }
 }
 /// Exact saved terminal response of the two-pack fixture.
@@ -62,49 +56,43 @@ pub fn result() -> ForkResult {
     for pack in PACKS {
         digest.update(&pack);
     }
-    ForkResult {
-        branch: RefName("main".into()),
-        source: RepositoryId([6; 32]),
-        source_sequence: 9,
-        tip: [10; 32],
-        packmap: [8; 32],
-        packs: 2,
-        bytes: 42,
-        index_entries: 3,
-        pack_digest: digest.finalize(),
-        destination_generation: revision(1),
-    }
+    ForkResult::new(
+        RefName("main".into()),
+        RepositoryId([6; 32]),
+        9,
+        [10; 32],
+        [8; 32],
+        2,
+        42,
+        3,
+        digest.finalize(),
+        revision(1),
+    )
 }
 /// First membership unit before either destination witness is installed.
 #[must_use]
 pub fn unit() -> ForkMembershipUnit {
-    ForkMembershipUnit {
-        pack: [7; 32],
-        inherited_revision: revision(3),
-        expected: ForkWitness {
-            generation: revision(1),
-            sequence: 0,
-            published: true,
-            held: false,
-            boundary: false,
-        },
-        live: None,
-        published: None,
-        context: ForkPairContext::Initial,
-    }
+    ForkMembershipUnit::new(
+        [7; 32],
+        revision(3),
+        ForkWitness::new(revision(1), 0, true, false, false),
+        None,
+        None,
+        ForkPairContext::Initial,
+    )
 }
 /// Scoped destination proof stand-in. Production hosts must acquire its evidence.
 #[must_use]
 pub fn proof() -> ForkClearanceProof {
-    ForkClearanceProof {
-        destination: RepositoryId([2; 32]),
-        binding: [1; 32],
-        progress_revision: revision(3),
-        pack: [7; 32],
-        apply_attempt: revision(12),
-        valid_through_ms: 200,
-        denial_revision: revision(13),
-    }
+    ForkClearanceProof::new(
+        RepositoryId([2; 32]),
+        [1; 32],
+        revision(3),
+        [7; 32],
+        revision(12),
+        200,
+        revision(13),
+    )
 }
 /// Build facts borrowing exact immutable result and caller-owned observations.
 #[must_use]
@@ -114,14 +102,12 @@ pub fn facts<'a>(
     unit: &'a ForkMembershipUnit,
     proof: &'a ForkClearanceProof,
 ) -> ForkActivationFacts<'a> {
-    ForkActivationFacts {
-        lifecycle: ForkLifecycleProtection::NotOffered,
-        advance,
-        expected_result: result,
-        accepted_result: Some(result),
-        inherited_packs: &PACKS,
-        unit,
-        proof: Some(proof),
+    {
+        let mut v = ForkActivationFacts::new(advance, result, &PACKS, unit);
+        v.lifecycle = ForkLifecycleProtection::NotOffered;
+        v.accepted_result = Some(result);
+        v.proof = Some(proof);
+        v
     }
 }
 
@@ -195,14 +181,13 @@ impl FuzzCase {
         }
     }
     fn facts(&self) -> ForkActivationFacts<'_> {
-        ForkActivationFacts {
-            lifecycle: self.lifecycle.clone(),
-            advance: &self.advance,
-            expected_result: &self.expected,
-            accepted_result: self.has_accepted.then_some(&self.accepted),
-            inherited_packs: &self.packs,
-            unit: &self.unit,
-            proof: self.has_proof.then_some(&self.proof),
+        {
+            let mut v =
+                ForkActivationFacts::new(&self.advance, &self.expected, &self.packs, &self.unit);
+            v.lifecycle = self.lifecycle.clone();
+            v.accepted_result = self.has_accepted.then_some(&self.accepted);
+            v.proof = self.has_proof.then_some(&self.proof);
+            v
         }
     }
     fn assert_install_eligible(&self) {
@@ -244,14 +229,14 @@ fn lifecycle_mutation(value: u8) -> ForkLifecycleProtection {
             1 => None,
             2 => Some(Observed::Absent(revision(value))),
             _ => Some(Observed::Present {
-                value: LifecycleFact {
-                    incarnation: revision(if value % 6 == 5 { 99 } else { 1 }),
-                    state: if value % 6 == 4 {
+                value: LifecycleFact::new(
+                    revision(if value % 6 == 5 { 99 } else { 1 }),
+                    if value % 6 == 4 {
                         LifecycleState::Deleting
                     } else {
                         LifecycleState::Active
                     },
-                },
+                ),
                 revision: revision(value),
             }),
         },
@@ -277,28 +262,28 @@ fn mutate_progress(advance: &mut ForkAdvanceFacts, opcode: u8, value: u8) {
         2 => {
             advance.grant_epoch = match value % 3 {
                 0 => None,
-                1 => Some(ForkEpochFence {
-                    recorded: ForkObservation::Absent,
-                    current: ForkObservation::Absent,
-                }),
-                _ => Some(ForkEpochFence {
-                    recorded: ForkObservation::Absent,
-                    current: ForkObservation::Present(revision(value)),
-                }),
+                1 => Some(ForkEpochFence::new(
+                    ForkObservation::Absent,
+                    ForkObservation::Absent,
+                )),
+                _ => Some(ForkEpochFence::new(
+                    ForkObservation::Absent,
+                    ForkObservation::Present(revision(value)),
+                )),
             }
         }
         _ => {
             advance.reservation = match value % 3 {
                 0 => None,
-                _ => Some(ForkReservationFence {
-                    reservation: mkit_primitives::decision::ReservationId([5; 32]),
-                    expected: revision(5),
-                    current: if value % 3 == 1 {
+                _ => Some(ForkReservationFence::new(
+                    mkit_primitives::decision::ReservationId([5; 32]),
+                    revision(5),
+                    if value % 3 == 1 {
                         ForkObservation::Absent
                     } else {
                         ForkObservation::Present(revision(5))
                     },
-                }),
+                )),
             }
         }
     }

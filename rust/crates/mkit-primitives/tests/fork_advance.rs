@@ -8,79 +8,67 @@ fn rev(n: u8) -> Revision {
     Revision([n; 32])
 }
 fn progress() -> ForkAdvanceFacts {
-    ForkAdvanceFacts {
-        binding: [1; 32],
-        destination: RepositoryId([2; 32]),
-        progress: ForkProgress {
-            phase: ForkAdvancePhase::Preparing,
-            cursor: 0,
-            part: 0,
-            revision: rev(3),
-        },
-        recorded_authority: ForkObservation::Absent,
-        authority: ForkObservation::Absent,
-        grant_epoch: Some(ForkEpochFence {
-            recorded: ForkObservation::Present(rev(4)),
-            current: ForkObservation::Present(rev(4)),
-        }),
-        reservation: Some(ForkReservationFence {
-            reservation: mkit_primitives::decision::ReservationId([5; 32]),
-            expected: rev(5),
-            current: ForkObservation::Present(rev(5)),
-        }),
-        construction_expires_ms: 100,
+    {
+        let mut v = ForkAdvanceFacts::new(
+            [1; 32],
+            RepositoryId([2; 32]),
+            ForkProgress::new(ForkAdvancePhase::Preparing, 0, 0, rev(3)),
+            100,
+        );
+        v.recorded_authority = ForkObservation::Absent;
+        v.authority = ForkObservation::Absent;
+        v.grant_epoch = Some(ForkEpochFence::new(
+            ForkObservation::Present(rev(4)),
+            ForkObservation::Present(rev(4)),
+        ));
+        v.reservation = Some(ForkReservationFence::new(
+            mkit_primitives::decision::ReservationId([5; 32]),
+            rev(5),
+            ForkObservation::Present(rev(5)),
+        ));
+        v
     }
 }
 fn result() -> ForkResult {
     let mut digest = Hasher::new();
     digest.update(&[7; 32]);
     digest.update(&[8; 32]);
-    ForkResult {
-        branch: RefName("main".into()),
-        source: RepositoryId([6; 32]),
-        source_sequence: 9,
-        tip: [10; 32],
-        packmap: [8; 32],
-        packs: 2,
-        bytes: 42,
-        index_entries: 3,
-        pack_digest: digest.finalize(),
-        destination_generation: rev(1),
-    }
+    ForkResult::new(
+        RefName("main".into()),
+        RepositoryId([6; 32]),
+        9,
+        [10; 32],
+        [8; 32],
+        2,
+        42,
+        3,
+        digest.finalize(),
+        rev(1),
+    )
 }
 fn unit() -> ForkMembershipUnit {
-    ForkMembershipUnit {
-        pack: [7; 32],
-        inherited_revision: rev(3),
-        expected: ForkWitness {
-            generation: rev(1),
-            sequence: 0,
-            published: true,
-            held: false,
-            boundary: false,
-        },
-        live: None,
-        published: None,
-        context: ForkPairContext::Initial,
-    }
+    ForkMembershipUnit::new(
+        [7; 32],
+        rev(3),
+        ForkWitness::new(rev(1), 0, true, false, false),
+        None,
+        None,
+        ForkPairContext::Initial,
+    )
 }
 fn proof() -> ForkClearanceProof {
-    ForkClearanceProof {
-        destination: RepositoryId([2; 32]),
-        binding: [1; 32],
-        progress_revision: rev(3),
-        pack: [7; 32],
-        apply_attempt: rev(12),
-        valid_through_ms: 200,
-        denial_revision: rev(13),
-    }
+    ForkClearanceProof::new(
+        RepositoryId([2; 32]),
+        [1; 32],
+        rev(3),
+        [7; 32],
+        rev(12),
+        200,
+        rev(13),
+    )
 }
 fn limits() -> ForkActivationLimits {
-    ForkActivationLimits {
-        packs: 2,
-        branch_bytes: 4,
-        work: 200,
-    }
+    ForkActivationLimits::new(2, 4, 200)
 }
 const PACKS: [[u8; 32]; 2] = [[7; 32], [8; 32]];
 fn facts<'a>(
@@ -89,14 +77,12 @@ fn facts<'a>(
     unit: &'a ForkMembershipUnit,
     proof: &'a ForkClearanceProof,
 ) -> ForkActivationFacts<'a> {
-    ForkActivationFacts {
-        lifecycle: ForkLifecycleProtection::NotOffered,
-        advance,
-        expected_result: result,
-        accepted_result: Some(result),
-        inherited_packs: &PACKS,
-        unit,
-        proof: Some(proof),
+    {
+        let mut v = ForkActivationFacts::new(advance, result, &PACKS, unit);
+        v.lifecycle = ForkLifecycleProtection::NotOffered;
+        v.accepted_result = Some(result);
+        v.proof = Some(proof);
+        v
     }
 }
 
@@ -378,17 +364,20 @@ fn activation_bounds_precede_unavailable_acquisition_and_comparisons() {
     let mut f = facts(&advance, &result, &unit, &proof);
     f.proof = None;
     for limit in [
-        ForkActivationLimits {
-            packs: 1,
-            ..limits()
+        {
+            let mut v = limits();
+            v.packs = 1;
+            v
         },
-        ForkActivationLimits {
-            branch_bytes: 3,
-            ..limits()
+        {
+            let mut v = limits();
+            v.branch_bytes = 3;
+            v
         },
-        ForkActivationLimits {
-            work: 1,
-            ..limits()
+        {
+            let mut v = limits();
+            v.work = 1;
+            v
         },
     ] {
         assert_eq!(
@@ -402,16 +391,19 @@ fn completion_requires_exact_inventory_progress_barrier_and_never_settles() {
     let mut advance = progress();
     advance.progress.phase = ForkAdvancePhase::Accepted;
     let result = result();
-    let original = ForkCompletionFacts {
-        lifecycle: ForkLifecycleProtection::NotOffered,
-        advance: &advance,
-        expected_result: &result,
-        accepted_result: Some(&result),
-        completed_cursor: 2,
-        completed_part: 0,
-        completed_packs: 2,
-        completed_digest: result.pack_digest,
-        expected_barrier_owner: advance.binding,
+    let original = {
+        let mut v = ForkCompletionFacts::new(
+            &advance,
+            &result,
+            2,
+            0,
+            2,
+            result.pack_digest,
+            advance.binding,
+        );
+        v.lifecycle = ForkLifecycleProtection::NotOffered;
+        v.accepted_result = Some(&result);
+        v
     };
     let guard = decide_fork_completion(&original, limits()).unwrap();
     assert_eq!(*guard.decision(), ForkCompletionDecision::Complete);
@@ -438,9 +430,10 @@ fn completion_requires_exact_inventory_progress_barrier_and_never_settles() {
     moved_checkpoint.progress.cursor = 1;
     moved_checkpoint.progress.part = 1;
     moved_checkpoint.progress.revision = rev(99);
-    let moved = ForkCompletionFacts {
-        advance: &moved_checkpoint,
-        ..original.clone()
+    let moved = {
+        let mut v = original.clone();
+        v.advance = &moved_checkpoint;
+        v
     };
     assert!(!guards_hold(&guard, &moved.guards(), 0));
     // A new checkpoint can still complete units finished before this commit.
@@ -449,9 +442,10 @@ fn completion_requires_exact_inventory_progress_barrier_and_never_settles() {
         ForkCompletionDecision::Complete
     );
     moved_checkpoint.progress.cursor = 3;
-    let backwards = ForkCompletionFacts {
-        advance: &moved_checkpoint,
-        ..original.clone()
+    let backwards = {
+        let mut v = original.clone();
+        v.advance = &moved_checkpoint;
+        v
     };
     assert_eq!(
         *decide_fork_completion(&backwards, limits())
@@ -461,10 +455,11 @@ fn completion_requires_exact_inventory_progress_barrier_and_never_settles() {
     );
     let mut done = advance.clone();
     done.progress.phase = ForkAdvancePhase::Complete;
-    let replay = ForkCompletionFacts {
-        lifecycle: ForkLifecycleProtection::NotOffered,
-        advance: &done,
-        ..original
+    let replay = {
+        let mut v = original;
+        v.lifecycle = ForkLifecycleProtection::NotOffered;
+        v.advance = &done;
+        v
     };
     assert_eq!(
         *decide_fork_completion(&replay, limits())
@@ -557,10 +552,7 @@ fn managed_lifecycle(state: mkit_primitives::decision::LifecycleState) -> ForkLi
     ForkLifecycleProtection::Managed {
         expected_incarnation: rev(1),
         current: Some(mkit_primitives::decision::Observed::Present {
-            value: mkit_primitives::decision::LifecycleFact {
-                incarnation: rev(1),
-                state,
-            },
+            value: mkit_primitives::decision::LifecycleFact::new(rev(1), state),
             revision: rev(20),
         }),
     }
@@ -630,16 +622,19 @@ fn managed_lifecycle_withholds_completion_but_never_changes_completed_replay() {
     let mut advance = progress();
     advance.progress.phase = ForkAdvancePhase::Accepted;
     let result = result();
-    let original = ForkCompletionFacts {
-        lifecycle: managed_lifecycle(LifecycleState::Active),
-        advance: &advance,
-        expected_result: &result,
-        accepted_result: Some(&result),
-        completed_cursor: 2,
-        completed_part: 0,
-        completed_packs: 2,
-        completed_digest: result.pack_digest,
-        expected_barrier_owner: advance.binding,
+    let original = {
+        let mut v = ForkCompletionFacts::new(
+            &advance,
+            &result,
+            2,
+            0,
+            2,
+            result.pack_digest,
+            advance.binding,
+        );
+        v.lifecycle = managed_lifecycle(LifecycleState::Active);
+        v.accepted_result = Some(&result);
+        v
     };
     let guard = decide_fork_completion(&original, limits()).unwrap();
     assert_eq!(*guard.decision(), ForkCompletionDecision::Complete);
@@ -647,19 +642,17 @@ fn managed_lifecycle_withholds_completion_but_never_changes_completed_replay() {
         None,
         Some(Observed::Absent(rev(20))),
         Some(Observed::Present {
-            value: mkit_primitives::decision::LifecycleFact {
-                incarnation: rev(1),
-                state: LifecycleState::Deleted,
-            },
+            value: mkit_primitives::decision::LifecycleFact::new(rev(1), LifecycleState::Deleted),
             revision: rev(20),
         }),
     ] {
-        let changed = ForkCompletionFacts {
-            lifecycle: ForkLifecycleProtection::Managed {
+        let changed = {
+            let mut v = original.clone();
+            v.lifecycle = ForkLifecycleProtection::Managed {
                 expected_incarnation: rev(1),
                 current: current.clone(),
-            },
-            ..original.clone()
+            };
+            v
         };
         assert!(!guards_hold(&guard, &changed.guards(), 0));
         let decision = decide_fork_completion(&changed, limits());
@@ -673,9 +666,10 @@ fn managed_lifecycle_withholds_completion_but_never_changes_completed_replay() {
         }
         let mut completed = advance.clone();
         completed.progress.phase = ForkAdvancePhase::Complete;
-        let replay = ForkCompletionFacts {
-            advance: &completed,
-            ..changed
+        let replay = {
+            let mut v = changed;
+            v.advance = &completed;
+            v
         };
         assert_eq!(
             *decide_fork_completion(&replay, limits())

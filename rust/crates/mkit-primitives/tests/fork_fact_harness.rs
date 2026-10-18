@@ -193,12 +193,7 @@ fn acceptance_mutations<'a>(
         )),
         m!("job.attempt.grant", |f: &mut ForkFacts<'a>| obs(
             &mut f.job,
-            |j| j.attempt.grant = Some(GrantFact {
-                namespace: NamespaceId([7; 32]),
-                grant: [3; 32],
-                epoch: rev(1),
-                presence: None
-            })
+            |j| j.attempt.grant = Some(GrantFact::new(NamespaceId([7; 32]), [3; 32], rev(1), None))
         )),
         m!("job.attempt.fencing", |f: &mut ForkFacts<'a>| obs(
             &mut f.job,
@@ -291,18 +286,12 @@ fn acceptance_mutations<'a>(
         )),
         m!("lifecycle.present", |f: &mut ForkFacts<'a>| f.lifecycle =
             Some(Observed::Present {
-                value: LifecycleFact {
-                    incarnation: Revision([2; 32]),
-                    state: LifecycleState::Active
-                },
+                value: LifecycleFact::new(Revision([2; 32]), LifecycleState::Active),
                 revision: REV
             })),
         m!("lifecycle.deleting", |f: &mut ForkFacts<'a>| f.lifecycle =
             Some(Observed::Present {
-                value: LifecycleFact {
-                    incarnation: Revision([2; 32]),
-                    state: LifecycleState::Deleting
-                },
+                value: LifecycleFact::new(Revision([2; 32]), LifecycleState::Deleting),
                 revision: REV
             })),
         m!("permission.rev", |f: &mut ForkFacts<'a>| bump(
@@ -368,12 +357,7 @@ fn acceptance_mutations<'a>(
         m!("grant.rev", |f: &mut ForkFacts<'a>| bump(&mut f.grant)),
         m!("grant.present", |f: &mut ForkFacts<'a>| f.grant =
             Some(Observed::Present {
-                value: GrantFact {
-                    namespace: NamespaceId([7; 32]),
-                    grant: [3; 32],
-                    epoch: rev(1),
-                    presence: None
-                },
+                value: GrantFact::new(NamespaceId([7; 32]), [3; 32], rev(1), None),
                 revision: REV
             })),
         m!("admission.rev", |f: &mut ForkFacts<'a>| bump(
@@ -705,10 +689,10 @@ fn advance_mutations() -> Vec<Mutation<'static, ForkAdvanceFacts>> {
         m!("epoch.removed", |f: &mut ForkAdvanceFacts| f.grant_epoch =
             None),
         m!("epoch.added", |f: &mut ForkAdvanceFacts| f.grant_epoch =
-            Some(ForkEpochFence {
-                recorded: ForkObservation::Absent,
-                current: ForkObservation::Absent
-            })),
+            Some(ForkEpochFence::new(
+                ForkObservation::Absent,
+                ForkObservation::Absent
+            ))),
         m!("reservation.id", |f: &mut ForkAdvanceFacts| {
             if let Some(r) = f.reservation.as_mut() {
                 r.reservation = ReservationId([97; 32]);
@@ -799,14 +783,13 @@ impl Activation {
         }
     }
     fn facts(&self) -> ForkActivationFacts<'_> {
-        ForkActivationFacts {
-            lifecycle: self.lifecycle.clone(),
-            advance: &self.advance,
-            expected_result: &self.expected,
-            accepted_result: self.accepted.as_ref(),
-            inherited_packs: &self.packs,
-            unit: &self.unit,
-            proof: self.proof.as_ref(),
+        {
+            let mut v =
+                ForkActivationFacts::new(&self.advance, &self.expected, &self.packs, &self.unit);
+            v.lifecycle = self.lifecycle.clone();
+            v.accepted_result = self.accepted.as_ref();
+            v.proof = self.proof.as_ref();
+            v
         }
     }
 }
@@ -819,10 +802,7 @@ fn managed(current: Option<Observed<LifecycleFact>>) -> ForkLifecycleProtection 
 }
 fn active() -> Observed<LifecycleFact> {
     Observed::Present {
-        value: LifecycleFact {
-            incarnation: rev(1),
-            state: LifecycleState::Active,
-        },
+        value: LifecycleFact::new(rev(1), LifecycleState::Active),
         revision: rev(2),
     }
 }
@@ -1029,16 +1009,19 @@ impl Completion {
         }
     }
     fn facts(&self) -> ForkCompletionFacts<'_> {
-        ForkCompletionFacts {
-            lifecycle: self.lifecycle.clone(),
-            advance: &self.advance,
-            expected_result: &self.expected,
-            accepted_result: self.accepted.as_ref(),
-            completed_cursor: self.cursor,
-            completed_part: self.part,
-            completed_packs: self.packs,
-            completed_digest: self.digest,
-            expected_barrier_owner: self.owner,
+        {
+            let mut v = ForkCompletionFacts::new(
+                &self.advance,
+                &self.expected,
+                self.cursor,
+                self.part,
+                self.packs,
+                self.digest,
+                self.owner,
+            );
+            v.lifecycle = self.lifecycle.clone();
+            v.accepted_result = self.accepted.as_ref();
+            v
         }
     }
 }
@@ -1091,52 +1074,43 @@ static PACKS: [Hash; 3] = [[1; 32], [2; 32], [3; 32]];
 static ALTERNATE: [Hash; 1] = [[9; 32]];
 
 fn adv(sequence: u64, state: ClearanceState) -> ClearanceAdvance<'static> {
-    ClearanceAdvance {
-        sequence,
-        generation: 1,
-        operation: OperationId([sequence as u8; 32]),
-        head: Some([sequence as u8; 32]),
-        packmap: Some([sequence as u8 + 10; 32]),
-        state,
-        additions: &PACKS[..1],
-        dependencies: &PACKS[..2],
-        external_suppliers: &PACKS[2..],
-        obligations: &[],
-        obligation_revisions: &[],
-        takedown_complete: false,
-        flagged: false,
-        revision: rev(sequence as u8),
+    {
+        let mut v = ClearanceAdvance::new(
+            sequence,
+            1,
+            OperationId([sequence as u8; 32]),
+            state,
+            rev(sequence as u8),
+        );
+        v.head = Some([sequence as u8; 32]);
+        v.packmap = Some([sequence as u8 + 10; 32]);
+        v.additions = &PACKS[..1];
+        v.dependencies = &PACKS[..2];
+        v.external_suppliers = &PACKS[2..];
+        v.obligations = &[];
+        v.obligation_revisions = &[];
+        v.takedown_complete = false;
+        v.flagged = false;
+        v
     }
 }
 fn witness(object: Hash) -> DependencyWitness {
-    DependencyWitness {
-        object,
-        present: true,
-        published: true,
-        held: false,
-        generation: 1,
-        revision: rev(4),
-    }
+    DependencyWitness::new(object, true, true, false, 1, rev(4))
 }
 fn clearance_base(moment: ClearanceMoment) -> ClearanceFacts<'static> {
-    ClearanceFacts {
-        repository: RepositoryId([1; 32]),
-        moment,
-        prior: PriorPublication {
-            generation: 1,
-            sequence: 1,
-            published_prefix: 1,
-            deletion_boundary: 0,
-            head: Some([1; 32]),
-            packmap: Some([11; 32]),
-            revision: rev(9),
-        },
-        previous_state: ClearanceState::Pending,
-        changed: adv(2, ClearanceState::Cleared),
-        suffix: &[],
-        witnesses: Box::leak(Box::new([witness(PACKS[1]), witness(PACKS[2])])),
-        lifecycle: ClearanceLifecycle::NotOffered,
-        deleted: false,
+    {
+        let mut v = ClearanceFacts::new(
+            RepositoryId([1; 32]),
+            moment,
+            PriorPublication::new(1, 1, 1, 0, Some([1; 32]), Some([11; 32]), rev(9)),
+            adv(2, ClearanceState::Cleared),
+        );
+        v.previous_state = ClearanceState::Pending;
+        v.suffix = &[];
+        v.witnesses = Box::leak(Box::new([witness(PACKS[1]), witness(PACKS[2])]));
+        v.lifecycle = ClearanceLifecycle::NotOffered;
+        v.deleted = false;
+        v
     }
 }
 

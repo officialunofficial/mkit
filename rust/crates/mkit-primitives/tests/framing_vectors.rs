@@ -96,6 +96,7 @@ fn streamed(bytes: &[u8], limits: VerifyLimits) -> Result<Outcome, FailureCode> 
                         base: Some(base),
                         bytes: stream.to_vec(),
                     },
+                    other => panic!("unmodelled framed entry: {other:?}"),
                 });
             }
             FramingStep::RetainEvidence(page) => {

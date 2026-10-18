@@ -884,35 +884,31 @@ fn an_unaccounted_clearance_guard_fails_closed() {
     };
     let mut view = clearance_advance(&changed_advance, &[], &[], Revision([1; 32]));
     view.dependencies = &dependency;
-    let witnesses = [DependencyWitness {
-        object: dependency[0],
-        present: true,
-        published: true,
-        held: false,
-        generation: 0,
-        revision: Revision([2; 32]),
-    }];
-    let facts = ClearanceFacts {
-        repository: RepositoryId([0; 32]),
-        moment: ClearanceMoment::Acceptance,
-        prior: PriorPublication {
-            generation: 0,
-            sequence: 0,
-            published_prefix: 0,
-            deletion_boundary: 0,
-            head: None,
-            packmap: None,
-            revision: Revision([3; 32]),
-        },
-        previous_state: ClearanceState::Pending,
-        changed: ClearanceAdvance {
-            sequence: 1,
-            ..view
-        },
-        suffix: &[],
-        witnesses: &witnesses,
-        lifecycle: ClearanceLifecycle::NotOffered,
-        deleted: false,
+    let witnesses = [DependencyWitness::new(
+        dependency[0],
+        true,
+        true,
+        false,
+        0,
+        Revision([2; 32]),
+    )];
+    let facts = {
+        let mut v = ClearanceFacts::new(
+            RepositoryId([0; 32]),
+            ClearanceMoment::Acceptance,
+            PriorPublication::new(0, 0, 0, 0, None, None, Revision([3; 32])),
+            {
+                let mut v = view;
+                v.sequence = 1;
+                v
+            },
+        );
+        v.previous_state = ClearanceState::Pending;
+        v.suffix = &[];
+        v.witnesses = &witnesses;
+        v.lifecycle = ClearanceLifecycle::NotOffered;
+        v.deleted = false;
+        v
     };
     let decision = decide_clearance(&facts, &ClearanceLimits::reference()).unwrap();
     assert!(account_for(&decision).is_err());

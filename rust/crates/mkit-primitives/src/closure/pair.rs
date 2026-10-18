@@ -226,6 +226,7 @@ pub enum PairRequest {
 /// An exact answer to the outstanding request.
 #[derive(Debug)]
 #[must_use]
+#[non_exhaustive]
 pub enum PairResponse<'a> {
     /// Packmap node facts or explicit acquisition failure.
     PackmapNode {

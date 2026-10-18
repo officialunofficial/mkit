@@ -62,6 +62,7 @@ fn bool_from(cursor: &mut Cursor<'_, '_>) -> Result<bool, Failure> {
 
 /// Per-object signature outcome; unsigned kinds record `None`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Signature {
     /// Kind carries no signature.
     None,
@@ -91,6 +92,7 @@ impl Signature {
 
 /// Signature domain recorded for diagnosis; `0` when `signature` is `None`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Domain {
     /// Unsigned.
     None,
@@ -390,6 +392,7 @@ impl OrdinalRecord {
 /// Ordered dependency evidence: object edges, or an external-base fact a
 /// delta consumed. Tags distinguish the two layouts.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DependencyRecord {
     /// A direct reference of the object at its first occurrence.
     Edge {

@@ -17,6 +17,7 @@ use mkit_core::hash::{Hash, Hasher};
 
 /// Logical construction stage, independent of a driver's physical phases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ForkAdvancePhase {
     /// Preparation, including the final acceptance proof.
     Preparing,
@@ -30,6 +31,7 @@ pub enum ForkAdvancePhase {
 /// Exact expected durable checkpoint. Its revision covers the original job row,
 /// including omitted driver cursor data; proposed progress is separate.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ForkProgress {
     /// Logical phase.
     pub phase: ForkAdvancePhase,
@@ -40,8 +42,23 @@ pub struct ForkProgress {
     /// Exact job revision, including immutable binding and all progress fields.
     pub revision: Revision,
 }
+
+impl ForkProgress {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(phase: ForkAdvancePhase, cursor: u64, part: u16, revision: Revision) -> Self {
+        Self {
+            phase,
+            cursor,
+            part,
+            revision,
+        }
+    }
+}
 /// Acquired authoritative observation. Missing acquisition cannot be represented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ForkObservation {
     /// Authoritative absence; the host must guard absence at the effect boundary.
     Absent,
@@ -50,14 +67,25 @@ pub enum ForkObservation {
 }
 /// An enabled grant-epoch fence; inner absence is an authoritative observation.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ForkEpochFence {
     /// Recorded epoch observation.
     pub recorded: ForkObservation,
     /// Current epoch observation.
     pub current: ForkObservation,
 }
+
+impl ForkEpochFence {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(recorded: ForkObservation, current: ForkObservation) -> Self {
+        Self { recorded, current }
+    }
+}
 /// Exact original reservation protection before acceptance.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ForkReservationFence {
     /// Exact original reservation identity; never a joining request's reservation.
     pub reservation: crate::decision::ReservationId,
@@ -66,8 +94,26 @@ pub struct ForkReservationFence {
     /// Current pending reservation revision, or authoritative absence.
     pub current: ForkObservation,
 }
+
+impl ForkReservationFence {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(
+        reservation: crate::decision::ReservationId,
+        expected: Revision,
+        current: ForkObservation,
+    ) -> Self {
+        Self {
+            reservation,
+            expected,
+            current,
+        }
+    }
+}
 /// Fixed-shape snapshot needed by every advancing coordinator commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ForkAdvanceFacts {
     /// Original immutable operation binding.
     pub binding: Hash,
@@ -87,8 +133,33 @@ pub struct ForkAdvanceFacts {
     /// This is not a commit deadline. Accepted clearance ignores this bound.
     pub construction_expires_ms: u64,
 }
+
+impl ForkAdvanceFacts {
+    /// Facts whose recorded and current authority are both authoritative
+    /// absence, with no epoch fence and no reservation fence. Assign the public
+    /// fields that apply. The struct is `#[non_exhaustive]`.
+    #[must_use]
+    pub const fn new(
+        binding: Hash,
+        destination: RepositoryId,
+        progress: ForkProgress,
+        construction_expires_ms: u64,
+    ) -> Self {
+        Self {
+            binding,
+            destination,
+            progress,
+            recorded_authority: ForkObservation::Absent,
+            authority: ForkObservation::Absent,
+            grant_epoch: None,
+            reservation: None,
+            construction_expires_ms,
+        }
+    }
+}
 /// Fine-grained host mapping preserves authority-before-epoch precedence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ForkAdvanceRefusal {
     /// Authority changed from the recorded observation.
     AuthorityMoved,
@@ -112,6 +183,7 @@ impl ForkAdvanceRefusal {
 }
 /// Progress permission; no variant creates or settles a terminal outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ForkAdvanceDecision {
     /// One advancing commit may proceed under all guards.
     Advance,
@@ -181,6 +253,7 @@ pub fn decide_fork_advance(facts: &ForkAdvanceFacts, now_ms: u64) -> Guarded<For
 }
 /// Exact semantic membership witness. No storage encoding is specified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ForkWitness {
     /// Destination membership generation.
     pub generation: Revision,
@@ -193,8 +266,30 @@ pub struct ForkWitness {
     /// Inherited packmap head boundary flag.
     pub boundary: bool,
 }
+
+impl ForkWitness {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(
+        generation: Revision,
+        sequence: u64,
+        published: bool,
+        held: bool,
+        boundary: bool,
+    ) -> Self {
+        Self {
+            generation,
+            sequence,
+            published,
+            held,
+            boundary,
+        }
+    }
+}
 /// Distinguishes the first read from the read after a failed absent-row CAS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ForkPairContext {
     /// Ordinary initial observation.
     Initial,
@@ -203,6 +298,7 @@ pub enum ForkPairContext {
 }
 /// One exact inherited membership unit.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ForkMembershipUnit {
     /// Pack in the immutable accepted inventory.
     pub pack: Hash,
@@ -217,9 +313,33 @@ pub struct ForkMembershipUnit {
     /// Why this pair was acquired.
     pub context: ForkPairContext,
 }
+
+impl ForkMembershipUnit {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(
+        pack: Hash,
+        inherited_revision: Revision,
+        expected: ForkWitness,
+        live: Option<ForkWitness>,
+        published: Option<ForkWitness>,
+        context: ForkPairContext,
+    ) -> Self {
+        Self {
+            pack,
+            inherited_revision,
+            expected,
+            live,
+            published,
+            context,
+        }
+    }
+}
 /// Destination lifecycle profile and exact managed protection.
 /// Profiles without lifecycle transitions declare that limitation explicitly.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ForkLifecycleProtection {
     /// Host profile offers no repository lifecycle transitions.
     NotOffered,
@@ -257,6 +377,7 @@ fn lifecycle_available(protection: &ForkLifecycleProtection) -> Result<bool, Fai
 /// and must be discharged by the host's actual publication proof/fence protocol.
 /// Comparing these fields alone does not verify acquisition provenance.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ForkClearanceProof {
     /// Exact destination.
     pub destination: RepositoryId,
@@ -275,8 +396,34 @@ pub struct ForkClearanceProof {
     /// the comparison instead of installing a denied pack.
     pub denial_revision: Revision,
 }
+
+impl ForkClearanceProof {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(
+        destination: RepositoryId,
+        binding: Hash,
+        progress_revision: Revision,
+        pack: Hash,
+        apply_attempt: Revision,
+        valid_through_ms: u64,
+        denial_revision: Revision,
+    ) -> Self {
+        Self {
+            destination,
+            binding,
+            progress_revision,
+            pack,
+            apply_attempt,
+            valid_through_ms,
+            denial_revision,
+        }
+    }
+}
 /// Borrowed fixed-shape activation facts; no complete graph is reconstructed.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ForkActivationFacts<'a> {
     /// Explicit lifecycle profile and any exact acquired managed facts.
     pub lifecycle: ForkLifecycleProtection,
@@ -293,8 +440,32 @@ pub struct ForkActivationFacts<'a> {
     /// Acquired current destination proof; None means not acquired.
     pub proof: Option<&'a ForkClearanceProof>,
 }
+
+impl<'a> ForkActivationFacts<'a> {
+    /// Facts with no managed lifecycle protection, the accepted result equal
+    /// to the expected one, and no destination proof acquired. Assign the
+    /// public fields that apply. The struct is `#[non_exhaustive]`.
+    #[must_use]
+    pub const fn new(
+        advance: &'a ForkAdvanceFacts,
+        expected_result: &'a ForkResult,
+        inherited_packs: &'a [Hash],
+        unit: &'a ForkMembershipUnit,
+    ) -> Self {
+        Self {
+            lifecycle: ForkLifecycleProtection::NotOffered,
+            advance,
+            expected_result,
+            accepted_result: Some(expected_result),
+            inherited_packs,
+            unit,
+            proof: None,
+        }
+    }
+}
 /// Explicit work and string ceilings for both borrowed result comparisons.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ForkActivationLimits {
     /// Maximum number of retained inherited packs.
     pub packs: u64,
@@ -303,8 +474,22 @@ pub struct ForkActivationLimits {
     /// Comparison budget, charged for both branch names and fixed facts.
     pub work: u64,
 }
+
+impl ForkActivationLimits {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(packs: u64, branch_bytes: u64, work: u64) -> Self {
+        Self {
+            packs,
+            branch_bytes,
+            work,
+        }
+    }
+}
 /// Membership activation permission. No variant changes terminal acceptance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ForkActivationDecision {
     /// Install both absent rows atomically with exact absence guards.
     Install,
@@ -443,6 +628,7 @@ pub fn decide_fork_activation<'a>(
 /// Final coordinator clearance facts after all membership write/check units.
 /// No new membership is written by this decision, so it needs no new pack proof.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ForkCompletionFacts<'a> {
     /// Explicit lifecycle profile and any exact acquired managed facts.
     pub lifecycle: ForkLifecycleProtection,
@@ -464,8 +650,37 @@ pub struct ForkCompletionFacts<'a> {
     /// Required exact barrier owner to compare atomically, not an acquired row.
     pub expected_barrier_owner: Hash,
 }
+
+impl<'a> ForkCompletionFacts<'a> {
+    /// Facts with no managed lifecycle protection and the accepted result
+    /// equal to the expected one. Assign the public fields that apply. The
+    /// struct is `#[non_exhaustive]`.
+    #[must_use]
+    pub const fn new(
+        advance: &'a ForkAdvanceFacts,
+        expected_result: &'a ForkResult,
+        completed_cursor: u64,
+        completed_part: u16,
+        completed_packs: u64,
+        completed_digest: Hash,
+        expected_barrier_owner: Hash,
+    ) -> Self {
+        Self {
+            lifecycle: ForkLifecycleProtection::NotOffered,
+            advance,
+            expected_result,
+            accepted_result: Some(expected_result),
+            completed_cursor,
+            completed_part,
+            completed_packs,
+            completed_digest,
+            expected_barrier_owner,
+        }
+    }
+}
 /// Final coordinator action; never creates or settles a terminal outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ForkCompletionDecision {
     /// Record clearance completion and remove only the exactly owned barrier.
     Complete,

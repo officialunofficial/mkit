@@ -22,6 +22,7 @@ use crate::evidence::{RepositoryId, Revision};
 
 /// Lifecycle profile. A profile without transitions says so; it does not invent an active fact.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ClearanceLifecycle {
     /// This profile has no repository lifecycle transitions.
     NotOffered,
@@ -36,6 +37,7 @@ pub enum ClearanceLifecycle {
 
 /// Clearance state from the publication rules. The host supplies it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ClearanceState {
     /// Inspection or a dependency is still outstanding.
     Pending,
@@ -59,6 +61,7 @@ impl ClearanceState {
 
 /// When the host is applying the decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ClearanceMoment {
     /// The advance is not stored yet. Eligibility can withhold publication.
     Acceptance,
@@ -68,6 +71,7 @@ pub enum ClearanceMoment {
 
 /// One retained or candidate advance reduced to the facts clearance compares.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ClearanceAdvance<'a> {
     /// Never-reused sequence.
     pub sequence: u64,
@@ -99,6 +103,37 @@ pub struct ClearanceAdvance<'a> {
     pub revision: Revision,
 }
 
+impl ClearanceAdvance<'_> {
+    /// An advance with no head, packmap, additions, dependencies, suppliers
+    /// or obligations, and no flag. Assign the public fields that apply. The
+    /// struct is `#[non_exhaustive]`.
+    #[must_use]
+    pub const fn new(
+        sequence: u64,
+        generation: u64,
+        operation: OperationId,
+        state: ClearanceState,
+        revision: Revision,
+    ) -> Self {
+        Self {
+            sequence,
+            generation,
+            operation,
+            head: None,
+            packmap: None,
+            state,
+            additions: &[],
+            dependencies: &[],
+            external_suppliers: &[],
+            obligations: &[],
+            obligation_revisions: &[],
+            takedown_complete: false,
+            flagged: false,
+            revision,
+        }
+    }
+}
+
 impl<'a> ClearanceAdvance<'a> {
     /// Take the dependency and external-supplier sets from an established
     /// resulting-pair coverage. The coverage must belong to `repository` and cover
@@ -127,6 +162,7 @@ impl<'a> ClearanceAdvance<'a> {
 
 /// Prior publication identity. The published value is not part of the binding.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PriorPublication {
     /// Membership generation.
     pub generation: u64,
@@ -144,8 +180,34 @@ pub struct PriorPublication {
     pub revision: Revision,
 }
 
+impl PriorPublication {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(
+        generation: u64,
+        sequence: u64,
+        published_prefix: u64,
+        deletion_boundary: u64,
+        head: Option<Hash>,
+        packmap: Option<Hash>,
+        revision: Revision,
+    ) -> Self {
+        Self {
+            generation,
+            sequence,
+            published_prefix,
+            deletion_boundary,
+            head,
+            packmap,
+            revision,
+        }
+    }
+}
+
 /// Published-membership witness. Absence is `present: false`, not a missing entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DependencyWitness {
     /// Pack identity.
     pub object: Hash,
@@ -161,8 +223,32 @@ pub struct DependencyWitness {
     pub revision: Revision,
 }
 
+impl DependencyWitness {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(
+        object: Hash,
+        present: bool,
+        published: bool,
+        held: bool,
+        generation: u64,
+        revision: Revision,
+    ) -> Self {
+        Self {
+            object,
+            present,
+            published,
+            held,
+            generation,
+            revision,
+        }
+    }
+}
+
 /// Host-supplied clearance snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ClearanceFacts<'a> {
     /// Destination repository. Guard scope only.
     pub repository: RepositoryId,
@@ -183,6 +269,31 @@ pub struct ClearanceFacts<'a> {
     pub lifecycle: ClearanceLifecycle,
     /// This unit is a deletion. It publishes the boundary without inspection.
     pub deleted: bool,
+}
+
+impl<'a> ClearanceFacts<'a> {
+    /// Facts with the changed advance's own state as the previous state, no
+    /// retained suffix, no witnesses, no lifecycle protection and no deletion.
+    /// Assign the public fields that apply. The struct is `#[non_exhaustive]`.
+    #[must_use]
+    pub const fn new(
+        repository: RepositoryId,
+        moment: ClearanceMoment,
+        prior: PriorPublication,
+        changed: ClearanceAdvance<'a>,
+    ) -> Self {
+        Self {
+            repository,
+            moment,
+            prior,
+            previous_state: changed.state,
+            changed,
+            suffix: &[],
+            witnesses: &[],
+            lifecycle: ClearanceLifecycle::NotOffered,
+            deleted: false,
+        }
+    }
 }
 
 fn state_tag(state: ClearanceState) -> u8 {
@@ -357,6 +468,7 @@ impl ClearanceFacts<'_> {
 
 /// Finite host ceilings. They are not protocol constants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ClearanceLimits {
     /// Outstanding advances in one prefix walk.
     pub max_advances: u64,
@@ -364,6 +476,19 @@ pub struct ClearanceLimits {
     pub max_items: usize,
     /// Charged comparisons.
     pub max_work: u64,
+}
+
+impl ClearanceLimits {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(max_advances: u64, max_items: usize, max_work: u64) -> Self {
+        Self {
+            max_advances,
+            max_items,
+            max_work,
+        }
+    }
 }
 
 impl ClearanceLimits {
@@ -381,6 +506,7 @@ impl ClearanceLimits {
 
 /// Clearance outcome. No variant settles a reservation or records a terminal result.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ClearanceDecision {
     /// Move the published prefix. Head and packmap move together.
     AdvancePrefix {

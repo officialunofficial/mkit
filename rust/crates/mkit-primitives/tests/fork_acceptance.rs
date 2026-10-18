@@ -85,12 +85,7 @@ fn semantic_fixtures_pin_decisions_and_stable_codes() {
             "authority_generation" => value(&mut f.authority).generation = Revision([9; 32]),
             "authority_unfenceable" => value(&mut f.authority).ready = false,
             "unexpected_grant" => {
-                f.grant = observed(GrantFact {
-                    namespace: NamespaceId([7; 32]),
-                    grant: [9; 32],
-                    epoch: REV,
-                    presence: None,
-                });
+                f.grant = observed(GrantFact::new(NamespaceId([7; 32]), [9; 32], REV, None));
             }
             "settled_reservation" => {
                 f.reservation = observed(ForkReservation::Settled(ForkTerminal::Refused(
@@ -119,10 +114,10 @@ fn semantic_fixtures_pin_decisions_and_stable_codes() {
                 });
             }
             "destination_deleting" => {
-                f.lifecycle = observed(LifecycleFact {
-                    incarnation: p.binding().destination_generation,
-                    state: LifecycleState::Deleting,
-                });
+                f.lifecycle = observed(LifecycleFact::new(
+                    p.binding().destination_generation,
+                    LifecycleState::Deleting,
+                ));
             }
             "unacquired_emptiness" => f.emptiness = None,
             "unacquired_authority" => f.authority = None,
@@ -386,12 +381,7 @@ fn malicious_and_bounded_plans_never_seal_incomplete_success() {
 fn original_grant_epoch_is_not_replaced_by_newer_permission() {
     let p = plan();
     let mut request = attempt(1);
-    request.grant = Some(GrantFact {
-        namespace: NamespaceId([7; 32]),
-        grant: [8; 32],
-        epoch: REV,
-        presence: None,
-    });
+    request.grant = Some(GrantFact::new(NamespaceId([7; 32]), [8; 32], REV, None));
     let mut f = facts(&p, &request);
     let s = proof(&p);
     f.grant = observed(request.grant.clone().expect("valid deterministic fixture"));
@@ -648,12 +638,12 @@ fn review_terminal_replay_precedes_advancement_authority_and_grant_checks() {
             };
             value(&mut f.authority).generation = Revision([9; 32]);
             value(&mut f.authority).ready = false;
-            f.grant = observed(GrantFact {
-                namespace: NamespaceId([7; 32]),
-                grant: [9; 32],
-                epoch: Revision([9; 32]),
-                presence: None,
-            });
+            f.grant = observed(GrantFact::new(
+                NamespaceId([7; 32]),
+                [9; 32],
+                Revision([9; 32]),
+                None,
+            ));
             assert_eq!(
                 outcome(decide_fork_acceptance(
                     &p, &request, &f, None, 1_000, LIMITS

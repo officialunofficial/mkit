@@ -391,6 +391,7 @@ fn run(data: &[u8]) -> (Outcome, Counts) {
                             value: Acquisition::Unavailable,
                         })
                     }
+                    other => panic!("unmodelled closure request: {other:?}"),
                 };
                 if let Err(error) = result {
                     return (refused(&mut walker, &error), counts);
@@ -400,6 +401,7 @@ fn run(data: &[u8]) -> (Outcome, Counts) {
                     "malformed or unavailable response accepted"
                 );
             }
+            other => panic!("unmodelled closure step: {other:?}"),
         }
     }
     panic!("finite work ceiling did not bound closure transitions");

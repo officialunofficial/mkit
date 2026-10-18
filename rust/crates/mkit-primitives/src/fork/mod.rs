@@ -12,8 +12,7 @@
 //!
 //! ```
 //! use mkit_primitives::fork::{ForkLimits, ForkVisibility};
-//! let limits = ForkLimits { packs: 8, edges: 16, branch_bytes: 128,
-//!     index_entries: 128, inherited_bytes: 4096, work: 4096 };
+//! let limits = ForkLimits::new(8, 16, 128, 128, 4096, 4096);
 //! assert_eq!(limits.packs, 8);
 //! assert_ne!(ForkVisibility::Public, ForkVisibility::Private);
 //! // Seal full inventories, acquire destination facts and a final source proof,

@@ -36,11 +36,21 @@ pub enum Observed<T> {
 }
 /// Exact ref value.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RefFact {
     /// Validated served name.
     pub name: RefName,
     /// Current target.
     pub target: Hash,
+}
+
+impl RefFact {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(name: RefName, target: Hash) -> Self {
+        Self { name, target }
+    }
 }
 /// Namespace authorization mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +63,7 @@ pub enum AuthorityMode {
 }
 /// Commit-fenced authority observation.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AuthorityFact {
     /// Namespace this observation belongs to; a guard compares it with its scope key.
     pub namespace: NamespaceId,
@@ -63,8 +74,28 @@ pub struct AuthorityFact {
     /// Generation can be fenced atomically.
     pub ready: bool,
 }
+
+impl AuthorityFact {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(
+        namespace: NamespaceId,
+        mode: AuthorityMode,
+        generation: Revision,
+        ready: bool,
+    ) -> Self {
+        Self {
+            namespace,
+            mode,
+            generation,
+            ready,
+        }
+    }
+}
 /// Scoped authorization grant.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct GrantFact {
     /// Namespace this observation belongs to; a guard compares it with its scope key.
     pub namespace: NamespaceId,
@@ -74,6 +105,25 @@ pub struct GrantFact {
     pub epoch: Revision,
     /// Presence constraint when authorization depends on it.
     pub presence: Option<bool>,
+}
+
+impl GrantFact {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(
+        namespace: NamespaceId,
+        grant: Hash,
+        epoch: Revision,
+        presence: Option<bool>,
+    ) -> Self {
+        Self {
+            namespace,
+            grant,
+            epoch,
+            presence,
+        }
+    }
 }
 /// Repository lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,14 +138,25 @@ pub enum LifecycleState {
 }
 /// Repository incarnation and lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LifecycleFact {
     /// Repository incarnation.
     pub incarnation: Revision,
     /// Exact lifecycle state.
     pub state: LifecycleState,
 }
+
+impl LifecycleFact {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(incarnation: Revision, state: LifecycleState) -> Self {
+        Self { incarnation, state }
+    }
+}
 /// Complete captured publication state.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PublicationFact {
     /// Publication generation.
     pub generation: Revision,
@@ -110,8 +171,32 @@ pub struct PublicationFact {
     /// Complete published packmap component.
     pub packmap: Option<Hash>,
 }
+
+impl PublicationFact {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(
+        generation: Revision,
+        sequence: u64,
+        published_prefix: u64,
+        deletion_boundary: u64,
+        head: Option<Hash>,
+        packmap: Option<Hash>,
+    ) -> Self {
+        Self {
+            generation,
+            sequence,
+            published_prefix,
+            deletion_boundary,
+            head,
+            packmap,
+        }
+    }
+}
 /// Applicable denial and inspection observations.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DenialFact {
     /// Exact denied object set.
     pub objects: Vec<Hash>,
@@ -120,8 +205,22 @@ pub struct DenialFact {
     /// Exact inspection-held supplier set.
     pub held: Vec<Hash>,
 }
+
+impl DenialFact {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(objects: Vec<Hash>, packs: Vec<Hash>, held: Vec<Hash>) -> Self {
+        Self {
+            objects,
+            packs,
+            held,
+        }
+    }
+}
 /// Applicable ref policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PolicyFact {
     /// Intersected allowed signer set.
     pub allowed_signers: Vec<[u8; 32]>,
@@ -130,8 +229,26 @@ pub struct PolicyFact {
     /// Exact policy revision.
     pub revision: Revision,
 }
+
+impl PolicyFact {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(
+        allowed_signers: Vec<[u8; 32]>,
+        fast_forward: bool,
+        revision: Revision,
+    ) -> Self {
+        Self {
+            allowed_signers,
+            fast_forward,
+            revision,
+        }
+    }
+}
 /// Presence change committed by admission.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PresenceDelta {
     /// Served ref name.
     pub name: RefName,
@@ -140,8 +257,22 @@ pub struct PresenceDelta {
     /// Proposed presence.
     pub after: bool,
 }
+
+impl PresenceDelta {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(name: RefName, before: bool, after: bool) -> Self {
+        Self {
+            name,
+            before,
+            after,
+        }
+    }
+}
 /// Admission bound to exact proposed effects.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AdmissionFact {
     /// Authenticated operation.
     pub operation: OperationId,
@@ -152,8 +283,28 @@ pub struct AdmissionFact {
     /// Applicable reservation.
     pub reservation: Option<ReservationId>,
 }
+
+impl AdmissionFact {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(
+        operation: OperationId,
+        effects: Hash,
+        presence: Vec<PresenceDelta>,
+        reservation: Option<ReservationId>,
+    ) -> Self {
+        Self {
+            operation,
+            effects,
+            presence,
+            reservation,
+        }
+    }
+}
 /// Exact charge-window counters and ceilings.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AccountingFact {
     /// Logical accounting scope.
     pub scope: Hash,
@@ -168,8 +319,32 @@ pub struct AccountingFact {
     /// Exact operation ceiling.
     pub operation_limit: u64,
 }
+
+impl AccountingFact {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(
+        scope: Hash,
+        window: Revision,
+        bytes: u64,
+        byte_limit: u64,
+        operations: u64,
+        operation_limit: u64,
+    ) -> Self {
+        Self {
+            scope,
+            window,
+            bytes,
+            byte_limit,
+            operations,
+            operation_limit,
+        }
+    }
+}
 /// Exact upload ticket binding.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TicketFact {
     /// Reservation-derived ticket identity; the row's own key.
     pub ticket: TicketId,
@@ -195,13 +370,60 @@ pub struct TicketFact {
     /// Backend upload-session incarnation, when one was allocated.
     pub upload_session: Option<Vec<u8>>,
 }
+
+impl TicketFact {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(
+        ticket: TicketId,
+        repository: RepositoryId,
+        name: RefName,
+        signer: [u8; 32],
+        pack: PackSource,
+        part_bytes: u64,
+        created_ms: u64,
+        expires_ms: u64,
+        reservation: ReservationId,
+        authority_generation: Option<Revision>,
+        upload_session: Option<Vec<u8>>,
+    ) -> Self {
+        Self {
+            ticket,
+            repository,
+            name,
+            signer,
+            pack,
+            part_bytes,
+            created_ms,
+            expires_ms,
+            reservation,
+            authority_generation,
+            upload_session,
+        }
+    }
+}
 /// Exact repository stored-bytes counter (SPEC-SERVER §6.5.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct StorageFact {
     /// Absolute stored pack bytes.
     pub stored_bytes: u64,
     /// Monotonic counter version.
     pub version: u64,
+}
+
+impl StorageFact {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(stored_bytes: u64, version: u64) -> Self {
+        Self {
+            stored_bytes,
+            version,
+        }
+    }
 }
 /// Only terminal refusal classes permitted for durable replay.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,6 +451,7 @@ pub enum PermanentCode {
 /// It preserves the exact public message; it never truncates or regenerates it.
 /// This skeleton has no decision entry point accepting untrusted records.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PermanentRefusal {
     /// Only a permanent replayable transport class.
     pub code: PermanentCode,
@@ -236,13 +459,35 @@ pub struct PermanentRefusal {
     pub public_message: String,
 }
 
+impl PermanentRefusal {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(code: PermanentCode, public_message: String) -> Self {
+        Self {
+            code,
+            public_message,
+        }
+    }
+}
+
 /// Normalized ref response component.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RefValue {
     /// Served name.
     pub name: RefName,
     /// Exact result value or authoritative absence.
     pub value: Option<Hash>,
+}
+
+impl RefValue {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(name: RefName, value: Option<Hash>) -> Self {
+        Self { name, value }
+    }
 }
 /// Durable terminal result; retryable or pending results are unrepresentable.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -269,6 +514,7 @@ pub enum ReplayState {
 }
 /// Replay record bound to authenticated fingerprint.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ReplayFact {
     /// Authenticated replay scope this record belongs to; a guard compares it with its scope key.
     pub scope: ReplayScope,
@@ -278,6 +524,25 @@ pub struct ReplayFact {
     pub expires_ms: u64,
     /// Exact replay state.
     pub state: ReplayState,
+}
+
+impl ReplayFact {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(
+        scope: ReplayScope,
+        fingerprint: Hash,
+        expires_ms: u64,
+        state: ReplayState,
+    ) -> Self {
+        Self {
+            scope,
+            fingerprint,
+            expires_ms,
+            state,
+        }
+    }
 }
 /// Stable semantic reservation abort reasons, separate from replay codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -300,6 +565,7 @@ pub enum ReservationAbortReason {
 }
 /// Accounting observations carried by a committed reservation outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ReservationAccounting {
     /// Stored bytes attributed to the operation.
     pub bytes_stored: u64,
@@ -307,6 +573,19 @@ pub struct ReservationAccounting {
     pub new_to_repository: u64,
     /// Bytes new to the backing store.
     pub new_to_store: u64,
+}
+
+impl ReservationAccounting {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(bytes_stored: u64, new_to_repository: u64, new_to_store: u64) -> Self {
+        Self {
+            bytes_stored,
+            new_to_repository,
+            new_to_store,
+        }
+    }
 }
 /// Reservation terminal payload, independent of client replay responses.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -340,6 +619,7 @@ pub enum ReservationTerminalKind {
 }
 /// Exact terminal reservation state shared by settlement and durable delivery.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ReservationTerminal {
     /// Repository bound to the original reservation.
     pub repository: RepositoryId,
@@ -347,6 +627,23 @@ pub struct ReservationTerminal {
     pub occurred_ms: u64,
     /// Exact terminal payload, never a client replay result.
     pub kind: ReservationTerminalKind,
+}
+
+impl ReservationTerminal {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(
+        repository: RepositoryId,
+        occurred_ms: u64,
+        kind: ReservationTerminalKind,
+    ) -> Self {
+        Self {
+            repository,
+            occurred_ms,
+            kind,
+        }
+    }
 }
 /// Reservation lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -380,6 +677,7 @@ pub enum ReservationOp {
 }
 /// Keyed repository membership observation, including authoritative absence.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MembershipObservation {
     /// Exact object key, retained even when the observation is absent.
     pub object: Hash,
@@ -387,8 +685,18 @@ pub struct MembershipObservation {
     /// The decision owner checks present object/repository equality with keys.
     pub observed: Observed<MemberFact>,
 }
+
+impl MembershipObservation {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(object: Hash, observed: Observed<MemberFact>) -> Self {
+        Self { object, observed }
+    }
+}
 /// Acquired facts for a pure decision; all unacquired categories stay None.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Snapshot {
     /// Destination repository.
     pub repository: RepositoryId,
@@ -427,4 +735,31 @@ pub struct Snapshot {
     /// store still yields it. Dependency membership and publication guards
     /// compare against [`Self::members`] instead.
     pub basis: Vec<super::RequiredGuard>,
+}
+
+impl Snapshot {
+    /// An empty snapshot of `repository`: nothing is acquired. Assign the
+    /// public fields for the facts the host acquired. The struct is
+    /// `#[non_exhaustive]`, so hosts build it here, not with a literal.
+    #[must_use]
+    pub const fn new(repository: RepositoryId) -> Self {
+        Self {
+            repository,
+            refs: Vec::new(),
+            replay: None,
+            tickets: Vec::new(),
+            reservations: Vec::new(),
+            authority: None,
+            grant: None,
+            lifecycle: None,
+            members: Vec::new(),
+            denial: None,
+            policy: None,
+            admission: None,
+            accounting: None,
+            storage: None,
+            publication: None,
+            basis: Vec::new(),
+        }
+    }
 }

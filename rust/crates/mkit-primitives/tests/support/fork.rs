@@ -16,14 +16,7 @@ use mkit_primitives::{
 /// Fixed logical revision used by the deterministic replay corpus.
 pub const REV: Revision = Revision([1; 32]);
 /// Finite bounds for the three-pack test graph.
-pub const LIMITS: ForkLimits = ForkLimits {
-    packs: 3,
-    edges: 4,
-    branch_bytes: 128,
-    index_entries: 30,
-    inherited_bytes: 300,
-    work: 4096,
-};
+pub const LIMITS: ForkLimits = ForkLimits::new(3, 4, 128, 30, 300, 4096);
 
 /// Trusted present observation with a fixed revision.
 pub fn observed<T>(value: T) -> Option<Observed<T>> {
@@ -36,132 +29,91 @@ pub fn observed<T>(value: T) -> Option<Observed<T>> {
 #[must_use]
 pub fn inventories() -> Vec<ForkInventory> {
     vec![
-        ForkInventory {
-            pack: [1; 32],
-            descriptor: [11; 32],
-            bytes: 100,
-            index_entries: 10,
-            dependencies: vec![[2; 32]],
-        },
-        ForkInventory {
-            pack: [2; 32],
-            descriptor: [12; 32],
-            bytes: 100,
-            index_entries: 10,
-            dependencies: vec![[3; 32]],
-        },
-        ForkInventory {
-            pack: [3; 32],
-            descriptor: [13; 32],
-            bytes: 100,
-            index_entries: 10,
-            dependencies: vec![],
-        },
+        ForkInventory::new([1; 32], [11; 32], 100, 10, vec![[2; 32]]),
+        ForkInventory::new([2; 32], [12; 32], 100, 10, vec![[3; 32]]),
+        ForkInventory::new([3; 32], [13; 32], 100, 10, vec![]),
     ]
 }
 /// Exact deterministic source/destination publication binding.
 #[must_use]
 pub fn binding() -> ForkBinding {
-    ForkBinding {
-        source: RepositoryId([1; 32]),
-        source_incarnation: REV,
-        branch: RefName("refs/heads/main".into()),
-        publication: PublicationFact {
-            generation: REV,
-            sequence: 1,
-            published_prefix: 1,
-            deletion_boundary: 0,
-            head: Some([10; 32]),
-            packmap: Some([1; 32]),
-        },
-        source_access: SourceAccess {
-            principal: [21; 32],
-            visibility: ForkVisibility::Private,
-            visibility_revision: REV,
-            authorization_revision: REV,
-        },
-        destination: RepositoryId([2; 32]),
-        destination_generation: Revision([2; 32]),
-        destination_visibility: ForkVisibility::Private,
-    }
+    ForkBinding::new(
+        RepositoryId([1; 32]),
+        REV,
+        RefName("refs/heads/main".into()),
+        PublicationFact::new(REV, 1, 1, 0, Some([10; 32]), Some([1; 32])),
+        SourceAccess::new([21; 32], ForkVisibility::Private, REV, REV),
+        RepositoryId([2; 32]),
+        Revision([2; 32]),
+        ForkVisibility::Private,
+    )
 }
 /// Fixed request with explicit authority fencing and grant-independent permission.
 #[must_use]
 pub fn attempt(id: u8) -> ForkAttempt {
-    ForkAttempt {
-        operation: OperationId([id; 32]),
-        reservation: Some(ReservationId([id; 32])),
-        replay: ReplayScope([id; 32]),
-        fingerprint: [id; 32],
-        expires_ms: 100,
-        authority: AuthorityFact {
-            namespace: NamespaceId([7; 32]),
-            mode: AuthorityMode::Authority,
-            generation: REV,
-            ready: true,
-        },
-        grant: None,
-        authority_fencing: true,
-    }
+    ForkAttempt::new(
+        OperationId([id; 32]),
+        Some(ReservationId([id; 32])),
+        ReplayScope([id; 32]),
+        [id; 32],
+        100,
+        AuthorityFact::new(NamespaceId([7; 32]), AuthorityMode::Authority, REV, true),
+        None,
+        true,
+    )
 }
 /// Fully staged destination with no reader-visible membership or writes.
 #[must_use]
 pub fn facts<'a>(plan: &'a ForkPlan, request: &'a ForkAttempt) -> ForkFacts<'a> {
-    ForkFacts {
-        repository: plan.binding().destination,
-        request,
-        apply_attempt: REV,
-        acceptance_point: 12,
-        job: observed(ForkJob {
+    {
+        let mut v = ForkFacts::new(plan.binding().destination, request, REV, 12);
+        v.job = observed(ForkJob::new(
             plan,
-            attempt: request.clone(),
-            expires_ms: 90,
-            state: ForkJobState::Staged {
+            request.clone(),
+            90,
+            ForkJobState::Staged {
                 packs: 3,
                 revision: REV,
                 last_effect: 10,
             },
-        }),
-        emptiness: observed(ForkEmptiness {
-            refs: 0,
-            visible_members: 0,
-            staged_members: 3,
-            staged_pack_digest: plan.pack_digest(),
-            staged_owner: Some(request.operation.clone()),
-            writes_enabled: false,
-        }),
-        name: observed(ForkName {
-            registered_by: None,
-            declared_visibility: Some(ForkVisibility::Private),
-        }),
-        lifecycle: Some(Observed::Absent(REV)),
-        permission: observed(ForkPermission {
-            operation: request.operation.clone(),
-            source_access: plan.binding().source_access.clone(),
-            destination_visibility: ForkVisibility::Private,
-            create: true,
-            write: true,
-        }),
-        authority: observed(request.authority.clone()),
-        grant: Some(Observed::Absent(REV)),
-        admission: observed(ForkAdmission {
+        ));
+        v.emptiness = observed(ForkEmptiness::new(
+            0,
+            0,
+            3,
+            plan.pack_digest(),
+            Some(request.operation.clone()),
+            false,
+        ));
+        v.name = observed(ForkName::new(None, Some(ForkVisibility::Private)));
+        v.lifecycle = Some(Observed::Absent(REV));
+        v.permission = observed(ForkPermission::new(
+            request.operation.clone(),
+            plan.binding().source_access.clone(),
+            ForkVisibility::Private,
+            true,
+            true,
+        ));
+        v.authority = observed(request.authority.clone());
+        v.grant = Some(Observed::Absent(REV));
+        v.admission = observed(ForkAdmission::new(
             plan,
-            operation: request.operation.clone(),
-            reservation: request.reservation.clone(),
-            declared_bytes: 300,
-            new_to_repo_bytes: 300,
-            charge: Some(REV),
-        }),
-        quota: observed(ForkQuota {
-            operation: request.operation.clone(),
-            charge: REV,
-            bytes: 300,
-            used_bytes: 300,
-            byte_limit: 300,
-            used_operations: 1,
-            operation_limit: 1,
-        }),
-        reservation: if request.reservation.is_some() {
+            request.operation.clone(),
+            request.reservation.clone(),
+            300,
+            300,
+            Some(REV),
+        ));
+        v.quota = observed(ForkQuota::new(
+            request.operation.clone(),
+            REV,
+            300,
+            300,
+            300,
+            1,
+            1,
+        ));
+        v.reservation = if request.reservation.is_some() {
             observed(ForkReservation::Pending {
                 operation: request.operation.clone(),
                 destination: plan.binding().destination,
@@ -169,60 +121,55 @@ pub fn facts<'a>(plan: &'a ForkPlan, request: &'a ForkAttempt) -> ForkFacts<'a> 
             })
         } else {
             Some(Observed::Absent(REV))
-        },
-        replay: observed(ForkReplay::InFlight {
+        };
+        v.replay = observed(ForkReplay::InFlight {
             operation: request.operation.clone(),
             fingerprint: request.fingerprint,
-        }),
+        });
+        v
     }
 }
 /// Final whole-source proof at point eleven, after staging and before acceptance.
 #[must_use]
 pub fn proof(plan: &ForkPlan) -> FinalForkSourceProof {
     let binding = plan.binding();
-    FinalForkSourceProof {
-        apply_attempt: REV,
-        staged_revision: REV,
-        proof_point: 11,
-        repository: binding.source,
-        branch: binding.branch.clone(),
-        lifecycle: Observed::Present {
-            value: LifecycleFact {
-                incarnation: binding.source_incarnation,
-                state: LifecycleState::Active,
-            },
+    FinalForkSourceProof::new(
+        REV,
+        REV,
+        11,
+        binding.source,
+        binding.branch.clone(),
+        Observed::Present {
+            value: LifecycleFact::new(binding.source_incarnation, LifecycleState::Active),
             revision: REV,
         },
-        publication: Observed::Present {
+        Observed::Present {
             value: binding.publication.clone(),
             revision: REV,
         },
-        access: Observed::Present {
+        Observed::Present {
             value: binding.source_access.clone(),
             revision: REV,
         },
-        readable: true,
-        packs: plan
-            .packs()
+        true,
+        plan.packs()
             .iter()
-            .map(|pack| ForkPackProof {
-                pack: pack.pack,
-                incarnation: binding.source_incarnation,
-                generation: binding.publication.generation,
-                membership: REV,
-                descriptor: pack.descriptor,
-                descriptor_revision: REV,
-                denial_revision: REV,
-                eligibility: ForkPackEligibility {
-                    live: true,
-                    cleared: true,
-                    held: false,
-                },
-                denied: false,
-                superseded: false,
+            .map(|pack| {
+                ForkPackProof::new(
+                    pack.pack,
+                    binding.source_incarnation,
+                    binding.publication.generation,
+                    REV,
+                    pack.descriptor,
+                    REV,
+                    REV,
+                    ForkPackEligibility::new(true, true, false),
+                    false,
+                    false,
+                )
             })
             .collect(),
-    }
+    )
 }
 
 /// Mutate every destination observation revision, including authoritative absence.

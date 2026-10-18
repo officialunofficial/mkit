@@ -3,6 +3,44 @@
 //! Unacquired facts are absent from a snapshot, never `Observed::Absent`.
 //! The host compares every atomic guard and commits every effect together.
 //! Source fences are separate pre-apply checks on each destination attempt.
+//!
+//! # Frozen surface
+//!
+//! Every step, decision, outcome, refusal and guard-kind enum is
+//! `#[non_exhaustive]`, so a host matches with a wildcard arm and makes that arm
+//! fail closed. Every fact, request and limit struct a host builds is
+//! `#[non_exhaustive]` with a constructor and public fields to assign.
+//!
+//! ```compile_fail,E0004
+//! use mkit_primitives::decision::ClearanceDecision;
+//! fn published(decision: &ClearanceDecision) -> bool {
+//!     match decision {
+//!         ClearanceDecision::AdvancePrefix { .. } => true,
+//!         ClearanceDecision::Retain { .. } => false,
+//!     }
+//! }
+//! ```
+//!
+//! ```compile_fail,E0639
+//! use mkit_primitives::{decision::Snapshot, evidence::RepositoryId};
+//! let _ = Snapshot { repository: RepositoryId([0; 32]), refs: vec![], replay: None,
+//!     tickets: vec![], reservations: vec![], authority: None, grant: None,
+//!     lifecycle: None, members: vec![], denial: None, policy: None,
+//!     admission: None, accounting: None, storage: None, publication: None,
+//!     basis: vec![] };
+//! ```
+//!
+//! ```
+//! use mkit_primitives::{decision::{ClearanceDecision, Snapshot}, evidence::RepositoryId};
+//! let mut snapshot = Snapshot::new(RepositoryId([0; 32]));
+//! snapshot.refs.clear();
+//! let published = |decision: &ClearanceDecision| match decision {
+//!     ClearanceDecision::AdvancePrefix { .. } => true,
+//!     // An unknown future decision must not publish.
+//!     _ => false,
+//! };
+//! assert!(!published(&ClearanceDecision::Retain { published_prefix: 0 }));
+//! ```
 
 mod basis;
 mod clearance;

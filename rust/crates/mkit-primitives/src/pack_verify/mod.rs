@@ -170,10 +170,10 @@ pub struct EvidencePage<'a> {
 /// One cooperative pull-machine outcome.
 #[derive(Debug)]
 #[must_use]
-#[non_exhaustive]
 // Keep the fixed-size sealed summary inline; boxing adds an ownership allocation
 // that the verifier would have to charge at completion.
 #[allow(clippy::large_enum_variant)]
+#[non_exhaustive]
 pub enum Step<'a> {
     /// Caller must acquire input.
     Request(Request),

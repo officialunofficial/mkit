@@ -30,34 +30,37 @@ fn advance<'a>(
     dependencies: &'a [Hash],
     suppliers: &'a [Hash],
 ) -> ClearanceAdvance<'a> {
-    ClearanceAdvance {
-        sequence,
-        generation: 1,
-        operation: OperationId([byte(sequence); 32]),
-        head: Some(id(byte(sequence))),
-        packmap: Some(id(byte(sequence + 10))),
-        state,
-        additions,
-        dependencies,
-        external_suppliers: suppliers,
-        obligations: &[],
-        obligation_revisions: &[],
-        takedown_complete: false,
-        flagged: false,
-        revision: rev(byte(sequence)),
+    {
+        let mut v = ClearanceAdvance::new(
+            sequence,
+            1,
+            OperationId([byte(sequence); 32]),
+            state,
+            rev(byte(sequence)),
+        );
+        v.head = Some(id(byte(sequence)));
+        v.packmap = Some(id(byte(sequence + 10)));
+        v.additions = additions;
+        v.dependencies = dependencies;
+        v.external_suppliers = suppliers;
+        v.obligations = &[];
+        v.obligation_revisions = &[];
+        v.takedown_complete = false;
+        v.flagged = false;
+        v
     }
 }
 
 fn prior(published: u64, sequence: u64) -> PriorPublication {
-    PriorPublication {
-        generation: 1,
+    PriorPublication::new(
+        1,
         sequence,
-        published_prefix: published,
-        deletion_boundary: 0,
-        head: Some(id(byte(published))),
-        packmap: Some(id(byte(published + 10))),
-        revision: rev(9),
-    }
+        published,
+        0,
+        Some(id(byte(published))),
+        Some(id(byte(published + 10))),
+        rev(9),
+    )
 }
 
 fn facts<'a>(
@@ -67,28 +70,14 @@ fn facts<'a>(
     suffix: &'a [ClearanceAdvance<'a>],
     witnesses: &'a [DependencyWitness],
 ) -> ClearanceFacts<'a> {
-    ClearanceFacts {
-        repository: RepositoryId([1; 32]),
-        moment,
-        prior,
-        previous_state: changed.state,
-        changed,
-        suffix,
-        witnesses,
-        lifecycle: ClearanceLifecycle::NotOffered,
-        deleted: false,
-    }
+    let mut v = ClearanceFacts::new(RepositoryId([1; 32]), moment, prior, changed);
+    v.suffix = suffix;
+    v.witnesses = witnesses;
+    v
 }
 
 fn witness(object: Hash, published: bool) -> DependencyWitness {
-    DependencyWitness {
-        object,
-        present: true,
-        published,
-        held: false,
-        generation: 1,
-        revision: rev(4),
-    }
+    DependencyWitness::new(object, true, published, false, 1, rev(4))
 }
 
 #[test]
@@ -285,10 +274,10 @@ fn mutated_snapshot_does_not_match_and_managed_lifecycle_fails_closed() {
     managed.lifecycle = ClearanceLifecycle::Managed {
         expected_incarnation: rev(1),
         current: Some(Observed::Present {
-            value: mkit_primitives::decision::LifecycleFact {
-                incarnation: rev(1),
-                state: mkit_primitives::decision::LifecycleState::Deleted,
-            },
+            value: mkit_primitives::decision::LifecycleFact::new(
+                rev(1),
+                mkit_primitives::decision::LifecycleState::Deleted,
+            ),
             revision: rev(2),
         }),
     };
@@ -316,11 +305,7 @@ fn hostile_suffix_and_item_counts_refuse_before_publication() {
     let huge = vec![id(9); 5];
     let changed = advance(1, ClearanceState::Cleared, &huge, &huge, &[]);
     let input = facts(ClearanceMoment::Acceptance, prior(0, 0), changed, &[], &[]);
-    let limits = ClearanceLimits {
-        max_advances: 64,
-        max_items: 2,
-        max_work: 100,
-    };
+    let limits = ClearanceLimits::new(64, 2, 100);
     assert_eq!(
         decide_clearance(&input, &limits).unwrap_err().code,
         FailureCode::ResourceLimit
@@ -388,10 +373,10 @@ fn conflicting_witnesses_and_foreign_incarnation_fail_closed() {
     managed.lifecycle = ClearanceLifecycle::Managed {
         expected_incarnation: rev(1),
         current: Some(Observed::Present {
-            value: mkit_primitives::decision::LifecycleFact {
-                incarnation: rev(2),
-                state: mkit_primitives::decision::LifecycleState::Active,
-            },
+            value: mkit_primitives::decision::LifecycleFact::new(
+                rev(2),
+                mkit_primitives::decision::LifecycleState::Active,
+            ),
             revision: rev(2),
         }),
     };
@@ -408,9 +393,10 @@ fn lookup_work_is_charged_and_flagged_suffix_records_withhold() {
     let many: Vec<Hash> = (0..=255).map(id).collect();
     let changed = advance(1, ClearanceState::Cleared, &many, &many, &[]);
     let input = facts(ClearanceMoment::Acceptance, prior(0, 0), changed, &[], &[]);
-    let tight = ClearanceLimits {
-        max_work: 1000,
-        ..ClearanceLimits::reference()
+    let tight = {
+        let mut v = ClearanceLimits::reference();
+        v.max_work = 1000;
+        v
     };
     assert_eq!(
         decide_clearance(&input, &tight).unwrap_err().code,

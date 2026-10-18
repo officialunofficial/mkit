@@ -558,24 +558,27 @@ fn clearance_prefix(
         .find(|view| view.sequence == changed.sequence)
         .cloned()
         .unwrap_or_else(|| clearance_advance(changed, &[], &[], Revision([0; 32])));
-    let facts = ClearanceFacts {
-        repository: RepositoryId([0; 32]),
-        moment: ClearanceMoment::Recheck,
-        prior: PriorPublication {
-            generation: state.generation,
-            sequence: state.sequence,
-            published_prefix: state.published,
-            deletion_boundary: state.boundary,
-            head: state.value.head,
-            packmap: state.value.packmap,
-            revision: prior,
-        },
-        previous_state: obligation_state_from(changed.state),
-        changed: changed_view,
-        suffix: &views,
-        witnesses: &[],
-        lifecycle: ClearanceLifecycle::NotOffered,
-        deleted: false,
+    let facts = {
+        let mut v = ClearanceFacts::new(
+            RepositoryId([0; 32]),
+            ClearanceMoment::Recheck,
+            PriorPublication::new(
+                state.generation,
+                state.sequence,
+                state.published,
+                state.boundary,
+                state.value.head,
+                state.value.packmap,
+                prior,
+            ),
+            changed_view,
+        );
+        v.previous_state = obligation_state_from(changed.state);
+        v.suffix = &views;
+        v.witnesses = &[];
+        v.lifecycle = ClearanceLifecycle::NotOffered;
+        v.deleted = false;
+        v
     };
     let verdict = decide_clearance(&facts, &ClearanceLimits::reference())
         .map_err(|_| StoreError::Corrupt("publication prefix decision refused".into()))?;
@@ -594,6 +597,11 @@ fn clearance_prefix(
             },
         ),
         ClearanceDecision::Retain { published_prefix } => (*published_prefix, state.value.clone()),
+        _ => {
+            return Err(StoreError::Corrupt(
+                "unknown publication clearance decision".into(),
+            ));
+        }
     })
 }
 
@@ -603,21 +611,24 @@ fn clearance_advance<'a>(
     obligation_revisions: &'a [Revision],
     revision: Revision,
 ) -> ClearanceAdvance<'a> {
-    ClearanceAdvance {
-        sequence: advance.sequence,
-        generation: advance.generation,
-        operation: OperationId(advance.operation),
-        head: advance.value.head,
-        packmap: advance.value.packmap,
-        state: obligation_state_from(advance.state),
-        additions: &[],
-        dependencies: &[],
-        external_suppliers: &[],
-        obligations,
-        obligation_revisions,
-        takedown_complete: advance.state == Clearance::Resolved,
-        flagged: false,
-        revision,
+    {
+        let mut v = ClearanceAdvance::new(
+            advance.sequence,
+            advance.generation,
+            OperationId(advance.operation),
+            obligation_state_from(advance.state),
+            revision,
+        );
+        v.head = advance.value.head;
+        v.packmap = advance.value.packmap;
+        v.additions = &[];
+        v.dependencies = &[];
+        v.external_suppliers = &[];
+        v.obligations = obligations;
+        v.obligation_revisions = obligation_revisions;
+        v.takedown_complete = advance.state == Clearance::Resolved;
+        v.flagged = false;
+        v
     }
 }
 

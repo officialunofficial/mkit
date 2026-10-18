@@ -172,6 +172,7 @@ fn record_frame(frames: &mut Hasher, frame: &mkit_primitives::pack_verify::frami
             frames.update(&base);
             frames.update(stream);
         }
+        ref other => panic!("unmodelled framed entry: {other:?}"),
     }
 }
 

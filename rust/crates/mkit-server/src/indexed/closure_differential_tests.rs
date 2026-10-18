@@ -138,6 +138,7 @@ impl Fixture {
                 }
                 Ok(ClosureStep::Request(request)) => request.clone(),
                 Err(failure) => return file_failure(&walker, &failure),
+                Ok(other) => panic!("unmodelled closure step: {other:?}"),
             };
             let answered = match request {
                 ClosureRequest::Membership(request) => {
@@ -159,7 +160,9 @@ impl Fixture {
                     }))
                 }
                 ClosureRequest::Canonical { request, source } => {
-                    let CanonicalSource::Member(fact) = &source;
+                    let CanonicalSource::Member(fact) = &source else {
+                        panic!("unmodelled canonical source: {source:?}");
+                    };
                     let bytes = serialize(members[&fact.object]).unwrap();
                     walker.answer(ClosureResponse::Canonical {
                         request,
@@ -172,6 +175,7 @@ impl Fixture {
                     page,
                     value: Acquisition::Present(&pages[&page.digest]),
                 }),
+                other => panic!("unmodelled closure request: {other:?}"),
             };
             if let Err(failure) = answered {
                 return file_failure(&walker, &failure);

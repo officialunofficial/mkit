@@ -12,14 +12,8 @@ use mkit_primitives::{
 fn two_absent_members_at_one_revision_remain_distinct() {
     let repository = RepositoryId([1; 32]);
     let revision = Revision([2; 32]);
-    let first = MembershipObservation {
-        object: [3; 32],
-        observed: Observed::Absent(revision),
-    };
-    let second = MembershipObservation {
-        object: [4; 32],
-        observed: Observed::Absent(revision),
-    };
+    let first = MembershipObservation::new([3; 32], Observed::Absent(revision));
+    let second = MembershipObservation::new([4; 32], Observed::Absent(revision));
     assert_ne!(first, second);
     let first_guard = RequiredGuard::Membership {
         repository,
@@ -36,14 +30,14 @@ fn two_absent_members_at_one_revision_remain_distinct() {
 
 #[test]
 fn replay_retains_distinct_messages_under_the_same_public_code() {
-    let first = TerminalResult::Rejected(PermanentRefusal {
-        code: PermanentCode::PermissionDenied,
-        public_message: "signer is not allowed".into(),
-    });
-    let second = TerminalResult::Rejected(PermanentRefusal {
-        code: PermanentCode::PermissionDenied,
-        public_message: "update is not a fast-forward".into(),
-    });
+    let first = TerminalResult::Rejected(PermanentRefusal::new(
+        PermanentCode::PermissionDenied,
+        "signer is not allowed".into(),
+    ));
+    let second = TerminalResult::Rejected(PermanentRefusal::new(
+        PermanentCode::PermissionDenied,
+        "update is not a fast-forward".into(),
+    ));
     assert_ne!(first, second);
     if let TerminalResult::Rejected(refusal) = first {
         assert_eq!(refusal.public_message, "signer is not allowed");
@@ -54,14 +48,14 @@ fn replay_retains_distinct_messages_under_the_same_public_code() {
 
 #[test]
 fn ref_conflict_outcomes_keep_each_reservations_delivery_key() {
-    let terminal = ReservationTerminal {
-        repository: RepositoryId([1; 32]),
-        occurred_ms: 100,
-        kind: ReservationTerminalKind::Aborted {
+    let terminal = ReservationTerminal::new(
+        RepositoryId([1; 32]),
+        100,
+        ReservationTerminalKind::Aborted {
             reason: ReservationAbortReason::RefConflict,
             detail: String::new(),
         },
-    };
+    );
     let first = DurableOutcome {
         operation: OperationId([2; 32]),
         reservation: ReservationId([3; 32]),

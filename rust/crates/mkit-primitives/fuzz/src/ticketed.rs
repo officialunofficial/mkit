@@ -40,53 +40,35 @@ fn present<T>(value: T) -> Observed<T> {
     }
 }
 fn limits() -> RefDecisionLimits {
-    RefDecisionLimits {
-        facts: 256,
-        guards: 64,
-        bytes: 65_536,
-        work: 100_000,
-        public_message_bytes: 512,
-    }
+    RefDecisionLimits::new(256, 64, 65_536, 100_000, 512)
 }
 fn pair() -> [RefChange; 2] {
     [
-        RefChange {
-            name: packmap(),
-            condition: Match(OLD),
-            target: Some(NEW),
-        },
-        RefChange {
-            name: head(),
-            condition: Match(OLD),
-            target: Some(NEW),
-        },
+        RefChange::new(packmap(), Match(OLD), Some(NEW)),
+        RefChange::new(head(), Match(OLD), Some(NEW)),
     ]
 }
 fn ticket_fact(byte: u8) -> TicketFact {
-    TicketFact {
-        ticket: TicketId([byte; 32]),
-        repository: REPO,
-        name: head(),
-        signer: SIGNER,
-        pack: PackSource {
+    TicketFact::new(
+        TicketId([byte; 32]),
+        REPO,
+        head(),
+        SIGNER,
+        PackSource {
             id: [0x50 + byte; 32],
             len: 1000 + u64::from(byte),
             binding: SourceBinding([0; 32]),
         },
-        part_bytes: 1024,
-        created_ms: 10,
-        expires_ms: 1_000,
-        reservation: ReservationId([byte | 0x80; 32]),
-        authority_generation: None,
-        upload_session: None,
-    }
+        1024,
+        10,
+        1_000,
+        ReservationId([byte | 0x80; 32]),
+        None,
+        None,
+    )
 }
 fn claim(byte: u8, proof: UploadProof) -> TicketClaim {
-    TicketClaim {
-        ticket: TicketId([byte; 32]),
-        proof,
-        counted: false,
-    }
+    TicketClaim::new(TicketId([byte; 32]), proof, false)
 }
 fn reservation(byte: u8) -> (ReservationId, Observed<ReservationFact>) {
     (
@@ -95,57 +77,62 @@ fn reservation(byte: u8) -> (ReservationId, Observed<ReservationFact>) {
     )
 }
 fn write(changes: &[RefChange]) -> RefWriteRequest<'_> {
-    RefWriteRequest {
-        repository: REPO,
-        operation: Some(OperationId([6; 32])),
-        kind: RefWriteKind::Advance,
-        changes,
-        admitted: &[],
-        presence: None,
-        signer: Some(SIGNER),
-        replay: None,
-        ancestry: &[],
-        now_ms: NOW,
-        required: RefRequirements {
-            authority: None,
-            grant: None,
-            incarnation: None,
-            policy: None,
-            admission: None,
-            members: &[],
-            indexed_head: false,
-            membership_window: MembershipWindow::Elapsed,
-            denial: false,
-            publication: false,
-            source: None,
-            valid_through_ms: None,
-        },
+    {
+        let mut v = RefWriteRequest::new(
+            REPO,
+            RefWriteKind::Advance,
+            changes,
+            {
+                let mut v = RefRequirements::new(MembershipWindow::Elapsed);
+                v.authority = None;
+                v.grant = None;
+                v.incarnation = None;
+                v.policy = None;
+                v.admission = None;
+                v.members = &[];
+                v.indexed_head = false;
+                v.denial = false;
+                v.publication = false;
+                v.source = None;
+                v.valid_through_ms = None;
+                v
+            },
+            NOW,
+        );
+        v.operation = Some(OperationId([6; 32]));
+        v.admitted = &[];
+        v.presence = None;
+        v.signer = Some(SIGNER);
+        v.replay = None;
+        v.ancestry = &[];
+        v
     }
 }
 fn snapshot(changes: &[RefChange], ticket_bytes: &[u8]) -> Snapshot {
-    Snapshot {
-        repository: REPO,
-        refs: changes
+    {
+        let mut v = Snapshot::new(REPO);
+        v.refs = changes
             .iter()
             .map(|change| (change.name.clone(), present(OLD)))
-            .collect(),
-        replay: None,
-        tickets: ticket_bytes
+            .collect();
+        v.replay = None;
+        v.tickets = ticket_bytes
             .iter()
             .map(|&byte| (TicketId([byte; 32]), present(ticket_fact(byte))))
-            .collect(),
-        reservations: ticket_bytes.iter().map(|&byte| reservation(byte)).collect(),
-        authority: None,
-        grant: None,
-        lifecycle: None,
-        members: vec![],
-        denial: None,
-        policy: None,
-        admission: None,
-        accounting: None,
-        publication: None,
-        storage: None,
-        basis: vec![],
+            .collect();
+        v.reservations = ticket_bytes.iter().map(|&byte| reservation(byte)).collect();
+        v.authority = None;
+        v.grant = None;
+        v.lifecycle = None;
+        v.members = vec![];
+        v.denial = None;
+        v.policy = None;
+        v.admission = None;
+        v.accounting = None;
+        v.storage = None;
+        v.publication = None;
+        v.basis = vec![];
+        v
     }
 }
 fn request<'a>(
@@ -153,25 +140,25 @@ fn request<'a>(
     claims: &'a [TicketClaim],
     basis: &'a [AcceptanceBasis],
 ) -> TicketedAdvanceRequest<'a> {
-    TicketedAdvanceRequest {
-        write: write(changes),
-        tickets: claims,
-        verification: VerificationVerdict::Verified(basis),
-        storage: StorageAccounting::Disabled,
-        pending: None,
-    }
+    TicketedAdvanceRequest::new(
+        write(changes),
+        claims,
+        VerificationVerdict::Verified(basis),
+        StorageAccounting::Disabled,
+        None,
+    )
 }
 fn pending_binding(byte: u8) -> PendingBinding {
-    PendingBinding {
-        reservation: ReservationId([byte; 32]),
-        expected: present(ReservationFact::Pending {
+    PendingBinding::new(
+        ReservationId([byte; 32]),
+        present(ReservationFact::Pending {
             repository: REPO,
             created_ms: 5,
             reconcile_ms: 9_000,
             op: ReservationOp::Write,
         }),
-        occurred_ms: NOW,
-    }
+        NOW,
+    )
 }
 
 /// Replay one fixed-size transition plan through all three ticketed entry points.
@@ -194,17 +181,14 @@ pub fn check(data: &[u8]) {
         },
     )];
     // The host-attested basis carries only the fields the plan provides.
-    let basis = AcceptanceBasis::attested_by_host(HostAttestation {
-        repository: REPO,
-        packs: Vec::new(),
-        root: (byte(5) & 1 != 0).then_some([byte(5); 32]),
-        membership: (byte(6) & 1 != 0).then_some(MembershipWitness {
-            generation: u64::from(byte(6)),
-            removal_version: u64::from(byte(7)),
-        }),
-        denial_version: (byte(8) & 1 != 0).then_some(u64::from(byte(8))),
-        dependencies: Vec::new(),
+    let mut attestation = HostAttestation::new(REPO, Vec::new());
+    attestation.root = (byte(5) & 1 != 0).then_some([byte(5); 32]);
+    attestation.membership = (byte(6) & 1 != 0).then_some(MembershipWitness {
+        generation: u64::from(byte(6)),
+        removal_version: u64::from(byte(7)),
     });
+    attestation.denial_version = (byte(8) & 1 != 0).then_some(u64::from(byte(8)));
+    let basis = AcceptanceBasis::attested_by_host(attestation);
     let mut req = request(&changes, &claims, std::slice::from_ref(&basis));
     let mut snap = snapshot(&changes, &[0x42]);
     snap.basis = basis.guards().to_vec();
@@ -220,27 +204,27 @@ pub fn check(data: &[u8]) {
     req.verification = match byte(3) % 3 {
         0 => VerificationVerdict::Verified(std::slice::from_ref(&basis)),
         1 => VerificationVerdict::Pending,
-        _ => VerificationVerdict::Refused(decision::PermanentRefusal {
-            code: PermanentCode::InvalidArgument,
-            public_message: "invalid pack".into(),
-        }),
+        _ => VerificationVerdict::Refused(decision::PermanentRefusal::new(
+            PermanentCode::InvalidArgument,
+            "invalid pack".into(),
+        )),
     };
     if byte(4) % 3 != 0 {
-        req.write.replay = Some(decision::ref_write::RefReplay {
-            scope: ReplayScope([8; 32]),
-            fingerprint: [9; 32],
-            expires_ms: 10_000,
-        });
-        snap.replay = Some(present(ReplayFact {
-            scope: ReplayScope([8; 32]),
-            fingerprint: [9; 32],
-            expires_ms: 10_000,
-            state: if byte(4) % 3 == 1 {
+        req.write.replay = Some(decision::ref_write::RefReplay::new(
+            ReplayScope([8; 32]),
+            [9; 32],
+            10_000,
+        ));
+        snap.replay = Some(present(ReplayFact::new(
+            ReplayScope([8; 32]),
+            [9; 32],
+            10_000,
+            if byte(4) % 3 == 1 {
                 ReplayState::Committed(TerminalResult::Applied(vec![]))
             } else {
                 ReplayState::InFlight { resumable: false }
             },
-        }));
+        )));
     }
     let first = decide_ticketed_advance(&req, &snap, limits())
         .expect("bounded model observation must exist");
@@ -306,14 +290,14 @@ pub fn check(data: &[u8]) {
         assert!(effects.tickets.len() <= 1 && effects.outcomes.len() <= 1);
     }
     let (id, expected) = reservation(0x42);
-    let terminal = ReservationTerminal {
-        repository: REPO,
-        occurred_ms: NOW,
-        kind: ReservationTerminalKind::Aborted {
+    let terminal = ReservationTerminal::new(
+        REPO,
+        NOW,
+        ReservationTerminalKind::Aborted {
             reason: ReservationAbortReason::Internal,
             detail: String::new(),
         },
-    };
+    );
     let settled = decide_reservation_settlement(
         REPO,
         &OperationId([6; 32]),
