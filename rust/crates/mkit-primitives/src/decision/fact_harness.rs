@@ -733,3 +733,132 @@ pub(crate) fn assert_guards_cover(
     );
     changed
 }
+
+/// Every single-field variant of an attestation: each field changed, removed,
+/// or (for an absent optional field) supplied, and each dependency varied.
+/// Each variant must change the guards a basis derives from it.
+#[allow(clippy::too_many_lines)] // One block per attested field, each with its removal and addition.
+pub(crate) fn basis_mutations(
+    attestation: &super::HostAttestation,
+) -> Vec<(String, super::HostAttestation)> {
+    use super::HostAttestation;
+    use crate::evidence::acceptance::MembershipWitness;
+    let mut out: Vec<(String, HostAttestation)> = Vec::new();
+    let mut push = |name: &str, next: HostAttestation| out.push((name.to_owned(), next));
+    push(
+        "repository",
+        HostAttestation {
+            repository: RepositoryId(flip(&attestation.repository.0)),
+            ..attestation.clone()
+        },
+    );
+    match attestation.root {
+        Some(root) => {
+            push(
+                "root",
+                HostAttestation {
+                    root: Some(flip(&root)),
+                    ..attestation.clone()
+                },
+            );
+            push(
+                "root removed",
+                HostAttestation {
+                    root: None,
+                    ..attestation.clone()
+                },
+            );
+        }
+        None => push(
+            "root added",
+            HostAttestation {
+                root: Some(Hash::sample()),
+                ..attestation.clone()
+            },
+        ),
+    }
+    match attestation.membership {
+        Some(witness) => {
+            for (name, next) in [
+                (
+                    "membership generation",
+                    MembershipWitness {
+                        generation: witness.generation.wrapping_add(1),
+                        ..witness
+                    },
+                ),
+                (
+                    "membership removal version",
+                    MembershipWitness {
+                        removal_version: witness.removal_version.wrapping_add(1),
+                        ..witness
+                    },
+                ),
+            ] {
+                push(
+                    name,
+                    HostAttestation {
+                        membership: Some(next),
+                        ..attestation.clone()
+                    },
+                );
+            }
+            push(
+                "membership removed",
+                HostAttestation {
+                    membership: None,
+                    ..attestation.clone()
+                },
+            );
+        }
+        None => push(
+            "membership added",
+            HostAttestation {
+                membership: Some(MembershipWitness {
+                    generation: 1,
+                    removal_version: 1,
+                }),
+                ..attestation.clone()
+            },
+        ),
+    }
+    match attestation.denial_version {
+        Some(version) => {
+            push(
+                "denial version",
+                HostAttestation {
+                    denial_version: Some(version.wrapping_add(1)),
+                    ..attestation.clone()
+                },
+            );
+            push(
+                "denial removed",
+                HostAttestation {
+                    denial_version: None,
+                    ..attestation.clone()
+                },
+            );
+        }
+        None => push(
+            "denial added",
+            HostAttestation {
+                denial_version: Some(1),
+                ..attestation.clone()
+            },
+        ),
+    }
+    for (i, dependency) in attestation.dependencies.iter().enumerate() {
+        for variant in dependency.variants() {
+            let mut next = attestation.clone();
+            next.dependencies[i] = variant;
+            push(&format!("dependencies[{i}]"), next);
+        }
+        let mut next = attestation.clone();
+        next.dependencies.remove(i);
+        push(&format!("dependencies[{i}] removed"), next);
+    }
+    let mut next = attestation.clone();
+    next.dependencies.push(MemberFact::sample());
+    push("dependency added", next);
+    out
+}

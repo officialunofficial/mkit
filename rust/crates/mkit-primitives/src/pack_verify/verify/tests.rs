@@ -569,6 +569,24 @@ fn external_delta_base_verifies_through_member_fact() {
     assert!(counts.delta_entries <= counts.entries);
     assert_eq!(verified.dependencies().count, 1);
     let _ = result_id;
+    // The sealed commitment is exactly the one fact the host supplied, and any
+    // other list differs.
+    let supplied = fact(base_id, &base, ObjectType::Blob);
+    assert_eq!(
+        verified.external_bases(),
+        crate::pack_verify::ExternalBases::of([&supplied]).unwrap()
+    );
+    assert_eq!(verified.external_bases().count, 1);
+    assert_ne!(
+        verified.external_bases(),
+        crate::pack_verify::ExternalBases::EMPTY
+    );
+    let mut altered = supplied;
+    altered.revision = Revision([0xee; 32]);
+    assert_ne!(
+        verified.external_bases(),
+        crate::pack_verify::ExternalBases::of([&altered]).unwrap()
+    );
 }
 
 #[test]
@@ -853,6 +871,77 @@ fn mid_decode_checkpoint_resumes_through_page_audit() {
     let verified = host.finish(&mut resumed).unwrap();
     assert_eq!(verified.counts().entries, 4);
     assert_eq!(verified.counts().delta_entries, 1);
+}
+
+#[test]
+fn a_resumed_run_keeps_the_external_base_commitment() {
+    let (first_id, first) = blob(b"first external base");
+    let (second_id, second) = blob(b"second external base");
+    let (_, first_result) = blob(b"first result");
+    let (_, second_result) = blob(b"second result");
+    let mut writer = PackWriter::new();
+    writer
+        .push_delta(&first_id, &delta::encode(&first, &first_result).unwrap())
+        .unwrap();
+    writer
+        .push_delta(&second_id, &delta::encode(&second, &second_result).unwrap())
+        .unwrap();
+    let pack = writer.finish().unwrap();
+    let mut host = Host::new(&pack);
+    let facts = [
+        fact(first_id, &first, ObjectType::Blob),
+        fact(second_id, &second, ObjectType::Blob),
+    ];
+    host.externals
+        .insert(first_id, (facts[0].clone(), first.clone()));
+    host.externals
+        .insert(second_id, (facts[1].clone(), second.clone()));
+    let mut machine = driver(&pack);
+    let mut snapshot = None;
+    for _ in 0..400 {
+        match machine.step().unwrap() {
+            Step::Request(request) => host.serve(&mut machine, &request).unwrap(),
+            Step::ProvisionalObject(fragment) => {
+                host.fragments
+                    .entry(fragment.ordinal)
+                    .or_default()
+                    .extend_from_slice(fragment.bytes);
+            }
+            Step::RetainEvidence(page) => {
+                let commitment = page.commitment;
+                host.pages.push((commitment, page.bytes.to_vec()));
+                machine.acknowledge_retention(commitment).unwrap();
+            }
+            Step::Progress | Step::ReleasePage(_) => (),
+            Step::Complete(_) => panic!("pack finished before a snapshot"),
+        }
+        if machine.ordinal == 1
+            && snapshot.is_none()
+            && let Ok(cp) = machine.checkpoint()
+        {
+            snapshot = Some(Checkpoint::from_bytes(cp.bytes(), limits()).unwrap());
+            break;
+        }
+    }
+    let snapshot = snapshot.expect("a drained boundary after the first delta");
+    let state = snapshot.decode(limits()).unwrap();
+    assert_eq!(state.verify.unwrap().external_lookups, 1);
+    let mut resumed = VerifyDriver::resume(
+        source(&pack),
+        REPOSITORY,
+        profile(),
+        limits(),
+        18,
+        &snapshot,
+    )
+    .unwrap();
+    let verified = host.finish(&mut resumed).unwrap();
+    // The first base counted before the checkpoint, the second after resume.
+    assert_eq!(
+        verified.external_bases(),
+        crate::pack_verify::ExternalBases::of(&facts).unwrap()
+    );
+    assert_eq!(verified.external_bases().count, 2);
 }
 
 #[test]

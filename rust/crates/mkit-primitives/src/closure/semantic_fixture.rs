@@ -12,7 +12,7 @@ use crate::{
         MemberFact, PackSource, PageCommitment, ProfileId, RepositoryId, Revision, RulesetBinding,
         RulesetId, SourceBinding,
     },
-    pack_verify::Acquisition,
+    pack_verify::{Acquisition, VerifiedPack},
 };
 use mkit_core::{
     hash::{Hash, hash},
@@ -190,8 +190,16 @@ fn frozen_direct_children_case_checks_surplus_and_repository_frontier() {
         membership_batch: 4,
         work: 100_000,
     };
+    let verified = VerifiedPack::synthetic_for_tests(
+        case.view.object_set_root(),
+        RulesetBinding {
+            ruleset: RulesetId(1),
+            profile: ProfileId::Indexed,
+        },
+    );
     let mut walker = ClosureWalker::new(
         case.view,
+        &verified,
         &case.heads,
         REPOSITORY,
         VIEW,

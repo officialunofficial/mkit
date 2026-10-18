@@ -18,7 +18,7 @@ workspace = true
 cargo-fuzz = true
 
 [dependencies]
-mkit-primitives = { path = "..", version = "0.1", default-features = false, features = ["pack-ruzstd"] }
+mkit-primitives = { path = "..", version = "0.1", default-features = false, features = ["pack-ruzstd", "synthetic-artifacts"] }
 mkit-core = { path = "../../mkit-core", default-features = false }
 libfuzzer-sys = { version = "0.4", optional = true }
 

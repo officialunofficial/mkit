@@ -299,6 +299,13 @@ and authority checks of the same request rather than on a batch comparison of
 the grant epoch. The defensive abort of tickets whose pack is missing compares
 the ticket rows it closes and every earlier ticket row that fixed its boundary.
 
+The ticketed path accepts over a host attestation ([SPEC-PRIMITIVE-EVIDENCE](SPEC-PRIMITIVE-EVIDENCE.md)
+§4.4), filled from facts the server already holds and adding no read. The server's
+denial guard is the §14.2 plan-time proof window, bounded by `NotAfter`, not a
+compared denial version, and it keeps no repository membership witness, so the
+attestation carries neither and derives no guard. Reading and comparing them is
+a separate change with its own read cost.
+
 **Reference-server behavior.** One fact has one class at every portable decision.
 "Before a result is saved" covers the ref write, the ticketed advance and fork
 acceptance; "after acceptance" covers fork advance, activation, completion and

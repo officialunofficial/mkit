@@ -18,8 +18,8 @@ mod tests;
 pub use decide::{decide_reservation_settlement, decide_ticket_cleanup, decide_ticketed_advance};
 
 use super::{
-    Observed, PermanentRefusal, ReservationFact, ReservationId, StorageFact, TicketId,
-    ref_write::RefWriteRequest,
+    AcceptanceBasis, Observed, PermanentRefusal, ReservationFact, ReservationId, StorageFact,
+    TicketId, ref_write::RefWriteRequest,
 };
 
 /// Most upload tickets one advance consumes (SPEC-SERVER §9.3).
@@ -59,11 +59,17 @@ pub struct TicketClaim {
 }
 
 /// Batch content-verification result already decided by the host.
+///
+/// There is no bare "satisfied" input: acceptance requires a sealed
+/// [`AcceptanceBasis`], whose guards the decision adds to its guard set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum VerificationVerdict {
-    /// Content verification satisfied.
-    Satisfied,
+pub enum VerificationVerdict<'a> {
+    /// Content verification satisfied over these bases (at least one). Every
+    /// valid ticket's pack must be covered by one of them, and every basis is
+    /// for the request's repository. An attested basis is the host's own
+    /// assertion: see [`HostAttestation`](super::HostAttestation).
+    Verified(&'a [AcceptanceBasis]),
     /// Verification remains scheduled; the operation waits and retries.
     Pending,
     /// Verification refused the batch, including a proof arriving too late.
@@ -123,7 +129,7 @@ pub struct TicketedAdvanceRequest<'a> {
     /// Claimed tickets in request order; empty consumes nothing.
     pub tickets: &'a [TicketClaim],
     /// Content-verification verdict for the assembled batch.
-    pub verification: VerificationVerdict,
+    pub verification: VerificationVerdict<'a>,
     /// This partition's stored-bytes counting disposition.
     pub storage: StorageAccounting,
     /// Original admission reservation pending settlement.

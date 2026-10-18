@@ -1,10 +1,10 @@
 {
   "cursor_bytes": 263,
   "deferred_failure": null,
-  "description": "Format version 3 all-entry verification checkpoint at the first entry boundary, including exact acquisition hash frontiers and bounded deferred-refusal state.",
-  "encoded_bytes": 1065,
+  "description": "Format version 4 all-entry verification checkpoint at the first entry boundary, including exact acquisition hash frontiers and bounded deferred-refusal state and the external-base commitment.",
+  "encoded_bytes": 1097,
   "expected": "Checkpoint",
-  "format_version": 3,
+  "format_version": 4,
   "generation": 17,
   "header": {
     "count": 2,

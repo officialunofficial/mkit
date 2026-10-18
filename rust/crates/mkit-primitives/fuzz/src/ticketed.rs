@@ -9,13 +9,15 @@ use mkit_primitives::decision::ticketed::{
     decide_ticketed_advance,
 };
 use mkit_primitives::decision::{
-    self, Observed, OperationId, PermanentCode, RefName, ReplayFact, ReplayScope, ReplayState,
-    ReservationAbortReason, ReservationFact, ReservationId, ReservationOp, ReservationTerminal,
-    ReservationTerminalKind, Snapshot, TerminalResult, TicketFact, TicketId, WriteDecision,
+    self, AcceptanceBasis, HostAttestation, Observed, OperationId, PermanentCode, RefName,
+    ReplayFact, ReplayScope, ReplayState, ReservationAbortReason, ReservationFact, ReservationId,
+    ReservationOp, ReservationTerminal, ReservationTerminalKind, Snapshot, TerminalResult,
+    TicketFact, TicketId, WriteDecision,
 };
 
 use mkit_core::hash::Hash;
 use mkit_core::refs::RefWriteCondition::Match;
+use mkit_primitives::evidence::acceptance::MembershipWitness;
 use mkit_primitives::evidence::{PackSource, RepositoryId, Revision, SourceBinding};
 
 const REPO: RepositoryId = RepositoryId([1; 32]);
@@ -143,13 +145,18 @@ fn snapshot(changes: &[RefChange], ticket_bytes: &[u8]) -> Snapshot {
         accounting: None,
         publication: None,
         storage: None,
+        basis: vec![],
     }
 }
-fn request<'a>(changes: &'a [RefChange], claims: &'a [TicketClaim]) -> TicketedAdvanceRequest<'a> {
+fn request<'a>(
+    changes: &'a [RefChange],
+    claims: &'a [TicketClaim],
+    basis: &'a [AcceptanceBasis],
+) -> TicketedAdvanceRequest<'a> {
     TicketedAdvanceRequest {
         write: write(changes),
         tickets: claims,
-        verification: VerificationVerdict::Satisfied,
+        verification: VerificationVerdict::Verified(basis),
         storage: StorageAccounting::Disabled,
         pending: None,
     }
@@ -186,8 +193,21 @@ pub fn check(data: &[u8]) {
             _ => UploadProof::PackMissing,
         },
     )];
-    let mut req = request(&changes, &claims);
+    // The host-attested basis carries only the fields the plan provides.
+    let basis = AcceptanceBasis::attested_by_host(HostAttestation {
+        repository: REPO,
+        packs: Vec::new(),
+        root: (byte(5) & 1 != 0).then_some([byte(5); 32]),
+        membership: (byte(6) & 1 != 0).then_some(MembershipWitness {
+            generation: u64::from(byte(6)),
+            removal_version: u64::from(byte(7)),
+        }),
+        denial_version: (byte(8) & 1 != 0).then_some(u64::from(byte(8))),
+        dependencies: Vec::new(),
+    });
+    let mut req = request(&changes, &claims, std::slice::from_ref(&basis));
     let mut snap = snapshot(&changes, &[0x42]);
+    snap.basis = basis.guards().to_vec();
     if byte(1) & 1 != 0 {
         snap.refs[0].1 = present(NEW);
     }
@@ -198,7 +218,7 @@ pub fn check(data: &[u8]) {
         req.pending = Some(pending);
     }
     req.verification = match byte(3) % 3 {
-        0 => VerificationVerdict::Satisfied,
+        0 => VerificationVerdict::Verified(std::slice::from_ref(&basis)),
         1 => VerificationVerdict::Pending,
         _ => VerificationVerdict::Refused(decision::PermanentRefusal {
             code: PermanentCode::InvalidArgument,

@@ -117,6 +117,20 @@ a membership guard for them. Under `Relay` and `Disabled` accounting there is no
 counter in the partition: `counted` is an advisory membership observation and the
 coordinator's `StorageChanged` outcome stays authoritative.
 
+`decide_ticketed_advance` accepts only over sealed `AcceptanceBasis` values
+(`VerificationVerdict::Verified`, one per accepted pack); there is no bare
+"satisfied" input, and a ticket whose pack no basis covers is refused. The
+decision adds the basis guards to its set: a repository-scoped membership
+witness (generation and removal version, compared atomically), the one global
+denial version, per-dependency membership and publication guards, and a root
+binding (the evidence digest, or the object-set and closure roots). The three
+constructors draw on one guard vocabulary, so a host lowers any of them through
+one path. `AcceptanceBasis::attested_by_host`
+is the one explicit trust path: the host asserts integrity and closure, the
+decision derives guards only from the attestation's present fields, and the host
+owns every guard the attestation does not carry. `Guarded::into_lowering` hands
+back the effects together with their guards. See SPEC-PRIMITIVE-EVIDENCE 4.4.
+
 `decide_ticket_cleanup` aborts only a reservation that is still
 `Ticketed(claim.ticket)` and guards every ticket row up to the first failure.
 `decide_reservation_settlement` of a `Ticketed` reservation closes the bound

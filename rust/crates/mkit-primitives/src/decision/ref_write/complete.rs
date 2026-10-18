@@ -40,7 +40,8 @@ pub fn validate_guard_kind(kind: Option<GuardKind>, version: u32) -> Result<Guar
             | GuardKind::Accounting
             | GuardKind::Storage
             | GuardKind::Publication
-            | GuardKind::ValidThrough),
+            | GuardKind::ValidThrough
+            | GuardKind::Binding),
         ) => Ok(kind),
         None => Err(failure(FailureCode::UnsupportedCapability)),
     }
@@ -58,14 +59,19 @@ pub const fn guard_kind(guard: &RequiredGuard) -> GuardKind {
         RequiredGuard::Authority { .. } => GuardKind::Authority,
         RequiredGuard::Grant { .. } => GuardKind::Grant,
         RequiredGuard::Repository { .. } => GuardKind::Repository,
-        RequiredGuard::Membership { .. } => GuardKind::Membership,
-        RequiredGuard::Denial { .. } => GuardKind::Denial,
+        RequiredGuard::Membership { .. } | RequiredGuard::MembershipWitness { .. } => {
+            GuardKind::Membership
+        }
+        RequiredGuard::Denial { .. } | RequiredGuard::DenialVersion { .. } => GuardKind::Denial,
         RequiredGuard::Policy { .. } => GuardKind::Policy,
         RequiredGuard::Admission { .. } => GuardKind::Admission,
         RequiredGuard::Accounting { .. } => GuardKind::Accounting,
         RequiredGuard::Storage { .. } => GuardKind::Storage,
-        RequiredGuard::Publication { .. } => GuardKind::Publication,
+        RequiredGuard::Publication { .. } | RequiredGuard::DependencyPublication { .. } => {
+            GuardKind::Publication
+        }
         RequiredGuard::ValidThrough { .. } => GuardKind::ValidThrough,
+        RequiredGuard::Binding { .. } => GuardKind::Binding,
     }
 }
 
@@ -96,7 +102,7 @@ pub fn effect_guard_kinds(
     }
     let mut kinds = Vec::new();
     kinds
-        .try_reserve_exact(15)
+        .try_reserve_exact(16)
         .map_err(|_| failure(FailureCode::ResourceLimit))?;
     let mut add = |kind| {
         if !kinds.contains(&kind) {
@@ -329,14 +335,33 @@ fn same_identity(left: &RequiredGuard, right: &RequiredGuard) -> bool {
                 object: y,
                 ..
             },
+        )
+        | (
+            G::DependencyPublication {
+                repository: a,
+                object: x,
+                ..
+            },
+            G::DependencyPublication {
+                repository: b,
+                object: y,
+                ..
+            },
         ) => a == b && x == y,
         (G::Repository { id: a, .. }, G::Repository { id: b, .. })
         | (G::Denial { repository: a, .. }, G::Denial { repository: b, .. })
         | (G::Policy { repository: a, .. }, G::Policy { repository: b, .. })
         | (G::Accounting { repository: a, .. }, G::Accounting { repository: b, .. })
         | (G::Storage { repository: a, .. }, G::Storage { repository: b, .. })
-        | (G::Publication { repository: a, .. }, G::Publication { repository: b, .. }) => a == b,
+        | (G::Publication { repository: a, .. }, G::Publication { repository: b, .. })
+        | (
+            G::MembershipWitness { repository: a, .. },
+            G::MembershipWitness { repository: b, .. },
+        ) => a == b,
         (G::Admission { operation: a, .. }, G::Admission { operation: b, .. }) => a == b,
+        (G::DenialVersion { .. }, G::DenialVersion { .. }) => true,
+        // Bindings of distinct packs coexist; one digest has one identity.
+        (G::Binding { digest: a }, G::Binding { digest: b }) => a == b,
         // Independent upper bounds compose by taking their minimum.
         _ => false,
     }

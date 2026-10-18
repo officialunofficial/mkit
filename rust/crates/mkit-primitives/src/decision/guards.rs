@@ -6,7 +6,10 @@ use super::facts::{
 };
 use crate::evidence::{MemberFact, RepositoryId};
 use mkit_core::hash::Hash;
-/// Atomic comparison category.
+/// Atomic comparison category. Kind-level completeness is weaker than the
+/// exact guard check: `MembershipWitness` is a `Membership` kind, `DenialVersion`
+/// a `Denial` kind and `DependencyPublication` a `Publication` kind, so hosts
+/// must lower the exact guards, not only the kinds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum GuardKind {
@@ -42,6 +45,8 @@ pub enum GuardKind {
     Publication,
     /// Absolute business validity bound.
     ValidThrough,
+    /// Frozen acceptance record or root digest the host must still hold.
+    Binding,
 }
 /// Every mutable fact used to choose a result or effect.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,6 +167,41 @@ pub enum RequiredGuard {
     ValidThrough {
         /// Absolute business instant.
         instant_ms: u64,
+    },
+    /// Compare one repository-scoped membership witness atomically: the
+    /// incarnation and the removal version must both still match exactly.
+    MembershipWitness {
+        /// Exact logical scope.
+        repository: RepositoryId,
+        /// Membership incarnation.
+        generation: u64,
+        /// Removal version.
+        removal_version: u64,
+    },
+    /// Compare the one global denial version exactly (not per object).
+    DenialVersion {
+        /// Exact global denial version.
+        version: u64,
+    },
+    /// Compare a dependency supplier's publication standing: still published
+    /// and unheld as observed, or still unpublished or held as observed.
+    DependencyPublication {
+        /// Exact logical scope.
+        repository: RepositoryId,
+        /// Relied-on object the supplier provides.
+        object: Hash,
+        /// Supplier pack the dependency relies on.
+        supplier: Hash,
+        /// Whether the supplier was published.
+        published: bool,
+        /// Whether the supplier was held.
+        held: bool,
+    },
+    /// The frozen root the acceptance relied on: the evidence digest, or the
+    /// pack's object-set root together with the closure root.
+    Binding {
+        /// Exact binding digest.
+        digest: Hash,
     },
 }
 /// Explicit pre-apply published-source exception; repeat before every destination attempt.

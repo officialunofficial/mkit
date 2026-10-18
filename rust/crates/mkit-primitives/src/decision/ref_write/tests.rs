@@ -35,6 +35,7 @@ fn snapshot() -> Snapshot {
         accounting: None,
         publication: None,
         storage: None,
+        basis: vec![],
     }
 }
 fn limits() -> RefDecisionLimits {

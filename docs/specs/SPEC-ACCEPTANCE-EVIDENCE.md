@@ -34,7 +34,10 @@ and atomically compare all resulting live guards when committing effects.
 Every mutable fact relied on by verification or decisions MUST be guarded in
 that atomic unit, as required by [SPEC-SERVER](SPEC-SERVER.md) §3.
 Membership and denial versions in this envelope are observations, not authority
-to skip live guards. Head rechecking does not establish closure or authorization.
+to skip live guards. A writer that decides over this envelope derives them as the
+typed guards of an acceptance basis ([SPEC-PRIMITIVE-EVIDENCE](SPEC-PRIMITIVE-EVIDENCE.md)
+§4.4): the witness pair and the denial version are compared exactly and
+atomically, and the envelope digest is the root binding for every other field. Head rechecking does not establish closure or authorization.
 
 ## 2. Canonical binary encoding
 

@@ -59,6 +59,13 @@ pub fn decide_ticketed_advance(
             return Err(failure(FailureCode::InvalidRefRequest));
         }
     }
+    // A basis for another repository is a host error on every path, including
+    // those that answer from a recorded result or a ticket refusal first.
+    if let VerificationVerdict::Verified(bases) = &request.verification
+        && (bases.is_empty() || bases.iter().any(|b| b.repository() != write.repository))
+    {
+        return Err(failure(FailureCode::InvalidResponse));
+    }
     bounds(write, snapshot, limits)?;
     let mut attempt = Attempt::new(write, snapshot, limits)?;
     let decision = drive(request, &mut attempt, snapshot)?;
@@ -127,7 +134,7 @@ fn drive(
             Verdict::Refuse(code, message) => return attempt.reject(code, message),
         }
     }
-    if let Some(decision) = verification(request, attempt.limits)? {
+    if let Some(decision) = verification(request, attempt, &valid)? {
         return Ok(decision);
     }
     if let Some(decision) = attempt.context()? {
@@ -395,6 +402,9 @@ fn pending_outcome(
 }
 
 /// Decide the separate defensive abort for tickets whose pack is missing.
+///
+/// The request's verification verdict is not consulted: cleanup settles only
+/// ticket and reservation rows and never accepts a pack.
 ///
 /// This is its own atomic unit, never coupled to the failed ref write: it
 /// reproduces the reference's first-failure rule, aborts only valid tickets
@@ -808,8 +818,10 @@ fn validate_claims(claims: &[TicketClaim]) -> Result<(), Failure> {
 // policy/precondition refusals carry a bounded, printable denial detail.
 fn verification(
     request: &TicketedAdvanceRequest<'_>,
-    limits: RefDecisionLimits,
+    attempt: &mut Attempt<'_>,
+    valid: &[(&TicketClaim, &TicketFact, &Observed<TicketFact>)],
 ) -> Result<Option<WriteDecision>, Failure> {
+    let limits = attempt.limits;
     Ok(match &request.verification {
         VerificationVerdict::Pending => Some(WriteDecision::Retry(RetryReason::Unavailable)),
         VerificationVerdict::Refused(refusal) => {
@@ -825,7 +837,25 @@ fn verification(
                     .map(|pending| failed_proof_outcome(request, pending, refusal)),
             })
         }
-        VerificationVerdict::Satisfied => None,
+        VerificationVerdict::Verified(bases) => {
+            // The verified packs are the packs being accepted: a basis for one
+            // pack never accepts another pack's ticket.
+            if valid.iter().any(|(_, fact, _)| {
+                !bases
+                    .iter()
+                    .any(|basis| basis.covers(&fact.pack.id, fact.pack.len))
+            }) {
+                return Err(failure(FailureCode::InvalidResponse));
+            }
+            // Everything acceptance relied on becomes a guard of this decision;
+            // the repository was checked on entry.
+            for basis in *bases {
+                for guard in basis.guards() {
+                    attempt.add(guard.clone())?;
+                }
+            }
+            None
+        }
     })
 }
 

@@ -50,6 +50,33 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Breaking (toward 0.6)
 
+- [embedder: breaking API] Sealed acceptance basis for ticketed acceptance in
+  `mkit-primitives`. `VerificationVerdict` gains a lifetime and its `Satisfied`
+  variant is replaced by `Verified(&[AcceptanceBasis])`: pass one basis per
+  accepted pack, built with `AcceptanceBasis::from_verified` (sealed pack,
+  closure proof, witness pages and the external delta-base facts you supplied
+  during verification, every re-request included, which must reproduce the
+  pack's sealed `ExternalBases` commitment, `VerifiedPack::external_bases()`),
+  `from_evidence` (decoded `AcceptanceEvidence`) or
+  `attested_by_host(HostAttestation)` (a host that verified with its own
+  pipeline; it derives guards only from the fields it carries). The decision adds
+  the basis guards to its guard set, so `RequiredGuard` gains
+  `MembershipWitness`, `DenialVersion`, `DependencyPublication` and `Binding`
+  and `GuardKind` gains `Binding`; `DependencyPublication` names its object.
+  A ticket whose pack (identity and length) no basis covers is `InvalidResponse`;
+  `HostAttestation::packs` names the packs an attestation covers (empty covers
+  any pack, an explicit choice). Both enums are `#[non_exhaustive]`, so audit
+  every `_ =>` arm in guard lowering: a wildcard that drops the new guards is a
+  fail-open. An attestation without fields derives none. `Snapshot` gains
+  `basis`; fill it with the values your store currently yields (not a copy of
+  the required guards), or leave it empty.
+  `ClosureWalker::new` takes `&VerifiedPack` after the view and refuses a view
+  or ruleset that differs from it. `Guarded::into_lowering` returns the owned
+  parts. The new `synthetic-artifacts` feature fabricates a sealed pack for consumer
+  tests only. The all-entry verification checkpoint is now version 4 (it adds
+  the external-base commitment); version 3 checkpoints are not decoded, so
+  restart them from the immutable source. The reference server attests with no fields, so its guard set,
+  reads and stored formats are unchanged; no store reset is required.
 - [embedder: breaking API] Guard completeness for the ALPHA decisions in
   `mkit-primitives`. (1) `TicketedAdvanceRequest::authority_generation` is
   removed and `TicketFact::authority_generation` is `Option<Revision>`: request

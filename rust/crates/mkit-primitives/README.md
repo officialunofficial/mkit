@@ -169,8 +169,8 @@ Crate API version, normative ruleset, semantic profile, and encoded format
 versions are separate contracts. The initial indexed ruleset is 1. Page,
 proof, pair-coverage checkpoint, and ordered framing-record formats use version
 1. Framing checkpoints use envelope version 1; all-entry verification
-checkpoints use version 3 and bind six evidence roots, cumulative verification
-counters, and any deferred refusal.
+checkpoints use version 4 and bind six evidence roots, cumulative verification
+counters, the external-base commitment, and any deferred refusal.
 Unsupported disposable state versions require restart from the immutable
 source; historical readers are not promised. Existing pack and object bytes
 remain unchanged.
@@ -237,7 +237,7 @@ separate version-one formats.
 | Framing record v1 | `FrameRecord::from_bytes` | Fixed 58 bytes, checked frame geometry, no allocation |
 | Closure state/witness/missing pages v1 | `closure::output::{validate_state_page, decode_witness, decode_missing}` | `PageDecodeCfg`, fixed 1,024-byte internal journal cap |
 | Acceptance evidence v1 | `AcceptanceEvidence::decode` | Explicit `AcceptanceEvidenceDecodeCfg` envelope, operation, head and dependency caps |
-| Checkpoint v1 and v3 | `Checkpoint::from_bytes` | `VerifyLimits`, 518 values per frontier, 4096-byte core cursor |
+| Checkpoint v1 and v4 | `Checkpoint::from_bytes` | `VerifyLimits`, 518 values per frontier, 4096-byte core cursor |
 
 The fixture manifest registers encoded formats, canonical bytes, semantic
 sidecars, expected outcomes, decoder names, and fuzz targets. Its read-only
@@ -266,7 +266,8 @@ plan-sealing and acceptance example using deterministic host observations.
 
 ## Direct-child closure
 
-Drive `closure::ClosureWalker::new` with the complete verified object view,
+Drive `closure::ClosureWalker::new` with the complete verified object view, the
+sealed `VerifiedPack` that supplies its object-set root and ruleset,
 requested heads, repository identity/incarnation, ruleset, finite limits, and a
 fresh run generation. Poll `step`; answer exact acquisition requests and retain
 and acknowledge every page. Only `Closed` or `Missing` is a complete result.

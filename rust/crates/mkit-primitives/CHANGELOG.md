@@ -25,6 +25,10 @@ Initial public contract (0.1.0, not yet published).
   resumable progress.
 - Guarded ref, publication, fork acceptance, activation, ticketed-advance,
   reservation-settlement and clearance decisions, with refusal-only guards.
+- A sealed `AcceptanceBasis` (from sealed artifacts, decoded evidence, or an
+  explicit host attestation) that ticketed acceptance requires and whose typed
+  guards the decision adds; `Guarded::into_lowering`; `ClosureWalker::new` takes
+  the sealed `VerifiedPack`; and a `synthetic-artifacts` feature for consumer tests.
 - Portable auth-v2 validation, upload-claims binding and replay classification.
 - A versioned `AcceptanceEvidence` envelope with strict bounded decoding, a
   canonical digest and independent head-signature rechecking.

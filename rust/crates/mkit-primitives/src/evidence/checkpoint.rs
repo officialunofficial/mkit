@@ -22,7 +22,7 @@ use mkit_core::{
 const DOMAIN: &[u8] = b"mkit-checkpoint-checksum:v1";
 const MAGIC: &[u8; 4] = b"MKCP";
 const VERSION: u16 = 1;
-const VERSION_VERIFY: u16 = 3;
+const VERSION_VERIFY: u16 = 4;
 mod refusal;
 pub(crate) use refusal::{DeferredFailure, deferrable};
 const SUBTREE: u64 = 8 << 20;
@@ -160,7 +160,7 @@ pub(crate) struct IndexCheckpoint {
     pub commitment: PageCommitment,
     pub count: u64,
 }
-/// All-entry verification state carried by version-3 envelopes.
+/// All-entry verification state carried by version-4 envelopes.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct VerifyCheckpoint {
     pub objects: IndexCheckpoint,
@@ -173,6 +173,8 @@ pub(crate) struct VerifyCheckpoint {
     pub decoded: u64,
     pub edges: u64,
     pub external_lookups: u64,
+    /// Sum commitment over every external base fact received.
+    pub external_sum: Hash,
     pub signature_failure: Option<(Hash, u64)>,
     pub deferred_failure: Option<DeferredFailure>,
 }
@@ -212,7 +214,7 @@ fn codec_budget(len: usize, limits: VerifyLimits) -> Result<Budget, Failure> {
 fn validate_meta(m: &CheckpointMeta, version: u16) -> Result<(), Failure> {
     validate_limits(m.limits)?;
     // Version 1 stores one occurrences page per frame, so its retention chain
-    // length equals the entry ordinal. Version 3 retains paged index output;
+    // length equals the entry ordinal. Version 4 retains paged index output;
     // its retention count tracks cumulative acknowledged pages, of which the
     // host still holds `usage.evidence_pages`: it may already have released
     // the rest, including the last one acknowledged.
@@ -419,6 +421,7 @@ fn validate_verify(m: &CheckpointMeta, verify: &VerifyCheckpoint) -> Result<(), 
         || verify.decoded > m.profile.decoded_bytes
         || verify.edges > m.limits.dependency_edges
         || verify.external_lookups > m.limits.external_lookups
+        || (verify.external_lookups == 0 && verify.external_sum != [0; 32])
         || verify
             .signature_failure
             .is_some_and(|(_, ordinal)| ordinal >= m.ordinal)
@@ -460,6 +463,7 @@ fn read_verify(c: &mut Cursor<'_, '_>) -> Result<VerifyCheckpoint, Failure> {
         decoded: c.u64()?,
         edges: c.u64()?,
         external_lookups: c.u64()?,
+        external_sum: c.array()?,
         signature_failure: match c.byte()? {
             0 => None,
             1 => Some((c.array()?, c.u64()?)),
@@ -798,6 +802,7 @@ fn write_verify(out: &mut Output, verify: &VerifyCheckpoint) -> Result<(), Failu
     out.u64(verify.decoded)?;
     out.u64(verify.edges)?;
     out.u64(verify.external_lookups)?;
+    out.append(&verify.external_sum)?;
     out.byte(u8::from(verify.signature_failure.is_some()))?;
     if let Some((object, ordinal)) = verify.signature_failure {
         out.append(&object)?;
@@ -826,6 +831,7 @@ pub(crate) fn encode(
     });
     let verify_bytes = view.verify.map_or(0, |v| {
         6 * 57
+            + 32
             + 32
             + 1
             + u64::from(v.signature_failure.is_some()) * 40
@@ -950,7 +956,7 @@ mod tests {
         for len in 0..cp.bytes().len() {
             assert!(Checkpoint::from_bytes(&cp.bytes()[..len], limits).is_err());
         }
-        for version in [4u8, 0xff] {
+        for version in [3u8, 5, 0xff] {
             let mut wrong = cp.bytes().to_vec();
             wrong[4] = version;
             resign(&mut wrong);
@@ -961,7 +967,7 @@ mod tests {
         }
         // A version-1 body relabeled as the verify version is malformed.
         let mut relabeled = cp.bytes().to_vec();
-        relabeled[4] = 3;
+        relabeled[4] = 4;
         resign(&mut relabeled);
         assert!(Checkpoint::from_bytes(&relabeled, limits).is_err());
         let mut trailing = cp.bytes().to_vec();
@@ -1165,7 +1171,7 @@ mod tests {
 
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    fn frozen_v3_verify_state_decodes_index_checkpoints() {
+    fn frozen_v4_verify_state_decodes_index_checkpoints() {
         let bytes = include_bytes!("../../fixtures/evidence/checkpoint-verify.bin");
         let limits = VerifyLimits::indexed();
         let checkpoint = Checkpoint::from_bytes(bytes, limits).unwrap();
@@ -1200,7 +1206,7 @@ mod tests {
             (page.kind, page.len, page.items),
             (PageKind::Ordinals, 201, 1)
         );
-        let verify = state.verify.expect("v3 checkpoint carries verify state");
+        let verify = state.verify.expect("v4 checkpoint carries verify state");
         assert_eq!(verify.objects.count, verify.ordinals.count);
         assert!(verify.occurrences.count == 1);
         assert_eq!(verify.delta_entries, 0);
@@ -1213,7 +1219,22 @@ mod tests {
         assert!(verify.deferred_failure.is_none());
         let cursor = WindowCursor::from_bytes(&state.cursor).unwrap();
         assert!(cursor.metadata().unwrap().exact());
-        assert_eq!(&bytes[4..6], &3_u16.to_le_bytes());
+        assert_eq!(&bytes[4..6], &4_u16.to_le_bytes());
+        // A zero external-base count requires a zero sum.
+        let mut forged = state.verify.unwrap();
+        forged.external_sum = [1; 32];
+        let forged = encode(
+            &CheckpointView {
+                meta: state.meta,
+                integrity: state.integrity.as_ref().map(IntegrityState::view),
+                cursor: &state.cursor,
+                verify: Some(forged),
+            },
+            limits,
+        );
+        assert!(
+            forged.is_err() || Checkpoint::from_bytes(forged.unwrap().bytes(), limits).is_err()
+        );
         // The unshipped verification format is replaced, never legacy-decoded.
         let rechecksum = |mut body: Vec<u8>| {
             let checksum = domain_digest(DOMAIN, &body);
@@ -1221,13 +1242,15 @@ mod tests {
             body
         };
         let mut replaced = bytes[..bytes.len() - 32].to_vec();
-        replaced[4..6].copy_from_slice(&2_u16.to_le_bytes());
-        assert_eq!(
-            Checkpoint::from_bytes(&rechecksum(replaced), limits)
-                .unwrap_err()
-                .code,
-            FailureCode::InvalidCheckpoint
-        );
+        for superseded in [2_u16, 3] {
+            replaced[4..6].copy_from_slice(&superseded.to_le_bytes());
+            assert_eq!(
+                Checkpoint::from_bytes(&rechecksum(replaced.clone()), limits)
+                    .unwrap_err()
+                    .code,
+                FailureCode::InvalidCheckpoint
+            );
+        }
         // A syntactically present refusal must use a recognized content code.
         let mut unknown = bytes[..bytes.len() - 32].to_vec();
         *unknown.last_mut().unwrap() = 1;
