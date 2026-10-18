@@ -128,6 +128,10 @@ collect the applicable entries between their old and new immutable pins.
   boundaries. Accepted clearance preserves its saved result and never repeats
   settlement. Additive ALPHA API; no wire or stored-format change; no reset.
 
+- Add bounded in-process acceptance-evidence export with canonical signed head
+  checks, exact closure witness-chain authentication, and cross-artifact binding.
+  Evidence format 1 is unchanged; no migration or store reset.
+
 - Add guarded fork acceptance to `mkit-primitives`: bounded full-inventory plans,
   authoritative destination emptiness, final source-proof ordering, exact
   authority and admission guards, terminal reservation settlement, and saved
