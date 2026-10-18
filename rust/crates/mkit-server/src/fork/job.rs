@@ -465,7 +465,7 @@ async fn check_request<S: NamespaceStore>(
 
 /// A fork creates its destination: one that is already registered is not a
 /// fork destination, so a fork never inherits a visibility it did not ask for.
-async fn require_unregistered<S: NamespaceStore>(
+pub(super) async fn require_unregistered<S: NamespaceStore>(
     env: &ForkEnv<'_, S>,
     dest: &RepoId,
 ) -> Result<(), ForkError> {

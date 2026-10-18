@@ -432,3 +432,41 @@ fn large_valid_dependency_sets_fit_the_reference_work_ceiling() {
     let input = facts(ClearanceMoment::Acceptance, prior(0, 0), changed, &[], &[]);
     assert!(decide_clearance(&input, &ClearanceLimits::reference()).is_ok());
 }
+
+#[test]
+fn guard_derivation_at_max_items_is_bounded_and_charged() {
+    let limits = ClearanceLimits::reference();
+    let ids: Vec<Hash> = (0..limits.max_items)
+        .map(|n| {
+            let mut raw = [0; 32];
+            raw[..8].copy_from_slice(&(n as u64 + 1).to_le_bytes());
+            raw
+        })
+        .collect();
+    let suppliers = ids.clone();
+    let mut changed = advance(1, ClearanceState::Cleared, &[], &ids, &suppliers);
+    changed.external_suppliers = &suppliers;
+    // Half the dependencies carry a witness; the rest are guarded as absent.
+    let witnesses: Vec<DependencyWitness> = ids[..ids.len() / 2]
+        .iter()
+        .map(|id| witness(*id, true))
+        .collect();
+    let input = facts(
+        ClearanceMoment::Acceptance,
+        prior(0, 0),
+        changed,
+        &[],
+        &witnesses,
+    );
+    let decided = decide_clearance(&input, &limits).unwrap();
+    // One row per distinct dependency or supplier plus the three fixed rows.
+    assert_eq!(input.guards().len(), ids.len() + 3);
+    assert!(guards_hold(&decided, &input.guards(), 0));
+    // The derivation is charged: a work allowance below its cost refuses.
+    let mut starved = limits;
+    starved.max_work = ids.len() as u64;
+    assert_eq!(
+        decide_clearance(&input, &starved).unwrap_err().code,
+        FailureCode::ResourceLimit
+    );
+}

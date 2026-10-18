@@ -28,6 +28,8 @@ mod settle;
 #[cfg(feature = "perf-metrics")]
 mod trace;
 
+#[cfg(all(test, feature = "memory"))]
+mod divergence_tests;
 #[cfg(test)]
 mod wave_tests;
 

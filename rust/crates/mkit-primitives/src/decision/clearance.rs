@@ -420,12 +420,12 @@ impl ClearanceFacts<'_> {
             .chain(self.changed.external_suppliers);
         // The absence row carries the all-zero sentinel revision: it names "no
         // witness supplied", not a storage absence token.
+        // Sets keep this O(n log n); `validate` charges the same items.
+        let witnessed: std::collections::BTreeSet<Hash> =
+            self.witnesses.iter().map(|w| w.object).collect();
+        let mut guarded_absent = std::collections::BTreeSet::new();
         for object in needed {
-            if !self.witnesses.iter().any(|w| w.object == *object)
-                && !out.iter().any(|g| {
-                    matches!(g, RequiredGuard::Row { row: GuardRow::ClearanceWitness(o), .. } if o == object)
-                })
-            {
+            if !witnessed.contains(object) && guarded_absent.insert(*object) {
                 out.push(RequiredGuard::Row {
                     repository,
                     row: GuardRow::ClearanceWitness(*object),
@@ -890,7 +890,15 @@ fn validate(facts: &ClearanceFacts<'_>, limits: &ClearanceLimits) -> Result<(), 
         &mut work,
         lookups
             .saturating_add(facts.suffix.len() as u64)
-            .saturating_add(facts.witnesses.len() as u64),
+            .saturating_add(facts.witnesses.len() as u64)
+            // Deriving the guards: ordered-set build and probes over every
+            // dependency, supplier and witness, about three comparisons each.
+            .saturating_add(
+                (changed.dependencies.len() as u64)
+                    .saturating_add(changed.external_suppliers.len() as u64)
+                    .saturating_add(facts.witnesses.len() as u64)
+                    .saturating_mul(3),
+            ),
     )?;
     Ok(())
 }

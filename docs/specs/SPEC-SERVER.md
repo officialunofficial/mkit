@@ -338,26 +338,22 @@ fork progress, activation and completion through the portable decisions. Fork
 acceptance is not routed: the server derives it from the durable job row, the
 captured source proof and the destination barrier, because the job keeps no
 sealed inventory (descriptors and dependency edges) to build a portable plan
-from. Each difference from the portable acceptance decision is deliberate and
-pinned by a test in `fork::decision`:
+from. Each difference below is deliberate and pinned by a test in
+`fork::divergence_tests` that runs the server path and the portable decision on
+the same input:
 
-- **Admission charge.** The server treats the charged bytes as an upper bound
-  (a smaller resolved set is covered, a larger one is `over_admitted`); the
-  portable decision requires the charged bytes to equal the plan's bytes.
-- **Refusal classes.** Authority movement, grant-epoch movement and an
-  unregistrable namespace are three stored failures where the portable decision
-  has one permission class; a registered destination (including one of another
-  visibility) is `Changed`, where the portable decision separates a visibility
-  mismatch; a reservation settled elsewhere ends the job as `Expired`; a
-  differing request binding is a different job and a replay-scope conflict is
-  decided before any job exists.
-- **Stored classes without a portable analog.** `TooLarge` (a bound of this
-  implementation) has none, and `TipChanged` is reported to the caller as the
-  uniform source-not-found answer at acceptance.
-- **Destination denial at activation.** The server holds no durable denial row
-  revision. The proof's denial revision is a request-local token bound to the
-  pack and the proof window, and the denial itself is read fresh just before the
-  decision and bounded by the apply `NotAfter` window.
+- **Admission charge.** The server treats the charged bytes as an upper bound (a
+  smaller resolved set is covered, a larger one is `over_admitted`); the portable
+  decision requires the charged bytes to equal the plan's bytes and answers
+  `QuotaExceeded` otherwise.
+- **Authority and epoch movement.** The portable decision answers one
+  `PermissionDenied` class; the server replays two public errors, authority moved
+  and epoch moved.
+- **Settled reservation.** The portable decision names `ReservationSettled`; the
+  server's progress decision ends the job as `Expired`, as for a lapsed lifetime.
+- **Registered destination.** The portable decision compares a declared
+  visibility and answers `VisibilityMismatch`; the server refuses any registered
+  destination as not empty before visibility is compared.
 
 Where the server routes a decision and the portable vocabulary is coarser, the
 server keeps the finer public answer: authority and epoch movement share one
@@ -2885,10 +2881,13 @@ external-supplier witnesses are not guards of the apply: they live in other
 partitions or under other refs' publication rows, a batch is capped at 100
 operations against up to 4,096 dependencies, and the walk that reads them
 spans timer firings. They are checked by the dependency walk before the apply,
-and the apply is bounded by `NotAfter` (ten seconds). A change to a witness's
+and the apply is bounded by `NotAfter` (ten seconds). **Known residual.** A change to a witness's
 standing between its read and the apply is therefore not compared by the apply:
-that gap is a known residual of the cross-partition read, bounded by the
-`NotAfter` window for rows read in the same firing. The recheck adds no read or
+that gap is bounded by the `NotAfter` window for rows read in the same firing.
+Takedown and supplier-hold writers are not serialized through the publication
+row, and cross-partition atomicity is the blocker. The portable guards stay
+complete, so a host with cross-partition atomic batches enforces them; the
+reference server's exposure is unchanged from before this decision was routed. The recheck adds no read or
 round trip.
 
 **Protocol requirement.** Exhaustion of implementation execution capacity MUST
