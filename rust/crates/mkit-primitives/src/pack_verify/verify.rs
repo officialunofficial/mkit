@@ -1642,7 +1642,7 @@ impl VerifyDriver {
         let mut budget = Budget::new(self.limits.work, self.limits.resident_bytes);
         let result = self
             .index_mut(live.index)
-            .feed(&mut live.op, &cached, &mut budget);
+            .feed_resident(&mut live.op, &cached, &mut budget);
         let used = self.limits.work.saturating_sub(budget.remaining());
         self.cache.restore(commitment, cached);
         let result = result.and_then(|()| {

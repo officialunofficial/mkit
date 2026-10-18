@@ -342,6 +342,22 @@ impl<'a> PageView<'a> {
         }
         Ok(())
     }
+    /// Same charge and role checks as [`Self::authenticate`] for bytes whose
+    /// digest the caller already established; the digest is not recomputed.
+    pub(crate) fn authenticate_resident(
+        &self,
+        expected: PageCommitment,
+        budget: &mut Budget,
+    ) -> Result<(), Failure> {
+        budget.charge(self.bytes.len() as u64, 0)?;
+        if self.kind != expected.kind
+            || self.bytes.len() as u64 != expected.len
+            || u64::from(self.items) != expected.items
+        {
+            return Err(failure(FailureCode::EvidenceMismatch));
+        }
+        Ok(())
+    }
     /// Decodes one complete canonical page under a finite shared operation budget.
     ///
     /// # Errors
