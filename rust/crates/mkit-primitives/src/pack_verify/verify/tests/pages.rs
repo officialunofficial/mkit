@@ -1023,3 +1023,42 @@ fn lookups_and_audits_refuse_a_leaf_key_outside_its_inherited_interval() {
     let root = pages.internal(1, low, &[(0x80, high)]);
     pages.both_accept(root, 2, 0x90);
 }
+
+#[test]
+fn the_resident_ceiling_is_never_passed_whatever_the_budget() {
+    // Every reservation, the cache's included, is checked against the ceiling
+    // before it happens, so a tight budget refuses with ResourceLimit; it
+    // never overshoots. Sweep budgets from far too small to comfortable.
+    let pack = blob_tree_pairs(400);
+    let mut completed = 0;
+    let mut refused = 0;
+    for megabytes in [1_u64, 4, 8, 9, 10, 11, 12, 14, 16, 24, 64] {
+        let budget = VerifyLimits {
+            resident_bytes: megabytes << 20,
+            page_bytes: 4096,
+            resident_pages: 4,
+            ..limits()
+        };
+        let Ok(mut machine) = VerifyDriver::new(source(&pack), REPOSITORY, profile(), budget, 17)
+        else {
+            refused += 1;
+            continue;
+        };
+        let outcome = Host::new(&pack).finish(&mut machine);
+        match outcome {
+            Ok(_) => completed += 1,
+            Err(error) => {
+                assert_eq!(error.code, FailureCode::ResourceLimit, "{megabytes} MiB");
+                refused += 1;
+            }
+        }
+        assert!(
+            machine.usage().peak_resident_bytes <= budget.resident_bytes,
+            "{megabytes} MiB budget passed"
+        );
+    }
+    assert!(
+        completed > 0 && refused > 0,
+        "sweep must cross the boundary"
+    );
+}
