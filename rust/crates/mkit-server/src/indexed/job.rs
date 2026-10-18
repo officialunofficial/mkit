@@ -1513,8 +1513,10 @@ where
             if !check.complete(job.pack_len, self.pack) {
                 return self.integrity(job).await;
             }
-            // Retry the failed entry with fresh live facts. On a membership
-            // wait, the enclosing slice retains this completed marker.
+            // Retry the failed entry with fresh live facts. A membership wait
+            // before any new checkpoint restores the slice start, which keeps
+            // this completed marker; after forward progress the marker is gone
+            // and a later deferral simply scans the frozen source again.
             job.integrity = None;
         }
         let window_bytes = self.h.limits.window_bytes;

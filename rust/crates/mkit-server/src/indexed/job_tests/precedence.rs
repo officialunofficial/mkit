@@ -338,7 +338,7 @@ fn valid_missing_base_reuses_integrity_while_retrying_membership() {
 }
 
 #[test]
-fn completed_integrity_survives_membership_waits_after_a_decode_checkpoint() {
+fn completed_integrity_survives_membership_waits_after_earlier_checkpointed_entries() {
     let (lead, lead_raw) = blob(7, 200);
     let (base, base_raw) = blob(1, 3_000);
     let (_, target_raw) = blob(2, 3_000);

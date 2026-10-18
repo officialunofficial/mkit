@@ -135,34 +135,80 @@ fn largest_job(extracting: bool) -> VerifyJobV1 {
 }
 
 #[test]
-fn the_largest_decode_header_with_integrity_progress_fits_its_bound() {
-    // Smallest window and a 2 GiB pack give the deepest two frontier stacks.
+fn the_largest_decode_headers_with_integrity_progress_fit_their_bound() {
+    // Smallest window and the largest deferrable pack give the deepest stacks;
+    // the completed marker additionally carries both roots.
     let window = 1_u64 << 10;
-    let pack_len = 2_u64 << 30;
-    let depth = ((pack_len - 1) / window).count_ones() as usize;
-    let full = vec!["ff".repeat(32); depth];
-    let trailer = "ff".repeat(32);
-    let mut job = largest_job(false);
-    job.kind = Kind::Pack;
-    job.phase = Phase::Decode;
-    job.pack_len = pack_len;
-    job.integrity = Some(
-        serde_json::from_value(serde_json::json!({
-            "window": window,
-            "offset": (pack_len - 1) / window * window,
-            "whole": {"stack": full, "root": null},
-            "prefix": {"stack": full, "root": null},
-            "trailer": trailer,
-        }))
-        .unwrap(),
-    );
-    let raw = checkpoint::encode_job(&job);
-    eprintln!(
-        "decode header with integrity bytes: {}",
-        raw.as_bytes().len()
-    );
-    assert!(raw.as_bytes().len() <= checkpoint::MAX_JOB_HEADER_BYTES);
-    checkpoint::decode_job(&raw).unwrap();
+    let pack_len =
+        mkit_core::pack::MAX_TOTAL_PAYLOAD + u64::from(mkit_core::pack::MAX_ENTRIES) * 5 + 44;
+    let hash = "ff".repeat(32);
+    for complete in [false, true] {
+        let offset = if complete {
+            pack_len
+        } else {
+            (pack_len - 1) / window * window
+        };
+        let frontier = |total: u64| {
+            let depth = (offset.div_ceil(window).min((total - 1) / window)).count_ones() as usize;
+            serde_json::json!({
+                "stack": vec![hash.clone(); depth],
+                "root": complete.then(|| hash.clone()),
+            })
+        };
+        let mut job = largest_job(false);
+        job.kind = Kind::Pack;
+        job.phase = Phase::Decode;
+        job.pack_len = pack_len;
+        job.integrity = Some(
+            serde_json::from_value(serde_json::json!({
+                "window": window,
+                "offset": offset,
+                "whole": frontier(pack_len),
+                "prefix": frontier(pack_len - 32),
+                "trailer": hash,
+            }))
+            .unwrap(),
+        );
+        let raw = checkpoint::encode_job(&job);
+        assert!(raw.as_bytes().len() <= checkpoint::MAX_JOB_HEADER_BYTES);
+        assert_eq!(
+            checkpoint::decode_job(&raw).unwrap().integrity,
+            job.integrity
+        );
+    }
+}
+
+#[test]
+fn integrity_progress_hex_rejects_malformed_values() {
+    let good = serde_json::json!({
+        "window": 1024,
+        "offset": 0,
+        "whole": {"stack": [], "root": null},
+        "prefix": {"stack": [], "root": null},
+        "trailer": "00".repeat(32),
+    });
+    let parse =
+        |value: serde_json::Value| serde_json::from_value::<checkpoint::IntegrityCheck>(value);
+    let check = parse(good.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&check).unwrap(), good);
+    for (path, bad) in [
+        ("trailer", serde_json::json!("00".repeat(31))),
+        (
+            "trailer",
+            serde_json::json!(format!("{}zz", "00".repeat(31))),
+        ),
+        ("trailer", serde_json::json!([0; 32].to_vec())),
+    ] {
+        let mut value = good.clone();
+        value[path] = bad;
+        assert!(parse(value).is_err());
+    }
+    let mut value = good.clone();
+    value["whole"]["stack"] = serde_json::json!(["00"]);
+    assert!(parse(value).is_err());
+    let mut value = good.clone();
+    value["whole"].as_object_mut().unwrap().remove("root");
+    assert!(parse(value).is_err());
 }
 
 #[test]
