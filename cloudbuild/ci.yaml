@@ -95,8 +95,8 @@ steps:
           cargo check --locked -p mkit-primitives --all-features --all-targets
           cargo nextest run --locked -p mkit-primitives --no-default-features --test framing_backends --test framing_vectors -j 3 --no-tests=fail
           cargo nextest run --locked -p mkit-primitives --all-features --test framing_backends --test framing_vectors -j 3 --no-tests=fail
-          cargo nextest run --locked -p mkit-primitives --no-default-features --lib -E 'test(resume_tests::)' -j 3 --no-tests=fail
-          cargo nextest run --locked -p mkit-primitives --all-features --lib -E 'test(resume_tests::)' -j 3 --no-tests=fail
+          cargo nextest run --locked -p mkit-primitives --no-default-features --lib -E 'test(resume_tests::) | test(pack_verify::verify::tests::compute::)' -j 3 --no-tests=fail
+          cargo nextest run --locked -p mkit-primitives --all-features --lib -E 'test(resume_tests::) | test(pack_verify::verify::tests::compute::)' -j 3 --no-tests=fail
           cargo test --locked -p mkit-primitives --doc
           cargo test --locked -p mkit-primitives --no-default-features --doc
           RUSTDOCFLAGS=-Dwarnings cargo doc --locked -p mkit-primitives --all-features --no-deps

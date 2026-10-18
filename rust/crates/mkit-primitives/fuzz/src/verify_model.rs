@@ -8,7 +8,7 @@ use mkit_primitives::{
     limits::{IndexedProfile, VerifyLimits},
     pack_verify::{
         Acquisition, ByteRange, ByteSource, Request, RequestId, Response, Step,
-        verify::VerifyDriver,
+        verify::{ComputeConfig, ComputeDisposition, ComputeOutput, VerifyDriver},
     },
 };
 use std::collections::BTreeMap;
@@ -47,6 +47,57 @@ fn compare_schedules(bytes: &[u8]) {
     assert_eq!(run(bytes, 3), baseline);
 }
 
+/// Replays arbitrary packs and generated valid packs under caller compute schedules.
+pub(super) fn exercise_compute(data: &[u8]) {
+    let seed = data
+        .iter()
+        .take(8)
+        .enumerate()
+        .fold(0x9e37_79b9_u64, |seed, (index, byte)| {
+            seed ^ (u64::from(*byte) << (index * 8))
+        });
+    compare_compute(data, seed);
+    if let Some(split) = data.len().checked_sub(32) {
+        let mut repaired = data.to_vec();
+        let digest = hash::hash(&repaired[..split]);
+        repaired[split..].copy_from_slice(&digest);
+        compare_compute(&repaired, seed);
+    }
+    compare_compute(&small_blobs(data), seed);
+}
+
+fn compare_compute(bytes: &[u8], seed: u64) {
+    let baseline = run(bytes, 0);
+    for order in [0, 1, seed.max(2)] {
+        assert_eq!(run_compute(bytes, 2, Some(order), &mut 0), baseline);
+    }
+}
+
+fn small_blobs(seed: &[u8]) -> Vec<u8> {
+    use mkit_core::{
+        object::{Blob, Object},
+        serialize::serialize,
+    };
+    let count = 8 + u32::from(seed.first().copied().unwrap_or(0)) % 8;
+    let mut pack = b"MKIT\x01\0\0\0".to_vec();
+    pack.extend_from_slice(&count.to_le_bytes());
+    for ordinal in 0..count {
+        let mut data = ordinal.to_le_bytes().to_vec();
+        let start = (ordinal as usize * 7).min(seed.len());
+        data.extend_from_slice(&seed[start..(start + 32).min(seed.len())]);
+        let bytes = serialize(&Object::Blob(Blob { data })).expect("bounded blob");
+        pack.push(0);
+        pack.extend_from_slice(
+            &u32::try_from(bytes.len())
+                .expect("bounded generated blob")
+                .to_le_bytes(),
+        );
+        pack.extend_from_slice(&bytes);
+    }
+    pack.extend_from_slice(&hash::hash(&pack));
+    pack
+}
+
 #[derive(Default)]
 struct Host {
     fragments: BTreeMap<u64, Vec<u8>>,
@@ -66,6 +117,16 @@ impl Host {
 
 #[allow(clippy::too_many_lines)]
 fn run(bytes: &[u8], schedule: u8) -> Outcome {
+    run_compute(bytes, schedule, None, &mut 0)
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_compute(
+    bytes: &[u8],
+    schedule: u8,
+    mut compute_seed: Option<u64>,
+    peak: &mut usize,
+) -> Outcome {
     let limits = VerifyLimits {
         work: 64 << 20,
         ..VerifyLimits::indexed()
@@ -87,12 +148,49 @@ fn run(bytes: &[u8], schedule: u8) -> Outcome {
         Ok(driver) => driver,
         Err(error) => return Outcome::Refused(error.code, trace.finalize()),
     };
+    if compute_seed.is_some() {
+        driver = driver
+            .with_compute(ComputeConfig { max_jobs: 3 })
+            .expect("finite configuration");
+    }
+    if compute_seed.is_some() {
+        assert_eq!(
+            driver
+                .supply_compute(stale_output())
+                .expect("stale run output"),
+            ComputeDisposition::Stale
+        );
+    }
+    let mut outputs: Vec<ComputeOutput> = Vec::new();
     for _ in 0..8 * super::MAX_INPUT_BYTES {
         let step = match driver.step() {
             Ok(step) => step,
             Err(error) => return Outcome::Refused(error.code, trace.finalize()),
         };
         match step {
+            Step::Request(Request::Compute { job }) => {
+                let Step::Request(Request::Compute { job: repeated }) =
+                    driver.step().expect("stable compute request")
+                else {
+                    panic!("untaken compute request advanced")
+                };
+                assert_eq!(repeated, job);
+                let owned = driver.take_compute(job).expect("issued compute descriptor");
+                assert_eq!(owned.request(), job);
+                assert_eq!(
+                    driver
+                        .take_compute(job)
+                        .expect_err("job can be taken only once")
+                        .code,
+                    FailureCode::InvalidResponse
+                );
+                outputs.push(owned.run());
+                *peak = (*peak).max(outputs.len());
+                assert!(
+                    outputs.len() <= 3,
+                    "compute queue exceeded configured width"
+                );
+            }
             Step::Request(Request::Bytes {
                 request,
                 source,
@@ -229,12 +327,36 @@ fn run(bytes: &[u8], schedule: u8) -> Outcome {
                 if schedule != 0 {
                     exercise_retention(&mut driver, commitment);
                 }
+                trace.update(&[0xe1]);
+                trace.update(&commitment.digest);
+                trace.update(&bytes);
                 host.pages.push((commitment, bytes));
                 driver
                     .acknowledge_retention(commitment)
                     .expect("bounded model invariant");
             }
             Step::Progress => {
+                if !outputs.is_empty() {
+                    let seed = compute_seed.as_mut().expect("compute mode issued a job");
+                    let index = match *seed {
+                        0 => 0,
+                        1 => outputs.len() - 1,
+                        _ => {
+                            *seed ^= *seed << 13;
+                            *seed ^= *seed >> 7;
+                            *seed ^= *seed << 17;
+                            usize::try_from(*seed % outputs.len() as u64)
+                                .expect("bounded queue index")
+                        }
+                    };
+                    assert_eq!(
+                        driver
+                            .supply_compute(outputs.remove(index))
+                            .expect("bound output"),
+                        ComputeDisposition::Accepted
+                    );
+                    continue;
+                }
                 if schedule == 3 && !restarted && driver.checkpoint().is_ok() {
                     restarted = true;
                     driver = restart(&mut driver, source, profile, limits);
@@ -247,15 +369,94 @@ fn run(bytes: &[u8], schedule: u8) -> Outcome {
                     schedule != 3 || restarted || pack.counts().entries == 0,
                     "cold-resume schedule never restarted"
                 );
-                trace.update(&pack.object_set_root());
-                trace.update(&pack.counts().entries.to_le_bytes());
-                trace.update(&pack.counts().delta_entries.to_le_bytes());
+                assert_eq!(pack.pack_id(), source.id);
+                assert_eq!(pack.len(), source.len);
+                assert_eq!(pack.profile(), profile);
+                assert_eq!(pack.limits(), limits);
+                trace.update(
+                    format!(
+                        "{:?}",
+                        (
+                            pack.source(),
+                            pack.counts(),
+                            pack.version(),
+                            pack.trailer(),
+                            pack.ruleset(),
+                            pack.profile(),
+                            pack.limits(),
+                            pack.object_set_root(),
+                            pack.occurrences(),
+                            pack.dependencies(),
+                            pack.ordinals(),
+                            pack.head_facts()
+                        )
+                    )
+                    .as_bytes(),
+                );
                 return Outcome::Complete(trace.finalize());
             }
             _ => panic!("unexpected verify transition"),
         }
     }
     panic!("bounded verify did not terminate");
+}
+
+// A real library output from another generation must never satisfy this run.
+fn stale_output() -> ComputeOutput {
+    let bytes = small_blobs(b"retired generation");
+    let source = PackSource {
+        id: hash::hash(&bytes),
+        len: bytes.len() as u64,
+        binding: SourceBinding([4; 32]),
+    };
+    let mut driver = VerifyDriver::new(
+        source,
+        RepositoryId([9; 32]),
+        IndexedProfile {
+            pack_bytes: super::MAX_INPUT_BYTES as u64,
+            decoded_bytes: 4 << 20,
+            delta_depth: 50,
+        },
+        VerifyLimits::indexed(),
+        16,
+    )
+    .expect("valid source")
+    .with_compute(ComputeConfig { max_jobs: 3 })
+    .expect("finite configuration");
+    for _ in 0..4096 {
+        match driver.step().expect("valid generation probe") {
+            Step::Request(Request::Compute { job }) => {
+                return driver.take_compute(job).expect("owned probe job").run();
+            }
+            Step::Request(Request::Bytes {
+                request,
+                source,
+                range,
+            }) => {
+                driver
+                    .supply(Response::Bytes {
+                        request,
+                        source,
+                        range,
+                        value: Acquisition::Present(
+                            &bytes[usize::try_from(range.offset).expect("bounded probe offset")
+                                ..usize::try_from(range.offset + range.len)
+                                    .expect("bounded probe end")],
+                        ),
+                    })
+                    .expect("bound probe bytes");
+            }
+            Step::RetainEvidence(page) => {
+                let commitment = page.commitment;
+                driver
+                    .acknowledge_retention(commitment)
+                    .expect("probe retention");
+            }
+            Step::Progress => {}
+            _ => panic!("probe failed before compute"),
+        }
+    }
+    panic!("probe did not issue compute");
 }
 
 fn restart(
@@ -368,6 +569,22 @@ fn exercise_retries(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn caller_compute_replays_seeds_and_reorders_multiple_outputs() {
+        super::super::replay_seeds(exercise_compute);
+        let bytes = small_blobs(b"fixed caller scheduling seed");
+        let baseline = run(&bytes, 0);
+        assert!(matches!(baseline, Outcome::Complete(_)));
+        for order in [0, 1, 0x51a7_f00d] {
+            let mut peak = 0;
+            assert_eq!(run_compute(&bytes, 2, Some(order), &mut peak), baseline);
+            assert!(peak >= 2, "schedule did not exercise actual fan-out");
+        }
+        exercise_compute(include_bytes!(
+            "../../fixtures/framing/earlier-delta-base.bin"
+        ));
+    }
 
     #[test]
     fn fixture_pack_completes_across_schedules() {

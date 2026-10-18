@@ -1,5 +1,7 @@
 //! End-to-end driver tests over real packs and live acquisition loops.
 use super::*;
+
+mod compute;
 use crate::evidence::{MemberFact, Revision, SourceBinding};
 use mkit_core::{
     delta,
@@ -219,6 +221,12 @@ impl Host {
                     request: *request,
                     value,
                 })
+            }
+            Request::Compute { job } => {
+                let output = machine.take_compute(*job)?.run();
+                let disposition = machine.supply_compute(output)?;
+                assert_eq!(disposition, ComputeDisposition::Accepted);
+                Ok(())
             }
             Request::EvidencePage { request, page } => {
                 let value = if self.lost_pages.contains(page) {

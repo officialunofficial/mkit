@@ -1827,3 +1827,10 @@ path = "evidence/verify-record-external-version.bin"
 sha256 = "ddfbfce8027b3218b1dc1cd968648094a06a15feece161924949995aa81b236a"
 semantic = "evidence/verify-record-external-version.json"
 semantic_sha256 = "d63ab9d7d11ce11a95ccad6a979900d28df0ba4722aa14afe1c2da4a2e22270c"
+
+[[contracts]]
+type = "ComputeScheduling"
+ruleset = 1
+path = "compute/schedules.json"
+sha256 = "41588192367ab296f262753a415f4bae6af2f94dbcea581f7c45c0cc59ffacd5"
+spec = "SPEC-PRIMITIVE-EVIDENCE#412-caller-owned-computation"

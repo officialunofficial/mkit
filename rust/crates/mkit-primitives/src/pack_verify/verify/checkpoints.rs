@@ -233,6 +233,7 @@ impl VerifyDriver {
     pub fn checkpoint(&mut self) -> Result<&Checkpoint, Failure> {
         self.release_checkpoint()?;
         if self.phase != Phase::Entries
+            || !self.compute_drained()
             || self.work.is_some()
             || self.op.is_some()
             || self.pending.is_some()

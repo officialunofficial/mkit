@@ -23,11 +23,12 @@ source. Cargo compatibility alone does not promise checkpoint compatibility.
 
 ## Implementation status
 
-The current framing release implements the bounded two-pass framing driver,
-page and proof codecs, and strict checkpoint envelope codec. `FramedPack`
-records integrity and framing only. All-entry verification and optional compute
-execution remain future work. Closure and guarded decisions have separate entry
-points; framing completion establishes none of their semantic checks.
+The crate implements bounded two-pass framing, all-entry verification,
+page and proof codecs, strict checkpoint envelopes, and optional caller-owned
+compute. `FramedPack` records integrity and framing only; `VerifiedPack` seals
+canonical, delta, and individual signature evidence. Closure and guarded
+decisions have separate entry points. Framing completion establishes none of
+their semantic checks.
 
 The driver resumes integrity, acknowledged entry, and completion boundaries.
 Decode restoration checks the core cursor's validated metadata against every
@@ -137,6 +138,21 @@ ordinal, operation, input commitments, and byte/work permits. The library
 supplies the pure worker and creates opaque outputs. Results merge by ordinal;
 stale completions are ignored. Worker input, scratch, and output count against
 the same simultaneous memory ceiling.
+
+`VerifyDriver::with_compute` enables a finite queue of at most sixteen jobs.
+The driver emits descriptors through `Request::Compute`; the caller takes each
+owned job once, runs the pure worker, and returns its opaque output. Raw Blob
+entries may overlap inside an acquired window. Other object kinds and deltas
+are barriers, as are input acquisition and later parser failures. This avoids a
+second dependency graph and keeps every authenticated index mutation serial.
+Deltas enter compute only after their eligible base is resolved.
+
+Optional lookahead protects a conservative complete Blob-commit allowance and
+worker input/scratch/output ownership before dispatch. Insufficient room drains
+the queue; it does not add a content refusal. A completed later output retains
+its permits until all earlier ordinals commit. No job is persisted: checkpoints
+require a drained queue and reader position, and resume may choose serial or
+caller-owned execution without changing evidence formats.
 
 ## Validation and integration
 

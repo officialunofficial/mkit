@@ -111,6 +111,14 @@ collect the applicable entries between their old and new immutable pins.
   projects to a physical precondition. No wire or stored-format change or
   store reset; source migrations are listed under Breaking.
 
+- Add optional caller-owned compute scheduling to `mkit-primitives` pack
+  verification. Immutable jobs and opaque outputs bind the run, frame, inputs,
+  operation, and shared memory/work permits. Raw Blob jobs can overlap;
+  ordinal merge preserves serial evidence and refusals. Other objects and
+  deltas remain dependency barriers, and serial execution stays the default.
+  Additive ALPHA API; no protocol bytes, checkpoint format, or store reset.
+
+
 - Add bounded all-entry `VerifyDriver` verification to `mkit-primitives`, with
   canonical object identity, earlier-entry and repository-scoped external delta
   bases, individual signatures, authenticated paged evidence, and cold resume.
