@@ -20,14 +20,67 @@ pub struct IntegrityCheck {
     offset: u64,
     whole: Frontier,
     prefix: Frontier,
+    #[serde(with = "hex_hash")]
     trailer: Hash,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Frontier {
+    #[serde(with = "hex_hashes")]
     stack: Vec<Hash>,
+    #[serde(with = "hex_root")]
     root: Option<Hash>,
+}
+
+// Hex keeps the worst-case progress inside the job header ceiling; a JSON
+// number array is about twice as large.
+mod hex_hash {
+    use super::Hash;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(hash: &Hash, s: S) -> Result<S::Ok, S::Error> {
+        mkit_core::hash::to_hex(hash).serialize(s)
+    }
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Hash, D::Error> {
+        let text = String::deserialize(d)?;
+        mkit_core::hash::from_hex(&text).map_err(serde::de::Error::custom)
+    }
+}
+
+mod hex_hashes {
+    use super::Hash;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(hashes: &[Hash], s: S) -> Result<S::Ok, S::Error> {
+        hashes
+            .iter()
+            .map(mkit_core::hash::to_hex)
+            .collect::<Vec<_>>()
+            .serialize(s)
+    }
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Hash>, D::Error> {
+        Vec::<String>::deserialize(d)?
+            .iter()
+            .map(|text| mkit_core::hash::from_hex(text).map_err(serde::de::Error::custom))
+            .collect()
+    }
+}
+
+mod hex_root {
+    use super::Hash;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    // serde's `with` contract passes the field by reference.
+    #[allow(clippy::ref_option)]
+    pub(super) fn serialize<S: Serializer>(hash: &Option<Hash>, s: S) -> Result<S::Ok, S::Error> {
+        hash.as_ref().map(mkit_core::hash::to_hex).serialize(s)
+    }
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Hash>, D::Error> {
+        Option::<String>::deserialize(d)?
+            .map(|text| mkit_core::hash::from_hex(&text).map_err(serde::de::Error::custom))
+            .transpose()
+    }
 }
 
 fn corrupt() -> StoreError {

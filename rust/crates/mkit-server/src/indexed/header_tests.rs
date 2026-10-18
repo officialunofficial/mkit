@@ -135,6 +135,37 @@ fn largest_job(extracting: bool) -> VerifyJobV1 {
 }
 
 #[test]
+fn the_largest_decode_header_with_integrity_progress_fits_its_bound() {
+    // Smallest window and a 2 GiB pack give the deepest two frontier stacks.
+    let window = 1_u64 << 10;
+    let pack_len = 2_u64 << 30;
+    let depth = ((pack_len - 1) / window).count_ones() as usize;
+    let full = vec!["ff".repeat(32); depth];
+    let trailer = "ff".repeat(32);
+    let mut job = largest_job(false);
+    job.kind = Kind::Pack;
+    job.phase = Phase::Decode;
+    job.pack_len = pack_len;
+    job.integrity = Some(
+        serde_json::from_value(serde_json::json!({
+            "window": window,
+            "offset": (pack_len - 1) / window * window,
+            "whole": {"stack": full, "root": null},
+            "prefix": {"stack": full, "root": null},
+            "trailer": trailer,
+        }))
+        .unwrap(),
+    );
+    let raw = checkpoint::encode_job(&job);
+    eprintln!(
+        "decode header with integrity bytes: {}",
+        raw.as_bytes().len()
+    );
+    assert!(raw.as_bytes().len() <= checkpoint::MAX_JOB_HEADER_BYTES);
+    checkpoint::decode_job(&raw).unwrap();
+}
+
+#[test]
 fn job_headers_and_member_bodies_fit_their_explicit_bounds() {
     for extracting in [false, true] {
         let job = largest_job(extracting);

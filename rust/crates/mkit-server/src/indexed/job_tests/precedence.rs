@@ -338,6 +338,38 @@ fn valid_missing_base_reuses_integrity_while_retrying_membership() {
 }
 
 #[test]
+fn completed_integrity_survives_membership_waits_after_a_decode_checkpoint() {
+    let (lead, lead_raw) = blob(7, 200);
+    let (base, base_raw) = blob(1, 3_000);
+    let (_, target_raw) = blob(2, 3_000);
+    let mut writer = PackWriter::new();
+    writer.push_raw(lead, &lead_raw).unwrap();
+    writer
+        .push_delta(
+            &base,
+            &mkit_core::delta::encode(&base_raw, &target_raw).unwrap(),
+        )
+        .unwrap();
+    let bytes = writer.finish().unwrap();
+    let rig = Rig::new();
+    let (ticket, id) = rig.add(&bytes);
+    rig.create(&ticket, id);
+    rig.drive(|rig| {
+        serde_json::to_value(rig.job(&ticket.pack_id).unwrap()).unwrap()["integrity"]["offset"]
+            .as_u64()
+            == Some(bytes.len() as u64)
+    });
+    let marker = rig.job(&ticket.pack_id).unwrap().integrity;
+    assert!(marker.is_some());
+    for _ in 0..3 {
+        rig.tick();
+        rig.clock.advance(1_000);
+        assert_eq!(rig.job(&ticket.pack_id).unwrap().integrity, marker);
+        assert!(rejected(&rig, &ticket.pack_id).is_none());
+    }
+}
+
+#[test]
 fn a_changed_source_discards_failure_integrity_progress() {
     let (bytes, _) = missing_base();
     let rig = Rig::new();
