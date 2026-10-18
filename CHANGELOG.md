@@ -42,6 +42,11 @@ collect the applicable entries between their old and new immutable pins.
   to `AcceptanceEffects` when counting is disabled. Handle `GuardKind::Storage`
   and `ReservationTerminalKind::StorageChanged` in exhaustive consumers.
   Wire and stored formats are unchanged; no store reset is required.
+- [embedder: breaking API] [embedder: stored-format change] Scheduled
+  verification job headers add optional `VerifyJobV1::integrity` progress.
+  Migration: use `VerifyJobV1::new`, or initialize `integrity: None` in job
+  literals. This disposable state cannot establish verification. Successful
+  jobs omit the field; no repository store reset is required.
 
 - [embedder: breaking API] The all-entry pack verifier adds
   `PackCounts::delta_entries` and replaces
@@ -270,6 +275,15 @@ collect the applicable entries between their old and new immutable pins.
   uploads and failures on a fresh connection are never resent by the channel;
   a write still surfaces the transient connection error so the caller can
   retry with its signed identity.
+- Scheduled pack verification now applies SPEC-PACKFILE §§6.1 and 6.2 when
+  integrity and entry faults compete. A corrupt trailer with a missing delta
+  base or an indexed decode-limit violation produces the same persisted
+  `invalid_argument: object hash mismatch` rejection as inline verification.
+  Previously, scheduled verification could select the base or limit refusal
+  first. A missing base with a valid trailer retains its membership-lag
+  handling and never becomes a persisted rejection. Extra source reads occur
+  only after an early entry refusal; successful verification adds no reads.
+
 - Preserve reference diagnostics for partial signed envelopes in the portable
   auth header precheck, including a missing version, audience, content
   commitment, validity, signature, idempotency key, or unary body digest. A

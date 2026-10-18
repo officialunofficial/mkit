@@ -1907,6 +1907,24 @@ yet. The membership message applies to the closure, head and packlist
 misses found when the advance checks the consumed set, and a base that is
 still absent after the window is the permanent §9.4 answer, as inline.
 
+**Reference-server behavior.** Before finalizing an early delta-base or
+indexed decode-limit refusal, the scheduled verifier checks whole-source
+integrity as required by SPEC-PACKFILE §§6.1 and 6.2. A corrupt trailer produces
+`invalid_argument` with `object hash mismatch`, persisted as `Rejected`, just
+as inline verification does. With valid integrity, the verifier retries the
+failed entry using fresh membership facts. An absent base retains its lag-window
+handling and non-persisted terminal result. Successful verification performs no
+additional source reads.
+
+The failure-only recheck reads at most one configured window per slice, capped
+at 16 MiB and half the slice's resident allowance. Power-of-two windows are at
+least 1 KiB. It checkpoints bounded BLAKE3 subtree frontiers and the trailer
+under the existing job guard and source etag. No hasher memory image or
+verification proof is serialized. A source change restarts the job. This
+progress remains disposable and cannot publish indexes or mark a pack verified.
+Successful job headers omit the optional recheck state, and the existing 16 KiB
+header ceiling remains unchanged.
+
 **Reference-server behavior.** Scheduled verification polling hints use the consumed job's
 persisted timer with a 3,000 ms cap. Tiny decoded packs use a 100 ms floor and
 preserve millisecond precision in the typed detail. Other phases round up to

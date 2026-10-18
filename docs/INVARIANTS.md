@@ -3313,3 +3313,22 @@ vectors, and a sealed-artifact export test cover head checks, witness-chain
 authentication, budgets, binding, and real `VerifiedPack`/`ClosureProof` input.
 Decision parity awaits the acceptance-decision lanes. No live guard or remote
 authentication responsibility moves into this constructor.
+
+## Scheduled entry refusals follow complete source integrity
+
+**Always:** a scheduled early delta-base or indexed decode-limit refusal waits
+for whole-source integrity. A corrupt trailer selects the same persisted hash
+rejection as inline verification. Valid integrity triggers a fresh entry attempt;
+missing membership remains subject to its original lag window and never becomes
+a persisted content rejection. Successful decode performs no recheck reads.
+
+**Because:** SPEC-PACKFILE §§6.1 and 6.2 require integrity-first refusal order
+across verification strategies. An unavailable base cannot authenticate a trailer.
+
+**If violated:** the same corrupt pack can produce different public refusals,
+or a transient repository fact can permanently poison a valid pack.
+
+**Enforced by:** the failure-only `indexed::job::integrity` frontier, the guarded
+optional job progress, competing-fault tests across inline, scheduled, and
+`VerifyDriver`, and the unchanged success-path read and verification round probes.
+Only the original completed decode can proceed to index publication.
