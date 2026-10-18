@@ -73,11 +73,16 @@ remaining memory for that compiler. Both steps use identical profile settings
 to reuse compiled tests. Test selection and execution concurrency stay unchanged,
 including the required ignored-test lane. The machine type stays unchanged.
 
-When diagnosing a compiler exit without a Rust diagnostic, run the underlying
-`cargo test --no-run` command directly as well as nextest. sccache reports a
-signaled child on stdout; Cargo's JSON output consumed by nextest can hide that
-message. Measure the Linux compiler rather than extrapolating native RSS from
-a different platform.
+sccache replaces Cargo's jobserver with CPU-count parallelism even for
+uncached test binaries. The `check` step's compiler wrapper invokes rustc
+directly only for the linked `mkit-server` lib-test, preserving Cargo's
+single-job bound. Other compilations, including metadata checks, keep sccache.
+The lib-test binary was already uncacheable, so this bypass loses no cache hits.
+
+The wrapper also copies sccache's raw stdout to stderr on failure and preserves
+its exit code. This exposes signal messages that Cargo's JSON renderer otherwise
+discards. For diagnosis, use `cargo test --no-run --message-format=human` on the
+same workspace feature graph and measure the Linux compiler's memory use.
 
 ## Test failure reporting
 
