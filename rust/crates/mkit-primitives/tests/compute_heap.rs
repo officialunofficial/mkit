@@ -25,10 +25,7 @@ fn assert_accounted(machine: &VerifyDriver, epoch: &heap::Epoch, ceiling: u64) {
     assert!(usage.peak_resident_bytes <= ceiling);
 }
 
-#[test]
-fn shared_ceiling_covers_queued_jobs_completed_outputs_and_window_crossings() {
-    // All source and host-retention storage exists before the allocation epoch.
-    // Provisional raw Blob bytes need no canonical lookup and are discarded.
+fn fixture_pack() -> Vec<u8> {
     let mut writer = PackWriter::new_raw_only();
     for index in 0_u8..96 {
         let object = Object::Blob(Blob {
@@ -46,7 +43,40 @@ fn shared_ceiling_covers_queued_jobs_completed_outputs_and_window_crossings() {
     let id = id_from_object(&long, &bytes);
     writer.push_raw(id, &bytes).unwrap();
     writer.push_raw(id, &bytes).unwrap();
-    let pack = writer.finish().unwrap();
+    writer.finish().unwrap()
+}
+
+fn complete_batch(
+    machine: &mut VerifyDriver,
+    jobs: &mut Vec<ComputeJob>,
+    outputs: &mut Vec<ComputeOutput>,
+    epoch: &heap::Epoch,
+    ceiling: u64,
+) -> usize {
+    // Run last-issued first and retain every opaque output together before
+    // delivering any result. Both ownership phases count in the epoch.
+    while let Some(job) = jobs.pop() {
+        assert!(outputs.len() < outputs.capacity());
+        outputs.push(job.run());
+        assert_accounted(machine, epoch, ceiling);
+    }
+    let held_outputs = outputs.len();
+    while !outputs.is_empty() {
+        let output = outputs.remove(0);
+        assert_eq!(
+            machine.supply_compute(output).unwrap(),
+            ComputeDisposition::Accepted
+        );
+        assert_accounted(machine, epoch, ceiling);
+    }
+    held_outputs
+}
+
+#[test]
+fn shared_ceiling_covers_queued_jobs_completed_outputs_and_window_crossings() {
+    // All source and host-retention storage exists before the allocation epoch.
+    // Provisional raw Blob bytes need no canonical lookup and are discarded.
+    let pack = fixture_pack();
     let source = PackSource {
         id: hash::hash(&pack),
         len: pack.len() as u64,
@@ -115,22 +145,13 @@ fn shared_ceiling_covers_queued_jobs_completed_outputs_and_window_crossings() {
                     .unwrap();
             }
             Step::Progress => {
-                // Run last-issued first and retain every opaque output together
-                // before delivering any result. Both ownership phases count.
-                while let Some(job) = jobs.pop() {
-                    assert!(outputs.len() < outputs.capacity());
-                    outputs.push(job.run());
-                    max_outputs = max_outputs.max(outputs.len());
-                    assert_accounted(&machine, &epoch, budget.resident_bytes);
-                }
-                while !outputs.is_empty() {
-                    let output = outputs.remove(0);
-                    assert_eq!(
-                        machine.supply_compute(output).unwrap(),
-                        ComputeDisposition::Accepted
-                    );
-                    assert_accounted(&machine, &epoch, budget.resident_bytes);
-                }
+                max_outputs = max_outputs.max(complete_batch(
+                    &mut machine,
+                    &mut jobs,
+                    &mut outputs,
+                    &epoch,
+                    budget.resident_bytes,
+                ));
             }
             Step::ProvisionalObject(_) => (),
             Step::RetainEvidence(page) => {
