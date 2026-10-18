@@ -77,6 +77,19 @@ class ServerGates(unittest.TestCase):
         self.assertLess(match.start(), check.index("          cargo fetch --locked"))
         return textwrap.dedent(match.group(1)) + "\n"
 
+    def test_cloud_step_scripts_fit_argument_limit(self):
+        yaml = (ROOT / "cloudbuild/ci.yaml").read_text()
+        steps = re.split(r"(?m)^  - name: ", yaml)[1:]
+        for step in steps:
+            if "entrypoint: bash" not in step:
+                continue
+            match = re.search(r"(?m)^      - \|\n((?:        [^\n]*\n|\n)*)", step)
+            self.assertIsNotNone(match)
+            script = textwrap.dedent(match.group(1))
+            # Cloud Build rejects any step argument above 10,000 characters.
+            # Count UTF-8 bytes conservatively so non-ASCII comments fit too.
+            self.assertLessEqual(len(script.encode()), 10_000)
+
     def test_cloud_server_lib_test_preserves_cargo_jobserver(self):
         wrapper = self.cloud_rustc_wrapper()
         with tempfile.TemporaryDirectory() as directory:
@@ -232,6 +245,7 @@ if __name__ == "__main__":
     if "--hosted-only" in sys.argv:
         suite = unittest.defaultTestLoader.loadTestsFromNames([
             "test_cloud_linux_allocator_executor", "test_cloud_workspace_test_compilation_is_serial",
+            "test_cloud_step_scripts_fit_argument_limit",
             "test_cloud_server_lib_test_preserves_cargo_jobserver",
             "test_cloud_wrapper_failure_is_visible_and_fails",
             "test_cloud_nextest_reports_every_failure", "test_native_wire_executor_and_gate"], ServerGates)
