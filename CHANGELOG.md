@@ -24,6 +24,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coverage. The reference prefix walk uses `decide_clearance`. No wire or
   stored-format change; no wipe.
 
+- Pin one refusal order and classification across inline, scheduled and
+  driver-based pack verification (SPEC-PACKFILE §§6.1-6.2, SPEC-SERVER §9.4).
+  Inside a delta entry the depth check now follows base resolution and
+  precedes decoding. Frame caps are reported in wire order, so an earlier
+  entry's content refusal outranks a later entry's cap
+  (`PackDecodeCursor` reports a frame's cap when it reaches the frame and
+  gains `resume_checked`). A bad signature is judged per ticket right after
+  that pack's decode, and denial is a policy check after integrity and after
+  every content refusal. Corrupt stored base bytes are `unavailable` on every
+  path. Resulting-pair coverage uses one lag-aware miss mapper, so a missing
+  object is retryable inside the membership lag window on both paths. A
+  completed integrity marker is kept for the rest of Decode, so a membership
+  wait never rescans the source. The closure walker treats held and
+  unpublished members as absent and reports a file-integrity fault only after
+  every absent object. `mkit-primitives` adds `FailureCode::persistence`,
+  `classify_membership_miss` and `FailureCode::ExternalDeltaChainTooDeep`. No
+  wire or repository stored-format change; no read-probe change.
+
 Embedder migration entries use `[embedder: breaking API]`,
 `[embedder: stored-format change]` and `[embedder: store reset required]` tags.
 Combine tags when applicable; every breaking API entry states a replacement and
@@ -31,6 +49,18 @@ every stored-format entry states whether a store reset is required. Embedders
 collect the applicable entries between their old and new immutable pins.
 
 ### Breaking (toward 0.6)
+
+- [embedder: breaking API] The in-pack decoded-byte budget is no longer
+  persisted as a rejection by scheduled verification; it is a terminal
+  `DecodeBudget` outcome, as inline already answered. Migration: none for
+  callers; a stored `Rejected` row with that message is no longer written.
+  `ClosureWalker` reports a file-integrity fault (wrong-kind chunk, bad chunk
+  bytes, manifest total) when the closure completes rather than at the fault,
+  and treats held or unpublished members as absent. Migration: expect the
+  fault from the final `step`, after any `Missing` verdict would have been
+  reported. `FailureCode` gains `ExternalDeltaChainTooDeep`; the deferred
+  refusal checkpoint table appends tag 20, so discard unsupported
+  verification checkpoints and restart. No repository store reset is required.
 
 - [embedder: stored-format change] All-entry verification checkpoints use
   envelope version 3 with explicit hash frontiers, an authenticated remaining

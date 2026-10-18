@@ -1536,6 +1536,11 @@ fn pair_coverage_inline_and_resumable_agree_on_chain_evidence() {
             cfg,
             &crate::telemetry::NoopMetrics,
             true,
+            crate::indexed::publication::Lag {
+                now: 0,
+                created: 0,
+                bound: cfg.relay_lag_bound_ms,
+            },
             &SliceBudget::new(10_000),
         )
         .await
@@ -1752,6 +1757,18 @@ async fn drive_both(
     branch: bool,
     additions: Vec<Hash>,
 ) -> (Result<Advance, ServerError>, Result<Advance, ServerError>) {
+    drive_both_at(kv, blobs, repo, pair, branch, additions, 0).await
+}
+/// [`drive_both`] with the consuming ticket `age` ms old on both paths.
+async fn drive_both_at(
+    kv: &MemoryKv,
+    blobs: &MemoryBlobStore,
+    repo: &RepoId,
+    pair: crate::store::publication::Pair,
+    branch: bool,
+    additions: Vec<Hash>,
+    age: u64,
+) -> (Result<Advance, ServerError>, Result<Advance, ServerError>) {
     let source = SinglePartition.ref_shard(repo, "refs/heads/main");
     let cfg = IndexedConfig::default();
     let mut inline = advance([0; 32]);
@@ -1770,6 +1787,11 @@ async fn drive_both(
         cfg,
         &crate::telemetry::NoopMetrics,
         true,
+        crate::indexed::publication::Lag {
+            now: age,
+            created: 0,
+            bound: cfg.relay_lag_bound_ms,
+        },
         &SliceBudget::new(1_000_000),
     )
     .await
@@ -1785,7 +1807,7 @@ async fn drive_both(
             repo,
             &mut resumed,
             cfg,
-            0,
+            age,
             &crate::telemetry::NoopMetrics,
             0,
             branch,
@@ -2081,9 +2103,9 @@ fn pair_coverage_cleared_head_is_still_read_on_both_paths() {
         assert_eq!(resumed.dependencies, deps);
     });
 }
-/// Missing object: the head's tree is absent from both indexes — inline
-/// fails closed with the open-closure refusal while the resumable path
-/// records a lag-classified missing stop.
+/// Missing object: the head's tree is absent from both indexes. Both paths
+/// share one lag-classified mapper: retryable inside the lag window, an open
+/// closure only after it.
 #[test]
 fn pair_coverage_missing_object_maps_per_path() {
     block_on(async {
@@ -2110,15 +2132,23 @@ fn pair_coverage_missing_object_maps_per_path() {
             head: Some(commit.id().unwrap()),
             packmap: Some(root),
         };
-        let (inline, resumed) = drive_both(&kv, &blobs, &repo, pair, true, vec![root]).await;
-        assert_eq!(inline.unwrap_err().public_message(), "open closure");
-        let error = resumed.unwrap_err();
-        assert_eq!(
-            error.public_message(),
-            "repository membership not yet visible"
-        );
+        let (inline, resumed) =
+            drive_both(&kv, &blobs, &repo, pair.clone(), true, vec![root]).await;
+        // Inside the lag window a missing object is retryable on both paths.
+        for error in [inline.unwrap_err(), resumed.unwrap_err()] {
+            assert_eq!(
+                error.public_message(),
+                "repository membership not yet visible"
+            );
+        }
         let stored = read_progress(&kv, &repo, root).await;
         assert!(stored.missing && !stored.missing_base);
+        // Only after the window does it open the closure, on both paths.
+        let after = IndexedConfig::default().relay_lag_bound_ms;
+        let (inline, resumed) = drive_both_at(&kv, &blobs, &repo, pair, true, vec![root], after).await;
+        for error in [inline.unwrap_err(), resumed.unwrap_err()] {
+            assert_eq!(error.public_message(), "open closure");
+        }
     });
 }
 /// A non-history head is refused closed on the inline path and as the

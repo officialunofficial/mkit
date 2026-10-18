@@ -36,6 +36,29 @@ fn unavailable() -> ServerError {
     ServerError::unavailable("object storage request failed")
 }
 
+/// The consuming request's clock context for repository-membership lag.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Lag {
+    /// Server time, Unix ms.
+    pub now: u64,
+    /// When the consuming ticket was created.
+    pub created: u64,
+    /// The configured membership visibility bound.
+    pub bound: u64,
+}
+impl Lag {
+    /// The one answer for an absent closure object (`base: false`) or delta
+    /// base (`base: true`) on both pair-coverage paths: retryable inside the
+    /// lag window, and only after it an open closure or an unavailable base.
+    pub(super) fn miss(self, base: bool) -> ServerError {
+        if base {
+            resolve::missing_base(self.now, self.created, self.bound)
+        } else {
+            super::verify::closure_error(self.now, self.created, self.bound)
+        }
+    }
+}
+
 // Restrict closure lookup to the exact packmap chain. Newly consumed packs
 // qualify before live membership commits; this facade never grants bytes on a
 // serving path and still applies the hold gate before accepting any membership.
@@ -139,6 +162,7 @@ async fn packlist<B: BlobStore, S: NamespaceStore>(
     id: Hash,
     additions: &[Hash],
     remaining: &mut u64,
+    lag: Lag,
 ) -> Result<(mkit_core::transfer::PackListNode, bool), ServerError> {
     let mut boundary = false;
     if !additions.contains(&id) {
@@ -152,7 +176,7 @@ async fn packlist<B: BlobStore, S: NamespaceStore>(
             .await
             .map_err(|_| unavailable())?;
         match row {
-            None => return Err(closed()),
+            None => return Err(lag.miss(false)),
             Some(raw) => {
                 boundary = store::publication::Witness::decode(&raw)
                     .map_err(|_| unavailable())?
@@ -218,6 +242,7 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
     cfg: IndexedConfig,
     metrics: &dyn Metrics,
     honor_cleared: bool,
+    lag: Lag,
 ) -> Result<(), ServerError> {
     // The primitive owns resulting-pair graph semantics; this host owns
     // storage reads, byte accounting, item caps, and refusal mapping.
@@ -271,7 +296,7 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
             }
         }
         match walker.step() {
-            Err(error) => return Err(pair_failure(&error, walker.failure_context())),
+            Err(error) => return Err(pair_failure(&error, walker.failure_context(), lag)),
             Ok(PairStep::Progress) => {}
             Ok(PairStep::Covered(coverage)) => {
                 advance.dependencies = coverage.dependencies().to_vec();
@@ -290,6 +315,7 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
                             pack,
                             &advance.additions,
                             &mut remaining,
+                            lag,
                         )
                         .await?;
                         walker
@@ -302,7 +328,7 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
                                     boundary: flagged,
                                 }),
                             })
-                            .map_err(|error| pair_failure(&error, walker.failure_context()))?;
+                            .map_err(|error| pair_failure(&error, walker.failure_context(), lag))?;
                         let counts = walker.counts();
                         if counts.chain + counts.packs > MAX_ADVANCE_ITEMS as u64 {
                             return Err(item_capacity());
@@ -324,7 +350,7 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
                                     suppliers: &suppliers,
                                 }),
                             })
-                            .map_err(|error| pair_failure(&error, walker.failure_context()))?;
+                            .map_err(|error| pair_failure(&error, walker.failure_context(), lag))?;
                     }
                     PairRequest::Object {
                         request,
@@ -348,9 +374,9 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
                             resolve::locate_split(&closure, shards, repo, &[object], metrics)
                                 .await?
                                 .remove(&object)
-                                .ok_or_else(closed)?
+                                .ok_or_else(|| lag.miss(false))?
                                 .map_err(|_| capped())?
-                                .ok_or_else(closed)?;
+                                .ok_or_else(|| lag.miss(false))?;
                         let mut memo = resolve::MemberCache::with_work_budget(256);
                         let mut visiting = BTreeSet::new();
                         let (bytes, _) = resolve::member_object(
@@ -373,13 +399,15 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
                             {
                                 e
                             }
-                            resolve::ResolveFailure::Missing => closed(),
+                            resolve::ResolveFailure::Missing => lag.miss(false),
                             resolve::ResolveFailure::Capped => capped(),
                             resolve::ResolveFailure::Store(_) => {
                                 ServerError::unavailable("object storage request failed")
                             }
-                            resolve::ResolveFailure::Other(e)
-                            | resolve::ResolveFailure::Corrupt(e) => e,
+                            resolve::ResolveFailure::Corrupt(_) => {
+                                ServerError::unavailable(resolve::MEMBER_UNAVAILABLE)
+                            }
+                            resolve::ResolveFailure::Other(e) => e,
                         })?;
                         remaining = remaining
                             .checked_sub(memo.retained_bytes())
@@ -404,7 +432,7 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
                                     base: None,
                                 }),
                             })
-                            .map_err(|error| pair_failure(&error, walker.failure_context()))?;
+                            .map_err(|error| pair_failure(&error, walker.failure_context(), lag))?;
                         let counts = walker.counts();
                         if counts.dependencies > MAX_ADVANCE_ITEMS as u64
                             || sorted_union_len(walker.suppliers(), walker.cleared_suppliers())
@@ -455,10 +483,12 @@ fn sorted_union_len(left: &[Hash], right: &[Hash]) -> u64 {
 fn pair_failure(
     error: &mkit_primitives::error::Failure,
     context: Option<PairCheck>,
+    lag: Lag,
 ) -> ServerError {
     use mkit_primitives::error::FailureCode;
     match error.code {
-        FailureCode::MissingClosure | FailureCode::WrongKind => closed(),
+        FailureCode::MissingClosure => lag.miss(false),
+        FailureCode::WrongKind => closed(),
         FailureCode::PackmapCycle => capped(),
         FailureCode::ResourceLimit => item_capacity(),
         _ => {
@@ -487,6 +517,7 @@ pub(crate) async fn verify_within<B: BlobStore, S: NamespaceStore>(
     cfg: IndexedConfig,
     metrics: &dyn Metrics,
     honor_cleared: bool,
+    lag: Lag,
     slice: &super::budget::SliceBudget,
 ) -> Result<(), ServerError> {
     let blobs = super::budget::Budgeted::new(blobs, slice);
@@ -503,6 +534,7 @@ pub(crate) async fn verify_within<B: BlobStore, S: NamespaceStore>(
         cfg,
         metrics,
         honor_cleared,
+        lag,
     )
     .await;
     crate::pipeline::publication_budget::PublicationBudget::settle(slice, result)
@@ -525,6 +557,7 @@ pub(crate) async fn verify_inspected_within<B: BlobStore, S: NamespaceStore>(
     metrics: &dyn Metrics,
     honor_cleared: bool,
     inspection: &mut super::inspection::InspectionSet,
+    lag: Lag,
     slice: &super::budget::SliceBudget,
 ) -> Result<(), ServerError> {
     let blobs = super::budget::Budgeted::new(blobs, slice);
@@ -542,6 +575,7 @@ pub(crate) async fn verify_inspected_within<B: BlobStore, S: NamespaceStore>(
             cfg,
             metrics,
             honor_cleared,
+            lag,
         )
         .await?;
         inspection.complete_added(&store, repo).await

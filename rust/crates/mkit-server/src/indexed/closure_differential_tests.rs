@@ -250,6 +250,11 @@ fn member_fact(id: Hash, object: &Object) -> MemberFact {
     }
 }
 fn file_failure(walker: &ClosureWalker<View>, failure: &Failure) -> Verdict {
+    // A head that cannot be a history tip is an open closure on the servers.
+    if walker.failure_context().map(|context| context.check) == Some(ClosureCheck::Head) {
+        assert_eq!(failure.code, FailureCode::WrongKind);
+        return Verdict::Missing;
+    }
     assert!(matches!(
         walker.failure_context().unwrap().check,
         ClosureCheck::Chunk { .. } | ClosureCheck::Manifest
@@ -496,4 +501,53 @@ fn public_walker_and_servers_agree_on_a_wrong_kind_chunk() {
         head,
     }
     .assert_parity(Verdict::MalformedFile);
+}
+
+#[test]
+fn public_walker_and_servers_report_a_missing_object_before_a_file_fault() {
+    // A wrong-kind chunk and an absent tree member in the same tree: both
+    // servers answer the open closure, so the walker must as well.
+    let chunk = Object::Tree(Tree { entries: vec![] });
+    let manifest = Object::ChunkedBlob(ChunkedBlob {
+        total_size: 0,
+        chunk_size: 0,
+        chunks: vec![chunk.id().unwrap()],
+    });
+    let (tree, commit, head) = tree_head(&[manifest.id().unwrap(), [93; 32]]);
+    let objects = vec![chunk, manifest, tree, commit];
+    Fixture {
+        bytes: pack(&objects),
+        objects,
+        members: vec![],
+        head,
+    }
+    .assert_parity(Verdict::Missing);
+
+    // The same shape with a bad manifest total instead of a wrong-kind chunk.
+    let mut fixture = manifest_fixture(&[], false, 1);
+    let (tree, commit, head) = tree_head(&[fixture.objects[0].id().unwrap(), [94; 32]]);
+    fixture.objects.extend([tree, commit]);
+    fixture.bytes = pack(&fixture.objects);
+    fixture.head = head;
+    fixture.assert_parity(Verdict::Missing);
+}
+
+#[test]
+fn public_walker_and_servers_agree_on_head_kinds() {
+    for object in [
+        Object::Blob(Blob {
+            data: vec![1; 100],
+        }),
+        Object::Tree(Tree { entries: vec![] }),
+    ] {
+        let head = object.id().unwrap();
+        let objects = vec![object];
+        Fixture {
+            bytes: pack(&objects),
+            objects,
+            members: vec![],
+            head,
+        }
+        .assert_parity(Verdict::Missing);
+    }
 }

@@ -1654,6 +1654,9 @@ struct CursorFrame<'a> {
     frame_length: u64,
     wire_type: u8,
     delta_base: Option<Hash>,
+    /// A wire-cap violation of this frame, reported when the decode reaches it
+    /// rather than at preflight, so an earlier entry's refusal comes first.
+    cap: Option<PackError>,
 }
 
 /// A store-less pack decoder that pauses at an unresolved external base.
@@ -1679,7 +1682,10 @@ impl<'a> PackDecodeCursor<'a> {
     ///
     /// # Errors
     /// Invalid framing, unsupported content, or a decoded-size claim over
-    /// `limits` is returned before the sink observes any entry.
+    /// `limits` is returned before the sink observes any entry. An entry-
+    /// geometry cap (see [`DecodeLimits::with_entry_geometry`]) is the exception:
+    /// it is reported by [`Self::resume`] when the decode reaches that frame,
+    /// so an earlier entry's refusal takes precedence in wire order.
     pub fn new(pack: &'a [u8], limits: DecodeLimits) -> Result<Self, PackError> {
         let mut pack_entries = PackEntries::new(pack)?;
         let mut budget = DecodeBudget {
@@ -1694,10 +1700,12 @@ impl<'a> PackDecodeCursor<'a> {
             let payload = pack_entries
                 .last_payload_range()
                 .ok_or(PackError::UnexpectedEof)?;
-            limits.check_frame(
-                pack[payload.start - ENTRY_FRAME_LEN],
-                &pack[payload.clone()],
-            )?;
+            let cap = limits
+                .check_frame(
+                    pack[payload.start - ENTRY_FRAME_LEN],
+                    &pack[payload.clone()],
+                )
+                .err();
             let offset = payload
                 .start
                 .checked_sub(ENTRY_FRAME_LEN)
@@ -1712,6 +1720,7 @@ impl<'a> PackDecodeCursor<'a> {
                 frame_length: (payload.end - offset) as u64,
                 wire_type: pack[offset],
                 delta_base,
+                cap,
             }));
         }
 
@@ -1762,10 +1771,26 @@ impl<'a> PackDecodeCursor<'a> {
     /// [`PackError::DeltaBaseMissing`] leaves the current frame ready to
     /// retry after `bases` gains that id. Any other error is terminal. The
     /// sink may have seen earlier entries when either error is returned.
-    #[allow(clippy::too_many_lines)] // One stateful loop preserves frame order and charges.
     pub fn resume<B: DeltaBaseSource>(
         &mut self,
         bases: &mut B,
+        sink: impl FnMut(DecodedEntry<'_>) -> Result<(), PackError>,
+    ) -> Result<DecodeReport, PackError> {
+        self.resume_checked(bases, |_| Ok(()), sink)
+    }
+
+    /// [`Self::resume`] with a check run on each frame's delta base, if any,
+    /// after the frame's wire cap and before anything of it is decoded or its
+    /// base fetched. An error from `before` ends the decode like any other.
+    /// A frame retried after [`PackError::DeltaBaseMissing`] runs it again.
+    ///
+    /// # Errors
+    /// As [`Self::resume`], plus whatever `before` returns.
+    #[allow(clippy::too_many_lines)] // One stateful loop preserves frame order and charges.
+    pub fn resume_checked<B: DeltaBaseSource>(
+        &mut self,
+        bases: &mut B,
+        mut before: impl FnMut(Option<Hash>) -> Result<(), PackError>,
         mut sink: impl FnMut(DecodedEntry<'_>) -> Result<(), PackError>,
     ) -> Result<DecodeReport, PackError> {
         if self.report.is_none() {
@@ -1786,7 +1811,12 @@ impl<'a> PackDecodeCursor<'a> {
                 frame_length,
                 wire_type,
                 delta_base,
+                cap,
             } = frame;
+            if let Some(cap) = cap {
+                return Err(cap);
+            }
+            before(delta_base)?;
             match entry {
                 PackEntry::Raw { bytes } => {
                     let object = validate_storable_object(&bytes)?;
@@ -1837,6 +1867,7 @@ impl<'a> PackDecodeCursor<'a> {
                                 frame_length,
                                 wire_type,
                                 delta_base,
+                                cap: None,
                             });
                             return Err(error);
                         }

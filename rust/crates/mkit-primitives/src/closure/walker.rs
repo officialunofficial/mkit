@@ -159,6 +159,8 @@ struct Frame {
     chunks: Option<u64>,
     chunk_sum: u64,
     missing_chunk: bool,
+    /// A chunk fault was deferred; the manifest total can no longer be judged.
+    faulted: bool,
 }
 impl Frame {
     fn seeds() -> Self {
@@ -173,6 +175,7 @@ impl Frame {
             chunks: None,
             chunk_sum: 0,
             missing_chunk: false,
+            faulted: false,
         }
     }
     fn object(object: InPackObject, depth: u64, total: Option<u64>, chunks: Option<u64>) -> Self {
@@ -278,6 +281,10 @@ pub struct ClosureWalker<V> {
     evidence_pages: u64,
     diagnostics: ClosureDiagnostics,
     context: Option<ClosureFailureContext>,
+    /// The first file-integrity fault in traversal order. It is reported only
+    /// after the whole closure is known to be complete, so absent objects take
+    /// precedence over it, as in both server paths.
+    deferred: Option<(Failure, Option<ClosureFailureContext>)>,
     failed: bool,
     finished: bool,
 }
@@ -358,6 +365,7 @@ impl<V: InPackObjectView> ClosureWalker<V> {
             evidence_pages: 0,
             diagnostics: ClosureDiagnostics::default(),
             context: None,
+            deferred: None,
             failed: false,
             finished: false,
         };
@@ -403,6 +411,13 @@ impl<V: InPackObjectView> ClosureWalker<V> {
             }));
         }
         if self.frames.is_empty() && self.missing.is_empty() {
+            if self.missing_count == 0
+                && let Some((fault, context)) = self.deferred.take()
+            {
+                self.failed = true;
+                self.context = context;
+                return Err(fault);
+            }
             self.finished = true;
             if self.missing_count > 0 {
                 return Ok(ClosureStep::Missing(MissingSet::seal(
@@ -484,6 +499,19 @@ impl<V: InPackObjectView> ClosureWalker<V> {
     }
     fn charge(&mut self, n: u64) -> Result<(), Failure> {
         charge(&mut self.work, n, self.limits.work)
+    }
+    /// Record a file-integrity fault of the active obligation and keep walking.
+    /// Only the first is kept: traversal order is wire order of discovery.
+    fn defer_only(&mut self, fault: Failure) {
+        if self.deferred.is_none() {
+            self.deferred = Some((fault, self.context));
+        }
+    }
+    fn defer(&mut self, fault: Failure) {
+        self.defer_only(fault);
+        if let Some(frame) = self.frames.last_mut() {
+            frame.faulted = true;
+        }
     }
     fn resident(&mut self, extra: u64) -> Result<(), Failure> {
         // Conservative reservations include vector capacity and the maximum

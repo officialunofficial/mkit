@@ -307,6 +307,7 @@ codes:
 | 7 | TrailingData | 17 | ExternalBaseAbsent |
 | 8 | DecompressionFailed | 18 | ResourceLimit |
 | 9 | DecompressedSizeMismatch | 19 | UnsupportedCapability |
+| 20 | ExternalDeltaChainTooDeep | | |
 
 Unknown code, optional, or detail tags are invalid. A present offset MUST NOT
 exceed source length, and a present ordinal MUST NOT exceed consumed entries.

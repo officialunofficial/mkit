@@ -63,15 +63,24 @@ impl ResolveFailure {
                 ServerError::failed_precondition("delta base not available in this repository")
             }
             Self::Store(_) => unavailable(),
-            Self::Other(error) | Self::Corrupt(error) => error,
+            // Corrupt bytes of a base this repository stores are a server
+            // fault, retryable and never a client refusal: scheduled
+            // verification answers the same (SPEC-PACKFILE 6.1).
+            Self::Corrupt(_) => ServerError::unavailable(MEMBER_UNAVAILABLE),
+            Self::Other(error) => error,
         }
     }
 }
 
+/// The public message when a stored member's bytes cannot be used.
+pub(crate) const MEMBER_UNAVAILABLE: &str = "member content unavailable";
+
 /// Whether a ticket still lies inside the §9.4 repository-membership window.
 #[must_use]
 pub fn lagged(now_ms: u64, created_at_ms: u64, bound_ms: u64) -> bool {
-    now_ms.saturating_sub(created_at_ms) < bound_ms
+    use mkit_primitives::error::{MembershipMiss, classify_membership_miss};
+    classify_membership_miss(now_ms.saturating_sub(created_at_ms), bound_ms)
+        == MembershipMiss::Retryable
 }
 
 /// Exact error for an unresolved base, independent of global blob existence.

@@ -1395,7 +1395,7 @@ fn head_only_and_packmap_only_updates_verify_the_unchanged_counterpart() {
             .auth(&signed(&owner, &identity, Procedure::UpdateRef, 9206))
             .unwrap();
         let error = block_on(env.pipe.update_ref(&a, upd(name, Match(old), new))).unwrap_err();
-        assert_eq!(error.public_message(), "open closure");
+        assert_eq!(error.public_message(), "repository membership not yet visible");
         let repo = &a.repo().repo;
         let p = env.pipe.shards.ref_shard(repo, HEAD);
         assert_eq!(

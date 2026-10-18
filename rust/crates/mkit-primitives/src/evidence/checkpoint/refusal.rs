@@ -9,7 +9,10 @@ pub(crate) struct DeferredFailure {
     detail: BoundedDetail,
 }
 
-const CODES: &[FailureCode] = &[
+/// The content refusals a one-pass verifier defers behind integrity, in
+/// checkpoint tag order. This is the one list of deferrable codes: the driver's
+/// entry-refusal test derives from it. Append only; tags are positions.
+pub(crate) const CODES: &[FailureCode] = &[
     FailureCode::UnexpectedEof,
     FailureCode::InvalidEntryType,
     FailureCode::TooManyObjects,
@@ -30,7 +33,13 @@ const CODES: &[FailureCode] = &[
     FailureCode::ExternalBaseAbsent,
     FailureCode::ResourceLimit,
     FailureCode::UnsupportedCapability,
+    FailureCode::ExternalDeltaChainTooDeep,
 ];
+
+/// Whether `code` is an entry-level refusal deferred behind integrity.
+pub(crate) fn deferrable(code: FailureCode) -> bool {
+    CODES.contains(&code)
+}
 
 impl From<&Failure> for DeferredFailure {
     fn from(failure: &Failure) -> Self {

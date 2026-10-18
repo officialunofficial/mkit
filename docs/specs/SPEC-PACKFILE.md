@@ -403,17 +403,36 @@ Error precedence is deterministic across execution strategies:
    structure, and whole-source integrity failures precede every entry-level
    check.
 2. Entry framing, declared-count, and wire-cap violations precede that
-   entry's content checks.
+   entry's content checks. Caps are checked entry by entry in wire order, so
+   a later entry's cap never outranks an earlier entry's content refusal.
 3. Delta-base resolution, canonical decode and identity checks, edge
    extraction, and signature checks follow in wire order; a signature
    failure is recorded and prevents terminal acceptance but does not
-   substitute for integrity or decode failures.
+   substitute for integrity or decode failures. Within one delta entry the
+   order is: base resolution, then the depth check as soon as the base is
+   known and before any decode work, then decode, identity, edges and
+   signature. A chain one past the profile depth whose last delta is
+   malformed is therefore a depth refusal.
 4. Malformed content, caller-selected content-profile limits, execution
    resource exhaustion, and unavailable acquisition are distinct refusal
    classes and MUST NOT be collapsed into one another (see §6.2 and
    SPEC-PRIMITIVE-EVIDENCE §3). Unavailable input is retryable and never
    produces absence; absence requires an authenticated answer to the exact
    request.
+
+Denial by a global blocklist (SPEC-SERVER §14.2) is a policy check, not a
+content check. It is evaluated after whole-source integrity and after every
+content refusal, including a bad signature, and a verifier MAY report it only
+when no earlier refusal exists. A verifier that must stop at a denied object
+to keep denied bytes out of its rows reports a content refusal it has already
+seen in preference to the denial.
+
+When one advance consumes several packs, packs are judged in ticket order: the
+first ticket with a refusal wins, and the precedence above applies inside it.
+
+The bytes of a delta base that the repository stores, but which do not match
+its identity, are a repository fault, not a property of the submitted pack:
+every strategy reports `unavailable`, and none records a content refusal.
 
 A verifier that checks entries while hashing the source MUST defer an
 entry-level refusal until the trailer and requested whole-pack identity have
@@ -439,6 +458,18 @@ budget or fewer concurrent operations may succeed), *unavailable input*
 and *invalid response* (a reply mismatched its outstanding request). The
 refusal for a given input MUST be identical whether entries are verified
 inline, streamed, or fanned out across caller-driven workers.
+
+A refusal is *permanent* (a property of the submitted bytes alone, so a host
+may record it and replay it) or *transient* (it depends on repository state,
+time, a deployment limit or resources, so it is re-run, never replayed).
+Malformed content, integrity failures, bad signatures and a delta chain too
+deep inside the pack alone are permanent. Wire or profile ceilings,
+decoded-byte budgets, an external base's depth, membership misses and every
+execution or acquisition failure are transient. The in-pack decoded-byte
+budget is a deployment limit and is transient. The reference classification is
+`FailureCode::persistence` in `mkit-primitives`; a membership miss is
+retryable while the input's age is below the visibility bound and a content
+verdict afterwards (`classify_membership_miss`).
 
 ---
 

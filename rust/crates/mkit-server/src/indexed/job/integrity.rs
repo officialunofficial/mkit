@@ -149,9 +149,12 @@ impl IntegrityCheck {
                 Outcome::BaseMissing
                 | Outcome::BaseCapped
                 | Outcome::ExternalTooDeep
-                | Outcome::DecodeBudget,
+                | Outcome::DecodeBudget
+                // Denial is a policy check: it follows integrity like every
+                // entry-level refusal (SPEC-PACKFILE 6.1).
+                | Outcome::Blocked,
             )
-            | Stop::Reject("delta chain too deep" | "pack exceeds indexed decode budget") => (),
+            | Stop::Reject("delta chain too deep") => (),
             // Hash refusals already have the same public, persisted rejection as
             // integrity failures. Signatures wait until WindowReader::Done.
             _ => return None,

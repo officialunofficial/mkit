@@ -241,7 +241,18 @@ impl<V: InPackObjectView> ClosureWalker<V> {
             self.phase = Phase::Process;
             return Ok(());
         };
+        // A held or unpublished member is absent for closure, as in the pack
+        // verifier: neither can satisfy a reference.
         let (record, present) = match &answer.value {
+            Acquisition::Present(fact) if fact.held || !fact.published => (
+                &Record {
+                    kind: ObjectType::Blob,
+                    canonical_len: 0,
+                    state: State::Absent,
+                    blob_payload_len: None,
+                },
+                false,
+            ),
             Acquisition::Present(fact) => (
                 &Record {
                     kind: fact.kind,
@@ -281,14 +292,14 @@ impl<V: InPackObjectView> ClosureWalker<V> {
                 return Err(failure(FailureCode::InvalidResponse));
             }
             self.diagnose(visit, object.kind);
-            check_kind(visit, object.kind)?;
-            if visit.chunk {
-                self.chunk(
-                    object
-                        .canonical_len
-                        .checked_sub(10)
-                        .ok_or_else(|| failure(FailureCode::NonCanonicalObject))?,
-                )?;
+            match check_kind(visit, object.kind) {
+                Ok(()) => {
+                    if visit.chunk {
+                        self.chunk_len(object.canonical_len.checked_sub(10))?;
+                    }
+                }
+                Err(fault) if visit.head => return Err(fault),
+                Err(fault) => self.defer(fault),
             }
             if let Some(record) = record {
                 if record.kind != object.kind || record.canonical_len != object.canonical_len {
@@ -336,10 +347,17 @@ impl<V: InPackObjectView> ClosureWalker<V> {
                 }
                 State::Member(fact) => {
                     self.diagnose(visit, fact.kind);
-                    check_kind(visit, fact.kind)?;
+                    if let Err(fault) = check_kind(visit, fact.kind) {
+                        if visit.head {
+                            return Err(fault);
+                        }
+                        self.defer(fault);
+                        self.complete_visit();
+                        return Ok(());
+                    }
                     if visit.chunk {
                         if let Some(len) = record.blob_payload_len {
-                            self.chunk(len)?;
+                            self.chunk(len);
                             self.complete_visit();
                             Ok(())
                         } else {
@@ -389,19 +407,28 @@ impl<V: InPackObjectView> ClosureWalker<V> {
         }
         self.phase = Phase::Process;
     }
-    pub(super) fn chunk(&mut self, len: u64) -> Result<(), Failure> {
-        let frame = self
-            .frames
-            .last_mut()
-            .ok_or_else(|| failure(FailureCode::InvalidResponse))?;
-        let total = frame
+    /// Account one chunk's payload length, or defer a fault when the manifest
+    /// cannot hold it.
+    pub(super) fn chunk(&mut self, len: u64) {
+        let Some(frame) = self.frames.last_mut() else {
+            return;
+        };
+        let sum = frame
             .total
-            .ok_or_else(|| failure(FailureCode::InvalidResponse))?;
-        frame.chunk_sum = frame
-            .chunk_sum
-            .checked_add(len)
-            .filter(|n| *n <= total)
-            .ok_or_else(|| failure(FailureCode::NonCanonicalObject))?;
+            .and_then(|total| frame.chunk_sum.checked_add(len).filter(|n| *n <= total));
+        match sum {
+            Some(sum) => frame.chunk_sum = sum,
+            None => self.defer(failure(FailureCode::NonCanonicalObject)),
+        }
+    }
+    pub(super) fn chunk_len(&mut self, len: Option<u64>) -> Result<(), Failure> {
+        if self.frames.last().is_none_or(|f| f.total.is_none()) {
+            return Err(failure(FailureCode::InvalidResponse));
+        }
+        match len {
+            Some(len) => self.chunk(len),
+            None => self.defer(failure(FailureCode::NonCanonicalObject)),
+        }
         Ok(())
     }
     pub(super) fn add_missing(&mut self, visit: Visit) -> Result<(), Failure> {
@@ -451,10 +478,14 @@ impl<V: InPackObjectView> ClosureWalker<V> {
             .ok_or_else(|| failure(FailureCode::InvalidResponse))?;
         if let Some(total) = frame.total
             && !frame.missing_chunk
+            && !frame.faulted
             && frame.chunk_sum != total
         {
-            return Err(failure(FailureCode::NonCanonicalObject));
+            self.defer_only(failure(FailureCode::NonCanonicalObject));
         }
+        self.finish_popped(frame)
+    }
+    fn finish_popped(&mut self, frame: Frame) -> Result<(), Failure> {
         if let Some(object) = frame.object {
             self.phase = Phase::Process;
             self.frames

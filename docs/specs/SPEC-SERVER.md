@@ -1907,6 +1907,23 @@ yet. The membership message applies to the closure, head and packlist
 misses found when the advance checks the consumed set, and a base that is
 still absent after the window is the permanent §9.4 answer, as inline.
 
+**Reference-server behavior.** Inline, scheduled and driver-based verification
+share one refusal order (SPEC-PACKFILE §6.1): within a delta entry the depth
+check follows base resolution and precedes decoding; frame caps are checked in
+wire order; denial (§14.2) follows integrity and every content refusal; and
+the first ticket of an advance with a refusal wins. The in-pack decoded-byte
+budget is a deployment limit: it is reported but never persisted as `Rejected`.
+Known scheduled-path divergence: the scheduled verifier reads denial per admitted
+batch so that no row of a denied object is written, hence a denied object in an
+earlier batch is reported (`permission_denied`, `object blocked`, not persisted)
+ahead of a content refusal in a later entry, where inline verification reports
+the content refusal. Denial still follows integrity and every refusal found
+up to and including its own batch. The divergence ends when scheduled
+verification runs on the driver. Corrupt bytes of a stored delta base are `unavailable` (`member content
+unavailable`) and never persisted. Resulting-pair coverage uses one lag-aware
+mapper on its inline and resumable paths: a missing object is retryable inside
+the lag window and an `open closure` only after it.
+
 **Reference-server behavior.** Before finalizing an early delta-base or
 indexed decode-limit refusal, the scheduled verifier checks whole-source
 integrity as required by SPEC-PACKFILE §§6.1 and 6.2. A corrupt trailer produces

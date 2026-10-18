@@ -85,12 +85,23 @@ impl<V: InPackObjectView> ClosureWalker<V> {
                 )?;
                 self.charge(bytes.len() as u64)?;
                 let CanonicalSource::Member(fact) = source;
-                let len = verify_blob(fact.object, bytes)?;
+                let verified = verify_blob(fact.object, bytes);
                 if !matches!(self.phase, Phase::Visit(_)) {
                     return Err(failure(FailureCode::InvalidResponse));
                 }
                 self.request = None;
-                self.chunk(len as u64)?;
+                // A bad chunk is a file-integrity fault: deferred behind any
+                // absent object, and recorded without a payload length.
+                let len = match verified {
+                    Ok(len) => {
+                        self.chunk(len as u64);
+                        Some(len as u64)
+                    }
+                    Err(fault) => {
+                        self.defer(fault);
+                        None
+                    }
+                };
                 self.complete_visit();
                 self.put(
                     fact.object,
@@ -98,7 +109,7 @@ impl<V: InPackObjectView> ClosureWalker<V> {
                         kind: fact.kind,
                         canonical_len: fact.canonical_len,
                         state: State::Member(fact),
-                        blob_payload_len: Some(len as u64),
+                        blob_payload_len: len,
                     },
                 )
             }

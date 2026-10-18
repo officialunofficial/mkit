@@ -30,13 +30,13 @@ use mkit_core::hash::{Hash, hash};
 use mkit_core::object::Object;
 use mkit_core::ops::graph::{ClosureMode, children};
 use mkit_core::pack::{
-    DecodedEntry, DeltaBaseSource, PackDecodeCursor, PackError, decode_entries_with,
-    delta_base_hashes,
+    DecodedEntry, DeltaBaseSource, PackDecodeCursor, PackError, delta_base_hashes,
 };
 use mkit_core::sign::verify_object_signature;
 use mkit_core::transfer::decode_packlist;
 use mkit_core::verify::{ObjectSource, VerifyError, verify_push};
 use std::borrow::Cow;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -745,22 +745,34 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
                     &bytes,
                     super::geometry::entry_limits(cfg.decode_budget.saturating_sub(staged_bytes)),
                 ) {
-                    let mut probe_depths = BTreeMap::new();
+                    let probe_depths: RefCell<BTreeMap<Hash, u32>> = RefCell::new(BTreeMap::new());
                     loop {
-                        let result = probe.resume(&mut bases, |entry| {
-                            let hops = entry.delta_base.map_or(0, |base| {
-                                probe_depths
-                                    .get(&base)
-                                    .copied()
-                                    .unwrap_or(0_u32)
-                                    .saturating_add(1)
-                            });
-                            if hops > cfg.max_delta_chain_depth {
-                                return Err(PackError::PackfileTooLarge);
-                            }
-                            probe_depths.entry(entry.id).or_insert(hops);
-                            Ok(())
-                        });
+                        let result = {
+                            let hops_of = |base: Option<Hash>| {
+                                base.map_or(0, |base| {
+                                    probe_depths
+                                        .borrow()
+                                        .get(&base)
+                                        .copied()
+                                        .unwrap_or(0_u32)
+                                        .saturating_add(1)
+                                })
+                            };
+                            probe.resume_checked(
+                                &mut bases,
+                                |base| {
+                                    if hops_of(base) > cfg.max_delta_chain_depth {
+                                        return Err(PackError::PackfileTooLarge);
+                                    }
+                                    Ok(())
+                                },
+                                |entry| {
+                                    let hops = hops_of(entry.delta_base);
+                                    probe_depths.borrow_mut().entry(entry.id).or_insert(hops);
+                                    Ok(())
+                                },
+                            )
+                        };
                         renew_all_pending(store, source, repo, acquired, clock).await?;
                         let Err(PackError::DeltaBaseMissing(hex)) = result else {
                             break;
@@ -884,66 +896,90 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
                     }
                 }
                 let mut frames = Vec::new();
-                let mut local_depths: BTreeMap<Hash, (u32, Option<Hash>)> = BTreeMap::new();
-                let mut in_pack_depth_exceeded = false;
-                let mut external_depth_exceeded = false;
-                let decoded = decode_entries_with(
-                    &bytes,
-                    &mut bases,
-                    super::geometry::entry_limits(
-                        cfg.decode_budget
-                            .saturating_sub(staged_bytes.saturating_add(memo.retained_bytes())),
-                    ),
-                    |entry: DecodedEntry<'_>| {
-                        super::geometry::check_entry(entry.bytes.len() as u64, entry.frame_length)?;
-                        let (hops, external) = match entry.delta_base {
-                            None => (0, None),
-                            Some(base) => match local_depths.get(&base) {
-                                Some((depth, external)) => (depth.saturating_add(1), *external),
-                                None => (1, Some(base)),
+                // Depth is checked once an entry's base is known and before the
+                // entry is decoded (SPEC-PACKFILE 6.1), so no decode work is
+                // spent past the profile.
+                let local_depths: RefCell<BTreeMap<Hash, (u32, Option<Hash>)>> =
+                    RefCell::new(BTreeMap::new());
+                let in_pack_depth_exceeded = Cell::new(false);
+                let external_depth_exceeded = Cell::new(false);
+                let decoded = {
+                    let chain_of = |base: Option<Hash>| match base {
+                        None => (0, None),
+                        Some(base) => match local_depths.borrow().get(&base) {
+                            Some((depth, external)) => (depth.saturating_add(1), *external),
+                            None => (1, Some(base)),
+                        },
+                    };
+                    PackDecodeCursor::new(
+                        &bytes,
+                        super::geometry::entry_limits(
+                            cfg.decode_budget
+                                .saturating_sub(staged_bytes.saturating_add(memo.retained_bytes())),
+                        ),
+                    )
+                    .and_then(|mut cursor| {
+                        cursor.resume_checked(
+                            &mut bases,
+                            |base| {
+                                let (hops, external) = chain_of(base);
+                                if hops > cfg.max_delta_chain_depth {
+                                    in_pack_depth_exceeded.set(true);
+                                    return Err(PackError::PackfileTooLarge);
+                                }
+                                let total = hops.saturating_add(
+                                    external
+                                        .and_then(|base| depths.get(&base).copied())
+                                        .unwrap_or(0),
+                                );
+                                if total > cfg.max_delta_chain_depth {
+                                    external_depth_exceeded.set(true);
+                                    return Err(PackError::PackfileTooLarge);
+                                }
+                                Ok(())
                             },
-                        };
-                        let total = hops.saturating_add(
-                            external
-                                .and_then(|base| depths.get(&base).copied())
-                                .unwrap_or(0),
-                        );
-                        if hops > cfg.max_delta_chain_depth {
-                            in_pack_depth_exceeded = true;
-                            return Err(PackError::PackfileTooLarge);
-                        }
-                        if total > cfg.max_delta_chain_depth {
-                            external_depth_exceeded = true;
-                            return Err(PackError::PackfileTooLarge);
-                        }
-                        local_depths.entry(entry.id).or_insert((hops, external));
-                        frames.push(FrameMeta {
-                            id: entry.id,
-                            frame_offset: entry.frame_offset,
-                            frame_length: entry.frame_length,
-                            wire_type: entry.wire_type,
-                            delta_base: entry.delta_base,
-                            decoded_size: entry.bytes.len() as u64,
-                        });
-                        if let std::collections::btree_map::Entry::Vacant(slot) =
-                            staged.entry(entry.id)
-                        {
-                            staged_bytes = staged_bytes
-                                .checked_add(entry.bytes.len() as u64)
-                                .ok_or(PackError::PackfileTooLarge)?;
-                            if staged_bytes.saturating_add(memo.retained_bytes())
-                                > cfg.decode_budget
-                            {
-                                return Err(PackError::PackfileTooLarge);
-                            }
-                            slot.insert((entry.bytes.to_vec(), entry.object, ticket.created_at_ms));
-                        }
-                        staged_owner.entry(entry.id).or_insert(ticket.pack_id);
-                        Ok(())
-                    },
-                );
+                            |entry: DecodedEntry<'_>| {
+                                super::geometry::check_entry(
+                                    entry.bytes.len() as u64,
+                                    entry.frame_length,
+                                )?;
+                                let chain = chain_of(entry.delta_base);
+                                local_depths.borrow_mut().entry(entry.id).or_insert(chain);
+                                frames.push(FrameMeta {
+                                    id: entry.id,
+                                    frame_offset: entry.frame_offset,
+                                    frame_length: entry.frame_length,
+                                    wire_type: entry.wire_type,
+                                    delta_base: entry.delta_base,
+                                    decoded_size: entry.bytes.len() as u64,
+                                });
+                                if let std::collections::btree_map::Entry::Vacant(slot) =
+                                    staged.entry(entry.id)
+                                {
+                                    staged_bytes = staged_bytes
+                                        .checked_add(entry.bytes.len() as u64)
+                                        .ok_or(PackError::PackfileTooLarge)?;
+                                    if staged_bytes.saturating_add(memo.retained_bytes())
+                                        > cfg.decode_budget
+                                    {
+                                        return Err(PackError::PackfileTooLarge);
+                                    }
+                                    slot.insert((
+                                        entry.bytes.to_vec(),
+                                        entry.object,
+                                        ticket.created_at_ms,
+                                    ));
+                                }
+                                staged_owner.entry(entry.id).or_insert(ticket.pack_id);
+                                Ok(())
+                            },
+                        )
+                    })
+                };
                 renew_all_pending(store, source, repo, acquired, clock).await?;
                 if let Err(error) = decoded {
+                    let (in_pack_depth_exceeded, external_depth_exceeded) =
+                        (in_pack_depth_exceeded.get(), external_depth_exceeded.get());
                     if in_pack_depth_exceeded {
                         return Err(reject_content(
                             store,
@@ -1005,6 +1041,28 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
                     )
                     .await);
                 };
+                // Signatures follow this pack's complete decode, in wire order,
+                // before the next ticket is decoded: the first ticket with a
+                // refusal wins (SPEC-PACKFILE 6.1).
+                let mut checked = BTreeSet::new();
+                for frame in &frames {
+                    if staged_owner.get(&frame.id) == Some(&ticket.pack_id)
+                        && checked.insert(frame.id)
+                        && verify_object_signature(&staged[&frame.id].1).is_err()
+                    {
+                        return Err(reject_content(
+                            store,
+                            source,
+                            repo,
+                            &ticket.pack_id,
+                            acquired,
+                            "bad signature",
+                            clock,
+                            metrics,
+                        )
+                        .await);
+                    }
+                }
                 work.push(PackWork {
                     ticket: ticket.clone(),
                     entries,
@@ -1024,22 +1082,6 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
         &mut denial_counts.counts,
     )
     .await?;
-    for (id, (_, object, _)) in &staged {
-        if verify_object_signature(object).is_err() {
-            let owner = staged_owner[id];
-            return Err(reject_content(
-                store,
-                source,
-                repo,
-                &owner,
-                acquired,
-                "bad signature",
-                clock,
-                metrics,
-            )
-            .await);
-        }
-    }
     let mut needed: BTreeMap<Hash, u64> = BTreeMap::new();
     for (_, object, created) in staged.values() {
         for child in children(object, ClosureMode::History) {
