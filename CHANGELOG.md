@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add `decide_clearance` to `mkit-primitives`. It recomputes the contiguous
+  published prefix from host-supplied facts and never settles an acceptance
+  reservation or records a second terminal outcome. Add
+  `decide_accept_and_clear`, which returns the unchanged ticketed-advance
+  decision and, only when that decision applies, a clearance over the same
+  repository and operation, plus `ClearanceAdvance::with_pair`, which takes the
+  dependency and external-supplier sets from an established resulting-pair
+  coverage. The reference prefix walk uses `decide_clearance`. No wire or
+  stored-format change; no wipe.
+
 Embedder migration entries use `[embedder: breaking API]`,
 `[embedder: stored-format change]` and `[embedder: store reset required]` tags.
 Combine tags when applicable; every breaking API entry states a replacement and

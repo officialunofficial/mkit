@@ -3107,6 +3107,28 @@ remain caller-controlled; drain fork jobs before switching denial mode.
 **Enforced by:** the fork engine tests for the denial-on full walk, the carried
 pair check, the plan fallback, the publication stage order and the round probe.
 
+## Published clearance does not settle acceptance
+
+**Always:** `decide_clearance` recomputes the largest contiguous cleared or
+resolved prefix and withholds a later value while an earlier advance is pending,
+held, or hit. Own additions never satisfy an external supplier. A deletion moves
+the boundary immediately and does not resurrect a component the deletion advance
+does not carry. The decision has no reservation settlement and no terminal
+acceptance result. `decide_accept_and_clear` returns the ticketed-advance
+decision untouched and a clearance only when it applies, so the combined unit
+equals acceptance then clearance. The reference profile declares lifecycle transitions
+not offered and applies denial before this decision.
+
+**Because:** clearance may run in the acceptance unit or later. Repeating
+settlement would charge or consume the accepted operation twice.
+
+**If violated:** a reader could see a ref past a blocked advance, an external
+base could be treated as published because this advance added it, or recovery
+could create a second outcome.
+
+**Enforced by:** `mkit-primitives` clearance tests and the reference publication
+prefix and deletion tests.
+
 ## Fork publication absorbs only exact witness replays
 
 **Always:** after a publication absent guard fails, the driver reads both rows
