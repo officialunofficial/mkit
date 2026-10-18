@@ -1918,7 +1918,7 @@ batch so that no row of a denied object is written, hence a denied object in an
 earlier batch is reported (`permission_denied`, `object blocked`, not persisted)
 ahead of a content refusal or a bad signature in a later batch, where inline verification reports
 the content refusal. Denial still follows integrity and every refusal found
-up to and including its own batch. The divergence ends when scheduled
+up to and including its own batch. Where the failure-only integrity recheck cannot run (a slice allowance under 1 KiB), a denied batch reports the denial without the signature preference. The divergence ends when scheduled
 verification runs on the driver. Corrupt bytes of a stored delta base are `unavailable` (`member content
 unavailable`) and never persisted. Resulting-pair coverage uses one lag-aware
 mapper on its inline and resumable paths: a missing object is retryable inside
