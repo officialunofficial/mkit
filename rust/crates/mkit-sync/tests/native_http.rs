@@ -274,8 +274,9 @@ fn two_sequential_requests_work_against_a_server_that_closes_after_each_response
     // Keep-alive on the wire (no `connection: close`), then the server closes
     // the socket: the second request must still succeed whether the close is
     // observed before the request is written (hyper discards the connection)
-    // or after (the unanswered read is resent on a fresh connection). Neither
-    // order is controlled here, so the test needs no sleep.
+    // or after (the unanswered read is resent on a fresh connection). Either
+    // order must succeed, so this is a smoke test needing no sleep; the
+    // `..._is_resent_...` tests pin the resend path deterministically.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     std::thread::spawn(move || {
@@ -326,6 +327,32 @@ fn a_read_unanswered_on_a_reused_connection_is_resent_once_on_a_fresh_one() {
     assert_eq!(seen.later.len(), 1, "resent exactly once");
     assert!(seen.later[0].ends_with(b"ping"));
     assert!(seen.listener.accept().is_err(), "resent more than once");
+}
+
+#[test]
+fn a_signed_read_unanswered_on_a_reused_connection_is_resent() {
+    let (url, server) = close_when_next_request_arrives(true);
+    let http = NativeHttp::new().unwrap();
+    http.block_on(http.send(read_request_to(&url), 1024))
+        .unwrap();
+    http.block_on(async {
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+    });
+    // Signed reads carry the envelope headers but record no replay entry.
+    let request = Request::post(format!("{url}{READ_URL_PATH}"))
+        .header("x-signature", "fixed-signature")
+        .header("idempotency-key", "fixed-nonce")
+        .body(b"ping".to_vec())
+        .unwrap();
+
+    let reply = http.block_on(http.send(request, 1024)).unwrap();
+
+    assert_eq!(reply.body(), b"second");
+    let seen = server.join().unwrap();
+    assert!(!seen.unanswered.is_empty(), "the race was not reproduced");
+    assert_eq!(seen.later.len(), 1);
 }
 
 #[test]

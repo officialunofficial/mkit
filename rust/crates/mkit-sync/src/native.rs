@@ -79,14 +79,12 @@ const READ_PROCEDURES: [&str; 9] = [
 ];
 
 /// Whether resending `request` after an unanswered attempt cannot change
-/// server state. Writes (anything carrying an `idempotency-key`, and every
+/// server state. A signed read carries an `idempotency-key` like a write but
+/// records no replay entry, so only the procedure decides. Writes (every
 /// procedure not listed as a read) are never resent here: whether the server
 /// applied them is unknown, and recovery belongs to the caller, which keeps
 /// the signed identity.
-fn is_resend_safe(method: &http::Method, uri: &Uri, headers: &HeaderMap) -> bool {
-    if headers.contains_key("idempotency-key") {
-        return false;
-    }
+fn is_resend_safe(method: &http::Method, uri: &Uri) -> bool {
     if method == http::Method::GET || method == http::Method::HEAD {
         return true;
     }
@@ -783,7 +781,7 @@ impl NativeHttp {
         }
         self.prepare_headers(&mut parts.headers)?;
         let body = Bytes::from(body);
-        let resend = is_resend_safe(&parts.method, &parts.uri, &parts.headers).then(|| {
+        let resend = is_resend_safe(&parts.method, &parts.uri).then(|| {
             (
                 parts.method.clone(),
                 parts.uri.clone(),
@@ -1259,6 +1257,42 @@ impl Clock for NativeClock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_listed_reads_are_resend_safe() {
+        let post = |name: &str| {
+            is_resend_safe(
+                &http::Method::POST,
+                &format!("http://h/mkit.transport.v1.TransportService/{name}")
+                    .parse()
+                    .unwrap(),
+            )
+        };
+        for name in READ_PROCEDURES {
+            assert!(post(name), "{name}");
+        }
+        for name in [
+            "UpdateRef",
+            "AdvanceRefs",
+            "BeginUpload",
+            "UploadPart",
+            "UploadPack",
+            "CompleteUpload",
+            "SetGrantEpoch",
+            "SetRepoVisibility",
+            "Unknown",
+        ] {
+            assert!(!post(name), "{name}");
+        }
+        assert!(!is_resend_safe(
+            &http::Method::POST,
+            &"http://h/".parse().unwrap()
+        ));
+        assert!(is_resend_safe(
+            &http::Method::GET,
+            &"http://h/x".parse().unwrap()
+        ));
+    }
 
     #[test]
     fn timeout_defaults_and_overrides_are_selected_by_exact_procedure() {
