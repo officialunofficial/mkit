@@ -362,7 +362,8 @@ impl<'a> PageView<'a> {
     }
     /// Decodes a page whose payload an earlier [`Self::decode`] already
     /// validated: it checks the header and binding, skips the per-record pass,
-    /// and charges `budget` exactly what [`Self::decode`] would have charged.
+    /// and charges `budget` exactly what [`Self::decode`] would have charged
+    /// (debug builds also run the full decode).
     /// Only for bytes that already passed [`Self::decode`] (the driver's cache
     /// holds nothing else); the accessors parse the payload they return but
     /// do not repeat the ordering and geometry checks.
@@ -376,16 +377,6 @@ impl<'a> PageView<'a> {
         if len > limits.page_bytes.min(MAX_PAGE_BYTES) {
             return Err(failure(FailureCode::ResourceLimit));
         }
-        debug_assert!(
-            Self::decode(
-                bytes,
-                expected,
-                limits,
-                &mut Budget::new(u64::MAX, u64::MAX)
-            )
-            .is_ok(),
-            "resident page failed full validation"
-        );
         // The header is read against a scratch budget; the real one is charged
         // the exact total below.
         let mut scratch = Budget::new(u64::MAX, 0);
@@ -417,6 +408,16 @@ impl<'a> PageView<'a> {
             5 * items_work - 1
         };
         budget.charge(len + HEADER_TAKES + body, 0)?;
+        debug_assert!(
+            Self::decode(
+                bytes,
+                expected,
+                limits,
+                &mut Budget::new(u64::MAX, u64::MAX)
+            )
+            .is_ok(),
+            "resident page failed full validation"
+        );
         Ok(Self {
             bytes,
             binding: expected,
@@ -684,6 +685,9 @@ mod tests {
         ] {
             let full = PageView::decode(&bytes, expected, limits, &mut Budget::new(1 << 20, 0));
             assert_eq!(full.unwrap_err().code, code);
+            let resident =
+                PageView::decode_resident(&bytes, expected, limits, &mut Budget::new(1 << 20, 0));
+            assert_eq!(resident.unwrap_err().code, code);
         }
         let mut budget = Budget::new(1 << 20, 0);
         let view = PageView::decode(EMPTY, binding(), limits, &mut budget).unwrap();

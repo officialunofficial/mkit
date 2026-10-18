@@ -257,6 +257,8 @@ struct Seal {
 thread_local! {
     /// Test switch: seal every ordinal with its own descent.
     static NO_ORDINAL_LEAF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test counter: lookups served from a kept ordinal leaf.
+    static ORDINAL_LEAF_HITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// The ordinal leaf the seal last descended to. Ordinals are dense and the
@@ -1888,6 +1890,8 @@ impl VerifyDriver {
             return Ok(None);
         }
         let charge = leaf.charge;
+        #[cfg(test)]
+        ORDINAL_LEAF_HITS.with(|hits| hits.set(hits.get() + 1));
         let (_, value) = leaf.records.pop_front().ok_or_else(invalid)?;
         let freed = 32 + u64::try_from(value.len()).map_err(|_| resource())?;
         leaf.reserved -= freed;

@@ -361,8 +361,7 @@ fn ninety_six_blob_pack_costs_the_host_only_its_final_pages() {
 
 #[test]
 fn ordinal_leaf_reuse_changes_neither_work_nor_residency_nor_roots() {
-    // Several ordinal leaves, a cache small enough to evict, and a tight
-    // resident ceiling: each lookup the kept leaf serves must charge what a
+    // Several ordinal leaves and a cache small enough to evict: each lookup the kept leaf serves must charge what a
     // descent would, and the reservation must be fully returned.
     let pack = raw_blobs(200, 300);
     let outcome = |disabled: bool| {
@@ -373,7 +372,13 @@ fn ordinal_leaf_reuse_changes_neither_work_nor_residency_nor_roots() {
         let usage = machine.usage();
         (usage.work, usage.resident_bytes, roots_of(&verified))
     };
-    assert_eq!(outcome(false), outcome(true));
+    super::super::ORDINAL_LEAF_HITS.with(|hits| hits.set(0));
+    let reused = outcome(false);
+    let hits = super::super::ORDINAL_LEAF_HITS.with(std::cell::Cell::get);
+    assert!(hits > 150, "the kept leaf served only {hits} lookups");
+    super::super::ORDINAL_LEAF_HITS.with(|hits| hits.set(0));
+    assert_eq!(reused, outcome(true));
+    assert_eq!(super::super::ORDINAL_LEAF_HITS.with(std::cell::Cell::get), 0);
 }
 
 #[test]
