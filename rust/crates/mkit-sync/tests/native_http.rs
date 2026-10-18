@@ -197,12 +197,86 @@ fn cleartext_http_to_a_non_loopback_host_is_refused_unless_allowed() {
     assert!(!err.contains("non-loopback"), "{err}");
 }
 
+const READ_URL_PATH: &str = "mkit.transport.v1.TransportService/ListRefs";
+const WRITE_URL_PATH: &str = "mkit.transport.v1.TransportService/UpdateRef";
+
+fn read_request_to(url: &str) -> Request<Vec<u8>> {
+    Request::post(format!("{url}{READ_URL_PATH}"))
+        .body(b"ping".to_vec())
+        .unwrap()
+}
+
+fn signed_write_to(url: &str) -> Request<Vec<u8>> {
+    Request::post(format!("{url}{WRITE_URL_PATH}"))
+        .header("x-signature", "fixed-signature")
+        .header("idempotency-key", "fixed-nonce")
+        .body(b"signed mutation".to_vec())
+        .unwrap()
+}
+
+/// What the server saw after the client's second request.
+struct Stale {
+    /// The second request, read in full on the kept connection (never answered).
+    unanswered: Vec<u8>,
+    /// Requests that arrived on later connections, each answered `second`.
+    later: Vec<Vec<u8>>,
+    /// The listener, nonblocking, to look for a connection that must not exist.
+    listener: TcpListener,
+}
+
+/// Serves one keep-alive exchange, then holds the connection open until the
+/// client has written its next request on it, and closes without answering:
+/// exactly a server that closes an idle connection as the request arrives.
+/// With `expect_resend`, it then answers one later connection (bounded wait for
+/// an event the test requires, not a sleep that hides a race).
+fn close_when_next_request_arrives(
+    expect_resend: bool,
+) -> (String, std::thread::JoinHandle<Stale>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let (mut stale, _) = listener.accept().unwrap();
+        stale
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        read_request(&mut stale);
+        stale
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nfirst")
+            .unwrap();
+        let unanswered = read_request(&mut stale);
+        drop(stale);
+        listener.set_nonblocking(true).unwrap();
+        let mut later = Vec::new();
+        if expect_resend {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while later.is_empty() && std::time::Instant::now() < deadline {
+                if let Ok((mut next, _)) = listener.accept() {
+                    next.set_nonblocking(false).unwrap();
+                    next.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                    later.push(read_request(&mut next));
+                    next.write_all(&response("200 OK", &[], b"second")).unwrap();
+                } else {
+                    std::thread::yield_now();
+                }
+            }
+        }
+        Stale {
+            unanswered,
+            later,
+            listener,
+        }
+    });
+    (url, server)
+}
+
 #[test]
 fn two_sequential_requests_work_against_a_server_that_closes_after_each_response() {
     // Keep-alive on the wire (no `connection: close`), then the server closes
-    // the socket: the second request must still succeed when the current-thread
-    // runtime resumes. A closed idle connection is discarded at checkout or
-    // recovered through hyper's untouched-request cancellation retry.
+    // the socket: the second request must still succeed whether the close is
+    // observed before the request is written (hyper discards the connection)
+    // or after (the unanswered read is resent on a fresh connection). Either
+    // order must succeed, so this is a smoke test needing no sleep; the
+    // `..._is_resent_...` tests pin the resend path deterministically.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     std::thread::spawn(move || {
@@ -217,10 +291,119 @@ fn two_sequential_requests_work_against_a_server_that_closes_after_each_response
     let http = NativeHttp::new().unwrap();
     let url = format!("http://{addr}/");
 
-    assert_eq!(send(&http, &url, 1024).unwrap().body(), b"ok");
-    // Time for the server's close to reach the client.
-    std::thread::sleep(Duration::from_millis(100));
-    assert_eq!(send(&http, &url, 1024).unwrap().body(), b"ok");
+    for _ in 0..2 {
+        let reply = http
+            .block_on(http.send(read_request_to(&url), 1024))
+            .unwrap();
+        assert_eq!(reply.body(), b"ok");
+    }
+}
+
+#[test]
+fn a_read_unanswered_on_a_reused_connection_is_resent_once_on_a_fresh_one() {
+    let (url, server) = close_when_next_request_arrives(true);
+    let http = NativeHttp::new().unwrap();
+
+    let first = http
+        .block_on(http.send(read_request_to(&url), 1024))
+        .unwrap();
+    // Let the connection task return the connection to the pool (the runtime
+    // only runs inside `block_on`), without involving the network.
+    http.block_on(async {
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+    });
+    // The server holds the connection open until this request is written to
+    // it, then closes it without a response: written, unanswered.
+    let second = http
+        .block_on(http.send(read_request_to(&url), 1024))
+        .unwrap();
+
+    assert_eq!(first.body(), b"first");
+    assert_eq!(second.body(), b"second");
+    let seen = server.join().unwrap();
+    assert!(!seen.unanswered.is_empty(), "the race was not reproduced");
+    assert_eq!(seen.later.len(), 1, "resent exactly once");
+    assert!(seen.later[0].ends_with(b"ping"));
+    assert!(seen.listener.accept().is_err(), "resent more than once");
+}
+
+#[test]
+fn a_signed_read_unanswered_on_a_reused_connection_is_resent() {
+    let (url, server) = close_when_next_request_arrives(true);
+    let http = NativeHttp::new().unwrap();
+    http.block_on(http.send(read_request_to(&url), 1024))
+        .unwrap();
+    http.block_on(async {
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+    });
+    // Signed reads carry the envelope headers but record no replay entry.
+    let request = Request::post(format!("{url}{READ_URL_PATH}"))
+        .header("x-signature", "fixed-signature")
+        .header("idempotency-key", "fixed-nonce")
+        .body(b"ping".to_vec())
+        .unwrap();
+
+    let reply = http.block_on(http.send(request, 1024)).unwrap();
+
+    assert_eq!(reply.body(), b"second");
+    let seen = server.join().unwrap();
+    assert!(!seen.unanswered.is_empty(), "the race was not reproduced");
+    assert_eq!(seen.later.len(), 1);
+}
+
+#[test]
+fn a_signed_write_unanswered_on_a_reused_connection_is_not_resent() {
+    use mkit_client::ChannelError;
+    let (url, server) = close_when_next_request_arrives(false);
+    let http = NativeHttp::new().unwrap();
+    http.block_on(http.send(read_request_to(&url), 1024))
+        .unwrap();
+
+    let err = http
+        .block_on(http.send_classified(signed_write_to(&url), 1024))
+        .unwrap_err();
+
+    // The typed, retryable error: the caller keeps the signed identity and
+    // decides, because the server may have applied the write.
+    assert!(matches!(err, ChannelError::Transient(_)), "{err:?}");
+    // The error is returned only after any resend would have connected.
+    let seen = server.join().unwrap();
+    assert!(seen.unanswered.ends_with(b"signed mutation"));
+    assert!(seen.listener.accept().is_err(), "a write was resent");
+}
+
+#[test]
+fn a_read_failing_on_a_fresh_connection_is_not_resent() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        read_request(&mut stream);
+        drop(stream);
+        // The client's only error has been returned by the time it is joined;
+        // a resend would already be queued on the listener.
+        listener.set_nonblocking(true).unwrap();
+        listener
+    });
+    let http = NativeHttp::new().unwrap();
+
+    let err = http
+        .block_on(http.send(read_request_to(&url), 1024))
+        .unwrap_err();
+
+    assert!(
+        err.contains("connection closed before message completed"),
+        "{err}"
+    );
+    let listener = server.join().unwrap();
+    assert!(
+        listener.accept().is_err(),
+        "a fresh-connection failure was resent"
+    );
 }
 
 #[test]
