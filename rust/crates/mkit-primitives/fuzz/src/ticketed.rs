@@ -152,7 +152,6 @@ fn request<'a>(changes: &'a [RefChange], claims: &'a [TicketClaim]) -> TicketedA
         verification: VerificationVerdict::Satisfied,
         storage: StorageAccounting::Disabled,
         pending: None,
-        authority_generation: None,
     }
 }
 fn pending_binding(byte: u8) -> PendingBinding {
@@ -213,6 +212,7 @@ pub fn check(data: &[u8]) {
             expires_ms: 10_000,
         });
         snap.replay = Some(present(ReplayFact {
+            scope: ReplayScope([8; 32]),
             fingerprint: [9; 32],
             expires_ms: 10_000,
             state: if byte(4) % 3 == 1 {

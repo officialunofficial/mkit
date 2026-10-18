@@ -168,6 +168,12 @@ pub fn required_guard_kinds(
         _ => &empty,
     };
     let mut kinds = effect_guard_kinds(class, mutations)?;
+    // The bare-effects rule above is the conservative one for an embedder that
+    // composes its own membership additions. A sealed decision's additions are
+    // idempotent inserts of immutable verified packs: they read no fact, and
+    // every membership fact the decision does read is an emitted Membership
+    // guard, re-added by the dependency loop below.
+    kinds.retain(|kind| *kind != GuardKind::Membership);
     if matches!(
         effects.decision(),
         WriteDecision::Reject {
@@ -180,6 +186,20 @@ pub fn required_guard_kinds(
     ) && !kinds.contains(&GuardKind::Replay)
     {
         kinds.push(GuardKind::Replay);
+    }
+    // A refusal or conflict that settles a reservation depends on that row.
+    if matches!(
+        effects.decision(),
+        WriteDecision::Reject {
+            reservation: Some(_),
+            ..
+        } | WriteDecision::Conflict {
+            reservation: Some(_),
+            ..
+        }
+    ) && !kinds.contains(&GuardKind::Reservation)
+    {
+        kinds.push(GuardKind::Reservation);
     }
     for dependency in effects.required_guards() {
         let kind = guard_kind(dependency);
@@ -232,7 +252,7 @@ pub fn check_guard_completeness(
     Ok(())
 }
 
-fn compatible(left: &RequiredGuard, right: &RequiredGuard) -> bool {
+pub(in crate::decision) fn compatible(left: &RequiredGuard, right: &RequiredGuard) -> bool {
     use RequiredGuard as G;
     match (left, right) {
         (

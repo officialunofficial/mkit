@@ -50,6 +50,41 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Breaking (toward 0.6)
 
+- [embedder: breaking API] Guard completeness for the ALPHA decisions in
+  `mkit-primitives`. (1) `TicketedAdvanceRequest::authority_generation` is
+  removed and `TicketFact::authority_generation` is `Option<Revision>`: request
+  ticket fencing with `write.required.authority`, supply the authority
+  observation in `Snapshot::authority`, and convert a numeric generation with the
+  same `Revision` encoding on both sides; the decision now emits the Authority
+  guard. (2) `ReplayFact` gains `scope`, `AuthorityFact` and `GrantFact` gain
+  `namespace`; a wrongly scoped observation is `InvalidResponse` and
+  `guards_match` compares the key. (3) `RetryReason` gains `AdmittedRefChanged`
+  (was `ChangedFacts`) and `MembershipNotVisible` (was `Unavailable`); map the
+  first to a ref conflict and the second to a retryable `unavailable`.
+  (4) `ForkRefusal::LifecycleUnavailable` is removed; activation and completion
+  return `Withhold(ForkWithheld::LifecycleUnavailable)` (a new variant of
+  `ForkActivationDecision` and `ForkCompletionDecision`: add the arm to exhaustive
+  matches), which never refuses the saved result, and fork acceptance reports an authority fence that cannot be
+  compared atomically as retryable `UnavailableInput` (was `UnsupportedCapability`).
+  Wire and stored formats are unchanged; no store reset is required.
+- [embedder: breaking API] Decision behavior now matches its guards. A ticketed
+  advance guards every ticket row it examined (also on a stored conflict), the
+  exact storage counter whenever it counts inline, and lists each consumed pack
+  once in `AcceptanceEffects::membership`. `decide_ticket_cleanup` returns
+  `InvalidResponse` unless each aborted reservation is still `Ticketed` for its
+  claim, and guards every ticket row up to the first failure.
+  `decide_reservation_settlement` of a `Ticketed` reservation also closes the
+  bound ticket (or guards its observed absence): supply the ticket observation in
+  the snapshot. A stored refusal is decided after the grant, authority and
+  lifecycle bindings. A decision whose guards contradict each other returns
+  `InvalidResponse`. A published-source fence answers an unpublished or unpaired
+  source with `not_found` "source not found", and a destination pair that differs
+  from the captured pair with a retry. `required_guard_kinds` no longer demands a
+  Membership guard for a sealed decision's own pack-membership additions.
+  Migration: lower the new `Ticket`, `Storage` and `Authority` guards and the
+  membership addition, and supply the extra observations. No wire or stored-format
+  change.
+
 - [embedder: breaking API] The in-pack decoded-byte budget is no longer
   persisted as a rejection by scheduled verification; it is a terminal
   `DecodeBudget` outcome, as inline already answered. Migration: none for

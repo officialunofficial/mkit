@@ -130,6 +130,7 @@ fn inspection_pair_budget_includes_dependency_visibility_before_hooks() {
             advance: None,
             implicit: None,
             rejection: None,
+            denial_ref: None,
             pending: None,
             publication: Some(clearance::PublicationWrite {
                 repo: &repo,

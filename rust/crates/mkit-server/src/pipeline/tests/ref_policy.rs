@@ -1273,3 +1273,33 @@ fn reserved_policy_denial_aborts_its_reservation_when_a_replay_winner_commits() 
         UpdateRefResult::Committed
     );
 }
+
+#[test]
+fn a_stored_fast_forward_refusal_pins_the_ref_value_only_for_an_any_expectation() {
+    use crate::store::Precondition;
+    let mut w = World::indexed(Some(ff_main()));
+    let [_, id2, _, stray] = w.history();
+    let repo = w.repo();
+    let main = keys::ref_key(&repo.name, HEAD);
+    let pinned = Precondition::Equals(main.clone(), codec::encode_ref_id(&id2));
+    let compares_main = |w: &World| {
+        let batches = w.env.pipe.meta.batches.lock().unwrap();
+        let last = batches.last().expect("the stored refusal is a batch");
+        (
+            last.preconditions.contains(&pinned),
+            last.writes.iter().any(|write| {
+                matches!(write, crate::store::Write::Put(key, _) | crate::store::Write::Delete(key) if *key == main)
+            }),
+        )
+    };
+    // ANY is decided on the value the check observed and pinned.
+    denied(&w.update(HEAD, Any, Some(stray)).unwrap_err(), FF_MESSAGE);
+    assert_eq!(compares_main(&w), (true, false));
+    // An explicit expectation decides from the expectation alone.
+    denied(
+        &w.update(HEAD, Match(id2), Some(stray)).unwrap_err(),
+        FF_MESSAGE,
+    );
+    assert_eq!(compares_main(&w), (false, false));
+    assert_eq!(w.value(HEAD), Some(id2));
+}

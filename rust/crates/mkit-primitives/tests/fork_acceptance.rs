@@ -6,7 +6,9 @@ use harness::{
     observed, proof,
 };
 use mkit_primitives::{
-    decision::{AuthorityMode, GrantFact, LifecycleFact, LifecycleState, Observed, OperationId},
+    decision::{
+        AuthorityMode, GrantFact, LifecycleFact, LifecycleState, NamespaceId, Observed, OperationId,
+    },
     error::FailureCode,
     evidence::{RepositoryId, Revision},
     fork::{
@@ -83,6 +85,7 @@ fn semantic_fixtures_pin_decisions_and_stable_codes() {
             "authority_unfenceable" => value(&mut f.authority).ready = false,
             "unexpected_grant" => {
                 f.grant = observed(GrantFact {
+                    namespace: NamespaceId([7; 32]),
                     grant: [9; 32],
                     epoch: REV,
                     presence: None,
@@ -379,6 +382,7 @@ fn original_grant_epoch_is_not_replaced_by_newer_permission() {
     let p = plan();
     let mut request = attempt(1);
     request.grant = Some(GrantFact {
+        namespace: NamespaceId([7; 32]),
         grant: [8; 32],
         epoch: REV,
         presence: None,
@@ -640,6 +644,7 @@ fn review_terminal_replay_precedes_advancement_authority_and_grant_checks() {
             value(&mut f.authority).generation = Revision([9; 32]);
             value(&mut f.authority).ready = false;
             f.grant = observed(GrantFact {
+                namespace: NamespaceId([7; 32]),
                 grant: [9; 32],
                 epoch: Revision([9; 32]),
                 presence: None,

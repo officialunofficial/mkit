@@ -138,6 +138,9 @@ pub(crate) fn plan_write(
 
     let (on_commit, ref_puts, conflict) =
         decide_write_result(req, snap, clock, &mut pre, &mut puts)?;
+    if conflict && let Some(advance) = &req.advance {
+        crate::pipeline::advance::guard_examined_tickets(snap, advance, &mut pre);
+    }
     if conflict && req.replay.is_none() && req.charges.is_empty() && req.pending.is_none() {
         return Ok(Planned::Done(on_commit));
     }
@@ -338,6 +341,13 @@ fn decide_write_result(
     if req.kind != WriteKind::UploadCommit
         && let Some(rejection) = req.rejection
     {
+        if let Some((name, value)) = req.denial_ref {
+            let key = keys::ref_key(req.repo, name);
+            pre.push(match value {
+                Some(value) => Precondition::Equals(key, codec::encode_ref_id(&value)),
+                None => Precondition::Absent(key),
+            });
+        }
         return Ok((StoredResult::Rejected(rejection.clone()), Vec::new(), false));
     }
     let (outcome, ref_puts) = decide_refs(req, snap, pre)?;

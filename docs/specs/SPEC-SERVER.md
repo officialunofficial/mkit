@@ -257,13 +257,16 @@ apply attempt, rather than an atomic source-at-commit comparison.
 **Reference-server behavior.** The portable ref decision answers every request
 shape the wire admits: a single create/update, a single exact-match delete,
 and any pair of valid ref names — canonical, unmatched, reversed, or
-repeated — decided positionally under the first change's outcome class
+distinct — decided positionally under the first change's outcome class
 (SPEC-TRANSPORT-CONNECT §4 makes the canonical packmap/head pairing
 optional). Shapes the wire rejects or leaves to the implementation — a delete
 whose expectation is not `MATCH` or whose new ID is nonempty
-(SPEC-TRANSPORT-CONNECT §7.8), and a request carrying more than two ref
-changes — keep the reference server's generic per-ref CAS decision, and the
-portable decision answers a typed refusal for them.
+(SPEC-TRANSPORT-CONNECT §7.8), a repeated or malformed ref name, a partial
+admission binding, and a request carrying more than two ref changes — keep the
+reference server's generic per-ref CAS decision, and the portable decision
+answers a typed refusal for them. The shape is judged before the portable
+decision runs; every failure of the decision for an admitted shape is the
+server's answer, never a silent fallback to the generic path.
 
 **Reference-server behavior.** The portable ticketed decision answers the
 signed `AdvanceRefs` form: a ref pair consumed with one or more upload
@@ -274,9 +277,50 @@ and durable-outcome effects it composes (§6.3, §6.5, §9.3). The separate
 defensive abort for a ticket whose pack never landed and a standalone
 reservation settlement share the same portable rules. A ticketed request
 that is unsigned or carries no replay binding, that was rejected before
-planning, or that holds a fork barrier keeps the reference path. If stored
-observations cannot be projected, the reference path retains its original
-pending/replay and first-failure precedence, including corruption diagnostics.
+planning, or that holds a fork barrier keeps the reference path. A stored row
+that cannot be decoded is withheld from the decision rather than answered: an
+earlier pending, replay, ticket or ref answer keeps its precedence, and the first
+undecodable row the decision actually needs is the diagnostic.
+
+The ticketed decision guards every ticket row it examined, including on a stored
+conflict, the exact repository storage counter whenever the batch counts inline
+(it fixes each pack's `new_to_repo`), the settled reservation rows, and the
+authority observation when authority fencing applies. A ref that moved after
+custom admission answers `aborted` "ref changed after admission; retry" with the
+ref-conflict abort cause, exactly as the unticketed path does. A stored
+fast-forward refusal decided on an `ANY` expectation commits only while the ref
+still holds the value the check pinned. If the ref moves, the stored refusal
+fails its guard, the write is re-planned, and the request ends as retryable write
+contention; the client's retry is decided afresh. The membership rows that an
+ancestry or closure check read live in the paged, sharded object index and stay
+covered by the §9.4 lag window and the §14.2 plan-time blocklist check bounded by
+`NotAfter` instead of a batch comparison. A stored built-in refusal relies on the admission-time grant
+and authority checks of the same request rather than on a batch comparison of
+the grant epoch. The defensive abort of tickets whose pack is missing compares
+the ticket rows it closes and every earlier ticket row that fixed its boundary.
+
+**Reference-server behavior.** One fact has one class at every portable decision.
+"Before a result is saved" covers the ref write, the ticketed advance and fork
+acceptance; "after acceptance" covers fork advance, activation, completion and
+clearance, which never change the saved result.
+
+| Observed fact | Before a result is saved | After acceptance |
+| --- | --- | --- |
+| Authority fence not comparable atomically | Retryable: `Retry(Unavailable)`; fork acceptance `UnavailableInput` | Not observed |
+| Authority or grant moved from the original binding | Permission denied, unstored | Withheld, result unchanged: `Defer`, code `ForkPermissionDenied` |
+| Lifecycle unacquired | `UnavailableInput` | `UnavailableInput` |
+| Lifecycle not active at the bound incarnation | Ref write and ticketed advance: `Retry(ChangedFacts)`. Fork acceptance: `DestinationNotEmpty`, because §9.9 requires an empty destination | Withheld, result unchanged: `Withhold(LifecycleUnavailable)`; clearance `Retain` |
+| Supplier held | Retryable: `Retry(Unavailable)` | Not observed |
+| Object or supplier denied | Permission denied "object blocked", unstored | Not observed |
+| Member not yet visible | Retryable inside the original window: `Retry(MembershipNotVisible)`; after it, stored `invalid_argument` "open closure" | Not observed |
+| Admitted ref changed | Retryable: `Retry(AdmittedRefChanged)`, `aborted` with the ref-conflict cause | Not observed |
+| Source absent, unreadable, unpublished or unpaired | `not_found` "source not found", unstored | Not observed |
+| Source pair differs from the captured pair | Retryable: `Retry(Unavailable)` | Not observed |
+
+The rows are pinned by `fact_class_table_rows_for_ref_writes`,
+`fact_class_table_rows_for_fork_decisions`, `source_fence_refusals_use_the_server_specification_answers`
+and the `authority_unfenceable`, `authority_generation` and `destination_deleting`
+rows of the fork acceptance fixtures.
 
 ### 3.2 Replay, durability, and recovery
 
@@ -5534,6 +5578,7 @@ scheduling mechanism a requirement on other conforming servers.
 | 1 | draft | Fork job rounds (§9.9): a deployment without pack-level denial builds no cleared set (a later switch to denial takes a full first walk); the pre-admission plan is carried into the job when it fits one slice, after an equality check of the source pair; and independent pack units of planning and publication overlap in waves, the packmap head last. No wire, stored-row or response change. |
 | 1 | draft | Embedded dispatch for a fork (§9.9): a typed in-process entry that authenticates, runs the deployment guard, recognises a completed replay with fail-closed evidence and runs the embedder's pre-dispatch policy before `fork_repo`. Additive API; no wire change, no stored-row change. |
 | 1 | draft | Document scoped heavy extraction regression scheduling in §20; no runtime, wire, or conformance requirement change. |
+| 1 | draft | Portable decision completeness (§3.1): a ticketed decision guards every ticket row it examined, the inline storage counter and the authority observation; a ref that moved after custom admission is a retryable ref conflict on the ticketed path too; a stored fast-forward refusal on an `ANY` expectation compares the pinned ref value; the fact-to-class table is published. Reference-server behavior only; no wire change, no stored-format change. |
 | 1 | draft | Server-side fork (§9.9): a durable, resumable job that gives an empty destination the published membership of one source branch (packmap chain, listed packs and external-base packs), the cleared set and the flagged packmap head that bound later publication walks, and admission bound to the job. Additive: witness boundary flag (`m`/`pm` value of 20 bytes), `fj` and `fo` rows, timer kind 16, `Procedure::Fork`; the embedder-facing `ForkRequest` with its canonical signed body, `Pipeline::fork_repo`, the source-read and destination-write authorization, a hard-bound admission charge, and additive hook fields (`Operation.fork`, `AdmitRequest.fork`). No Connect wire change; no stored-row version change. |
 | 1 | draft | Authority-generation setter and getter without a namespace record under `any`; authority-mode registration and the refusal of unregistered writes (§6.2.2); the `ag` guard on the fenced namespace-creation batch; one-batch replacement of a stale-generation upload ticket (§6.2.1). No wire change; no stored row changes. |
 | 1 | draft | Opt-in authority-owned namespace grammar and trust model (§6.2.2), wildcard generation-key scopes, refused owner statements, and hook writer authority for owner-view operations. Default self-certifying deployments retain their behavior. |

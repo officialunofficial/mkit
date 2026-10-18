@@ -313,6 +313,15 @@ fn unambiguous(request: &RefWriteRequest<'_>, snapshot: &Snapshot) -> Result<(),
     Ok(())
 }
 
+/// A present observation must carry the scope key its guard names; an absence
+/// carries none, so the guard's own key is the only scope it can state.
+fn keyed<T>(expected: &Observed<T>, scope_ok: impl FnOnce(&T) -> bool) -> bool {
+    match expected {
+        Observed::Present { value, .. } => scope_ok(value),
+        Observed::Absent(_) => true,
+    }
+}
+
 pub(super) fn matches(guard: &RequiredGuard, current: &Snapshot, now_ms: u64) -> bool {
     match guard {
         RequiredGuard::RefValue {
@@ -336,7 +345,10 @@ pub(super) fn matches(guard: &RequiredGuard, current: &Snapshot, now_ms: u64) ->
                     key == name && matches!(value, Observed::Present { .. }) == *present
                 })
         }
-        RequiredGuard::Replay { expected, .. } => current.replay.as_ref() == Some(expected),
+        RequiredGuard::Replay { scope, expected } => {
+            keyed(expected, |fact| fact.scope == *scope)
+                && current.replay.as_ref() == Some(expected)
+        }
         RequiredGuard::Ticket { id, expected } => current
             .tickets
             .iter()
@@ -345,8 +357,20 @@ pub(super) fn matches(guard: &RequiredGuard, current: &Snapshot, now_ms: u64) ->
             .reservations
             .iter()
             .any(|(key, value)| key == id && value == expected),
-        RequiredGuard::Authority { expected, .. } => current.authority.as_ref() == Some(expected),
-        RequiredGuard::Grant { expected, .. } => current.grant.as_ref() == Some(expected),
+        RequiredGuard::Authority {
+            namespace,
+            expected,
+        } => {
+            keyed(expected, |fact| fact.namespace == *namespace)
+                && current.authority.as_ref() == Some(expected)
+        }
+        RequiredGuard::Grant {
+            namespace,
+            expected,
+        } => {
+            keyed(expected, |fact| fact.namespace == *namespace)
+                && current.grant.as_ref() == Some(expected)
+        }
         RequiredGuard::Repository { id, expected } => {
             *id == current.repository && current.lifecycle.as_ref() == Some(expected)
         }
@@ -369,7 +393,13 @@ pub(super) fn matches(guard: &RequiredGuard, current: &Snapshot, now_ms: u64) ->
             repository,
             expected,
         } => *repository == current.repository && current.policy.as_ref() == Some(expected),
-        RequiredGuard::Admission { expected, .. } => current.admission.as_ref() == Some(expected),
+        RequiredGuard::Admission {
+            operation,
+            expected,
+        } => {
+            keyed(expected, |fact| fact.operation == *operation)
+                && current.admission.as_ref() == Some(expected)
+        }
         RequiredGuard::Accounting {
             repository,
             expected,

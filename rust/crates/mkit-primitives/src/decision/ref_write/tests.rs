@@ -255,7 +255,7 @@ fn fast_forward_any_guards_value_while_missing_and_match_use_their_own_basis() {
                 if result == AncestryResult::MembershipLag {
                     assert!(matches!(
                         decision.decision(),
-                        WriteDecision::Retry(RetryReason::Unavailable)
+                        WriteDecision::Retry(RetryReason::MembershipNotVisible)
                     ));
                 }
             }
@@ -324,7 +324,7 @@ fn admission_any_fences_presence_without_value_equality() {
     assert!(!guards_match(&guarded, &raced, 100));
     assert!(matches!(
         decide_ref_write(&req, &raced, limits()).unwrap().decision(),
-        WriteDecision::Retry(RetryReason::ChangedFacts)
+        WriteDecision::Retry(RetryReason::AdmittedRefChanged)
     ));
 }
 
@@ -346,11 +346,13 @@ fn authority_grant_and_lifecycle_matrix_keep_original_binding() {
     req.required.incarnation = Some(REV);
     let mut snap = snapshot();
     snap.authority = Some(present(AuthorityFact {
+        namespace: NamespaceId([7; 32]),
         mode: AuthorityMode::Authority,
         generation: REV,
         ready: true,
     }));
     snap.grant = Some(present(GrantFact {
+        namespace: NamespaceId([7; 32]),
         grant: [8; 32],
         epoch: REV,
         presence: Some(true),
@@ -413,6 +415,7 @@ fn completed_replay_precedes_unacquired_new_authority_and_inflight_never_stores(
         value: Some(NEW),
     }]);
     snap.replay = Some(present(ReplayFact {
+        scope: ReplayScope([8; 32]),
         fingerprint: [9; 32],
         expires_ms: 20,
         state: ReplayState::Committed(saved.clone()),
@@ -523,6 +526,7 @@ fn effect_guard_kinds_reports_each_intrinsic_effect_and_its_omission() {
             effects.replay = Some(ReplayTransition {
                 scope: crate::decision::ReplayScope(NEW),
                 next: ReplayFact {
+                    scope: ReplayScope([8; 32]),
                     fingerprint: SIGNER,
                     expires_ms: 1,
                     state: ReplayState::InFlight { resumable: false },
@@ -685,11 +689,13 @@ fn every_applicable_guard_has_an_exact_mutation_and_omission_case() {
     let mut snap = snapshot();
     snap.replay = Some(Observed::Absent(REV));
     snap.authority = Some(present(AuthorityFact {
+        namespace: NamespaceId([7; 32]),
         mode: AuthorityMode::Authority,
         generation: REV,
         ready: true,
     }));
     snap.grant = Some(present(GrantFact {
+        namespace: NamespaceId([7; 32]),
         grant: [8; 32],
         epoch: REV,
         presence: Some(true),
@@ -861,7 +867,7 @@ fn missing_head_uses_original_lag_window_and_reference_code() {
     let retry = decide_ref_write(&req, &snap, limits()).unwrap();
     assert_eq!(
         retry.decision(),
-        &WriteDecision::Retry(RetryReason::Unavailable)
+        &WriteDecision::Retry(RetryReason::MembershipNotVisible)
     );
     req.required.membership_window = MembershipWindow::Elapsed;
     let denied = decide_ref_write(&req, &snap, limits()).unwrap();
@@ -929,6 +935,7 @@ fn source_fence_is_complete_separate_and_not_required_for_saved_replay() {
         repository: REPO,
         name: RefName("refs/heads/source".into()),
         read_authority: present(AuthorityFact {
+            namespace: NamespaceId([7; 32]),
             mode: AuthorityMode::Authority,
             generation: REV,
             ready: true,
@@ -986,6 +993,7 @@ fn source_fence_is_complete_separate_and_not_required_for_saved_replay() {
         expires_ms: 200,
     });
     snap.replay = Some(present(ReplayFact {
+        scope: ReplayScope([8; 32]),
         fingerprint: [9; 32],
         expires_ms: 200,
         state: ReplayState::Committed(TerminalResult::Applied(vec![])),
@@ -1069,6 +1077,7 @@ fn authority_mode_readiness_and_grant_epoch_have_stable_precedence() {
                         });
                         let mut snap = snapshot();
                         snap.grant = Some(present(GrantFact {
+                            namespace: NamespaceId([7; 32]),
                             grant: [8; 32],
                             epoch: if epoch_matches {
                                 REV
@@ -1078,6 +1087,7 @@ fn authority_mode_readiness_and_grant_epoch_have_stable_precedence() {
                             presence: None,
                         }));
                         snap.authority = Some(present(AuthorityFact {
+                            namespace: NamespaceId([7; 32]),
                             mode: current.clone(),
                             generation: if generation_matches {
                                 REV
@@ -1135,4 +1145,561 @@ fn contradictory_member_views_fail_the_mutation_comparator() {
         decide_ref_write(&req, &snap, limits()).unwrap_err().code,
         FailureCode::InvalidResponse
     );
+}
+
+type Tweak = fn(&mut Full);
+
+/// One owned scenario touching every guard category.
+struct Full {
+    changes: Vec<RefChange>,
+    admitted: Vec<AdmittedRef>,
+    proof: Vec<AncestryFact>,
+    members: Vec<Hash>,
+    snap: Snapshot,
+    membership_window: MembershipWindow,
+    policy_signer_restricted: bool,
+}
+impl Full {
+    fn new() -> Self {
+        use crate::evidence::{MemberFact, PackSource, SourceBinding};
+        use mkit_core::object::ObjectType;
+        let mut snap = snapshot();
+        snap.replay = Some(Observed::Absent(REV));
+        snap.authority = Some(present(AuthorityFact {
+            namespace: NamespaceId([7; 32]),
+            mode: AuthorityMode::Authority,
+            generation: REV,
+            ready: true,
+        }));
+        snap.grant = Some(present(GrantFact {
+            namespace: NamespaceId([7; 32]),
+            grant: [8; 32],
+            epoch: REV,
+            presence: Some(true),
+        }));
+        snap.lifecycle = Some(present(LifecycleFact {
+            incarnation: REV,
+            state: LifecycleState::Active,
+        }));
+        policy(&mut snap, true);
+        snap.admission = Some(present(AdmissionFact {
+            operation: OperationId([6; 32]),
+            effects: [8; 32],
+            presence: vec![PresenceDelta {
+                name: name(),
+                before: true,
+                after: true,
+            }],
+            reservation: None,
+        }));
+        snap.members.push(MembershipObservation {
+            object: NEW,
+            observed: present(MemberFact {
+                repository: REPO,
+                incarnation: REV,
+                object: NEW,
+                kind: ObjectType::Commit,
+                canonical_len: 32,
+                supplier: PackSource {
+                    id: [10; 32],
+                    len: 100,
+                    binding: SourceBinding([11; 32]),
+                },
+                canonical_binding: SourceBinding([12; 32]),
+                revision: REV,
+                delta_depth: 0,
+                published: true,
+                held: false,
+            }),
+        });
+        snap.denial = Some(present(DenialFact {
+            objects: vec![],
+            packs: vec![],
+            held: vec![],
+        }));
+        snap.publication = Some(present(PublicationFact {
+            generation: REV,
+            sequence: 4,
+            published_prefix: 3,
+            deletion_boundary: 0,
+            head: Some(OLD),
+            packmap: Some([13; 32]),
+        }));
+        Self {
+            changes: vec![change(Match(OLD))],
+            admitted: vec![AdmittedRef {
+                name: name(),
+                target: Some(NEW),
+                prior_present: true,
+            }],
+            proof: vec![AncestryFact {
+                repository: REPO,
+                name: name(),
+                from: OLD,
+                to: NEW,
+                result: AncestryResult::Descendant,
+            }],
+            members: vec![NEW],
+            snap,
+            membership_window: MembershipWindow::Elapsed,
+            policy_signer_restricted: true,
+        }
+    }
+    fn request(&self) -> RefWriteRequest<'_> {
+        let mut req = request(&self.changes);
+        req.ancestry = &self.proof;
+        req.replay = Some(RefReplay {
+            scope: ReplayScope([8; 32]),
+            fingerprint: [9; 32],
+            expires_ms: 1_000,
+        });
+        req.required.authority = Some(AuthorityBinding {
+            namespace: NamespaceId([7; 32]),
+            mode: AuthorityMode::Authority,
+            generation: REV,
+        });
+        req.presence = Some((name(), true));
+        req.required.grant = Some(GrantBinding {
+            namespace: NamespaceId([7; 32]),
+            grant: [8; 32],
+            epoch: REV,
+        });
+        req.required.incarnation = Some(REV);
+        req.required.policy = Some(PolicyRequirement {
+            signer_restricted: self.policy_signer_restricted,
+            grant_fast_forward: false,
+        });
+        req.admitted = &self.admitted;
+        req.required.admission = Some(AdmissionBinding { effects: [8; 32] });
+        req.required.members = &self.members;
+        req.required.indexed_head = true;
+        req.required.membership_window = self.membership_window;
+        req.required.denial = true;
+        req.required.publication = true;
+        req.required.valid_through_ms = Some(100);
+        req
+    }
+}
+
+#[test]
+fn fact_mutation_finds_no_unguarded_ref_write_dependency() {
+    use crate::decision::fact_harness::assert_guards_cover;
+    let scenarios: Vec<(&str, Tweak)> = vec![
+        ("apply", |_| {}),
+        ("ref conflict", |f| {
+            f.snap.refs[0].1 = present(NEW);
+        }),
+        ("recorded signer refusal", |f| {
+            if let Some(Observed::Present { value, .. }) = &mut f.snap.policy {
+                value.allowed_signers.clear();
+            }
+        }),
+        ("recorded open closure", |f| {
+            f.snap.members[0].observed = Observed::Absent(REV);
+        }),
+        ("recorded ancestry refusal", |f| {
+            f.proof[0].result = AncestryResult::Denied;
+        }),
+        ("membership lag", |f| {
+            f.snap.members[0].observed = Observed::Absent(REV);
+            f.membership_window = MembershipWindow::WithinLag;
+        }),
+        ("denied object", |f| {
+            if let Some(Observed::Present { value, .. }) = &mut f.snap.denial {
+                value.objects.push([0x77; 32]);
+            }
+        }),
+        ("held pack", |f| {
+            if let Some(Observed::Present { value, .. }) = &mut f.snap.denial {
+                value.held.push([0x77; 32]);
+            }
+        }),
+        ("grant epoch moved", |f| {
+            if let Some(Observed::Present { value, .. }) = &mut f.snap.grant {
+                value.epoch = Revision([99; 32]);
+            }
+        }),
+        ("authority moved", |f| {
+            if let Some(Observed::Present { value, .. }) = &mut f.snap.authority {
+                value.generation = Revision([99; 32]);
+            }
+        }),
+        ("authority not ready", |f| {
+            if let Some(Observed::Present { value, .. }) = &mut f.snap.authority {
+                value.ready = false;
+            }
+        }),
+        ("lifecycle inactive", |f| {
+            if let Some(Observed::Present { value, .. }) = &mut f.snap.lifecycle {
+                value.state = LifecycleState::Deleting;
+            }
+        }),
+        ("recorded replay", |f| {
+            f.snap.replay = Some(present(ReplayFact {
+                scope: ReplayScope([8; 32]),
+                fingerprint: [9; 32],
+                expires_ms: 1_000,
+                state: ReplayState::Committed(TerminalResult::Applied(vec![RefValue {
+                    name: name(),
+                    value: Some(NEW),
+                }])),
+            }));
+        }),
+    ];
+    let mut exercised = 0;
+    for (label, tweak) in scenarios {
+        let mut full = Full::new();
+        tweak(&mut full);
+        let req = full.request();
+        exercised += assert_guards_cover(label, &full.snap, 100, |snap| {
+            decide_ref_write(&req, snap, limits())
+        });
+    }
+    assert!(exercised > 100, "scenarios must exercise many mutations");
+}
+
+#[test]
+fn recorded_refusals_are_decided_under_the_original_authorization() {
+    // A stored permanent answer is only sound while the original grant,
+    // authority and lifecycle binding still hold, so every recorded refusal
+    // carries those guards.
+    let refusals: Vec<(&str, Tweak)> = vec![
+        ("signer", |f| {
+            if let Some(Observed::Present { value, .. }) = &mut f.snap.policy {
+                value.allowed_signers.clear();
+            }
+        }),
+        ("open closure", |f| {
+            f.snap.members[0].observed = Observed::Absent(REV);
+        }),
+        ("ancestry", |f| f.proof[0].result = AncestryResult::Denied),
+    ];
+    for (label, tweak) in refusals {
+        let mut full = Full::new();
+        tweak(&mut full);
+        let req = full.request();
+        let guarded = decide_ref_write(&req, &full.snap, limits()).unwrap();
+        assert!(
+            matches!(
+                guarded.decision(),
+                WriteDecision::Reject {
+                    terminal: Some(_),
+                    ..
+                }
+            ),
+            "{label}"
+        );
+        for kind in [
+            GuardKind::Grant,
+            GuardKind::Authority,
+            GuardKind::Repository,
+        ] {
+            assert!(
+                guarded
+                    .required_guards()
+                    .iter()
+                    .any(|guard| guard_kind(guard) == kind),
+                "{label}: recorded refusal lacks {kind:?}"
+            );
+        }
+        // Once the binding moved, nothing is recorded: the stale authorization
+        // answers instead of a stored refusal.
+        let mut moved = full.snap.clone();
+        if let Some(Observed::Present { value, .. }) = &mut moved.authority {
+            value.generation = Revision([99; 32]);
+        }
+        let answer = decide_ref_write(&req, &moved, limits()).unwrap();
+        assert!(
+            matches!(
+                answer.decision(),
+                WriteDecision::Reject { refusal, terminal: None, .. }
+                    if refusal.code == PermanentCode::PermissionDenied
+            ),
+            "{label}"
+        );
+        assert!(!guards_match(&guarded, &moved, 100), "{label}");
+    }
+}
+
+#[test]
+fn source_fence_refusals_use_the_server_specification_answers() {
+    let changes = [
+        RefChange {
+            name: RefName("refs/mkit/packmap/main".into()),
+            condition: Missing,
+            target: Some(OLD),
+        },
+        change(Missing),
+    ];
+    let published = PublicationFact {
+        generation: REV,
+        sequence: 2,
+        published_prefix: 2,
+        deletion_boundary: 0,
+        head: Some(NEW),
+        packmap: Some(OLD),
+    };
+    let fence = |publication: Observed<PublicationFact>, ready: bool| RequiredSourceFence {
+        repository: REPO,
+        name: RefName("refs/heads/source".into()),
+        read_authority: present(AuthorityFact {
+            namespace: NamespaceId([7; 32]),
+            mode: AuthorityMode::Authority,
+            generation: REV,
+            ready,
+        }),
+        publication,
+    };
+    let mut snap = snapshot();
+    snap.refs = changes
+        .iter()
+        .map(|change| (change.name.clone(), Observed::Absent(REV)))
+        .collect();
+    let decide = |source: &RequiredSourceFence, changes: &[RefChange]| {
+        let mut req = request(changes);
+        req.kind = RefWriteKind::Advance;
+        req.required.source = Some(source);
+        decide_ref_write(&req, &snap, limits())
+    };
+    let unpublished = |edit: fn(&mut PublicationFact)| {
+        let mut fact = published.clone();
+        edit(&mut fact);
+        present(fact)
+    };
+    // Absent, unreadable, unpublished and unpaired sources are one uniform answer.
+    for source in [
+        fence(Observed::Absent(REV), true),
+        fence(present(published.clone()), false),
+        fence(unpublished(|f| f.head = None), true),
+        fence(unpublished(|f| f.packmap = None), true),
+        fence(
+            unpublished(|f| {
+                f.sequence = 0;
+                f.published_prefix = 0;
+            }),
+            true,
+        ),
+    ] {
+        let guarded = decide(&source, &changes).unwrap();
+        assert!(
+            matches!(
+                guarded.decision(),
+                WriteDecision::Reject { refusal, terminal: None, .. }
+                    if refusal.code == PermanentCode::NotFound
+                        && refusal.public_message == "source not found"
+            ),
+            "{source:?}"
+        );
+    }
+    // A destination pair that is not the captured publication pair means the
+    // source moved: nothing is recorded and the host reacquires and retries.
+    let moved = fence(present(published.clone()), true);
+    let mut other = changes.clone();
+    other[1].target = Some([77; 32]);
+    let guarded = decide(&moved, &other).unwrap();
+    assert_eq!(
+        guarded.decision(),
+        &WriteDecision::Retry(RetryReason::Unavailable)
+    );
+    assert_eq!(guarded.source_fences(), std::slice::from_ref(&moved));
+    // A contradictory row is still a host error.
+    let broken = fence(unpublished(|f| f.published_prefix = 3), true);
+    assert_eq!(
+        decide(&broken, &changes).unwrap_err().code,
+        FailureCode::InvalidResponse
+    );
+}
+
+#[test]
+fn guards_match_compares_the_scope_key_of_single_slot_facts() {
+    let full = Full::new();
+    let req = full.request();
+    let mut snap = full.snap.clone();
+    snap.replay = Some(Observed::Absent(REV));
+    let guarded = decide_ref_write(&req, &snap, limits()).unwrap();
+    assert!(guards_match(&guarded, &snap, 100));
+    // A guard whose present observation carries another scope key never matches,
+    // even against a snapshot that holds that very observation.
+    let wrong_namespace = |fact: AuthorityFact| AuthorityFact {
+        namespace: NamespaceId([99; 32]),
+        ..fact
+    };
+    let mut forged = snap.clone();
+    let Some(Observed::Present { value, revision }) = &mut forged.authority else {
+        unreachable!()
+    };
+    *value = wrong_namespace(value.clone());
+    let revision = *revision;
+    let scoped = Guarded {
+        repository: REPO,
+        decision: WriteDecision::Retry(RetryReason::InFlight),
+        required: vec![RequiredGuard::Authority {
+            namespace: NamespaceId([7; 32]),
+            expected: forged.authority.clone().unwrap(),
+        }],
+        source_fences: vec![],
+    };
+    assert!(!guards_match(&scoped, &forged, 100));
+    let _ = revision;
+    // The decision itself refuses a wrongly scoped observation.
+    assert_eq!(
+        decide_ref_write(&req, &forged, limits()).unwrap_err().code,
+        FailureCode::InvalidResponse
+    );
+    let mut grant = snap.clone();
+    if let Some(Observed::Present { value, .. }) = &mut grant.grant {
+        value.namespace = NamespaceId([99; 32]);
+    }
+    assert_eq!(
+        decide_ref_write(&req, &grant, limits()).unwrap_err().code,
+        FailureCode::InvalidResponse
+    );
+    let mut replay = snap;
+    replay.replay = Some(present(ReplayFact {
+        scope: ReplayScope([99; 32]),
+        fingerprint: [9; 32],
+        expires_ms: 1_000,
+        state: ReplayState::InFlight { resumable: false },
+    }));
+    assert_eq!(
+        decide_ref_write(&req, &replay, limits()).unwrap_err().code,
+        FailureCode::InvalidResponse
+    );
+}
+
+#[test]
+fn contradictory_guards_are_an_error_not_an_unsatisfiable_apply() {
+    use super::decide::push_guard;
+    let value = |observed| RequiredGuard::RefValue {
+        repository: REPO,
+        name: name(),
+        expected: observed,
+    };
+    let mut guards = Vec::new();
+    push_guard(&mut guards, 8, value(present(OLD))).unwrap();
+    // An exact duplicate is dropped.
+    push_guard(&mut guards, 8, value(present(OLD))).unwrap();
+    assert_eq!(guards.len(), 1);
+    // The same identity with another expectation can never commit.
+    for contradiction in [
+        value(present(NEW)),
+        value(Observed::Absent(REV)),
+        RequiredGuard::RefPresence {
+            repository: REPO,
+            name: name(),
+            present: false,
+        },
+    ] {
+        assert_eq!(
+            push_guard(&mut guards, 8, contradiction).unwrap_err().code,
+            FailureCode::InvalidResponse
+        );
+    }
+    // A presence guard agreeing with the value guard is not a contradiction.
+    push_guard(
+        &mut guards,
+        8,
+        RequiredGuard::RefPresence {
+            repository: REPO,
+            name: name(),
+            present: true,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        push_guard(
+            &mut guards,
+            2,
+            RequiredGuard::ValidThrough { instant_ms: 1 }
+        )
+        .unwrap_err()
+        .code,
+        FailureCode::ResourceLimit
+    );
+}
+
+/// Rows of the fact-to-class table in SPEC-SERVER §3.1, for the pre-result
+/// decisions. The fork and clearance rows are pinned in `tests/fork_advance.rs`,
+/// `tests/fork_acceptance.rs` (fixtures) and `decision/clearance.rs`.
+#[test]
+fn fact_class_table_rows_for_ref_writes() {
+    let outcome = |tweak: fn(&mut Full)| {
+        let mut full = Full::new();
+        tweak(&mut full);
+        let req = full.request();
+        decide_ref_write(&req, &full.snap, limits())
+            .unwrap()
+            .decision()
+            .clone()
+    };
+    // Authority fence not comparable atomically: retry, nothing stored.
+    assert_eq!(
+        outcome(|f| {
+            if let Some(Observed::Present { value, .. }) = &mut f.snap.authority {
+                value.ready = false;
+            }
+        }),
+        WriteDecision::Retry(RetryReason::Unavailable)
+    );
+    // Authority or grant moved from the original binding: permission denied, nothing stored.
+    for tweak in [
+        (|f: &mut Full| {
+            if let Some(Observed::Present { value, .. }) = &mut f.snap.authority {
+                value.generation = Revision([99; 32]);
+            }
+        }) as fn(&mut Full),
+        |f| {
+            if let Some(Observed::Present { value, .. }) = &mut f.snap.grant {
+                value.epoch = Revision([99; 32]);
+            }
+        },
+    ] {
+        assert!(matches!(
+            outcome(tweak),
+            WriteDecision::Reject { refusal, terminal: None, .. }
+                if refusal.code == PermanentCode::PermissionDenied
+        ));
+    }
+    // Lifecycle not active at the bound incarnation: a stale binding retries.
+    assert_eq!(
+        outcome(|f| {
+            if let Some(Observed::Present { value, .. }) = &mut f.snap.lifecycle {
+                value.state = LifecycleState::Deleting;
+            }
+        }),
+        WriteDecision::Retry(RetryReason::ChangedFacts)
+    );
+    // Denial: a held supplier retries, a denied object is permission denied.
+    assert_eq!(
+        outcome(|f| {
+            if let Some(Observed::Present { value, .. }) = &mut f.snap.denial {
+                value.held.push([0x77; 32]);
+            }
+        }),
+        WriteDecision::Retry(RetryReason::Unavailable)
+    );
+    assert!(matches!(
+        outcome(|f| {
+            if let Some(Observed::Present { value, .. }) = &mut f.snap.denial {
+                value.objects.push([0x77; 32]);
+            }
+        }),
+        WriteDecision::Reject { refusal, terminal: None, .. }
+            if refusal.code == PermanentCode::PermissionDenied
+                && refusal.public_message == "object blocked"
+    ));
+    // Membership not visible: retry inside the window, stored refusal after it.
+    assert_eq!(
+        outcome(|f| {
+            f.snap.members[0].observed = Observed::Absent(REV);
+            f.membership_window = MembershipWindow::WithinLag;
+        }),
+        WriteDecision::Retry(RetryReason::MembershipNotVisible)
+    );
+    assert!(matches!(
+        outcome(|f| f.snap.members[0].observed = Observed::Absent(REV)),
+        WriteDecision::Reject { refusal, terminal: Some(_), .. }
+            if refusal.code == PermanentCode::InvalidArgument
+                && refusal.public_message == "open closure"
+    ));
 }

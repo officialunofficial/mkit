@@ -2588,7 +2588,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         // §9.7: the signer rule needs no verified content, so it runs first.
         if let Err(error) = self.check_ref_signers(&op) {
             return self
-                .store_policy_denial(&op, a, &p, ahead, error, false)
+                .store_policy_denial(&op, a, &p, ahead, error, (false, None))
                 .await
                 .map(|stored| (stored, ResponseMeta::default()));
         }
@@ -2622,7 +2622,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }
         } else if let Err(error) = self.check_ticketless_head(&op).await {
             return self
-                .store_policy_denial(&op, a, &p, ahead, error, false)
+                .store_policy_denial(&op, a, &p, ahead, error, (false, None))
                 .await
                 .map(|stored| (stored, ResponseMeta::default()));
         }
@@ -2744,6 +2744,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     op.created = self.commit_creation(&op, a.business_skew_ms).await?;
                     None
                 };
+                let was_any = ref_policy::subject_is_any(&op, &refs);
                 if let Err(error) = self
                     .check_fast_forward(
                         &op,
@@ -2754,8 +2755,18 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     )
                     .await
                 {
+                    // An ancestry denial was decided against the exact value the
+                    // check pinned; the stored refusal must not outlive it.
+                    let denial_ref = ref_policy::pinned_ref_value(&op, &refs, was_any);
                     return self
-                        .store_policy_denial(&op, a, &p, ahead, error, pending.is_some())
+                        .store_policy_denial(
+                            &op,
+                            a,
+                            &p,
+                            ahead,
+                            error,
+                            (pending.is_some(), denial_ref),
+                        )
                         .await;
                 }
                 self.pre_receive(&op).await?;
@@ -3803,6 +3814,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     .as_ref()
                     .is_none_or(|snap| snap.get(&keys::repo_known(&op.repo.name)).is_none()),
             rejection: None,
+            denial_ref: None,
             publication: (caps.atomic_multi_key && !refs.is_empty()).then_some(
                 clearance::PublicationWrite {
                     repo: &op.repo,
@@ -3844,7 +3856,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     && error.code() == crate::Code::PermissionDenied =>
             {
                 return self
-                    .store_policy_denial(op, a, p, ahead, error, pending.is_some())
+                    .store_policy_denial(op, a, p, ahead, error, (pending.is_some(), None))
                     .await;
             }
             Err(error) => return Err(error),

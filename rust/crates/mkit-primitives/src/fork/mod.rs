@@ -53,8 +53,6 @@ pub enum ForkRefusal {
     QuotaExceeded,
     /// A durable job or replay belongs to another admitted binding.
     BindingMismatch,
-    /// Destination lifecycle currently withholds accepted clearance.
-    LifecycleUnavailable,
 }
 impl ForkRefusal {
     /// Stable machine-readable registry code.
@@ -69,6 +67,25 @@ impl ForkRefusal {
             Self::Expired => FailureCode::ForkExpired,
             Self::QuotaExceeded => FailureCode::ForkQuotaExceeded,
             Self::BindingMismatch => FailureCode::ForkBindingMismatch,
+        }
+    }
+}
+
+/// Why accepted clearance is withheld without changing the saved result.
+///
+/// Acceptance already recorded the terminal result; the destination stays
+/// invisible and the host redrives clearance once the fact clears.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ForkWithheld {
+    /// Destination lifecycle is not active at the bound incarnation.
+    LifecycleUnavailable,
+}
+impl ForkWithheld {
+    /// Stable machine-readable registry code.
+    #[must_use]
+    pub const fn code(self) -> FailureCode {
+        match self {
             Self::LifecycleUnavailable => FailureCode::ForkLifecycleUnavailable,
         }
     }
@@ -207,8 +224,9 @@ impl<'a> GuardedFork<'a> {
 /// # Errors
 /// `UnavailableInput` for unacquired required facts; `InvalidResponse` for
 /// contradictory, wrongly scoped, or malformed facts; `ResourceLimit` for
-/// explicit plan, proof, or work bounds; `UnsupportedCapability` when requested
-/// authority fencing is unavailable. Errors create no effects or terminal result.
+/// explicit plan, proof, or work bounds. Requested authority fencing that cannot
+/// yet be compared atomically is retryable `UnavailableInput`, like a ref write's
+/// retry. Errors create no effects or terminal result.
 pub fn decide_fork_acceptance<'a>(
     plan: &'a ForkPlan,
     request: &'a ForkAttempt,
@@ -298,7 +316,7 @@ fn classify<'a>(
     }
     let authority = present(facts.authority.as_ref())?;
     if request.authority_fencing && !authority.ready {
-        return Err(failure(FailureCode::UnsupportedCapability).into());
+        return Err(failure(FailureCode::UnavailableInput).into());
     }
     if authority != &request.authority || !grant_matches(facts.grant.as_ref(), request)? {
         return Err(ForkRefusal::PermissionDenied.into());

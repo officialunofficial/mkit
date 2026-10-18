@@ -45,6 +45,24 @@ ref-presence, and final denial errors remain unstored in this decision path.
 An invalid original lifecycle binding returns a retry; the host retains its
 lifecycle policy rather than acquiring a new public lifecycle error here.
 
+A stored refusal (signer, indexed-head closure or ancestry) is only sound while
+the original authorization holds, so the grant, authority and lifecycle bindings
+are decided and guarded before the refusal is recorded. A stale binding answers
+with its own unstored result instead of a stored refusal. Retries are split by
+cause: `AdmittedRefChanged` (the ref moved after custom admission),
+`MembershipNotVisible` (lag inside the original window), `InFlight`,
+`ChangedFacts` and `Unavailable`. The fact-to-class table in SPEC-SERVER §3.1
+fixes which class each observed fact has at every decision.
+
+Observations of single-slot categories carry their scope key: `ReplayFact::scope`,
+`AuthorityFact::namespace` and `GrantFact::namespace`. The decision refuses a
+wrongly scoped observation (`InvalidResponse`) and `guards_match` compares the
+key, so an adapter cannot satisfy a guard with another scope's row.
+
+A decision that would collect two guards for the same fact with different
+expectations (so that no snapshot can satisfy both) returns `InvalidResponse`
+instead of an Apply that can never commit.
+
 ## Atomic application
 
 `Guarded<WriteDecision>` has private construction. Keep it intact through
@@ -87,9 +105,34 @@ composition in their existing order. Deployment policy acquisition and source
 reauthorization remain host boundaries. The non-atomic paired fallback remains
 sequential, as required by the existing server contract.
 
+`decide_ticketed_advance` adds the ticket rows it examined (valid or refused, in
+request order), the exact stored-bytes counter row whenever it counts inline
+(the marker behind each claim's `counted` moves only with that counter), the
+reservation rows it settles, and the authority observation when
+`write.required.authority` fences tickets: every consumed ticket must carry the
+bound generation (`TicketFact::authority_generation` is a `Revision`). Its Apply
+lists each consumed pack once in `AcceptanceEffects::membership`; those inserts
+are idempotent and read no fact, so the sealed completeness rule does not demand
+a membership guard for them. Under `Relay` and `Disabled` accounting there is no
+counter in the partition: `counted` is an advisory membership observation and the
+coordinator's `StorageChanged` outcome stays authoritative.
+
+`decide_ticket_cleanup` aborts only a reservation that is still
+`Ticketed(claim.ticket)` and guards every ticket row up to the first failure.
+`decide_reservation_settlement` of a `Ticketed` reservation closes the bound
+ticket in the same effects, or fences its observed absence, so a ticket never
+survives to write a second terminal outcome.
+
+A published-source fence refuses an absent, unreadable, unpublished or unpaired
+source with `not_found` "source not found" (SPEC-SERVER §9.3). A destination pair
+that differs from the captured publication pair means the source moved, and the
+decision retries (`Unavailable`); the expected-tip comparison stays a host duty.
+
 Executable fixtures cover the CAS matrix. Deterministic fuzz replay exercises
 bounded models against an independent CAS oracle. Mutation tests change each
 applicable dependency and omit each guard, including omissions within one
-category. A frozen reference planner compares complete physical plans and exact
+category. The fact-mutation harness (`decision/fact_harness.rs`) mutates every
+acquired fact of ref-write, ticketed, cleanup and settlement scenarios and
+requires that any change which alters the decision also breaks a guard. A frozen reference planner compares complete physical plans and exact
 errors for CAS, admission, grant presence, replay, authority, quota, deletion,
 publication prefixes, backlog, and competing corrupt observations.

@@ -4,19 +4,19 @@ use super::{
 };
 use crate::{
     decision::{
-        AcceptanceEffects, DurableOutcome, Guarded, Observed, OperationId, PermanentCode,
-        PermanentRefusal, RefName, RefValue, RequiredGuard, ReservationAbortReason,
+        AcceptanceEffects, DurableOutcome, Guarded, MembershipEffect, Observed, OperationId,
+        PermanentCode, PermanentRefusal, RefName, RefValue, RequiredGuard, ReservationAbortReason,
         ReservationAccounting, ReservationFact, ReservationId, ReservationOutcome,
         ReservationTerminal, ReservationTerminalKind, RetryReason, Snapshot, StorageEffect,
         StorageFact, TicketFact, TicketId, TicketTransition, WriteDecision,
         ref_write::{
             RefDecisionLimits, RefWriteKind, RefWriteRequest,
             checks::{bounds, failure},
-            decide::Attempt,
+            decide::{Attempt, push_guard},
         },
     },
     error::{Failure, FailureCode},
-    evidence::{RepositoryId, Revision},
+    evidence::RepositoryId,
 };
 
 const INVALID_TICKET: &str = "invalid or expired upload ticket";
@@ -115,15 +115,16 @@ fn drive(
             }
             other => other,
         };
+        // Every row the decision examined is a read dependency, whatever the
+        // verdict: a refusal, conflict or replay built on these rows commits
+        // only while they are unchanged.
+        attempt.add(RequiredGuard::Ticket {
+            id: claim.ticket.clone(),
+            expected: observed.clone(),
+        })?;
         match verdict {
             Verdict::Valid(fact) => valid.push((claim, fact, observed)),
-            Verdict::Refuse(code, message) => {
-                attempt.add(RequiredGuard::Ticket {
-                    id: claim.ticket.clone(),
-                    expected: observed.clone(),
-                })?;
-                return attempt.reject(code, message);
-            }
+            Verdict::Refuse(code, message) => return attempt.reject(code, message),
         }
     }
     if let Some(decision) = verification(request, attempt.limits)? {
@@ -133,10 +134,12 @@ fn drive(
         return Ok(decision);
     }
     // Tickets issued under a superseded authority generation cannot commit.
-    if let Some(generation) = request.authority_generation
+    // The generation is the guarded authority binding's, so the Authority guard
+    // that `context` collected already covers it.
+    if let Some(bound) = &write.required.authority
         && valid
             .iter()
-            .any(|(_, fact, _)| fact.authority_generation != Some(generation))
+            .any(|(_, fact, _)| fact.authority_generation != Some(bound.generation))
     {
         return attempt.reject(PermanentCode::PermissionDenied, EPOCH_MOVED);
     }
@@ -206,8 +209,19 @@ fn augment_apply(
             id: claim.ticket.clone(),
             next: None,
         });
-        // Membership rows and any cross-partition storage relay are
-        // unconditional lowering of ticket consumption, not semantic effects.
+        // The consumed pack joins the repository's membership. A pack named by
+        // several tickets is added once. Cross-partition relays remain host
+        // lowering of this semantic addition.
+        if !effects
+            .membership
+            .iter()
+            .any(|added| added.pack.id == fact.pack.id)
+        {
+            effects.membership.push(MembershipEffect {
+                repository: write.repository,
+                pack: fact.pack,
+            });
+        }
         let terminal = ReservationTerminal {
             repository: write.repository,
             occurred_ms: write.now_ms,
@@ -245,7 +259,11 @@ fn augment_apply(
                     .ok_or_else(|| failure(FailureCode::ResourceLimit))?;
             }
         }
-        if added > 0 {
+        if !valid.is_empty() {
+            // `counted` is the marker observation of each claim's pack. A marker
+            // appears only in a batch that also moves this counter, so the exact
+            // counter row guards every claim's `counted` value, whether or not
+            // this batch adds bytes.
             let acquired = snapshot
                 .storage
                 .as_ref()
@@ -253,6 +271,12 @@ fn augment_apply(
             if acquired != observed {
                 return Err(failure(FailureCode::InvalidResponse));
             }
+            attempt.add(RequiredGuard::Storage {
+                repository: write.repository,
+                expected: acquired.clone(),
+            })?;
+        }
+        if added > 0 {
             let Observed::Present { value: counter, .. } = observed else {
                 return Err(failure(FailureCode::InvalidResponse));
             };
@@ -266,20 +290,15 @@ fn augment_apply(
                     .checked_add(1)
                     .ok_or_else(|| failure(FailureCode::ResourceLimit))?,
             };
-            attempt.add(RequiredGuard::Storage {
-                repository: write.repository,
-                expected: acquired.clone(),
-            })?;
             let counter_row = observed_reservation(snapshot, outcome)?;
+            // The counter-change outcome id derives from the next counter
+            // version, so a live row there contradicts the counter itself.
+            if !matches!(counter_row, Observed::Absent(_)) {
+                return Err(failure(FailureCode::InvalidResponse));
+            }
             attempt.add(RequiredGuard::Reservation {
                 id: outcome.clone(),
-                // The reference plans an unconditional absence precondition
-                // for the derived counter-outcome row. A live row can never
-                // satisfy it; the sealed guard makes that explicit.
-                expected: match counter_row {
-                    Observed::Absent(_) => counter_row.clone(),
-                    Observed::Present { .. } => Observed::Absent(Revision([0; 32])),
-                },
+                expected: counter_row.clone(),
             })?;
             effects.storage.push(StorageEffect {
                 repository: write.repository,
@@ -411,18 +430,6 @@ pub fn decide_ticket_cleanup(
     guards
         .try_reserve_exact(limits.guards.min(64) as usize)
         .map_err(|_| failure(FailureCode::ResourceLimit))?;
-    let mut add = |guard: RequiredGuard| -> Result<(), Failure> {
-        if !guards.contains(&guard) {
-            if guards.len() >= limits.guards as usize {
-                return Err(failure(FailureCode::ResourceLimit));
-            }
-            guards
-                .try_reserve(1)
-                .map_err(|_| failure(FailureCode::ResourceLimit))?;
-            guards.push(guard);
-        }
-        Ok(())
-    };
     let mut first_failure = None;
     let mut rows = Vec::new();
     rows.try_reserve(request.tickets.len())
@@ -463,19 +470,45 @@ pub fn decide_ticket_cleanup(
         storage: Vec::new(),
         outcomes: Vec::new(),
     };
-    for &(claim, fact, observed) in rows[..=boundary].iter().flatten() {
+    // The abort set depends on every ticket row up to the first failure, not
+    // only on the rows it aborts, so each examined row is a read dependency.
+    for (claim, observed) in request.tickets[..=boundary]
+        .iter()
+        .map(|claim| (claim, observed_ticket(snapshot, &claim.ticket)))
+    {
+        push_guard(
+            &mut guards,
+            limits.guards,
+            RequiredGuard::Ticket {
+                id: claim.ticket.clone(),
+                expected: observed?.clone(),
+            },
+        )?;
+    }
+    for &(claim, fact, _) in rows[..=boundary].iter().flatten() {
         if claim.proof != UploadProof::PackMissing {
             continue;
         }
         let res_observed = observed_reservation(snapshot, &fact.reservation)?;
-        add(RequiredGuard::Ticket {
-            id: claim.ticket.clone(),
-            expected: observed.clone(),
-        })?;
-        add(RequiredGuard::Reservation {
-            id: fact.reservation.clone(),
-            expected: res_observed.clone(),
-        })?;
+        // Only the reservation this ticket is bound to may be aborted; any
+        // other state is already settled, and a second terminal is forbidden.
+        if !matches!(
+            res_observed,
+            Observed::Present {
+                value: ReservationFact::Ticketed(id),
+                ..
+            } if id == &claim.ticket
+        ) {
+            return Err(failure(FailureCode::InvalidResponse));
+        }
+        push_guard(
+            &mut guards,
+            limits.guards,
+            RequiredGuard::Reservation {
+                id: fact.reservation.clone(),
+                expected: res_observed.clone(),
+            },
+        )?;
         effects.tickets.push(TicketTransition {
             id: claim.ticket.clone(),
             next: None,
@@ -601,9 +634,9 @@ pub fn decide_reservation_settlement(
     }
     let mut required = Vec::new();
     required
-        .try_reserve_exact(1)
+        .try_reserve_exact(2)
         .map_err(|_| failure(FailureCode::ResourceLimit))?;
-    let expected = match observed {
+    let guarded_row = match observed {
         Observed::Present {
             value: ReservationFact::Terminal(value),
             revision,
@@ -615,14 +648,58 @@ pub fn decide_reservation_settlement(
     };
     required.push(RequiredGuard::Reservation {
         id: reservation.clone(),
-        expected,
+        expected: guarded_row,
     });
+    if observed == expected {
+        close_settled_ticket(observed, reservation, snapshot, &mut required, &mut effects)?;
+    }
     Ok(Guarded {
         repository,
         decision: WriteDecision::Apply(effects),
         required,
         source_fences: Vec::new(),
     })
+}
+
+/// A `Ticketed` reservation ends together with its ticket: settling it alone
+/// would leave a live ticket whose consumption writes a second terminal
+/// outcome. The same effects close the ticket row, and its exact observation
+/// (the row, or its absence) is guarded so no other path can race it.
+fn close_settled_ticket(
+    settled: &Observed<ReservationFact>,
+    reservation: &ReservationId,
+    snapshot: &Snapshot,
+    required: &mut Vec<RequiredGuard>,
+    effects: &mut AcceptanceEffects,
+) -> Result<(), Failure> {
+    let Observed::Present {
+        value: ReservationFact::Ticketed(ticket),
+        ..
+    } = settled
+    else {
+        return Ok(());
+    };
+    let row = observed_ticket(snapshot, ticket)?;
+    if let Observed::Present { value, .. } = row
+        && (value.ticket != *ticket || value.reservation != *reservation)
+    {
+        return Err(failure(FailureCode::InvalidResponse));
+    }
+    required.push(RequiredGuard::Ticket {
+        id: ticket.clone(),
+        expected: row.clone(),
+    });
+    if matches!(row, Observed::Present { .. }) {
+        effects
+            .tickets
+            .try_reserve_exact(1)
+            .map_err(|_| failure(FailureCode::ResourceLimit))?;
+        effects.tickets.push(TicketTransition {
+            id: ticket.clone(),
+            next: None,
+        });
+    }
+    Ok(())
 }
 
 enum Verdict<'a> {

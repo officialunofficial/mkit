@@ -6,6 +6,8 @@
 
 mod clearance;
 mod effects;
+#[cfg(test)]
+pub(crate) mod fact_harness;
 mod facts;
 mod guards;
 pub mod ref_write;
@@ -40,6 +42,13 @@ pub enum RetryReason {
     Unavailable,
     /// Facts changed; reacquire and redecide.
     ChangedFacts,
+    /// The ref changed after custom admission observed it: the admitted target
+    /// or prior presence no longer matches. A ticketed settlement maps this to
+    /// a ref conflict; no terminal result is stored.
+    AdmittedRefChanged,
+    /// A required member is not yet visible in the repository. Retryable inside
+    /// the membership window; never a stored result.
+    MembershipNotVisible,
     /// Nonresumable operation remains in flight.
     InFlight,
 }

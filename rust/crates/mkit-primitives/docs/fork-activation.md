@@ -86,7 +86,8 @@ and retain their required commit fences.
 `ForkLifecycleProtection::Managed` binds the construction's repository
 incarnation to a current revisioned lifecycle observation. Missing acquisition
 returns `UnavailableInput`. Authoritative absence, deletion, or a different
-incarnation withholds clearance with `ForkLifecycleUnavailable`. Both the
+incarnation withholds clearance (`Withhold(ForkWithheld::LifecycleUnavailable)`, code
+`ForkLifecycleUnavailable`); it never refuses or changes the saved result. Both the
 observation and its revision belong to the activation/completion guard snapshot.
 `NotOffered` explicitly selects a profile without those transitions. Neither
 profile can change the accepted result; an already completed replay needs no

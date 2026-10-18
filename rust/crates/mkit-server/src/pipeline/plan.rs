@@ -210,6 +210,9 @@ pub(crate) struct WriteRequest<'a> {
     /// A final rejection: upload `pre_receive`, or a replay-only built-in
     /// policy denial with no refs or other mutable effects.
     pub(crate) rejection: Option<&'a StoredRejection>,
+    /// The ref value a recorded policy denial was decided on: the stored refusal
+    /// commits only while the ref still holds it, so a moved ref is redecided.
+    pub(crate) denial_ref: Option<(&'a str, Option<mkit_core::hash::Hash>)>,
     /// Paired publication context; absent only on ref-only stores.
     pub(crate) publication: Option<super::clearance::PublicationWrite<'a>>,
     /// A separately committed admission reservation, if one was granted.
@@ -464,7 +467,7 @@ pub(crate) fn plan_write(
     }
     // The composed ticketed decision covers pending stability, replay and
     // ticket rows for an advance the portable contract serves.
-    let ticketed = ticketed_decision::decide(req, snap, clock);
+    let ticketed = ticketed_decision::decide(req, snap, clock)?;
     if let Some(decided) = &ticketed
         && let Some(answer) = decided.verdict()
     {
@@ -617,6 +620,9 @@ pub(crate) fn plan_write(
 
     let (on_commit, ref_puts, conflict) =
         decide_write_result(req, snap, clock, &mut pre, &mut puts, ticketed.as_ref())?;
+    if conflict && let Some(advance) = &req.advance {
+        super::advance::guard_examined_tickets(snap, advance, &mut pre);
+    }
     if conflict && req.replay.is_none() && req.charges.is_empty() && req.pending.is_none() {
         return Ok(Planned::Done(on_commit));
     }
@@ -870,6 +876,13 @@ fn decide_write_result(
     if req.kind != WriteKind::UploadCommit
         && let Some(rejection) = req.rejection
     {
+        if let Some((name, value)) = req.denial_ref {
+            let key = keys::ref_key(req.repo, name);
+            pre.push(match value {
+                Some(value) => Precondition::Equals(key, codec::encode_ref_id(&value)),
+                None => Precondition::Absent(key),
+            });
+        }
         return Ok((StoredResult::Rejected(rejection.clone()), Vec::new(), false));
     }
     // Quota is charged on a CAS conflict. The charge commits in the same

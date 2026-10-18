@@ -7,7 +7,8 @@
 use mkit_core::hash::hash;
 use mkit_primitives::{
     decision::{
-        Guarded, Observed, RefName, RequiredGuard, Snapshot as RefSnapshot, WriteDecision,
+        Guarded, Observed, RefName, RequiredGuard, RetryReason, Snapshot as RefSnapshot,
+        WriteDecision,
         ref_write::{
             AdmittedRef, MembershipWindow, RefChange, RefDecisionLimits, RefRequirements,
             RefWriteKind, RefWriteRequest, check_guard_completeness, decide_ref_write,
@@ -27,10 +28,12 @@ use crate::{
 };
 
 /// The request remains bound to its sealed semantic decision through lowering.
-/// Shapes the wire rejects or no wire procedure emits — unconditional or
-/// `MISSING` deletes and requests with more than two changes — keep the
-/// generic per-ref CAS decision the unextracted planner used (SPEC-SERVER
-/// §3.1, "Reference-server behavior").
+/// Only a shape the wire rejects or no wire procedure emits — an unconditional
+/// or `MISSING` delete, a repeated or malformed ref name, or more than two
+/// changes — keeps the generic per-ref CAS decision the unextracted planner
+/// used (SPEC-SERVER §3.1, "Reference-server behavior"). The shape is judged
+/// before the portable decision runs; every failure of the portable decision
+/// itself is an error, never a silent fallback.
 pub(super) enum RefDecision<'request, 'data> {
     /// A served shape decided by the portable contract — including
     /// noncanonical but protocol-admitted pairs.
@@ -97,13 +100,8 @@ pub(super) fn decide<'request, 'data>(
     // a new wire encoding, signing input, or hash domain.
     let identity = crate::store::repo_storage::identity(&request.namespace, request.repo);
     let repository = RepositoryId(hash(identity.as_bytes()));
-    let deletion = changes.iter().all(|change| change.target.is_none());
-    let kind = match (changes.len(), deletion) {
-        (1, false) => RefWriteKind::Update,
-        (1, true) => RefWriteKind::Delete,
-        (2, false) => RefWriteKind::Advance,
-        (2, true) => RefWriteKind::DeletePair,
-        _ => return generic(request, snapshot).map(Some),
+    let Some(kind) = portable_kind(&changes, &admitted) else {
+        return generic(request, snapshot).map(Some);
     };
     let input = RefWriteRequest {
         repository,
@@ -155,13 +153,52 @@ pub(super) fn decide<'request, 'data>(
             Err(failure)
                 if failure.code == FailureCode::UnavailableInput
                     && index + 1 < request.refs.len() => {}
-            // Any other rejection means the request is outside the portable
-            // contract for this input; the generic CAS keeps the planner's
-            // exact established behavior for it.
-            Err(_) => return generic(request, snapshot).map(Some),
+            // The shape is portable, so any other failure is the primitive's
+            // answer for these facts, not a reason to decide elsewhere.
+            Err(failure) => return Err(super::ticketed_decision::failure_error(&failure)),
         }
     }
     Err(super::internal("missing portable ref decision"))
+}
+
+/// The portable request kind when the decision's shape contract admits
+/// `changes`; `None` keeps the generic path.
+fn portable_kind(changes: &[RefChange], admitted: &[AdmittedRef]) -> Option<RefWriteKind> {
+    let deletion = changes.iter().all(|change| change.target.is_none());
+    let kind = match (changes.len(), deletion) {
+        (1, false) => RefWriteKind::Update,
+        (1, true) => RefWriteKind::Delete,
+        (2, false) => RefWriteKind::Advance,
+        (2, true) => RefWriteKind::DeletePair,
+        _ => return None,
+    };
+    portable_shape(changes, admitted).then_some(kind)
+}
+
+/// Whether the portable decision's shape contract admits `changes`: valid,
+/// distinct ref names, either only exact-match deletions or only writes, and
+/// an admission binding (when any) that names every change. Admission always
+/// resolves every ref, so a partial binding never reaches production.
+fn portable_shape(changes: &[RefChange], admitted: &[AdmittedRef]) -> bool {
+    use mkit_core::refs::{RefWriteCondition, validate_ref_name};
+    let distinct = changes
+        .iter()
+        .enumerate()
+        .all(|(i, change)| changes[..i].iter().all(|other| other.name != change.name));
+    let names = changes
+        .iter()
+        .all(|change| change.name.0.starts_with("refs/") && validate_ref_name(&change.name.0));
+    let deletes = changes.iter().all(|change| {
+        change.target.is_none() && matches!(change.condition, RefWriteCondition::Match(_))
+    });
+    let covered = admitted.is_empty()
+        || changes
+            .iter()
+            .all(|change| admitted.iter().any(|entry| entry.name == change.name));
+    distinct
+        && names
+        && covered
+        && (deletes || changes.iter().all(|change| change.target.is_some()))
 }
 
 /// Generic per-ref CAS decision for served shapes the portable contract does
@@ -345,12 +382,13 @@ pub(super) fn lower(
                 _ => return Err(super::internal("unsupported portable ref refusal")),
             });
         }
-        WriteDecision::Retry(_) => {
+        WriteDecision::Retry(RetryReason::AdmittedRefChanged) => {
             return Err(
                 ServerError::aborted_retryable("ref changed after admission; retry")
                     .with_abort_cause(AbortCause::RefConflict),
             );
         }
+        WriteDecision::Retry(_) => return Err(super::internal("unexpected portable ref retry")),
         _ => return Err(super::internal("unsupported portable ref decision")),
     };
     preconditions.extend(required);

@@ -1,14 +1,15 @@
 use super::*;
 use crate::decision::ref_write::{
-    MembershipWindow, RefChange, RefDecisionLimits, RefRequirements, RefWriteKind, RefWriteRequest,
-    effect_guard_kinds, guard_kind, guards_match,
+    AuthorityBinding, MembershipWindow, RefChange, RefDecisionLimits, RefRequirements,
+    RefWriteKind, RefWriteRequest, check_guard_completeness, effect_guard_kinds, guard_kind,
+    guards_match,
 };
 use crate::decision::{
-    self, DecisionClass, GuardKind, Observed, OperationId, PermanentCode, RefName, RefValue,
-    ReplayFact, ReplayScope, ReplayState, RequiredGuard, ReservationAbortReason, ReservationFact,
-    ReservationId, ReservationOp, ReservationTerminal, ReservationTerminalKind, RetryReason,
-    Snapshot, StorageEffect, StorageFact, TerminalResult, TicketFact, TicketId, TicketTransition,
-    WriteDecision,
+    self, AuthorityFact, AuthorityMode, DecisionClass, GuardKind, NamespaceId, Observed,
+    OperationId, PermanentCode, RefName, RefValue, ReplayFact, ReplayScope, ReplayState,
+    RequiredGuard, ReservationAbortReason, ReservationFact, ReservationId, ReservationOp,
+    ReservationTerminal, ReservationTerminalKind, RetryReason, Snapshot, StorageEffect,
+    StorageFact, TerminalResult, TicketFact, TicketId, TicketTransition, WriteDecision,
 };
 use crate::error::FailureCode;
 use crate::evidence::{PackSource, RepositoryId, Revision, SourceBinding};
@@ -149,7 +150,6 @@ fn request<'a>(changes: &'a [RefChange], claims: &'a [TicketClaim]) -> TicketedA
         verification: VerificationVerdict::Satisfied,
         storage: StorageAccounting::Disabled,
         pending: None,
-        authority_generation: None,
     }
 }
 fn pending_binding(byte: u8) -> PendingBinding {
@@ -367,6 +367,7 @@ fn replay_and_pending_gate_the_decision() {
         }
         let mut snap = snapshot(&changes, &[0x40]);
         snap.replay = Some(present(ReplayFact {
+            scope: scope.clone(),
             fingerprint: [8; 32],
             expires_ms: 9_000,
             state: ReplayState::Committed(TerminalResult::Applied(vec![])),
@@ -430,13 +431,15 @@ fn conflict_aborts_the_pending_reservation() {
         }
         other => panic!("expected conflict: {other:?}"),
     }
-    // Ticket consumption never reaches the conflict path.
+    // The conflict commits a recorded answer on the ticket rows it examined, so
+    // those rows are guarded, but consumption never reaches the conflict path.
     assert!(
         guarded
             .required_guards()
             .iter()
-            .all(|g| !matches!(g, RequiredGuard::Ticket { .. }))
+            .any(|g| matches!(g, RequiredGuard::Ticket { .. }))
     );
+    assert!(matches!(guarded.decision(), WriteDecision::Conflict { .. }));
 }
 
 #[test]
@@ -462,26 +465,50 @@ fn verification_verdicts_gate_and_fences_refuse() {
             .decision(),
         WriteDecision::Reject { refusal, .. } if refusal.code == PermanentCode::InvalidArgument
     ));
-    // A ticket issued under a superseded authority generation refuses.
+    // A ticket issued under a superseded authority generation refuses, and the
+    // guarded authority observation is what the generation is compared with.
     req.verification = VerificationVerdict::Satisfied;
-    req.authority_generation = Some(7);
+    let generation = Revision([7; 32]);
+    req.write.required.authority = Some(AuthorityBinding {
+        namespace: NamespaceId([7; 32]),
+        mode: AuthorityMode::Authority,
+        generation,
+    });
+    let mut snap = snapshot(&changes, &[0x42]);
+    snap.authority = Some(present(AuthorityFact {
+        namespace: NamespaceId([7; 32]),
+        mode: AuthorityMode::Authority,
+        generation,
+        ready: true,
+    }));
+    let stale = decide_ticketed_advance(&req, &snap, limits()).unwrap();
+    assert!(matches!(
+        stale.decision(),
+        WriteDecision::Reject { refusal, .. } if refusal.code == PermanentCode::PermissionDenied
+    ));
+    assert!(
+        stale
+            .required_guards()
+            .iter()
+            .any(|guard| matches!(guard, RequiredGuard::Authority { .. }))
+    );
+    // A matching generation applies.
+    let Observed::Present { value: fact, .. } = &mut snap.tickets[0].1 else {
+        unreachable!()
+    };
+    fact.authority_generation = Some(generation);
+    let applied = decide_ticketed_advance(&req, &snap, limits()).unwrap();
+    assert!(matches!(applied.decision(), WriteDecision::Apply(_)));
+    // A moved authority observation refuses before any ticket is consumed.
+    let Some(Observed::Present { value, .. }) = &mut snap.authority else {
+        unreachable!()
+    };
+    value.generation = Revision([8; 32]);
     assert!(matches!(
         decide_ticketed_advance(&req, &snap, limits())
             .unwrap()
             .decision(),
         WriteDecision::Reject { refusal, .. } if refusal.code == PermanentCode::PermissionDenied
-    ));
-    // A matching generation applies.
-    let mut snap = snapshot(&changes, &[0x42]);
-    let Observed::Present { value: fact, .. } = &mut snap.tickets[0].1 else {
-        unreachable!()
-    };
-    fact.authority_generation = Some(7);
-    assert!(matches!(
-        decide_ticketed_advance(&req, &snap, limits())
-            .unwrap()
-            .decision(),
-        WriteDecision::Apply(_)
     ));
 }
 
@@ -884,6 +911,7 @@ fn ticketed_semantic_fixtures_pin_terminal_identity_and_replay() {
                 expires_ms: 10_000,
             });
             snap.replay = Some(present(ReplayFact {
+                scope: ReplayScope([8; 32]),
                 fingerprint: [9; 32],
                 expires_ms: 10_000,
                 state: ReplayState::Committed(TerminalResult::Applied(vec![])),
@@ -1201,4 +1229,378 @@ mod combined {
             assert_eq!(err.code, FailureCode::InvalidResponse);
         }
     }
+}
+
+/// One owned ticketed-advance scenario: two tickets, inline storage counting,
+/// an admission reservation, a replay record and an authority binding.
+struct Scenario {
+    changes: [RefChange; 2],
+    claims: Vec<TicketClaim>,
+    snap: Snapshot,
+    verification: VerificationVerdict,
+    bound: Option<AuthorityBinding>,
+}
+type Tweak = fn(&mut Scenario);
+const GENERATION: Revision = Revision([7; 32]);
+const STORAGE_OUTCOME: ReservationId = ReservationId([0x71; 32]);
+impl Scenario {
+    fn new() -> Self {
+        let changes = pair();
+        let mut snap = snapshot(&changes, &[0x10, 0x11]);
+        for (_, observed) in &mut snap.tickets {
+            if let Observed::Present { value, .. } = observed {
+                value.authority_generation = Some(GENERATION);
+            }
+        }
+        snap.storage = Some(present(StorageFact {
+            stored_bytes: 400,
+            version: 7,
+        }));
+        snap.reservations
+            .push((ReservationId([0x70; 32]), pending_binding(0x70).expected));
+        snap.reservations
+            .push((STORAGE_OUTCOME, Observed::Absent(REV)));
+        snap.replay = Some(Observed::Absent(REV));
+        snap.authority = Some(present(AuthorityFact {
+            namespace: NamespaceId([7; 32]),
+            mode: AuthorityMode::Authority,
+            generation: GENERATION,
+            ready: true,
+        }));
+        Self {
+            changes,
+            claims: vec![
+                claim(0x10, UploadProof::Ready),
+                claim(0x11, UploadProof::Ready),
+            ],
+            snap,
+            verification: VerificationVerdict::Satisfied,
+            bound: Some(AuthorityBinding {
+                namespace: NamespaceId([7; 32]),
+                mode: AuthorityMode::Authority,
+                generation: GENERATION,
+            }),
+        }
+    }
+    fn request(&self) -> TicketedAdvanceRequest<'_> {
+        let mut req = request(&self.changes, &self.claims);
+        req.write.replay = Some(decision::ref_write::RefReplay {
+            scope: ReplayScope([8; 32]),
+            fingerprint: [9; 32],
+            expires_ms: 9_000,
+        });
+        req.write.required.authority.clone_from(&self.bound);
+        req.pending = Some(pending_binding(0x70));
+        req.verification = self.verification.clone();
+        req.storage = StorageAccounting::Inline {
+            observed: self.snap.storage.clone().unwrap(),
+            outcome: STORAGE_OUTCOME,
+            occurred_ms: NOW,
+        };
+        req
+    }
+    fn ticket(&mut self, index: usize) -> &mut TicketFact {
+        match &mut self.snap.tickets[index].1 {
+            Observed::Present { value, .. } => value,
+            Observed::Absent(_) => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn fact_mutation_finds_no_unguarded_ticketed_dependency() {
+    let scenarios: Vec<(&str, Tweak)> = vec![
+        ("apply", |_| {}),
+        ("all counted", |s| {
+            for claim in &mut s.claims {
+                claim.counted = true;
+            }
+        }),
+        ("expired ticket", |s| s.ticket(0).expires_ms = NOW),
+        ("signer mismatch", |s| s.ticket(1).signer = [9; 32]),
+        ("missing second ticket", |s| {
+            s.snap.tickets[1].1 = Observed::Absent(REV);
+        }),
+        ("incomplete upload", |s| {
+            s.claims[1].proof = UploadProof::MarkerMissing;
+        }),
+        ("epoch moved ticket", |s| {
+            s.ticket(1).authority_generation = Some(Revision([1; 32]));
+        }),
+        ("authority moved", |s| {
+            if let Some(Observed::Present { value, .. }) = &mut s.snap.authority {
+                value.generation = Revision([1; 32]);
+            }
+        }),
+        ("ref conflict", |s| {
+            s.snap.refs[1].1 = present([99; 32]);
+        }),
+        ("pending changed", |s| {
+            s.snap.reservations[2].1 = Observed::Absent(REV);
+        }),
+        ("verification refused", |s| {
+            s.verification = VerificationVerdict::Refused(decision::PermanentRefusal {
+                code: PermanentCode::FailedPrecondition,
+                public_message: "proof arrived too late".into(),
+            });
+        }),
+        ("verification pending", |s| {
+            s.verification = VerificationVerdict::Pending;
+        }),
+        ("recorded replay", |s| {
+            s.snap.replay = Some(present(ReplayFact {
+                scope: ReplayScope([8; 32]),
+                fingerprint: [9; 32],
+                expires_ms: 9_000,
+                state: ReplayState::Committed(TerminalResult::Applied(vec![])),
+            }));
+        }),
+    ];
+    let mut exercised = 0;
+    for (label, tweak) in scenarios {
+        let mut scenario = Scenario::new();
+        tweak(&mut scenario);
+        let req = scenario.request();
+        exercised += crate::decision::fact_harness::assert_guards_cover(
+            label,
+            &scenario.snap,
+            NOW,
+            |snap| decide_ticketed_advance(&req, snap, limits()),
+        );
+    }
+    assert!(exercised > 100, "scenarios must exercise many mutations");
+}
+
+#[test]
+fn counted_claims_are_covered_by_the_exact_counter_row() {
+    // A pack's marker appears only in a batch that also moves the counter, so
+    // flipping one claim's `counted` is the same event as a counter change.
+    for all_counted in [false, true] {
+        let mut scenario = Scenario::new();
+        for claim in &mut scenario.claims {
+            claim.counted = all_counted;
+        }
+        let req = scenario.request();
+        let original = decide_ticketed_advance(&req, &scenario.snap, limits()).unwrap();
+        assert!(
+            original
+                .required_guards()
+                .iter()
+                .any(|guard| matches!(guard, RequiredGuard::Storage { .. })),
+            "the counter row guards `counted` even when no bytes are added"
+        );
+        let mut flipped = Scenario::new();
+        for claim in &mut flipped.claims {
+            claim.counted = !all_counted;
+        }
+        if let Some(Observed::Present { value, .. }) = &mut flipped.snap.storage {
+            value.version += 1;
+        }
+        let req = flipped.request();
+        // The flipped world carries its own counter observation.
+        if let Ok(redecided) = decide_ticketed_advance(&req, &flipped.snap, limits()) {
+            assert_ne!(redecided.decision(), original.decision());
+        }
+        assert!(!guards_match(&original, &flipped.snap, NOW));
+    }
+}
+
+#[test]
+fn an_unsatisfiable_counter_outcome_is_an_error_not_an_apply() {
+    let mut scenario = Scenario::new();
+    scenario.snap.reservations[3].1 = present(ReservationFact::Terminal(ReservationTerminal {
+        repository: REPO,
+        occurred_ms: 1,
+        kind: ReservationTerminalKind::Expired,
+    }));
+    let req = scenario.request();
+    assert_eq!(
+        decide_ticketed_advance(&req, &scenario.snap, limits())
+            .unwrap_err()
+            .code,
+        FailureCode::InvalidResponse
+    );
+}
+
+#[test]
+fn recorded_refusal_and_conflict_guard_every_examined_ticket_row() {
+    // A conflict records its answer; the rows it examined must not move.
+    let mut conflict = Scenario::new();
+    conflict.snap.refs[1].1 = present([99; 32]);
+    let req = conflict.request();
+    let guarded = decide_ticketed_advance(&req, &conflict.snap, limits()).unwrap();
+    assert!(matches!(guarded.decision(), WriteDecision::Conflict { .. }));
+    let tickets = guarded
+        .required_guards()
+        .iter()
+        .filter(|guard| matches!(guard, RequiredGuard::Ticket { .. }))
+        .count();
+    assert_eq!(tickets, 2);
+    // A refusal at the second ticket guards both rows read, not the rest.
+    let mut refused = Scenario::new();
+    refused.ticket(1).signer = [9; 32];
+    let req = refused.request();
+    let guarded = decide_ticketed_advance(&req, &refused.snap, limits()).unwrap();
+    assert!(matches!(guarded.decision(), WriteDecision::Reject { .. }));
+    assert_eq!(
+        guarded
+            .required_guards()
+            .iter()
+            .filter(|guard| matches!(guard, RequiredGuard::Ticket { .. }))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn apply_adds_each_consumed_pack_to_membership_once() {
+    let mut scenario = Scenario::new();
+    let shared = scenario.ticket(0).pack;
+    scenario.ticket(1).pack = shared;
+    let req = scenario.request();
+    let guarded = decide_ticketed_advance(&req, &scenario.snap, limits()).unwrap();
+    let WriteDecision::Apply(effects) = guarded.decision() else {
+        panic!("expected apply: {:?}", guarded.decision());
+    };
+    assert_eq!(
+        effects.membership,
+        vec![decision::MembershipEffect {
+            repository: REPO,
+            pack: shared,
+        }]
+    );
+    // The sealed decision needs no membership guard for its own additions.
+    check_guard_completeness(&guarded, guarded.required_guards()).unwrap();
+    let mut distinct = Scenario::new();
+    let req = distinct.request();
+    let guarded = decide_ticketed_advance(&req, &distinct.snap, limits()).unwrap();
+    let WriteDecision::Apply(effects) = guarded.decision() else {
+        panic!("expected apply");
+    };
+    assert_eq!(effects.membership.len(), 2);
+    distinct.claims.truncate(0);
+}
+
+#[test]
+fn cleanup_requires_the_exact_ticketed_reservation() {
+    let changes = pair();
+    let claims = [claim(0x60, UploadProof::PackMissing)];
+    let req = request(&changes, &claims);
+    let snap = snapshot(&changes, &[0x60]);
+    let guarded = decide_ticket_cleanup(&req, "lost", NOW, &snap, limits()).unwrap();
+    assert!(
+        matches!(guarded.decision(), WriteDecision::Apply(effects) if effects.tickets.len() == 1)
+    );
+    for state in [
+        Observed::Absent(REV),
+        present(ReservationFact::Ticketed(TicketId([0x99; 32]))),
+        present(ReservationFact::Terminal(ReservationTerminal {
+            repository: REPO,
+            occurred_ms: 1,
+            kind: ReservationTerminalKind::Expired,
+        })),
+        pending_binding(0x60).expected,
+    ] {
+        let mut snap = snapshot(&changes, &[0x60]);
+        snap.reservations[0].1 = state;
+        assert_eq!(
+            decide_ticket_cleanup(&req, "lost", NOW, &snap, limits())
+                .unwrap_err()
+                .code,
+            FailureCode::InvalidResponse,
+            "a second terminal outcome must never be written"
+        );
+    }
+}
+
+#[test]
+fn cleanup_guards_every_row_that_fixes_the_first_failure() {
+    use crate::decision::fact_harness::assert_guards_cover;
+    let changes = pair();
+    let claims = [
+        claim(0x60, UploadProof::PackMissing),
+        claim(0x61, UploadProof::Ready),
+        claim(0x62, UploadProof::PackMissing),
+    ];
+    let req = request(&changes, &claims);
+    let mut snap = snapshot(&changes, &[0x60, 0x61, 0x62]);
+    snap.tickets[1].1 = Observed::Absent(REV);
+    let flipped = assert_guards_cover("cleanup", &snap, NOW, |snap| {
+        decide_ticket_cleanup(&req, "lost", NOW, snap, limits())
+    });
+    assert!(flipped > 0);
+}
+
+#[test]
+fn settlement_of_a_ticketed_reservation_closes_or_fences_its_ticket() {
+    use crate::decision::fact_harness::assert_guards_cover;
+    let operation = OperationId([6; 32]);
+    let (id, expected) = reservation(0x42);
+    let terminal = |kind| ReservationTerminal {
+        repository: REPO,
+        occurred_ms: NOW,
+        kind,
+    };
+    for kind in [
+        ReservationTerminalKind::Expired,
+        ReservationTerminalKind::Aborted {
+            reason: ReservationAbortReason::Internal,
+            detail: String::new(),
+        },
+    ] {
+        let terminal = terminal(kind);
+        let snap = snapshot(&[], &[0x42]);
+        let decide = |snap: &Snapshot| {
+            decide_reservation_settlement(
+                REPO,
+                &operation,
+                &id,
+                &expected,
+                &terminal,
+                snap,
+                limits(),
+            )
+        };
+        let guarded = decide(&snap).unwrap();
+        let WriteDecision::Apply(effects) = guarded.decision() else {
+            panic!("expected apply");
+        };
+        assert_eq!(
+            effects.tickets,
+            vec![TicketTransition {
+                id: TicketId([0x42; 32]),
+                next: None
+            }]
+        );
+        assert_eq!(effects.reservations.len(), 1);
+        assert!(assert_guards_cover("settlement", &snap, NOW, decide) > 0);
+        // A ticket row already gone is fenced by its observed absence.
+        let mut gone = snapshot(&[], &[0x42]);
+        gone.tickets[0].1 = Observed::Absent(REV);
+        let fenced = decide(&gone).unwrap();
+        let WriteDecision::Apply(effects) = fenced.decision() else {
+            panic!("expected apply");
+        };
+        assert!(effects.tickets.is_empty() && effects.reservations.len() == 1);
+        assert!(!guards_match(&fenced, &snap, NOW));
+    }
+    // The ticket must belong to the reservation being settled.
+    let mut mismatched = snapshot(&[], &[0x42]);
+    if let Observed::Present { value, .. } = &mut mismatched.tickets[0].1 {
+        value.reservation = ReservationId([1; 32]);
+    }
+    assert_eq!(
+        decide_reservation_settlement(
+            REPO,
+            &operation,
+            &id,
+            &expected,
+            &terminal(ReservationTerminalKind::Expired),
+            &mismatched,
+            limits()
+        )
+        .unwrap_err()
+        .code,
+        FailureCode::InvalidResponse
+    );
 }

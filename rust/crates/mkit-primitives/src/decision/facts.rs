@@ -54,6 +54,8 @@ pub enum AuthorityMode {
 /// Commit-fenced authority observation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorityFact {
+    /// Namespace this observation belongs to; a guard compares it with its scope key.
+    pub namespace: NamespaceId,
     /// Authorization mode.
     pub mode: AuthorityMode,
     /// Original authorization generation.
@@ -64,6 +66,8 @@ pub struct AuthorityFact {
 /// Scoped authorization grant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrantFact {
+    /// Namespace this observation belongs to; a guard compares it with its scope key.
+    pub namespace: NamespaceId,
     /// Exact grant identity.
     pub grant: Hash,
     /// Commit-fenced namespace grant epoch.
@@ -186,7 +190,8 @@ pub struct TicketFact {
     /// Bound reservation.
     pub reservation: ReservationId,
     /// Authority generation the ticket was issued under; `None` means fencing is disabled.
-    pub authority_generation: Option<u64>,
+    /// It is compared with the generation of the guarded authority observation.
+    pub authority_generation: Option<Revision>,
     /// Backend upload-session incarnation, when one was allocated.
     pub upload_session: Option<Vec<u8>>,
 }
@@ -265,6 +270,8 @@ pub enum ReplayState {
 /// Replay record bound to authenticated fingerprint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayFact {
+    /// Authenticated replay scope this record belongs to; a guard compares it with its scope key.
+    pub scope: ReplayScope,
     /// Signing digest.
     pub fingerprint: Hash,
     /// Recorded envelope expiry.

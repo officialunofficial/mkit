@@ -569,7 +569,7 @@ fn managed_lifecycle(state: mkit_primitives::decision::LifecycleState) -> ForkLi
 #[test]
 fn managed_lifecycle_requires_acquisition_active_incarnation_and_exact_revision() {
     assert_eq!(
-        ForkRefusal::LifecycleUnavailable.code().as_str(),
+        ForkWithheld::LifecycleUnavailable.code().as_str(),
         "ForkLifecycleUnavailable"
     );
     let mut advance = progress();
@@ -618,7 +618,7 @@ fn managed_lifecycle_requires_acquisition_active_incarnation_and_exact_revision(
         } else {
             assert_eq!(
                 decision.unwrap().decision(),
-                ForkActivationDecision::Refuse(ForkRefusal::LifecycleUnavailable)
+                ForkActivationDecision::Withhold(ForkWithheld::LifecycleUnavailable)
             );
         }
         assert_eq!(changed.accepted_result, Some(&result));
@@ -668,7 +668,7 @@ fn managed_lifecycle_withholds_completion_but_never_changes_completed_replay() {
         } else {
             assert_eq!(
                 decision.unwrap().decision(),
-                ForkCompletionDecision::Refuse(ForkRefusal::LifecycleUnavailable)
+                ForkCompletionDecision::Withhold(ForkWithheld::LifecycleUnavailable)
             );
         }
         let mut completed = advance.clone();
@@ -685,4 +685,52 @@ fn managed_lifecycle_withholds_completion_but_never_changes_completed_replay() {
         );
         assert_eq!(replay.accepted_result, Some(&result));
     }
+}
+
+/// Rows of the fact-to-class table in SPEC-SERVER §3.1 for the fork decisions.
+/// The acceptance rows (`authority_unfenceable`, `authority_generation`,
+/// `destination_deleting`) are pinned by `fixtures/fork/acceptance.txt`.
+#[test]
+fn fact_class_table_rows_for_fork_decisions() {
+    // Authority or grant movement is one permission class at every stage.
+    assert_eq!(
+        ForkRefusal::PermissionDenied.code(),
+        ForkAdvanceRefusal::AuthorityMoved.code()
+    );
+    assert_eq!(
+        ForkAdvanceRefusal::EpochMoved.code(),
+        ForkAdvanceRefusal::AuthorityMoved.code()
+    );
+    // After acceptance a destination lifecycle fact only withholds clearance,
+    // under its own stable code; it is never a refusal of the saved result.
+    assert_eq!(
+        ForkWithheld::LifecycleUnavailable.code(),
+        FailureCode::ForkLifecycleUnavailable
+    );
+    let mut advance = progress();
+    advance.progress.phase = ForkAdvancePhase::Accepted;
+    let result = result();
+    let unit = unit();
+    let proof = proof();
+    let mut facts = facts(&advance, &result, &unit, &proof);
+    for state in [LifecycleState::Deleting, LifecycleState::Deleted] {
+        facts.lifecycle = managed_lifecycle(state);
+        assert_eq!(
+            decide_fork_activation(&facts, 0, limits())
+                .unwrap()
+                .decision(),
+            ForkActivationDecision::Withhold(ForkWithheld::LifecycleUnavailable)
+        );
+    }
+    // An unacquired lifecycle is retryable input, as for a ref write.
+    facts.lifecycle = ForkLifecycleProtection::Managed {
+        expected_incarnation: rev(1),
+        current: None,
+    };
+    assert_eq!(
+        decide_fork_activation(&facts, 0, limits())
+            .unwrap_err()
+            .code,
+        FailureCode::UnavailableInput
+    );
 }

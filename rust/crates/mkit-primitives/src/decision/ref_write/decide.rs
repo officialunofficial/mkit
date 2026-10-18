@@ -91,6 +91,35 @@ pub fn decide_ref_write(
     })
 }
 
+/// Add one guard, dropping an exact duplicate.
+///
+/// A guard that contradicts one already collected for the same identity names
+/// an Apply (or refusal) that could never commit, so it is a failure rather
+/// than a decision.
+pub(crate) fn push_guard(
+    guards: &mut Vec<RequiredGuard>,
+    limit: u32,
+    guard: RequiredGuard,
+) -> Result<(), Failure> {
+    if guards.contains(&guard) {
+        return Ok(());
+    }
+    if guards
+        .iter()
+        .any(|other| !super::complete::compatible(other, &guard))
+    {
+        return Err(failure(FailureCode::InvalidResponse));
+    }
+    if guards.len() >= limit as usize {
+        return Err(failure(FailureCode::ResourceLimit));
+    }
+    guards
+        .try_reserve(1)
+        .map_err(|_| failure(FailureCode::ResourceLimit))?;
+    guards.push(guard);
+    Ok(())
+}
+
 fn invalid_shape(request: &RefWriteRequest<'_>) -> bool {
     let pair = matches!(
         request.kind,
@@ -126,16 +155,7 @@ fn invalid_shape(request: &RefWriteRequest<'_>) -> bool {
 
 impl Attempt<'_> {
     pub(crate) fn add(&mut self, guard: RequiredGuard) -> Result<(), Failure> {
-        if !self.guards.contains(&guard) {
-            if self.guards.len() >= self.limits.guards as usize {
-                return Err(failure(FailureCode::ResourceLimit));
-            }
-            self.guards
-                .try_reserve(1)
-                .map_err(|_| failure(FailureCode::ResourceLimit))?;
-            self.guards.push(guard);
-        }
-        Ok(())
+        push_guard(&mut self.guards, self.limits.guards, guard)
     }
 
     pub(crate) fn reject(
@@ -165,14 +185,22 @@ impl Attempt<'_> {
         })
     }
 
+    /// A refusal the replay record will store. Storing a permanent answer is
+    /// only sound while the original authorization still holds, so grant,
+    /// authority and lifecycle are decided and guarded first; a stale binding
+    /// then yields its own unrecorded answer instead of a stored refusal.
     pub(crate) fn reject_recorded(
-        &self,
+        &mut self,
         code: PermanentCode,
         message: &str,
     ) -> Result<WriteDecision, Failure> {
+        let recording =
+            self.req.replay.is_some() && matches!(self.snapshot.replay, Some(Observed::Absent(_)));
+        if recording && let Some(decision) = self.authorized()? {
+            return Ok(decision);
+        }
         let mut decision = self.reject(code, message)?;
-        if self.req.replay.is_some()
-            && matches!(self.snapshot.replay, Some(Observed::Absent(_)))
+        if recording
             && let WriteDecision::Reject {
                 refusal, terminal, ..
             } = &mut decision
@@ -180,6 +208,16 @@ impl Attempt<'_> {
             *terminal = Some(TerminalResult::Rejected(refusal.clone()));
         }
         Ok(decision)
+    }
+
+    fn authorized(&mut self) -> Result<Option<WriteDecision>, Failure> {
+        if let Some(decision) = self.grant()? {
+            return Ok(Some(decision));
+        }
+        if let Some(decision) = self.authority()? {
+            return Ok(Some(decision));
+        }
+        self.lifecycle()
     }
 
     pub(crate) fn replay(&mut self) -> Result<Option<WriteDecision>, Failure> {
@@ -191,6 +229,9 @@ impl Attempt<'_> {
             .replay
             .as_ref()
             .ok_or_else(|| failure(FailureCode::UnavailableInput))?;
+        if matches!(observed, Observed::Present { value, .. } if value.scope != replay.scope) {
+            return Err(failure(FailureCode::InvalidResponse));
+        }
         self.add(RequiredGuard::Replay {
             scope: replay.scope.clone(),
             expected: observed.clone(),
@@ -285,6 +326,8 @@ impl Attempt<'_> {
             {
                 return Err(failure(FailureCode::InvalidRefRequest));
             }
+            // SPEC-SERVER §9.3: an unreadable, absent, unpublished or unpaired
+            // source is uniformly "source not found".
             if !matches!(&source.read_authority, Observed::Present { value, .. } if value.ready) {
                 return self
                     .reject(PermanentCode::NotFound, "source not found")
@@ -295,18 +338,24 @@ impl Attempt<'_> {
                     .reject(PermanentCode::NotFound, "source not found")
                     .map(Some);
             };
-            if value.sequence == 0
-                || value.published_prefix > value.sequence
+            if value.published_prefix > value.sequence
                 || value.deletion_boundary > value.published_prefix
-                || value.head.is_none()
-                || value.packmap.is_none()
             {
                 return Err(failure(FailureCode::InvalidResponse));
             }
+            if value.sequence == 0 || value.head.is_none() || value.packmap.is_none() {
+                return self
+                    .reject(PermanentCode::NotFound, "source not found")
+                    .map(Some);
+            }
+            // The destination pair is the pair captured from this publication
+            // row. A difference means the source moved since capture: nothing
+            // is recorded, and the caller reacquires and redecides (§9.3 "otherwise
+            // retryable unavailable"; the expected-tip comparison belongs to the host).
             if self.req.changes[0].target != value.packmap
                 || self.req.changes[1].target != value.head
             {
-                return Err(failure(FailureCode::InvalidResponse));
+                return Ok(Some(WriteDecision::Retry(RetryReason::Unavailable)));
             }
         }
         Ok(None)
@@ -319,6 +368,10 @@ impl Attempt<'_> {
                 .authority
                 .as_ref()
                 .ok_or_else(|| failure(FailureCode::UnavailableInput))?;
+            if matches!(observed, Observed::Present { value, .. } if value.namespace != bound.namespace)
+            {
+                return Err(failure(FailureCode::InvalidResponse));
+            }
             self.add(RequiredGuard::Authority {
                 namespace: bound.namespace.clone(),
                 expected: observed.clone(),
@@ -351,6 +404,10 @@ impl Attempt<'_> {
                 .grant
                 .as_ref()
                 .ok_or_else(|| failure(FailureCode::UnavailableInput))?;
+            if matches!(observed, Observed::Present { value, .. } if value.namespace != bound.namespace)
+            {
+                return Err(failure(FailureCode::InvalidResponse));
+            }
             self.add(RequiredGuard::Grant {
                 namespace: bound.namespace.clone(),
                 expected: observed.clone(),
@@ -452,7 +509,9 @@ impl Attempt<'_> {
                     if self.req.required.membership_window
                         == super::MembershipWindow::WithinLag =>
                 {
-                    return Ok(Some(WriteDecision::Retry(RetryReason::Unavailable)));
+                    return Ok(Some(WriteDecision::Retry(
+                        RetryReason::MembershipNotVisible,
+                    )));
                 }
                 Observed::Absent(_) => {
                     return self
@@ -487,7 +546,9 @@ impl Attempt<'_> {
                     if self.req.required.membership_window
                         == super::MembershipWindow::WithinLag =>
                 {
-                    return Ok(Some(WriteDecision::Retry(RetryReason::Unavailable)));
+                    return Ok(Some(WriteDecision::Retry(
+                        RetryReason::MembershipNotVisible,
+                    )));
                 }
                 _ => {
                     return self
@@ -645,9 +706,9 @@ impl Attempt<'_> {
             AncestryResult::Denied => self
                 .reject_recorded(PermanentCode::PermissionDenied, message)
                 .map(Some),
-            AncestryResult::MembershipLag => {
-                Ok(Some(WriteDecision::Retry(RetryReason::Unavailable)))
-            }
+            AncestryResult::MembershipLag => Ok(Some(WriteDecision::Retry(
+                RetryReason::MembershipNotVisible,
+            ))),
         }
     }
 
@@ -723,7 +784,7 @@ impl Attempt<'_> {
                     present: value.is_some(),
                 })?;
                 if admitted.target != change.target || admitted.prior_present != value.is_some() {
-                    return Ok(WriteDecision::Retry(RetryReason::ChangedFacts));
+                    return Ok(WriteDecision::Retry(RetryReason::AdmittedRefChanged));
                 }
             }
         }
@@ -739,6 +800,7 @@ impl Attempt<'_> {
         let replay = self.req.replay.as_ref().map(|replay| ReplayTransition {
             scope: replay.scope.clone(),
             next: crate::decision::ReplayFact {
+                scope: replay.scope.clone(),
                 fingerprint: replay.fingerprint,
                 expires_ms: replay.expires_ms,
                 state: ReplayState::Committed(TerminalResult::Applied(

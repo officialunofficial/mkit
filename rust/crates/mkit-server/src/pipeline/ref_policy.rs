@@ -21,6 +21,11 @@ const NON_FAST_FORWARD: &str = "non-fast-forward update not allowed on this ref"
 impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// Store only final built-in policy denials, without ref, ticket or
     /// admission effects. The usual replay guard preserves a racing winner.
+    /// `denial_ref` is the ref value an ancestry denial was decided on; the
+    /// stored refusal commits only while the ref still holds it. The membership
+    /// rows an ancestry or closure check read live in the paged, sharded object
+    /// index and cannot be compared in one batch: they stay covered by the
+    /// membership-lag window and the proof-time denial window (SPEC-SERVER §9.4).
     pub(super) async fn store_policy_denial(
         &self,
         op: &Operation,
@@ -28,7 +33,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         p: &Partition,
         ahead: Option<Snapshot>,
         error: ServerError,
-        reserved: bool,
+        (reserved, denial_ref): (bool, Option<(String, Option<mkit_core::hash::Hash>)>),
     ) -> Result<StoredResult, ServerError> {
         let Some(rejection) = StoredRejection::new(error.code(), error.public_message())
             .filter(|_| error.details().is_empty())
@@ -60,6 +65,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             layout_version: false,
             mark_repo_known: false,
             rejection: Some(&rejection),
+            denial_ref: denial_ref
+                .as_ref()
+                .map(|(name, value)| (name.as_str(), *value)),
             publication: None,
             pending: None,
             begin: None,
@@ -229,5 +237,43 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             Verdict::Descendant => Ok(()),
             Verdict::NotDescendant | Verdict::Unchecked => Err(denied()),
         }
+    }
+}
+
+/// The fast-forward subject of `op`, when the write moves one.
+fn fast_forward_subject(op: &Operation) -> Option<&str> {
+    match &op.kind {
+        OpKind::UpdateRef(update) => Some(update.name.as_str()),
+        OpKind::AdvanceRefs { head, .. } => Some(head.name.as_str()),
+        _ => None,
+    }
+}
+
+/// Whether the subject's expectation is `ANY` before the ancestry check pins it.
+pub(super) fn subject_is_any(op: &Operation, refs: &[RefUpdate]) -> bool {
+    fast_forward_subject(op)
+        .and_then(|subject| refs.iter().find(|update| update.name == subject))
+        .is_some_and(|update| update.condition == RefWriteCondition::Any)
+}
+
+/// The exact ref value an ancestry denial was decided on. An explicit
+/// `MATCH`/`MISSING` expectation decides from the expectation alone, so the
+/// stored refusal needs no ref guard. An `ANY` expectation is decided from the
+/// value the check observed and pinned, and the stored refusal must not outlive
+/// it (the portable decision guards that value the same way).
+pub(super) fn pinned_ref_value(
+    op: &Operation,
+    refs: &[RefUpdate],
+    was_any: bool,
+) -> Option<(String, Option<mkit_core::hash::Hash>)> {
+    if !was_any {
+        return None;
+    }
+    let subject = fast_forward_subject(op)?;
+    let update = refs.iter().find(|update| update.name == subject)?;
+    match update.condition {
+        RefWriteCondition::Match(from) => Some((subject.to_owned(), Some(from))),
+        RefWriteCondition::Missing => Some((subject.to_owned(), None)),
+        RefWriteCondition::Any => None,
     }
 }
