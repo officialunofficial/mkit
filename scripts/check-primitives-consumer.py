@@ -63,6 +63,21 @@ def third_party_closure():
     return result
 
 
+def extract(crate, destination):
+    """Extract regular files only, refusing absolute or parent-relative names.
+
+    Works on interpreters whose tarfile lacks extraction filters (CI image).
+    """
+    with tarfile.open(crate) as archive:
+        members = archive.getmembers()
+        for member in members:
+            parts = Path(member.name).parts
+            if (Path(member.name).is_absolute() or ".." in parts
+                    or not (member.isfile() or member.isdir())):
+                raise SystemExit(f"unsafe entry in {crate.name}: {member.name!r}")
+        archive.extractall(destination, members=members)
+
+
 def write_checksum(directory, checksum):
     (directory / ".cargo-checksum.json").write_text(
         json.dumps({"files": {}, "package": checksum}))
@@ -106,8 +121,7 @@ def package(name, manifest, vendor, target):
         raise SystemExit(f"expected one packaged {name} crate, found {len(crates)}")
     data = crates[0].read_bytes()
     stem = crates[0].name.removesuffix(".crate")
-    with tarfile.open(crates[0]) as archive:
-        archive.extractall(vendor, filter="data")
+    extract(crates[0], vendor)
     write_checksum(vendor / stem, hashlib.sha256(data).hexdigest())
     shutil.rmtree(target / "package/package")
     return vendor / stem
@@ -137,8 +151,7 @@ def download_published(version, work):
         data = response.read()
     archive = work / "published.crate"
     archive.write_bytes(data)
-    with tarfile.open(archive) as tar:
-        tar.extractall(work, filter="data")
+    extract(archive, work)
     return work / f"mkit-primitives-{version}"
 
 
