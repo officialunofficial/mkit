@@ -2,7 +2,7 @@
 use super::facts::{
     AccountingFact, AdmissionFact, AuthorityFact, DenialFact, GrantFact, LifecycleFact,
     NamespaceId, Observed, OperationId, PolicyFact, PublicationFact, RefName, ReplayFact,
-    ReplayScope, ReservationFact, ReservationId, TicketFact, TicketId,
+    ReplayScope, ReservationFact, ReservationId, StorageFact, TicketFact, TicketId,
 };
 use crate::evidence::{MemberFact, RepositoryId};
 use mkit_core::hash::Hash;
@@ -36,6 +36,8 @@ pub enum GuardKind {
     Admission,
     /// Exact charge window and counters.
     Accounting,
+    /// Exact stored-bytes counter.
+    Storage,
     /// Exact publication state.
     Publication,
     /// Absolute business validity bound.
@@ -141,6 +143,13 @@ pub enum RequiredGuard {
         repository: RepositoryId,
         /// Exact required observation, including authoritative absence.
         expected: Observed<AccountingFact>,
+    },
+    /// Compare exact stored-bytes counter.
+    Storage {
+        /// Exact logical scope.
+        repository: RepositoryId,
+        /// Exact required observation, including authoritative absence.
+        expected: Observed<StorageFact>,
     },
     /// Compare exact publication fact.
     Publication {

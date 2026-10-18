@@ -34,6 +34,7 @@ fn snapshot() -> Snapshot {
         admission: None,
         accounting: None,
         publication: None,
+        storage: None,
     }
 }
 fn limits() -> RefDecisionLimits {
@@ -479,6 +480,7 @@ fn effect_guard_kinds_reports_each_intrinsic_effect_and_its_omission() {
         replay: None,
         publication: vec![],
         accounting: vec![],
+        storage: vec![],
         outcomes: vec![],
     };
     let mut effects = base.clone();
@@ -511,9 +513,9 @@ fn effect_guard_kinds_reports_each_intrinsic_effect_and_its_omission() {
                 id: crate::decision::ReservationId([9; 32]),
                 next: ReservationFact::Pending {
                     repository: REPO,
-                    operation: crate::decision::OperationId([10; 32]),
                     created_ms: 0,
-                    expires_ms: 1,
+                    reconcile_ms: 1,
+                    op: crate::decision::ReservationOp::Write,
                 },
             });
         }),
