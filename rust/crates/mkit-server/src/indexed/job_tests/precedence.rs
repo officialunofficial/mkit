@@ -69,12 +69,25 @@ fn primitive_integrity_refusal(bytes: &[u8]) -> FailureCode {
         1,
     )
     .unwrap();
+    let mut pages = Vec::new();
     loop {
         match driver.step() {
             Err(failure) => return failure.code,
             Ok(Step::RetainEvidence(page)) => {
                 let commitment = page.commitment;
+                pages.push((commitment, page.bytes.to_vec()));
                 driver.acknowledge_retention(commitment).unwrap();
+            }
+            // Restore only pages this run retained.
+            Ok(Step::Request(Request::EvidencePage { request, page })) => {
+                let bytes = &pages.iter().find(|(c, _)| *c == page).unwrap().1;
+                if let Err(failure) = driver.supply(Response::EvidencePage {
+                    request,
+                    page,
+                    value: Acquisition::Present(bytes),
+                }) {
+                    return failure.code;
+                }
             }
             Ok(Step::Request(Request::Bytes {
                 request,
@@ -93,8 +106,17 @@ fn primitive_integrity_refusal(bytes: &[u8]) -> FailureCode {
                     return failure.code;
                 }
             }
-            Ok(Step::Progress) => (),
-            // In particular, no external-base lookup may precede integrity.
+            // The single pass defers entry refusals; an authenticated absence
+            // must still lose to the whole-source integrity verdict.
+            Ok(Step::Request(Request::ExternalObject { request, .. })) => {
+                if let Err(failure) = driver.supply(Response::ExternalObject {
+                    request,
+                    value: Acquisition::Absent,
+                }) {
+                    return failure.code;
+                }
+            }
+            Ok(Step::Progress | Step::ProvisionalObject(_)) => (),
             other => panic!("unexpected step before integrity refusal {other:?}"),
         }
     }
@@ -328,4 +350,75 @@ fn a_changed_source_discards_failure_integrity_progress() {
     assert!(job.integrity.is_none());
     assert!(!job.usable());
     assert!(rejected(&rig, &ticket.pack_id).is_none());
+}
+
+fn pending_integrity(rig: Rig) -> (Rig, TicketV1, Hash) {
+    let (bytes, _) = missing_base();
+    let (ticket, id) = rig.add(&bytes);
+    rig.create(&ticket, id);
+    rig.drive(|rig| rig.job(&ticket.pack_id).unwrap().integrity.is_some());
+    assert!(!rig.job(&ticket.pack_id).unwrap().usable());
+    (rig, ticket, id)
+}
+
+fn assert_terminal_without_integrity(rig: &Rig, pack: &Hash) -> VerifyJobV1 {
+    let job = rig.job(pack).unwrap();
+    assert_eq!(job.phase, Phase::Watch);
+    assert!(job.integrity.is_none());
+    assert!(!matches!(
+        rig.state(pack),
+        Some(VerificationV1::Verified { .. })
+    ));
+    job
+}
+
+#[test]
+fn terminal_killed_slice_cap_discards_integrity_progress() {
+    let mut rig = Rig::new();
+    rig.limits.max_entries = 1;
+    let (rig, ticket, _) = pending_integrity(rig);
+    *rig.windows.fail.lock().unwrap() = true;
+    rig.drive(|rig| rig.job(&ticket.pack_id).unwrap().attempts >= 3);
+    assert_eq!(rig.tick().failed, 0, "terminal checkpoint must commit");
+    let job = assert_terminal_without_integrity(&rig, &ticket.pack_id);
+    assert_eq!(job.outcome, Some(checkpoint::Outcome::DecodeBudget));
+    assert!(!job.usable());
+    assert!(rejected(&rig, &ticket.pack_id).is_none());
+}
+
+#[test]
+fn terminal_concurrent_rejection_discards_integrity_progress() {
+    let (rig, ticket, _) = pending_integrity(Rig::new());
+    let rejection = VerificationV1::Rejected {
+        code: "invalid_argument".into(),
+        message: "bad pack".into(),
+    };
+    block_on(rig.store.apply(
+        &rig.source(),
+        Batch::new().put(
+            keys::verification(&rig.repo.name, &ticket.pack_id),
+            super::super::state::encode(&rejection),
+        ),
+    ))
+    .unwrap();
+    assert_eq!(rig.tick().failed, 0, "terminal checkpoint must commit");
+    let job = assert_terminal_without_integrity(&rig, &ticket.pack_id);
+    assert_eq!(job.outcome, None);
+    assert_eq!(rig.state(&ticket.pack_id), Some(rejection));
+}
+
+#[test]
+fn terminal_lowered_pack_cap_discards_integrity_progress() {
+    let (mut rig, ticket, _) = pending_integrity(Rig::new());
+    rig.cfg.max_pack_bytes = ticket.bytes - 1;
+    assert_eq!(rig.tick().failed, 0, "terminal checkpoint must commit");
+    let job = assert_terminal_without_integrity(&rig, &ticket.pack_id);
+    assert_eq!(job.outcome, None);
+    assert_eq!(
+        rejected(&rig, &ticket.pack_id),
+        Some((
+            "invalid_argument".into(),
+            super::super::PACK_CAP_MESSAGE.into()
+        ))
+    );
 }

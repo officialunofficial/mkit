@@ -909,6 +909,11 @@ where
                 0
             }
         };
+        // Failure-only progress belongs to Decode, including when another
+        // verifier or a changed configuration ends this slice early.
+        if job.phase != Phase::Decode {
+            job.integrity = None;
+        }
         #[cfg(not(feature = "perf-metrics"))]
         tracing::info!(event = "verification_slice_result", now_ms = now_ms(self.h.clock.as_ref()),
             source = ?self.source, ticket = %mkit_core::hash::to_hex(&job.ticket_id),
@@ -1016,6 +1021,7 @@ where
             if *cap <= 1 {
                 job.outcome = Some(outcome);
                 job.phase = Phase::Watch;
+                job.integrity = None;
             } else {
                 *cap = (*cap / 2).max(1);
             }
