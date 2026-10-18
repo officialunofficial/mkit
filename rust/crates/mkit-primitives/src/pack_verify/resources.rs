@@ -27,6 +27,7 @@ pub struct ResourceUsage {
 pub(super) struct Resources {
     limits: VerifyLimits,
     usage: ResourceUsage,
+    protected_work: u64,
 }
 
 fn exhausted() -> Failure {
@@ -65,6 +66,7 @@ impl Resources {
         Ok(Self {
             limits,
             usage: ResourceUsage::default(),
+            protected_work: 0,
         })
     }
 
@@ -107,8 +109,36 @@ impl Resources {
         Ok(())
     }
 
+    /// Protect future source hashing from ordinary entry and evidence work.
+    pub(super) fn protect_work(&mut self, units: u64) -> Result<(), Failure> {
+        let protected = add(self.protected_work, units, self.limits.work)?;
+        add(self.usage.work, protected, self.limits.work)?;
+        self.protected_work = protected;
+        Ok(())
+    }
+
+    pub(super) fn remaining_work(&self) -> u64 {
+        self.limits.work - self.usage.work - self.protected_work
+    }
+
     pub(super) fn work(&mut self, units: u64) -> Result<(), Failure> {
-        self.usage.work = add(self.usage.work, units, self.limits.work)?;
+        let ceiling = self
+            .limits
+            .work
+            .checked_sub(self.protected_work)
+            .ok_or_else(exhausted)?;
+        self.usage.work = add(self.usage.work, units, ceiling)?;
+        Ok(())
+    }
+
+    pub(super) fn integrity_work(&mut self, units: u64) -> Result<(), Failure> {
+        let protected = self
+            .protected_work
+            .checked_sub(units)
+            .ok_or_else(exhausted)?;
+        let work = add(self.usage.work, units, self.limits.work)?;
+        self.protected_work = protected;
+        self.usage.work = work;
         Ok(())
     }
 
@@ -148,6 +178,29 @@ mod tests {
         assert_eq!(resources.usage().work, 7);
         assert!(resources.work(u64::MAX).is_err());
         assert_eq!(resources.usage().work, 7);
+    }
+
+    #[test]
+    fn protected_hash_work_survives_ordinary_exhaustion() {
+        let mut resources = Resources::new(VerifyLimits {
+            work: 100,
+            ..VerifyLimits::indexed()
+        })
+        .unwrap();
+        resources.work(10).unwrap();
+        resources.protect_work(70).unwrap();
+        assert_eq!(resources.remaining_work(), 20);
+        let before = resources.usage();
+        assert!(resources.work(21).is_err());
+        assert!(resources.protect_work(21).is_err());
+        assert_eq!(resources.usage(), before);
+        assert_eq!(resources.remaining_work(), 20);
+        resources.integrity_work(70).unwrap();
+        assert_eq!(resources.usage().work, 80);
+        assert_eq!(resources.remaining_work(), 20);
+        assert!(resources.integrity_work(1).is_err());
+        resources.work(20).unwrap();
+        assert_eq!(resources.usage().work, 100);
     }
 
     #[test]

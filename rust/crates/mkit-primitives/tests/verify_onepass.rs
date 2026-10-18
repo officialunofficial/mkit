@@ -58,6 +58,28 @@ enum Schedule {
     Serial,
     Fifo,
     Lifo,
+    Seeded(u64),
+}
+const SCHEDULES: [Schedule; 5] = [
+    Schedule::Serial,
+    Schedule::Fifo,
+    Schedule::Lifo,
+    Schedule::Seeded(7),
+    Schedule::Seeded(31),
+];
+impl Schedule {
+    fn completion_index(self, len: usize, random: &mut u64) -> usize {
+        match self {
+            Self::Lifo => len - 1,
+            Self::Seeded(_) => {
+                *random = random
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                usize::try_from(*random % u64::try_from(len).unwrap()).unwrap()
+            }
+            _ => 0,
+        }
+    }
 }
 fn configured(
     pack: &[u8],
@@ -173,6 +195,11 @@ fn run(
     let mut host = snapshot.map_or_else(Host::default, |snapshot| snapshot.host.clone());
     host.ranges.clear();
     let mut jobs = Vec::<ComputeJob>::new();
+    let mut random = if let Schedule::Seeded(seed) = schedule {
+        seed
+    } else {
+        0
+    };
     let mut snapshots = Vec::new();
     let mut last_boundary = snapshot.map_or(0, |snapshot| snapshot.entries);
     let mut peak = 0;
@@ -192,11 +219,7 @@ fn run(
             }
             Step::Progress => {
                 while !jobs.is_empty() {
-                    let index = if matches!(schedule, Schedule::Lifo) {
-                        jobs.len() - 1
-                    } else {
-                        0
-                    };
+                    let index = schedule.completion_index(jobs.len(), &mut random);
                     assert_eq!(
                         driver.supply_compute(jobs.remove(index).run()).unwrap(),
                         ComputeDisposition::Accepted
@@ -289,7 +312,7 @@ fn every_raw_entry_boundary_resumes_without_prefix_acquisition() {
     assert_eq!(outcome.unwrap(), 24);
     assert_eq!(snapshots.len(), 24);
     for snapshot in &snapshots {
-        for schedule in [Schedule::Serial, Schedule::Fifo, Schedule::Lifo] {
+        for schedule in SCHEDULES {
             let (outcome, host, _, _) = run(&pack, budget, schedule, Some(snapshot), false, false);
             assert_eq!(outcome.unwrap(), 24);
             let resumed_bytes: u64 = host.ranges.iter().map(|(_, len)| len).sum();
@@ -349,8 +372,9 @@ fn fault_pack(kind: usize) -> Vec<u8> {
                 .push_raw(id_from_object(&object, &bytes), &bytes)
                 .unwrap();
         }
-        3 => {
-            let (id, bytes) = blob(vec![99; 64]);
+        3 | 4 => {
+            let size = if kind == 4 { (1 << 20) + 1 } else { 64 };
+            let (id, bytes) = blob(vec![99; size]);
             writer.push_raw(id, &bytes).unwrap();
         }
         _ => unreachable!(),
@@ -372,6 +396,7 @@ fn integrity_precedence_is_identical_across_schedules_and_durable_boundaries() {
         (1, FailureCode::ExternalBaseAbsent),
         (2, FailureCode::BadSignature),
         (3, FailureCode::InvalidEntryType),
+        (4, FailureCode::PackfileTooLarge),
     ] {
         for corrupt in [false, true] {
             let mut pack = fault_pack(kind);
@@ -386,7 +411,7 @@ fn integrity_precedence_is_identical_across_schedules_and_durable_boundaries() {
             };
             let budget = limits(64 << 10);
             let mut reference = None;
-            for schedule in [Schedule::Serial, Schedule::Fifo, Schedule::Lifo] {
+            for schedule in SCHEDULES {
                 let (outcome, _, snapshots, _) = run(&pack, budget, schedule, None, true, true);
                 let failure = outcome.unwrap_err();
                 assert_eq!(
@@ -402,7 +427,7 @@ fn integrity_precedence_is_identical_across_schedules_and_durable_boundaries() {
                     }
                 }
                 for snapshot in snapshots {
-                    for resumed_schedule in [Schedule::Serial, Schedule::Fifo, Schedule::Lifo] {
+                    for resumed_schedule in SCHEDULES {
                         let (outcome, _, _, _) = run(
                             &pack,
                             budget,
@@ -440,7 +465,7 @@ fn unavailable_earlier_base_remains_retryable_before_integrity_verdict() {
             let last = pack.len() - 1;
             pack[last] ^= 1;
         }
-        for schedule in [Schedule::Serial, Schedule::Fifo, Schedule::Lifo] {
+        for schedule in SCHEDULES {
             let (outcome, _, _, _) = run(&pack, limits(64 << 10), schedule, None, false, false);
             assert_eq!(outcome.unwrap_err().code, FailureCode::UnavailableInput);
         }

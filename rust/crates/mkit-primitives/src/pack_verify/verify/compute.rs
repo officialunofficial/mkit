@@ -55,8 +55,8 @@ pub struct ComputePermits {
 
 /// Immutable identity of a library-created compute job.
 ///
-/// The authenticated whole-pack identity and exact frame placement commit the
-/// entry input. A delta additionally binds its validated canonical base identity.
+/// The requested whole-pack identity and provisional frame placement bind the
+/// entry input. Only terminal verification authenticates the pack. A delta additionally binds its validated canonical base identity.
 /// This descriptor is local execution state, not an encoded proof or wire format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use]
@@ -78,7 +78,7 @@ impl ComputeRequest {
         self.request
     }
 
-    /// Authenticated immutable pack source.
+    /// Requested immutable pack source; authentication awaits terminal verification.
     #[must_use]
     pub const fn source(&self) -> PackSource {
         self.source
@@ -96,7 +96,7 @@ impl ComputeRequest {
         self.ordinal
     }
 
-    /// Exact complete frame placement in the authenticated pack.
+    /// Provisional complete frame placement in the requested pack.
     #[must_use]
     pub const fn frame(&self) -> FrameInfo {
         self.info

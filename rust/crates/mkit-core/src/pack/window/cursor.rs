@@ -80,6 +80,7 @@ pub struct WindowCursorMetadata {
     expected_pack_id: Option<Hash>,
     exact: bool,
     integrity_only: bool,
+    acquired_end: Option<u64>,
 }
 
 impl WindowCursorMetadata {
@@ -87,6 +88,15 @@ impl WindowCursorMetadata {
     #[must_use]
     pub const fn exact(&self) -> bool {
         self.exact
+    }
+
+    /// End of the bytes already absorbed into the integrity frontier.
+    /// Exact version-2 cursors return `Some`; legacy cursors return `None`.
+    /// This can exceed the entry position because an acquired window includes
+    /// bytes of subsequent entries. Resume does not hash those bytes twice.
+    #[must_use]
+    pub const fn acquired_end(&self) -> Option<u64> {
+        self.acquired_end
     }
 
     /// Whether resume continues only integrity acquisition, without entry parsing.
@@ -166,6 +176,7 @@ impl WindowCursor {
             entry_index: self.index,
             expected_pack_id: self.expected,
             exact: self.exact.is_some(),
+            acquired_end: self.exact.as_ref().map(|exact| exact.end),
             integrity_only: self
                 .exact
                 .as_ref()

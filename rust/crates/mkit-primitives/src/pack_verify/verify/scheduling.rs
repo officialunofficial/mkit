@@ -283,6 +283,21 @@ impl VerifyDriver {
         };
         let count = scheduler.slots.len() as u64 + 1;
         let usage = self.resources.usage();
+        // Optional overlap keeps a complete decoder envelope available. The
+        // serial reader may use its smaller frame-sensitive reservation, but
+        // batching does not depend on that optimization for admission.
+        let decoder = self
+            .limits
+            .acquisition_bytes
+            .saturating_mul(2)
+            .saturating_add(super::FRAME_BYTES)
+            .saturating_add(super::DELTA_BYTES + 32)
+            .saturating_add(super::CANONICAL_BYTES)
+            .saturating_add(super::DECODER_SCRATCH)
+            .saturating_add(JOB_OVERHEAD);
+        let resident = usage
+            .resident_bytes
+            .saturating_add(decoder.saturating_sub(self.decoder_reservation));
         let headroom = self
             .limits
             .page_bytes
@@ -290,12 +305,8 @@ impl VerifyDriver {
             .saturating_add(256 << 10);
         scheduler.config.max_jobs > 1
             && count <= u64::from(scheduler.config.max_jobs)
-            && usage
-                .work
-                .saturating_add(count.saturating_mul(BLOB_WORK_ESCROW))
-                <= self.limits.work
-            && usage
-                .resident_bytes
+            && count.saturating_mul(BLOB_WORK_ESCROW) <= self.resources.remaining_work()
+            && resident
                 .saturating_add(headroom)
                 .saturating_add(JOB_OVERHEAD)
                 .saturating_add(BOUNDARY_BYTES)
@@ -312,6 +323,10 @@ impl VerifyDriver {
         overlap: u64,
         work: u64,
     ) -> Result<(), Failure> {
+        let scheduler = self.scheduler.as_mut().ok_or_else(invalid)?;
+        if scheduler.slots.is_empty() && scheduler.committed_boundary.take().is_some() {
+            self.resources.release(BOUNDARY_BYTES)?;
+        }
         self.resources.reserve(BOUNDARY_BYTES)?;
         let boundary = self
             .reader

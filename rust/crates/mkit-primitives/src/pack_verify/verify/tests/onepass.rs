@@ -321,16 +321,22 @@ fn finish_after_committed_boundary(
 fn unavailable_external_acquisition_stays_retryable_before_integrity_verdict() {
     let (base_id, base) = blob(b"external source");
     let (_, target) = blob(b"result");
-    let mut writer = PackWriter::new();
-    writer
-        .push_delta(&base_id, &delta::encode(&base, &target).unwrap())
-        .unwrap();
+    let mut writer = PackWriter::new_raw_only();
     // The fault precedes another acquisition so the source cannot finish first.
     for byte in 0..3 {
         let (id, bytes) = blob(&vec![byte; 768 << 10]);
         writer.push_raw(id, &bytes).unwrap();
     }
     let mut pack = writer.finish().unwrap();
+    pack.truncate(pack.len() - 32);
+    let mut payload = base_id.to_vec();
+    payload.extend_from_slice(&delta::encode(&base, &target).unwrap());
+    let mut frame = vec![2];
+    frame.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
+    frame.extend_from_slice(&payload);
+    pack.splice(12..12, frame);
+    pack[8..12].copy_from_slice(&4_u32.to_le_bytes());
+    pack.extend_from_slice(&hash::hash(&pack));
     *pack.last_mut().unwrap() ^= 1;
     let mut host = Host::new(&pack);
     let mut machine = driver(&pack);
@@ -532,6 +538,106 @@ fn changed_resume_suffix_makes_the_driver_terminal() {
             Step::Request(request) => host.serve(&mut resumed, &request).unwrap(),
             Step::Progress => (),
             _ => panic!("entry emitted before suffix authentication"),
+        }
+    }
+}
+
+fn hash_only_budget_outcome(pack: &[u8], mode: Option<u64>, resume: bool) -> FailureCode {
+    let budget = VerifyLimits {
+        acquisition_bytes: 64 << 10,
+        work: u64::try_from(pack.len()).unwrap() * 3 + (256 << 10),
+        ..limits()
+    };
+    let mut machine = VerifyDriver::new(source(pack), REPOSITORY, profile(), budget, 17).unwrap();
+    if mode.is_some() {
+        machine = machine.with_compute(ComputeConfig { max_jobs: 3 }).unwrap();
+    }
+    let mut host = Host::new(pack);
+    let mut jobs = Vec::new();
+    let mut random = mode.unwrap_or(0);
+    let mut resumed = false;
+    loop {
+        match machine.step() {
+            Err(error) => {
+                assert!(!resume || resumed, "drain progress was not resumed");
+                return error.code;
+            }
+            Ok(Step::Request(Request::Compute { job })) => {
+                jobs.push(machine.take_compute(job).unwrap());
+            }
+            Ok(Step::Request(request)) => {
+                if let Err(error) = host.serve(&mut machine, &request) {
+                    assert!(!resume || resumed, "drain progress was not resumed");
+                    return error.code;
+                }
+            }
+            Ok(Step::ProvisionalObject(fragment)) => host
+                .fragments
+                .entry(fragment.ordinal)
+                .or_default()
+                .extend_from_slice(fragment.bytes),
+            Ok(Step::RetainEvidence(page)) => {
+                let commitment = page.commitment;
+                host.pages.push((commitment, page.bytes.to_vec()));
+                machine.acknowledge_retention(commitment).unwrap();
+            }
+            Ok(Step::Progress) => {
+                while !jobs.is_empty() {
+                    let index = match mode {
+                        Some(0) => 0,
+                        Some(1) => jobs.len() - 1,
+                        _ => {
+                            random = random
+                                .wrapping_mul(6_364_136_223_846_793_005)
+                                .wrapping_add(1);
+                            usize::try_from(random % u64::try_from(jobs.len()).unwrap()).unwrap()
+                        }
+                    };
+                    assert_eq!(
+                        machine.supply_compute(jobs.remove(index).run()).unwrap(),
+                        ComputeDisposition::Accepted
+                    );
+                }
+            }
+            Ok(Step::Complete(_)) => panic!("entry work exceeded the hash-only budget"),
+        }
+        if resume
+            && !resumed
+            && machine.phase == Phase::Drain
+            && let Ok(checkpoint) = machine.checkpoint()
+        {
+            let checkpoint = Checkpoint::from_bytes(checkpoint.bytes(), budget).unwrap();
+            machine =
+                VerifyDriver::resume(source(pack), REPOSITORY, profile(), budget, 18, &checkpoint)
+                    .unwrap();
+            resumed = true;
+        }
+    }
+}
+
+#[test]
+fn hashing_work_is_protected_from_entry_work_exhaustion() {
+    let mut writer = PackWriter::new_raw_only();
+    for byte in 1..=4 {
+        let (id, bytes) = blob(&vec![byte; 512 << 10]);
+        writer.push_raw(id, &bytes).unwrap();
+    }
+    let mut pack = writer.finish().unwrap();
+    for corrupt in [true, false] {
+        *pack.last_mut().unwrap() ^= 1;
+        let expected = if corrupt {
+            FailureCode::PackfileCorrupted
+        } else {
+            FailureCode::ResourceLimit
+        };
+        for mode in [None, Some(0), Some(1), Some(7)] {
+            for resume in [false, true] {
+                assert_eq!(
+                    hash_only_budget_outcome(&pack, mode, resume),
+                    expected,
+                    "mode={mode:?}, resume={resume}, corrupt={corrupt}"
+                );
+            }
         }
     }
 }

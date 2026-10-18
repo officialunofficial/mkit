@@ -97,8 +97,9 @@ until its output returns. Retrying a lost job requires restarting the run.
 
 Each descriptor binds the immutable source, repository, generation, request
 sequence, frame ordinal and placement, validated delta base, operation, and
-memory/work permits. The authenticated whole-pack identity and frame placement
-commit the input; jobs are local state with no serialized format. Current-run
+memory/work permits. The requested whole-pack identity and provisional frame
+placement bind the input. Only terminal `Complete` authenticates the pack. Jobs
+are local state with no serialized format. Current-run
 mismatches refuse without advancing. Stale generations and retired or duplicate
 outputs are ignored without budget changes. Results, fragments, and evidence
 merge in ordinal order, preserving the serial artifact and refusal precedence.

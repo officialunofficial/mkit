@@ -70,6 +70,19 @@ impl VerifyDriver {
         let mut resources = Resources::resume(limits, meta.usage)?;
         resources.reserve(std::mem::size_of::<Self>() as u64)?;
         resources.reserve(workspace)?;
+        let state = checkpoint.decode(limits)?;
+        let acquired_hash_end = WindowCursor::from_bytes(&state.cursor)
+            .map_err(|_| failure(FailureCode::InvalidCheckpoint))?
+            .metadata()
+            .map_err(|_| failure(FailureCode::InvalidCheckpoint))?
+            .acquired_end()
+            .ok_or_else(|| failure(FailureCode::InvalidCheckpoint))?;
+        let integrity_work = source
+            .len
+            .checked_sub(acquired_hash_end)
+            .and_then(|remaining| remaining.checked_mul(3))
+            .ok_or_else(|| failure(FailureCode::InvalidCheckpoint))?;
+        resources.protect_work(integrity_work)?;
         resources.work(
             (checkpoint.bytes().len() as u64)
                 .checked_mul(4)
@@ -77,13 +90,13 @@ impl VerifyDriver {
                 .ok_or_else(|| failure(FailureCode::ResourceLimit))?,
         )?;
         let mut machine = Self::new(source, repository, profile, limits, generation)?;
-        let state = checkpoint.decode(limits)?;
         let verify = state
             .verify
             .ok_or_else(|| failure(FailureCode::InvalidCheckpoint))?;
         machine.restore_decode(&meta, &state.cursor, &verify, &mut resources)?;
         resources.release(workspace)?;
         machine.resources = resources;
+        machine.acquired_hash_end = acquired_hash_end;
         machine.header = meta.header;
         machine.sequence = meta.sequence;
         machine.ordinal = meta.ordinal;

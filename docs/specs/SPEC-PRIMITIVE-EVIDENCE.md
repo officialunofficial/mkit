@@ -328,6 +328,12 @@ Consistency rules for decode phase, all of which resume MUST check before progre
 - Every committed page commitment names a canonical page within the encoded
   page-byte and fan-out ceilings.
 
+For either verification phase, cumulative performed work plus three times the
+unacquired source length MUST fit the encoded work ceiling. Resume MUST
+protect that remaining integrity allowance before charging provisional work.
+The allowance is derived from the exact cursor’s acquired end and is not
+performed work or a separate encoded field.
+
 Cold verify resume re-authenticates every committed evidence page through
 caller-supplied page requests before continuing; a lost page is unavailable
 input, never absence. The retained set is not serialized into the envelope
@@ -351,9 +357,11 @@ commitment, and does not absorb it into the hash frontiers again. Drain resume
 starts at the acquired end. The cursor remains bounded by 4096 bytes; no
 opaque hasher or decoder state enters its encoding.
 
-Integrity frontiers represent completed 8 MiB subtrees. A nonfinal acquired
-offset MUST lie on a subtree boundary. Sources no larger than 8 MiB have no
-stored chaining values; their incomplete hash work is replayed. A root exists
+The framing driver’s separate integrity frontier represents completed 8 MiB
+subtrees. Its nonfinal acquired offset MUST lie on a subtree boundary. Sources
+no larger than 8 MiB have no stored chaining values in that frontier; their
+incomplete hash work is replayed. The exact-boundary verification cursor instead
+uses the acquisition-window geometry, including windows smaller than 8 MiB. A root exists
 exactly when its stream is complete. The trailer stream covers source length
 minus 32 bytes. Unused bytes of the partial trailer MUST be zero.
 

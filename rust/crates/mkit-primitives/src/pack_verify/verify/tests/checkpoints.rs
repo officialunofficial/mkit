@@ -140,6 +140,7 @@ fn deferred_absence_checkpoint_resumes_only_hashing_without_prefix_or_page_reads
         }
     };
     assert!(acquired_end < pack.len() as u64);
+    assert_checkpoint_preserves_integrity_work(&snapshot, execution_limits);
     let state = snapshot.decode(execution_limits).unwrap();
     assert_eq!(
         state.meta.phase,
@@ -227,17 +228,60 @@ fn write_checkpoint_fixtures(
 }
 
 fn missing_base_pack_with_unread_tail() -> Vec<u8> {
-    let mut writer = PackWriter::new();
+    let mut writer = PackWriter::new_raw_only();
     let (id, bytes) = blob(b"first");
     writer.push_raw(id, &bytes).unwrap();
     let (missing, base) = blob(b"external base");
     let (_, target) = blob(b"delta target");
-    writer
-        .push_delta(&missing, &delta::encode(&base, &target).unwrap())
-        .unwrap();
+    let insertion = 12 + 5 + bytes.len();
     for byte in 1..=3 {
         let (id, bytes) = blob(&vec![byte; 60 << 10]);
         writer.push_raw(id, &bytes).unwrap();
     }
-    writer.finish().unwrap()
+    let mut pack = writer.finish().unwrap();
+    pack.truncate(pack.len() - 32);
+    let mut payload = missing.to_vec();
+    payload.extend_from_slice(&delta::encode(&base, &target).unwrap());
+    let mut frame = vec![2];
+    frame.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
+    frame.extend_from_slice(&payload);
+    pack.splice(insertion..insertion, frame);
+    pack[8..12].copy_from_slice(&5_u32.to_le_bytes());
+    pack.extend_from_slice(&hash::hash(&pack));
+    pack
+}
+
+fn assert_checkpoint_preserves_integrity_work(snapshot: &Checkpoint, limits: VerifyLimits) {
+    let mut state = snapshot.decode(limits).unwrap();
+    let end = WindowCursor::from_bytes(&state.cursor)
+        .unwrap()
+        .metadata()
+        .unwrap()
+        .acquired_end()
+        .unwrap();
+    let remaining_work = 3 * (state.meta.source.len - end);
+    assert!(remaining_work > 0);
+    state.meta.usage.work = limits.work - remaining_work;
+    let view = |meta| CheckpointView {
+        meta,
+        integrity: None,
+        cursor: &state.cursor,
+        verify: state.verify,
+    };
+    // The exact remaining hashing allowance is valid state; ordinary work
+    // cannot consume even one unit of that protected allowance.
+    let exact = checkpoint::encode(&view(state.meta), limits).unwrap();
+    assert_eq!(
+        Checkpoint::from_bytes(exact.bytes(), limits)
+            .unwrap()
+            .bytes(),
+        exact.bytes()
+    );
+    state.meta.usage.work += 1;
+    assert_eq!(
+        checkpoint::encode(&view(state.meta), limits)
+            .unwrap_err()
+            .code,
+        FailureCode::InvalidCheckpoint
+    );
 }

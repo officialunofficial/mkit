@@ -1719,6 +1719,7 @@ fn cursor_metadata_preserves_frozen_encoding() {
     let cursor = WindowCursor::from_bytes(&bytes).unwrap();
     let metadata = cursor.metadata().unwrap();
     assert_eq!(metadata.pack_len(), 189);
+    assert_eq!(metadata.acquired_end(), None);
     assert_eq!(metadata.window_size(), 1 << 20);
     assert_eq!(metadata.position(), 31);
     assert_eq!(metadata.payload_sum(), 14);
@@ -1915,6 +1916,10 @@ fn exact_checkpoint_drain_resumes_at_acquired_frontier() {
         let cursor = reader.checkpoint_exact().unwrap();
         assert!(cursor.metadata().unwrap().exact());
         assert!(cursor.metadata().unwrap().integrity_only());
+        assert_eq!(
+            cursor.metadata().unwrap().acquired_end(),
+            Some(acquired_end)
+        );
         assert_eq!(cursor.metadata().unwrap().position(), 12);
         let cursor = WindowCursor::from_bytes(&cursor.to_bytes()).unwrap();
         reader = WindowReader::resume(&cursor, DecodeLimits::default()).unwrap();
@@ -2103,7 +2108,15 @@ fn exact_cursor_encoding_is_digest_pinned() {
     };
     feed_exact(&mut reader, &pack, request);
     assert!(matches!(reader.step().unwrap(), Step::Entry(_)));
-    let encoded = reader.checkpoint_exact().unwrap().to_bytes();
+    let cursor = reader.checkpoint_exact().unwrap();
+    assert_eq!(
+        cursor.metadata().unwrap().acquired_end(),
+        Some(pack.len() as u64)
+    );
+    assert!(
+        cursor.metadata().unwrap().acquired_end().unwrap() > cursor.metadata().unwrap().position()
+    );
+    let encoded = cursor.to_bytes();
     assert_eq!(encoded.len(), 263);
     assert_eq!(
         hash::to_hex(&hash::hash(&encoded)),

@@ -264,6 +264,7 @@ pub struct VerifyDriver {
     pending: Option<Pending>,
     phase: Phase,
     deferred_failure: Option<Failure>,
+    acquired_hash_end: u64,
     reader: Option<WindowReader>,
     resources: Resources,
     objects: Index,
@@ -369,6 +370,7 @@ impl VerifyDriver {
             pending: None,
             phase: Phase::Roots,
             deferred_failure: None,
+            acquired_hash_end: 0,
             reader: Some(reader),
             resources,
             objects,
@@ -667,18 +669,12 @@ impl VerifyDriver {
                 }
                 self.pending = None;
                 match for_ {
-                    For::Input => {
-                        // One copy plus both pack commitments; exact resume
-                        // restores the commitments without re-hashing a prefix.
-                        self.charge_feed(range, 3)?;
-                        self.accept_input(range.offset, bytes)
-                    }
+                    For::Input => self.accept_input(range.offset, bytes),
                     For::Base | For::External => {
                         // Served base bytes are deserialized, hashed, and
                         // copied before the entry decodes: the same three
                         // passes integrity feeds pay.
-                        self.charge_feed(range, 3)?;
-                        self.accept_base(for_ == For::External, range, bytes)
+                        self.accept_base_input(for_ == For::External, range, bytes)
                     }
                 }
             }
@@ -730,27 +726,32 @@ impl VerifyDriver {
                 let used = self.limits.work.saturating_sub(budget.remaining());
                 self.op = Some(live);
                 let charged = self.resources.work(used);
-                if charged.is_err() {
-                    self.phase = Phase::Failed;
+                match result.and(charged) {
+                    Err(error) if self.phase == Phase::Entries && Self::entry_refusal(&error) => {
+                        self.defer_failure(error)
+                    }
+                    result => result,
                 }
-                result.and(charged)
             }
             _ => Err(invalid()),
         }
     }
 
-    /// Charges `range.len * passes` of feed work; exhaustion is terminal.
-    fn charge_feed(&mut self, range: ByteRange, passes: u64) -> Result<(), Failure> {
-        let result = range
-            .len
-            .checked_mul(passes)
-            .ok_or_else(|| failure(FailureCode::ResourceLimit))
-            .and_then(|charge| self.resources.work(charge));
-        if let Err(error) = result {
-            self.phase = Phase::Failed;
-            return Err(error);
+    fn accept_base_input(
+        &mut self,
+        external: bool,
+        range: ByteRange,
+        bytes: &[u8],
+    ) -> Result<(), Failure> {
+        let result = (|| {
+            self.resources
+                .work(range.len.checked_mul(3).ok_or_else(resource)?)?;
+            self.accept_base(external, range, bytes)
+        })();
+        match result {
+            Err(error) if Self::entry_refusal(&error) => self.defer_failure(error),
+            result => result,
         }
-        Ok(())
     }
 
     fn accept_member(&mut self, object: Hash, fact: MemberFact) -> Result<(), Failure> {
@@ -802,26 +803,37 @@ impl VerifyDriver {
         let result = (|| {
             if self.phase == Phase::Header {
                 self.accept_header(bytes)?;
+                self.resources
+                    .protect_work(self.source.len.checked_mul(3).ok_or_else(resource)?)?;
                 self.loan_compute_control()?;
                 self.phase = Phase::Entries;
             }
             if !matches!(self.phase, Phase::Entries | Phase::Drain) {
                 return Err(invalid());
             }
+            let len = u64::try_from(bytes.len()).map_err(|_| resource())?;
+            let end = offset.checked_add(len).ok_or_else(resource)?;
+            let fresh = end.saturating_sub(self.acquired_hash_end).min(len);
             let memory = self
                 .reader
                 .as_ref()
                 .ok_or_else(invalid)?
                 .memory_bound(0)
-                .checked_add(bytes.len() as u64)
+                .checked_add(len.checked_mul(2).ok_or_else(resource)?)
                 .and_then(|n| n.checked_add(64 << 10))
                 .ok_or_else(resource)?;
             self.resize_decoder(memory.max(Self::decoder_baseline(self.limits)?))?;
+            self.resources
+                .work((len - fresh).checked_mul(3).ok_or_else(resource)?)?;
+            self.resources
+                .integrity_work(fresh.checked_mul(3).ok_or_else(resource)?)?;
             self.reader
                 .as_mut()
                 .ok_or_else(invalid)?
                 .feed(offset, bytes)
-                .map_err(|error| map_core(&error))
+                .map_err(|error| map_core(&error))?;
+            self.acquired_hash_end = self.acquired_hash_end.max(end);
+            Ok(())
         })();
         if result.is_err() {
             self.phase = Phase::Failed;

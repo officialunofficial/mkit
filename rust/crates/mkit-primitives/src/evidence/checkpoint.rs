@@ -362,8 +362,15 @@ fn validate_view(v: &CheckpointView<'_>) -> Result<(), Failure> {
         validate_verify(&v.meta, &verify)?;
         let cursor = WindowCursor::from_bytes(v.cursor).map_err(|_| invalid())?;
         let metadata = cursor.metadata().map_err(|_| invalid())?;
+        let integrity_work = metadata
+            .acquired_end()
+            .and_then(|end| v.meta.source.len.checked_sub(end))
+            .and_then(|remaining| remaining.checked_mul(3))
+            .and_then(|remaining| v.meta.usage.work.checked_add(remaining))
+            .ok_or_else(invalid)?;
         if !metadata.exact()
             || metadata.integrity_only() != (v.meta.phase == CheckpointPhase::Drain)
+            || integrity_work > v.meta.limits.work
         {
             return Err(invalid());
         }
