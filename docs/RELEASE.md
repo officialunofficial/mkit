@@ -330,6 +330,58 @@ Notes on the published set:
 - **The crates.io `mkit` name** belongs to an unrelated project; the CLI is
   published as **`mkit-cli`**. Do not run `cargo install mkit`.
 
+### Publishing `mkit-primitives` (independent release)
+
+`mkit-primitives` is versioned on its own (`rust/crates/mkit-primitives/Cargo.toml`)
+and is excluded from the train: `crates-publish.yml` runs `cargo publish
+--workspace --exclude mkit-primitives`, and `rust/release-plz.toml` keeps it
+`release = false` with no `version_group`. It is released by
+[`.github/workflows/primitives-publish.yml`](../.github/workflows/primitives-publish.yml)
+on a signed `mkit-primitives-vX.Y.Z` tag (same trust rules as `release.yml`:
+annotated, allowlisted key, reachable from `main`), which does not match the
+`v*.*.*` train tags.
+
+Before tagging:
+
+- [ ] Rename the crate changelog's `## [Unreleased]` content to
+      `## [X.Y.Z] - YYYY-MM-DD` in `rust/crates/mkit-primitives/CHANGELOG.md`
+      and set `version` in its `Cargo.toml` (a literal, never
+      `version.workspace`).
+- [ ] The `mkit-core` requirement in its `Cargo.toml` names a **published**
+      core release that contains every core API the crate uses (`cargo
+      publish` verifies the package against the registry, with no workspace
+      patches). Publish that core release first.
+- [ ] `just check-primitives-release` and `just check-primitives-consumer` pass.
+
+The workflow then, in order: validates the tag; runs
+`scripts/publish-primitives.py guard` (tag equals crate version, dated
+changelog section, train exclusion intact, the tree's `mkit-core` version live
+and not yanked on crates.io); runs `cargo semver-checks` against the newest
+published `mkit-primitives` (its own baseline; skipped before the first
+release); rebuilds the packaged crates in the out-of-tree consumer; publishes;
+and finally resolves the published crate from the registry in the same
+consumer. Publishing is idempotent: an absent version is published, a present
+version whose packaged files match is skipped, and a present version with
+different files fails the run and needs a version bump
+(`scripts/publish-primitives.py publish`; fixture tests in
+`scripts/test-publish-primitives.py`).
+
+**Release order.** `mkit-server` depends on `mkit-primitives`, and
+`mkit-primitives` depends on `mkit-core`. Until the train is staged so that
+`mkit-core` can be published before `mkit-server` in the same release, a
+release needs `mkit-core` on crates.io, then the primitives tag, then the
+remaining train crates. Do not tag the train (`vX.Y.Z`) while the primitives
+version required by `mkit-server` is unpublished.
+
+The consumer check (`scripts/check-primitives-consumer.py`, template in
+`scripts/primitives-consumer/`) packages `mkit-ruzstd`, `mkit-core` and
+`mkit-primitives`, extracts the three `.crate` files into a directory source
+that replaces crates.io for a standalone crate, and runs its portable-fixture
+tests natively (default and raw-only) and on `wasm32-unknown-unknown` through
+`wasm-pack test --node`. The consumer has no path dependency, `[patch]` table
+or workspace; the script refuses a lock file in which an mkit crate does not
+resolve from a registry source. It runs in Cloud Build's primitives step.
+
 ### Token
 
 `cargo publish` authenticates with the `CRATES_PACKAGE_KEY` **org-level** secret

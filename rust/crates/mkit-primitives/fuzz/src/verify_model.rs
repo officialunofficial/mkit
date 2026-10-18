@@ -327,13 +327,21 @@ fn run_compute(
                 if schedule != 0 {
                     exercise_retention(&mut driver, commitment);
                 }
-                trace.update(&[0xe1]);
-                trace.update(&commitment.digest);
-                trace.update(&bytes);
+                // Which pages the host holds, and when, depends on the
+                // checkpoint cadence, so retention stays out of the trace.
+                // A page released too early surfaces as an unavailable fetch.
                 host.pages.push((commitment, bytes));
                 driver
                     .acknowledge_retention(commitment)
                     .expect("bounded model invariant");
+            }
+            Step::ReleasePage(page) => {
+                let position = host
+                    .pages
+                    .iter()
+                    .position(|(commitment, _)| *commitment == page)
+                    .expect("released a page the host never held");
+                host.pages.swap_remove(position);
             }
             Step::Progress => {
                 if !outputs.is_empty() {
@@ -357,9 +365,17 @@ fn run_compute(
                     );
                     continue;
                 }
-                if schedule == 3 && !restarted && driver.checkpoint().is_ok() {
+                if schedule == 3
+                    && !restarted
+                    && let Ok(snapshot) = driver.checkpoint()
+                {
+                    let checkpoint = mkit_primitives::evidence::checkpoint::Checkpoint::from_bytes(
+                        snapshot.bytes(),
+                        limits,
+                    )
+                    .expect("canonical checkpoint");
                     restarted = true;
-                    driver = restart(&mut driver, source, profile, limits);
+                    driver = restart(source, profile, limits, &checkpoint);
                 }
             }
             Step::Complete(pack) => {
@@ -460,22 +476,18 @@ fn stale_output() -> ComputeOutput {
 }
 
 fn restart(
-    driver: &mut VerifyDriver,
     source: PackSource,
     profile: IndexedProfile,
     limits: VerifyLimits,
+    checkpoint: &mkit_primitives::evidence::checkpoint::Checkpoint,
 ) -> VerifyDriver {
-    let snapshot = driver.checkpoint().expect("safe acknowledged boundary");
-    let checkpoint =
-        mkit_primitives::evidence::checkpoint::Checkpoint::from_bytes(snapshot.bytes(), limits)
-            .expect("canonical checkpoint");
     VerifyDriver::resume(
         source,
         RepositoryId([9; 32]),
         profile,
         limits,
         18,
-        &checkpoint,
+        checkpoint,
     )
     .expect("bound cold resume")
 }

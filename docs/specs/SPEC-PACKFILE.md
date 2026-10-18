@@ -438,7 +438,11 @@ budget or fewer concurrent operations may succeed), *unavailable input*
 (a bounded acquisition could not complete; retry or restart may succeed),
 and *invalid response* (a reply mismatched its outstanding request). The
 refusal for a given input MUST be identical whether entries are verified
-inline, streamed, or fanned out across caller-driven workers.
+inline, streamed, or fanned out across caller-driven workers. A cumulative
+decoded-byte total above the content profile's ceiling is a content-profile
+limit; the same total above a caller's own decoded-byte execution ceiling is
+an execution limit, so a caller's smaller budget never reads as a defect of
+the pack.
 
 ---
 

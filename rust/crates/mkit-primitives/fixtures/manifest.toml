@@ -904,9 +904,9 @@ decode_config = "indexed-checkpoint"
 expected = "Checkpoint"
 spec = "SPEC-PRIMITIVE-EVIDENCE checkpoint envelope"
 path = "evidence/checkpoint-verify.bin"
-sha256 = "9e664310c1bc6ce3e07c8d29d6588f32e52b54302e46f81d0f942623c19100a8"
+sha256 = "4dec37dd4a7e7eb7acd90647f1e934b9b99a021cade452dce8c02b3d1d8d1ae8"
 semantic = "evidence/checkpoint-verify.json"
-semantic_sha256 = "efb97f33a85b434849fcb189673e3a23faa3eed96b888c1b71c78352fc7c94a9"
+semantic_sha256 = "508878d2020499d2c63b005a44c8dda02ab888b4e60a2e4d90e5515d2f891c8a"
 
 [[fixtures]]
 type = "evidence-page"

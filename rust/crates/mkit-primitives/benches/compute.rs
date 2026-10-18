@@ -109,6 +109,9 @@ fn verify(bytes: &[u8], width: u8) -> (String, usize, u64, u64) {
                     .acknowledge_retention(commitment)
                     .expect("retention acknowledged");
             }
+            Step::ReleasePage(page) => {
+                pages.remove(&page.digest);
+            }
             Step::ProvisionalObject(fragment) => {
                 trace.update(&fragment.ordinal.to_le_bytes());
                 trace.update(&fragment.offset.to_le_bytes());

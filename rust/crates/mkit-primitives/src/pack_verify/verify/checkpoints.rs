@@ -7,8 +7,10 @@
 //! Integrity-only drains retain the first refusal and acquired hash frontiers;
 //! their evidence indices are inert and cannot produce verified artifacts.
 use super::{
-    Failure, FailureCode, Live, PackSource, Phase, RepositoryId, Resources, Step, Then,
-    VerifyDriver, Which, WindowReader, failure,
+    Failure, FailureCode, Live, PackSource, PageRetention, Phase, RepositoryId, Resources, Step,
+    Then, VerifyDriver, Which, WindowReader,
+    cache::{PageCache, Releasable},
+    failure,
     index::{Index, Sequence},
     kind_of,
 };
@@ -110,7 +112,10 @@ impl VerifyDriver {
         machine.external_lookups = verify.external_lookups;
         machine.signature_failure = verify.signature_failure;
         machine.deferred_failure = verify.deferred_failure.map(DeferredFailure::failure);
-        machine.roots.clear();
+        // The audit below re-reads every page the checkpoint reaches. The
+        // resumed checkpoint is the run's first, so those pages are protected
+        // by it until the next checkpoint exists.
+        machine.cache = PageCache::new(Self::cache_capacity(limits)?, 1);
         if machine.phase == Phase::Entries {
             machine.op = Some(Live {
                 index: AUDIT_ORDER[0],
@@ -233,6 +238,81 @@ impl VerifyDriver {
             .ok_or_else(|| failure(FailureCode::ResourceLimit))
     }
 
+    /// Encodes the envelope for the current drained state. The usage snapshot
+    /// already omits the pages this checkpoint releases, because the host
+    /// drops them as soon as it has persisted the checkpoint.
+    fn encode_snapshot(
+        &mut self,
+        draining: bool,
+        releasable: Releasable,
+    ) -> Result<Checkpoint, Failure> {
+        let suffix_work = self.checkpoint_cursor_work();
+        self.resources.work(
+            suffix_work
+                .checked_add(3 * 8192)
+                .ok_or_else(|| failure(FailureCode::ResourceLimit))?,
+        )?;
+        let cursor = self
+            .checkpoint_cursor()
+            .ok_or_else(|| failure(FailureCode::CheckpointNotReady))?
+            .to_bytes();
+        let mut usage = self.resources.usage();
+        usage.resident_bytes = 0;
+        // The pages this checkpoint obsoletes are released right after it.
+        usage.evidence_pages -= releasable.pages;
+        usage.evidence_bytes -= releasable.bytes;
+        let checkpoint_of = |index: &Index| IndexCheckpoint {
+            commitment: index.commitment(),
+            count: index.count(),
+        };
+        let sequence_of = |sequence: &Sequence| IndexCheckpoint {
+            commitment: sequence.commitment(),
+            count: sequence.committed(),
+        };
+        checkpoint::encode(
+            &CheckpointView {
+                meta: CheckpointMeta {
+                    source: self.source,
+                    repository: self.repository,
+                    ruleset: self.ruleset,
+                    limits: self.limits,
+                    profile: self.profile,
+                    generation: self.generation,
+                    sequence: self.sequence,
+                    phase: if draining {
+                        CheckpointPhase::Drain
+                    } else {
+                        CheckpointPhase::Decode
+                    },
+                    header: self.header,
+                    ordinal: self.ordinal,
+                    payload: self.payload,
+                    trailer: self.trailer,
+                    retention_count: self.retention_count,
+                    last_retained: self.last_retained,
+                    usage,
+                },
+                integrity: None,
+                cursor: &cursor,
+                verify: Some(VerifyCheckpoint {
+                    objects: checkpoint_of(&self.objects),
+                    ordinals: sequence_of(&self.ordinals),
+                    occurrences: sequence_of(&self.occurrences),
+                    dependencies: sequence_of(&self.dependencies),
+                    referenced: checkpoint_of(&self.referenced),
+                    heads: sequence_of(&self.heads),
+                    delta_entries: self.delta_entries,
+                    decoded: self.decoded,
+                    edges: self.edges,
+                    external_lookups: self.external_lookups,
+                    signature_failure: self.signature_failure,
+                    deferred_failure: self.deferred_failure.as_ref().map(DeferredFailure::from),
+                }),
+            },
+            self.limits,
+        )
+    }
+
     pub(super) fn release_checkpoint(&mut self) -> Result<(), Failure> {
         if self.checkpoint.take().is_some() {
             self.resources.release(self.checkpoint_reservation()?)?;
@@ -242,109 +322,61 @@ impl VerifyDriver {
 
     /// Encodes a snapshot at an entry boundary or during integrity-only draining.
     ///
-    /// Every buffered record must be under its sequence root: the boundary is
-    /// reached only right after a flush finished at an entry end. The borrowed
-    /// output remains charged until the next mutable call. Persist it in
-    /// trusted storage together with every acknowledged evidence page. A drain
+    /// A snapshot needs the host to hold every page its roots reach and every
+    /// buffered record to sit under its sequence root, which takes host steps.
+    /// A refused call therefore arms the request: the driver flushes the
+    /// buffered records and retains the remaining pages at the next drained
+    /// entry boundary, then returns `Step::Progress` with the snapshot ready.
+    /// Call `checkpoint` again before the next `step`, `supply`, or
+    /// acknowledgement. Persist the output in trusted storage together with
+    /// every page the host holds; the borrowed output stays charged until the
+    /// next mutable call. The checkpoint before it is obsolete: pages only it
+    /// reached are released afterwards, so persist the new one first. A drain
     /// carries only committed index roots: discarded partial records cannot
     /// affect its terminal refusal and never establish verified status.
     ///
     /// # Errors
     /// `CheckpointNotReady` preserves progress outside the drained boundary:
     /// an entry, operation, request, or retention acknowledgement is
-    /// unfinished, buffered records are uncommitted, or the run already ended.
+    /// unfinished, the boundary work is not done, or the run already ended.
+    /// `UnsupportedCapability` for an [`PageRetention::Ephemeral`] run.
     /// Exhaustion is `ResourceLimit`.
     pub fn checkpoint(&mut self) -> Result<&Checkpoint, Failure> {
         self.release_checkpoint()?;
         let draining = self.phase == Phase::Drain;
+        if !draining && self.retention == PageRetention::Ephemeral {
+            return Err(failure(FailureCode::UnsupportedCapability));
+        }
         if !matches!(self.phase, Phase::Entries | Phase::Drain)
             || !self.compute_checkpointable()
             || self.work.is_some()
             || self.op.is_some()
             || self.pending.is_some()
             || self.retained.is_some()
-            || (!draining && !self.roots.is_empty())
+            || !self.retain_queue.is_empty()
             || self.reader.is_none()
-            || (!draining
-                && [
-                    &self.ordinals,
-                    &self.occurrences,
-                    &self.dependencies,
-                    &self.heads,
-                ]
-                .iter()
-                .any(|sequence| sequence.pending() != 0))
         {
             return Err(failure(FailureCode::CheckpointNotReady));
         }
+        if !draining && !self.checkpoint_ready {
+            self.armed = true;
+            return Err(failure(FailureCode::CheckpointNotReady));
+        }
+        let releasable = if draining {
+            Releasable::default()
+        } else {
+            self.cache.releasable()
+        };
         let reservation = self.checkpoint_reservation()?;
         self.resources.reserve(reservation)?;
-        let result = (|| {
-            let suffix_work = self.checkpoint_cursor_work();
-            self.resources.work(
-                suffix_work
-                    .checked_add(3 * 8192)
-                    .ok_or_else(|| failure(FailureCode::ResourceLimit))?,
-            )?;
-            let cursor = self
-                .checkpoint_cursor()
-                .ok_or_else(|| failure(FailureCode::CheckpointNotReady))?
-                .to_bytes();
-            let mut usage = self.resources.usage();
-            usage.resident_bytes = 0;
-            let checkpoint_of = |index: &Index| IndexCheckpoint {
-                commitment: index.commitment(),
-                count: index.count(),
-            };
-            let sequence_of = |sequence: &Sequence| IndexCheckpoint {
-                commitment: sequence.commitment(),
-                count: sequence.committed(),
-            };
-            checkpoint::encode(
-                &CheckpointView {
-                    meta: CheckpointMeta {
-                        source: self.source,
-                        repository: self.repository,
-                        ruleset: self.ruleset,
-                        limits: self.limits,
-                        profile: self.profile,
-                        generation: self.generation,
-                        sequence: self.sequence,
-                        phase: if draining {
-                            CheckpointPhase::Drain
-                        } else {
-                            CheckpointPhase::Decode
-                        },
-                        header: self.header,
-                        ordinal: self.ordinal,
-                        payload: self.payload,
-                        trailer: self.trailer,
-                        retention_count: self.retention_count,
-                        last_retained: self.last_retained,
-                        usage,
-                    },
-                    integrity: None,
-                    cursor: &cursor,
-                    verify: Some(VerifyCheckpoint {
-                        objects: checkpoint_of(&self.objects),
-                        ordinals: sequence_of(&self.ordinals),
-                        occurrences: sequence_of(&self.occurrences),
-                        dependencies: sequence_of(&self.dependencies),
-                        referenced: checkpoint_of(&self.referenced),
-                        heads: sequence_of(&self.heads),
-                        delta_entries: self.delta_entries,
-                        decoded: self.decoded,
-                        edges: self.edges,
-                        external_lookups: self.external_lookups,
-                        signature_failure: self.signature_failure,
-                        deferred_failure: self.deferred_failure.as_ref().map(DeferredFailure::from),
-                    }),
-                },
-                self.limits,
-            )
-        })();
+        let result = self.encode_snapshot(draining, releasable);
         match result {
             Ok(checkpoint) => {
+                if !draining {
+                    self.armed = false;
+                    self.checkpoint_ready = false;
+                    self.cache.commit_checkpoint(&mut self.resources)?;
+                }
                 self.checkpoint = Some(checkpoint);
                 self.checkpoint
                     .as_ref()
