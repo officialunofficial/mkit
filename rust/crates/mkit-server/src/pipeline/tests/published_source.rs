@@ -532,7 +532,7 @@ fn published_source_keeps_configured_coverage_denial_policy_and_quota_checks() {
     let error = copy(&w, HEAD, "refs/heads/copy", None).unwrap_err();
     assert_eq!(
         (error.code(), error.public_message()),
-        (Code::InvalidArgument, "open closure")
+        (Code::Unavailable, "repository membership not yet visible")
     );
     assert_eq!(w.pair(&branch("copy")), (None, None));
     w.env.pipe.publication_policy = None;

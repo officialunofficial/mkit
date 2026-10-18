@@ -158,11 +158,12 @@ impl Progress {
             return Err(failure.error());
         }
         if self.missing {
-            return Err(if self.missing_base {
-                resolve::missing_base(now, created, lag)
-            } else {
-                crate::indexed::verify::closure_error(now, created, lag)
-            });
+            return Err(super::Lag {
+                now,
+                created,
+                bound: lag,
+            }
+            .miss(self.missing_base));
         }
         if !self.complete {
             return Err(crate::indexed::pending(1_000));

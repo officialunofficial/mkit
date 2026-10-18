@@ -1509,16 +1509,17 @@ where
                 *held = Some(state::encode(&pending));
             }
         }
-        if let Some(check) = &job.integrity {
-            if !check.complete(job.pack_len, self.pack) {
-                return self.integrity(job).await;
-            }
-            // Retry the failed entry with fresh live facts. A membership wait
-            // before any new checkpoint restores the slice start, which keeps
-            // this completed marker; after forward progress the marker is gone
-            // and a later deferral simply scans the frozen source again.
-            job.integrity = None;
+        if let Some(check) = &job.integrity
+            && !check.complete(job.pack_len, self.pack)
+        {
+            return self.integrity(job).await;
         }
+        // A completed marker authenticates the frozen source for the rest of
+        // Decode. It stays in the job through every checkpoint, so a later
+        // membership wait neither scans the source again nor defers a refusal
+        // the marker already makes final; the failed entry simply retries with
+        // fresh live facts. It is dropped when Decode ends or the job restarts.
+
         let window_bytes = self.h.limits.window_bytes;
         let mut preloaded = None;
         if job.kind == Kind::Unknown {
@@ -1907,10 +1908,29 @@ where
             .saturating_add(now_ms(self.h.clock.as_ref()).saturating_sub(started));
         st.denial_calls += self.budget.used().saturating_sub(calls);
         clear.map_err(|error| {
-            if error.code() == crate::Code::PermissionDenied {
-                Stop::Outcome(Outcome::Blocked)
-            } else {
+            if error.code() != crate::Code::PermissionDenied {
                 unavailable("decoded object unavailable")
+            } else if job.bad_signature
+                || batch
+                    .iter()
+                    .any(|item| verify_object_signature(&item.object).is_err())
+            {
+                // Denial is a policy check: it follows every content refusal
+                // already decided, including a bad signature (SPEC-PACKFILE 6.1).
+                // Integrity comes first: until the source is authenticated the
+                // stop is deferred as a denial, and the retried entry reports
+                // the signature once the completed marker exists.
+                if job
+                    .integrity
+                    .as_ref()
+                    .is_some_and(|check| check.complete(job.pack_len, self.pack))
+                {
+                    Stop::Reject("bad signature")
+                } else {
+                    Stop::Outcome(Outcome::Blocked)
+                }
+            } else {
+                Stop::Outcome(Outcome::Blocked)
             }
         })?;
         Ok(())
@@ -1957,7 +1977,9 @@ where
             job.in_pack_bytes = job.in_pack_bytes.saturating_add(size);
             let budget = self.h.cfg.decode_budget;
             if job.in_pack_bytes > budget {
-                return Err(Stop::Reject("pack exceeds indexed decode budget"));
+                // A deployment limit, not a property of the bytes: terminal but
+                // never persisted, as inline verification answers.
+                return Err(Stop::Outcome(Outcome::DecodeBudget));
             }
             if job.in_pack_bytes.saturating_add(job.external_bytes) > budget {
                 return Err(Stop::Outcome(Outcome::DecodeBudget));
@@ -2161,7 +2183,7 @@ where
             ResolveFailure::Missing => self.missing(job),
             ResolveFailure::Capped => Stop::Outcome(Outcome::BaseCapped),
             ResolveFailure::Corrupt(_) | ResolveFailure::Store(_) => {
-                unavailable("member content unavailable")
+                unavailable(super::resolve::MEMBER_UNAVAILABLE)
             }
             ResolveFailure::Other(error) => match error.public_message() {
                 "pack exceeds indexed decode budget" => Stop::Outcome(Outcome::DecodeBudget),

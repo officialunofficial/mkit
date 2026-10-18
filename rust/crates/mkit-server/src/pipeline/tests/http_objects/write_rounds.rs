@@ -1047,9 +1047,9 @@ const SHAPES: [(WOp, [Expect; 4]); 6] = [
                 phases: &[(PlanSnapshot, 3), (GuardedApply, 1)],
             },
             // Denial: a ticketless create cannot carry a packlist, so the
-            // open-closure check rejects at plan time — before any apply.
+            // open-closure check (retryable inside the lag window) rejects at plan time — before any apply.
             Expect {
-                outcome: "open closure",
+                outcome: "repository membership not yet visible",
                 kv: 5,
                 blobs: 2,
                 warm_ms: 180,
@@ -1070,7 +1070,7 @@ const SHAPES: [(WOp, [Expect; 4]); 6] = [
                 ],
             },
             Expect {
-                outcome: "open closure",
+                outcome: "repository membership not yet visible",
                 kv: 8,
                 blobs: 2,
                 warm_ms: 270,
