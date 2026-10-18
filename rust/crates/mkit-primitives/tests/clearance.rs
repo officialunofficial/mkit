@@ -70,7 +70,8 @@ fn facts<'a>(
     suffix: &'a [ClearanceAdvance<'a>],
     witnesses: &'a [DependencyWitness],
 ) -> ClearanceFacts<'a> {
-    let mut v = ClearanceFacts::new(RepositoryId([1; 32]), moment, prior, changed);
+    let previous = changed.state;
+    let mut v = ClearanceFacts::new(RepositoryId([1; 32]), moment, prior, changed, previous);
     v.suffix = suffix;
     v.witnesses = witnesses;
     v

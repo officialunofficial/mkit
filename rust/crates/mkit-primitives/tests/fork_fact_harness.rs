@@ -106,11 +106,13 @@ fn exhaust<F: Clone + PartialEq, D: std::fmt::Debug>(
         );
     }
     let mut changed_decision = 0;
+    let mut skipped = 0usize;
     for (name, mutate) in mutations {
         let mut variant = base.clone();
         mutate(&mut variant);
         if variant == *base {
             // The scenario already holds this value; nothing moved.
+            skipped += 1;
             continue;
         }
         let variant_live = live(&variant);
@@ -130,6 +132,10 @@ fn exhaust<F: Clone + PartialEq, D: std::fmt::Debug>(
             }
         }
     }
+    assert!(
+        skipped * 4 <= mutations.len(),
+        "{label}: too many mutations were no-ops in this scenario ({skipped})"
+    );
     assert!(
         changed_decision > 0,
         "{label}: the harness must find mutations that move the decision"
@@ -1104,8 +1110,8 @@ fn clearance_base(moment: ClearanceMoment) -> ClearanceFacts<'static> {
             moment,
             PriorPublication::new(1, 1, 1, 0, Some([1; 32]), Some([11; 32]), rev(9)),
             adv(2, ClearanceState::Cleared),
+            ClearanceState::Pending,
         );
-        v.previous_state = ClearanceState::Pending;
         v.suffix = &[];
         v.witnesses = Box::leak(Box::new([witness(PACKS[1]), witness(PACKS[2])]));
         v.lifecycle = ClearanceLifecycle::NotOffered;

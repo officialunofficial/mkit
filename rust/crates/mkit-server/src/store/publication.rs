@@ -572,8 +572,8 @@ fn clearance_prefix(
                 prior,
             ),
             changed_view,
+            obligation_state_from(changed.state),
         );
-        v.previous_state = obligation_state_from(changed.state);
         v.suffix = &views;
         v.witnesses = &[];
         v.lifecycle = ClearanceLifecycle::NotOffered;

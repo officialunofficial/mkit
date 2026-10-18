@@ -545,7 +545,8 @@ mod tests {
         assert!(!exceeds_admission(150, 150), "exact charge");
         assert!(
             !exceeds_admission(150, 1_000),
-            "a larger charge covers a smaller set; the portable decision refuses it"
+            "a larger charge covers a smaller set here; the portable decision \
+             requires equality (SPEC-SERVER 3.1)"
         );
         assert!(exceeds_admission(150, 149));
     }

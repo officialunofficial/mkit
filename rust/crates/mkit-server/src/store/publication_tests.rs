@@ -720,6 +720,7 @@ fn every_advance_writer_rewrites_the_publication_row() {
         let name = "refs/heads/main";
         let p = shards.ref_shard(&repo, name);
         let publication = keys::publication(&repo.name, name);
+        let mut advance_rows_written = 0;
         // Writer 1: `append` of a pending, a cleared and a deleting advance.
         for (deleted, state) in [
             (false, Clearance::Pending),
@@ -744,11 +745,13 @@ fn every_advance_writer_rewrites_the_publication_row() {
             .unwrap();
             let advance_key = keys::advance(&repo.name, name, written.sequence);
             if writes_key(&batch, &advance_key) {
+                advance_rows_written += 1;
                 assert!(writes_key(&batch, &publication), "append {state:?}");
                 assert!(compares_key(&batch, &publication), "append {state:?}");
             }
             assert_eq!(kv.apply(&p, batch).await.unwrap(), BatchOutcome::Committed);
         }
+        assert!(advance_rows_written > 0, "append wrote no advance row");
         // Writer 2: `clear` of a retained pending advance.
         let kv = MemoryKv::default();
         apply(&kv, &shards, name, advance(1, Clearance::Pending), false).await;
@@ -855,6 +858,18 @@ fn only_the_publication_store_constructs_advance_row_keys() {
             }
             let text = std::fs::read_to_string(&path).unwrap();
             let production = text.split("#[cfg(test)]").next().unwrap();
+            // No production code moves an advance row into a hold, hit or
+            // resolved state: those states exist only as stored-state decoding
+            // and clearance mapping, so no hold writer bypasses the publication row.
+            assert!(
+                !production.contains("state = Clearance::Held")
+                    && !production.contains("state = Clearance::Hit")
+                    && !production.contains("state = Clearance::Resolved")
+                    && !production.contains("state: Clearance::Held")
+                    && !production.contains("state: Clearance::Hit")
+                    && !production.contains("state: Clearance::Resolved"),
+                "{name} writes a held, hit or resolved advance state"
+            );
             let count = production.matches("keys::advance(").count();
             if count > 0 {
                 hits.push((name, count));
@@ -902,8 +917,8 @@ fn an_unaccounted_clearance_guard_fails_closed() {
                 v.sequence = 1;
                 v
             },
+            ClearanceState::Pending,
         );
-        v.previous_state = ClearanceState::Pending;
         v.suffix = &[];
         v.witnesses = &witnesses;
         v.lifecycle = ClearanceLifecycle::NotOffered;

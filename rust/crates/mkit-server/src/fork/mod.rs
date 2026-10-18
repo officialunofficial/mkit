@@ -471,8 +471,7 @@ pub enum Failure {
     TipChanged,
     /// The destination gained refs or conflicting rows during the job.
     Changed,
-    /// The job expired, its reservation was settled elsewhere, or the
-    /// authority it was authorized under moved.
+    /// The job expired or its reservation was settled elsewhere.
     Expired,
     /// Registering the destination was not permitted.
     Denied,

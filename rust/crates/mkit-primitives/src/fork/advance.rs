@@ -130,7 +130,8 @@ pub struct ForkAdvanceFacts {
     /// Original admission protection; absent for default admission.
     pub reservation: Option<ForkReservationFence>,
     /// Inclusive construction eligibility bound at phase start.
-    /// This is not a commit deadline. Accepted clearance ignores this bound.
+    /// A preparing `Advance` lowers it as a `ValidThrough` guard; accepted
+    /// clearance ignores this bound.
     pub construction_expires_ms: u64,
 }
 
@@ -442,8 +443,9 @@ pub struct ForkActivationFacts<'a> {
 }
 
 impl<'a> ForkActivationFacts<'a> {
-    /// Facts with no managed lifecycle protection, the accepted result equal
-    /// to the expected one, and no destination proof acquired. Assign the
+    /// Facts with no managed lifecycle protection, no saved accepted result (the
+    /// decision then refuses with `BindingMismatch`), and no destination proof
+    /// acquired. Assign the
     /// public fields that apply. The struct is `#[non_exhaustive]`.
     #[must_use]
     pub const fn new(
@@ -456,7 +458,7 @@ impl<'a> ForkActivationFacts<'a> {
             lifecycle: ForkLifecycleProtection::NotOffered,
             advance,
             expected_result,
-            accepted_result: Some(expected_result),
+            accepted_result: None,
             inherited_packs,
             unit,
             proof: None,
@@ -652,8 +654,8 @@ pub struct ForkCompletionFacts<'a> {
 }
 
 impl<'a> ForkCompletionFacts<'a> {
-    /// Facts with no managed lifecycle protection and the accepted result
-    /// equal to the expected one. Assign the public fields that apply. The
+    /// Facts with no managed lifecycle protection and no saved accepted result
+    /// (the decision then refuses with `BindingMismatch`). Assign the public fields that apply. The
     /// struct is `#[non_exhaustive]`.
     #[must_use]
     pub const fn new(
@@ -669,7 +671,7 @@ impl<'a> ForkCompletionFacts<'a> {
             lifecycle: ForkLifecycleProtection::NotOffered,
             advance,
             expected_result,
-            accepted_result: Some(expected_result),
+            accepted_result: None,
             completed_cursor,
             completed_part,
             completed_packs,

@@ -272,21 +272,22 @@ pub struct ClearanceFacts<'a> {
 }
 
 impl<'a> ClearanceFacts<'a> {
-    /// Facts with the changed advance's own state as the previous state, no
-    /// retained suffix, no witnesses, no lifecycle protection and no deletion.
-    /// Assign the public fields that apply. The struct is `#[non_exhaustive]`.
+    /// Facts with no retained suffix, no witnesses, no lifecycle protection
+    /// and no deletion. `previous_state` is explicit: it decides whether a
+    /// retained `Hit` may become `Cleared`. Assign the public fields that apply. The struct is `#[non_exhaustive]`.
     #[must_use]
     pub const fn new(
         repository: RepositoryId,
         moment: ClearanceMoment,
         prior: PriorPublication,
         changed: ClearanceAdvance<'a>,
+        previous_state: ClearanceState,
     ) -> Self {
         Self {
             repository,
             moment,
             prior,
-            previous_state: changed.state,
+            previous_state,
             changed,
             suffix: &[],
             witnesses: &[],
@@ -417,6 +418,8 @@ impl ClearanceFacts<'_> {
             .iter()
             .filter(|id| !self.changed.additions.contains(id))
             .chain(self.changed.external_suppliers);
+        // The absence row carries the all-zero sentinel revision: it names "no
+        // witness supplied", not a storage absence token.
         for object in needed {
             if !self.witnesses.iter().any(|w| w.object == *object)
                 && !out.iter().any(|g| {

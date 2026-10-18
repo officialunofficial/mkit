@@ -351,6 +351,9 @@ pinned by a test in `fork::decision`:
   mismatch; a reservation settled elsewhere ends the job as `Expired`; a
   differing request binding is a different job and a replay-scope conflict is
   decided before any job exists.
+- **Stored classes without a portable analog.** `TooLarge` (a bound of this
+  implementation) has none, and `TipChanged` is reported to the caller as the
+  uniform source-not-found answer at acceptance.
 - **Destination denial at activation.** The server holds no durable denial row
   revision. The proof's denial revision is a request-local token bound to the
   pack and the proof window, and the denial itself is read fresh just before the
