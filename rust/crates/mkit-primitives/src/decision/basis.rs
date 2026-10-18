@@ -36,7 +36,7 @@ use crate::{
         MemberFact, PackSource, RepositoryId,
         acceptance::{AcceptanceEvidence, MembershipWitness},
     },
-    pack_verify::VerifiedPack,
+    pack_verify::{ExternalBases, VerifiedPack},
 };
 use mkit_core::hash::{self, Hash, ZERO};
 use std::collections::BTreeMap;
@@ -114,10 +114,11 @@ impl AcceptanceBasis {
     /// over the pack's identity and length, its object-set root and the closure
     /// root (requested heads and witness chain).
     ///
-    /// `external_bases` are the membership facts the host supplied while the
-    /// pack was verified. The verification evidence pages are scoped to that
-    /// run, so the primitive cannot re-derive them: completeness against the
-    /// sealed dependency sequence is the host's obligation. `coverage`, when given, must
+    /// `external_bases` is every membership fact the host supplied while the
+    /// pack was verified, re-requests included, in any order. It is recomputed
+    /// against the verifier's sealed commitment (count and hash sum), so an
+    /// omitted, extra or altered base is `EvidenceBindingMismatch`. Duplicates
+    /// then collapse to one guard per object. `coverage`, when given, must
     /// describe the same repository, view and ruleset as the proof; it is
     /// validated only and contributes no guard. Two witnesses that disagree on
     /// one supplier's published or held state are inconsistent observations
@@ -155,6 +156,12 @@ impl AcceptanceBasis {
         }
         let repository = proof.repository();
         let mut facts = witness_facts(proof, witness_pages, cfg)?;
+        // The supplied list must be exactly what the verification received,
+        // re-requests included, so an omitted, extra or altered base is an error
+        // rather than a missing guard.
+        if ExternalBases::of(external_bases)? != verified.external_bases() {
+            return Err(failure(FailureCode::EvidenceBindingMismatch));
+        }
         merge_external_bases(&mut facts, external_bases, repository, cfg)?;
         let mut guards = Vec::new();
         guards
@@ -360,10 +367,9 @@ fn witness_facts<P: AsRef<[u8]>>(
 
 /// Add the external delta-base facts the host supplied during verification.
 ///
-/// The primitive cannot recompute them: the verification evidence pages are
-/// scoped to the run, so completeness against the sealed dependency sequence is
-/// the host's obligation (SPEC-PRIMITIVE-EVIDENCE 4.4). Each fact must belong to
-/// the proof's repository; a fact repeated for one object must be identical.
+/// The list was already checked against the sealed commitment. Each fact must
+/// belong to the proof's repository; a fact repeated for one object must be
+/// identical.
 fn merge_external_bases(
     facts: &mut Vec<MemberFact>,
     bases: &[MemberFact],

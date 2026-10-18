@@ -215,7 +215,7 @@ indexed_content_profile:
 run_generation:u64
 request_sequence:u64
 phase:u8                         0 header, 1 integrity, 2 decode, 3 complete,
-                                 4 integrity drain (version 3 only)
+                                 4 integrity drain (version 4 only)
 header:optional(pack_version:u32, entry_count:u32)
 consumed_entries:u64
 consumed_wire_payload:u64
@@ -261,7 +261,7 @@ entry count and trailer boundary.
 For a format version 1 checkpoint, acknowledged page count MUST equal consumed
 entry count and cumulative evidence page count. A last retained commitment
 exists exactly when this count is nonzero; it names one occurrence record. A
-format version 3 checkpoint instead records the cumulative acknowledged page
+format version 4 checkpoint instead records the cumulative acknowledged page
 count, which MUST be at least the number of pages the host still holds
 (`evidence_pages`; released pages leave that count), and its last retained
 commitment may name any acknowledged evidence page kind, including one the host
@@ -271,12 +271,12 @@ caller's expected source, repository, ruleset, limits, and run binding, and
 checks core cursor metadata against the outer phase and counters. Successful
 envelope decoding alone does not perform those resume checks.
 
-#### 4.1.1 Verify-state section (format version 3)
+#### 4.1.1 Verify-state section (format version 4)
 
 **Protocol requirement.**
 
-`format_version:u16 = 3` appends one verify-state section after `core_cursor`
-and before `checksum`. The section exists exactly when the version is 3 and
+`format_version:u16 = 4` appends one verify-state section after `core_cursor`
+and before `checksum`. The section exists exactly when the version is 4 and
 the phase is decode or integrity drain. Version 1 remains the framing-only
 format and carries no section. Version 2 is unsupported; discard that
 reconstructible state and restart from the immutable source. Every earlier
@@ -296,6 +296,8 @@ delta_entries:u64
 decoded:u64
 edges:u64
 external_lookups:u64
+external_sum:[32]                      wrapping little-endian 256-bit sum over the
+                                       external-base facts received (see below)
 signature_failure:optional(object_id[32], ordinal:u64)
 deferred_refusal:optional(
   code:u8,
@@ -342,6 +344,12 @@ Consistency rules for decode phase, all of which resume MUST check before progre
 - `ordinals.count <= consumed_entries`, `heads.count <= ordinals.count`,
   `delta_entries <= consumed_entries`, and
   `dependencies.count <= edges + external_lookups`.
+- `external_lookups` and `external_sum` are the count and wrapping 256-bit sum of
+  `domain_digest("mkit-external-base:v1", record)` over every external member
+  fact the verification accepted, re-requests included, where `record` is the
+  external dependency record encoding with consumed ordinal and child zeroed.
+  The sealed `VerifiedPack` carries the same pair, so a host recomputes it from
+  the facts it supplied and an omitted or altered base is detectable.
 - `decoded` fits both the encoded execution limits and the encoded content
   profile; `edges` and `external_lookups` fit the encoded execution limits.
 - A present `signature_failure` ordinal is below `consumed_entries`.
@@ -602,7 +610,7 @@ three guards, and an attestation only the guards its present fields name.
 
 | Constructor | Derives |
 |---|---|
-| From sealed `VerifiedPack`, `ClosureProof` and the proof's witness chain, plus the external delta-base facts the host supplied during verification | A `Membership` guard (the exact member fact) and a `DependencyPublication` guard (the supplier's published and held state for that object) for every relied-on closure witness and every external delta base, one global denial version, and a root binding over the pack id and length, the object-set root and the closure root (heads root and witness-chain root). The pack and proof must agree on object-set root and ruleset; an optional pair coverage must agree on repository, view and ruleset and is validated only. A missing, extra, reordered or unauthenticated witness page is `InvalidResponse`; an external base for another repository is a binding mismatch; one object with two different facts is `InvalidResponse`; an exhausted allowance (at most 4096 distinct dependencies) is `ResourceLimit`, never a truncated set. |
+| From sealed `VerifiedPack`, `ClosureProof` and the proof's witness chain, plus the external delta-base facts the host supplied during verification | A `Membership` guard (the exact member fact) and a `DependencyPublication` guard (the supplier's published and held state for that object) for every relied-on closure witness and every external delta base, one global denial version, and a root binding over the pack id and length, the object-set root and the closure root (heads root and witness-chain root). The supplied external bases must reproduce the pack's sealed external-base commitment. The pack and proof must agree on object-set root and ruleset; an optional pair coverage must agree on repository, view and ruleset and is validated only. A missing, extra, reordered or unauthenticated witness page is `InvalidResponse`; an external base for another repository is a binding mismatch; one object with two different facts is `InvalidResponse`; an exhausted allowance (at most 4096 distinct dependencies) is `ResourceLimit`, never a truncated set. |
 | From decoded `AcceptanceEvidence` (decide-at-writer) | Exactly three guards: one repository-scoped membership witness over the pair (generation, removal version), compared atomically with exact match on both fields; one global denial version, compared exactly; and a root binding, the evidence digest. |
 | From a host attestation (`attested_by_host`) | Only the guards for the fields the attestation carries: an optional membership witness, optional global denial version, optional root, and any observed dependency facts. |
 
@@ -614,13 +622,16 @@ membership witness and denial version by their typed guards; and every remaining
 field (object and delta counts, object-set root, head records, dependency ids)
 by the root binding, which binds the whole canonical envelope.
 
-**Limits of the sealed-artifact constructor.** The external delta bases a pack
-relied on were answered by the host while the pack was verified, and the
-verification evidence pages are scoped to that run, so the primitive cannot
-re-derive them afterwards: the host passes the facts it supplied, and
-completeness against the sealed dependency sequence is the host's obligation.
-The resulting-pair coverage's dependency and supplier id sets carry no member
-facts; they stay with the clearance decision's dependency witnesses.
+**External delta bases fail closed.** The verifier keeps an order-independent
+commitment (count and wrapping hash sum) over every external member fact it
+accepted, re-requests included, and seals it in the verified pack and in the
+checkpoint. The sealed-artifact constructor takes the host's list of supplied
+facts and refuses (`EvidenceBindingMismatch`) unless its recomputed commitment
+equals the sealed one, so an omitted, extra or altered base is an error; it then
+collapses duplicates to one guard per object. The resulting-pair coverage's
+dependency and supplier id sets carry no member facts; they stay with the
+clearance decision's dependency witnesses, and the constructor validates the
+coverage's repository, view and ruleset only.
 
 **Trust boundary.** The sealed-artifact and evidence constructors establish
 what their artifacts establish. A host attestation establishes nothing: the host
@@ -638,7 +649,7 @@ ticketed acceptance and is intentionally greppable.
 | Page | 1 | Initial source-bound canonical page envelope; kinds 4–5 added with verify. |
 | Proof | 1 | Exact routed root-to-leaf page path. |
 | Frame record | 1 | Ordered framing-only retention chain. |
-| Checkpoint | 1, 3 | Framing uses 1; one-pass verification uses 3 with exact-boundary hashing and deferred refusal; its usage counts the pages the host holds. Version 2 is unsupported; restart. |
+| Checkpoint | 1, 4 | Framing uses 1; one-pass verification uses 4 with exact-boundary hashing, deferred refusal and the external-base commitment; its usage counts the pages the host holds. Versions 2 and 3 are unsupported; restart. |
 | Verify records | 1 | All-entry object, occurrence, ordinal, head, and dependency evidence. |
 
 ## 6. Test vectors

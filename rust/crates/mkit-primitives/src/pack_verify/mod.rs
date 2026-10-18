@@ -223,6 +223,67 @@ pub struct EvidenceSequence {
     /// Exact committed record count.
     pub count: u64,
 }
+/// Order-independent commitment to every external delta-base fact a verification
+/// received, re-requests included: their count and the 256-bit wrapping sum of
+/// their domain-separated hashes.
+///
+/// The host that supplied the facts can recompute it from its own list, so an
+/// omitted, extra or altered base is detectable without any retained page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExternalBases {
+    /// Number of facts received.
+    pub count: u64,
+    /// Wrapping little-endian 256-bit sum of the facts' domain-separated hashes.
+    pub sum: Hash,
+}
+impl ExternalBases {
+    /// The commitment of no external base.
+    pub const EMPTY: Self = Self {
+        count: 0,
+        sum: [0; 32],
+    };
+    /// Add one received fact.
+    ///
+    /// # Errors
+    /// `ResourceLimit` if the count would overflow.
+    pub fn add(&mut self, fact: &crate::evidence::MemberFact) -> Result<(), crate::error::Failure> {
+        let record = verify::records::DependencyRecord::External {
+            consumed_ordinal: 0,
+            child: [0; 32],
+            fact: fact.clone(),
+        }
+        .to_bytes();
+        let digest = mkit_core::hash::domain_digest(b"mkit-external-base:v1", &record);
+        self.count = self
+            .count
+            .checked_add(1)
+            .ok_or_else(|| crate::error::Failure {
+                code: crate::error::FailureCode::ResourceLimit,
+                location: crate::error::Location::default(),
+                detail: crate::error::BoundedDetail::None,
+            })?;
+        let mut carry = 0u16;
+        for (sum, add) in self.sum.iter_mut().zip(digest) {
+            let total = u16::from(*sum) + u16::from(add) + carry;
+            *sum = total.to_le_bytes()[0];
+            carry = total >> 8;
+        }
+        Ok(())
+    }
+    /// Commitment of a list, in any order.
+    ///
+    /// # Errors
+    /// `ResourceLimit` if the count would overflow.
+    pub fn of<'a>(
+        facts: impl IntoIterator<Item = &'a crate::evidence::MemberFact>,
+    ) -> Result<Self, crate::error::Failure> {
+        let mut commitment = Self::EMPTY;
+        for fact in facts {
+            commitment.add(fact)?;
+        }
+        Ok(commitment)
+    }
+}
 /// Sealed all-entry indexed verification. Construction belongs to this module.
 ///
 /// It carries root digests and counts, not the evidence pages. Pages are scoped
@@ -258,6 +319,7 @@ pub struct VerifiedPack {
     dependencies: EvidenceSequence,
     ordinals: EvidenceSequence,
     heads: EvidenceSequence,
+    external_bases: ExternalBases,
 }
 impl VerifiedPack {
     /// Seals a completed run. Only the verify driver may construct this; all
@@ -276,6 +338,7 @@ impl VerifiedPack {
         dependencies: EvidenceSequence,
         ordinals: EvidenceSequence,
         heads: EvidenceSequence,
+        external_bases: ExternalBases,
     ) -> Self {
         Self {
             source,
@@ -290,6 +353,7 @@ impl VerifiedPack {
             dependencies,
             ordinals,
             heads,
+            external_bases,
         }
     }
     /// A pack that no verification produced, for tests of consumers only.
@@ -299,6 +363,16 @@ impl VerifiedPack {
     #[cfg(any(test, feature = "synthetic-artifacts"))]
     #[doc(hidden)]
     pub fn synthetic_for_tests(object_set_root: Hash, ruleset: RulesetBinding) -> Self {
+        Self::synthetic_with_external_bases(object_set_root, ruleset, ExternalBases::EMPTY)
+    }
+    /// [`Self::synthetic_for_tests`] with an external-base commitment.
+    #[cfg(any(test, feature = "synthetic-artifacts"))]
+    #[doc(hidden)]
+    pub fn synthetic_with_external_bases(
+        object_set_root: Hash,
+        ruleset: RulesetBinding,
+        external_bases: ExternalBases,
+    ) -> Self {
         let sequence = EvidenceSequence {
             root: [0; 32],
             count: 0,
@@ -330,6 +404,7 @@ impl VerifiedPack {
             sequence,
             sequence,
             sequence,
+            external_bases,
         )
     }
     /// Requested and computed whole-pack identity; equality is established at sealing.
@@ -404,6 +479,11 @@ impl VerifiedPack {
     #[must_use]
     pub const fn ordinals(&self) -> EvidenceSequence {
         self.ordinals
+    }
+    /// Commitment to every external delta-base fact the verification received.
+    #[must_use]
+    pub const fn external_bases(&self) -> ExternalBases {
+        self.external_bases
     }
     /// Authenticated head-fact sequence.
     #[must_use]

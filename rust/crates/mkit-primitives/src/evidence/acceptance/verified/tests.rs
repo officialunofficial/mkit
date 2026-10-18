@@ -1025,6 +1025,14 @@ mod basis {
     fn verified() -> VerifiedPack {
         VerifiedPack::synthetic_for_tests([0x44; 32], rules())
     }
+    /// A pack whose verification received exactly these external bases.
+    fn verified_with(bases: &[MemberFact]) -> VerifiedPack {
+        VerifiedPack::synthetic_with_external_bases(
+            [0x44; 32],
+            rules(),
+            crate::pack_verify::ExternalBases::of(bases).unwrap(),
+        )
+    }
     fn kinds(basis: &AcceptanceBasis) -> Vec<GuardKind> {
         let mut kinds = Vec::new();
         for guard in basis.guards() {
@@ -1070,11 +1078,12 @@ mod basis {
     #[test]
     fn from_verified_guards_every_relied_on_dependency_the_denial_and_the_roots() {
         let (proof, pages) = proof_with_three_members();
+        let relied = [external_base(0x10)];
         let basis = derive(
-            &verified(),
+            &verified_with(&relied),
             &proof,
             &all(&pages),
-            &[external_base(0x10)],
+            &relied,
             &cfg(),
         )
         .unwrap();
@@ -1098,7 +1107,7 @@ mod basis {
             assert!(kinds(&basis).contains(&kind), "{kind:?}");
         }
         // The pack the basis covers is the sealed pack, by identity and length.
-        let sealed = verified();
+        let sealed = verified_with(&relied);
         assert!(basis.covers(&sealed.pack_id(), sealed.len()));
         assert!(!basis.covers(&sealed.pack_id(), sealed.len() + 1));
         assert!(!basis.covers(&[0x42; 32], sealed.len()));
@@ -1186,10 +1195,89 @@ mod basis {
     }
 
     #[test]
+    fn a_pair_coverage_must_match_the_proof_and_adds_no_guard() {
+        use crate::closure::pair::PairCoverage;
+        let (proof, pages) = proof_with_three_members();
+        let pages = all(&pages);
+        let go = |coverage: &PairCoverage| {
+            AcceptanceBasis::from_verified(
+                &verified(),
+                &proof,
+                Some(coverage),
+                9,
+                pages.iter().copied(),
+                &[],
+                &cfg(),
+            )
+        };
+        let matching = PairCoverage::for_tests(REPOSITORY, VIEW, rules());
+        let without = derive(&verified(), &proof, &pages, &[], &cfg()).unwrap();
+        // A matching coverage is validated only: the guards are unchanged.
+        assert_eq!(go(&matching).unwrap().guards(), without.guards());
+        // Each differing scope fact is a binding mismatch.
+        let wrong_repository = PairCoverage::for_tests(RepositoryId([0x23; 32]), VIEW, rules());
+        let wrong_view = PairCoverage::for_tests(REPOSITORY, Revision([0x56; 32]), rules());
+        let wrong_ruleset = PairCoverage::for_tests(
+            REPOSITORY,
+            VIEW,
+            RulesetBinding {
+                ruleset: RulesetId(2),
+                ..rules()
+            },
+        );
+        for (name, coverage) in [
+            ("repository", wrong_repository),
+            ("view", wrong_view),
+            ("ruleset", wrong_ruleset),
+        ] {
+            assert_eq!(
+                go(&coverage).unwrap_err().code,
+                FailureCode::EvidenceBindingMismatch,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_external_base_list_must_match_the_sealed_commitment() {
+        let (proof, pages) = proof_with_three_members();
+        let pages = all(&pages);
+        let (a, b) = (external_base(0x10), external_base(0x11));
+        // The verification received a, b and a again (a re-request).
+        let received = [a.clone(), b.clone(), a.clone()];
+        let sealed = verified_with(&received);
+        let go = |supplied: &[MemberFact]| derive(&sealed, &proof, &pages, supplied, &cfg());
+        // Any order is the same multiset.
+        let ok = go(&[b.clone(), a.clone(), a.clone()]).unwrap();
+        assert_eq!(ok.guards().len(), 2 * 2 + 3 * 2 + 2);
+        // An omitted base, an omitted re-request, an extra base and an altered
+        // base are each an error, never a missing guard.
+        let mut altered = b.clone();
+        altered.revision = Revision([0x12; 32]);
+        for (name, supplied) in [
+            ("omitted base", vec![a.clone(), a.clone()]),
+            ("omitted re-request", vec![a.clone(), b.clone()]),
+            (
+                "extra base",
+                vec![a.clone(), b.clone(), a.clone(), external_base(0x13)],
+            ),
+            ("altered base", vec![a.clone(), altered, a.clone()]),
+            ("none", vec![]),
+        ] {
+            assert_eq!(
+                go(&supplied).unwrap_err().code,
+                FailureCode::EvidenceBindingMismatch,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
     fn external_bases_are_scoped_deduplicated_and_never_contradictory() {
         let (proof, pages) = proof_with_three_members();
         let pages = all(&pages);
-        let go = |bases: &[MemberFact]| derive(&verified(), &proof, &pages, bases, &cfg());
+        let go =
+            |bases: &[MemberFact]| derive(&verified_with(bases), &proof, &pages, bases, &cfg());
         // A base from another repository is refused.
         let mut foreign = external_base(0x10);
         foreign.repository = RepositoryId([0x23; 32]);

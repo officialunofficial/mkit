@@ -200,8 +200,8 @@ fn write_checkpoint_fixtures(
     let m = state.meta;
     let last = m.last_retained.unwrap();
     let json = serde_json::json!({
-        "description": "Format version 3 all-entry verification checkpoint at the first entry boundary, including exact acquisition hash frontiers and bounded deferred-refusal state.",
-        "format_version": 3, "expected": "Checkpoint", "encoded_bytes": snapshot.bytes().len(),
+        "description": "Format version 4 all-entry verification checkpoint at the first entry boundary, including exact acquisition hash frontiers and bounded deferred-refusal state and the external-base commitment.",
+        "format_version": 4, "expected": "Checkpoint", "encoded_bytes": snapshot.bytes().len(),
         "cursor_bytes": state.cursor.len(), "generation": m.generation,
         "header": { "version": m.header.unwrap().0, "count": m.header.unwrap().1 },
         "ordinal": m.ordinal, "payload_bytes": m.payload, "phase": "decode", "integrity": null,
@@ -221,7 +221,7 @@ fn write_checkpoint_fixtures(
     .unwrap();
     let header = include_bytes!("../../../../fixtures/evidence/checkpoint-header.bin");
     let mut unsupported = header[..header.len() - 32].to_vec();
-    unsupported[4..6].copy_from_slice(&4_u16.to_le_bytes());
+    unsupported[4..6].copy_from_slice(&5_u16.to_le_bytes());
     let checksum = hash::domain_digest(b"mkit-checkpoint-checksum:v1", &unsupported);
     unsupported.extend_from_slice(&checksum);
     std::fs::write(destination.join("checkpoint-version.bin"), &unsupported).unwrap();

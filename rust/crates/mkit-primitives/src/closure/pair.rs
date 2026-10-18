@@ -375,6 +375,22 @@ pub struct PairCoverage {
     external_suppliers: Vec<Hash>,
 }
 impl PairCoverage {
+    /// A coverage no walk produced, for this crate's tests of consumers only.
+    #[cfg(test)]
+    pub(crate) fn for_tests(
+        repository: RepositoryId,
+        view: Revision,
+        ruleset: RulesetBinding,
+    ) -> Self {
+        Self {
+            repository,
+            view,
+            ruleset,
+            pair: ResultingPair::default(),
+            dependencies: Vec::new(),
+            external_suppliers: Vec::new(),
+        }
+    }
     /// Repository whose membership was observed.
     #[must_use]
     pub const fn repository(&self) -> RepositoryId {

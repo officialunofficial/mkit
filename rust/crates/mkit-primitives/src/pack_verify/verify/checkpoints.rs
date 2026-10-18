@@ -110,6 +110,7 @@ impl VerifyDriver {
         machine.delta_entries = verify.delta_entries;
         machine.edges = verify.edges;
         machine.external_lookups = verify.external_lookups;
+        machine.external_sum = verify.external_sum;
         machine.signature_failure = verify.signature_failure;
         machine.deferred_failure = verify.deferred_failure.map(DeferredFailure::failure);
         // The audit below re-reads every page the checkpoint reaches. The
@@ -305,6 +306,7 @@ impl VerifyDriver {
                     decoded: self.decoded,
                     edges: self.edges,
                     external_lookups: self.external_lookups,
+                    external_sum: self.external_sum,
                     signature_failure: self.signature_failure,
                     deferred_failure: self.deferred_failure.as_ref().map(DeferredFailure::from),
                 }),

@@ -32,7 +32,7 @@ spec = "SPEC-PRIMITIVE-EVIDENCE"
 
 [[formats]]
 type = "verify-checkpoint"
-format_version = 3
+format_version = 4
 decoder = "evidence::checkpoint::Checkpoint::from_bytes"
 fuzz_target = "checkpoint"
 spec = "SPEC-PRIMITIVE-EVIDENCE"
@@ -800,7 +800,7 @@ decode_config = "indexed-checkpoint"
 expected = "InvalidCheckpoint"
 spec = "SPEC-PRIMITIVE-EVIDENCE checkpoint envelope"
 path = "evidence/checkpoint-version.bin"
-sha256 = "a32a7332f1e2e169b4e2f97806fff486a71ef06fb6c42af6dab8117a8ae104d3"
+sha256 = "686f823a14875f7d0d4a8a675ebbbd84a506e06266ee34fe25b3f5b8550d3985"
 semantic = "evidence/checkpoint-version.json"
 semantic_sha256 = "12c2448de56f95e96a1defcd53030acfd2457ac965aee34936738b8750c179a3"
 
@@ -897,16 +897,16 @@ semantic_sha256 = "e700621a5049b9fe2d53c480863fd1171840fab31cf44605684edd683b2cc
 
 [[fixtures]]
 type = "verify-checkpoint"
-format_version = 3
+format_version = 4
 ruleset = 1
 profile = "indexed"
 decode_config = "indexed-checkpoint"
 expected = "Checkpoint"
 spec = "SPEC-PRIMITIVE-EVIDENCE checkpoint envelope"
 path = "evidence/checkpoint-verify.bin"
-sha256 = "4dec37dd4a7e7eb7acd90647f1e934b9b99a021cade452dce8c02b3d1d8d1ae8"
+sha256 = "540856732a7ddeaa9170005e0b35e088a772c9d8d0d5ce387310eff1fe03eb6c"
 semantic = "evidence/checkpoint-verify.json"
-semantic_sha256 = "508878d2020499d2c63b005a44c8dda02ab888b4e60a2e4d90e5515d2f891c8a"
+semantic_sha256 = "214d419e9f9e24363834cf94fe2804b102c0240c698db93ac7a6a7a6c5dc4085"
 
 [[fixtures]]
 type = "evidence-page"

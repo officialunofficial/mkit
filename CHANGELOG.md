@@ -55,7 +55,8 @@ collect the applicable entries between their old and new immutable pins.
   variant is replaced by `Verified(&[AcceptanceBasis])`: pass one basis per
   accepted pack, built with `AcceptanceBasis::from_verified` (sealed pack,
   closure proof, witness pages and the external delta-base facts you supplied
-  during verification), `from_evidence` (decoded `AcceptanceEvidence`) or
+  during verification, which must reproduce the pack's sealed external-base
+  commitment, `VerifiedPack::external_bases()`), `from_evidence` (decoded `AcceptanceEvidence`) or
   `attested_by_host(HostAttestation)` (a host that verified with its own
   pipeline; it derives guards only from the fields it carries). The decision adds
   the basis guards to its guard set, so `RequiredGuard` gains
@@ -71,7 +72,9 @@ collect the applicable entries between their old and new immutable pins.
   `ClosureWalker::new` takes `&VerifiedPack` after the view and refuses a view
   or ruleset that differs from it. `Guarded::into_lowering` returns the owned
   parts. The new `synthetic-artifacts` feature fabricates a sealed pack for consumer
-  tests only. The reference server attests with no fields, so its guard set,
+  tests only. The all-entry verification checkpoint is now version 4 (it adds
+  the external-base commitment); version 3 checkpoints are not decoded, so
+  restart them from the immutable source. The reference server attests with no fields, so its guard set,
   reads and stored formats are unchanged; no store reset is required.
 - [embedder: breaking API] Guard completeness for the ALPHA decisions in
   `mkit-primitives`. (1) `TicketedAdvanceRequest::authority_generation` is

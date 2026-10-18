@@ -169,8 +169,8 @@ Crate API version, normative ruleset, semantic profile, and encoded format
 versions are separate contracts. The initial indexed ruleset is 1. Page,
 proof, pair-coverage checkpoint, and ordered framing-record formats use version
 1. Framing checkpoints use envelope version 1; all-entry verification
-checkpoints use version 3 and bind six evidence roots, cumulative verification
-counters, and any deferred refusal.
+checkpoints use version 4 and bind six evidence roots, cumulative verification
+counters, the external-base commitment, and any deferred refusal.
 Unsupported disposable state versions require restart from the immutable
 source; historical readers are not promised. Existing pack and object bytes
 remain unchanged.

@@ -314,6 +314,8 @@ pub struct VerifyDriver {
     delta_entries: u64,
     edges: u64,
     external_lookups: u64,
+    /// Sum commitment over every external base fact received, re-requests included.
+    external_sum: Hash,
     header: Option<(u32, u32)>,
     /// Lowest object id whose signature failed, and its wire ordinal.
     signature_failure: Option<(Hash, u64)>,
@@ -447,6 +449,7 @@ impl VerifyDriver {
             delta_entries: 0,
             edges: 0,
             external_lookups: 0,
+            external_sum: [0; 32],
             header: None,
             signature_failure: None,
             decoder_reservation,
@@ -855,7 +858,13 @@ impl VerifyDriver {
         if external_lookups > self.limits.external_lookups {
             return Err(failure(FailureCode::ResourceLimit));
         }
+        let mut bases = super::ExternalBases {
+            count: self.external_lookups,
+            sum: self.external_sum,
+        };
+        bases.add(&fact)?;
         self.external_lookups = external_lookups;
+        self.external_sum = bases.sum;
         self.pending = None;
         let canonical_len = fact.canonical_len;
         let binding = fact.canonical_binding;
@@ -1932,6 +1941,10 @@ impl VerifyDriver {
             EvidenceSequence {
                 root: self.heads.commitment().digest,
                 count: self.heads.committed(),
+            },
+            super::ExternalBases {
+                count: self.external_lookups,
+                sum: self.external_sum,
             },
         ));
         self.phase = Phase::Complete;
