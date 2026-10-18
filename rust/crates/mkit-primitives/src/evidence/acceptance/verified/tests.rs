@@ -689,6 +689,9 @@ fn verify_pack(pack: &[u8], canonical: &BTreeMap<Hash, Vec<u8>>) -> VerifiedPack
                         })
                         .expect("retained page response");
                 }
+                Request::Compute { .. } => {
+                    panic!("acceptance verification issues no compute jobs")
+                }
             },
             Step::ProvisionalObject(fragment) => fragments
                 .entry(fragment.ordinal)
