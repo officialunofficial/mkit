@@ -15,6 +15,12 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Breaking (toward 0.6)
 
+- [embedder: breaking API] [embedder: stored-format change] Scheduled
+  verification job headers add optional `VerifyJobV1::integrity` progress.
+  Migration: use `VerifyJobV1::new`, or initialize `integrity: None` in job
+  literals. This disposable state cannot establish verification. Successful
+  jobs omit the field; no repository store reset is required.
+
 - [embedder: breaking API] The all-entry pack verifier adds
   `PackCounts::delta_entries` and replaces
   `VerifiedPack::external_dependencies()` with `dependencies()`. Migration:
@@ -207,6 +213,15 @@ collect the applicable entries between their old and new immutable pins.
   change; no wipe.
 
 ### Fixed
+
+- Scheduled pack verification now applies SPEC-PACKFILE §§6.1 and 6.2 when
+  integrity and entry faults compete. A corrupt trailer with a missing delta
+  base or an indexed decode-limit violation produces the same persisted
+  `invalid_argument: object hash mismatch` rejection as inline verification.
+  Previously, scheduled verification could select the base or limit refusal
+  first. A missing base with a valid trailer retains its membership-lag
+  handling and never becomes a persisted rejection. Extra source reads occur
+  only after an early entry refusal; successful verification adds no reads.
 
 - Preserve reference diagnostics for partial signed envelopes in the portable
   auth header precheck, including a missing version, audience, content

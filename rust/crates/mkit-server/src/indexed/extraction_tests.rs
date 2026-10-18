@@ -1,4 +1,6 @@
 //! Scheduled extraction acceptance, using the same native verifier as the oracle.
+#[path = "closure_differential_tests.rs"]
+mod closure_differential_tests;
 #[path = "extraction_chain_tests.rs"]
 mod extraction_chain_tests;
 #[path = "extraction_count_tests.rs"]

@@ -6,6 +6,7 @@
 //! commits a slice. Settled children are deleted with that checkpoint, so a
 //! crash cannot discard the satisfying-pack dependency.
 
+pub use super::job::integrity::IntegrityCheck;
 use super::state::VerificationV1;
 use crate::repo::RepoName;
 use crate::store::{
@@ -168,6 +169,9 @@ pub struct VerifyJobV1 {
     /// `WindowCursor` bytes at the last checkpoint; empty before the first.
     #[serde(with = "hex::bytes")]
     pub cursor: Vec<u8>,
+    /// Failure-only source integrity progress; never grants verified status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integrity: Option<IntegrityCheck>,
     /// Object-store etag every window read is bound to (SPEC-PACKFILE §11).
     pub etag: Option<String>,
     /// Entries decoded up to `cursor`.
@@ -385,6 +389,9 @@ pub fn decode_job(value: &Value) -> Result<VerifyJobV1, StoreError> {
     let Some((&CODEC_V1, body)) = value.as_bytes().split_first() else {
         return Err(StoreError::Corrupt("bad verification job version".into()));
     };
+    if value.as_bytes().len() > MAX_JOB_HEADER_BYTES {
+        return Err(StoreError::Corrupt("oversized job header".into()));
+    }
     let job: VerifyJobV1 = serde_json::from_slice(body)
         .map_err(|_| StoreError::Corrupt("bad verification job".into()))?;
     validate_header(&job, value)?;
@@ -398,6 +405,9 @@ pub const MAX_JOB_HEADER_BYTES: usize = 16 << 10;
 fn validate_header(job: &VerifyJobV1, raw: &Value) -> Result<(), StoreError> {
     let bounded = raw.as_bytes().len() <= MAX_JOB_HEADER_BYTES
         && job.cursor.len() <= 4096
+        && job.integrity.as_ref().is_none_or(|check| {
+            check.valid(job.pack_len) && job.phase == Phase::Decode && job.kind == Kind::Pack
+        })
         && job.scan.len() <= 324
         && job.etag.as_ref().is_none_or(|e| e.len() <= 64)
         && job.extraction_group.len() <= crate::store::outbox::MAX_TICKETS_PER_ADVANCE

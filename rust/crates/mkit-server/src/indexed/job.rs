@@ -61,6 +61,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
 mod extraction;
+pub(super) mod integrity;
 #[cfg(test)]
 mod probe;
 mod tiny;
@@ -755,6 +756,38 @@ where
         let mut result = self
             .observed_step(&mut st, &mut job, state.as_ref(), &mut held)
             .await;
+        // Only early entry refusals need an integrity recheck. Roll unfinished
+        // entry charges back to the last durable boundary; pure rows already
+        // committed there remain provisional until the original decode finishes.
+        if old_phase == Phase::Decode
+            && start.integrity.is_none()
+            && job.kind == Kind::Pack
+            && job.pack_len
+                <= mkit_core::pack::MAX_TOTAL_PAYLOAD
+                    + u64::from(mkit_core::pack::MAX_ENTRIES) * 5
+                    + 44
+            && let Err(stop) = &result
+            && let Some(check) = integrity::IntegrityCheck::defer(
+                stop,
+                self.h.limits.window_bytes,
+                self.h.limits.resident_bytes,
+            )
+        {
+            let version = job.version;
+            let etag = job.etag.clone();
+            job = st
+                .decode_checkpoint
+                .clone()
+                .unwrap_or_else(|| start.clone());
+            job.kind = Kind::Pack;
+            job.version = version;
+            job.etag = etag;
+            job.integrity = Some(check);
+            st.writes.clear();
+            st.settled.clear();
+            st.guards.clear();
+            result = Ok(0);
+        }
         // The phases after the decode are cheap: run them back to back while
         // each one finishes at once and the slice still has calls to spend.
         let mut chained = 0;
@@ -1469,6 +1502,14 @@ where
                 }
                 *held = Some(state::encode(&pending));
             }
+        }
+        if let Some(check) = &job.integrity {
+            if !check.complete(job.pack_len, self.pack) {
+                return self.integrity(job).await;
+            }
+            // Retry the failed entry with fresh live facts. On a membership
+            // wait, the enclosing slice retains this completed marker.
+            job.integrity = None;
         }
         let window_bytes = self.h.limits.window_bytes;
         let mut preloaded = None;
