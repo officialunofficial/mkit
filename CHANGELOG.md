@@ -50,7 +50,6 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Breaking (toward 0.6)
 
-<<<<<<< HEAD
 - [embedder: breaking API] The in-pack decoded-byte budget is no longer
   persisted as a rejection by scheduled verification; it is a terminal
   `DecodeBudget` outcome, as inline already answered. Migration: none for
@@ -62,7 +61,7 @@ collect the applicable entries between their old and new immutable pins.
   reported. `FailureCode` gains `ExternalDeltaChainTooDeep`; the deferred
   refusal checkpoint table appends tag 20, so discard unsupported
   verification checkpoints and restart. No repository store reset is required.
-=======
+
 - [embedder: breaking API] All-entry verification pages are now scoped to the
   run, cached, and counted live. The driver keeps a write-back page cache of
   `resident_pages * page_bytes` bytes charged at actual page sizes, flushes a
@@ -107,7 +106,6 @@ collect the applicable entries between their old and new immutable pins.
   it was byte-for-byte `decode`, and its name implied a trust step that does not
   exist. Migration: call `AcceptanceEvidence::decode` with the same arguments.
   No format change; no store reset.
->>>>>>> origin/main
 
 - [embedder: stored-format change] All-entry verification checkpoints use
   envelope version 3 with explicit hash frontiers, an authenticated remaining
