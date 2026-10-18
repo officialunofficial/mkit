@@ -61,8 +61,10 @@ external retained-page storage separately.
 
 ## Verify every entry
 
-`pack_verify::verify::VerifyDriver` authenticates the complete pack before
-decoding each canonical object in wire order. It resolves deltas from earlier
+`pack_verify::verify::VerifyDriver` hashes the pack while decoding each
+canonical object in wire order. It acquires each source range once on a
+successful uninterrupted run; canonical delta bases may require separate
+requests. It resolves deltas from earlier
 entries or repository-scoped `MemberFact` bases and verifies each applicable
 signature individually. Construction uses the same source, repository, profile,
 limits, and fresh run generation as framing. Drive it through `Step`, supply
@@ -75,6 +77,12 @@ dependency, and head roots. Read `DependencyRecord` values to distinguish graph
 edges from external base facts. Missing retained evidence is unavailable input;
 it cannot establish absence or completion. Repository closure and live write
 authorization remain separate checks.
+
+Entry failures, including authenticated external-base absence, remain deferred
+until the trailer and whole-pack identity verify. The first entry failure wins
+in wire order; integrity failure takes precedence. Unavailable acquisition
+returns immediately and never manufactures absence. Signature failures remain
+deferred behind integrity and decode failures.
 
 ## Schedule pure compute
 
@@ -89,8 +97,9 @@ until its output returns. Retrying a lost job requires restarting the run.
 
 Each descriptor binds the immutable source, repository, generation, request
 sequence, frame ordinal and placement, validated delta base, operation, and
-memory/work permits. The authenticated whole-pack identity and frame placement
-commit the input; jobs are local state with no serialized format. Current-run
+memory/work permits. The requested whole-pack identity and provisional frame
+placement bind the input. Only terminal `Complete` authenticates the pack. Jobs
+are local state with no serialized format. Current-run
 mismatches refuse without advancing. Stale generations and retired or duplicate
 outputs are ignored without budget changes. Results, fragments, and evidence
 merge in ordinal order, preserving the serial artifact and refusal precedence.
@@ -103,6 +112,9 @@ bounded Blob index-commit headroom, and escrows worst-case work. Tight budgets
 drain the queue instead of refusing optional overlap. Completed outputs retain
 their charge while an earlier job is outstanding. Signature checks remain
 individual. No checkpoint can contain an outstanding job or read-ahead frame.
+A fully committed entry boundary can be checkpointed while later jobs remain
+in flight; the snapshot contains only that committed prefix. Batches stop before
+replacing the window needed to bind that boundary.
 
 Retire or drop all jobs and outputs before replacing a driver's resource
 envelope. A new generation rejects old completions but does not free memory
@@ -157,8 +169,8 @@ Crate API version, normative ruleset, semantic profile, and encoded format
 versions are separate contracts. The initial indexed ruleset is 1. Page,
 proof, pair-coverage checkpoint, and ordered framing-record formats use version
 1. Framing checkpoints use envelope version 1; all-entry verification
-checkpoints use version 2 and bind six evidence roots and cumulative
-verification counters.
+checkpoints use version 3 and bind six evidence roots, cumulative verification
+counters, and any deferred refusal.
 Unsupported disposable state versions require restart from the immutable
 source; historical readers are not promised. Existing pack and object bytes
 remain unchanged.
@@ -168,13 +180,14 @@ corruption and does not authenticate hostile state or authorize resume. Hosts
 must trust retained checkpoints or authenticate the complete envelope and its
 bindings. Resume must validate expected context, cursor consistency, and
 retained evidence before advancing. Active decoder and hash-library memory is
-never a persisted checkpoint format. The driver resumes safe integrity,
-acknowledged entry, and completion boundaries under a fresh generation. Decode
-resume compares validated core cursor metadata with every outer binding,
-recovers retained predecessor pages, then reacquires and authenticates the
-current window prefix. Cumulative budgets survive restart. Window acquisition
-prepays incremental prefix hashing; repeated warm checkpoints charge fixed
-encoding work rather than recharging the complete window.
+never a persisted checkpoint format. All-entry verification checkpoints at
+acknowledged entry boundaries under a fresh generation. Resume compares core
+cursor metadata with every outer binding and audits retained evidence. Its
+explicit hash-tree frontiers include the already-acquired window; a commitment
+binds the remaining suffix. Resume fetches only that suffix, starting at the
+entry boundary, and authenticates it without hashing it into the frontiers
+twice. It never reacquires the consumed prefix. Framing-only checkpoints retain
+their existing current-window prefix check. Cumulative budgets survive restart.
 
 ## Module and decoder inventory
 

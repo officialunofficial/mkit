@@ -44,6 +44,27 @@ exceed the advertised memory bound.
 barriers, opaque jobs/outputs, ordinal merge, drained checkpoints, schedule
 parity tests, allocation probes, and the bounded compute-schedule fuzz oracle.
 
+## All-entry verification shares one acquisition stream with integrity
+
+**Always:** `VerifyDriver` hashes each acquired pack range while framing and
+decoding entries. An uninterrupted successful run acquires exactly the pack
+length, apart from separately requested canonical delta bases. Entry refusals
+and authenticated external-base absence remain deferred behind final trailer
+and whole-pack identity checks. The bounded state holds only the first entry
+refusal; signature failures retain their separate decode-first precedence.
+Unavailable input remains immediately retryable and never becomes absence.
+
+**Because:** remote sources must not pay for a second integrity pass, and
+provisional decoding must preserve the integrity-first refusal contract.
+
+**If violated:** acquisition cost doubles, a corruption verdict changes with
+execution strategy, or a provisional object could become trusted too early.
+
+**Enforced by:** `VerifyDriver` deferred-refusal drain, the public acquisition
+table and competing-fault regressions in `verify_onepass`, exact-boundary resume
+tests, and the `verify_onepass_heap` allocation epoch. Only terminal
+`Step::Complete` constructs a `VerifiedPack`.
+
 ## Portable closure completion requires every occurrence and retained page
 
 **Always:** direct-child closure checks every supplied verified object and every
@@ -1713,6 +1734,16 @@ concurrent read-only checkpoint calls. Advancing the reader moves its cached
 incremental state forward and clears the boundary cache. Cold resume
 authenticates the prefix once and reconstructs this state. Only the existing
 explicit subtree commitments and prefix digest enter the cursor encoding.
+
+The opt-in one-pass reader keeps acquired windows through carried-frame decode.
+Its exact-boundary cursor instead retains explicit subtree frontiers through
+the acquired end, the collected trailer, and a commitment to the unconsumed
+suffix. Cold resume requests that suffix from the entry boundary and verifies
+it without hashing it into the frontiers again. Integrity-only drain checkpoints
+resume at the acquired end. Both forms keep private hash-library memory out of
+their encodings. Exact checkpoint creation charges suffix hashing as work;
+decoder reservations use the next frame's actual wire geometry and scratch
+requirement before allocation.
 
 **If violated:** malformed packs or mismatched cursor/source pairs can publish
 partially verified data.

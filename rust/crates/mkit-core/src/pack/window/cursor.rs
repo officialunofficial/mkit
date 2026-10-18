@@ -3,7 +3,10 @@
 //! completed-window u64; optional expected id, trailer anchor, and current-window
 //! prefix commitment; two trees (u8 depth, CVs, optional root); checksum. Optional
 //! fields have a 0/1 tag. All integers LE. The tagged prefix adds at most 33 bytes;
-//! the complete encoding remains bounded by 4 KiB.
+//! the complete encoding remains bounded by 4 KiB. Version 2 adds acquisition-end
+//! u64, optional remaining-suffix digest, 32 saved trailer bytes, and an
+//! integrity-only 0/1 flag before the two trees. Its trees cover acquired bytes
+//! through acquisition-end, rather than only completed consumed windows.
 use super::{MAX_ENTRIES, MAX_TOTAL_PAYLOAD, PackError, Tree, geometry};
 use crate::hash::{self, Hash};
 
@@ -33,6 +36,17 @@ pub struct WindowCursor {
     pub(super) window_prefix: Option<Hash>,
     pub(super) trailer_tree: Tree,
     pub(super) id_tree: Tree,
+    pub(super) exact: Option<ExactWindow>,
+}
+
+/// Acquisition frontier and binding for an exact resume. The CVs are documented
+/// BLAKE3 subtree values, never an encoding of an opaque Hasher.
+#[derive(Debug, Clone)]
+pub(super) struct ExactWindow {
+    pub end: u64,
+    pub suffix: Option<Hash>,
+    pub trailer: Hash,
+    pub integrity_only: bool,
 }
 
 /// Validated cursor bindings for comparison with a caller-owned checkpoint.
@@ -64,9 +78,33 @@ pub struct WindowCursorMetadata {
     entry_count: u32,
     entry_index: u32,
     expected_pack_id: Option<Hash>,
+    exact: bool,
+    integrity_only: bool,
+    acquired_end: Option<u64>,
 }
 
 impl WindowCursorMetadata {
+    /// Whether the cursor uses exact-offset acquisition frontiers (encoding v2).
+    #[must_use]
+    pub const fn exact(&self) -> bool {
+        self.exact
+    }
+
+    /// End of the bytes already absorbed into the integrity frontier.
+    /// Exact version-2 cursors return `Some`; legacy cursors return `None`.
+    /// This can exceed the entry position because an acquired window includes
+    /// bytes of subsequent entries. Resume does not hash those bytes twice.
+    #[must_use]
+    pub const fn acquired_end(&self) -> Option<u64> {
+        self.acquired_end
+    }
+
+    /// Whether resume continues only integrity acquisition, without entry parsing.
+    #[must_use]
+    pub const fn integrity_only(&self) -> bool {
+        self.integrity_only
+    }
+
     /// Pack length, including its trailer.
     #[must_use]
     pub const fn pack_len(&self) -> u64 {
@@ -137,6 +175,12 @@ impl WindowCursor {
             entry_count: self.count,
             entry_index: self.index,
             expected_pack_id: self.expected,
+            exact: self.exact.is_some(),
+            acquired_end: self.exact.as_ref().map(|exact| exact.end),
+            integrity_only: self
+                .exact
+                .as_ref()
+                .is_some_and(|exact| exact.integrity_only),
         })
     }
 
@@ -156,6 +200,7 @@ impl WindowCursor {
             window_prefix: None,
             trailer_tree: Tree::new(),
             id_tree: Tree::new(),
+            exact: None,
         }
     }
     pub(super) fn split(&self) -> u64 {
@@ -172,8 +217,35 @@ impl WindowCursor {
             .checked_add(u64::from(self.count) * 5)
             .and_then(|n| n.checked_add(44));
         let window_start = self.completed.checked_mul(self.window_size);
-        if window_start.is_none_or(|start| self.window_prefix.is_some() != (self.pos > start))
-            || (self.expected.is_none() && self.anchor.is_none())
+        let frontier = if let Some(exact) = &self.exact {
+            if exact.end < self.pos
+                || exact.end > self.pack_len
+                || (exact.end != self.pack_len && !exact.end.is_multiple_of(self.window_size))
+                || self.window_prefix.is_some()
+                || (!exact.integrity_only
+                    && exact.end
+                        != (self.pos.div_ceil(self.window_size) * self.window_size)
+                            .min(self.pack_len)
+                    && !(self.pos == self.split()
+                        && self.index == self.count
+                        && exact.end == self.pack_len))
+                || exact.suffix.is_some() != (!exact.integrity_only && exact.end > self.pos)
+            {
+                return Err(bad);
+            }
+            let trailer_bytes = usize::try_from(exact.end.saturating_sub(self.split()).min(32))
+                .map_err(|_| PackError::PackfileCorrupted)?;
+            if exact.trailer[trailer_bytes..].iter().any(|byte| *byte != 0) {
+                return Err(bad);
+            }
+            exact.end.div_ceil(self.window_size)
+        } else {
+            if window_start.is_none_or(|start| self.window_prefix.is_some() != (self.pos > start)) {
+                return Err(bad);
+            }
+            self.completed
+        };
+        if (self.expected.is_none() && self.anchor.is_none())
             || !matches!(self.version, 1 | 2)
             || self.count > MAX_ENTRIES
             || self.index > self.count
@@ -186,11 +258,11 @@ impl WindowCursor {
             || self.first_non_raw.is_some_and(|i| i >= self.index)
             || !self
                 .trailer_tree
-                .validate(self.completed, self.split(), self.window_size)
+                .validate(frontier, self.split(), self.window_size)
             || (self.expected.is_some()
                 && !self
                     .id_tree
-                    .validate(self.completed, self.pack_len, self.window_size))
+                    .validate(frontier, self.pack_len, self.window_size))
             || (self.expected.is_none() && self.id_tree != Tree::new())
         {
             return Err(bad);
@@ -198,10 +270,10 @@ impl WindowCursor {
         Ok(())
     }
 
-    /// Encode canonical little-endian v1 fields followed by BLAKE3 checksum.
+    /// Encode canonical versioned little-endian fields followed by BLAKE3 checksum.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = vec![1];
+        let mut out = vec![if self.exact.is_some() { 2 } else { 1 }];
         for n in [self.pack_len, self.window_size, self.pos, self.payload_sum] {
             out.extend_from_slice(&n.to_le_bytes());
         }
@@ -216,6 +288,12 @@ impl WindowCursor {
         write_option(&mut out, self.expected);
         write_option(&mut out, self.anchor);
         write_option(&mut out, self.window_prefix);
+        if let Some(exact) = &self.exact {
+            out.extend_from_slice(&exact.end.to_le_bytes());
+            write_option(&mut out, exact.suffix);
+            out.extend_from_slice(&exact.trailer);
+            out.push(u8::from(exact.integrity_only));
+        }
         for tree in [&self.trailer_tree, &self.id_tree] {
             // Full pack geometry needs fewer than 64 CVs (and at most 17 under
             // the format caps), so this is lossless for every internal cursor.
@@ -243,7 +321,8 @@ impl WindowCursor {
             return Err(PackError::PackfileCorrupted);
         }
         let mut r = Input(body);
-        if r.byte()? != 1 {
+        let encoding = r.byte()?;
+        if !matches!(encoding, 1 | 2) {
             return Err(PackError::PackfileCorrupted);
         }
         let mut state = Self {
@@ -261,12 +340,21 @@ impl WindowCursor {
             window_prefix: None,
             trailer_tree: Tree::new(),
             id_tree: Tree::new(),
+            exact: None,
         };
         state.first_non_raw = if r.tag()? { Some(r.u32()?) } else { None };
         state.completed = r.u64()?;
         state.expected = r.optional_hash()?;
         state.anchor = r.optional_hash()?;
         state.window_prefix = r.optional_hash()?;
+        if encoding == 2 {
+            state.exact = Some(ExactWindow {
+                end: r.u64()?,
+                suffix: r.optional_hash()?,
+                trailer: r.array()?,
+                integrity_only: r.tag()?,
+            });
+        }
         state.trailer_tree = r.tree()?;
         state.id_tree = r.tree()?;
         if !r.0.is_empty() {

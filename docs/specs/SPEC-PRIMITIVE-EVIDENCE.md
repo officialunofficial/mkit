@@ -151,7 +151,10 @@ validate consistency among these fields before producing progress.
 Only completed integrity subtrees and safe entry/evidence boundaries may be
 checkpointed. A partial subtree or active entry is replayed from its bound
 start. Private decoder or cryptographic-library memory MUST NOT be serialized.
-Cold resume authenticates the consumed prefix of its current input window.
+Framing checkpoints authenticate the consumed prefix of their current input
+window. All-entry verification checkpoints instead retain the hash frontier
+through the already-acquired window and authenticate its unconsumed suffix;
+they MUST NOT reacquire bytes before the saved entry boundary.
 Changed source bindings, missing retained evidence, unsupported versions, or
 inconsistent geometry require recovery or restart and never manufactured
 success. Cumulative work and evidence charges survive restart; replay adds
@@ -193,7 +196,8 @@ indexed_content_profile:
   delta_depth:u32
 run_generation:u64
 request_sequence:u64
-phase:u8                         0 header, 1 integrity, 2 decode, 3 complete
+phase:u8                         0 header, 1 integrity, 2 decode, 3 complete,
+                                 4 integrity drain (version 3 only)
 header:optional(pack_version:u32, entry_count:u32)
 consumed_entries:u64
 consumed_wire_payload:u64
@@ -239,7 +243,7 @@ entry count and trailer boundary.
 For a format version 1 checkpoint, acknowledged page count MUST equal consumed
 entry count and cumulative evidence page count. A last retained commitment
 exists exactly when this count is nonzero; it names one occurrence record. A
-format version 2 checkpoint instead requires the acknowledged page count to
+format version 3 checkpoint instead requires the acknowledged page count to
 equal the cumulative committed page count across all six evidence indexes, and
 its last retained commitment may name any committed evidence page kind (see
 4.1.1). Cumulative usage MUST fit the encoded limits. The source length MUST
@@ -248,15 +252,19 @@ caller's expected source, repository, ruleset, limits, and run binding, and
 checks core cursor metadata against the outer phase and counters. Successful
 envelope decoding alone does not perform those resume checks.
 
-#### 4.1.1 Verify-state section (format version 2)
+#### 4.1.1 Verify-state section (format version 3)
 
 **Protocol requirement.**
 
-`format_version:u16 = 2` appends one verify-state section after `core_cursor`
-and before `checksum`. The section exists exactly when the version is 2 and
-the phase is decode; a version-1 envelope carries no section and a version-2
-envelope with any other phase is invalid. Every earlier field keeps the §4.1
-v1 layout and validation.
+`format_version:u16 = 3` appends one verify-state section after `core_cursor`
+and before `checksum`. The section exists exactly when the version is 3 and
+the phase is decode or integrity drain. Version 1 remains the framing-only
+format and carries no section. Version 2 is unsupported; discard that
+reconstructible state and restart from the immutable source. Every earlier
+field keeps the §4.1 v1 layout except for the additional phase value. A version-3
+envelope has no separate integrity frontier and uses the exact-boundary core
+cursor described below. Its `verified_pack_trailer` remains zero until final
+integrity acceptance.
 
 ```text
 objects:page_commitment,     count:u64     kind byte MUST be 0
@@ -270,6 +278,11 @@ decoded:u64
 edges:u64
 external_lookups:u64
 signature_failure:optional(object_id[32], ordinal:u64)
+deferred_refusal:optional(
+  code:u8,
+  ordinal:optional(u64), offset:optional(u64),
+  detail:u8,                     0 none; 1 followed by expected:u64, actual:u64
+)
 ```
 
 Each index entry is the 49-byte root commitment followed by the committed
@@ -277,7 +290,30 @@ record count. `signature_failure` is a two-field optional value: `0` absent,
 `1` present with an object id and the owning occurrence ordinal; any other
 tag is invalid.
 
-Consistency rules, all of which resume MUST check before progress:
+The deferred refusal occupies at most 37 bytes, including its presence tag.
+It records exactly one refusal, selected in wire order. Its code byte uses
+this fixed checkpoint-local table; these tags do not replace public refusal
+codes:
+
+| Tag | Code | Tag | Code |
+|---|---|---|---|
+| 0 | UnexpectedEof | 10 | DecompressionLimitExceeded |
+| 1 | InvalidEntryType | 11 | InvalidDelta |
+| 2 | TooManyObjects | 12 | DeltaBaseMismatch |
+| 3 | PackfileTooLarge | 13 | DeltaSizeMismatch |
+| 4 | ZstdEntryTruncated | 14 | NonCanonicalObject |
+| 5 | DeltaEntryTruncated | 15 | ObjectHashMismatch |
+| 6 | NonStorableObject | 16 | DeltaChainTooDeep |
+| 7 | TrailingData | 17 | ExternalBaseAbsent |
+| 8 | DecompressionFailed | 18 | ResourceLimit |
+| 9 | DecompressedSizeMismatch | 19 | UnsupportedCapability |
+
+Unknown code, optional, or detail tags are invalid. A present offset MUST NOT
+exceed source length, and a present ordinal MUST NOT exceed consumed entries.
+The refusal exists exactly in integrity-drain phase. Unavailable acquisition
+and invalid responses MUST NOT be encoded as deferred content verdicts.
+
+Consistency rules for decode phase, all of which resume MUST check before progress:
 
 - `occurrences.count = consumed_entries`; every consumed wire entry owns
   exactly one occurrence record.
@@ -292,14 +328,40 @@ Consistency rules, all of which resume MUST check before progress:
 - Every committed page commitment names a canonical page within the encoded
   page-byte and fan-out ceilings.
 
+For either verification phase, cumulative performed work plus three times the
+unacquired source length MUST fit the encoded work ceiling. Resume MUST
+protect that remaining integrity allowance before charging provisional work.
+The allowance is derived from the exact cursor’s acquired end and is not
+performed work or a separate encoded field.
+
 Cold verify resume re-authenticates every committed evidence page through
 caller-supplied page requests before continuing; a lost page is unavailable
 input, never absence. The retained set is not serialized into the envelope
 beyond its root commitments.
 
-Integrity frontiers represent completed 8 MiB subtrees. A nonfinal acquired
-offset MUST lie on a subtree boundary. Sources no larger than 8 MiB have no
-stored chaining values; their incomplete hash work is replayed. A root exists
+Integrity-drain phase cannot produce an acceptance artifact or resume entry
+decoding. Committed occurrence, object, ordinal, head, and delta counts MUST
+NOT exceed consumed entries; dependency and byte counters keep their bounds
+above. The last completed entry boundary can precede the deferred refusal.
+Resumption continues hashing from the saved acquisition frontier and reports
+the deferred refusal only after final integrity succeeds. Those roots remain
+inert; the drain does not require an evidence audit to refuse the pack.
+
+The exact-boundary core cursor uses version 2. It stores explicit BLAKE3
+subtree chaining values for the trailer and whole-pack streams through the
+end of the acquired window, the logical entry boundary, that acquired end,
+the collected trailer bytes, an integrity-only flag, and an optional BLAKE3
+commitment to the remaining window suffix. Decode resume requests the suffix
+starting exactly at the entry boundary, authenticates it against that
+commitment, and does not absorb it into the hash frontiers again. Drain resume
+starts at the acquired end. The cursor remains bounded by 4096 bytes; no
+opaque hasher or decoder state enters its encoding.
+
+The framing driver’s separate integrity frontier represents completed 8 MiB
+subtrees. Its nonfinal acquired offset MUST lie on a subtree boundary. Sources
+no larger than 8 MiB have no stored chaining values in that frontier; their
+incomplete hash work is replayed. The exact-boundary verification cursor instead
+uses the acquisition-window geometry, including windows smaller than 8 MiB. A root exists
 exactly when its stream is complete. The trailer stream covers source length
 minus 32 bytes. Unused bytes of the partial trailer MUST be zero.
 
@@ -317,6 +379,11 @@ have not merged, or a read-ahead frame beyond its committed ordinal. The host
 retires old jobs before replacing their resource envelope. A fresh generation
 prevents stale acceptance; it does not reclaim caller-owned worker memory.
 These requirements add no encoded fields or format version.
+
+A checkpoint MAY retain a fully committed prefix while later jobs remain
+outstanding in the current process. Such a snapshot MUST exclude those jobs
+and their entry evidence. Resuming it under a fresh generation replays only the
+uncommitted entries and retains the host's worker-retirement obligation.
 
 ### 4.2 Ordered frame evidence
 
@@ -489,7 +556,7 @@ rescanning the sequence.
 | Page | 1 | Initial source-bound canonical page envelope; kinds 4–5 added with verify. |
 | Proof | 1 | Exact routed root-to-leaf page path. |
 | Frame record | 1 | Ordered framing-only retention chain. |
-| Checkpoint | 1–2 | Current-only reconstructible state; 2 adds verify state, unsupported versions restart. |
+| Checkpoint | 1, 3 | Framing uses 1; one-pass verification uses 3 with exact-boundary hashing and deferred refusal. Version 2 is unsupported; restart. |
 | Verify records | 1 | All-entry object, occurrence, ordinal, head, and dependency evidence. |
 
 ## 6. Test vectors

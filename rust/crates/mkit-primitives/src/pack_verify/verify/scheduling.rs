@@ -2,8 +2,9 @@
 use super::{
     ComputeConfig, ComputeDisposition, ComputeJob, ComputeOperation, ComputeOutput, ComputePermits,
     ComputeRequest, CoreStep, Failure, FrameInfo, PackEntry, Phase, Request, Stage, Step,
-    VerifyDriver, invalid, map_core, resource,
+    VerifyDriver, invalid, resource,
 };
+use mkit_core::pack::window::{WindowBoundary, WindowCursor};
 use std::{borrow::Cow, collections::VecDeque, mem::size_of};
 
 // A Blob has no edges. Only three fixed-record indexes can change: Objects,
@@ -15,6 +16,9 @@ use std::{borrow::Cow, collections::VecDeque, mem::size_of};
 // This escrow controls optional admission, never content validity or charging.
 const BLOB_WORK_ESCROW: u64 = 16 << 20;
 const JOB_OVERHEAD: u64 = 64 << 10;
+// Two bounded subtree frontiers plus fixed metadata; this allowance also covers
+// the temporary cursor clone when the boundary is materialized for a snapshot.
+const BOUNDARY_BYTES: u64 = 8192;
 
 #[derive(Debug)]
 pub(super) enum Deferred {
@@ -31,6 +35,7 @@ struct Slot {
     output: Option<ComputeOutput>,
     merged: bool,
     overlap: u64,
+    boundary: WindowBoundary,
 }
 
 #[derive(Debug)]
@@ -41,6 +46,7 @@ pub(super) struct Scheduler {
     sealed: bool,
     retired: Option<u64>,
     control_charged: bool,
+    committed_boundary: Option<WindowBoundary>,
 }
 
 impl VerifyDriver {
@@ -103,6 +109,7 @@ impl VerifyDriver {
             sealed: false,
             retired: None,
             control_charged,
+            committed_boundary: None,
         }));
         Ok(self)
     }
@@ -138,7 +145,7 @@ impl VerifyDriver {
     pub fn supply_compute(&mut self, output: ComputeOutput) -> Result<ComputeDisposition, Failure> {
         let descriptor = output.descriptor;
         if descriptor.request.generation != self.generation
-            || matches!(self.phase, Phase::Failed | Phase::Complete)
+            || matches!(self.phase, Phase::Failed | Phase::Complete | Phase::Drain)
         {
             return Ok(ComputeDisposition::Stale);
         }
@@ -166,6 +173,16 @@ impl VerifyDriver {
         Ok(ComputeDisposition::Accepted)
     }
 
+    // Outstanding caller-owned jobs remain provisional and become stale.
+    // Their reservations stay charged until the driver is dropped: a worker
+    // may still own its input even after an earlier entry has failed.
+    pub(super) fn discard_compute(&mut self) {
+        if let Some(scheduler) = &mut self.scheduler {
+            scheduler.deferred = None;
+            scheduler.sealed = true;
+        }
+    }
+
     pub(super) fn loan_compute_control(&mut self) -> Result<(), Failure> {
         if let Some(scheduler) = &mut self.scheduler
             && scheduler.control_charged
@@ -177,11 +194,14 @@ impl VerifyDriver {
     }
 
     pub(super) fn reclaim_compute_control(&mut self) -> Result<(), Failure> {
-        if let Some(scheduler) = &mut self.scheduler
-            && !scheduler.control_charged
-        {
-            self.resources.reserve(JOB_OVERHEAD)?;
-            scheduler.control_charged = true;
+        if let Some(scheduler) = &mut self.scheduler {
+            if scheduler.committed_boundary.take().is_some() {
+                self.resources.release(BOUNDARY_BYTES)?;
+            }
+            if !scheduler.control_charged {
+                self.resources.reserve(JOB_OVERHEAD)?;
+                scheduler.control_charged = true;
+            }
         }
         Ok(())
     }
@@ -202,21 +222,54 @@ impl VerifyDriver {
             })
     }
 
-    pub(super) fn compute_drained(&self) -> bool {
-        self.scheduler
-            .as_ref()
-            .is_none_or(|scheduler| scheduler.slots.is_empty() && scheduler.deferred.is_none())
+    pub(super) fn compute_checkpointable(&self) -> bool {
+        self.phase == Phase::Drain
+            || self.scheduler.as_ref().is_none_or(|scheduler| {
+                scheduler.committed_boundary.is_some()
+                    || (scheduler.slots.is_empty() && scheduler.deferred.is_none())
+            })
+    }
+
+    pub(super) fn checkpoint_cursor_work(&self) -> u64 {
+        let Some(reader) = &self.reader else {
+            return 0;
+        };
+        if self.phase != Phase::Drain
+            && let Some(boundary) = self
+                .scheduler
+                .as_ref()
+                .and_then(|s| s.committed_boundary.as_ref())
+        {
+            return reader.exact_checkpoint_work_at(boundary);
+        }
+        reader.exact_checkpoint_work()
+    }
+
+    pub(super) fn checkpoint_cursor(&self) -> Option<WindowCursor> {
+        let reader = self.reader.as_ref()?;
+        if self.phase != Phase::Drain
+            && let Some(boundary) = self
+                .scheduler
+                .as_ref()
+                .and_then(|s| s.committed_boundary.as_ref())
+        {
+            return reader.checkpoint_exact_at(boundary);
+        }
+        reader.checkpoint_exact()
     }
 
     fn read_scheduled(&mut self) -> Result<Deferred, Failure> {
-        let reader = self.reader.as_mut().ok_or_else(invalid)?;
-        Ok(match reader.step() {
-            Ok(CoreStep::Entry(entry)) => {
-                Deferred::Entry(entry, reader.last_frame().ok_or_else(invalid)?)
-            }
+        Ok(match self.read_entry_step() {
+            Ok(CoreStep::Entry(entry)) => Deferred::Entry(
+                entry,
+                self.reader
+                    .as_ref()
+                    .and_then(super::WindowReader::last_frame)
+                    .ok_or_else(invalid)?,
+            ),
             Ok(CoreStep::NeedWindow(range)) => Deferred::Window(range.offset, range.len),
             Ok(CoreStep::Done(summary)) => Deferred::Done(summary.version, summary.entry_count),
-            Err(error) => Deferred::Failed(map_core(&error)),
+            Err(error) => Deferred::Failed(error),
             _ => return Err(invalid()),
         })
     }
@@ -230,6 +283,21 @@ impl VerifyDriver {
         };
         let count = scheduler.slots.len() as u64 + 1;
         let usage = self.resources.usage();
+        // Optional overlap keeps a complete decoder envelope available. The
+        // serial reader may use its smaller frame-sensitive reservation, but
+        // batching does not depend on that optimization for admission.
+        let decoder = self
+            .limits
+            .acquisition_bytes
+            .saturating_mul(2)
+            .saturating_add(super::FRAME_BYTES)
+            .saturating_add(super::DELTA_BYTES + 32)
+            .saturating_add(super::CANONICAL_BYTES)
+            .saturating_add(super::DECODER_SCRATCH)
+            .saturating_add(JOB_OVERHEAD);
+        let resident = usage
+            .resident_bytes
+            .saturating_add(decoder.saturating_sub(self.decoder_reservation));
         let headroom = self
             .limits
             .page_bytes
@@ -237,14 +305,11 @@ impl VerifyDriver {
             .saturating_add(256 << 10);
         scheduler.config.max_jobs > 1
             && count <= u64::from(scheduler.config.max_jobs)
-            && usage
-                .work
-                .saturating_add(count.saturating_mul(BLOB_WORK_ESCROW))
-                <= self.limits.work
-            && usage
-                .resident_bytes
+            && count.saturating_mul(BLOB_WORK_ESCROW) <= self.resources.remaining_work()
+            && resident
                 .saturating_add(headroom)
                 .saturating_add(JOB_OVERHEAD)
+                .saturating_add(BOUNDARY_BYTES)
                 <= self.limits.resident_bytes
     }
 
@@ -258,6 +323,16 @@ impl VerifyDriver {
         overlap: u64,
         work: u64,
     ) -> Result<(), Failure> {
+        let scheduler = self.scheduler.as_mut().ok_or_else(invalid)?;
+        if scheduler.slots.is_empty() && scheduler.committed_boundary.take().is_some() {
+            self.resources.release(BOUNDARY_BYTES)?;
+        }
+        self.resources.reserve(BOUNDARY_BYTES)?;
+        let boundary = self
+            .reader
+            .as_ref()
+            .and_then(super::WindowReader::checkpoint_boundary)
+            .ok_or_else(invalid)?;
         let descriptor = ComputeRequest {
             request: self.request_id()?,
             source: self.source,
@@ -287,6 +362,7 @@ impl VerifyDriver {
                 output: None,
                 merged: false,
                 overlap,
+                boundary,
             });
         Ok(())
     }
@@ -316,7 +392,14 @@ impl VerifyDriver {
             .ok_or_else(invalid)?
             .slots
             .is_empty();
-        if !batch && nonempty {
+        if nonempty
+            && (!batch
+                || !self
+                    .reader
+                    .as_ref()
+                    .ok_or_else(invalid)?
+                    .next_entry_fits_window())
+        {
             self.scheduler.as_mut().ok_or_else(invalid)?.sealed = true;
             return Ok(Step::Progress);
         }
@@ -339,6 +422,7 @@ impl VerifyDriver {
                 if usage
                     .resident_bytes
                     .saturating_add(overlap)
+                    .saturating_add(BOUNDARY_BYTES)
                     .saturating_add(headroom)
                     <= self.limits.resident_bytes
                 {
@@ -416,7 +500,7 @@ impl VerifyDriver {
         };
         slot.merged = true;
         let decoded = output.outcome?;
-        let base_len = self.work.as_ref().ok_or_else(invalid)?.base_len;
+        let base_len = std::mem::take(&mut self.work.as_mut().ok_or_else(invalid)?.base_len);
         self.resources.release(base_len)?;
         self.finish_canonical(
             decoded.id,
@@ -435,6 +519,13 @@ impl VerifyDriver {
             return Err(invalid());
         }
         self.resources.release(slot.overlap)?;
+        if scheduler
+            .committed_boundary
+            .replace(slot.boundary)
+            .is_some()
+        {
+            self.resources.release(BOUNDARY_BYTES)?;
+        }
         scheduler.retired = Some(slot.descriptor.request.sequence);
         if scheduler.slots.is_empty() {
             scheduler.sealed = false;

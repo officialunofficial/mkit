@@ -22,7 +22,9 @@ use mkit_core::{
 const DOMAIN: &[u8] = b"mkit-checkpoint-checksum:v1";
 const MAGIC: &[u8; 4] = b"MKCP";
 const VERSION: u16 = 1;
-const VERSION_VERIFY: u16 = 2;
+const VERSION_VERIFY: u16 = 3;
+mod refusal;
+pub(crate) use refusal::DeferredFailure;
 const SUBTREE: u64 = 8 << 20;
 const MAX_CVS: usize = 518;
 const MAX_PACK: u64 = MAX_TOTAL_PAYLOAD + MAX_ENTRIES as u64 * 5 + 44;
@@ -110,6 +112,7 @@ pub(crate) enum CheckpointPhase {
     Integrity = 1,
     Decode = 2,
     Complete = 3,
+    Drain = 4,
 }
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct IntegrityView<'a> {
@@ -157,7 +160,7 @@ pub(crate) struct IndexCheckpoint {
     pub commitment: PageCommitment,
     pub count: u64,
 }
-/// All-entry verification state carried by version-2 envelopes.
+/// All-entry verification state carried by version-3 envelopes.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct VerifyCheckpoint {
     pub objects: IndexCheckpoint,
@@ -171,6 +174,7 @@ pub(crate) struct VerifyCheckpoint {
     pub edges: u64,
     pub external_lookups: u64,
     pub signature_failure: Option<(Hash, u64)>,
+    pub deferred_failure: Option<DeferredFailure>,
 }
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CheckpointView<'a> {
@@ -208,7 +212,7 @@ fn codec_budget(len: usize, limits: VerifyLimits) -> Result<Budget, Failure> {
 fn validate_meta(m: &CheckpointMeta, version: u16) -> Result<(), Failure> {
     validate_limits(m.limits)?;
     // Version 1 stores one occurrences page per frame, so its retention chain
-    // length equals the entry ordinal. Version 2 retains paged index output;
+    // length equals the entry ordinal. Version 3 retains paged index output;
     // its retention count only tracks cumulative emitted pages.
     if m.ruleset.ruleset != RulesetId(1)
         || m.ruleset.profile != ProfileId::Indexed
@@ -263,7 +267,7 @@ fn validate_meta(m: &CheckpointMeta, version: u16) -> Result<(), Failure> {
                 return Err(invalid());
             }
         }
-        CheckpointPhase::Decode | CheckpointPhase::Complete => {
+        CheckpointPhase::Decode | CheckpointPhase::Complete | CheckpointPhase::Drain => {
             let (_, count) = m.header.ok_or_else(invalid)?;
             let position = m
                 .ordinal
@@ -312,6 +316,9 @@ fn validate_view(v: &CheckpointView<'_>) -> Result<(), Failure> {
         VERSION
     };
     validate_meta(&v.meta, version)?;
+    if version == VERSION && v.meta.phase == CheckpointPhase::Drain {
+        return Err(invalid());
+    }
     match v.meta.phase {
         CheckpointPhase::Header | CheckpointPhase::Complete => {
             if v.integrity.is_some() || !v.cursor.is_empty() {
@@ -338,7 +345,7 @@ fn validate_view(v: &CheckpointView<'_>) -> Result<(), Failure> {
                 f.trailer_root,
             )?;
         }
-        CheckpointPhase::Decode => {
+        CheckpointPhase::Decode | CheckpointPhase::Drain => {
             if v.integrity.is_some() || v.cursor.is_empty() || v.cursor.len() as u64 > CURSOR_CAP {
                 return Err(invalid());
             }
@@ -349,13 +356,32 @@ fn validate_view(v: &CheckpointView<'_>) -> Result<(), Failure> {
         return Err(invalid());
     }
     if let Some(verify) = v.verify {
+        if v.meta.trailer != [0; 32] {
+            return Err(invalid());
+        }
         validate_verify(&v.meta, &verify)?;
+        let cursor = WindowCursor::from_bytes(v.cursor).map_err(|_| invalid())?;
+        let metadata = cursor.metadata().map_err(|_| invalid())?;
+        let integrity_work = metadata
+            .acquired_end()
+            .and_then(|end| v.meta.source.len.checked_sub(end))
+            .and_then(|remaining| remaining.checked_mul(3))
+            .and_then(|remaining| v.meta.usage.work.checked_add(remaining))
+            .ok_or_else(invalid)?;
+        if !metadata.exact()
+            || metadata.integrity_only() != (v.meta.phase == CheckpointPhase::Drain)
+            || integrity_work > v.meta.limits.work
+        {
+            return Err(invalid());
+        }
     }
     Ok(())
 }
 
 fn validate_verify(m: &CheckpointMeta, verify: &VerifyCheckpoint) -> Result<(), Failure> {
-    if m.phase != CheckpointPhase::Decode {
+    if !matches!(m.phase, CheckpointPhase::Decode | CheckpointPhase::Drain)
+        || verify.deferred_failure.is_some() != (m.phase == CheckpointPhase::Drain)
+    {
         return Err(invalid());
     }
     for index in [
@@ -377,11 +403,14 @@ fn validate_verify(m: &CheckpointMeta, verify: &VerifyCheckpoint) -> Result<(), 
     }
     // Every consumed entry owns exactly one occurrence; first occurrences
     // alone add object and ordinal records, so their counts agree.
-    if verify.occurrences.count != m.ordinal
-        || verify.objects.count != verify.ordinals.count
+    if (m.phase == CheckpointPhase::Decode && verify.occurrences.count != m.ordinal)
+        || verify.occurrences.count > m.ordinal
+        || (m.phase == CheckpointPhase::Decode && verify.objects.count != verify.ordinals.count)
+        || verify.objects.count > m.ordinal
         || verify.ordinals.count > m.ordinal
         || verify.delta_entries > m.ordinal
-        || verify.heads.count > verify.ordinals.count
+        || (m.phase == CheckpointPhase::Decode && verify.heads.count > verify.ordinals.count)
+        || verify.heads.count > m.ordinal
         || verify.dependencies.count > verify.edges.saturating_add(verify.external_lookups)
         || verify.decoded > m.limits.decoded_bytes
         || verify.decoded > m.profile.decoded_bytes
@@ -392,6 +421,9 @@ fn validate_verify(m: &CheckpointMeta, verify: &VerifyCheckpoint) -> Result<(), 
             .is_some_and(|(_, ordinal)| ordinal >= m.ordinal)
     {
         return Err(invalid());
+    }
+    if let Some(refusal) = verify.deferred_failure {
+        refusal.validate(m.source.len, m.ordinal)?;
     }
     Ok(())
 }
@@ -430,6 +462,7 @@ fn read_verify(c: &mut Cursor<'_, '_>) -> Result<VerifyCheckpoint, Failure> {
             1 => Some((c.array()?, c.u64()?)),
             _ => return Err(invalid()),
         },
+        deferred_failure: refusal::read(c)?,
     })
 }
 
@@ -495,6 +528,7 @@ fn read_meta(c: &mut Cursor<'_, '_>) -> Result<CheckpointMeta, Failure> {
         1 => CheckpointPhase::Integrity,
         2 => CheckpointPhase::Decode,
         3 => CheckpointPhase::Complete,
+        4 => CheckpointPhase::Drain,
         _ => return Err(invalid()),
     };
     let header = match c.byte()? {
@@ -766,6 +800,7 @@ fn write_verify(out: &mut Output, verify: &VerifyCheckpoint) -> Result<(), Failu
         out.append(&object)?;
         out.u64(ordinal)?;
     }
+    refusal::write(out, verify.deferred_failure)?;
     Ok(())
 }
 
@@ -787,7 +822,11 @@ pub(crate) fn encode(
             + u64::from(f.trailer_root.is_some()) * 32
     });
     let verify_bytes = view.verify.map_or(0, |v| {
-        6 * 57 + 32 + 1 + u64::from(v.signature_failure.is_some()) * 40
+        6 * 57
+            + 32
+            + 1
+            + u64::from(v.signature_failure.is_some()) * 40
+            + refusal::encoded_len(v.deferred_failure)
     });
     let encoded_len = 369_u64
         .checked_add(u64::from(view.meta.header.is_some()) * 8)
@@ -908,7 +947,7 @@ mod tests {
         for len in 0..cp.bytes().len() {
             assert!(Checkpoint::from_bytes(&cp.bytes()[..len], limits).is_err());
         }
-        for version in [3u8, 0xff] {
+        for version in [4u8, 0xff] {
             let mut wrong = cp.bytes().to_vec();
             wrong[4] = version;
             resign(&mut wrong);
@@ -919,7 +958,7 @@ mod tests {
         }
         // A version-1 body relabeled as the verify version is malformed.
         let mut relabeled = cp.bytes().to_vec();
-        relabeled[4] = 2;
+        relabeled[4] = 3;
         resign(&mut relabeled);
         assert!(Checkpoint::from_bytes(&relabeled, limits).is_err());
         let mut trailing = cp.bytes().to_vec();
@@ -1123,7 +1162,7 @@ mod tests {
 
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    fn frozen_v2_verify_state_decodes_index_checkpoints() {
+    fn frozen_v3_verify_state_decodes_index_checkpoints() {
         let bytes = include_bytes!("../../fixtures/evidence/checkpoint-verify.bin");
         let limits = VerifyLimits::indexed();
         let checkpoint = Checkpoint::from_bytes(bytes, limits).unwrap();
@@ -1158,7 +1197,7 @@ mod tests {
             (page.kind, page.len, page.items),
             (PageKind::Ordinals, 201, 1)
         );
-        let verify = state.verify.expect("v2 checkpoint carries verify state");
+        let verify = state.verify.expect("v3 checkpoint carries verify state");
         assert_eq!(verify.objects.count, verify.ordinals.count);
         assert!(verify.occurrences.count == 1);
         assert_eq!(verify.delta_entries, 0);
@@ -1167,7 +1206,35 @@ mod tests {
         assert_eq!(verify.external_lookups, 0);
         assert!(verify.signature_failure.is_none());
         // The serialized window cursor matches the semantic sidecar exactly.
-        assert_eq!(state.cursor.len(), 157);
+        assert_eq!(state.cursor.len(), 263);
+        assert!(verify.deferred_failure.is_none());
+        let cursor = WindowCursor::from_bytes(&state.cursor).unwrap();
+        assert!(cursor.metadata().unwrap().exact());
+        assert_eq!(&bytes[4..6], &3_u16.to_le_bytes());
+        // The unshipped verification format is replaced, never legacy-decoded.
+        let rechecksum = |mut body: Vec<u8>| {
+            let checksum = domain_digest(DOMAIN, &body);
+            body.extend_from_slice(&checksum);
+            body
+        };
+        let mut replaced = bytes[..bytes.len() - 32].to_vec();
+        replaced[4..6].copy_from_slice(&2_u16.to_le_bytes());
+        assert_eq!(
+            Checkpoint::from_bytes(&rechecksum(replaced), limits)
+                .unwrap_err()
+                .code,
+            FailureCode::InvalidCheckpoint
+        );
+        // A syntactically present refusal must use a recognized content code.
+        let mut unknown = bytes[..bytes.len() - 32].to_vec();
+        *unknown.last_mut().unwrap() = 1;
+        unknown.push(255);
+        assert_eq!(
+            Checkpoint::from_bytes(&rechecksum(unknown), limits)
+                .unwrap_err()
+                .code,
+            FailureCode::InvalidCheckpoint
+        );
     }
 
     #[cfg_attr(not(target_arch = "wasm32"), test)]

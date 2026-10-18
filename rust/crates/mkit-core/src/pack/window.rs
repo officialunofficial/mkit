@@ -1,6 +1,8 @@
 //! Windowed, resumable, sans-IO pack decoding (SPEC-PACKFILE §11).
 //!
-//! Entries are provisional until [`Step::Done`]. On any error the caller must
+//! Entries are provisional until normal [`WindowReader::step`] verification returns
+//! [`Step::Done`]. Integrity-only draining never clears an earlier content refusal.
+//! On any error the caller must
 //! discard everything staged by this run, including entries from earlier slices.
 //! This reader does not validate objects, resolve deltas, or write to a store.
 //!
@@ -15,6 +17,8 @@
 //!
 //! A resumed run re-fetches its current window and checks the checkpoint's
 //! prefix commitment before yielding entries. Completed windows are not re-read.
+//! Exact version-2 cursors instead fetch only the remaining suffix and authenticate
+//! it against a saved digest; already-acquired subtree values are retained.
 //! Without a requested pack id, the initial run first fetches the trailer
 //! window(s), retaining that anchor in its cursor to bind even an unseen suffix.
 
@@ -25,7 +29,9 @@ use super::{
 use crate::hash::Hash;
 use std::borrow::Cow;
 mod cursor;
+mod residency;
 mod tree;
+use cursor::ExactWindow;
 pub use cursor::{WindowCursor, WindowCursorMetadata};
 use tree::Tree;
 
@@ -35,6 +41,16 @@ use tree::Tree;
 pub struct WindowRequest {
     pub offset: u64,
     pub len: u64,
+}
+
+/// Process-local entry-boundary token for batching provisional entries.
+/// It has no encoded form and must be bound to the retained acquisition window
+/// with [`WindowReader::checkpoint_exact_at`] before it can be persisted.
+#[derive(Debug, Clone)]
+pub struct WindowBoundary {
+    cursor: WindowCursor,
+    acquired_trailer: Tree,
+    acquired_id: Tree,
 }
 
 /// Where the entry a reader last yielded sat in the pack: its complete
@@ -57,13 +73,17 @@ pub struct FrameInfo {
 pub enum Step {
     /// Fetch exactly this range, then call `feed`.
     NeedWindow(WindowRequest),
-    /// An owned entry, provisional until `Done`.
+    /// An owned entry, provisional until normal [`WindowReader::step`] completion.
     Entry(PackEntry<'static>),
-    /// Framing, trailer, and optional requested pack id are verified.
+    /// Normal [`WindowReader::step`] completion verifies framing, trailer, and
+    /// requested pack id. From [`WindowReader::integrity_step`], only trailer and
+    /// requested pack id are verified; any earlier content refusal still applies.
     Done(WindowSummary),
 }
 
-/// Verified pack metadata; raw-only means every wire type was `0x00`.
+/// Observed pack metadata; normal reader completion verifies framing as well as
+/// integrity. An integrity-only drain does not confer entry or framing acceptance.
+/// Raw-only means every observed wire type was `0x00`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct WindowSummary {
@@ -87,7 +107,7 @@ enum Phase {
 
 /// An I/O-free decoder retaining only the current window and current entry.
 ///
-/// **Binding.** `Done` means every entry yielded across the whole run chain (the original run and every resume
+/// **Binding.** `Done` from normal [`Self::step`] verification means every entry yielded across the whole run chain (the original run and every resume
 /// through its cursors) is an entry, in order, of the one pack whose bytes hash to the verified pack id: the trailer,
 /// and `expected_pack_id` when set. A cursor from pack A used on a source that yields different bytes for any
 /// not-yet-verified range fails with `PackfileCorrupted`, never `Done`. The reader does not re-read ranges it has
@@ -116,6 +136,9 @@ pub struct WindowReader {
     // and bounded by the current window (at most 64 MiB).
     prefix: LivePrefix,
     last_frame: Option<FrameInfo>,
+    exact_resume: Option<ExactWindow>,
+    integrity_only: bool,
+    one_pass: bool,
     #[cfg(test)]
     peak: usize,
 }
@@ -204,6 +227,24 @@ impl WindowReader {
         ))
     }
 
+    /// Start a reader that retains its acquired window through carried-frame
+    /// decoding. Successful sequential reads never reacquire that window merely
+    /// to release decoder memory. Hosts must budget the retained window alongside
+    /// decoder scratch, using [`Self::memory_bound`] before advancing.
+    ///
+    /// # Errors
+    /// Uses the same geometry checks as [`Self::new`].
+    pub fn new_one_pass(
+        pack_len: u64,
+        window_size: u64,
+        limits: DecodeLimits,
+        expected_pack_id: Option<Hash>,
+    ) -> Result<Self, PackError> {
+        let mut reader = Self::new(pack_len, window_size, limits, expected_pack_id)?;
+        reader.one_pass = true;
+        Ok(reader)
+    }
+
     /// Restore a trusted entry boundary for the same immutable pack source.
     /// The first request contains the next entry and authenticates its consumed
     /// window prefix once, rebuilding the live incremental digest. Completed
@@ -216,6 +257,21 @@ impl WindowReader {
         let mut reader = Self::from_state(cursor.clone(), limits, Phase::Boundary);
         reader.boundary = Some(cursor.clone());
         reader.resume_prefix = cursor.window_prefix;
+        if let Some(exact) = &cursor.exact {
+            reader.one_pass = true;
+            reader.trailer = exact.trailer;
+            reader.integrity_only = exact.integrity_only;
+            if exact.integrity_only {
+                reader.start = exact.end;
+                reader.end = exact.end;
+            } else {
+                reader.start = cursor.pos;
+                reader.end = cursor.pos;
+                if exact.end > cursor.pos {
+                    reader.exact_resume = Some(exact.clone());
+                }
+            }
+        }
         Ok(reader)
     }
 
@@ -241,6 +297,9 @@ impl WindowReader {
             resume_prefix: None,
             prefix: LivePrefix::default(),
             last_frame: None,
+            exact_resume: None,
+            integrity_only: false,
+            one_pass: false,
             #[cfg(test)]
             peak: 0,
         }
@@ -252,7 +311,11 @@ impl WindowReader {
             .pack_len
             .checked_sub(offset)
             .ok_or(PackError::PackfileCorrupted)?
-            .min(self.state.window_size);
+            .min(
+                self.exact_resume
+                    .as_ref()
+                    .map_or(self.state.window_size, |exact| exact.end - offset),
+            );
         if len == 0 {
             return Err(PackError::UnexpectedEof);
         }
@@ -268,6 +331,9 @@ impl WindowReader {
     /// Malformed packs, resource limits, and failed integrity checks use the
     /// errors documented at module level. A parsing error makes the reader inert.
     pub fn step(&mut self) -> Result<Step, PackError> {
+        if self.integrity_only {
+            return self.integrity_step();
+        }
         if let Some(request) = self.request {
             return Ok(Step::NeedWindow(request));
         }
@@ -333,22 +399,72 @@ impl WindowReader {
                     if self.end < self.state.pack_len {
                         return self.need(self.end);
                     }
-                    if self
-                        .state
-                        .anchor
-                        .is_some_and(|anchor| anchor != self.trailer)
-                        || self.state.trailer_tree.root != Some(self.trailer)
-                        || self
-                            .state
-                            .expected
-                            .is_some_and(|id| self.state.id_tree.root != Some(id))
-                    {
-                        return Err(PackError::PackfileCorrupted);
-                    }
+                    self.verify_integrity()?;
                     self.phase = Phase::Done;
                 }
             }
         }
+    }
+
+    /// Continue only acquisition and integrity verification, even after a framing
+    /// or decoding error. No further entries are parsed or allocated. Hosts may
+    /// defer that earlier refusal until this verifies the trailer and requested id.
+    /// `Done` from this method confers no framing or entry acceptance. Subsequent
+    /// [`Self::step`] calls remain in integrity-only mode with the same contract.
+    ///
+    /// # Errors
+    /// Invalid ranges, allocation failures, and final integrity mismatches use the
+    /// same errors as [`Self::step`]. A content error does not prevent this drain.
+    pub fn integrity_step(&mut self) -> Result<Step, PackError> {
+        self.integrity_only = true;
+        self.carry = Vec::new();
+        if let Some(exact) = self.exact_resume.take() {
+            // Parsing no longer needs this already-hashed suffix.
+            self.end = exact.end;
+            self.request = None;
+            self.state.exact = None;
+        }
+        if let Some(request) = self.request {
+            return Ok(Step::NeedWindow(request));
+        }
+        // Anchor-only acquisition has not entered the sequential hash stream.
+        if self.phase == Phase::Anchor {
+            if self.end == self.state.pack_len {
+                self.state.anchor = Some(self.trailer);
+            }
+            self.trailer = [0; 32];
+            self.start = 0;
+            self.end = 0;
+            self.phase = Phase::Finish;
+        }
+        if self.end < self.state.pack_len {
+            return self.need(self.end);
+        }
+        self.verify_integrity()?;
+        self.phase = Phase::Done;
+        Ok(Step::Done(self.summary()))
+    }
+
+    fn verify_integrity(&self) -> Result<(), PackError> {
+        if self
+            .state
+            .anchor
+            .is_some_and(|anchor| anchor != self.trailer)
+            || self.state.trailer_tree.root != Some(self.trailer)
+            || self
+                .state
+                .expected
+                .is_some_and(|id| self.state.id_tree.root != Some(id))
+        {
+            return Err(PackError::PackfileCorrupted);
+        }
+        Ok(())
+    }
+
+    /// The source trailer, available only after final integrity acceptance.
+    #[must_use]
+    pub fn trailer(&self) -> Option<Hash> {
+        (self.phase == Phase::Done).then_some(self.trailer)
     }
 
     fn advance_header(&mut self) -> Result<Option<Step>, PackError> {
@@ -448,6 +564,19 @@ impl WindowReader {
             }
             3 if self.state.version == 2 => {}
             other => return Err(PackError::InvalidEntryType(other)),
+        }
+        if self.one_pass {
+            let cap = match self.kind {
+                0 => Some(self.limits.max_decoded_bytes),
+                2 => self
+                    .limits
+                    .entry_geometry
+                    .map(|(_, stream)| stream.saturating_add(32)),
+                _ => None,
+            };
+            if cap.is_some_and(|cap| self.payload_len > cap) {
+                return Err(PackError::PackfileTooLarge);
+            }
         }
         if self.kind != 0 && self.state.first_non_raw.is_none() {
             self.state.first_non_raw = Some(self.state.index);
@@ -558,7 +687,7 @@ impl WindowReader {
 
     // Authenticate the post-entry prefix before releasing the carried frame's window.
     fn release_carried_window(&mut self) -> Result<Option<WindowCursor>, PackError> {
-        if self.limits.entry_geometry.is_none() || !matches!(self.kind, 3 | 4) {
+        if self.one_pass || self.limits.entry_geometry.is_none() || !matches!(self.kind, 3 | 4) {
             return Ok(None);
         }
         self.entry_finished()?;
@@ -673,7 +802,8 @@ impl WindowReader {
     }
 
     fn retains_window(&self) -> bool {
-        !(self.phase == Phase::Anchor && self.state.pack_len > self.state.window_size)
+        !(self.integrity_only
+            || (self.phase == Phase::Anchor && self.state.pack_len > self.state.window_size))
     }
 
     fn validate_feed(&self, offset: u64, bytes: &[u8]) -> Result<WindowRequest, PackError> {
@@ -688,6 +818,22 @@ impl WindowReader {
 
     fn feed_data(&mut self, offset: u64, bytes: &[u8]) -> Result<(), PackError> {
         let request = self.validate_feed(offset, bytes)?;
+        if let Some(exact) = self.exact_resume.as_ref() {
+            if crate::hash::hash(bytes) != exact.suffix.ok_or(PackError::PackfileCorrupted)? {
+                return Err(PackError::PackfileCorrupted);
+            }
+            // This suffix was already part of the persisted subtree frontier.
+            // Authenticate its bytes, without absorbing that subtree twice.
+            self.start = offset;
+            self.end = exact.end;
+            self.collect_trailer(offset, bytes)?;
+            self.exact_resume = None;
+            self.state.exact = None;
+            self.request = None;
+            self.prefix = LivePrefix::default();
+            return Ok(());
+        }
+        self.state.exact = None;
         let mut prefix_hasher = crate::hash::Hasher::new();
         let mut prefix_len = 0;
         if let Some(expected) = self.resume_prefix {
@@ -810,6 +956,9 @@ impl WindowReader {
             return None;
         }
         let mut cursor = self.boundary.clone()?;
+        if cursor.exact.is_some() || !self.start.is_multiple_of(self.state.window_size) {
+            return None;
+        }
         if self.window.is_empty()
             && self.limits.entry_geometry.is_some()
             && self.resume_prefix.is_some()
@@ -827,6 +976,142 @@ impl WindowReader {
             let end = usize::try_from(prefix_len).ok()?;
             self.prefix.digest(self.window.get(..end)?)
         };
+        Some(cursor)
+    }
+
+    /// Capture a process-local boundary without hashing its remaining suffix.
+    /// Batches retain this token until they choose their committed boundary.
+    /// It can be checkpointed only while its acquisition window remains retained.
+    #[must_use]
+    pub fn checkpoint_boundary(&self) -> Option<WindowBoundary> {
+        if !matches!(self.phase, Phase::Boundary | Phase::Finish | Phase::Done) {
+            return None;
+        }
+        Some(WindowBoundary {
+            cursor: self.boundary.clone()?,
+            acquired_trailer: self.state.trailer_tree.clone(),
+            acquired_id: self.state.id_tree.clone(),
+        })
+    }
+
+    /// Whether the next complete entry is available in the retained window.
+    /// Hosts can use this to bound batching before another acquisition is needed.
+    #[must_use]
+    pub fn next_entry_fits_window(&self) -> bool {
+        if self.phase != Phase::Boundary || self.state.index == self.state.count {
+            return false;
+        }
+        let Some(begin) = self
+            .state
+            .pos
+            .checked_sub(self.start)
+            .and_then(|n| usize::try_from(n).ok())
+        else {
+            return false;
+        };
+        let Some(header) = self.window.get(begin..).and_then(|bytes| bytes.get(..5)) else {
+            return false;
+        };
+        let len = u32::from_le_bytes([header[1], header[2], header[3], header[4]]) as usize;
+        self.window.len().saturating_sub(begin + 5) >= len
+    }
+
+    /// Number of suffix bytes hashed by the next [`Self::checkpoint_exact`].
+    /// Cursor encoding and its bounded checksum are charged separately.
+    #[must_use]
+    pub fn exact_checkpoint_work(&self) -> u64 {
+        if self.integrity_only || self.exact_resume.is_some() {
+            return 0;
+        }
+        self.boundary
+            .as_ref()
+            .map_or(0, |cursor| self.end.saturating_sub(cursor.pos))
+    }
+
+    /// Number of source bytes hashed to bind a batching boundary's suffix.
+    /// Returns zero for a token that is no longer in the retained window.
+    #[must_use]
+    pub fn exact_checkpoint_work_at(&self, boundary: &WindowBoundary) -> u64 {
+        if self.boundary_is_retained(boundary) {
+            self.end.saturating_sub(boundary.cursor.pos)
+        } else {
+            0
+        }
+    }
+
+    /// Checkpoint at the exact entry offset, retaining documented BLAKE3 subtree
+    /// frontiers through the acquired window and a digest of its remaining suffix.
+    /// Cold resume fetches only that suffix, authenticates it, and never absorbs
+    /// it into the frontier twice. No consumed prefix is acquired again.
+    ///
+    /// This produces cursor encoding version 2. An integrity-only drain retains
+    /// the last entry boundary and resumes at the completed acquisition frontier.
+    #[must_use]
+    pub fn checkpoint_exact(&self) -> Option<WindowCursor> {
+        if let Some(exact) = &self.exact_resume {
+            let mut cursor = self.boundary.clone()?;
+            cursor.exact = Some(exact.clone());
+            return Some(cursor);
+        }
+        if !self.integrity_only
+            && !matches!(self.phase, Phase::Boundary | Phase::Finish | Phase::Done)
+        {
+            return None;
+        }
+        self.exact_cursor(self.boundary.clone()?)
+    }
+
+    /// Bind an earlier process-local boundary to the currently retained window.
+    /// Tokens from another source, or windows already released, return `None`.
+    /// The host charges [`Self::exact_checkpoint_work_at`] before this operation.
+    #[must_use]
+    pub fn checkpoint_exact_at(&self, boundary: &WindowBoundary) -> Option<WindowCursor> {
+        if !self.boundary_is_retained(boundary) || self.integrity_only {
+            return None;
+        }
+        self.exact_cursor(boundary.cursor.clone())
+    }
+
+    fn boundary_is_retained(&self, boundary: &WindowBoundary) -> bool {
+        let cursor = &boundary.cursor;
+        boundary.acquired_trailer == self.state.trailer_tree
+            && boundary.acquired_id == self.state.id_tree
+            && cursor.pack_len == self.state.pack_len
+            && cursor.window_size == self.state.window_size
+            && cursor.expected == self.state.expected
+            && cursor.anchor == self.state.anchor
+            && cursor.version == self.state.version
+            && cursor.count == self.state.count
+            && cursor.pos >= self.start
+            && cursor.pos <= self.state.pos
+            && cursor.pos <= self.end
+            && !self.window.is_empty()
+    }
+
+    fn exact_cursor(&self, mut cursor: WindowCursor) -> Option<WindowCursor> {
+        cursor.trailer_tree = self.state.trailer_tree.clone();
+        cursor.id_tree = self.state.id_tree.clone();
+        cursor.window_prefix = None;
+        let suffix = if !self.integrity_only && self.end > cursor.pos {
+            if cursor.pos == cursor.split()
+                && self.end == cursor.pack_len
+                && self.start > cursor.pos
+            {
+                Some(crate::hash::hash(&self.trailer))
+            } else {
+                let begin = usize::try_from(cursor.pos.checked_sub(self.start)?).ok()?;
+                Some(crate::hash::hash(self.window.get(begin..)?))
+            }
+        } else {
+            None
+        };
+        cursor.exact = Some(ExactWindow {
+            end: self.end,
+            suffix,
+            trailer: self.trailer,
+            integrity_only: self.integrity_only,
+        });
+        cursor.validate().ok()?;
         Some(cursor)
     }
 

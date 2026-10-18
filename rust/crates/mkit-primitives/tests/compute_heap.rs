@@ -194,10 +194,10 @@ fn shared_ceiling_covers_queued_jobs_completed_outputs_and_window_crossings() {
     }
     assert!(finished);
     assert!(max_jobs >= 2 && max_outputs >= 2);
-    assert!(
-        pack_requests > 8,
-        "large objects must cross acquisition windows"
-    );
+    // Both large frames exceed a window, so this also exercises carried input.
+    assert!(192 << 10 > budget.acquisition_bytes);
+    let expected_requests = source.len.div_ceil(budget.acquisition_bytes);
+    assert_eq!(u64::try_from(pack_requests).unwrap(), expected_requests);
     assert!(jobs.is_empty() && outputs.is_empty());
     assert_accounted(&machine, &epoch, budget.resident_bytes);
     drop(machine);

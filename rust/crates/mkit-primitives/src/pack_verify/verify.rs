@@ -22,7 +22,7 @@ use super::{
     Acquisition, ByteRange, ByteSource, EvidencePage, EvidenceSequence, ObjectPurpose, PackCounts,
     Request, RequestId, Response, Step, VerifiedPack,
     framing::{CANONICAL_BYTES, DECODER_SCRATCH, DELTA_BYTES, FRAME_BYTES, map_core},
-    integrity::{IntegrityPass, MAX_PACK_BYTES},
+    integrity::MAX_PACK_BYTES,
     resources::{ResourceUsage, Resources},
 };
 use crate::{
@@ -91,7 +91,7 @@ enum Phase {
     /// Emit the six canonical empty root pages.
     Roots,
     Header,
-    Integrity,
+    Drain,
     Entries,
     Seal,
     Complete,
@@ -263,7 +263,8 @@ pub struct VerifyDriver {
     sequence: u64,
     pending: Option<Pending>,
     phase: Phase,
-    integrity: Option<IntegrityPass>,
+    deferred_failure: Option<Failure>,
+    acquired_hash_end: u64,
     reader: Option<WindowReader>,
     resources: Resources,
     objects: Index,
@@ -289,7 +290,6 @@ pub struct VerifyDriver {
     header: Option<(u32, u32)>,
     /// Lowest object id whose signature failed, and its wire ordinal.
     signature_failure: Option<(Hash, u64)>,
-    integrity_reservation: u64,
     decoder_reservation: u64,
     complete: Option<VerifiedPack>,
     checkpoint: Option<Checkpoint>,
@@ -334,24 +334,19 @@ impl VerifyDriver {
             return Err(failure(FailureCode::PackfileTooLarge));
         }
         let mut resources = Resources::new(limits)?;
-        let integrity_reservation = IntegrityPass::reservation(source.len)?;
-        let decoder_reservation = limits
-            .acquisition_bytes
-            .checked_mul(2)
-            .and_then(|n| n.checked_add(FRAME_BYTES))
-            .and_then(|n| n.checked_add(DELTA_BYTES + 32))
-            .and_then(|n| n.checked_add(CANONICAL_BYTES))
-            .and_then(|n| n.checked_add(DECODER_SCRATCH))
-            .and_then(|n| n.checked_add(64 << 10))
-            .ok_or_else(|| failure(FailureCode::ResourceLimit))?;
+        let decoder_reservation = Self::decoder_baseline(limits)?;
         resources.reserve(
             u64::try_from(std::mem::size_of::<Self>())
                 .map_err(|_| failure(FailureCode::ResourceLimit))?,
         )?;
         resources.reserve(decoder_reservation)?;
-        resources.release(decoder_reservation)?;
-        resources.reserve(integrity_reservation)?;
-        let integrity = IntegrityPass::new(source)?;
+        let reader = WindowReader::new_one_pass(
+            source.len,
+            limits.acquisition_bytes,
+            Self::decode_limits(),
+            Some(source.id),
+        )
+        .map_err(|error| map_core(&error))?;
         let binding = Self::binding(source, repository);
         let evidence = EvidenceLimits {
             page_bytes: limits.page_bytes,
@@ -374,8 +369,9 @@ impl VerifyDriver {
             sequence: 0,
             pending: None,
             phase: Phase::Roots,
-            integrity: Some(integrity),
-            reader: None,
+            deferred_failure: None,
+            acquired_hash_end: 0,
+            reader: Some(reader),
             resources,
             objects,
             ordinals,
@@ -399,7 +395,6 @@ impl VerifyDriver {
             external_lookups: 0,
             header: None,
             signature_failure: None,
-            integrity_reservation,
             decoder_reservation,
             complete: None,
             checkpoint: None,
@@ -514,10 +509,17 @@ impl VerifyDriver {
         }
         if self.op.is_some() {
             let result = self.drive_op();
-            if result.is_err() {
-                self.phase = Phase::Failed;
-            }
-            return result;
+            return match result {
+                Err(error) if self.phase == Phase::Entries && Self::entry_refusal(&error) => {
+                    self.defer_failure(error)?;
+                    Ok(Step::Progress)
+                }
+                Err(error) => {
+                    self.phase = Phase::Failed;
+                    Err(error)
+                }
+                result => result,
+            };
         }
         if let Some(page) = self.roots.pop_front() {
             self.resources.reserve(self.limits.page_bytes)?;
@@ -544,10 +546,10 @@ impl VerifyDriver {
         let result: Result<Step<'static>, Failure> = match self.phase {
             Phase::Roots => {
                 self.phase = Phase::Header;
-                self.request_input(0, 12)
+                self.start_input()
             }
-            Phase::Header => self.request_input(0, 12),
-            Phase::Integrity => self.advance_integrity(),
+            Phase::Header => self.start_input(),
+            Phase::Drain => self.advance_drain(),
             Phase::Entries => self.advance_entries(),
             Phase::Seal => self.advance_seal(),
             Phase::Complete => self
@@ -557,10 +559,25 @@ impl VerifyDriver {
                 .ok_or_else(invalid),
             Phase::Failed => Err(invalid()),
         };
+        let result = match result {
+            Err(error) if self.phase == Phase::Entries && Self::entry_refusal(&error) => {
+                self.defer_failure(error)?;
+                Ok(Step::Progress)
+            }
+            result => result,
+        };
         if result.is_err() && self.phase != Phase::Failed {
             self.phase = Phase::Failed;
         }
         result
+    }
+
+    fn start_input(&mut self) -> Result<Step<'static>, Failure> {
+        let reader = self.reader.as_mut().ok_or_else(invalid)?;
+        match reader.step().map_err(|error| map_core(&error))? {
+            CoreStep::NeedWindow(range) => self.request_input(range.offset, range.len),
+            _ => Err(invalid()),
+        }
     }
 
     fn request_input(&mut self, offset: u64, len: u64) -> Result<Step<'static>, Failure> {
@@ -652,20 +669,12 @@ impl VerifyDriver {
                 }
                 self.pending = None;
                 match for_ {
-                    For::Input => {
-                        // Decoder feeds copy and commit the window. Prepay one
-                        // additional prefix pass: cold resume re-feeds and
-                        // re-hashes consumed windows.
-                        let passes = if self.phase == Phase::Entries { 4 } else { 3 };
-                        self.charge_feed(range, passes)?;
-                        self.accept_input(range.offset, bytes)
-                    }
+                    For::Input => self.accept_input(range.offset, bytes),
                     For::Base | For::External => {
                         // Served base bytes are deserialized, hashed, and
                         // copied before the entry decodes: the same three
                         // passes integrity feeds pay.
-                        self.charge_feed(range, 3)?;
-                        self.accept_base(for_ == For::External, range, bytes)
+                        self.accept_base_input(for_ == For::External, range, bytes)
                     }
                 }
             }
@@ -679,14 +688,20 @@ impl VerifyDriver {
                 let fact = match value {
                     Acquisition::Present(fact) => fact,
                     Acquisition::Absent => {
-                        self.phase = Phase::Failed;
-                        return Err(failure(FailureCode::ExternalBaseAbsent));
+                        self.pending = None;
+                        return self.defer_failure(failure(FailureCode::ExternalBaseAbsent));
                     }
                     Acquisition::Unavailable => {
                         return Err(failure(FailureCode::UnavailableInput));
                     }
                 };
-                self.accept_member(object, fact)
+                match self.accept_member(object, fact) {
+                    Err(error) if Self::entry_refusal(&error) => {
+                        self.pending = None;
+                        self.defer_failure(error)
+                    }
+                    result => result,
+                }
             }
             (
                 Pending::Page { request, page },
@@ -710,28 +725,44 @@ impl VerifyDriver {
                     .feed(&mut live.op, bytes, &mut budget);
                 let used = self.limits.work.saturating_sub(budget.remaining());
                 self.op = Some(live);
-                let charged = self.resources.work(used);
-                if charged.is_err() {
-                    self.phase = Phase::Failed;
-                }
-                result.and(charged)
+                self.finish_page_feed(result, used)
             }
             _ => Err(invalid()),
         }
     }
 
-    /// Charges `range.len * passes` of feed work; exhaustion is terminal.
-    fn charge_feed(&mut self, range: ByteRange, passes: u64) -> Result<(), Failure> {
-        let result = range
-            .len
-            .checked_mul(passes)
-            .ok_or_else(|| failure(FailureCode::ResourceLimit))
-            .and_then(|charge| self.resources.work(charge));
-        if let Err(error) = result {
-            self.phase = Phase::Failed;
-            return Err(error);
+    fn finish_page_feed(&mut self, result: Result<(), Failure>, used: u64) -> Result<(), Failure> {
+        let charged = self.resources.work(used);
+        let charge_failed = charged.is_err();
+        match result.and(charged) {
+            Err(error) if self.phase == Phase::Entries && Self::entry_refusal(&error) => {
+                self.defer_failure(error)
+            }
+            Err(error) => {
+                if charge_failed {
+                    self.phase = Phase::Failed;
+                }
+                Err(error)
+            }
+            result => result,
         }
-        Ok(())
+    }
+
+    fn accept_base_input(
+        &mut self,
+        external: bool,
+        range: ByteRange,
+        bytes: &[u8],
+    ) -> Result<(), Failure> {
+        let result = (|| {
+            self.resources
+                .work(range.len.checked_mul(3).ok_or_else(resource)?)?;
+            self.accept_base(external, range, bytes)
+        })();
+        match result {
+            Err(error) if Self::entry_refusal(&error) => self.defer_failure(error),
+            result => result,
+        }
     }
 
     fn accept_member(&mut self, object: Hash, fact: MemberFact) -> Result<(), Failure> {
@@ -739,8 +770,8 @@ impl VerifyDriver {
             return Err(invalid());
         }
         if fact.held || !fact.published {
-            self.phase = Phase::Failed;
-            return Err(failure(FailureCode::ExternalBaseAbsent));
+            self.pending = None;
+            return self.defer_failure(failure(FailureCode::ExternalBaseAbsent));
         }
         // A fact that cannot name servable canonical bytes is a protocol
         // violation, not a missing member.
@@ -748,13 +779,14 @@ impl VerifyDriver {
             return Err(invalid());
         }
         self.resources.charge_external()?;
-        self.external_lookups = self
+        let external_lookups = self
             .external_lookups
             .checked_add(1)
             .ok_or_else(|| failure(FailureCode::ResourceLimit))?;
-        if self.external_lookups > self.limits.external_lookups {
+        if external_lookups > self.limits.external_lookups {
             return Err(failure(FailureCode::ResourceLimit));
         }
+        self.external_lookups = external_lookups;
         self.pending = None;
         let canonical_len = fact.canonical_len;
         let binding = fact.canonical_binding;
@@ -779,21 +811,41 @@ impl VerifyDriver {
     }
 
     fn accept_input(&mut self, offset: u64, bytes: &[u8]) -> Result<(), Failure> {
-        let result = match self.phase {
-            Phase::Roots | Phase::Header => self.accept_header(bytes),
-            Phase::Integrity => self
-                .integrity
-                .as_mut()
-                .ok_or_else(invalid)?
-                .feed(offset, bytes),
-            Phase::Entries => self
+        let result = (|| {
+            if self.phase == Phase::Header {
+                self.accept_header(bytes)?;
+                self.resources
+                    .protect_work(self.source.len.checked_mul(3).ok_or_else(resource)?)?;
+                self.loan_compute_control()?;
+                self.phase = Phase::Entries;
+            }
+            if !matches!(self.phase, Phase::Entries | Phase::Drain) {
+                return Err(invalid());
+            }
+            let len = u64::try_from(bytes.len()).map_err(|_| resource())?;
+            let end = offset.checked_add(len).ok_or_else(resource)?;
+            let fresh = end.saturating_sub(self.acquired_hash_end).min(len);
+            let memory = self
                 .reader
+                .as_ref()
+                .ok_or_else(invalid)?
+                .memory_bound(0)
+                .checked_add(len.checked_mul(2).ok_or_else(resource)?)
+                .and_then(|n| n.checked_add(64 << 10))
+                .ok_or_else(resource)?;
+            self.resize_decoder(memory.max(Self::decoder_baseline(self.limits)?))?;
+            self.resources
+                .work((len - fresh).checked_mul(3).ok_or_else(resource)?)?;
+            self.resources
+                .integrity_work(fresh.checked_mul(3).ok_or_else(resource)?)?;
+            self.reader
                 .as_mut()
                 .ok_or_else(invalid)?
                 .feed(offset, bytes)
-                .map_err(|error| map_core(&error)),
-            _ => Err(invalid()),
-        };
+                .map_err(|error| map_core(&error))?;
+            self.acquired_hash_end = self.acquired_hash_end.max(end);
+            Ok(())
+        })();
         if result.is_err() {
             self.phase = Phase::Failed;
         }
@@ -822,7 +874,6 @@ impl VerifyDriver {
                 .map_err(|_| failure(FailureCode::UnexpectedEof))?,
         );
         self.header = Some((version, count));
-        self.phase = Phase::Integrity;
         Ok(())
     }
 
@@ -869,27 +920,117 @@ impl VerifyDriver {
         Ok(())
     }
 
-    fn advance_integrity(&mut self) -> Result<Step<'static>, Failure> {
-        let pass = self.integrity.as_ref().ok_or_else(invalid)?;
-        if let Some(range) = pass.next(self.limits.acquisition_bytes) {
-            return self.request_input(range.offset, range.len);
+    /// Record only the first content verdict, then finish authenticating the
+    /// immutable source. Later entries cannot change this wire-order choice.
+    fn defer_failure(&mut self, error: Failure) -> Result<(), Failure> {
+        if self.deferred_failure.is_none() {
+            self.deferred_failure = Some(error);
         }
-        self.trailer = pass.verify()?;
-        self.integrity = None;
-        self.resources.release(self.integrity_reservation)?;
-        self.loan_compute_control()?;
-        self.resources.reserve(self.decoder_reservation)?;
-        self.reader = Some(
-            WindowReader::new(
-                self.source.len,
-                self.limits.acquisition_bytes,
-                Self::decode_limits(),
-                Some(self.source.id),
-            )
-            .map_err(|error| map_core(&error))?,
-        );
-        self.phase = Phase::Entries;
-        Ok(Step::Progress)
+        if let Some(work) = self.work.take() {
+            self.resources.release(work.base_len)?;
+        }
+        self.op = None;
+        self.discard_compute();
+        self.phase = Phase::Drain;
+        // Mark the reader before permitting a checkpoint of this drain. A
+        // returned request is replayed by advance_drain without acquiring it.
+        if let Err(error) = self.reader.as_mut().ok_or_else(invalid)?.integrity_step() {
+            self.phase = Phase::Failed;
+            return Err(map_core(&error));
+        }
+        Ok(())
+    }
+
+    fn entry_refusal(error: &Failure) -> bool {
+        matches!(
+            error.code,
+            FailureCode::UnexpectedEof
+                | FailureCode::InvalidEntryType
+                | FailureCode::TooManyObjects
+                | FailureCode::PackfileTooLarge
+                | FailureCode::ZstdEntryTruncated
+                | FailureCode::DeltaEntryTruncated
+                | FailureCode::NonStorableObject
+                | FailureCode::TrailingData
+                | FailureCode::DecompressionFailed
+                | FailureCode::DecompressedSizeMismatch
+                | FailureCode::DecompressionLimitExceeded
+                | FailureCode::InvalidDelta
+                | FailureCode::DeltaBaseMismatch
+                | FailureCode::DeltaSizeMismatch
+                | FailureCode::NonCanonicalObject
+                | FailureCode::ObjectHashMismatch
+                | FailureCode::DeltaChainTooDeep
+                | FailureCode::ExternalBaseAbsent
+                | FailureCode::ResourceLimit
+                | FailureCode::UnsupportedCapability
+        )
+    }
+
+    fn advance_drain(&mut self) -> Result<Step<'static>, Failure> {
+        match self
+            .reader
+            .as_mut()
+            .ok_or_else(invalid)?
+            .integrity_step()
+            .map_err(|error| map_core(&error))?
+        {
+            CoreStep::NeedWindow(range) => self.request_input(range.offset, range.len),
+            CoreStep::Done(_) => Err(self.deferred_failure.take().ok_or_else(invalid)?),
+            _ => Err(invalid()),
+        }
+    }
+
+    const fn canonical_workspace() -> u64 {
+        // Entry/canonical ownership, deserialized objects and transient clones
+        // share this allowance; reader carry and zstd scratch are separate.
+        8 * CANONICAL_BYTES + (64 << 10)
+    }
+
+    fn decoder_baseline(limits: VerifyLimits) -> Result<u64, Failure> {
+        limits
+            .acquisition_bytes
+            .checked_mul(2)
+            .and_then(|n| n.checked_add(Self::canonical_workspace()))
+            .ok_or_else(resource)
+    }
+
+    fn resize_decoder(&mut self, bytes: u64) -> Result<(), Failure> {
+        if bytes > self.decoder_reservation {
+            self.resources.reserve(bytes - self.decoder_reservation)?;
+        } else {
+            self.resources.release(self.decoder_reservation - bytes)?;
+        }
+        self.decoder_reservation = bytes;
+        Ok(())
+    }
+
+    fn read_entry_step(&mut self) -> Result<CoreStep, Failure> {
+        let memory = self
+            .reader
+            .as_ref()
+            .ok_or_else(invalid)?
+            .memory_bound(DECODER_SCRATCH)
+            .checked_add(64 << 10)
+            .ok_or_else(resource)?;
+        self.resize_decoder(memory.max(Self::decoder_baseline(self.limits)?))?;
+        let result = self
+            .reader
+            .as_mut()
+            .ok_or_else(invalid)?
+            .step()
+            .map_err(|error| map_core(&error));
+        if result.is_ok() {
+            let memory = self
+                .reader
+                .as_ref()
+                .ok_or_else(invalid)?
+                .memory_bound(0)
+                .checked_add(64 << 10)
+                .ok_or_else(resource)?;
+            self.resize_decoder(memory.max(Self::decoder_baseline(self.limits)?))?;
+        }
+        result
     }
 
     fn decode_limits() -> DecodeLimits {
@@ -905,11 +1046,14 @@ impl VerifyDriver {
         if self.scheduler.is_some() {
             return self.advance_scheduled();
         }
-        let reader = self.reader.as_mut().ok_or_else(invalid)?;
-        match reader.step().map_err(|error| map_core(&error))? {
+        match self.read_entry_step()? {
             CoreStep::NeedWindow(range) => self.request_input(range.offset, range.len),
             CoreStep::Entry(entry) => {
-                let info = reader.last_frame().ok_or_else(invalid)?;
+                let info = self
+                    .reader
+                    .as_ref()
+                    .and_then(WindowReader::last_frame)
+                    .ok_or_else(invalid)?;
                 self.start_entry(entry, info)
             }
             CoreStep::Done(summary) => self.entries_done(summary.version, summary.entry_count),
@@ -981,6 +1125,11 @@ impl VerifyDriver {
         if self.header != Some((version, entry_count)) || self.ordinal != u64::from(entry_count) {
             return Err(failure(FailureCode::SourceChanged));
         }
+        self.trailer = self
+            .reader
+            .as_ref()
+            .and_then(WindowReader::trailer)
+            .ok_or_else(invalid)?;
         self.reader = None;
         // Decoding finished; deferred signature selection fires here,
         // before any further evidence work.
@@ -1051,7 +1200,7 @@ impl VerifyDriver {
         };
         let (id, bytes) = decode_entry_with(entry, &mut bases, Self::decode_limits())
             .map_err(|error| map_core(&error))?;
-        let base_len = work.base_len;
+        let base_len = std::mem::take(&mut work.base_len);
         self.resources.release(base_len)?;
         let object = deserialize(&bytes).map_err(|_| failure(FailureCode::NonCanonicalObject))?;
         self.finish_canonical(id, bytes, object, None)
@@ -1070,13 +1219,14 @@ impl VerifyDriver {
             u64::try_from(bytes.len()).map_err(|_| failure(FailureCode::ResourceLimit))?;
         // Canonical passes: deserialize, validate, and hash the object once.
         self.resources.work(canonical_len)?;
-        self.decoded = self
+        let decoded = self
             .decoded
             .checked_add(canonical_len)
             .ok_or_else(|| failure(FailureCode::PackfileTooLarge))?;
-        if self.decoded > self.profile.decoded_bytes || self.decoded > self.limits.decoded_bytes {
+        if decoded > self.profile.decoded_bytes || decoded > self.limits.decoded_bytes {
             return Err(failure(FailureCode::PackfileTooLarge));
         }
+        self.decoded = decoded;
         if work.base.is_some() {
             self.delta_entries = self
                 .delta_entries
@@ -1114,13 +1264,14 @@ impl VerifyDriver {
             work.chunk_total = manifest.total_size;
             work.chunk_count = manifest.chunks.len() as u64;
         }
-        self.edges = self
+        let edges = self
             .edges
             .checked_add(work.edge_total)
             .ok_or_else(|| failure(FailureCode::ResourceLimit))?;
-        if self.edges > self.limits.dependency_edges {
+        if edges > self.limits.dependency_edges {
             return Err(failure(FailureCode::ResourceLimit));
         }
+        self.edges = edges;
         work.object = Some(object);
         work.id = id;
         work.bytes = bytes;

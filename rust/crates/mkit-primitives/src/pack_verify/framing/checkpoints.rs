@@ -60,6 +60,7 @@ impl FramingDriver {
         let state = checkpoint.decode(limits)?;
         match meta.phase {
             CheckpointPhase::Header => machine.phase = Phase::Header,
+            CheckpointPhase::Drain => return Err(failure(FailureCode::InvalidCheckpoint)),
             CheckpointPhase::Integrity => {
                 let frontier = state
                     .integrity

@@ -1,9 +1,10 @@
 {
-  "cursor_bytes": 157,
-  "description": "Format version 2 checkpoint captured at an entry boundary during all-entry verification, carrying the verify-state section with six index checkpoints.",
-  "encoded_bytes": 958,
+  "cursor_bytes": 263,
+  "deferred_failure": null,
+  "description": "Format version 3 all-entry verification checkpoint at the first entry boundary, including exact acquisition hash frontiers and bounded deferred-refusal state.",
+  "encoded_bytes": 1065,
   "expected": "Checkpoint",
-  "format_version": 2,
+  "format_version": 3,
   "generation": 17,
   "header": {
     "count": 2,
@@ -23,16 +24,16 @@
   "repository": "0909090909090909090909090909090909090909090909090909090909090909",
   "retention_count": 9,
   "ruleset": 1,
-  "sequence": 6,
+  "sequence": 4,
   "source_binding": "0707070707070707070707070707070707070707070707070707070707070707",
   "source_id": "db4e89aeb654e0f5758ec5cc29d3bb9e795ac5d7a31d4cc17f28331439caa95a",
   "source_len": 83,
-  "trailer": "c871a9b609967233e135e6e61042dc4435698562918019f54ff677a0cb0cdc58",
+  "trailer": "0000000000000000000000000000000000000000000000000000000000000000",
   "usage": {
     "evidence_bytes": 1556,
     "evidence_pages": 9,
-    "peak_resident_bytes": 22120038,
+    "peak_resident_bytes": 50000000,
     "resident_bytes": 0,
-    "work": 24580
+    "work": 2000000
   }
 }

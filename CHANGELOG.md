@@ -15,6 +15,13 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Breaking (toward 0.6)
 
+- [embedder: stored-format change] All-entry verification checkpoints use
+  envelope version 3 with explicit hash frontiers, an authenticated remaining
+  suffix, and bounded deferred refusal state. Migration: discard unsupported
+  verification checkpoints and restart from the immutable source. Framing
+  checkpoints retain version 1. No pack or object bytes change, and no
+  repository store reset is required.
+
 - [embedder: breaking API] The ALPHA decision facts now model the exact ticket
   and pending-reservation observations. Migration: replace `TicketFact.authority`
   with `authority_generation: Option<u64>`, replace `upload` with
@@ -32,7 +39,7 @@ collect the applicable entries between their old and new immutable pins.
   initialize the new count in struct literals and read typed
   `DependencyRecord` values from the combined dependency sequence to distinguish
   graph edges from external bases. Verification checkpoints use envelope
-  version 2; framing checkpoints retain version 1. Restart unsupported disposable
+  version 3; framing checkpoints retain version 1. Restart unsupported disposable
   checkpoints from their immutable source. Pack and object bytes are unchanged;
   no repository store reset is required.
 
@@ -100,6 +107,10 @@ collect the applicable entries between their old and new immutable pins.
   all other stored formats are unchanged.
 
 ### Added
+
+- Verify pack integrity and canonical entries in one acquisition pass.
+  Entry-boundary checkpoints resume without reacquiring the consumed prefix;
+  integrity failures retain precedence over deferred entry refusals.
 
 - Add portable ticketed-advance and reservation-settlement decisions to
   `mkit-primitives`: request-ordered ticket validation, upload-proof claims,
