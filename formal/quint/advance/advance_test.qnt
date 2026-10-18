@@ -282,3 +282,21 @@ module splitCasFF_test {
       .then(srvUpd2(2))                                                       // blind write of 2 over 1
       .expect(and { hd == 2, not(NoLostSuccess), not(NoLostUpdate) })
 }
+
+// An unchanged, separate limitation: a non-force lease can name a head that
+// does not exist when its head-only plan starts. Keep its counterexample
+// explicit rather than including it in the focused force-push ABA instance.
+module futureLeaseNonforce_test {
+  import advance(PUSHERS = Map(1 -> { tip: 6, cond: 3 }, 3 -> { tip: 3, cond: 6 }),
+                 MODE = "atomic", LEDGER = false, ANY_FALLBACK = false, INIT_HEAD = 3, THRESH = 1,
+                 ATTEMPTS = 4, LADDER = 2,
+                 FAULTS = { oldConflict: false, trustConflict: false, noGate: false, gateNoAny: false, splitCas: false, headFirst: false, noTimeout: false, noLadderBound: false }).* from "./advance"
+
+  run futureLeaseHeadOnlyCanStrandTest =
+    init.then(start(3))
+      .expect(ps.get(3).pc == "updSrv")
+      .then(start(1)).then(loop(1)).then(srvAdvAtomic(1))
+      .expect(and { hd == 6, pm == [1], DeltaTransfer })
+      .then(srvUpd(3))
+      .expect(and { hd == 3, pm == [1], not(DeltaTransfer) })
+}

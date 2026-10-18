@@ -144,8 +144,8 @@ let report = push(&dir, &source, &options)?;
 ```
 
 On atomic-capable sources, force pushes publish the head and packmap together,
-including a head-only change. A successful force push adds at most one strong
-packmap read; other pushes keep their existing requests. A replaced chain causes
+including a head-only change. The uncontended success path adds at most one
+strong packmap read; other pushes keep their existing requests. A replaced chain causes
 a re-plan within the same eight-attempt budget as publication. Sustained
 contention returns `PushError::PackmapContended`. A dependent plan compares both
 observed refs so a reset back to an identical packmap digest is safe. The

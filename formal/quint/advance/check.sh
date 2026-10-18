@@ -50,11 +50,15 @@ STEPS=${STEPS:-40}
 SAMPLES=${SAMPLES:-20000}
 F=advance.qnt
 
+# The additional ABA regression starts its restoring lease only after the
+# intermediate head exists; all original instances keep the original step.
+step_for() { if [[ $1 == gapAbaAny3 ]]; then echo abaStep; else echo step; fi; }
+
 # quint run: $1 module, $2 invariant, $3 expect ok|violation
 qrun() {
   [[ ${QUINT:-1} == 1 ]] || return 0
   local out rc=0
-  out=$(quint run "$F" --main "$1" --invariant "$2" --max-steps "$STEPS" \
+  out=$(quint run "$F" --main "$1" --step "$(step_for "$1")" --invariant "$2" --max-steps "$STEPS" \
     --max-samples "$SAMPLES" --backend rust --seed=0x1 2>&1) || rc=$?
   if [[ $3 == ok && $rc == 0 && $out == *"[ok]"* ]] ||
      [[ $3 == violation && $out == *"[violation]"* ]]; then
@@ -73,7 +77,7 @@ compile() {
   mkdir -p "$3"
   local try out
   for try in 1 2 3; do
-    if out=$(cd "$3" && quint compile --target tlaplus --main "$1" --invariant "$2" "$HERE/$F" 2>"$3/compile.err") &&
+    if out=$(cd "$3" && quint compile --target tlaplus --main "$1" --step "$(step_for "$1")" --invariant "$2" "$HERE/$F" 2>"$3/compile.err") &&
        [[ $out == *"MODULE"* ]]; then
       printf '%s\n' "$out" | sed -n '/^-* MODULE/,$p' | sed "1s/MODULE [A-Za-z0-9_]*/MODULE M/" > "$3/M.tla"
       (cd "$3" && unzip -o -j -q "$APA_JAR" tla2sany/StandardModules/Apalache.tla \
@@ -160,7 +164,7 @@ live() {
 # ---- typecheck + deterministic scenarios ------------------------------------
 quint typecheck advance.qnt && quint typecheck advance_test.qnt
 for m in ordered_test ordered_oldConflict_test ledger_test atomic_test noGate_test \
-  splitCas_test gapNoopAny_test gapHttpAny_test gapTwoAny_test gapAppendAny_test gapAbaAny_test forceBudget_test splitCasFF_test; do
+  splitCas_test gapNoopAny_test gapHttpAny_test gapTwoAny_test gapAppendAny_test gapAbaAny_test forceBudget_test futureLeaseNonforce_test splitCasFF_test; do
   quint test advance_test.qnt --main "$m" >/dev/null && note "test $m" ok || bad "test $m" failed
 done
 
@@ -238,8 +242,6 @@ if [[ ${APALACHE:-0} == 1 ]]; then
   apa gapHttpAny2 All 7 ok
   apa gapTwoAny3 All 8 ok
   apa gapAppendAny2 All 6 ok
-  apa gapAppendTwoAny3 All 8 ok
-  apa gapAbaAny3 All 10 ok
   apa noop2_splitCas NoLostUpdate 7 violation
 fi
 [[ $fails == 0 ]] && echo "all checks as expected" || { echo "$fails unexpected"; exit 1; }

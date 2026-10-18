@@ -97,6 +97,14 @@ rather than merely preventing the bad write. `gapAbaAny3` additionally
 requires safety when independent reads span a change and the identical old
 packmap root is restored before the force write.
 
+The additional ABA instance uses `abaStep` to start the restoring lease only
+after the intermediate head exists. Every original instance keeps `step`.
+Starting that lease earlier exposes a separate unchanged non-force limit:
+a lease can name a future head, plan a head-only rewind against the old
+head, and later succeed after an incompatible reset. The deterministic
+`futureLeaseNonforce_test` retains that counterexample explicitly. This
+force-push change does not claim to repair the future-lease case.
+
 The baseline TLC witnesses use 182, 47, 70, 1211 and 1954 distinct states,
 respectively, in the table's order. These are counterexample search counts,
 not counts for the repaired state space.

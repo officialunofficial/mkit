@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   also compare the observed head, including when a reset restores an identical
   packmap digest. Force retries share the existing eight-attempt CAS budget;
   exhaustion returns `PushError::PackmapContended`. This adds at most one strong
-  packmap read on successful force pushes. Non-force requests, wire formats and
+  packmap read on the uncontended force-push success path. Non-force requests, wire formats and
   stored formats are unchanged; no store reset is required. Custom atomic
   transports whose endpoint cannot encode `Any` can override the new provided
   `Transport::atomic_force_head_condition` method; source adapters forward it.

@@ -511,14 +511,17 @@ module advance {
     lastAction' = { name: "quiet", p: 0, what: "" },
   }
 
-  action pusherStep = {
+  // Focused instances can constrain only when a pusher begins. The default
+  // permits every start and retains the original transition relation.
+  action pusherStepWithStarts(allowed: Set[int]): bool = {
     nondet i = PIDS.filter(j => not(terminal(j))).oneOf()
     any {
-      start(i), planForce(i), loop(i), srvAdvAtomic(i), srvAdvFirst(i), srvAdvSecond(i),
+      all { allowed.contains(i), start(i) }, planForce(i), loop(i), srvAdvAtomic(i), srvAdvFirst(i), srvAdvSecond(i),
       srvCrash(i), srvUpd(i), srvUpd2(i), deliver(i), lose(i), readHead(i), crash(i),
     }
   }
 
+  action pusherStep = pusherStepWithStarts(PIDS)
   action step = any { pusherStep, quiet }
 
   // ------------------------------------------------------------ invariants
@@ -763,4 +766,11 @@ module gapAbaAny3 {
   import advance(PUSHERS = Map(1 -> { tip: 6, cond: 3 }, 2 -> { tip: 4, cond: -1 }, 3 -> { tip: 3, cond: 6 }),
                  MODE = "atomic", LEDGER = false, ANY_FALLBACK = false, INIT_HEAD = 3, THRESH = 1,
                  ATTEMPTS = 4, LADDER = 2, FAULTS = { oldConflict: false, trustConflict: false, noGate: false, gateNoAny: false, splitCas: false, headFirst: false, noTimeout: false, noLadderBound: false }).*
+
+  // Focused setup: the restoring lease begins after head 6 exists. The
+  // separate futureLeaseNonforce_test retains the earlier-start witness.
+  action abaStep = any {
+    pusherStepWithStarts(if (hd == 6) PIDS else PIDS.exclude(Set(3))),
+    quiet,
+  }
 }
