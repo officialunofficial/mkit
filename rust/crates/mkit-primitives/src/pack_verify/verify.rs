@@ -725,21 +725,26 @@ impl VerifyDriver {
                     .feed(&mut live.op, bytes, &mut budget);
                 let used = self.limits.work.saturating_sub(budget.remaining());
                 self.op = Some(live);
-                if let Err(error) = self.resources.work(used) {
-                    if self.phase == Phase::Entries {
-                        return self.defer_failure(error);
-                    }
-                    self.phase = Phase::Failed;
-                    return Err(error);
-                }
-                match result {
-                    Err(error) if self.phase == Phase::Entries && Self::entry_refusal(&error) => {
-                        self.defer_failure(error)
-                    }
-                    result => result,
-                }
+                self.finish_page_feed(result, used)
             }
             _ => Err(invalid()),
+        }
+    }
+
+    fn finish_page_feed(&mut self, result: Result<(), Failure>, used: u64) -> Result<(), Failure> {
+        let charged = self.resources.work(used);
+        let charge_failed = charged.is_err();
+        match result.and(charged) {
+            Err(error) if self.phase == Phase::Entries && Self::entry_refusal(&error) => {
+                self.defer_failure(error)
+            }
+            Err(error) => {
+                if charge_failed {
+                    self.phase = Phase::Failed;
+                }
+                Err(error)
+            }
+            result => result,
         }
     }
 

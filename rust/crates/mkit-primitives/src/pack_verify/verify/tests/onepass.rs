@@ -668,7 +668,13 @@ fn seal_budget_pack() -> Vec<u8> {
     writer.finish().unwrap()
 }
 
-fn seal_budget_run(pack: &[u8], cap: u64, mode: Option<u64>, resume_last: bool) -> (u64, bool) {
+fn seal_budget_run(
+    pack: &[u8],
+    cap: u64,
+    mode: Option<u64>,
+    resume_last: bool,
+    malformed_at: Option<u64>,
+) -> (u64, bool) {
     let budget = VerifyLimits {
         work: cap,
         ..limits()
@@ -695,18 +701,41 @@ fn seal_budget_run(pack: &[u8], cap: u64, mode: Option<u64>, resume_last: bool) 
                     last_page_before = machine.usage().work;
                 }
                 let phase = machine.phase;
+                let malformed = phase == Phase::Seal && malformed_at == Some(last_page_before);
+                if malformed && let Request::EvidencePage { page, .. } = request {
+                    host.pages
+                        .iter_mut()
+                        .find(|(commitment, _)| *commitment == page)
+                        .unwrap()
+                        .1[0] ^= 1;
+                }
                 if let Err(error) = host.serve(&mut machine, &request) {
                     assert_eq!(phase, Phase::Seal);
-                    assert_eq!(error.code, FailureCode::ResourceLimit);
+                    assert_eq!(
+                        error.code,
+                        if malformed {
+                            FailureCode::InvalidEvidence
+                        } else {
+                            FailureCode::ResourceLimit
+                        }
+                    );
                     assert!(!resume_last || resumed);
-                    assert_eq!(
-                        machine.step().unwrap_err().code,
-                        FailureCode::InvalidResponse
-                    );
-                    assert_eq!(
-                        host.serve(&mut machine, &request).unwrap_err().code,
-                        FailureCode::InvalidResponse
-                    );
+                    if cap == last_page_before {
+                        assert_eq!(
+                            machine.step().unwrap_err().code,
+                            FailureCode::InvalidResponse
+                        );
+                        assert_eq!(
+                            host.serve(&mut machine, &request).unwrap_err().code,
+                            FailureCode::InvalidResponse
+                        );
+                    } else {
+                        assert!(malformed);
+                        assert!(matches!(
+                            machine.step().unwrap(),
+                            Step::Request(Request::EvidencePage { .. })
+                        ));
+                    }
                     return (last_page_before, false);
                 }
             }
@@ -774,10 +803,23 @@ fn sealing_page_work_exhaustion_is_terminal() {
     let pack = seal_budget_pack();
     for mode in [None, Some(0), Some(1), Some(7)] {
         for resume_last in [false, true] {
-            let (cap, complete) = seal_budget_run(&pack, limits().work, mode, resume_last);
+            let (cap, complete) = seal_budget_run(&pack, limits().work, mode, resume_last, None);
             assert!(complete);
             assert!(cap > 0);
-            assert!(!seal_budget_run(&pack, cap, mode, resume_last).1);
+            assert!(!seal_budget_run(&pack, cap, mode, resume_last, None).1);
+        }
+    }
+}
+
+#[test]
+fn malformed_sealing_page_keeps_precedence_over_work_exhaustion() {
+    let pack = seal_budget_pack();
+    for mode in [None, Some(0), Some(1), Some(7)] {
+        for resume_last in [false, true] {
+            let (cap, complete) = seal_budget_run(&pack, limits().work, mode, resume_last, None);
+            assert!(complete);
+            assert!(!seal_budget_run(&pack, cap, mode, resume_last, Some(cap)).1);
+            assert!(!seal_budget_run(&pack, limits().work, mode, resume_last, Some(cap)).1);
         }
     }
 }
