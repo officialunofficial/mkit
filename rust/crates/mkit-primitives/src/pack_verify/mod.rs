@@ -155,6 +155,10 @@ pub struct ObjectFragment<'a> {
     pub bytes: &'a [u8],
 }
 /// Retained-page event. Acknowledgment is mandatory before dependent progress.
+///
+/// The driver hands a page to the host when its cache evicts it, at a
+/// checkpoint, and at completion of a durable run. Pages are scoped to the run
+/// and are reproduced by re-verifying the pack; they are not an archive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use]
 pub struct EvidencePage<'a> {
@@ -177,6 +181,10 @@ pub enum Step<'a> {
     ProvisionalObject(ObjectFragment<'a>),
     /// Backpressure until this evidence page is retained and acknowledged.
     RetainEvidence(EvidencePage<'a>),
+    /// A page the host retained is no longer reachable from the driver's roots
+    /// or from its latest checkpoint; the host may drop it. No reply is needed,
+    /// and the run never asks for it again.
+    ReleasePage(PageCommitment),
     /// Bounded internal progress; call again.
     Progress,
     /// Every required check succeeded; this alone grants no membership.
@@ -216,9 +224,12 @@ pub struct EvidenceSequence {
 }
 /// Sealed all-entry indexed verification. Construction belongs to this module.
 ///
-/// Retained pages are part of its evidence lifetime. Page loss requires recovery
-/// or re-verification, never fabricated lookup success. This is not a remote
-/// attestation and grants neither repository membership nor read permission.
+/// It carries root digests and counts, not the evidence pages. Pages are scoped
+/// to the run that produced them: nothing reads them after the terminal
+/// `Step::Complete`, and re-verifying the pack reproduces them exactly. Page
+/// loss during a run requires recovery or re-verification, never fabricated
+/// lookup success. This is not a remote attestation and grants neither
+/// repository membership nor read permission.
 ///
 /// ```compile_fail
 /// use mkit_primitives::{pack_verify::*, evidence::*, limits::*};

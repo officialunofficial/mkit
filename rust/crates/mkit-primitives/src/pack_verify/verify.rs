@@ -6,6 +6,7 @@
 //! Canonical bytes it emits stay provisional until the whole-pack trailer and
 //! every signature have been checked; only the terminal [`Step::Complete`]
 //! seals a `VerifiedPack`.
+mod cache;
 mod checkpoints;
 mod compute;
 mod scheduling;
@@ -32,10 +33,11 @@ use crate::{
     evidence::{
         MemberFact, PackSource, PageCommitment, PageKind, ProfileId, RepositoryId, RulesetBinding,
         checkpoint::Checkpoint,
-        pages::{EncodedPage, EvidenceBinding, INDEXED_RULESET},
+        pages::{EvidenceBinding, INDEXED_RULESET},
     },
     limits::{EvidenceLimits, IndexedProfile, VerifyLimits},
 };
+use cache::{PageCache, Retained};
 use index::{Descent, Event, Index, Op, Sequence, Spine, ordinal_key};
 use mkit_core::{
     hash::Hash,
@@ -247,6 +249,24 @@ struct Seal {
     position: u64,
 }
 
+/// How a verification run treats the evidence pages it produces.
+///
+/// Pages are scoped to one run: nothing reads them after the terminal
+/// [`Step::Complete`], and re-verifying the pack reproduces them exactly.
+/// The retention mode says whether the run must be restartable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PageRetention {
+    /// The run can be checkpointed and resumed. Every page reachable from a
+    /// checkpoint's roots is retained by the host before the checkpoint exists,
+    /// and the final pages are retained before completion.
+    Durable,
+    /// The run is never resumed: [`VerifyDriver::checkpoint`] is refused and
+    /// the run ends with the host holding only pages evicted from the cache.
+    /// A pack whose indexes fit the cache costs the host no pages at all.
+    Ephemeral,
+}
+
 /// Bounded pull driver for indexed all-entry verification.
 ///
 /// It never buffers a whole pack, never fabricates absence, and commits roots
@@ -273,11 +293,18 @@ pub struct VerifyDriver {
     dependencies: Sequence,
     referenced: Index,
     heads: Sequence,
-    roots: VecDeque<EncodedPage>,
+    cache: PageCache,
+    retention: PageRetention,
+    /// Pages awaiting the host after the one in `retained`.
+    retain_queue: VecDeque<Retained>,
     op: Option<Live>,
     work: Option<Work>,
     seal: Option<Seal>,
-    retained: Option<EncodedPage>,
+    retained: Option<Retained>,
+    /// A checkpoint was asked for and awaits the next drained entry boundary.
+    armed: bool,
+    /// The driver stands at a drained boundary with every page retained.
+    checkpoint_ready: bool,
     ordinal: u64,
     payload: u64,
     trailer: Hash,
@@ -326,6 +353,29 @@ impl VerifyDriver {
         profile: IndexedProfile,
         limits: VerifyLimits,
         generation: u64,
+    ) -> Result<Self, Failure> {
+        Self::new_with_retention(
+            source,
+            repository,
+            profile,
+            limits,
+            generation,
+            PageRetention::Durable,
+        )
+    }
+
+    /// Starts a run with an explicit page-retention mode; [`Self::new`] is
+    /// [`PageRetention::Durable`].
+    ///
+    /// # Errors
+    /// The same refusals as [`Self::new`].
+    pub fn new_with_retention(
+        source: PackSource,
+        repository: RepositoryId,
+        profile: IndexedProfile,
+        limits: VerifyLimits,
+        generation: u64,
+        retention: PageRetention,
     ) -> Result<Self, Failure> {
         if source.len < 44 {
             return Err(failure(FailureCode::PackfileTooShort));
@@ -379,11 +429,15 @@ impl VerifyDriver {
             dependencies,
             referenced,
             heads,
-            roots: VecDeque::new(),
+            cache: PageCache::new(Self::cache_capacity(limits)?, 0),
+            retention,
+            retain_queue: VecDeque::new(),
             op: None,
             work: None,
             seal: None,
             retained: None,
+            armed: false,
+            checkpoint_ready: false,
             ordinal: 0,
             payload: 0,
             trailer: [0; 32],
@@ -400,14 +454,23 @@ impl VerifyDriver {
             checkpoint: None,
             scheduler: None,
         };
-        driver
-            .roots
-            .try_reserve_exact(6)
-            .map_err(|_| failure(FailureCode::ResourceLimit))?;
+        // The six canonical empty roots start as unretained cache pages.
         for page in [p0, p1, p2, p3, p4, p5] {
-            driver.roots.push_back(page);
+            let (bytes, commitment) = page.into_parts();
+            driver
+                .cache
+                .insert(&mut driver.resources, commitment, bytes)?;
         }
         Ok(driver)
+    }
+
+    /// Bytes of pages the cache may hold: the reservation `resident_pages` and
+    /// `page_bytes` already imply, charged at actual page sizes.
+    fn cache_capacity(limits: VerifyLimits) -> Result<u64, Failure> {
+        limits
+            .page_bytes
+            .checked_mul(u64::from(limits.resident_pages))
+            .ok_or_else(resource)
     }
 
     fn binding(source: PackSource, repository: RepositoryId) -> EvidenceBinding {
@@ -497,12 +560,18 @@ impl VerifyDriver {
     /// makes the driver inert. Requests remain stable until a matching reply
     /// is supplied.
     pub fn step(&mut self) -> Result<Step<'_>, Failure> {
-        self.release_checkpoint()?;
+        self.begin_call()?;
         if self.phase == Phase::Failed {
             return Err(invalid());
         }
+        if self.retained.is_none() {
+            self.retained = self.retain_queue.pop_front();
+        }
         if self.retained.is_some() {
             return self.retention_event();
+        }
+        if let Some(page) = self.cache.pop_release(&mut self.resources)? {
+            return Ok(Step::ReleasePage(page));
         }
         if let Some(pending) = self.pending {
             return Ok(Self::step_of(self.repository, pending));
@@ -520,13 +589,6 @@ impl VerifyDriver {
                 }
                 result => result,
             };
-        }
-        if let Some(page) = self.roots.pop_front() {
-            self.resources.reserve(self.limits.page_bytes)?;
-            let len = page.bytes().len() as u64;
-            self.resources.evidence(len)?;
-            self.retained = Some(page);
-            return self.retention_event();
         }
         if self.phase == Phase::Entries
             && let Some(request) = self.compute_request()
@@ -593,9 +655,15 @@ impl VerifyDriver {
     fn retention_event(&self) -> Result<Step<'_>, Failure> {
         let page = self.retained.as_ref().ok_or_else(invalid)?;
         Ok(Step::RetainEvidence(EvidencePage {
-            commitment: page.commitment(),
-            bytes: page.bytes(),
+            commitment: page.commitment,
+            bytes: &page.bytes,
         }))
+    }
+
+    /// Every mutating call retires the previous checkpoint and its readiness.
+    fn begin_call(&mut self) -> Result<(), Failure> {
+        self.checkpoint_ready = false;
+        self.release_checkpoint()
     }
 
     /// Acknowledges exactly the outstanding page.
@@ -604,25 +672,16 @@ impl VerifyDriver {
     /// Wrong, unsolicited, and duplicate acknowledgements are `InvalidResponse`
     /// and preserve the outstanding retention request.
     pub fn acknowledge_retention(&mut self, commitment: PageCommitment) -> Result<(), Failure> {
-        self.release_checkpoint()?;
+        self.begin_call()?;
         if self.phase == Phase::Failed {
             return Err(invalid());
         }
         let retained = self.retained.take().ok_or_else(invalid)?;
-        if retained.commitment() != commitment {
+        if retained.commitment != commitment {
             self.retained = Some(retained);
             return Err(invalid());
         }
-        if self.op.is_some() {
-            let mut live = self.op.take().ok_or_else(invalid)?;
-            let result = Index::acknowledge(&mut live.op, commitment);
-            self.op = Some(live);
-            if let Err(failure) = result {
-                self.retained = Some(retained);
-                return Err(failure);
-            }
-        }
-        self.resources.release(self.limits.page_bytes)?;
+        self.resources.release(retained.bytes.len() as u64)?;
         self.retention_count = self
             .retention_count
             .checked_add(1)
@@ -638,7 +697,7 @@ impl VerifyDriver {
     /// `InvalidResponse` and leave the request pending. `Unavailable`
     /// acquisition is `UnavailableInput`; it never proves absence.
     pub fn supply(&mut self, response: Response<'_>) -> Result<(), Failure> {
-        self.release_checkpoint()?;
+        self.begin_call()?;
         if self.phase == Phase::Failed {
             return Err(invalid());
         }
@@ -724,6 +783,16 @@ impl VerifyDriver {
                     .index_mut(live.index)
                     .feed(&mut live.op, bytes, &mut budget);
                 let used = self.limits.work.saturating_sub(budget.remaining());
+                // The feed authenticated the page against its commitment, so
+                // only now may it enter the cache.
+                let result = result.and_then(|()| {
+                    self.cache.fill(&mut self.resources, page, bytes)?;
+                    if matches!(live.then, Then::Audit { .. }) {
+                        self.cache.reference(page)?;
+                    }
+                    self.cache
+                        .evict(&mut self.resources, &mut self.retain_queue)
+                });
                 self.op = Some(live);
                 self.finish_page_feed(result, used)
             }
@@ -1043,6 +1112,9 @@ impl VerifyDriver {
         if self.work.is_some() {
             return self.advance_work();
         }
+        if self.armed && self.compute_checkpointable() {
+            return self.advance_boundary();
+        }
         if self.scheduler.is_some() {
             return self.advance_scheduled();
         }
@@ -1223,8 +1295,13 @@ impl VerifyDriver {
             .decoded
             .checked_add(canonical_len)
             .ok_or_else(|| failure(FailureCode::PackfileTooLarge))?;
-        if decoded > self.profile.decoded_bytes || decoded > self.limits.decoded_bytes {
+        // The profile is the content ceiling; the limit is the caller's own
+        // execution budget, which must not read as a defect of the pack.
+        if decoded > self.profile.decoded_bytes {
             return Err(failure(FailureCode::PackfileTooLarge));
+        }
+        if decoded > self.limits.decoded_bytes {
+            return Err(failure(FailureCode::ResourceLimit));
         }
         self.decoded = decoded;
         if work.base.is_some() {
@@ -1444,29 +1521,52 @@ impl VerifyDriver {
         self.drive_op()
     }
 
+    /// Starts a flush of one sequence's buffered records.
+    fn start_flush(&mut self, seq: Which) -> Result<Step<'static>, Failure> {
+        let op = self.sequence_mut(seq)?.flush()?;
+        let rightmost = matches!(
+            op,
+            Op::Descend {
+                rightmost: true,
+                ..
+            }
+        );
+        self.op = Some(Live {
+            index: seq,
+            op,
+            then: Then::Flush { seq, rightmost },
+        });
+        self.drive_op()
+    }
+
+    /// Ends an entry. A sequence flushes only once its buffered records fill
+    /// the open leaf; the rest wait for a checkpoint or the seal.
     fn advance_flush(&mut self) -> Result<Step<'static>, Failure> {
         for seq in SEQUENCES {
-            let sequence = self.sequence_mut(seq)?;
-            if sequence.pending() == 0 {
-                continue;
+            if self.sequence_mut(seq)?.needs_flush() {
+                return self.start_flush(seq);
             }
-            let op = sequence.flush()?;
-            let rightmost = matches!(
-                op,
-                Op::Descend {
-                    rightmost: true,
-                    ..
-                }
-            );
-            self.op = Some(Live {
-                index: seq,
-                op,
-                then: Then::Flush { seq, rightmost },
-            });
-            return self.drive_op();
         }
         let work = self.work.as_mut().ok_or_else(invalid)?;
         work.stage = Stage::Done;
+        Ok(Step::Progress)
+    }
+
+    /// Serves an armed checkpoint at a drained entry boundary: flush every
+    /// buffered record, retain every page the host does not yet hold, then
+    /// report readiness. The flag lasts until the host's next call.
+    fn advance_boundary(&mut self) -> Result<Step<'static>, Failure> {
+        for seq in SEQUENCES {
+            if self.sequence_mut(seq)?.pending() != 0 {
+                return self.start_flush(seq);
+            }
+        }
+        if let Some(page) = self.cache.take_dirty(&mut self.resources)? {
+            self.retained = Some(page);
+            return Ok(Step::Progress);
+        }
+        self.armed = false;
+        self.checkpoint_ready = true;
         Ok(Step::Progress)
     }
 
@@ -1481,6 +1581,9 @@ impl VerifyDriver {
             Ok(Event::Page(commitment)) => {
                 self.op = Some(live);
                 self.resources.work(1)?;
+                if let Some(cached) = self.cache.take(commitment) {
+                    return self.feed_cached(commitment, cached);
+                }
                 let request = self.request_id()?;
                 Ok(self.issue(Pending::Page {
                     request,
@@ -1489,21 +1592,53 @@ impl VerifyDriver {
             }
             Ok(Event::Emit(page)) => {
                 self.op = Some(live);
-                let len = page.bytes().len() as u64;
-                // Emitted pages were decoded, authenticated, and encoded; the
+                let (bytes, commitment) = page.into_parts();
+                let len = bytes.len() as u64;
+                // Produced pages were decoded, authenticated, and encoded; the
                 // passes mirror the four framing charges per produced page.
                 self.resources.work(
                     len.checked_mul(4)
                         .ok_or_else(|| failure(FailureCode::ResourceLimit))?,
                 )?;
-                self.resources.reserve(self.limits.page_bytes)?;
-                self.resources.evidence(len)?;
-                self.retained = Some(page);
+                self.cache.insert(&mut self.resources, commitment, bytes)?;
+                let live = self.op.as_mut().ok_or_else(invalid)?;
+                Index::acknowledge(&mut live.op, commitment)?;
+                self.cache
+                    .evict(&mut self.resources, &mut self.retain_queue)?;
                 Ok(Step::Progress)
             }
             Ok(Event::Descended(descent)) => self.after_descend(&live, *descent),
-            Ok(Event::Done { spine }) => self.after_done(&live, spine),
+            Ok(Event::Done { spine, replaced }) => {
+                for page in replaced {
+                    self.cache.supersede(&mut self.resources, page)?;
+                }
+                self.after_done(&live, spine)
+            }
         }
+    }
+
+    /// Feeds a page the cache held, exactly as a host reply would be fed.
+    fn feed_cached(
+        &mut self,
+        commitment: PageCommitment,
+        cached: Vec<u8>,
+    ) -> Result<Step<'static>, Failure> {
+        let mut live = self.op.take().ok_or_else(invalid)?;
+        let mut budget = Budget::new(self.limits.work, self.limits.resident_bytes);
+        let result = self
+            .index_mut(live.index)
+            .feed(&mut live.op, &cached, &mut budget);
+        let used = self.limits.work.saturating_sub(budget.remaining());
+        self.cache.restore(commitment, cached);
+        let result = result.and_then(|()| {
+            if matches!(live.then, Then::Audit { .. }) {
+                self.cache.reference(commitment)?;
+            }
+            Ok(())
+        });
+        self.op = Some(live);
+        self.finish_page_feed(result, used)?;
+        Ok(Step::Progress)
     }
 
     fn after_descend(&mut self, live: &Live, descent: Descent) -> Result<Step<'static>, Failure> {
@@ -1593,8 +1728,10 @@ impl VerifyDriver {
                 self.sequence_mut(seq)?.set_spine(spine);
                 if self.phase == Phase::Seal {
                     self.advance_seal()
-                } else {
+                } else if self.work.is_some() {
                     self.advance_flush()
+                } else {
+                    self.advance_boundary()
                 }
             }
             Then::Audit { next } => self.resume_audit(next),
@@ -1706,24 +1843,9 @@ impl VerifyDriver {
         match stage {
             SealStage::Flush => {
                 for seq in SEQUENCES {
-                    let sequence = self.sequence_mut(seq)?;
-                    if sequence.pending() == 0 {
-                        continue;
+                    if self.sequence_mut(seq)?.pending() != 0 {
+                        return self.start_flush(seq);
                     }
-                    let op = sequence.flush()?;
-                    let rightmost = matches!(
-                        op,
-                        Op::Descend {
-                            rightmost: true,
-                            ..
-                        }
-                    );
-                    self.op = Some(Live {
-                        index: seq,
-                        op,
-                        then: Then::Flush { seq, rightmost },
-                    });
-                    return self.drive_op();
                 }
                 let seal = self.seal.as_mut().ok_or_else(invalid)?;
                 seal.stage = SealStage::Heads;
@@ -1731,46 +1853,20 @@ impl VerifyDriver {
             }
             SealStage::Heads => {
                 // Heads flushes ride the same operation plumbing.
-                let heads = self.sequence_mut(Which::Heads)?;
-                if heads.needs_flush() {
-                    let op = heads.flush()?;
-                    let rightmost = matches!(
-                        op,
-                        Op::Descend {
-                            rightmost: true,
-                            ..
-                        }
-                    );
-                    self.op = Some(Live {
-                        index: Which::Heads,
-                        op,
-                        then: Then::Flush {
-                            seq: Which::Heads,
-                            rightmost,
-                        },
-                    });
-                    return self.drive_op();
+                if self.sequence_mut(Which::Heads)?.needs_flush() {
+                    return self.start_flush(Which::Heads);
                 }
                 let seal = self.seal.as_ref().ok_or_else(invalid)?;
                 if seal.next >= self.ordinals.committed() {
                     if self.heads.pending() != 0 {
-                        let op = self.heads.flush()?;
-                        let rightmost = matches!(
-                            op,
-                            Op::Descend {
-                                rightmost: true,
-                                ..
-                            }
-                        );
-                        self.op = Some(Live {
-                            index: Which::Heads,
-                            op,
-                            then: Then::Flush {
-                                seq: Which::Heads,
-                                rightmost,
-                            },
-                        });
-                        return self.drive_op();
+                        return self.start_flush(Which::Heads);
+                    }
+                    // A durable run leaves the host its final pages.
+                    if self.retention == PageRetention::Durable
+                        && let Some(page) = self.cache.take_dirty(&mut self.resources)?
+                    {
+                        self.retained = Some(page);
+                        return Ok(Step::Progress);
                     }
                     return self.finish_seal();
                 }
@@ -1787,6 +1883,7 @@ impl VerifyDriver {
 
     fn finish_seal(&mut self) -> Result<Step<'static>, Failure> {
         self.seal = None;
+        self.cache.clear(&mut self.resources)?;
         self.resources.release(self.decoder_reservation)?;
         self.reclaim_compute_control()?;
         let counts = PackCounts {

@@ -27,7 +27,7 @@ fn canonical_verify_checkpoint_fixture() {
                 host.pages.push((commitment, page.bytes.to_vec()));
                 machine.acknowledge_retention(commitment).unwrap();
             }
-            Step::Progress => (),
+            Step::Progress | Step::ReleasePage(_) => (),
             Step::Complete(_) => panic!("first entry boundary was not checkpointable"),
         }
         if machine.ordinal == 1
@@ -130,7 +130,7 @@ fn deferred_absence_checkpoint_resumes_only_hashing_without_prefix_or_page_reads
                 host.pages.push((commitment, page.bytes.to_vec()));
                 machine.acknowledge_retention(commitment).unwrap();
             }
-            Step::Progress => (),
+            Step::Progress | Step::ReleasePage(_) => (),
             Step::Complete(_) => panic!("missing base accepted"),
         }
         if machine.phase == Phase::Drain
@@ -184,7 +184,7 @@ fn deferred_absence_checkpoint_resumes_only_hashing_without_prefix_or_page_reads
                 }
                 host.serve(&mut resumed, &request).unwrap();
             }
-            Ok(Step::Progress) => (),
+            Ok(Step::Progress | Step::ReleasePage(_)) => (),
             Ok(_) => panic!("drain emitted provisional or verified evidence"),
         }
     };

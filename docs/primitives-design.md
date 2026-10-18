@@ -96,8 +96,20 @@ acquisition failure.
 
 Retention events apply backpressure. No dependent checkpoint or completion can
 refer to a page until the host acknowledges its exact commitment. Page loss
-requires recovery or re-verification. Replaced pages still count against
-cumulative evidence and work limits.
+requires recovery or re-verification.
+
+Pages are scoped to one run and reproducible by re-verifying the pack; nothing
+reads them after completion, and the sealed result carries only root digests.
+Every update is copy-on-write, so the driver keeps a write-back cache of
+recent pages sized by `resident_pages` and `page_bytes` and charged at actual
+page sizes. A page replaced before the host ever received it is dropped
+unseen. The host receives a page when the cache evicts it, at a checkpoint,
+and, for a durable run, at completion. When the roots stop reaching a page the
+host holds, and the latest checkpoint stops reaching it too, the driver tells
+the host it may drop it. The evidence ceilings therefore count the pages the
+host holds now, not every page ever produced; work stays cumulative. A run
+that is never resumed can ask for ephemeral retention, which refuses
+checkpoints and leaves the host only the pages the cache evicted.
 
 ## Checkpoints
 

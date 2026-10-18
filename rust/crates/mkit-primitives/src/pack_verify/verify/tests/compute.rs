@@ -135,6 +135,7 @@ fn run(
                 }
             }
             Step::Progress => complete_jobs(&mut machine, &mut jobs, mode, &mut random),
+            Step::ReleasePage(_) => (),
             Step::ProvisionalObject(fragment) => {
                 host.fragments
                     .entry(fragment.ordinal)
@@ -323,7 +324,7 @@ fn first_job(machine: &mut VerifyDriver, host: &mut Host) -> ComputeJob {
                 host.pages.push((commitment, page.bytes.to_vec()));
                 machine.acknowledge_retention(commitment).unwrap();
             }
-            Step::Progress => (),
+            Step::Progress | Step::ReleasePage(_) => (),
             _ => panic!("expected first compute before any object"),
         }
     }
@@ -420,7 +421,7 @@ fn drained_compute_run_resumes_without_serializing_jobs() {
                 host.pages.push((commitment, page.bytes.to_vec()));
                 machine.acknowledge_retention(commitment).unwrap();
             }
-            Step::Progress => (),
+            Step::Progress | Step::ReleasePage(_) => (),
             Step::Complete(_) => break,
         }
         if machine.ordinal >= 3

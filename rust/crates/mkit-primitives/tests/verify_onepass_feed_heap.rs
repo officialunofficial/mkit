@@ -91,7 +91,7 @@ fn carried_frame_feed_accounts_for_a_live_physical_buffer_and_the_driver_copy() 
                     break;
                 }
             }
-            Step::Progress => (),
+            Step::Progress | Step::ReleasePage(_) => (),
             _ => panic!("the test must stop before entry decode"),
         }
     }

@@ -170,7 +170,7 @@ fn shared_ceiling_covers_queued_jobs_completed_outputs_and_window_crossings() {
                     budget.resident_bytes,
                 ));
             }
-            Step::ProvisionalObject(_) => (),
+            Step::ProvisionalObject(_) | Step::ReleasePage(_) => (),
             Step::RetainEvidence(page) => {
                 let commitment = page.commitment;
                 let len = page.bytes.len();

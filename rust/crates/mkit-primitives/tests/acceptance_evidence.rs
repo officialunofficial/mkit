@@ -184,7 +184,7 @@ fn minimal_encoding_and_digest_are_pinned() {
         bytes.as_slice(),
         include_bytes!("../fixtures/acceptance/minimal.bin")
     );
-    let e = AcceptanceEvidence::from_trusted_host(&bytes, &cfg()).unwrap();
+    let e = AcceptanceEvidence::decode(&bytes, &cfg()).unwrap();
     let hex = mkit_core::hash::to_hex(&e.digest());
     // Independently generated BLAKE3 vector, committed with the format fixture.
     assert_eq!(
@@ -405,7 +405,7 @@ fn diagnostics_do_not_dump_head_or_operation_bytes() {
     let mut input = Envelope::empty();
     input.operation = b"private-operation".to_vec();
     input.heads = signed_heads();
-    let evidence = AcceptanceEvidence::from_trusted_host(&input.encode(), &cfg()).unwrap();
+    let evidence = AcceptanceEvidence::decode(&input.encode(), &cfg()).unwrap();
     // Diagnostics remain bounded independently of canonical object/identifier bytes.
     assert!(format!("{evidence:?}").len() < 128);
     for head in evidence.heads() {

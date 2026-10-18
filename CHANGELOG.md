@@ -25,6 +25,45 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Breaking (toward 0.6)
 
+- [embedder: breaking API] All-entry verification pages are now scoped to the
+  run, cached, and counted live. The driver keeps a write-back page cache of
+  `resident_pages * page_bytes` bytes charged at actual page sizes, flushes a
+  sequence only when its buffered records fill a leaf, at a checkpoint, or at
+  the seal, and hands the host a page only on eviction, at a checkpoint, and at
+  completion of a durable run. A new `Step::ReleasePage(PageCommitment)` tells
+  the host a page it holds is unreachable from the roots and from the latest
+  checkpoint (no reply). `VerifyLimits::evidence_pages` and `evidence_bytes`
+  and `ResourceUsage::evidence_*` now count pages the host holds, not every page
+  produced; the work ceiling stays cumulative. A 24-entry pack that cost 106
+  emitted pages and 154 page fetches now costs 14 and none. Migration: handle
+  `Step::ReleasePage` by dropping the page (never ask for it again); after
+  `checkpoint()` refuses with `CheckpointNotReady`, keep stepping (serving
+  retentions and fetches) until the driver returns `Progress` at a drained
+  entry boundary, then call `checkpoint()` once more before the next mutating
+  call, and persist the result before stepping on. Hosts that never resume use
+  `VerifyDriver::new_with_retention(.., PageRetention::Ephemeral)`, which
+  refuses checkpoints with `UnsupportedCapability` and keeps final pages out of
+  the host. Object, occurrence, ordinal, and head roots are unchanged; the
+  dependency root differs only where one entry emits 17 to 31 dependency
+  records into a partly filled leaf, because sequence leaves now fill first
+  and roots no longer depend on how appends batch. Verify checkpoints stay
+  version 3 and `retention_count` now counts cumulative acknowledgements, at
+  least the pages still held. Pack and object bytes are unchanged; no
+  repository store reset is required.
+
+- [embedder: breaking API] The all-entry verifier reports a cumulative decoded
+  total above `IndexedProfile::decoded_bytes` as `PackfileTooLarge` and above
+  the caller's own `VerifyLimits::decoded_bytes` as `ResourceLimit`; both were
+  `PackfileTooLarge`. Migration: treat `ResourceLimit` as a retryable execution
+  refusal. In-driver index lookups and the resume walk now also refuse a child
+  at the wrong height or a leaf key outside its inherited interval with
+  `InvalidEvidence`. No wire or stored-format change; no store reset.
+
+- [embedder: breaking API] `AcceptanceEvidence::from_trusted_host` is removed;
+  it was byte-for-byte `decode`, and its name implied a trust step that does not
+  exist. Migration: call `AcceptanceEvidence::decode` with the same arguments.
+  No format change; no store reset.
+
 - [embedder: stored-format change] All-entry verification checkpoints use
   envelope version 3 with explicit hash frontiers, an authenticated remaining
   suffix, and bounded deferred refusal state. Migration: discard unsupported

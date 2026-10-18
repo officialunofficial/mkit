@@ -709,7 +709,7 @@ fn verify_pack(pack: &[u8], canonical: &BTreeMap<Hash, Vec<u8>>) -> VerifiedPack
                     .acknowledge_retention(commitment)
                     .expect("acknowledged retention");
             }
-            Step::Progress => {}
+            Step::Progress | Step::ReleasePage(_) => {}
             Step::Complete(verified) => return verified,
         }
     }

@@ -88,7 +88,10 @@ pub(super) enum Graft {
 }
 
 /// A suspended index operation driven one bounded transition at a time.
+// One operation is live at a time and a rewrite is the common case, so boxing
+// the smaller variants would add an allocation to every lookup for nothing.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub(super) enum Op {
     /// Descend a key (or the rightmost edge) and produce a [`Descent`].
     Descend {
@@ -96,6 +99,8 @@ pub(super) enum Op {
         rightmost: bool,
         lower: Option<Hash>,
         upper: Option<Hash>,
+        /// Height every page reached next must have; unset until the root.
+        expected: Option<u8>,
         path: Vec<PathNode>,
         state: DescendState,
     },
@@ -125,15 +130,30 @@ pub(super) enum Op {
         stage: RewriteStage,
         /// Rebuilt right-edge spine when the caller asked for one.
         track: Option<Track>,
+        /// Whether the leaf level packs full-first (append) or splits evenly.
+        append: bool,
+        /// Committed pages this rewrite replaced; none is reachable from the
+        /// new root. Reported only once the new root is committed.
+        replaced: Vec<PageCommitment>,
     },
     /// Depth-first authentication of every page committed under the root.
     Audit {
-        /// Pending nodes with their inherited key intervals.
-        stack: Vec<(PageCommitment, Option<Hash>, Option<Hash>)>,
+        /// Pending nodes with their inherited key intervals and heights.
+        stack: Vec<Visit>,
         /// Served node awaiting its page bytes.
-        want: Option<(PageCommitment, Option<Hash>, Option<Hash>)>,
+        want: Option<Visit>,
         seen: u64,
     },
+}
+
+/// A tree node awaiting authentication, with everything its parent implies.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Visit {
+    page: PageCommitment,
+    lower: Option<Hash>,
+    upper: Option<Hash>,
+    /// Exact height required of the page; unset for the root.
+    height: Option<u8>,
 }
 
 #[derive(Debug)]
@@ -176,8 +196,12 @@ pub(super) enum Event {
     Emit(EncodedPage),
     /// Descend finished; the authenticated path and leaf are available.
     Descended(Box<Descent>),
-    /// Operation complete; `spine` is restored when tracked.
-    Done { spine: Option<Box<Spine>> },
+    /// Operation complete; `spine` is restored when tracked. `replaced` lists
+    /// the committed pages the new root no longer reaches.
+    Done {
+        spine: Option<Box<Spine>>,
+        replaced: Vec<PageCommitment>,
+    },
 }
 
 /// Shared index state: the committed root, its role, and its bindings.
@@ -318,6 +342,7 @@ impl Index {
             rightmost: false,
             lower: None,
             upper: None,
+            expected: None,
             path: Vec::new(),
             state: DescendState::Need(self.root),
         }
@@ -330,6 +355,7 @@ impl Index {
             rightmost: true,
             lower: None,
             upper: None,
+            expected: None,
             path: Vec::new(),
             state: DescendState::Need(self.root),
         }
@@ -338,7 +364,12 @@ impl Index {
     /// Starts a full-tree authentication walk for restart recovery.
     pub(super) fn audit(&self) -> Op {
         Op::Audit {
-            stack: vec![(self.root, None, None)],
+            stack: vec![Visit {
+                page: self.root,
+                lower: None,
+                upper: None,
+                height: None,
+            }],
             want: None,
             seen: 0,
         }
@@ -347,13 +378,14 @@ impl Index {
     /// Begins a rewrite of the leaf reached by `descent` holding `records`,
     /// propagating commitment changes to the root. `insert` appends a fresh
     /// leaf at the right edge instead of replacing `descent.leaf`. `track`
-    /// rebuilds the append spine of the written leaf.
+    /// rebuilds the append spine of the written leaf and packs leaves
+    /// full-first, so the tree shape never depends on how appends batch.
     pub(super) fn rewrite(
         descent: Descent,
         records: Vec<(Hash, Vec<u8>)>,
         insert: bool,
         added: u64,
-        track: bool,
+        append: bool,
     ) -> Op {
         Op::Rewrite {
             graft: if insert {
@@ -371,12 +403,14 @@ impl Index {
             height: 0,
             pending_root: None,
             stage: RewriteStage::Leaf,
-            track: track.then(|| Track {
+            track: append.then(|| Track {
                 right: false,
                 path: Vec::new(),
                 leaf: None,
                 records,
             }),
+            append,
+            replaced: Vec::new(),
         }
     }
 
@@ -418,7 +452,10 @@ impl Index {
                         found,
                     })))
                 }
-                DescendState::Done => Ok(Event::Done { spine: None }),
+                DescendState::Done => Ok(Event::Done {
+                    spine: None,
+                    replaced: Vec::new(),
+                }),
             },
             Op::Rewrite {
                 stage, outstanding, ..
@@ -433,17 +470,20 @@ impl Index {
                 }
             }
             Op::Audit { stack, want, seen } => {
-                if let Some((page, ..)) = want {
-                    return Ok(Event::Page(*page));
+                if let Some(visit) = want {
+                    return Ok(Event::Page(visit.page));
                 }
                 if let Some(node) = stack.pop() {
                     *want = Some(node);
-                    Ok(Event::Page(node.0))
+                    Ok(Event::Page(node.page))
                 } else {
                     if *seen != self.count {
                         return Err(failure(FailureCode::EvidenceMismatch));
                     }
-                    Ok(Event::Done { spine: None })
+                    Ok(Event::Done {
+                        spine: None,
+                        replaced: Vec::new(),
+                    })
                 }
             }
         }
@@ -459,6 +499,9 @@ impl Index {
             track,
             stage,
             outstanding,
+            append,
+            replaced,
+            prior,
             ..
         } = op
         else {
@@ -467,7 +510,9 @@ impl Index {
         // Encode first, mutate second: a refused encode must leave the op
         // exactly as it was so the failure can retry or unwind cleanly.
         if records.len() > FANOUT {
-            let mid = records.len() / 2;
+            // Appends fill the first leaf, so the shape is independent of how
+            // many records one rewrite carries; keyed inserts split evenly.
+            let mid = if *append { FANOUT } else { records.len() / 2 };
             let (left_page, right_page) = (
                 self.leaf_page(&records[..mid])?,
                 self.leaf_page(&records[mid..])?,
@@ -488,6 +533,9 @@ impl Index {
             }
             queue.push_back(left_page);
             queue.push_back(right_page);
+            if *graft == Graft::Replace {
+                replaced.push(*prior);
+            }
             *graft = match *graft {
                 Graft::Replace => Graft::ReplaceInsert,
                 Graft::Insert => Graft::InsertInsert,
@@ -501,6 +549,9 @@ impl Index {
                 track.records = std::mem::take(records);
             }
             queue.push_back(page);
+            if *graft == Graft::Replace {
+                replaced.push(*prior);
+            }
         }
         *stage = RewriteStage::Up;
         let page = queue.pop_front().ok_or_else(invalid)?;
@@ -536,6 +587,7 @@ impl Index {
             track,
             added,
             pending_root,
+            replaced,
             ..
         } = op
         else {
@@ -558,7 +610,10 @@ impl Index {
                 path: track.path,
             })
         });
-        Ok(Event::Done { spine })
+        Ok(Event::Done {
+            spine,
+            replaced: std::mem::take(replaced),
+        })
     }
 
     /// Propagates the finished child level into its parent, or finishes.
@@ -575,6 +630,7 @@ impl Index {
             stage,
             outstanding,
             pending_root,
+            replaced,
             ..
         } = op
         else {
@@ -693,6 +749,9 @@ impl Index {
                 );
             }
         }
+        // The parent is re-encoded in every graft, so its committed page is
+        // replaced once the encode below succeeds.
+        let old = parent.commitment;
         if rest.len() < FANOUT {
             let node_height = parent.height;
             let page = match encode_internal(
@@ -709,6 +768,7 @@ impl Index {
                     return Err(error);
                 }
             };
+            replaced.push(old);
             parent.first = first;
             parent.rest = rest;
             parent.commitment = page.commitment();
@@ -765,6 +825,7 @@ impl Index {
                     return Err(error);
                 }
             };
+            replaced.push(old);
             left.commitment = left_page.commitment();
             right.commitment = right_page.commitment();
             produced.clear();
@@ -825,15 +886,28 @@ impl Index {
                 rightmost,
                 lower,
                 upper,
+                expected,
             } => {
                 let DescendState::Need(want) = *state else {
                     return Err(invalid());
                 };
                 let view = self.view(bytes, want, budget)?;
+                // A committed child sits exactly one level below its parent
+                // and inside the interval its parent routes to it.
+                if expected.is_some_and(|height| view.height() != height) {
+                    return Err(failure(FailureCode::InvalidEvidence));
+                }
                 if view.height() == 0 {
+                    let records = Self::leaf_records(&view)?;
+                    if records.iter().any(|(record, _)| {
+                        lower.is_some_and(|low| *record < low)
+                            || upper.is_some_and(|high| *record >= high)
+                    }) {
+                        return Err(failure(FailureCode::InvalidEvidence));
+                    }
                     *state = DescendState::Leaf {
                         commitment: want,
-                        records: Self::leaf_records(&view)?,
+                        records,
                     };
                     return Ok(());
                 }
@@ -841,81 +915,143 @@ impl Index {
                     return Err(failure(FailureCode::InvalidEvidence));
                 }
                 let (first, rest) = Self::children(&view)?;
-                let mut choice = rest.len();
-                for (index, child) in rest.iter().enumerate() {
-                    if lower.is_some_and(|low| child.separator < low)
-                        || upper.is_some_and(|high| child.separator >= high)
-                    {
-                        return Err(failure(FailureCode::InvalidEvidence));
-                    }
-                    if choice == rest.len() && !*rightmost && *key < child.separator {
-                        choice = index;
-                    }
-                }
-                let node_lower = if choice == 0 {
-                    *lower
-                } else {
-                    Some(rest[choice - 1].separator)
-                };
-                let node_upper = if choice < rest.len() {
-                    Some(rest[choice].separator)
-                } else {
-                    *upper
-                };
-                let next = if choice == 0 {
+                let route = Route::choose(&rest, *key, *rightmost, *lower, *upper)?;
+                let next = if route.choice == 0 {
                     first
                 } else {
-                    rest[choice - 1].child
+                    rest[route.choice - 1].child
                 };
                 path.push(PathNode {
                     commitment: want,
                     height: view.height(),
                     first,
                     rest,
-                    choice,
+                    choice: route.choice,
                 });
-                *lower = node_lower;
-                *upper = node_upper;
+                *lower = route.lower;
+                *upper = route.upper;
+                *expected = view.height().checked_sub(1);
                 *state = DescendState::Need(next);
                 Ok(())
             }
             Op::Audit { stack, want, seen } => {
-                let (page, lower, upper) = want.take().ok_or_else(invalid)?;
+                let visit = want.take().ok_or_else(invalid)?;
                 // Any refused page leaves `want` installed so a retry
                 // re-requests the same node instead of skipping its subtree.
-                let result = (|| {
-                    let view = self.view(bytes, page, budget)?;
-                    if view.height() == 0 {
-                        *seen = seen
-                            .checked_add(u64::from(view.items()))
-                            .ok_or_else(|| failure(FailureCode::InvalidEvidence))?;
-                        return Ok(());
-                    }
-                    let (first, rest) = Self::children(&view)?;
-                    for child in &rest {
-                        if lower.is_some_and(|low| child.separator < low)
-                            || upper.is_some_and(|high| child.separator >= high)
-                        {
-                            return Err(failure(FailureCode::InvalidEvidence));
-                        }
-                    }
-                    stack
-                        .try_reserve(rest.len() + 1)
-                        .map_err(|_| failure(FailureCode::ResourceLimit))?;
-                    stack.push((first, lower, rest.first().map(|c| c.separator)));
-                    for (index, child) in rest.iter().enumerate() {
-                        let next = rest.get(index + 1).map(|c| c.separator).or(upper);
-                        stack.push((child.child, Some(child.separator), next));
-                    }
-                    Ok(())
-                })();
+                let result = self.audit_page(visit, bytes, budget, stack, seen);
                 if result.is_err() {
-                    *want = Some((page, lower, upper));
+                    *want = Some(visit);
                 }
                 result
             }
             Op::Rewrite { .. } => Err(invalid()),
         }
+    }
+
+    /// Authenticates one page of a full-tree walk and queues its children.
+    fn audit_page(
+        &self,
+        visit: Visit,
+        bytes: &[u8],
+        budget: &mut Budget,
+        stack: &mut Vec<Visit>,
+        seen: &mut u64,
+    ) -> Result<(), Failure> {
+        let Visit {
+            page,
+            lower,
+            upper,
+            height,
+        } = visit;
+        let view = self.view(bytes, page, budget)?;
+        if height.is_some_and(|expected| view.height() != expected) {
+            return Err(failure(FailureCode::InvalidEvidence));
+        }
+        if view.height() == 0 {
+            for record in view.records()? {
+                if lower.is_some_and(|low| record.key < low)
+                    || upper.is_some_and(|high| record.key >= high)
+                {
+                    return Err(failure(FailureCode::InvalidEvidence));
+                }
+            }
+            *seen = seen
+                .checked_add(u64::from(view.items()))
+                .ok_or_else(|| failure(FailureCode::InvalidEvidence))?;
+            return Ok(());
+        }
+        let (first, rest) = Self::children(&view)?;
+        for child in &rest {
+            if lower.is_some_and(|low| child.separator < low)
+                || upper.is_some_and(|high| child.separator >= high)
+            {
+                return Err(failure(FailureCode::InvalidEvidence));
+            }
+        }
+        let below = view.height().checked_sub(1);
+        stack
+            .try_reserve(rest.len() + 1)
+            .map_err(|_| failure(FailureCode::ResourceLimit))?;
+        stack.push(Visit {
+            page: first,
+            lower,
+            upper: rest.first().map(|c| c.separator),
+            height: below,
+        });
+        for (index, child) in rest.iter().enumerate() {
+            let next = rest.get(index + 1).map(|c| c.separator).or(upper);
+            stack.push(Visit {
+                page: child.child,
+                lower: Some(child.separator),
+                upper: next,
+                height: below,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Where an internal page routes a key, and the interval below that route.
+struct Route {
+    choice: usize,
+    lower: Option<Hash>,
+    upper: Option<Hash>,
+}
+
+impl Route {
+    /// Checks every separator against the inherited interval, then picks the
+    /// last child whose separator is at or below `key` (the first otherwise).
+    fn choose(
+        rest: &[BranchChild],
+        key: Hash,
+        rightmost: bool,
+        lower: Option<Hash>,
+        upper: Option<Hash>,
+    ) -> Result<Self, Failure> {
+        let mut choice = rest.len();
+        for (index, child) in rest.iter().enumerate() {
+            if lower.is_some_and(|low| child.separator < low)
+                || upper.is_some_and(|high| child.separator >= high)
+            {
+                return Err(failure(FailureCode::InvalidEvidence));
+            }
+            if choice == rest.len() && !rightmost && key < child.separator {
+                choice = index;
+            }
+        }
+        Ok(Self {
+            choice,
+            lower: if choice == 0 {
+                lower
+            } else {
+                Some(rest[choice - 1].separator)
+            },
+            upper: if choice < rest.len() {
+                Some(rest[choice].separator)
+            } else {
+                upper
+            },
+        })
     }
 }
 
@@ -998,8 +1134,8 @@ impl Sequence {
         self.open.push((ordinal_key(base), value));
     }
 
-    /// Whether buffered records fill the open leaf. Flushes are mandatory
-    /// before this returns true, and before checkpoints or sealing.
+    /// Whether buffered records would fill the open leaf. Until then they stay
+    /// buffered; a flush is also mandatory at a checkpoint and before sealing.
     #[must_use]
     pub(super) fn needs_flush(&self) -> bool {
         let committed = self

@@ -116,7 +116,7 @@ fn primitive_integrity_refusal(bytes: &[u8]) -> FailureCode {
                     return failure.code;
                 }
             }
-            Ok(Step::Progress | Step::ProvisionalObject(_)) => (),
+            Ok(Step::Progress | Step::ProvisionalObject(_) | Step::ReleasePage(_)) => (),
             other => panic!("unexpected step before integrity refusal {other:?}"),
         }
     }
