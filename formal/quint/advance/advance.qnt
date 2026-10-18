@@ -1,72 +1,46 @@
 // -*- mode: Bluespec; -*-
-// advance_refs model for mkit (remote-advance model, epic verification toolchain, PR #1082).
+// advance_refs: delta-transfer safety, guarded force pushes and bounded retries.
 //
-// What is modelled (branch claude/kind-brahmagupta-esqhc0; spec text as
-// reconciled on this branch is normative):
+// What is modelled:
+//   - Non-force pushes plan against the remote head, append a delta pack or
+//     re-baseline when atomic advance is supported, and use the existing
+//     packmap CAS loop and head-conflict disambiguation.
+//   - Force pushes on atomic transports first capture a strong packmap read,
+//     then read the head and plan. These are separate actions, allowing a
+//     concurrent reset between the reads. Head-only writes use a same-value
+//     packmap Match in an atomic advance. Appends reuse a plan only while the
+//     current chain extends the captured chain; otherwise they re-plan.
+//   - A plan that depends on the observed head also uses Match(observed head),
+//     alongside the required packmap guard. This covers identical-root ABA:
+//     another pusher can restore an earlier content-addressed packmap root.
+//     Every append pack here adversarially requires every ancestor of its
+//     planning head as a delta base, so every atomic force plan uses this
+//     head guard. Self-contained force packs may retain Any in the client;
+//     the model conservatively chooses the base-dependent case instead.
+//   - HTTP's atomic endpoint encodes a force head condition as Match of the
+//     head read during planning. It never uses the ordered force fallback.
+//   - Re-plans and packmap CAS attempts share ATTEMPTS. The transport retry
+//     ladder re-issues the identical guarded request up to LADDER times.
+//     Lost responses, crashes and replay-ledger responses are explicit.
+//   - Ordered transports retain their existing packmap-then-head behavior.
 //
-//   Client (mkit-cli `remote_dispatch::push_branch_with_limits` and
-//   `remote_dispatch::packmap::{advance_packmap, commit_head, head_conflict}`):
-//     - push_branch reads the remote head R, plans closure(tip) \ closure(R)
-//       (deltas against bases in closure(R)); an empty plan takes the
-//       head-only `commit_head` path;
-//     - the #406/#521 re-baseline gate: reset the packmap chain to one
-//       self-contained node ONLY when the chain would pass the threshold AND
-//       `supports_atomic_advance()` AND the head condition is not `Any`;
-//     - advance_packmap's CAS loop (PACKMAP_CAS_ATTEMPTS): read packmap,
-//       idempotency short-cut (our pack already in the chain -> commit_head),
-//       build node = prior ++ [ours] (or [ours] on a reset), advance_refs with
-//       packmap Match(prior) and the push's head condition;
-//     - outcome handling per SPEC-TRANSPORT §7 as reconciled on this branch:
-//       PackmapConflict -> re-read the packmap (the loop), HeadConflict or
-//       commit_head's RefConflict -> read_ref(head); head == tip means the
-//       write landed (success), else NonFastForwardPush.
-//   Transport retry ladder (SPEC-TRANSPORT §7, `mkit_core::protocol::
-//   retrying`; SPEC-TRANSPORT-CONNECT §7.3): a lost response (timeout,
-//   connection loss, server crash) re-issues the SAME request, carrying the
-//   same conditions, up to LADDER more times; then the call fails with an
-//   error. With the auth v2 replay ledger (SPEC-TRANSPORT-CONNECT §7.1,
-//   `RetryIdentity`), a re-issue within one call's ladder gets the stored
-//   result of the committed attempt.
-//   Server / store:
-//     - "atomic": one batch for packmap + head (mkit-server pipeline
-//       `apply_atomic` on an `atomic_multi_key` store; HTTP `/refs/advance`;
-//       SPEC-TRANSPORT-CONNECT §4 "SHOULD commit both writes atomically");
-//     - "ordered": packmap CAS then head CAS as two separately-durable writes
-//       (`Transport::advance_refs` default: FileTransport, S3, SSH, memory;
-//       mkit-server `plan_and_apply` on a non-atomic store; SPEC-TRANSPORT-
-//       CONNECT §4 "MUST fall back to the same packmap-then-head ordering").
-//       A crash / connection loss can land between the two writes.
-//     - ANY_FALLBACK: the HTTP transport's atomic endpoint cannot express
-//       `Any`, so an advance with an `Any` condition falls back to the ordered
-//       path (`HttpTransport::advance_refs_impl`) although the transport still
-//       reports `supports_atomic_advance() == true`.
-//
-// Abstraction (explicit):
-//   - Commits 0..6 with a fixed DAG: 1, 2 children of 0; 3 child of 1; 4 child
-//     of 2; 5 child of 3; 6 child of 4. An object = a commit; closure(c) = ancestors of c.
-//   - A pack = (objs, bases): an append pack for a push planned against R
-//     carries closure(tip) \ closure(R) and (adversarially) needs every object
-//     of closure(R) as a delta base; a reset pack is self-contained. Pack
-//     uploads (content-addressed, idempotent, SPEC-TRANSPORT §7) are always
-//     present: no pack GC here (that is SPEC-GC's model, formal/quint/gc).
-//   - A packmap value = the chain of pack ids, oldest first (node keys are
-//     content addressed, so equal chains = equal node keys). Pack 0 = the
-//     seed push that created the branch. Reconstructing a chain folds it
-//     oldest first; a node whose delta bases are not yet reconstructable
-//     breaks the chain (fetch fails).
-//   - Each pusher runs one push; its tip is distinct from the other pushers'.
-//   - push_branch's two reads (head, then the packmap probe) are one step:
-//     the probe only chooses reset vs append, and every write is then
-//     re-validated by CAS, so splitting them adds interleavings of the
-//     choice only, not of any write.
-//   - A request lost BEFORE the server processed it is not a separate step:
-//     it only burns a ladder attempt, which the lost-response step already
-//     covers.
-//   - The server keeps running a request after the client dies; a dead
-//     pusher here stops everything of its own, which also covers the local
-//     file transport (the client IS the writer) and a server crash.
-//   - The replay ledger keeps one stored result per pusher (its current
-//     logical call's nonce); its expiry is not modelled.
+// Abstraction:
+//   - Commits 0..6 have a fixed DAG: 1 and 2 descend from 0; 3 from 1; 4
+//     from 2; 5 from 3; 6 from 4. Objects are commits and closure is ancestry.
+//   - Pack 0 is the initial self-contained closure. Non-force pack i belongs
+//     to pusher i. A force plan's immutable pack id includes its planning
+//     head, so a re-plan cannot alter an already published pack's contents.
+//   - The packmap is an oldest-first list of pack ids; reconstruction fails
+//     if a pack's delta bases are absent. A reset to the initial closure can
+//     restore the identical root [0], explicitly modelling root ABA.
+//   - Uploads are content-addressed and available; pack GC is modelled in
+//     formal/quint/gc. Each pusher runs one logical push with a distinct tip.
+//   - Non-force head and packmap-probe reads stay combined, as before. Force
+//     reads are separate because their relationship is part of the proof.
+//   - A request lost before server processing only consumes ladder budget;
+//     lost-response steps already cover this. A dead pusher stops its own
+//     requests, also modelling a local writer or server crash. Replay-ledger
+//     expiry is outside this model.
 //
 // Invariants (./check.sh, README.md):
 //   DeltaTransfer   : if head resolves to T, the packmap reconstructs
@@ -100,14 +74,14 @@ module advance {
     oldConflict: bool,   // pre-reconciliation client: HeadConflict / RefConflict => NonFastForward, no read_ref
     trustConflict: bool, // HeadConflict / RefConflict => success without read_ref
     noGate: bool,        // pre-#521: re-baseline ignores supports_atomic_advance
-    gateNoAny: bool,     // the gate's `Any` clause dropped (HTTP Any fallback)
+    gateNoAny: bool,     // old HTTP force path: ordered fallback and unsafe reset
     splitCas: bool,      // server head CAS as read-then-write without a lock
     headFirst: bool,     // ordered advance writes the head BEFORE the packmap
     noTimeout: bool,     // a server crash mid-request never surfaces to the client
     noLadderBound: bool, // the retry ladder re-issues forever (no attempt limit)
   }
 
-  // pc: idle | loop | advSrv | advSrv2 | updSrv | updSrv2 | resp | readHead
+  // pc: idle | planForce | loop | advSrv | advSrv2 | updSrv | updSrv2 | resp | readHead
   //     | done | dead | hung
   //   advSrv  : advance_refs request at the server, not yet applied
   //   advSrv2 : ordered path, first write done, second pending
@@ -121,6 +95,7 @@ module advance {
     reset: bool,        // this push re-baselines (frozen before the loop)
     node: List[int],    // packmap value being written
     pmExp: List[int],   // packmap Match(prior)
+    plannedPm: List[int], // strong packmap read captured before the force plan
     attempts: int,      // advance_packmap loop iterations used
     ladder: int,        // re-issues left in the current call's ladder
     call: str,          // "adv" | "upd"
@@ -135,7 +110,7 @@ module advance {
   const PUSHERS: int -> Cfg     // pusher id (>= 1) -> tip and head condition
   const MODE: str               // "atomic" | "ordered"
   const LEDGER: bool            // auth v2 replay ledger (atomic stores only)
-  const ANY_FALLBACK: bool      // HTTP: `Any` forces the ordered path
+  const ANY_FALLBACK: bool      // HTTP: encode force head as Match(observed head)
   const INIT_HEAD: int
   const THRESH: int             // re-baseline when chain depth + 1 > THRESH
   const ATTEMPTS: int           // PACKMAP_CAS_ATTEMPTS (code: 8)
@@ -181,6 +156,13 @@ module advance {
   // A pack's contents; pack 0 is the seed push of INIT_HEAD.
   def packOf(k: int): { objs: Set[int], bases: Set[int] } =
     if (k == 0) { objs: CLOS.get(INIT_HEAD), bases: Set() }
+    else if (k >= 10) {
+      // Replanning creates a different immutable content-addressed pack.
+      // A previously appended pack must retain the bases of its own plan.
+      val owner = k / 10 - 1
+      val base = k % 10
+      { objs: CLOS.get(tipOf(owner)).exclude(CLOS.get(base)), bases: CLOS.get(base) }
+    }
     else {
       val st = ps.get(k)
       val tipC = CLOS.get(tipOf(k))
@@ -198,7 +180,7 @@ module advance {
 
   // ------------------------------------------------------------------- init
   pure val IDLE: P = {
-    pc: "idle", base: -1, reset: false, node: List(), pmExp: List(), attempts: 0,
+    pc: "idle", base: -1, reset: false, node: List(), pmExp: List(), plannedPm: List(), attempts: 0,
     ladder: 0, call: "", resp: "", report: "", srvRead: -1,
   }
 
@@ -226,7 +208,7 @@ module advance {
     val v = tipOf(i)
     // the server's CAS decided Match(e) on `seen` (== e); the write
     // replaces hd, which differs from e only if the CAS was not atomic
-    val blind = condOf(i) != ANY and condOf(i) != hd
+    val blind = requestCond(i) != ANY and requestCond(i) != hd
     all {
       hd' = v,
       landed' = landed.union(PIDS.filter(j => ps.get(j).pc != "idle" and tipOf(j) == v)),
@@ -238,10 +220,17 @@ module advance {
 
   action setP(i: int, st: P): bool = ps' = ps.set(i, st)
 
-  def effAtomic(i: int): bool = MODE == "atomic" and not(ANY_FALLBACK and condOf(i) == ANY)
+  def guardedForce(i: int): bool = MODE == "atomic" and condOf(i) == ANY and not(FAULTS.gateNoAny)
+  def effAtomic(i: int): bool = MODE == "atomic" and not(ANY_FALLBACK and condOf(i) == ANY and FAULTS.gateNoAny)
+  def requestCond(i: int): Cond =
+    if (guardedForce(i)) ps.get(i).base else condOf(i)
+  pure def extendsChain(current: List[int], prior: List[int]): bool =
+    current.length() >= prior.length() and current.slice(0, prior.length()) == prior
+
+  def packId(i: int): int = if (guardedForce(i)) 10 * (i + 1) + ps.get(i).base else i
 
   // --------------------------------------------------------------- actions
-  // push_branch: read R (and probe the packmap), plan, decide reset.
+  // Non-force: read R and probe packmap. Force: capture packmap before planning.
   action start(i: int): bool = {
     val st = ps.get(i)
     val tip = tipOf(i)
@@ -254,7 +243,11 @@ module advance {
       hd' = hd, wrote' = wrote, overwritten' = overwritten, lostUpdate' = lostUpdate,
       landed' = if (hd == tip) landed.union(Set(i)) else landed,
       pm' = pm,
-      if (empty)
+      if (guardedForce(i)) all {
+        setP(i, { ...st, pc: "planForce", plannedPm: pm }),
+        stored' = stored,
+      }
+      else if (empty)
         // no-op plan: commit_head only (fresh call, fresh nonce)
         all {
           setP(i, { ...st, pc: "updSrv", base: hd, call: "upd", ladder: LADDER }),
@@ -265,6 +258,27 @@ module advance {
         stored' = stored,
       },
       lastAction' = { name: "start", p: i, what: if (empty) "noop" else if (reset) "reset" else "append" },
+    }
+  }
+
+  // The strong packmap read precedes this head read. They are separate
+  // steps: a reset between them must also be caught by the packmap guard.
+  action planForce(i: int): bool = {
+    val st = ps.get(i)
+    val empty = CLOS.get(tipOf(i)).subseteq(CLOS.get(hd))
+    all {
+      st.pc == "planForce",
+      hd' = hd, wrote' = wrote, overwritten' = overwritten, lostUpdate' = lostUpdate, pm' = pm,
+      landed' = if (hd == tipOf(i)) landed.union(Set(i)) else landed,
+      stored' = stored.set(i, ""),
+      if (st.attempts >= ATTEMPTS)
+        setP(i, { ...st, pc: "done", report: "contended" })
+      else if (empty)
+        setP(i, { ...st, pc: "advSrv", base: hd, reset: false, call: "adv",
+                  node: st.plannedPm, pmExp: st.plannedPm, ladder: LADDER,
+                  attempts: st.attempts + 1 })
+      else setP(i, { ...st, pc: "loop", base: hd, reset: false }),
+      lastAction' = { name: "planForce", p: i, what: if (empty) "noop" else "append" },
     }
   }
 
@@ -280,17 +294,26 @@ module advance {
           setP(i, { ...st, pc: "done", report: "contended" }),
           lastAction' = { name: "loop", p: i, what: "contended" },
         }
-      else if (not(st.reset) and inList(pm, i))
+      else if (guardedForce(i) and not(extendsChain(pm, st.plannedPm)))
+        // The old plan's delta bases may have been dropped. Re-read and
+        // re-plan, sharing the CAS budget rather than starting a new one.
+        all {
+          setP(i, { ...st, pc: "idle", attempts: st.attempts + 1 }),
+          lastAction' = { name: "loop", p: i, what: "replan" },
+        }
+      else if (not(st.reset) and inList(pm, packId(i)))
         // idempotency: our pack is already chained, only the head remains
         all {
-          setP(i, { ...st, pc: "updSrv", call: "upd", ladder: LADDER, attempts: st.attempts + 1 }),
+          setP(i, { ...st, pc: if (guardedForce(i)) "advSrv" else "updSrv",
+                    call: if (guardedForce(i)) "adv" else "upd", node: pm, pmExp: pm,
+                    ladder: LADDER, attempts: st.attempts + 1 }),
           lastAction' = { name: "loop", p: i, what: "commitHead" },
         }
       else
         all {
           setP(i, { ...st, pc: "advSrv", call: "adv", ladder: LADDER,
                     attempts: st.attempts + 1, pmExp: pm,
-                    node: if (st.reset) List(i) else pm.append(i) }),
+                    node: if (st.reset) (if (tipOf(i) == INIT_HEAD) List(0) else List(i)) else pm.append(packId(i)) }),
           lastAction' = { name: "loop", p: i, what: "advance" },
         },
     }
@@ -302,7 +325,7 @@ module advance {
     val out =
       if (LEDGER and stored.get(i) != "") stored.get(i)
       else if (pm != st.pmExp) "PackmapConflict"
-      else if (not(holds(condOf(i), hd))) "HeadConflict"
+      else if (not(holds(requestCond(i), hd))) "HeadConflict"
       else "Committed"
     val applies = out == "Committed" and not(LEDGER and stored.get(i) != "")
     all {
@@ -328,7 +351,7 @@ module advance {
           all { keepHead, pm' = st.node, setP(i, { ...st, pc: "advSrv2" }),
                 lastAction' = { name: "srvAdvFirst", p: i, what: "packmap" } }
       else
-        if (not(holds(condOf(i), hd)))
+        if (not(holds(requestCond(i), hd)))
           all { keepHead, pm' = pm, setP(i, { ...st, pc: "resp", resp: "HeadConflict" }),
                 lastAction' = { name: "srvAdvFirst", p: i, what: "HeadConflict" } }
         else
@@ -344,7 +367,7 @@ module advance {
       st.pc == "advSrv2",
       stored' = stored,
       if (not(FAULTS.headFirst))
-        if (not(holds(condOf(i), hd)))
+        if (not(holds(requestCond(i), hd)))
           all { keepHead, pm' = pm, setP(i, { ...st, pc: "resp", resp: "HeadConflict" }),
                 lastAction' = { name: "srvAdvSecond", p: i, what: "HeadConflict" } }
         else
@@ -376,7 +399,7 @@ module advance {
   action srvUpd(i: int): bool = {
     val st = ps.get(i)
     val replayed = LEDGER and stored.get(i) != ""
-    val ok = holds(condOf(i), hd)
+    val ok = holds(requestCond(i), hd)
     all {
       st.pc == "updSrv",
       pm' = pm,
@@ -419,6 +442,8 @@ module advance {
         setP(i, { ...st, pc: "done", report: "success" })
       else if (st.resp == "PackmapConflict")
         setP(i, { ...st, pc: "loop" })
+      else if (guardedForce(i))
+        setP(i, { ...st, pc: "idle" })
       else if (FAULTS.oldConflict)
         setP(i, { ...st, pc: "done", report: "nff" })
       else if (FAULTS.trustConflict)
@@ -489,7 +514,7 @@ module advance {
   action pusherStep = {
     nondet i = PIDS.filter(j => not(terminal(j))).oneOf()
     any {
-      start(i), loop(i), srvAdvAtomic(i), srvAdvFirst(i), srvAdvSecond(i),
+      start(i), planForce(i), loop(i), srvAdvAtomic(i), srvAdvFirst(i), srvAdvSecond(i),
       srvCrash(i), srvUpd(i), srvUpd2(i), deliver(i), lose(i), readHead(i), crash(i),
     }
   }
@@ -535,7 +560,7 @@ module advance {
 
   // ------------------------------------------ canaries (each MUST be violated)
   val CanaryNoReset: bool = not(PIDS.exists(i => ps.get(i).reset and ps.get(i).report == "success"))
-  val CanaryNoAppendSuccess: bool = not(PIDS.exists(i => not(ps.get(i).reset) and ps.get(i).report == "success" and inList(pm, i)))
+  val CanaryNoAppendSuccess: bool = not(PIDS.exists(i => not(ps.get(i).reset) and ps.get(i).report == "success" and inList(pm, packId(i))))
   val CanaryNoReissueAfterLanded: bool = not(lastAction.name == "reissue" and wrote.contains(lastAction.p))
   val CanaryNoDisambiguatedSuccess: bool = not(lastAction.name == "readHead" and lastAction.what == "success")
   val CanaryNoNff: bool = not(PIDS.exists(i => ps.get(i).report == "nff"))
@@ -597,9 +622,8 @@ module ledger2 {
                  MODE = "atomic", LEDGER = true, ANY_FALLBACK = false, INIT_HEAD = 0, THRESH = 1,
                  ATTEMPTS = 3, LADDER = 2, FAULTS = { oldConflict: false, trustConflict: false, noGate: false, gateNoAny: false, splitCas: false, headFirst: false, noTimeout: false, noLadderBound: false }).*
 }
-// HTTP `/refs/advance`: atomic, but `Any` falls back to ordered. One force
-// pusher over head 1 with tip 2 (not a descendant): the gate's `Any` clause
-// keeps it appending (see http1_gateNoAny).
+// HTTP atomic advance substitutes Match(observed head) for Any. The mutant
+// below preserves the old ordered fallback to demonstrate its failure.
 module http1 {
   import advance(PUSHERS = Map(2 -> { tip: 2, cond: -1 }),
                  MODE = "atomic", LEDGER = false, ANY_FALLBACK = true, INIT_HEAD = 1, THRESH = 1,
@@ -614,38 +638,29 @@ module forceFF2 {
                  MODE = "atomic", LEDGER = false, ANY_FALLBACK = false, INIT_HEAD = 3, THRESH = 1,
                  ATTEMPTS = 3, LADDER = 2, FAULTS = { oldConflict: false, trustConflict: false, noGate: false, gateNoAny: false, splitCas: false, headFirst: false, noTimeout: false, noLadderBound: false }).*
 }
-// FINDING F2 (documented gap, DeltaTransfer expected violated): as forceFF2
-// but p1 is a NON-fast-forward --force-with-lease (3 -> 2, Match(3)). p2's
-// head-only Any write lands after p1's atomic reset: head 1, packmap
-// reconstructs only closure(2).
+// Head-only force push racing a sideways lease reset. The packmap guard
+// rejects the stale request, then the shared budget permits a fresh plan.
 module gapNoopAny2 {
   import advance(PUSHERS = Map(1 -> { tip: 2, cond: 3 }, 2 -> { tip: 1, cond: -1 }),
                  MODE = "atomic", LEDGER = false, ANY_FALLBACK = false, INIT_HEAD = 3, THRESH = 1,
                  ATTEMPTS = 3, LADDER = 2, FAULTS = { oldConflict: false, trustConflict: false, noGate: false, gateNoAny: false, splitCas: false, headFirst: false, noTimeout: false, noLadderBound: false }).*
 }
-// FINDING F2, fast-forward leases only: p3 force-pushes 3 -> 4 (sideways),
-// p1 fast-forwards 4 -> 6 with a reset, then p2's head-only Any write of 1
-// (planned against head 3) lands: head 1, packmap closure(6).
+// Head-only force push racing another force push and a fast-forward reset.
 module gapTwoAny3 {
   import advance(PUSHERS = Map(1 -> { tip: 6, cond: 4 }, 2 -> { tip: 1, cond: -1 }, 3 -> { tip: 4, cond: -1 }),
                  MODE = "atomic", LEDGER = false, ANY_FALLBACK = false, INIT_HEAD = 3, THRESH = 1,
                  ATTEMPTS = 3, LADDER = 2, FAULTS = { oldConflict: false, trustConflict: false, noGate: false, gateNoAny: false, splitCas: false, headFirst: false, noTimeout: false, noLadderBound: false }).*
 }
-// FINDING F1 (documented gap, DeltaTransfer expected violated): HTTP. p1
-// fast-forwards 0 -> 1 with an (atomic) re-baseline; p2 force-pushes 2 (Any),
-// which falls back to the ordered two-PUT path. p1's reset commits between
-// p2's packmap PUT and p2's head PUT: head 2, packmap reconstructs closure(1).
+// HTTP force advance remains atomic with both packmap and observed-head
+// guards. The former ordered fallback cannot split around p1's reset.
 module gapHttpAny2 {
   import advance(PUSHERS = Map(1 -> { tip: 1, cond: 0 }, 2 -> { tip: 2, cond: -1 }),
                  MODE = "atomic", LEDGER = false, ANY_FALLBACK = true, INIT_HEAD = 0, THRESH = 1,
                  ATTEMPTS = 3, LADDER = 2, FAULTS = { oldConflict: false, trustConflict: false, noGate: false, gateNoAny: false, splitCas: false, headFirst: false, noTimeout: false, noLadderBound: false }).*
 }
 
-// FINDING F2, appending variant (DeltaTransfer expected violated): p2
-// force-pushes 5 (Any) with a NON-empty plan against head 3 (its pack needs
-// closure(3) as bases); p1's non-fast-forward lease re-baselines to [closure(2)];
-// p2's loop re-reads the reset packmap, appends its pack onto it and commits
-// under Any: head 5, and the chain [closure(2), p2] cannot resolve p2's bases.
+// A force delta plan races a sideways lease reset. The replacement chain
+// does not extend its captured chain, so the old delta plan is discarded.
 module gapAppendAny2 {
   import advance(PUSHERS = Map(1 -> { tip: 2, cond: 3 }, 2 -> { tip: 5, cond: -1 }),
                  MODE = "atomic", LEDGER = false, ANY_FALLBACK = false, INIT_HEAD = 3, THRESH = 1,
@@ -740,4 +755,12 @@ module ordered2_noLadderBound { // Termination
                  MODE = "ordered", LEDGER = false, ANY_FALLBACK = false, INIT_HEAD = 0, THRESH = 1,
                  ATTEMPTS = 3, LADDER = 2,
                  FAULTS = { oldConflict: false, trustConflict: false, noGate: false, gateNoAny: false, splitCas: false, headFirst: false, noTimeout: false, noLadderBound: true }).*
+}
+
+// A reset to the initial closure may restore the identical content-addressed
+// root. The force head guard must still reject a plan made against head 6.
+module gapAbaAny3 {
+  import advance(PUSHERS = Map(1 -> { tip: 6, cond: 3 }, 2 -> { tip: 4, cond: -1 }, 3 -> { tip: 3, cond: 6 }),
+                 MODE = "atomic", LEDGER = false, ANY_FALLBACK = false, INIT_HEAD = 3, THRESH = 1,
+                 ATTEMPTS = 4, LADDER = 2, FAULTS = { oldConflict: false, trustConflict: false, noGate: false, gateNoAny: false, splitCas: false, headFirst: false, noTimeout: false, noLadderBound: false }).*
 }

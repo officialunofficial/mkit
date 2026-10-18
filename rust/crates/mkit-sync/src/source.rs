@@ -91,6 +91,15 @@ pub trait RemoteSource {
     fn supports_atomic_advance(&self) -> bool {
         false
     }
+    /// Select an encodable atomic head condition for a self-contained force
+    /// advance. The caller also compares the packmap; dependency plans compare
+    /// the observed head as well, even when the endpoint supports `Any`.
+    fn atomic_force_head_condition(
+        &self,
+        _observed_head: Option<Hash>,
+    ) -> mkit_core::refs::RefWriteCondition {
+        mkit_core::refs::RefWriteCondition::Any
+    }
     /// Identity and origin of the repository, for error context and fetch
     /// checkpoints. Both must identify this source's destination: changing
     /// either invalidates checkpoint reuse. `None` disables checkpoints.
@@ -216,6 +225,13 @@ impl RemoteSource for TransportSource<'_> {
     }
     fn supports_atomic_advance(&self) -> bool {
         self.transport.supports_atomic_advance()
+    }
+
+    fn atomic_force_head_condition(
+        &self,
+        observed_head: Option<Hash>,
+    ) -> mkit_core::refs::RefWriteCondition {
+        self.transport.atomic_force_head_condition(observed_head)
     }
 
     fn list_branches(&self) -> Result<Vec<Ref>, SourceError> {

@@ -350,6 +350,17 @@ message AdvanceRefsRequest {
 | `HeadConflict` | `ADVANCE_OUTCOME_HEAD_CONFLICT` | The head precondition failed; branch moved under the caller. |
 | `PackmapConflict` | `ADVANCE_OUTCOME_PACKMAP_CONFLICT` | The packmap precondition failed; a concurrent pusher advanced the chain first. |
 
+An atomic-capable client publishing a force push MUST compare the packmap in
+that same `AdvanceRefs`, including a head-only or idempotent write (set the
+packmap to its existing value under `MATCH`). A plan depending on the observed
+head's closure MUST also compare that head: separate reads do not establish an
+atomic pair, and a reset can restore an identical packmap digest. A full,
+self-contained append MAY use `ANY` for the head. On a precondition miss, the
+client MUST re-read the packmap and re-plan if it no longer extends the chain
+captured by the plan. Re-planning and publication attempts MUST share the
+existing bounded retry budget. These requirements use the existing fields;
+`UpdateRef` alone cannot carry the packmap dependency.
+
 A conflict is carried as a **successful** RPC with `outcome !=
 ADVANCE_OUTCOME_COMMITTED`, not a Connect error &mdash; unlike `UpdateRef`,
 `advance_refs`'s Rust signature already returns a typed enum rather

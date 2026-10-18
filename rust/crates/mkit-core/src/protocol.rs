@@ -761,11 +761,14 @@ pub trait Transport: Send + Sync {
     /// ONE transaction: then a failed advance changes nothing, and the head
     /// is never observed past a packmap that can't yet reconstruct it.
     ///
-    /// The default impl is the safe non-transactional approximation used by
+    /// The default impl is the non-transactional approximation used by
     /// stores without multi-ref transactions: it writes the **packmap first**
     /// (durable before the head moves) then the head. A crash in between
     /// leaves the head at its prior value and the packmap a superset — still
-    /// consistent for fetch. The [`AdvanceOutcome`] distinguishes a packmap
+    /// consistent for fetch while concurrent writes also preserve the chain.
+    /// This ordering cannot protect against a concurrent atomic re-baseline;
+    /// force pushes on atomic transports must use the atomic implementation.
+    /// The [`AdvanceOutcome`] distinguishes a packmap
     /// precondition failure (caller re-reads and retries the chain) from a
     /// head precondition failure (caller treats it as non-fast-forward),
     /// which a single `RefConflict` could not.
@@ -820,12 +823,25 @@ pub trait Transport: Send + Sync {
         UploadLimits::default()
     }
 
+    /// Head precondition for a force push using an atomic advance.
+    ///
+    /// The default keeps the unconditional force-write intent. Transports
+    /// whose atomic endpoint cannot encode [`RefWriteCondition::Any`] must
+    /// override this to match `observed_head` (or require a missing head).
+    /// Push pairs this condition with a packmap precondition and retries a
+    /// concurrent head change, so force pushes never use an ordered fallback.
+    /// Only used when [`Self::supports_atomic_advance`] returns `true`.
+    fn atomic_force_head_condition(&self, _observed_head: Option<Hash>) -> RefWriteCondition {
+        RefWriteCondition::Any
+    }
+
     /// Whether [`Self::advance_refs`] commits the head + packmap advance as
     /// one indivisible transaction, rather than the default's ordered
     /// packmap-then-head writes.
     ///
     /// The default (non-transactional) `advance_refs` is safe for an
-    /// **appending** packmap write: per its doc comment, a crash or lost
+    /// **appending** packmap write if concurrent writers preserve that chain:
+    /// per its doc comment, a crash or lost
     /// head-CAS race between the two writes leaves the packmap a strict
     /// superset of what the (unmoved) head needs — still reconstructable.
     /// That safety argument does NOT extend to a packmap **reset** (a fresh
@@ -840,7 +856,9 @@ pub trait Transport: Send + Sync {
     /// `remote_dispatch::push_branch`'s re-baseline gate. Override to
     /// `true` ONLY when [`Self::advance_refs`] is overridden with a
     /// genuinely transactional implementation (e.g. the HTTP transport's
-    /// single-request `/refs/advance` endpoint, mkit #408).
+    /// single-request `/refs/advance` endpoint, mkit #408). If that endpoint
+    /// cannot encode an unconditional head write, also override
+    /// [`Self::atomic_force_head_condition`] so force pushes stay atomic.
     fn supports_atomic_advance(&self) -> bool {
         false
     }
@@ -1058,6 +1076,19 @@ mod tests {
             .upload_blob_via_ref(bytes, &key, "refs/heads/main")
             .unwrap();
         assert_eq!(transport.upload_limits(), UploadLimits::default());
+    }
+
+    #[test]
+    fn atomic_force_head_condition_defaults_to_any() {
+        let transport = RecordingTransport::default();
+        assert_eq!(
+            transport.atomic_force_head_condition(Some([1; 32])),
+            RefWriteCondition::Any
+        );
+        assert_eq!(
+            transport.atomic_force_head_condition(None),
+            RefWriteCondition::Any
+        );
     }
 
     fn chunks_of(data: &[u8], chunk_len: usize) -> Vec<PackChunk> {

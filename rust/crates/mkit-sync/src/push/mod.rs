@@ -10,11 +10,17 @@ use mkit_core::transfer;
 use rayon::prelude::*;
 use std::path::Path;
 mod error;
+mod force;
 mod packmap;
 mod split;
 pub use error::PushError;
 use packmap::{ChainAction, advance_packmap, commit_head, probe_chain};
 pub use split::{MAX_CHAIN_COMMITS, MAX_SPLIT_STEPS, PushControl, StepAuthority, plan_push_steps};
+
+struct PreparedPlan {
+    pack: transfer::PackPlan,
+    force: Option<force::Snapshot>,
+}
 
 struct PushContext<'a> {
     source: &'a dyn RemoteSource,
@@ -294,6 +300,9 @@ pub enum RetryReason {
         "the upload was rejected and the push was re-planned against the remote's current head, which may have moved (fetch and merge, then push again)"
     )]
     Replanned,
+    /// A concurrent writer replaced the chain used by a force-push plan.
+    #[error("the pack map changed under this force push and its transfer was re-planned")]
+    PackmapChanged,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -333,13 +342,13 @@ fn run_steps(
     if estimate_pack_sizes(store, &plan, cap, limits.max_pack_bytes)?.len()
         <= split::data_pack_budget(limits)
     {
-        return single(Some(plan));
+        let force = force::snapshot(tx, branch, remote_tip, condition)?;
+        return single(Some(PreparedPlan { pack: plan, force }));
     }
     // The estimate is uncompressed: a push that compresses into the budget
     // is not split (exact dry seal), and one against a remote tip this store
     // lacks is left to the head CAS rather than walking all of history.
-    let unknown_remote = remote_tip.is_some_and(|remote| !store.contains(&remote));
-    if unknown_remote {
+    if remote_tip.is_some_and(|remote| !store.contains(&remote)) {
         return single(None);
     }
     match build_and_upload_packs(PackSink::Count, store, plan, cap, limits, tx.observer) {
@@ -426,8 +435,21 @@ fn push_step_recovering(
     condition: refs::RefWriteCondition,
     rebaseline_threshold: usize,
     pack_payload_cap: u64,
-    plan: Option<transfer::PackPlan>,
+    plan: Option<PreparedPlan>,
 ) -> Result<(), PushError> {
+    if matches!(condition, refs::RefWriteCondition::Any) && tx.supports_atomic_advance() {
+        refs::check_pushable_branch(branch)?;
+        return force::push_step(
+            tx,
+            store,
+            branch,
+            tip,
+            rebaseline_threshold,
+            pack_payload_cap,
+            plan,
+        );
+    }
+    let plan = plan.map(|prepared| prepared.pack);
     let once = |retry, plan| {
         push_branch_once(
             tx,
@@ -504,11 +526,9 @@ fn push_branch_once(
     // closure. We therefore re-baseline ONLY when BOTH hold:
     //   * the transport advances both refs transactionally
     //     (`supports_atomic_advance`), AND
-    //   * the head write is CAS-conditioned (not `Any`). A force push's `Any`
-    //     head condition makes even an atomic transport fall back to the
-    //     ordered two-PUT path (`Any` is not expressible on the atomic
-    //     endpoint — see `HttpTransport::supports_atomic_advance`), so a
-    //     force push MUST take the safe append path instead of resetting.
+    //   * the head write is CAS-conditioned (not `Any`). Atomic force pushes
+    //     use the guarded force driver before reaching this path. The `Any`
+    //     calls left here belong to non-atomic sources and cannot reset.
     let mut rebaseline = false;
     let mut resolved_chain = None;
     if !force_self_contained

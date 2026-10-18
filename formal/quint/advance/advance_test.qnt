@@ -1,7 +1,7 @@
 // -*- mode: Bluespec; -*-
 // Pinned interleavings for advance.qnt. Each run fixes one interleaving and
-// checks its outcome; MUTANT / GAP runs show an invariant failing
-// (non-vacuity) or a documented gap (a finding) being reachable.
+// checks its outcome; mutants show non-vacuity and force scenarios pin
+// bounded recovery from concurrent re-baselines.
 //
 // Pusher ids are 1 and 2; tips and conditions are in each module's import.
 
@@ -168,77 +168,100 @@ module splitCas_test {
       .expect(and { hd == 3, not(NoLostUpdate) })
 }
 
-// GAP F2: head-only force push after a non-fast-forward lease re-baseline.
+// Recovery of the formerly unsafe force-push interleavings.
 module gapNoopAny_test {
   import advance(PUSHERS = Map(1 -> { tip: 2, cond: 3 }, 2 -> { tip: 1, cond: -1 }),
                  MODE = "atomic", LEDGER = false, ANY_FALLBACK = false, INIT_HEAD = 3, THRESH = 1,
-                 ATTEMPTS = 2, LADDER = 1,
+                 ATTEMPTS = 4, LADDER = 1,
                  FAULTS = { oldConflict: false, trustConflict: false, noGate: false, gateNoAny: false, splitCas: false, headFirst: false, noTimeout: false, noLadderBound: false }).* from "./advance"
 
-  run forceAfterRebaselineStrandsTest =
-    init
-      .then(start(2))                          // plans against head 3: empty, head-only
+  run forceAfterRebaselineReplansTest =
+    init.then(start(2)).then(planForce(2))
       .then(start(1)).then(loop(1)).then(srvAdvAtomic(1))
-      .expect(and { ps.get(1).reset, pm == [1], hd == 2, DeltaTransfer })
-      .then(srvUpd(2))                         // Any: head 2 -> 1
-      .expect(and { hd == 1, pm == [1], not(DeltaTransfer) })
+      .then(srvAdvAtomic(2))
+      .expect(and { ps.get(2).resp == "PackmapConflict", hd == 2, All })
+      .then(deliver(2)).then(loop(2))
+      .expect(lastAction.what == "replan")
+      .then(start(2)).then(planForce(2)).then(loop(2)).then(srvAdvAtomic(2)).then(deliver(2))
+      .expect(and { hd == 1, ps.get(2).report == "success", All })
 }
-
-// GAP F1: HTTP Any fallback interleaved with a fast-forward re-baseline.
 module gapHttpAny_test {
   import advance(PUSHERS = Map(1 -> { tip: 1, cond: 0 }, 2 -> { tip: 2, cond: -1 }),
                  MODE = "atomic", LEDGER = false, ANY_FALLBACK = true, INIT_HEAD = 0, THRESH = 1,
-                 ATTEMPTS = 2, LADDER = 1,
+                 ATTEMPTS = 4, LADDER = 1,
                  FAULTS = { oldConflict: false, trustConflict: false, noGate: false, gateNoAny: false, splitCas: false, headFirst: false, noTimeout: false, noLadderBound: false }).* from "./advance"
 
-  run anyFallbackVsRebaselineStrandsTest =
-    init
-      .then(start(1)).then(start(2))
-      .expect(and { ps.get(1).reset, not(ps.get(2).reset) })   // gate: Any appends
-      .then(loop(2)).then(srvAdvFirst(2))                      // packmap PUT [0, 2]
-      .then(loop(1)).then(srvAdvAtomic(1))                     // reset Match([0, 2]), head Match(0)
-      .expect(and { pm == [1], hd == 1, DeltaTransfer })
-      .then(srvAdvSecond(2))                                   // head PUT Any: 2
-      .expect(and { hd == 2, pm == [1], not(DeltaTransfer) })
+  run anyUsesGuardedAtomicAdvanceTest =
+    init.then(start(1)).then(start(2)).then(planForce(2)).then(loop(2))
+      .expect(effAtomic(2))
+      .then(loop(1)).then(srvAdvAtomic(1))
+      .then(srvAdvAtomic(2))
+      .expect(and { ps.get(2).resp == "PackmapConflict", hd == 1, All })
+      .then(deliver(2)).then(loop(2)).then(start(2)).then(planForce(2))
+      .then(loop(2)).then(srvAdvAtomic(2)).then(deliver(2))
+      .expect(and { hd == 2, ps.get(2).report == "success", All })
 }
-
-// GAP F2 with fast-forward leases only (two force pushers).
 module gapTwoAny_test {
   import advance(PUSHERS = Map(1 -> { tip: 6, cond: 4 }, 2 -> { tip: 1, cond: -1 }, 3 -> { tip: 4, cond: -1 }),
                  MODE = "atomic", LEDGER = false, ANY_FALLBACK = false, INIT_HEAD = 3, THRESH = 1,
                  ATTEMPTS = 3, LADDER = 2,
                  FAULTS = { oldConflict: false, trustConflict: false, noGate: false, gateNoAny: false, splitCas: false, headFirst: false, noTimeout: false, noLadderBound: false }).* from "./advance"
 
-  run twoForcePushesAndFastForwardRebaselineStrandTest =
-    init
-      .then(start(2))                                  // head 3: tip 1 is covered, head-only
-      .then(start(3)).then(loop(3)).then(srvAdvAtomic(3))
-      .expect(and { hd == 4, pm == [0, 3], DeltaTransfer })   // force push sideways, appended
+  run twoForcePushesAndFastForwardRebaselineRecoverTest =
+    init.then(start(2)).then(planForce(2))
+      .then(start(3)).then(planForce(3)).then(loop(3)).then(srvAdvAtomic(3))
       .then(start(1)).then(loop(1)).then(srvAdvAtomic(1))
-      .expect(and { ps.get(1).reset, hd == 6, pm == [1], DeltaTransfer })  // fast-forward reset
-      .then(srvUpd(2))
-      .expect(and { hd == 1, not(DeltaTransfer) })
+      .then(srvAdvAtomic(2))
+      .expect(and { ps.get(2).resp == "PackmapConflict", hd == 6, All })
+      .then(deliver(2)).then(loop(2)).then(start(2)).then(planForce(2))
+      .then(loop(2)).then(srvAdvAtomic(2)).then(deliver(2))
+      .expect(and { hd == 1, ps.get(2).report == "success", All })
 }
-
-// GAP F2, appending variant: a force push with a non-empty plan re-reads a
-// packmap another pusher has just reset, appends its pack (whose delta bases
-// the reset dropped) and commits under Any.
 module gapAppendAny_test {
   import advance(PUSHERS = Map(1 -> { tip: 2, cond: 3 }, 2 -> { tip: 5, cond: -1 }),
                  MODE = "atomic", LEDGER = false, ANY_FALLBACK = false, INIT_HEAD = 3, THRESH = 1,
-                 ATTEMPTS = 2, LADDER = 1,
+                 ATTEMPTS = 4, LADDER = 1,
                  FAULTS = { oldConflict: false, trustConflict: false, noGate: false, gateNoAny: false, splitCas: false, headFirst: false, noTimeout: false, noLadderBound: false }).* from "./advance"
 
-  run forceAppendAfterRebaselineStrandsTest =
-    init
-      .then(start(2))                          // plans {5} against head 3; Any: append
-      .expect(and { ps.get(2).pc == "loop", not(ps.get(2).reset) })
+  run forceAppendAfterRebaselineReplansTest =
+    init.then(start(2)).then(planForce(2))
       .then(start(1)).then(loop(1)).then(srvAdvAtomic(1))
-      .expect(and { ps.get(1).reset, pm == [1], hd == 2, DeltaTransfer })
-      .then(loop(2))                           // re-reads the reset packmap [1]
-      .expect(ps.get(2).node == [1, 2])
-      .then(srvAdvAtomic(2))                   // packmap Match([1]) and Any both hold
-      .expect(and { ps.get(2).resp == "Committed", hd == 5, pm == [1, 2], not(DeltaTransfer) })
+      .then(loop(2))
+      .expect(and { lastAction.what == "replan", All })
+      .then(start(2)).then(planForce(2)).then(loop(2)).then(srvAdvAtomic(2)).then(deliver(2))
+      .expect(and { hd == 5, ps.get(2).report == "success", All })
+}
+module gapAbaAny_test {
+  import advance(PUSHERS = Map(1 -> { tip: 6, cond: 3 }, 2 -> { tip: 4, cond: -1 }, 3 -> { tip: 3, cond: 6 }),
+                 MODE = "atomic", LEDGER = false, ANY_FALLBACK = false, INIT_HEAD = 3, THRESH = 1,
+                 ATTEMPTS = 4, LADDER = 2, FAULTS = { oldConflict: false, trustConflict: false, noGate: false, gateNoAny: false, splitCas: false, headFirst: false, noTimeout: false, noLadderBound: false }).* from "./advance"
+
+  run identicalRootStillChecksHeadTest =
+    init.then(start(2))
+      .then(start(1)).then(loop(1)).then(srvAdvAtomic(1))
+      .then(planForce(2))
+      .expect(and { ps.get(2).base == 6, ps.get(2).pmExp == [0] })
+      .then(start(3)).then(loop(3)).then(srvAdvAtomic(3))
+      .expect(and { hd == 3, pm == [0], All })
+      .then(srvAdvAtomic(2))
+      .expect(and { ps.get(2).resp == "HeadConflict", hd == 3, All })
+      .then(deliver(2)).then(start(2)).then(planForce(2)).then(loop(2))
+      .then(srvAdvAtomic(2)).then(deliver(2))
+      .expect(and { hd == 4, ps.get(2).report == "success", All })
+}
+
+// A re-plan must not restart the contention budget.
+module forceBudget_test {
+  import advance(PUSHERS = Map(1 -> { tip: 2, cond: 3 }, 2 -> { tip: 1, cond: -1 }),
+                 MODE = "atomic", LEDGER = false, ANY_FALLBACK = false, INIT_HEAD = 3, THRESH = 1,
+                 ATTEMPTS = 1, LADDER = 1,
+                 FAULTS = { oldConflict: false, trustConflict: false, noGate: false, gateNoAny: false, splitCas: false, headFirst: false, noTimeout: false, noLadderBound: false }).* from "./advance"
+
+  run headOnlyExhaustionIsBoundedTest =
+    init.then(start(2)).then(planForce(2))
+      .then(start(1)).then(loop(1)).then(srvAdvAtomic(1))
+      .then(srvAdvAtomic(2)).then(deliver(2)).then(loop(2))
+      .expect(and { ps.get(2).report == "contended", ps.get(2).attempts == 1, All })
 }
 
 // MUTANT: the unlocked head CAS loses a fast-forward push's reported success.

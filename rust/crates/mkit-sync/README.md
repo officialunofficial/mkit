@@ -143,6 +143,15 @@ options.control.observer = &my_observer;
 let report = push(&dir, &source, &options)?;
 ```
 
+On atomic-capable sources, force pushes publish the head and packmap together,
+including a head-only change. A successful force push adds at most one strong
+packmap read; other pushes keep their existing requests. A replaced chain causes
+a re-plan within the same eight-attempt budget as publication. Sustained
+contention returns `PushError::PackmapContended`. A dependent plan compares both
+observed refs so a reset back to an identical packmap digest is safe. The
+superseded JSON HTTP endpoint uses its existing head `Match`/`Missing` condition
+alongside the packmap guard; it does not use the ordered `Any` fallback.
+
 `PushReport` contains the completed ref count, advance count, and optional
 single-branch tip. `PushError` preserves push-specific refusals and carries
 filesystem and backend failures through `PushError::Sync`; backend failures

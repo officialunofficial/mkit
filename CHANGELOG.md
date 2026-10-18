@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Keep atomic force pushes consistent with concurrent pack-chain re-baselines.
+  Head-only writes compare the packmap in the same advance, and appending
+  writes re-plan when their captured chain has been replaced. Dependency plans
+  also compare the observed head, including when a reset restores an identical
+  packmap digest. Force retries share the existing eight-attempt CAS budget;
+  exhaustion returns `PushError::PackmapContended`. This adds at most one strong
+  packmap read on successful force pushes. Non-force requests, wire formats and
+  stored formats are unchanged; no store reset is required. Custom atomic
+  transports whose endpoint cannot encode `Any` can override the new provided
+  `Transport::atomic_force_head_condition` method; source adapters forward it.
+
 - Add independent release plumbing for `mkit-primitives`: its own crate
   changelog, version and train-exclusion guard, a signed-tag
   `mkit-primitives-vX.Y.Z` publish workflow with an idempotent content-compare
@@ -77,6 +88,12 @@ collect the applicable entries between their old and new immutable pins.
   the external-base commitment); version 3 checkpoints are not decoded, so
   restart them from the immutable source. The reference server attests with no fields, so its guard set,
   reads and stored formats are unchanged; no store reset is required.
+
+- `mkit_sync::RetryReason` adds `PackmapChanged` for a force re-plan whose
+  transfer exceeds one advance. Migration: handle that variant when matching
+  retry reasons exhaustively. Existing variants and non-force errors are
+  unchanged. No wire or stored-format change; no store reset is required.
+
 - [embedder: breaking API] Guard completeness for the ALPHA decisions in
   `mkit-primitives`. (1) `TicketedAdvanceRequest::authority_generation` is
   removed and `TicketFact::authority_generation` is `Option<Revision>`: request
