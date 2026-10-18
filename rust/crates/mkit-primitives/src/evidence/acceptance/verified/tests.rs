@@ -607,6 +607,33 @@ impl InPackObjectView for PackView {
     }
 }
 
+/// Bytes for one requested range of the pack or a canonical object.
+fn byte_range<'a>(
+    pack: &'a [u8],
+    canonical: &BTreeMap<Hash, Vec<u8>>,
+    fragments: &BTreeMap<u64, Vec<u8>>,
+    source: ByteSource,
+    range: crate::pack_verify::ByteRange,
+    owned: &'a mut Option<Vec<u8>>,
+) -> Option<&'a [u8]> {
+    let start = usize::try_from(range.offset).unwrap();
+    let end = usize::try_from(range.offset + range.len).unwrap();
+    match source {
+        ByteSource::Pack(_) => pack.get(start..end),
+        ByteSource::Canonical { object, len, .. } => {
+            *owned = canonical.get(&object).cloned().or_else(|| {
+                fragments.values().find_map(|bytes| {
+                    (bytes.len() as u64 == len
+                        && deserialize(bytes)
+                            .is_ok_and(|parsed| id_from_object(&parsed, bytes) == object))
+                    .then(|| bytes.clone())
+                })
+            });
+            owned.as_deref().and_then(|bytes| bytes.get(start..end))
+        }
+    }
+}
+
 fn verify_pack(pack: &[u8], canonical: &BTreeMap<Hash, Vec<u8>>) -> VerifiedPack {
     let source = PackSource {
         id: hash::hash(pack),
@@ -635,30 +662,8 @@ fn verify_pack(pack: &[u8], canonical: &BTreeMap<Hash, Vec<u8>>) -> VerifiedPack
                     source,
                     range,
                 } => {
-                    let owned;
-                    let value = match source {
-                        ByteSource::Pack(_) => pack.get(
-                            usize::try_from(range.offset).unwrap()
-                                ..usize::try_from(range.offset + range.len).unwrap(),
-                        ),
-                        ByteSource::Canonical { object, len, .. } => {
-                            owned = canonical.get(&object).cloned().or_else(|| {
-                                fragments.values().find_map(|bytes| {
-                                    (bytes.len() as u64 == len
-                                        && deserialize(bytes).is_ok_and(|parsed| {
-                                            id_from_object(&parsed, bytes) == object
-                                        }))
-                                    .then(|| bytes.clone())
-                                })
-                            });
-                            owned.as_deref().and_then(|bytes| {
-                                bytes.get(
-                                    usize::try_from(range.offset).unwrap()
-                                        ..usize::try_from(range.offset + range.len).unwrap(),
-                                )
-                            })
-                        }
-                    };
+                    let mut owned = None;
+                    let value = byte_range(pack, canonical, &fragments, source, range, &mut owned);
                     machine
                         .supply(Response::Bytes {
                             request,
