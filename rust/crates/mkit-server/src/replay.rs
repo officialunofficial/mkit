@@ -162,14 +162,12 @@ pub fn classify(existing: Option<&ReplayRecord>, fingerprint: &Hash) -> ReplayDe
             ReplayState::Committed(result) => {
                 let terminal = match result {
                     StoredResult::Rejected(rejection) => {
-                        let Some(terminal) = replay::RecordedResult::rejection(
-                            result,
-                            rejection.code().as_str(),
-                            false,
-                        ) else {
-                            return ReplayDecision::FingerprintMismatch;
-                        };
-                        terminal
+                        // `StoredRejection` holds only permanent codes, so the
+                        // allowlist always accepts it. Were that ever to change,
+                        // the stored code is still returned as recorded: the
+                        // client's nonce is not a different operation.
+                        replay::RecordedResult::rejection(result, rejection.code().as_str(), false)
+                            .unwrap_or_else(|| replay::RecordedResult::success(result))
                     }
                     StoredResult::UpdateRef(_)
                     | StoredResult::AdvanceRefs(_)

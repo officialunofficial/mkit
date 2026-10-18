@@ -65,9 +65,15 @@ pub enum FailureCode {
     /// Invalid individual signature.
     #[error("BadSignature")]
     BadSignature,
-    /// Effective delta depth exceeds the profile.
+    /// The delta chain inside the pack alone exceeds the profile depth. A
+    /// property of the submitted bytes, so permanent.
     #[error("DeltaChainTooDeep")]
     DeltaChainTooDeep,
+    /// The chain fits the profile inside the pack but passes it once an
+    /// external base's recorded depth is added. That depth belongs to
+    /// repository state, so the refusal is never permanent.
+    #[error("ExternalDeltaChainTooDeep")]
+    ExternalDeltaChainTooDeep,
     /// Authoritative repository base absence.
     #[error("ExternalBaseAbsent")]
     ExternalBaseAbsent,
@@ -200,6 +206,7 @@ impl FailureCode {
             Self::ObjectHashMismatch => "ObjectHashMismatch",
             Self::BadSignature => "BadSignature",
             Self::DeltaChainTooDeep => "DeltaChainTooDeep",
+            Self::ExternalDeltaChainTooDeep => "ExternalDeltaChainTooDeep",
             Self::ExternalBaseAbsent => "ExternalBaseAbsent",
             Self::PackfileTooShort => "PackfileTooShort",
             Self::MissingClosure => "MissingClosure",
@@ -239,6 +246,86 @@ impl FailureCode {
         }
     }
 }
+/// Whether an embedder may record a refusal so a retry of the same input gets
+/// it back unchanged. Derived from the code alone; no embedder state is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Persistence {
+    /// A property of the submitted bytes: the same bytes always draw the same
+    /// refusal, so it may be recorded and replayed.
+    Content,
+    /// Depends on repository state, time, a deployment limit or resources.
+    /// Re-run the operation instead of replaying it.
+    Transient,
+}
+impl FailureCode {
+    /// How an embedder may treat a refusal with this code (SPEC-PACKFILE 6.2).
+    /// Unlisted codes are [`Persistence::Transient`], so a new code is never
+    /// recorded by accident.
+    #[must_use]
+    pub const fn persistence(self) -> Persistence {
+        match self {
+            Self::InvalidMagic
+            | Self::UnsupportedPackVersion
+            | Self::UnexpectedEof
+            | Self::InvalidEntryType
+            | Self::TooManyObjects
+            | Self::PackfileCorrupted
+            | Self::ZstdEntryTruncated
+            | Self::DeltaEntryTruncated
+            | Self::NonStorableObject
+            | Self::TrailingData
+            | Self::DecompressionFailed
+            | Self::DecompressedSizeMismatch
+            | Self::DecompressionLimitExceeded
+            | Self::InvalidDelta
+            | Self::DeltaBaseMismatch
+            | Self::DeltaSizeMismatch
+            | Self::NonCanonicalObject
+            | Self::ObjectHashMismatch
+            | Self::BadSignature
+            | Self::DeltaChainTooDeep
+            | Self::PackfileTooShort => Persistence::Content,
+            _ => Persistence::Transient,
+        }
+    }
+}
+impl Failure {
+    /// How an embedder may treat this refusal; see [`FailureCode::persistence`].
+    #[must_use]
+    pub const fn persistence(&self) -> Persistence {
+        self.code.persistence()
+    }
+}
+
+/// What a repository-membership miss means at a given age.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MembershipMiss {
+    /// Inside the visibility lag window: the object may still become visible.
+    /// Retry; this is never a content verdict.
+    Retryable,
+    /// After the window: an authenticated absence, a content verdict.
+    Absent,
+}
+
+/// Classify a membership miss for an input first seen `age` ago (same unit as
+/// `bound`). The miss is retryable while `age < bound`.
+///
+/// ```
+/// use mkit_primitives::error::{classify_membership_miss, MembershipMiss};
+/// assert_eq!(classify_membership_miss(9, 10), MembershipMiss::Retryable);
+/// assert_eq!(classify_membership_miss(10, 10), MembershipMiss::Absent);
+/// ```
+#[must_use]
+pub const fn classify_membership_miss(age: u64, bound: u64) -> MembershipMiss {
+    if age < bound {
+        MembershipMiss::Retryable
+    } else {
+        MembershipMiss::Absent
+    }
+}
+
 /// Bounded failure attribution, with no object bytes or credentials.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Location {
@@ -300,6 +387,7 @@ mod tests {
             FailureCode::ObjectHashMismatch.as_str(),
             FailureCode::BadSignature.as_str(),
             FailureCode::DeltaChainTooDeep.as_str(),
+            FailureCode::ExternalDeltaChainTooDeep.as_str(),
             FailureCode::ExternalBaseAbsent.as_str(),
             FailureCode::PackfileTooShort.as_str(),
             FailureCode::MissingClosure.as_str(),

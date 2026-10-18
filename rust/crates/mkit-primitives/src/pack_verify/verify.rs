@@ -954,13 +954,21 @@ impl VerifyDriver {
     ) -> Result<(), Failure> {
         let work = self.work.as_mut().ok_or_else(invalid)?;
         let base = work.base.ok_or_else(invalid)?;
-        // Served canonical bytes must deserialize to the storable object the
-        // request named; anything else breaks the acquisition contract.
-        let object = deserialize(bytes).map_err(|_| invalid())?;
+        // Served bytes of a base the repository stores that do not match its
+        // identity are a repository fault, retryable and never a content
+        // verdict. For an in-pack base they break the acquisition contract.
+        let bad = || {
+            if external {
+                failure(FailureCode::UnavailableInput)
+            } else {
+                invalid()
+            }
+        };
+        let object = deserialize(bytes).map_err(|_| bad())?;
         if mkit_core::object::id_from_object(&object, bytes) != base
             || bytes.len() as u64 != range.len
         {
-            return Err(invalid());
+            return Err(bad());
         }
         let depth = if external {
             let fact = work.fact.as_ref().ok_or_else(invalid)?;
@@ -968,7 +976,7 @@ impl VerifyDriver {
                 || fact.object != base
                 || fact.kind != object.object_type()
             {
-                return Err(invalid());
+                return Err(bad());
             }
             fact.delta_depth
         } else {
@@ -1011,29 +1019,7 @@ impl VerifyDriver {
     }
 
     fn entry_refusal(error: &Failure) -> bool {
-        matches!(
-            error.code,
-            FailureCode::UnexpectedEof
-                | FailureCode::InvalidEntryType
-                | FailureCode::TooManyObjects
-                | FailureCode::PackfileTooLarge
-                | FailureCode::ZstdEntryTruncated
-                | FailureCode::DeltaEntryTruncated
-                | FailureCode::NonStorableObject
-                | FailureCode::TrailingData
-                | FailureCode::DecompressionFailed
-                | FailureCode::DecompressedSizeMismatch
-                | FailureCode::DecompressionLimitExceeded
-                | FailureCode::InvalidDelta
-                | FailureCode::DeltaBaseMismatch
-                | FailureCode::DeltaSizeMismatch
-                | FailureCode::NonCanonicalObject
-                | FailureCode::ObjectHashMismatch
-                | FailureCode::DeltaChainTooDeep
-                | FailureCode::ExternalBaseAbsent
-                | FailureCode::ResourceLimit
-                | FailureCode::UnsupportedCapability
-        )
+        crate::evidence::checkpoint::deferrable(error.code)
     }
 
     fn advance_drain(&mut self) -> Result<Step<'static>, Failure> {
@@ -1262,7 +1248,33 @@ impl VerifyDriver {
         self.drive_op()
     }
 
+    /// The depth refusal for the entry's now-known base, if any. An external
+    /// base's recorded depth belongs to repository state, so overflowing the
+    /// profile through it is a transient refusal; a chain whose base is in
+    /// this pack is a property of the pack. (A chain that mixes the two is
+    /// reported by its direct base.)
+    fn depth_refusal(&self) -> Result<(), Failure> {
+        let work = self.work.as_ref().ok_or_else(invalid)?;
+        if work.base.is_none() {
+            return Ok(());
+        }
+        let too_deep = work
+            .base_depth
+            .checked_add(1)
+            .is_none_or(|depth| depth > self.profile.delta_depth);
+        if too_deep {
+            return Err(failure(if work.fact.is_some() {
+                FailureCode::ExternalDeltaChainTooDeep
+            } else {
+                FailureCode::DeltaChainTooDeep
+            }));
+        }
+        Ok(())
+    }
+
     fn finish_decode(&mut self) -> Result<Step<'static>, Failure> {
+        // SPEC-PACKFILE 6.1: with the base known, depth precedes decoding.
+        self.depth_refusal()?;
         if self.scheduler.is_some() {
             return self.dispatch_entry();
         }
@@ -1320,6 +1332,7 @@ impl VerifyDriver {
         } else {
             0
         };
+        // Normally refused before decoding; kept as the invariant's backstop.
         if depth > self.profile.delta_depth {
             return Err(failure(FailureCode::DeltaChainTooDeep));
         }

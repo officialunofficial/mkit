@@ -859,17 +859,37 @@ fn canonical_answers_bind_exact_source_and_distinguish_integrity_from_loss() {
             6 => Acquisition::Unavailable,
             _ => Acquisition::Present(changed.as_slice()),
         };
-        assert_eq!(
-            machine
-                .answer(ClosureResponse::Canonical {
-                    request,
-                    source,
-                    value
-                })
-                .unwrap_err()
-                .code,
-            expected
-        );
+        let answered = machine.answer(ClosureResponse::Canonical {
+            request,
+            source,
+            value,
+        });
+        if matches!(
+            expected,
+            FailureCode::ObjectHashMismatch | FailureCode::NonCanonicalObject
+        ) {
+            // A bad chunk is a file-integrity fault: the answer is accepted and
+            // the fault is reported once the whole closure is known complete.
+            answered.unwrap();
+            let fault = loop {
+                match machine.step() {
+                    Ok(ClosureStep::Progress) => {}
+                    Ok(ClosureStep::Retain(page)) => {
+                        let (request, page) = (page.request, page.page);
+                        machine.acknowledge(request, page).unwrap();
+                    }
+                    Ok(other) => panic!("unexpected {other:?}"),
+                    Err(fault) => break fault,
+                }
+            };
+            assert_eq!(fault.code, expected);
+            assert!(matches!(
+                machine.failure_context().map(|c| c.check),
+                Some(ClosureCheck::Chunk { .. })
+            ));
+        } else {
+            assert_eq!(answered.unwrap_err().code, expected);
+        }
         assert_eq!(
             machine.step().unwrap_err().code,
             FailureCode::InvalidResponse
@@ -1015,4 +1035,112 @@ fn content_failure_context_preserves_distinct_host_refusal_boundaries() {
             })
         );
     }
+}
+
+#[test]
+fn held_and_unpublished_members_are_absent_for_closure() {
+    for (held, published) in [(true, true), (false, false)] {
+        let mut view = View::default();
+        view.graph(id(1), &[id(50)]);
+        let mut host = Host::with_view(&view);
+        let mut fact = member(id(50), ObjectType::Blob, 6);
+        (fact.held, fact.published) = (held, published);
+        host.external.insert(id(50), fact);
+        let mut machine = walker(view, &[], ClosureLimits::indexed(), 1).unwrap();
+        let result = host.finish(&mut machine).unwrap();
+        assert_eq!(result.missing, vec![id(50)], "{held} {published}");
+        assert_eq!(result.witnesses, 0);
+    }
+}
+
+/// A wrong-kind chunk is a file fault; an absent object elsewhere is reported
+/// first, as both server paths do. Without one the fault is reported at the end.
+#[test]
+fn absent_objects_take_precedence_over_a_deferred_file_fault() {
+    let build = |extra_missing: bool| {
+        let mut view = View::default();
+        let wrong = view.real(&Object::Tree(Tree { entries: vec![] }));
+        let manifest = view.real(&Object::ChunkedBlob(ChunkedBlob {
+            total_size: 0,
+            chunk_size: 0,
+            chunks: vec![wrong],
+        }));
+        if extra_missing {
+            view.graph(id(7), &[id(99), manifest]);
+        }
+        view
+    };
+    let view = build(true);
+    let mut host = Host::with_view(&view);
+    let mut machine = walker(view, &[], ClosureLimits::indexed(), 1).unwrap();
+    assert_eq!(host.finish(&mut machine).unwrap().missing, vec![id(99)]);
+
+    let view = build(false);
+    let mut host = Host::with_view(&view);
+    let mut machine = walker(view, &[], ClosureLimits::indexed(), 1).unwrap();
+    let fault = host.finish(&mut machine).unwrap_err();
+    assert_eq!(fault.code, FailureCode::WrongKind);
+    assert!(matches!(
+        machine.failure_context().map(|c| c.check),
+        Some(ClosureCheck::Chunk { .. })
+    ));
+}
+
+#[test]
+fn a_manifest_total_mismatch_is_deferred_behind_absent_objects() {
+    let mut view = View::default();
+    let chunk = blob(&mut view, b"abc");
+    let manifest = view.real(&Object::ChunkedBlob(ChunkedBlob {
+        total_size: 4,
+        chunk_size: 0,
+        chunks: vec![chunk],
+    }));
+    view.graph(id(7), &[id(99), manifest]);
+    let mut host = Host::with_view(&view);
+    let mut machine = walker(view, &[], ClosureLimits::indexed(), 1).unwrap();
+    assert_eq!(host.finish(&mut machine).unwrap().missing, vec![id(99)]);
+}
+
+#[test]
+fn a_wrong_kind_head_still_fails_at_once() {
+    let mut view = View::default();
+    let tree = view.real(&Object::Tree(Tree { entries: vec![] }));
+    let mut host = Host::with_view(&view);
+    let mut machine = walker(view, &[tree], ClosureLimits::indexed(), 1).unwrap();
+    assert_eq!(
+        host.finish(&mut machine).unwrap_err().code,
+        FailureCode::WrongKind
+    );
+    assert!(matches!(
+        machine.failure_context().map(|c| c.check),
+        Some(ClosureCheck::Head)
+    ));
+}
+
+#[test]
+fn unavailable_membership_is_never_an_absence() {
+    let mut view = View::default();
+    view.graph(id(1), &[id(50)]);
+    let mut machine = walker(view.clone(), &[], ClosureLimits::indexed(), 1).unwrap();
+    let mut host = Host::with_view(&view);
+    let ClosureRequest::Membership(request) = host.next_request(&mut machine) else {
+        panic!("membership expected");
+    };
+    let answers = request
+        .objects
+        .iter()
+        .map(|object| MembershipAnswer {
+            object: *object,
+            value: Acquisition::Unavailable,
+        })
+        .collect();
+    let failure = machine
+        .answer(ClosureResponse::Membership(MembershipResponse {
+            request: request.request,
+            repository: request.repository,
+            view: request.view,
+            answers,
+        }))
+        .unwrap_err();
+    assert_eq!(failure.code, FailureCode::UnavailableInput);
 }

@@ -1661,7 +1661,7 @@ async fn without_pack_level_denial_the_cleared_set_is_not_honored() {
             .try_push(bytes, next, Some(published), &[pack])
             .await
             .unwrap_err(),
-        "open closure"
+        "repository membership not yet visible"
     );
 }
 

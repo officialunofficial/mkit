@@ -4154,6 +4154,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         // Pair verification and the inspection metadata share one slice of the
         // request's ledger; dependency visibility draws from the ledger itself.
         let slice = budget.verify_slice();
+        let lag = crate::indexed::publication::Lag {
+            now: ms(self.clock.now_ms()),
+            created,
+            bound: indexed.relay_lag_bound_ms,
+        };
         let denial_reads = crate::store::DenialReads::new(&self.meta, self.cfg.takedown_denial);
         if let Some(set) = inspected.as_deref_mut() {
             crate::indexed::publication::verify_inspected_within(
@@ -4169,6 +4174,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 self.metrics.as_ref(),
                 self.cfg.takedown_denial,
                 set,
+                lag,
                 &slice,
             )
             .await?;
@@ -4185,6 +4191,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 indexed,
                 self.metrics.as_ref(),
                 self.cfg.takedown_denial,
+                lag,
                 &slice,
             )
             .await?;

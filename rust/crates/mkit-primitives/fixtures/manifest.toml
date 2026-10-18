@@ -1653,7 +1653,7 @@ spec = "SPEC-SERVER §9.9; §10.2"
 type = "failure-codes"
 ruleset = 1
 path = "error/failure-codes.txt"
-sha256 = "de22011565b86b74124041c8265924b8fac30b823e8ffd9c5d281ca9174005fa"
+sha256 = "1d2304f4b2101a9027516bd657d43fbdc08bc40f3adae70f8bcd86729b86f09f"
 spec = "README.md stable failure codes"
 
 

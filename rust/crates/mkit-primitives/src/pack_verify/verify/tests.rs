@@ -606,6 +606,33 @@ fn held_and_unpublished_facts_refuse_external_bases() {
 }
 
 #[test]
+fn an_external_depth_overflow_is_transient_and_a_stored_base_with_wrong_bytes_is_unavailable() {
+    let (base_id, base) = blob(b"deep external");
+    let mut writer = PackWriter::new();
+    writer
+        .push_delta(&base_id, &delta::encode(&base, &base).unwrap())
+        .unwrap();
+    let pack = writer.finish().unwrap();
+    // The base is at the profile depth, so its delta is one past it.
+    let mut member = fact(base_id, &base, ObjectType::Blob);
+    member.delta_depth = profile().delta_depth;
+    let mut host = Host::new(&pack);
+    host.externals.insert(base_id, (member, base.clone()));
+    let failure = host.finish(&mut driver(&pack)).unwrap_err();
+    assert_eq!(failure.code, FailureCode::ExternalDeltaChainTooDeep);
+    assert_eq!(failure.persistence(), crate::error::Persistence::Transient);
+    // Bytes that do not match the stored base's identity are a repository
+    // fault: retryable, never a content verdict.
+    let (_, other) = blob(b"deep externaX");
+    let mut member = fact(base_id, &base, ObjectType::Blob);
+    member.canonical_len = other.len() as u64;
+    let mut host = Host::new(&pack);
+    host.externals.insert(base_id, (member, other));
+    let failure = host.finish(&mut driver(&pack)).unwrap_err();
+    assert_eq!(failure.code, FailureCode::UnavailableInput);
+}
+
+#[test]
 fn bad_signature_refuses_terminal_sealing() {
     let (tree_id, tree) = tree(b"child", EntryMode::Blob, [1; 32]);
     let (commit_id, mut commit) = signed_commit(tree_id, vec![]);

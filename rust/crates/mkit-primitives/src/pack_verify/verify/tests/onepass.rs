@@ -96,7 +96,7 @@ fn fault_pack(fault: Fault, corrupt: bool) -> Vec<u8> {
     pack
 }
 
-fn fault_result(pack: &[u8], parallel: bool, resume_ordinal: Option<u64>) -> FailureCode {
+fn fault_result(pack: &[u8], parallel: bool, resume_ordinal: Option<u64>) -> Failure {
     let mut host = Host::new(pack);
     host.members_absent = true;
     let mut machine = driver(pack);
@@ -112,7 +112,7 @@ fn fault_result(pack: &[u8], parallel: bool, resume_ordinal: Option<u64>) -> Fai
                     resume_ordinal.is_none() || resumed,
                     "requested entry boundary was not checkpointable"
                 );
-                return error.code;
+                return error;
             }
         };
         match step {
@@ -122,7 +122,7 @@ fn fault_result(pack: &[u8], parallel: bool, resume_ordinal: Option<u64>) -> Fai
                         resume_ordinal.is_none() || resumed,
                         "requested entry boundary was not checkpointable"
                     );
-                    return error.code;
+                    return error;
                 }
             }
             Step::ProvisionalObject(fragment) => host
@@ -187,11 +187,15 @@ fn competing_faults_keep_integrity_and_wire_precedence_across_schedules_and_resu
             } else if !corrupt && matches!(fault, Fault::External | Fault::LaterBase) {
                 boundaries.push(Some(4));
             }
+            // The complete Failure (code, location and detail), not only its
+            // code, is the same under every schedule and resume boundary.
+            let baseline = fault_result(&pack, false, None);
+            assert_eq!(baseline.code, expected, "{fault:?}, corrupt={corrupt}");
             for parallel in [false, true] {
                 for &boundary in &boundaries {
                     assert_eq!(
                         fault_result(&pack, parallel, boundary),
-                        expected,
+                        baseline,
                         "{fault:?}, corrupt={corrupt}, parallel={parallel}, boundary={boundary:?}"
                     );
                 }

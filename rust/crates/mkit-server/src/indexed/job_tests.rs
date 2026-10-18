@@ -1338,8 +1338,9 @@ fn the_decode_budget_is_the_same_wherever_the_slices_fall() {
             reference,
             "{window} {entries}"
         );
-        // No external base: the in-pack sum alone is over the budget, which
-        // is content-intrinsic and persisted.
+        // No external base: the in-pack sum alone is over the budget. The
+        // budget is a deployment limit, so like inline it is terminal and
+        // never persisted.
         let mut rig = Rig::new();
         rig.limits.window_bytes = window;
         rig.limits.max_entries = entries;
@@ -1348,13 +1349,11 @@ fn the_decode_budget_is_the_same_wherever_the_slices_fall() {
         rig.create(&ticket, id);
         rig.drive(|rig| rig.finished(&ticket.pack_id));
         assert_eq!(
-            rejected(&rig, &ticket.pack_id),
-            Some((
-                "invalid_argument".into(),
-                "pack exceeds indexed decode budget".into()
-            )),
+            rig.job(&ticket.pack_id).unwrap().outcome,
+            Some(checkpoint::Outcome::DecodeBudget),
             "{window} {entries}"
         );
+        assert_eq!(rejected(&rig, &ticket.pack_id), None, "{window} {entries}");
         // With the member base on top it is a terminal outcome, never persisted.
         let over = outcomes(window, entries, Some(in_pack + 1_000));
         assert_eq!(
@@ -3403,3 +3402,6 @@ mod performance;
 
 #[path = "job_tests/precedence.rs"]
 mod precedence;
+
+#[path = "job_tests/parity.rs"]
+mod parity;

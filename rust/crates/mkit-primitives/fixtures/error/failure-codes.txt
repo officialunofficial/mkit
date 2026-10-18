@@ -20,6 +20,7 @@ NonCanonicalObject
 ObjectHashMismatch
 BadSignature
 DeltaChainTooDeep
+ExternalDeltaChainTooDeep
 ExternalBaseAbsent
 PackfileTooShort
 
