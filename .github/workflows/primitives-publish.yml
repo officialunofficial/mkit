@@ -1,0 +1,208 @@
+name: "Release: mkit-primitives"
+
+# Per-crate crates.io release for mkit-primitives, which is versioned
+# independently and is excluded from `cargo publish --workspace` in
+# crates-publish.yml. The signed `mkit-primitives-vX.Y.Z` tag is the single,
+# deliberate trigger; it does not match the `v*.*.*` release-train tags, so the
+# binary, docs and train workflows never run for it.
+#
+# Order: the mkit-core release that the tagged tree depends on must already be
+# on crates.io (the guard step checks it). Publishing then follows the same
+# idempotent content-compare policy as the bounded decoder
+# (scripts/publish-bounded-decoder.py): an absent version is published, a
+# present version with identical packaged files is skipped, and a present
+# version with different files fails the run.
+#
+# Only the final publish step uploads anything. Every earlier step is a check.
+
+on:
+  push:
+    tags:
+      - 'mkit-primitives-v*.*.*'
+  # Escape hatch: re-run for an existing tag after a transient crates.io
+  # failure. Safe to repeat: an already-published identical crate is skipped.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing signed tag to publish from (e.g. mkit-primitives-v0.1.0). Must be pushed to origin.'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Share the train's lock so the two publishers never race on the index.
+concurrency:
+  group: crates-publish
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.95.0"
+
+jobs:
+  validate-tag:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      tag: ${{ steps.validate.outputs.tag }}
+      commit: ${{ steps.validate.outputs.commit }}
+      version: ${{ steps.validate.outputs.version }}
+    steps:
+      - name: Checkout release refs
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # Same trust model as release.yml: an annotated tag signed by an
+      # allowlisted key whose commit is reachable from origin/main.
+      - name: Validate tag trust and ancestry
+        id: validate
+        shell: bash
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
+          TRUSTED_FINGERPRINTS: ${{ vars.MKIT_RELEASE_GPG_FINGERPRINTS }}
+        run: |
+          set -euo pipefail
+
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            TAG="${DISPATCH_TAG}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          if [[ ! "${TAG}" =~ ^mkit-primitives-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ERROR: tag must match mkit-primitives-vMAJOR.MINOR.PATCH: ${TAG}" >&2
+            exit 1
+          fi
+          if [ -z "${TRUSTED_FINGERPRINTS}" ]; then
+            echo "ERROR: MKIT_RELEASE_GPG_FINGERPRINTS repo/org variable is required" >&2
+            exit 1
+          fi
+          TRUSTED_FINGERPRINTS="$(printf '%s' "${TRUSTED_FINGERPRINTS}" | tr '[:lower:]' '[:upper:]')"
+
+          git fetch --force --tags origin
+          git fetch --force origin main:refs/remotes/origin/main
+
+          # Gate on the key landing in the keyring, not on recv-keys' exit
+          # status (see release.yml for the UID-less keyserver failure mode).
+          KEYSERVERS="hkps://keyserver.ubuntu.com hkps://keys.openpgp.org"
+          for FINGERPRINT in ${TRUSTED_FINGERPRINTS}; do
+            if [[ ! "${FINGERPRINT}" =~ ^[A-F0-9]{40}$ ]]; then
+              echo "ERROR: invalid GPG fingerprint in MKIT_RELEASE_GPG_FINGERPRINTS: ${FINGERPRINT}" >&2
+              exit 1
+            fi
+            IMPORTED=0
+            for KS in ${KEYSERVERS}; do
+              gpg --batch --keyserver "${KS}" --recv-keys "${FINGERPRINT}" || true
+              if gpg --list-keys "${FINGERPRINT}" >/dev/null 2>&1; then
+                IMPORTED=1
+                break
+              fi
+            done
+            if [ "${IMPORTED}" -ne 1 ]; then
+              echo "ERROR: could not import GPG key ${FINGERPRINT} from any keyserver" >&2
+              exit 1
+            fi
+          done
+
+          REF="refs/tags/${TAG}"
+          if ! git show-ref --verify --quiet "${REF}"; then
+            echo "ERROR: tag ${TAG} does not exist" >&2
+            exit 1
+          fi
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${GITHUB_REF}" != "${REF}" ]; then
+            echo "ERROR: manual releases must run from ${REF}, not ${GITHUB_REF}" >&2
+            exit 1
+          fi
+          if [ "$(git cat-file -t "${REF}")" != "tag" ]; then
+            echo "ERROR: ${TAG} must be an annotated signed tag, not a lightweight tag" >&2
+            exit 1
+          fi
+
+          VERIFY_LOG="$(mktemp)"
+          if ! git verify-tag --raw -v "${REF}" >"${VERIFY_LOG}" 2>&1; then
+            cat "${VERIFY_LOG}" >&2
+            echo "ERROR: ${TAG} does not have a valid GPG signature" >&2
+            exit 1
+          fi
+          SIGNER="$(awk '/^\[GNUPG:\] VALIDSIG / { print $3; exit }' "${VERIFY_LOG}" | tr '[:lower:]' '[:upper:]')"
+          case " ${TRUSTED_FINGERPRINTS} " in
+            *" ${SIGNER} "*) ;;
+            *)
+              echo "ERROR: tag signer ${SIGNER:-unknown} is not allowlisted in MKIT_RELEASE_GPG_FINGERPRINTS" >&2
+              exit 1
+              ;;
+          esac
+
+          COMMIT="$(git rev-parse "${REF}^{commit}")"
+          if ! git merge-base --is-ancestor "${COMMIT}" origin/main; then
+            echo "ERROR: ${TAG} target commit ${COMMIT} is not reachable from origin/main" >&2
+            exit 1
+          fi
+
+          {
+            echo "tag=${TAG}"
+            echo "commit=${COMMIT}"
+            echo "version=${TAG#mkit-primitives-v}"
+          } >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: cargo publish -p mkit-primitives
+    needs: validate-tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      RELEASE_TAG: ${{ needs.validate-tag.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.validate-tag.outputs.version }}
+    steps:
+      # Publish the TAG's tree, not a branch.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ needs.validate-tag.outputs.commit }}
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: wasm32-unknown-unknown
+
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe  # v2
+        with:
+          tool: cargo-semver-checks,wasm-pack@0.13.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: '22'
+
+      # Version, dated changelog section, train exclusion, core requirement,
+      # and the required mkit-core release being live on crates.io.
+      - name: Guard - tag, changelog, train exclusion, published mkit-core
+        run: python3 scripts/publish-primitives.py guard "$RELEASE_TAG"
+
+      # mkit-primitives' own baseline: the newest live published version older
+      # than this one. The first release has none, so nothing to compare yet.
+      - name: Semver gate - public API vs the last mkit-primitives release
+        working-directory: rust
+        run: |
+          BASELINE="$(python3 ../scripts/publish-primitives.py baseline)"
+          if [[ "$BASELINE" == none ]]; then
+            echo "no published mkit-primitives yet; skipping semver baseline"
+          else
+            cargo semver-checks -p mkit-primitives --all-features --baseline-version "$BASELINE"
+          fi
+
+      # Packaged-crate consumer with no path overrides, native and wasm32.
+      - name: Consumer check - packaged crates, native and wasm32
+        run: python3 scripts/check-primitives-consumer.py
+
+      # The token is visible to this step only; earlier steps run build
+      # scripts and must never see it. Org-level secret, as crates-publish.yml.
+      - name: Publish mkit-primitives to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_PACKAGE_KEY }}
+        run: python3 scripts/publish-primitives.py publish
+
+      # What users get: the published crate resolved from the registry.
+      - name: Consumer smoke - published crate from crates.io
+        run: python3 scripts/check-primitives-consumer.py --registry "$RELEASE_VERSION"

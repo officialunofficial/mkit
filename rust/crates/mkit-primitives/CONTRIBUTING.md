@@ -27,3 +27,9 @@ Minimum-level builds reject dependencies on APIs below the selected level.
 
 `cargo fmt` does not discover macro-declared modules. Run
 `python3 scripts/fmt-primitives.py --check` from the repository root as well.
+
+Releases are independent of the workspace train; see "Publishing
+`mkit-primitives`" in `docs/RELEASE.md`. Record user-visible changes under
+`## [Unreleased]` in `CHANGELOG.md`; an API break needs the next `0.x` minor.
+Run `just check-primitives-release` and `just check-primitives-consumer`
+before changing packaged files, fixtures or the manifest.

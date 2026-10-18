@@ -85,6 +85,8 @@ steps:
         python3 scripts/check-primitives-fixtures.py
         python3 scripts/check-primitives-graph.py
         python3 scripts/check-primitives-native-workspace.py
+        python3 scripts/test-publish-primitives.py
+        python3 scripts/publish-primitives.py check
         ( cd rust
           cargo clippy --locked -p mkit-primitives -p mkit-primitives-fuzz --all-targets --all-features -- -D warnings
           cargo check --locked -p mkit-primitives-fuzz --features libfuzzer --bins
@@ -134,6 +136,9 @@ steps:
         node --version
         wasm-pack --version
         wasm-pack test --node rust/crates/mkit-core-wasm-check --test primitives_portable --locked
+        # Out-of-tree consumer of the packaged crates (no path overrides or
+        # patches), native and wasm32, over the shipped portable fixtures.
+        python3 scripts/check-primitives-consumer.py
         bash scripts/check-primitives-stability.sh
         sccache --show-stats
 

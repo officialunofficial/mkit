@@ -171,6 +171,7 @@ ci-scripts:
     python3 scripts/check-launch-feature-graph.py
     python3 scripts/test-server-gates.py
     python3 scripts/test-publish-bounded-decoder.py
+    just check-primitives-release
     bash scripts/check-cli-baseline.sh
     bash scripts/check-sync-native-deps.sh
     if ! rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unknown$'; then
@@ -488,3 +489,12 @@ check-primitives-fixtures:
 # Package-rooted normal target edges, excluding host proc macros.
 check-primitives-graph:
     python3 scripts/check-primitives-graph.py
+
+# Independent release policy: version, changelog, train exclusion, publish rules.
+check-primitives-release:
+    python3 scripts/test-publish-primitives.py
+    python3 scripts/publish-primitives.py check
+
+# Out-of-tree consumer built from packaged crates, native and wasm32 (needs wasm-pack and node).
+check-primitives-consumer:
+    python3 scripts/check-primitives-consumer.py
