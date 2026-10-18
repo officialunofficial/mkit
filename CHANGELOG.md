@@ -22,6 +22,17 @@ collect the applicable entries between their old and new immutable pins.
   checkpoints retain version 1. No pack or object bytes change, and no
   repository store reset is required.
 
+- [embedder: breaking API] The ALPHA decision facts now model the exact ticket
+  and pending-reservation observations. Migration: replace `TicketFact.authority`
+  with `authority_generation: Option<u64>`, replace `upload` with
+  `upload_session: Option<Vec<u8>>`, and supply the reservation-derived `ticket`
+  identity. Replace `ReservationFact::Pending.operation`/`expires_ms` with
+  `created_ms`, `reconcile_ms`, and `op: ReservationOp`; retain operation identity
+  in the request. Add `storage: None` to `Snapshot` and an empty `storage` vector
+  to `AcceptanceEffects` when counting is disabled. Handle `GuardKind::Storage`
+  and `ReservationTerminalKind::StorageChanged` in exhaustive consumers.
+  Wire and stored formats are unchanged; no store reset is required.
+
 - [embedder: breaking API] The all-entry pack verifier adds
   `PackCounts::delta_entries` and replaces
   `VerifiedPack::external_dependencies()` with `dependencies()`. Migration:
@@ -101,6 +112,16 @@ collect the applicable entries between their old and new immutable pins.
   Entry-boundary checkpoints resume without reacquiring the consumed prefix;
   integrity failures retain precedence over deferred entry refusals.
 
+- Add portable ticketed-advance and reservation-settlement decisions to
+  `mkit-primitives`: request-ordered ticket validation, upload-proof claims,
+  pending-reservation stability, replay precedence, authority-generation
+  fencing, and the composed ticket-closure, settlement, storage-counting and
+  durable-outcome effects. The defensive `PackMissing` cleanup and standalone
+  reservation settlement share the same portable rules. The reference server
+  decides ticketed advances through them and verifies every sealed guard
+  projects to a physical precondition. No wire or stored-format change or
+  store reset; source migrations are listed under Breaking.
+
 - Add optional caller-owned compute scheduling to `mkit-primitives` pack
   verification. Immutable jobs and opaque outputs bind the run, frame, inputs,
   operation, and shared memory/work permits. Raw Blob jobs can overlap;
@@ -138,6 +159,10 @@ collect the applicable entries between their old and new immutable pins.
   Recorded authority and exact pending reservation guards retain their commit
   boundaries. Accepted clearance preserves its saved result and never repeats
   settlement. Additive ALPHA API; no wire or stored-format change; no reset.
+
+- Add bounded in-process acceptance-evidence export with canonical signed head
+  checks, exact closure witness-chain authentication, and cross-artifact binding.
+  Evidence format 1 is unchanged; no migration or store reset.
 
 - Add guarded fork acceptance to `mkit-primitives`: bounded full-inventory plans,
   authoritative destination emptiness, final source-proof ordering, exact
@@ -1293,6 +1318,17 @@ collect the applicable entries between their old and new immutable pins.
   URL-token reads, supplied hooks, cold outcome retry and injected slice recovery.
 
 ### Breaking (toward 0.6)
+
+- [embedder: breaking API] The ALPHA decision facts now model the exact ticket
+  and pending-reservation observations. Migration: replace `TicketFact.authority`
+  with `authority_generation: Option<u64>`, replace `upload` with
+  `upload_session: Option<Vec<u8>>`, and supply the reservation-derived `ticket`
+  identity. Replace `ReservationFact::Pending.operation`/`expires_ms` with
+  `created_ms`, `reconcile_ms`, and `op: ReservationOp`; retain operation identity
+  in the request. Add `storage: None` to `Snapshot` and an empty `storage` vector
+  to `AcceptanceEffects` when counting is disabled. Handle `GuardKind::Storage`
+  and `ReservationTerminalKind::StorageChanged` in exhaustive consumers.
+  Wire and stored formats are unchanged; no store reset is required.
 
 - [embedder: breaking API] [embedder: stored-format change]
   [embedder: store reset required] Fork jobs retain the authorized source policy,

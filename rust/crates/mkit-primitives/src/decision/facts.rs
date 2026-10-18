@@ -167,6 +167,8 @@ pub struct AccountingFact {
 /// Exact upload ticket binding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TicketFact {
+    /// Reservation-derived ticket identity; the row's own key.
+    pub ticket: TicketId,
     /// Destination repository.
     pub repository: RepositoryId,
     /// Destination ref.
@@ -183,10 +185,18 @@ pub struct TicketFact {
     pub expires_ms: u64,
     /// Bound reservation.
     pub reservation: ReservationId,
-    /// Original authorization generation.
-    pub authority: Revision,
-    /// Exact upload incarnation or authoritative absence.
-    pub upload: Observed<Revision>,
+    /// Authority generation the ticket was issued under; `None` means fencing is disabled.
+    pub authority_generation: Option<u64>,
+    /// Backend upload-session incarnation, when one was allocated.
+    pub upload_session: Option<Vec<u8>>,
+}
+/// Exact repository stored-bytes counter (SPEC-SERVER §6.5.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StorageFact {
+    /// Absolute stored pack bytes.
+    pub stored_bytes: u64,
+    /// Monotonic counter version.
+    pub version: u64,
 }
 /// Only terminal refusal classes permitted for durable replay.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -312,6 +322,14 @@ pub enum ReservationTerminalKind {
     },
     /// An unconsumed ticket expired.
     Expired,
+    /// A repository's stored-bytes counter changed; `reservation` names the
+    /// counter-change outcome id, never a request reservation (§6.5.1).
+    StorageChanged {
+        /// Absolute stored-bytes total after the change.
+        stored_bytes: u64,
+        /// Monotonic counter version after the change.
+        version: u64,
+    },
 }
 /// Exact terminal reservation state shared by settlement and durable delivery.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -327,21 +345,31 @@ pub struct ReservationTerminal {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ReservationFact {
-    /// Pending exact operation.
+    /// Pending admission reservation.
     Pending {
         /// Exact destination.
         repository: RepositoryId,
-        /// Authenticated operation.
-        operation: OperationId,
         /// Creation instant.
         created_ms: u64,
-        /// Expiry instant.
-        expires_ms: u64,
+        /// Earliest safe reconciliation instant.
+        reconcile_ms: u64,
+        /// Write or read admission semantics.
+        op: ReservationOp,
     },
     /// Bound to a ticket, without terminal settlement or outcome delivery.
     Ticketed(TicketId),
     /// Terminal state with exact settlement payload.
     Terminal(ReservationTerminal),
+}
+
+/// Write or read admission semantics of a pending reservation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ReservationOp {
+    /// A directly admitted write or `BeginUpload`.
+    Write,
+    /// An admitted read.
+    Read,
 }
 /// Keyed repository membership observation, including authoritative absence.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -381,6 +409,8 @@ pub struct Snapshot {
     pub admission: Option<Observed<AdmissionFact>>,
     /// Accounting snapshot.
     pub accounting: Option<Observed<AccountingFact>>,
+    /// Stored-bytes counter for the destination repository.
+    pub storage: Option<Observed<StorageFact>>,
     /// Complete publication observation.
     pub publication: Option<Observed<PublicationFact>>,
 }

@@ -445,3 +445,6 @@ pub mod fork_advance;
 // decision
 /// Bounded ref transitions checked against an independent CAS oracle.
 pub mod ref_decisions;
+
+/// Bounded ticketed advance, cleanup, and reservation settlement replay.
+pub mod ticketed;

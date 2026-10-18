@@ -372,3 +372,8 @@ rules. No physical storage representation enters the decision.
 
 Run `cargo run -p mkit-primitives --example ref_decision` for a complete
 acquired-absence decision and guard-completeness check.
+
+The in-process `from_verified` export additionally accepts bounded caller-supplied
+canonical heads and streamed authenticated closure witnesses. See the
+[export contract and resource model](docs/acceptance-evidence.md). It preserves
+format 1 and does not add a wire form for either sealed artifact.

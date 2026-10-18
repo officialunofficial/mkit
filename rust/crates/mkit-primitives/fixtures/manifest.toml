@@ -947,6 +947,20 @@ sha256 = "e3f20e2d3ef43b750772653b11084b4476e7f6295b66e5cf45ecd7b7a263686b"
 semantic = "evidence/proof-multilevel-absence.json"
 semantic_sha256 = "fdaf4e0392f890e6140fa2134a46febfd73bdeab9a5b876ea3416b1546baa207"
 
+# Semantic export vectors; no new evidence encoding.
+[[contracts]]
+type = "AcceptanceEvidence::from_verified"
+format_version = 1
+ruleset = 1
+profile = "explicit"
+path = "acceptance-export/heads-root.json"
+semantic = "acceptance-export/README.md"
+spec = "SPEC-SERVER.md#local-closure-evidence-pages"
+expected = "exact closure head roots, preserving order and duplicate occurrences"
+decode_config = "in-memory export; at most 3 head occurrences; 96 id bytes"
+sha256 = "9d4b94758bedcf8ab307f772b19d7047be44b60935cbbd73ffe77a88da278c58"
+semantic_sha256 = "d53497f36f3318de521280162169c2baf425e88a382214a5bbc4149f7dfd4a0c"
+
 # pack_verify
 [[formats]]
 type = "pack-framing"
@@ -1642,6 +1656,27 @@ path = "error/failure-codes.txt"
 sha256 = "de22011565b86b74124041c8265924b8fac30b823e8ffd9c5d281ca9174005fa"
 spec = "README.md stable failure codes"
 
+
+# ticketed decisions
+[[fixtures]]
+type = "decision::ticketed"
+format_version = 1
+ruleset = "SPEC-SERVER"
+profile = "semantic-ticketed"
+path = "decision/ticketed.json"
+semantic = "decision/ticketed.md"
+decode_config = "facts=256,guards=64,bytes=65536,work=100000"
+expected = "exact decision, terminal identity, settlement and outcome per row"
+spec = "SPEC-SERVER §6.3; §9.3; SPEC-TRANSPORT-CONNECT §4"
+sha256 = "932cf65dd1e1601bd978018c1f02db9bbeba1b43a772e22a632081fef585ee8a"
+semantic_sha256 = "17a49068263dbcb9002d8f40cd5187cf75cddfe025ba5db2fae8e6dfa8d1a6a2"
+
+[[formats]]
+type = "decision::ticketed"
+format_version = 1
+decoder = "decision::ticketed::decide_ticketed_advance"
+fuzz_target = "ref_decisions"
+spec = "SPEC-SERVER §6.3; §9.3; SPEC-TRANSPORT-CONNECT §4"
 
 # verify
 [[formats]]

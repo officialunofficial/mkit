@@ -10,6 +10,33 @@ use crate::{
 };
 use mkit_core::{hash::Hash, object::ObjectType};
 
+// One definition for the walker's exact requested sequence and evidence export.
+pub(crate) fn heads_root(heads: impl ExactSizeIterator<Item = Hash>) -> Result<Hash, Failure> {
+    let mut digest = mkit_core::hash::Hasher::new();
+    let domain = b"mkit-closure-heads:v1";
+    let resource = || Failure {
+        code: crate::error::FailureCode::ResourceLimit,
+        location: crate::error::Location::default(),
+        detail: crate::error::BoundedDetail::None,
+    };
+    digest
+        .update(
+            &u16::try_from(domain.len())
+                .map_err(|_| resource())?
+                .to_le_bytes(),
+        )
+        .update(domain)
+        .update(
+            &u64::try_from(heads.len())
+                .map_err(|_| resource())?
+                .to_le_bytes(),
+        );
+    for head in heads {
+        digest.update(&head);
+    }
+    Ok(digest.finalize())
+}
+
 /// Required closure coverage; direct-child coverage never implies resulting-pair coverage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]

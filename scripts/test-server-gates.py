@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """The PR gate entry points must execute the isolated allocator regression."""
 from pathlib import Path
+import os
 import re
 import subprocess
 import sys
+import tempfile
+import textwrap
 import unittest
 
 
@@ -62,6 +65,81 @@ class ServerGates(unittest.TestCase):
                 self.assertIn('"CARGO_PROFILE_TEST_CODEGEN_UNITS=256"', step)
                 self.assertNotIn("allowFailure", step)
                 self.assertNotIn("allowExitCodes", step)
+
+    def cloud_rustc_wrapper(self):
+        yaml = (ROOT / "cloudbuild/ci.yaml").read_text()
+        steps = re.split(r"(?m)^  - name: ", yaml)[1:]
+        check, = [s for s in steps if "\n    id: check\n" in s]
+        self.assertIn('"RUSTC_WRAPPER=/tmp/mkit-ci-rustc"', check)
+        self.assertIn("        chmod +x /tmp/mkit-ci-rustc\n", check)
+        match = re.search(r"cat > /tmp/mkit-ci-rustc <<'SH'\n(.*?)\n        SH", check, re.S)
+        self.assertIsNotNone(match, "check must install its compiler wrapper before Cargo runs")
+        self.assertLess(match.start(), check.index("          cargo fetch --locked"))
+        return textwrap.dedent(match.group(1)) + "\n"
+
+    def test_cloud_step_scripts_fit_argument_limit(self):
+        yaml = (ROOT / "cloudbuild/ci.yaml").read_text()
+        steps = re.split(r"(?m)^  - name: ", yaml)[1:]
+        for step in steps:
+            if "entrypoint: bash" not in step:
+                continue
+            match = re.search(r"(?m)^      - \|\n((?:        [^\n]*\n|\n)*)", step)
+            self.assertIsNotNone(match)
+            script = textwrap.dedent(match.group(1))
+            # Cloud Build rejects any step argument above 10,000 characters.
+            # Count UTF-8 bytes conservatively so non-ASCII comments fit too.
+            self.assertLessEqual(len(script.encode()), 10_000)
+
+    def test_cloud_server_lib_test_preserves_cargo_jobserver(self):
+        wrapper = self.cloud_rustc_wrapper()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / "wrapper"
+            script.write_text(wrapper)
+            compiler = root / "rustc"
+            for path, label in ((compiler, "compiler"), (root / "sccache", "sccache")):
+                path.write_text(f'#!/bin/sh\nprintf "{label}\\n"\nprintf "%s\\n" "$@"\n')
+                path.chmod(0o755)
+            env = dict(os.environ, PATH=directory + os.pathsep + os.environ["PATH"])
+            target = ["--crate-name", "mkit_server", "crates/mkit-server/src/lib.rs",
+                      "--test", "--emit=dep-info,link", "argument with spaces"]
+            cases = [
+                (target, True),
+                (target[3:5] + target[:3] + target[5:], True),
+                ([arg for arg in target if arg != "--test"], False),
+                ([arg.replace("mkit_server", "another_crate") for arg in target], False),
+                ([arg.replace("src/lib.rs", "tests/mkit_server.rs") for arg in target], False),
+                ([arg.replace("dep-info,link", "dep-info,metadata") for arg in target], False),
+                (["-vV"], False),
+            ]
+            for args, direct in cases:
+                with self.subTest(args=args):
+                    result = subprocess.run(["bash", str(script), str(compiler), *args],
+                                            env=env, text=True, capture_output=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    expected = ["compiler", *args] if direct else ["sccache", str(compiler), *args]
+                    self.assertEqual(result.stdout.splitlines(), expected)
+                    self.assertEqual(result.stderr, "")
+
+    def test_cloud_wrapper_failure_is_visible_and_fails(self):
+        wrapper = self.cloud_rustc_wrapper()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / "wrapper"
+            script.write_text(wrapper)
+            cache = root / "sccache"
+            cache.write_text('#!/bin/sh\necho "sccache: Compile terminated by signal 9"\n'
+                             'echo "wrapper stderr diagnostic" >&2\nexit 2\n')
+            cache.chmod(0o755)
+            env = dict(os.environ, PATH=directory + os.pathsep + os.environ["PATH"])
+            result = subprocess.run(["bash", str(script), "rustc", "--crate-name", "other"],
+                                    env=env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 2)
+            # Cargo's JSON renderer discards this stdout message. Forwarding it
+            # to stderr preserves the real signal without masking the failure.
+            self.assertIn("sccache: Compile terminated by signal 9", result.stdout)
+            self.assertIn("sccache: Compile terminated by signal 9", result.stderr)
+            self.assertIn("wrapper stderr diagnostic", result.stderr)
 
     def test_cloud_nextest_reports_every_failure(self):
         yaml = (ROOT / "cloudbuild/ci.yaml").read_text()
@@ -167,6 +245,9 @@ if __name__ == "__main__":
     if "--hosted-only" in sys.argv:
         suite = unittest.defaultTestLoader.loadTestsFromNames([
             "test_cloud_linux_allocator_executor", "test_cloud_workspace_test_compilation_is_serial",
+            "test_cloud_step_scripts_fit_argument_limit",
+            "test_cloud_server_lib_test_preserves_cargo_jobserver",
+            "test_cloud_wrapper_failure_is_visible_and_fails",
             "test_cloud_nextest_reports_every_failure", "test_native_wire_executor_and_gate"], ServerGates)
         result = unittest.TextTestRunner().run(suite)
         sys.exit(not result.wasSuccessful())

@@ -3271,3 +3271,23 @@ keys and categories. The server checks ref and publication projections before
 committing its physical batch. Host policy acquisition and other effect groups
 retain their existing boundaries; these checks do not assert that every host
 policy path has moved into the portable module.
+
+## Acceptance export binds sealed artifacts before carrying their facts
+
+**Always:** in-process evidence export compares object-set roots, ruleset/profile
+bindings, and repository identity. It verifies canonical signed heads and the
+closure's original requested head sequence before sorting envelope records. It
+authenticates every relied-on witness page and requires exact count and chain
+termination before emitting bounded distinct supplier IDs.
+
+**Because:** privately constructed artifacts from different operations or a partial
+witness chain cannot jointly establish the facts carried to an acceptance writer.
+
+**If violated:** substituted heads, truncated dependencies, or unrelated proofs
+could be reported as facts from one verified operation.
+
+**Enforcement status:** bounded export helper regressions, frozen closure-root
+vectors, and a sealed-artifact export test cover head checks, witness-chain
+authentication, budgets, binding, and real `VerifiedPack`/`ClosureProof` input.
+Decision parity awaits the acceptance-decision lanes. No live guard or remote
+authentication responsibility moves into this constructor.
