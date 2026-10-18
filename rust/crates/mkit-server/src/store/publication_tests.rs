@@ -860,7 +860,7 @@ fn only_the_publication_store_constructs_advance_row_keys() {
             let production = text.split("#[cfg(test)]").next().unwrap();
             // No production code moves an advance row into a hold, hit or
             // resolved state: those states exist only as stored-state decoding
-            // and clearance mapping, so no hold writer bypasses the publication row.
+            // and clearance mapping, so no assignment-style hold writer bypasses the publication row (a tripwire, not proof).
             assert!(
                 !production.contains("state = Clearance::Held")
                     && !production.contains("state = Clearance::Hit")

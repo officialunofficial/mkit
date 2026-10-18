@@ -75,7 +75,7 @@ collect the applicable entries between their old and new immutable pins.
   `ClearanceAdvance::new(sequence, generation, operation, state, revision)`,
   `ForkAdvanceFacts::new(binding, destination, progress,
   construction_expires_ms)`, `ForkActivationFacts::new(advance, expected_result,
-  inherited_packs, unit)` (no saved accepted result, so the decision refuses until the host sets it) and `ForkCompletionFacts::new(advance, expected_result,
+  inherited_packs, unit)` and `ForkCompletionFacts` start with no saved accepted result, so the decision refuses until the host sets it and `ForkCompletionFacts::new(advance, expected_result,
   cursor, part, packs, digest, barrier_owner)`. Output structs a host only reads
   or destructures (for example `AcceptanceEffects` and its parts) stay
   exhaustive on purpose, so a new effect field fails the host's build. The set of
