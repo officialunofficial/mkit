@@ -293,8 +293,8 @@ still holds the value the check pinned. If the ref moves, the stored refusal
 fails its guard, the write is re-planned, and the request ends as retryable write
 contention; the client's retry is decided afresh. The membership rows that an
 ancestry or closure check read live in the paged, sharded object index and stay
-covered by the §9.4 lag window and the §14.2 blocklist commit window instead of a
-batch comparison. A stored built-in refusal relies on the admission-time grant
+covered by the §9.4 lag window and the §14.2 plan-time blocklist check bounded by
+`NotAfter` instead of a batch comparison. A stored built-in refusal relies on the admission-time grant
 and authority checks of the same request rather than on a batch comparison of
 the grant epoch. The defensive abort of tickets whose pack is missing compares
 the ticket rows it closes and every earlier ticket row that fixed its boundary.

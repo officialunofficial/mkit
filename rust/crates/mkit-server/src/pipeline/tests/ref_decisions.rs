@@ -603,7 +603,7 @@ fn ticketed_advance_parity_sweep() {
                             parity(&req, &snap);
                             if fate == 0
                                 && replay_case < 2
-                                && pending_case == 0
+                                && pending_case < 2
                                 && generation != Some(1)
                             {
                                 // The admitted refs no longer match the snapshot (admission
