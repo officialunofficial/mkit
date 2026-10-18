@@ -13,8 +13,8 @@ pub mod ticketed;
 
 pub use clearance::{
     ClearanceAdvance, ClearanceDecision, ClearanceFacts, ClearanceLifecycle, ClearanceLimits,
-    ClearanceMoment, ClearanceState, DependencyWitness, GuardedClearance, PriorPublication,
-    decide_clearance,
+    ClearanceMoment, ClearanceState, CombinedAcceptance, DependencyWitness, GuardedClearance,
+    PriorPublication, decide_accept_and_clear, decide_clearance,
 };
 
 pub use effects::{

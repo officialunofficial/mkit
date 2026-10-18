@@ -9,7 +9,12 @@
 
 use mkit_core::hash::Hash;
 
-use super::{LifecycleFact, LifecycleState, Observed, OperationId};
+use super::ref_write::RefDecisionLimits;
+use super::ticketed::{TicketedAdvanceRequest, decide_ticketed_advance};
+use super::{
+    Guarded, LifecycleFact, LifecycleState, Observed, OperationId, Snapshot, WriteDecision,
+};
+use crate::closure::pair::PairCoverage;
 use crate::error::{BoundedDetail, Failure, FailureCode, Location};
 use crate::evidence::{RepositoryId, Revision};
 
@@ -90,6 +95,32 @@ pub struct ClearanceAdvance<'a> {
     pub flagged: bool,
     /// Exact row observation. Acceptance uses the prepared-fact revision.
     pub revision: Revision,
+}
+
+impl<'a> ClearanceAdvance<'a> {
+    /// Take the dependency and external-supplier sets from an established
+    /// resulting-pair coverage. The coverage must belong to `repository` and cover
+    /// exactly this advance's head and packmap, or the sets are not this advance's.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidResponse` when the repository or the covered pair differs.
+    pub fn with_pair(
+        mut self,
+        repository: RepositoryId,
+        coverage: &'a PairCoverage,
+    ) -> Result<Self, Failure> {
+        let pair = coverage.pair();
+        if coverage.repository() != repository
+            || pair.head != self.head
+            || pair.packmap != self.packmap
+        {
+            return Err(invalid());
+        }
+        self.dependencies = coverage.dependencies();
+        self.external_suppliers = coverage.external_suppliers();
+        Ok(self)
+    }
 }
 
 /// Prior publication identity. The published value is not part of the binding.
@@ -240,6 +271,70 @@ pub fn decide_clearance<'a>(
     Ok(GuardedClearance { decision, facts })
 }
 
+/// Acceptance and clearance decided as one unit.
+#[derive(Debug)]
+#[must_use]
+pub struct CombinedAcceptance<'a> {
+    acceptance: Guarded<WriteDecision>,
+    clearance: Option<GuardedClearance<'a>>,
+}
+
+impl<'a> CombinedAcceptance<'a> {
+    /// The acceptance decision, unchanged. It alone owns ticket consumption, the
+    /// terminal result, and reservation settlement.
+    pub const fn acceptance(&self) -> &Guarded<WriteDecision> {
+        &self.acceptance
+    }
+
+    /// Clearance riding in the same unit. `None` unless acceptance applies; a
+    /// replay, conflict, refusal, or retry never publishes.
+    #[must_use]
+    pub const fn clearance(&self) -> Option<&GuardedClearance<'a>> {
+        self.clearance.as_ref()
+    }
+}
+
+/// Decide acceptance, then clearance with no intervening operation.
+///
+/// The acceptance decision is exactly [`decide_ticketed_advance`]'s, so its
+/// guards and settlement are unchanged. Clearance is decided only when
+/// acceptance applies, over the same repository and operation, and every
+/// clearance condition is evaluated as for separate clearance. A not-yet-eligible
+/// advance yields `Retain`: the host accepts now and clears later.
+///
+/// # Errors
+///
+/// Acceptance failures pass through. `InvalidResponse` when the clearance facts
+/// are not an acceptance-moment, non-deletion view of the same repository and
+/// operation; clearance failures pass through.
+#[must_use = "compare every supplied fact before applying"]
+pub fn decide_accept_and_clear<'a>(
+    request: &TicketedAdvanceRequest<'_>,
+    snapshot: &Snapshot,
+    ref_limits: RefDecisionLimits,
+    facts: &'a ClearanceFacts<'a>,
+    limits: &ClearanceLimits,
+) -> Result<CombinedAcceptance<'a>, Failure> {
+    let write = &request.write;
+    if facts.moment != ClearanceMoment::Acceptance
+        || facts.deleted
+        || facts.repository != write.repository
+        || write.operation.as_ref() != Some(&facts.changed.operation)
+    {
+        return Err(invalid());
+    }
+    let acceptance = decide_ticketed_advance(request, snapshot, ref_limits)?;
+    let clearance = if matches!(acceptance.decision(), WriteDecision::Apply(_)) {
+        Some(decide_clearance(facts, limits)?)
+    } else {
+        None
+    };
+    Ok(CombinedAcceptance {
+        acceptance,
+        clearance,
+    })
+}
+
 fn deletion(facts: &ClearanceFacts<'_>) -> Result<ClearanceDecision, Failure> {
     let sequence = facts.prior.sequence.checked_add(1).ok_or_else(resource)?;
     if facts.changed.sequence != sequence {
@@ -258,7 +353,7 @@ fn acceptance(facts: &ClearanceFacts<'_>) -> Result<ClearanceDecision, Failure> 
     if facts.changed.sequence != sequence || facts.changed.generation != facts.prior.generation {
         return Err(invalid());
     }
-    if !eligible(&facts.changed, facts)? {
+    if !facts.changed.state.publishable() || !eligible(&facts.changed, facts)? {
         return Ok(retain(facts));
     }
     if facts.prior.published_prefix.saturating_add(1) == sequence {

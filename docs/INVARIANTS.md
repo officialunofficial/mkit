@@ -3083,7 +3083,9 @@ resolved prefix and withholds a later value while an earlier advance is pending,
 held, or hit. Own additions never satisfy an external supplier. A deletion moves
 the boundary immediately and does not resurrect a component the deletion advance
 does not carry. The decision has no reservation settlement and no terminal
-acceptance result. The reference profile declares lifecycle transitions
+acceptance result. `decide_accept_and_clear` returns the ticketed-advance
+decision untouched and a clearance only when it applies, so the combined unit
+equals acceptance then clearance. The reference profile declares lifecycle transitions
 not offered and applies denial before this decision.
 
 **Because:** clearance may run in the acceptance unit or later. Repeating

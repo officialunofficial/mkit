@@ -1014,3 +1014,149 @@ fn ticketed_semantic_fixtures_pin_terminal_identity_and_replay() {
         assert_eq!(outcomes as u64, row["outcomes"].as_u64().unwrap());
     }
 }
+
+mod combined {
+    use super::*;
+    use crate::decision::{
+        ClearanceAdvance, ClearanceDecision, ClearanceFacts, ClearanceLifecycle, ClearanceLimits,
+        ClearanceMoment, ClearanceState, PriorPublication, decide_accept_and_clear,
+    };
+
+    fn advance(state: ClearanceState, operation: OperationId) -> ClearanceAdvance<'static> {
+        ClearanceAdvance {
+            sequence: 1,
+            generation: 1,
+            operation,
+            head: Some(NEW),
+            packmap: Some(NEW),
+            state,
+            additions: &[],
+            dependencies: &[],
+            external_suppliers: &[],
+            obligations: &[],
+            obligation_revisions: &[],
+            takedown_complete: false,
+            flagged: false,
+            revision: REV,
+        }
+    }
+
+    fn facts(changed: ClearanceAdvance<'static>) -> ClearanceFacts<'static> {
+        ClearanceFacts {
+            repository: REPO,
+            moment: ClearanceMoment::Acceptance,
+            prior: PriorPublication {
+                generation: 1,
+                sequence: 0,
+                published_prefix: 0,
+                deletion_boundary: 0,
+                head: None,
+                packmap: None,
+                revision: REV,
+            },
+            previous_state: changed.state,
+            changed,
+            suffix: &[],
+            witnesses: &[],
+            lifecycle: ClearanceLifecycle::NotOffered,
+            deleted: false,
+        }
+    }
+
+    #[test]
+    fn clearance_rides_apply_and_leaves_acceptance_unchanged() {
+        let changes = pair();
+        let claims = [claim(0x10, UploadProof::Ready)];
+        let mut req = request(&changes, &claims);
+        req.pending = Some(pending_binding(0x70));
+        let mut snap = snapshot(&changes, &[0x10]);
+        snap.reservations.push((
+            ReservationId([0x70; 32]),
+            pending_binding(0x70).expected.clone(),
+        ));
+        let alone = decide_ticketed_advance(&req, &snap, limits()).unwrap();
+        let input = facts(advance(ClearanceState::Cleared, OperationId([6; 32])));
+        let both =
+            decide_accept_and_clear(&req, &snap, limits(), &input, &ClearanceLimits::reference())
+                .unwrap();
+        assert_eq!(
+            format!("{:?}", both.acceptance().decision()),
+            format!("{:?}", alone.decision())
+        );
+        assert_eq!(both.acceptance().required_guards(), alone.required_guards());
+        assert!(matches!(
+            both.clearance().unwrap().decision(),
+            ClearanceDecision::AdvancePrefix {
+                published_prefix: 1,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn ineligible_advance_accepts_and_retains() {
+        let changes = pair();
+        let claims = [claim(0x10, UploadProof::Ready)];
+        let req = request(&changes, &claims);
+        let snap = snapshot(&changes, &[0x10]);
+        let input = facts(advance(ClearanceState::Pending, OperationId([6; 32])));
+        let both =
+            decide_accept_and_clear(&req, &snap, limits(), &input, &ClearanceLimits::reference())
+                .unwrap();
+        assert!(matches!(
+            both.acceptance().decision(),
+            WriteDecision::Apply(_)
+        ));
+        assert!(matches!(
+            both.clearance().unwrap().decision(),
+            ClearanceDecision::Retain {
+                published_prefix: 0
+            }
+        ));
+    }
+
+    #[test]
+    fn non_apply_acceptance_never_clears() {
+        let changes = pair();
+        let claims = [claim(0x10, UploadProof::MarkerMissing)];
+        let req = request(&changes, &claims);
+        let snap = snapshot(&changes, &[0x10]);
+        let input = facts(advance(ClearanceState::Cleared, OperationId([6; 32])));
+        let both =
+            decide_accept_and_clear(&req, &snap, limits(), &input, &ClearanceLimits::reference())
+                .unwrap();
+        assert!(!matches!(
+            both.acceptance().decision(),
+            WriteDecision::Apply(_)
+        ));
+        assert!(both.clearance().is_none());
+    }
+
+    #[test]
+    fn mismatched_scope_moment_or_deletion_is_refused() {
+        let changes = pair();
+        let claims = [claim(0x10, UploadProof::Ready)];
+        let req = request(&changes, &claims);
+        let snap = snapshot(&changes, &[0x10]);
+        let good = || facts(advance(ClearanceState::Cleared, OperationId([6; 32])));
+        let mut other_op = good();
+        other_op.changed.operation = OperationId([9; 32]);
+        let mut other_repo = good();
+        other_repo.repository = RepositoryId([9; 32]);
+        let mut recheck = good();
+        recheck.moment = ClearanceMoment::Recheck;
+        let mut deleted = good();
+        deleted.deleted = true;
+        for input in [other_op, other_repo, recheck, deleted] {
+            let err = decide_accept_and_clear(
+                &req,
+                &snap,
+                limits(),
+                &input,
+                &ClearanceLimits::reference(),
+            )
+            .unwrap_err();
+            assert_eq!(err.code, FailureCode::InvalidResponse);
+        }
+    }
+}

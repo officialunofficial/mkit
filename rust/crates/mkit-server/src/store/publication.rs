@@ -519,9 +519,9 @@ fn clearance_prefix(
         lifecycle: ClearanceLifecycle::NotOffered,
         deleted: false,
     };
-    let decided = decide_clearance(&facts, &ClearanceLimits::reference())
+    let verdict = decide_clearance(&facts, &ClearanceLimits::reference())
         .map_err(|_| StoreError::Corrupt("publication prefix decision refused".into()))?;
-    Ok(match decided.decision() {
+    Ok(match verdict.decision() {
         ClearanceDecision::AdvancePrefix {
             published_prefix,
             head,

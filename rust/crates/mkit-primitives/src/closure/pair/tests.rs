@@ -1426,3 +1426,46 @@ fn bfs_oracle(host: &Host, packs: &[Hash]) -> (Vec<Hash>, BTreeSet<Hash>, BTreeS
     }
     (order, deps, suppliers)
 }
+
+#[test]
+fn clearance_advance_takes_sets_only_from_matching_coverage() {
+    use crate::decision::{ClearanceAdvance, ClearanceState, OperationId};
+    let pair = ResultingPair {
+        head: Some(id(10)),
+        packmap: Some(id(1)),
+        branch: true,
+    };
+    let mut host = Host::default();
+    host.nodes.insert(id(1), (None, vec![id(2)], false));
+    host.objects
+        .insert(id(10), (id(2), ObjectType::Commit, vec![], vec![], None));
+    let coverage = run(&mut fresh(pair, &[id(1)]), &mut host).unwrap();
+    let advance = |head, packmap| ClearanceAdvance {
+        sequence: 1,
+        generation: 1,
+        operation: OperationId([1; 32]),
+        head,
+        packmap,
+        state: ClearanceState::Cleared,
+        additions: &[],
+        dependencies: &[],
+        external_suppliers: &[],
+        obligations: &[],
+        obligation_revisions: &[],
+        takedown_complete: false,
+        flagged: false,
+        revision: VIEW,
+    };
+    let taken = advance(Some(id(10)), Some(id(1)))
+        .with_pair(REPO, &coverage)
+        .unwrap();
+    assert_eq!(taken.dependencies, coverage.dependencies());
+    assert_eq!(taken.external_suppliers, coverage.external_suppliers());
+    for refused in [
+        advance(Some(id(11)), Some(id(1))).with_pair(REPO, &coverage),
+        advance(Some(id(10)), Some(id(3))).with_pair(REPO, &coverage),
+        advance(Some(id(10)), Some(id(1))).with_pair(RepositoryId([7; 32]), &coverage),
+    ] {
+        assert_eq!(refused.unwrap_err().code, FailureCode::InvalidResponse);
+    }
+}
