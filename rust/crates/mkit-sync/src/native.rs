@@ -10,6 +10,7 @@
 use std::io::Write as _;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -36,6 +37,79 @@ pub const DEFAULT_METADATA_TIMEOUT: Duration = Duration::from_secs(30);
 pub const DEFAULT_TRANSFER_TIMEOUT: Duration = Duration::from_mins(5);
 
 type Connector = hyper_rustls::HttpsConnector<HttpConnector>;
+
+/// Counts connection attempts. A request that fails while the count did not
+/// move ran on a reused pooled connection; one that fails after it moved ran
+/// on a connection opened for it (or concurrently), which is never retried.
+#[derive(Clone)]
+struct CountingConnector {
+    inner: Connector,
+    connects: Arc<AtomicU64>,
+}
+
+impl tower_service::Service<Uri> for CountingConnector {
+    type Response = <Connector as tower_service::Service<Uri>>::Response;
+    type Error = <Connector as tower_service::Service<Uri>>::Error;
+    type Future = <Connector as tower_service::Service<Uri>>::Future;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, uri: Uri) -> Self::Future {
+        self.connects.fetch_add(1, Ordering::SeqCst);
+        self.inner.call(uri)
+    }
+}
+
+/// Read RPCs of `mkit.transport.v1.TransportService`: signed reads (no replay
+/// entry is recorded, SPEC-TRANSPORT-CONNECT "Signed reads") and the unsigned
+/// server-info and grant-epoch reads. Resending one has no effect beyond the
+/// answer.
+const READ_PROCEDURES: [&str; 9] = [
+    "ListRepos",
+    "ListRefs",
+    "ReadRef",
+    "PackExists",
+    "DownloadPack",
+    "IssueObjectUrl",
+    "GetReceipt",
+    "GetServerInfo",
+    "GetGrantEpoch",
+];
+
+/// Whether resending `request` after an unanswered attempt cannot change
+/// server state. A signed read carries an `idempotency-key` like a write but
+/// records no replay entry, so only the procedure decides. Writes (every
+/// procedure not listed as a read) are never resent here: whether the server
+/// applied them is unknown, and recovery belongs to the caller, which keeps
+/// the signed identity.
+fn is_resend_safe(method: &http::Method, uri: &Uri) -> bool {
+    if method == http::Method::GET || method == http::Method::HEAD {
+        return true;
+    }
+    method == http::Method::POST
+        && uri
+            .path()
+            .strip_prefix("/mkit.transport.v1.TransportService/")
+            .is_some_and(|name| READ_PROCEDURES.contains(&name))
+}
+
+/// A pooled connection the server had already closed: the response head never
+/// arrived because the connection ended first.
+fn is_stale_connection(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(cause) = current {
+        if cause
+            .downcast_ref::<hyper::Error>()
+            .is_some_and(hyper::Error::is_incomplete_message)
+        {
+            return true;
+        }
+        current = cause.source();
+    }
+    false
+}
 
 // The receiver is owned and Send; the producer can still borrow the caller's
 // pack. A single queued frame applies backpressure without spawning a task or
@@ -83,7 +157,8 @@ impl hyper::body::Body for NativeBody {
 pub struct NativeHttp {
     // Declared first so in-flight connection tasks drop before the runtime
     // that drives them.
-    client: HyperClient<Connector, NativeBody>,
+    client: HyperClient<CountingConnector, NativeBody>,
+    connects: Arc<AtomicU64>,
     runtime: tokio::runtime::Runtime,
     metadata_timeout: Duration,
     transfer_timeout: Duration,
@@ -146,11 +221,18 @@ impl NativeHttp {
             .https_or_http()
             .enable_http1()
             .wrap_connector(http);
+        let connects = Arc::new(AtomicU64::new(0));
+        let connector = CountingConnector {
+            inner: connector,
+            connects: Arc::clone(&connects),
+        };
         // Keep one idle connection per origin for sequential RPCs. Checkout
         // checks elapsed idle time even while this runtime is paused. Hyper
         // retries a canceled request only if it has not started writing it;
         // this preserves signed bytes and also the streaming body's receiver.
-        // Failures after writing begins return to the existing host recovery.
+        // Failures after writing begins return to the existing host recovery,
+        // except that a read answered by nothing on a reused connection is
+        // resent once (`request_resending_reads`).
         let client = HyperClient::builder(TokioExecutor::new())
             .pool_max_idle_per_host(1)
             .pool_idle_timeout(Duration::from_secs(10))
@@ -160,6 +242,7 @@ impl NativeHttp {
         Ok(Self {
             runtime,
             client,
+            connects,
             metadata_timeout: DEFAULT_METADATA_TIMEOUT,
             transfer_timeout: DEFAULT_TRANSFER_TIMEOUT,
             allow_insecure_http: false,
@@ -615,6 +698,37 @@ fn decode_body<D: FailureObserver + ?Sized>(
 }
 
 impl NativeHttp {
+    /// One exchange. The server may close an idle keep-alive connection at the
+    /// moment the next request is written to it; hyper then reports the
+    /// request as written but unanswered and, having written it, does not
+    /// resend. When the failing connection was reused (no connection was
+    /// opened during the attempt) and `resend` holds a copy of a request that
+    /// is safe to repeat, it is sent once more on a fresh connection. Anything
+    /// else, including a second failure, is returned unchanged.
+    async fn request_resending_reads(
+        &self,
+        request: Request<NativeBody>,
+        resend: Option<(http::Method, Uri, HeaderMap, Bytes)>,
+    ) -> Result<Response<hyper::body::Incoming>, hyper_util::client::legacy::Error> {
+        let connects = self.connects.load(Ordering::SeqCst);
+        match self.client.request(request).await {
+            Err(error)
+                if is_stale_connection(&error)
+                    && self.connects.load(Ordering::SeqCst) == connects =>
+            {
+                let Some((method, uri, headers, body)) = resend else {
+                    return Err(error);
+                };
+                let mut again = Request::new(NativeBody::Full(Full::new(body)));
+                *again.method_mut() = method;
+                *again.uri_mut() = uri;
+                *again.headers_mut() = headers;
+                self.client.request(again).await
+            }
+            other => other,
+        }
+    }
+
     /// Send one request with typed native errors. The [`HttpTransport`] adapter
     /// uses the same path, converting errors to its required string form.
     ///
@@ -666,17 +780,29 @@ impl NativeHttp {
             .into());
         }
         self.prepare_headers(&mut parts.headers)?;
-        let request = Request::from_parts(parts, NativeBody::Full(Full::new(Bytes::from(body))));
+        let body = Bytes::from(body);
+        let resend = is_resend_safe(&parts.method, &parts.uri).then(|| {
+            (
+                parts.method.clone(),
+                parts.uri.clone(),
+                parts.headers.clone(),
+                body.clone(),
+            )
+        });
+        let request = Request::from_parts(parts, NativeBody::Full(Full::new(body)));
         let exchange = async {
-            let response = self.client.request(request).await.map_err(|error| {
-                initial.failure(
-                    FailureKind::RequestIo,
-                    &error.to_string(),
-                    None,
-                    response_limit,
-                    exchange_error("request failed", &error),
-                )
-            })?;
+            let response = self
+                .request_resending_reads(request, resend)
+                .await
+                .map_err(|error| {
+                    initial.failure(
+                        FailureKind::RequestIo,
+                        &error.to_string(),
+                        None,
+                        response_limit,
+                        exchange_error("request failed", &error),
+                    )
+                })?;
             // Redirects are never followed: a redirect would carry a signed
             // request to an origin the signature was not made for.
             if response.status().is_redirection() && !profile.expose_error_responses {
@@ -1131,6 +1257,42 @@ impl Clock for NativeClock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_listed_reads_are_resend_safe() {
+        let post = |name: &str| {
+            is_resend_safe(
+                &http::Method::POST,
+                &format!("http://h/mkit.transport.v1.TransportService/{name}")
+                    .parse()
+                    .unwrap(),
+            )
+        };
+        for name in READ_PROCEDURES {
+            assert!(post(name), "{name}");
+        }
+        for name in [
+            "UpdateRef",
+            "AdvanceRefs",
+            "BeginUpload",
+            "UploadPart",
+            "UploadPack",
+            "CompleteUpload",
+            "SetGrantEpoch",
+            "SetRepoVisibility",
+            "Unknown",
+        ] {
+            assert!(!post(name), "{name}");
+        }
+        assert!(!is_resend_safe(
+            &http::Method::POST,
+            &"http://h/".parse().unwrap()
+        ));
+        assert!(is_resend_safe(
+            &http::Method::GET,
+            &"http://h/x".parse().unwrap()
+        ));
+    }
 
     #[test]
     fn timeout_defaults_and_overrides_are_selected_by_exact_procedure() {

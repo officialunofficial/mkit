@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add `decide_clearance` to `mkit-primitives`. It recomputes the contiguous
+  published prefix from host-supplied facts and never settles an acceptance
+  reservation or records a second terminal outcome. Add
+  `decide_accept_and_clear`, which returns the unchanged ticketed-advance
+  decision and, only when that decision applies, a clearance over the same
+  repository and operation, plus `ClearanceAdvance::with_pair`, which takes the
+  dependency and external-supplier sets from an established resulting-pair
+  coverage. The reference prefix walk uses `decide_clearance`. No wire or
+  stored-format change; no wipe.
+
 Embedder migration entries use `[embedder: breaking API]`,
 `[embedder: stored-format change]` and `[embedder: store reset required]` tags.
 Combine tags when applicable; every breaking API entry states a replacement and
@@ -257,6 +267,14 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Fixed
 
+- The native HTTP channel (`mkit-sync` `connect-native`, and so `mkit-client`
+  over it) no longer fails a read when the server closes a pooled keep-alive
+  connection just as the request is written to it. A read RPC (or GET/HEAD)
+  that fails with a closed-before-response error on a reused connection is
+  resent once on a fresh one. Signed writes, unknown procedures, streaming
+  uploads and failures on a fresh connection are never resent by the channel;
+  a write still surfaces the transient connection error so the caller can
+  retry with its signed identity.
 - Scheduled pack verification now applies SPEC-PACKFILE §§6.1 and 6.2 when
   integrity and entry faults compete. A corrupt trailer with a missing delta
   base or an indexed decode-limit violation produces the same persisted
