@@ -46,12 +46,27 @@ fn graph_pack() -> Vec<u8> {
     writer.finish().unwrap()
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct EvidenceTrace {
+    peak_bytes: u64,
+    peak_pages: u64,
+    released: Vec<PageCommitment>,
+}
+impl EvidenceTrace {
+    fn observe(&mut self, machine: &VerifyDriver) {
+        let usage = machine.usage();
+        self.peak_bytes = self.peak_bytes.max(usage.evidence_bytes);
+        self.peak_pages = self.peak_pages.max(usage.evidence_pages);
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct DeterministicRun {
     outcome: Result<String, Failure>,
     pages: Vec<(PageCommitment, Vec<u8>)>,
     fragments: BTreeMap<u64, Vec<u8>>,
     work: u64,
+    evidence: EvidenceTrace,
 }
 
 fn scheduled_leaves(pack: &[u8], width: u8, enabled: bool) -> DeterministicRun {
@@ -70,7 +85,9 @@ fn scheduled_leaves(pack: &[u8], width: u8, enabled: bool) -> DeterministicRun {
     let mut cache_active = false;
     let mut fetches = 0;
     let mut peak = 0;
+    let mut evidence = EvidenceTrace::default();
     let outcome = loop {
+        evidence.observe(&machine);
         match machine.step() {
             Err(error) => break Err(error),
             Ok(Step::Complete(pack)) => {
@@ -104,7 +121,7 @@ fn scheduled_leaves(pack: &[u8], width: u8, enabled: bool) -> DeterministicRun {
                 host.pages.push((commitment, page.bytes.to_vec()));
                 machine.acknowledge_retention(commitment).unwrap();
             }
-            Ok(Step::ReleasePage(_)) => (),
+            Ok(Step::ReleasePage(page)) => evidence.released.push(page),
             Ok(Step::Progress) => {
                 let outputs = std::thread::scope(|scope| {
                     let workers: Vec<_> = jobs
@@ -136,6 +153,7 @@ fn scheduled_leaves(pack: &[u8], width: u8, enabled: bool) -> DeterministicRun {
         pages: host.pages,
         fragments: host.fragments,
         work: machine.usage().work,
+        evidence,
     }
 }
 
@@ -164,21 +182,67 @@ fn leaf_only_exact_job_determinism_and_work() {
     }
 }
 
+struct RunAccounting {
+    work: u64,
+    evidence: EvidenceTrace,
+    cache_active: bool,
+}
+fn finish_accounted(
+    machine: &mut VerifyDriver,
+    host: &mut Host,
+    evidence: &mut EvidenceTrace,
+    cache_active: &mut bool,
+) -> Result<VerifiedPack, Failure> {
+    loop {
+        evidence.observe(machine);
+        *cache_active |= machine.objects.decoded_leaves_enabled();
+        match machine.step()? {
+            Step::Request(request) => host.serve(machine, &request)?,
+            Step::ProvisionalObject(fragment) => host
+                .fragments
+                .entry(fragment.ordinal)
+                .or_default()
+                .extend_from_slice(fragment.bytes),
+            Step::RetainEvidence(page) => {
+                let commitment = page.commitment;
+                host.pages.push((commitment, page.bytes.to_vec()));
+                machine.acknowledge_retention(commitment)?;
+            }
+            Step::ReleasePage(page) => evidence.released.push(page),
+            Step::Progress => (),
+            Step::Complete(pack) => return Ok(pack),
+        }
+    }
+}
 fn limited_run(
     pack: &[u8],
     execution: VerifyLimits,
     enabled: bool,
-) -> (Result<String, Failure>, crate::pack_verify::ResourceUsage) {
+) -> (Result<String, Failure>, RunAccounting) {
     let mut machine =
         VerifyDriver::new(source(pack), REPOSITORY, profile(), execution, 17).unwrap();
     if !enabled {
         machine.objects.prevent_decoded_leaves();
     }
-    let outcome = Host::new(pack)
-        .finish(&mut machine)
-        .map(|pack| format!("{pack:?}"));
-    (outcome, machine.usage())
+    let mut evidence = EvidenceTrace::default();
+    let mut cache_active = false;
+    let outcome = finish_accounted(
+        &mut machine,
+        &mut Host::new(pack),
+        &mut evidence,
+        &mut cache_active,
+    )
+    .map(|pack| format!("{pack:?}"));
+    (
+        outcome,
+        RunAccounting {
+            work: machine.usage().work,
+            evidence,
+            cache_active,
+        },
+    )
 }
+
 #[test]
 fn leaf_only_limit_refusals_and_work() {
     let pack = leaf_pack(320);
@@ -209,7 +273,7 @@ fn leaf_only_limit_refusals_and_work() {
             ..base
         });
     }
-    for decoded in [1, 64 << 10, 128 << 10, 512 << 10, 1 << 20] {
+    for decoded in [1, 64 << 10, 128 << 10, 512 << 10, 1 << 20, 2 << 20] {
         cases.push(VerifyLimits {
             decoded_bytes: decoded,
             ..base
@@ -220,6 +284,14 @@ fn leaf_only_limit_refusals_and_work() {
         let (b, ub) = limited_run(&pack, limits, true);
         assert_eq!(a, b, "{limits:?}");
         assert_eq!(ua.work, ub.work, "{limits:?}");
+        assert_eq!(ua.evidence, ub.evidence, "{limits:?}");
+        if limits.decoded_bytes == 2 << 20 {
+            assert!(
+                ub.cache_active,
+                "decoded-byte refusal must follow cache activation"
+            );
+            assert_eq!(b.as_ref().unwrap_err().code, FailureCode::ResourceLimit);
+        }
     }
 }
 
@@ -365,6 +437,7 @@ fn leaf_only_resource_and_content_refusals_keep_integrity_precedence() {
             }
             assert_eq!(actual, expected, "pages={pages}, corrupt={corrupted}");
             assert_eq!(a.work, b.work, "pages={pages}, corrupt={corrupted}");
+            assert_eq!(a.evidence, b.evidence, "pages={pages}, corrupt={corrupted}");
         }
     }
 }

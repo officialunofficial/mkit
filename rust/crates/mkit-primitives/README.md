@@ -207,8 +207,9 @@ Objects-index lookups may reuse owned decoded leaf records after authenticating
 and charging the supplied or resident page through the ordinary path. The
 optional cache holds at most 512 fixed-record leaves in a 4 MiB reservation.
 It releases before entry or edge growth approaches that allowance, at a
-checkpoint, on refusal and at completion. This changes neither page emission
-nor the logical work charged for decoding. It does not defer branch encoding.
+checkpoint, on deferred entry refusal and at completion. This changes neither
+page emission nor the logical work charged for decoding. It does not defer
+branch encoding.
 
 ## Module and decoder inventory
 
