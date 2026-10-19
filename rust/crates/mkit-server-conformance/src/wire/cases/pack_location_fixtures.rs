@@ -115,7 +115,7 @@ fn location(reply: StreamReply<DownloadPackResponse>) -> Result<DownloadPackLoca
         .next()
         .and_then(|message| message.body)
     {
-        Some(DownloadBody::Location(location)) => Ok(location),
+        Some(DownloadBody::Location(location)) => Ok(*location),
         _ => Err("fixture did not issue a location".into()),
     }
 }

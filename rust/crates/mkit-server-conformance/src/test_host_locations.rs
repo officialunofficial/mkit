@@ -62,18 +62,14 @@ impl Locations {
             .map(|config| Arc::new(config.with_test_loopback_http()))
             .map_err(|error| error.to_string())
     }
-    pub(super) fn mount(&self, router: Router) -> Router {
+    pub(super) fn mount(&self, app: Router) -> Router {
         let mut routes = Router::new().route("/__mkit_test/pack-locations/{token}", get(fetch));
         if self.fixtures {
             routes = routes
                 .route(control::CAPABILITIES_PATH, get(capabilities))
                 .route(control::CONTROL_PATH, axum::routing::post(command));
         }
-        router.merge(
-            routes
-                .layer(axum::extract::DefaultBodyLimit::max(4 * 1_048_576 + 4096))
-                .with_state(self.clone()),
-        )
+        app.merge(routes.with_state(self.clone()))
     }
     pub(super) fn corrupt(&self, value: bool) {
         self.corrupt.store(value, Ordering::Relaxed);
@@ -231,7 +227,7 @@ async fn install_fixture(
     pack: Vec<u8>,
     status: PackLocationState,
 ) -> Result<(), StatusCode> {
-    if pack.is_empty() || pack.len() > 1_048_576 {
+    if pack.is_empty() || pack.len() > 65_536 {
         return Err(StatusCode::BAD_REQUEST);
     }
     let repo = state

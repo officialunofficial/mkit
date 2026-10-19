@@ -56,7 +56,7 @@ struct DelayedBlobs {
     inner: MemoryBlobStore,
     clock: Arc<ManualClock>,
     delay_ms: i64,
-    denial: Option<MemoryKv>,
+    denial: Option<Arc<MemoryKv>>,
 }
 
 impl BlobStore for DelayedBlobs {

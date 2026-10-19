@@ -621,7 +621,7 @@ The additive version-1 test-control request is:
 {"operation":"pack_location_fixture","repository":"ed25519-<public-key>/locations","pack":[1,2,3],"state":"available"}
 ```
 
-`pack` is a nonempty byte array of at most 1 MiB. Its hash identifies the pack.
+`pack` is a nonempty byte array of at most 64 KiB. Its hash identifies the pack.
 States are `available`, `held`, `pending`, `private`, `denied`, and `corrupt`.
 The fixture establishes real repository membership and the selected serving
 state. `corrupt` preserves the exact body length and changes location bytes;

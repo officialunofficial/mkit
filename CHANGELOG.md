@@ -83,15 +83,18 @@ collect the applicable entries between their old and new immutable pins.
   scheduling; evidence, work charges, refusals, and the checkpoint format stay
   the same. No store reset is required.
 
-- Add `Request::PackLocationFixture` and `PackLocationState` to the optional
-  conformance test-control API. Migration: update exhaustive request matches;
+- Add `Request::PackLocationFixture`, `PackLocationState`, and pack-location
+  `Feature` variants to the optional conformance API. Migration: update
+  exhaustive request and feature matches;
   implement and advertise `pack-locations.fixture` only on disposable test
   hosts running the pack-location fixture profile. No production RPC or stored
   format changes; no store reset.
 
 - Add `Location` to the generated `DownloadPackResponse` body enum and optional
   discovery and request fields. Migration: update exhaustive response matches;
-  clients that do not opt in continue to receive the same streaming bytes.
+  initialize new optional fields to `None` in complete generated struct literals
+  or use `..Default::default()`. Clients that do not opt in receive the same
+  streaming bytes.
   Configure `PipelineConfig::pack_locations` to offer locations; its default
   remains `None`, as does `ServerInfo::max_pack_location_lifetime_ms` when
   support is disabled. No store reset.
