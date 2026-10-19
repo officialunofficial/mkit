@@ -1502,6 +1502,19 @@ decoder = "decision::ref_write::decide_ref_write"
 fuzz_target = "ref_decisions"
 spec = "SPEC-TRANSPORT-CONNECT §3; §4; §7.8"
 
+[[contracts]]
+type = "decision::Guarded.with_acceptance_basis"
+format_version = 1
+ruleset = "SPEC-PRIMITIVE-EVIDENCE"
+profile = "plain-ref-acceptance"
+path = "decision/plain-basis.json"
+semantic = "decision/plain-basis.md"
+decode_config = "facts=256,guards=64,bytes=65536,work=100000"
+expected = "exact pack coverage or InvalidResponse"
+spec = "SPEC-PRIMITIVE-EVIDENCE §4.4"
+sha256 = "d80e4762bbc74a65ec9cdfe9a6228f7b4856349e8ccf4b4548f4bbf5ad579aae"
+semantic_sha256 = "46a7580dbae69e2de5e6411fdb1e8b3d5d53a9f4e8e8b7ed57f09e0b2a6a07a1"
+
 # auth
 [[contracts]]
 type = "auth::AuthenticatedEnvelope.unary"

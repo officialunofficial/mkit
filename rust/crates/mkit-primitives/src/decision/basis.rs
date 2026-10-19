@@ -1,6 +1,7 @@
-//! Sealed acceptance basis: what a ticketed acceptance relied on.
+//! Sealed acceptance basis: what an acceptance relied on.
 //!
-//! A ticketed advance is accepted only over a basis. The basis carries the
+//! A ticketed advance is accepted only over a basis. Plain ref writes can attach
+//! the same dependencies with [`Guarded::with_acceptance_basis`](super::Guarded::with_acceptance_basis). The basis carries the
 //! mutable facts that acceptance relied on, as typed guards the decision adds
 //! to its guard set, so that no sealed artifact can be forgotten by a caller:
 //!
@@ -295,6 +296,10 @@ impl AcceptanceBasis {
             packs: packs.iter().map(|pack| (pack.id, pack.len)).collect(),
             guards,
         }
+    }
+
+    pub(crate) fn pack_count(&self) -> usize {
+        self.packs.len()
     }
 
     /// Whether this basis covers a pack of this identity and exact length.

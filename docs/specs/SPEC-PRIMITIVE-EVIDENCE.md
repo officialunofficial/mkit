@@ -629,6 +629,26 @@ advance that consumes several packs supplies one basis per pack. The decision
 adds every basis's guards to its guard set, and contradictory guards are an
 error.
 
+Plain single-ref and paired writes MAY carry zero or more bases through
+`Guarded<WriteDecision>::with_acceptance_basis`. A host that accepts packs
+through its own path MUST attach a basis before lowering a write that relies
+on that acceptance, and MUST supply the complete set of newly accepted packs
+that write relies on. Ref targets alone do not identify containing packs.
+Each supplied pack MUST be covered with the same `covers` rule as ticketed
+acceptance: exact identity and length, or the explicit unrestricted claim of
+an empty-pack host attestation. Deletions and writes relying on no new content
+need no basis. An empty attachment leaves the decision and guard set unchanged.
+
+The consuming method preserves frozen request constructors and keeps effects
+with their requirements. Repository mismatch or uncovered content is
+`InvalidResponse`. All basis guards join the sealed set, deduplicated by exact
+identity and value; contradictory values for one identity are `InvalidResponse`.
+Distinct binding digests coexist, as on the ticketed path. The completeness
+checker audits these requirements exactly as on ticketed decisions: missing or
+mismatched dependencies and contradictory extra guards fail; compatible extra
+host safety guards remain permitted. Attachment has finite fact, byte, work and
+total guard allowances and changes no effects or source fences.
+
 A basis has exactly three constructors. Each derives guards of the same
 `RequiredGuard` vocabulary (membership, publication, denial and binding
 guards), so a host lowers any of them through one path; the sealed-artifact
