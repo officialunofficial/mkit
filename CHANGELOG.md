@@ -291,6 +291,12 @@ collect the applicable entries between their old and new immutable pins.
   carrying in-progress publication progress. Public APIs, wire formats, and
   all other stored formats are unchanged.
 
+- `mkit-git-bridge::import::ObjectSink` requires `reuse_object`: refresh the
+  cached object's retention time and return its immediate history references,
+  refusing missing objects. Implement this method in custom sinks; reuse a
+  `DepthMemo` across per-ref importers in one run. In-memory sinks may simply
+  return decoded references. No stored-format change; no store reset.
+
 ### Added
 
 - Verify pack integrity and canonical entries in one acquisition pass.
@@ -504,6 +510,13 @@ collect the applicable entries between their old and new immutable pins.
   regression retains its 512 KiB stack, and a native future-size guard covers the
   extraction steps shared with wasm32. Checks, source charging, stored bytes,
   public APIs, and wire formats are unchanged; no store reset is required.
+
+- Fix bulk-writer reuse of read-only object files on Unix. Local gc now
+  excludes its final age check and unlink from concurrent bulk refreshes;
+  a crashed sweep leaves objects at their canonical paths. Git import
+  refreshes complete cached closures once per run without re-hashing.
+  The strict grace-window bound still applies to concurrent imports.
+  No object format or layout change; no store reset.
 
 ### Changed
 

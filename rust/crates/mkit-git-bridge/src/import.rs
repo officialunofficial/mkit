@@ -19,7 +19,7 @@ use mkit_core::object::{
     Blob, ChunkedBlob, Commit, EntryMode, Identity, Object, ObjectType, Tag, Tree, TreeEntry,
 };
 use mkit_core::{ChunkIterator, FastCdc, Hash};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// SPEC-GIT-IMPORT §3.1: the normative chunking threshold.
 pub const CHUNK_THRESHOLD: u64 = mkit_core::worktree::CHUNK_THRESHOLD;
@@ -78,6 +78,11 @@ impl GitSource for MemGitSource {
 pub trait ObjectSink {
     fn write_object(&mut self, bytes: &[u8]) -> Result<Hash, BridgeError>;
 
+    /// Refresh a cached object for concurrent gc and return its immediate
+    /// history references. Missing objects must return an error. This is
+    /// retention bookkeeping: implementations need not re-hash cached bytes.
+    fn reuse_object(&mut self, h: &Hash) -> Result<Vec<Hash>, BridgeError>;
+
     /// The stored object's type byte, when the sink can answer (used
     /// only to disambiguate blob vs chunked-manifest tag targets).
     fn kind_of(&self, _h: &Hash) -> Option<ObjectType> {
@@ -87,8 +92,25 @@ pub trait ObjectSink {
 
 impl ObjectSink for mkit_core::ObjectStore {
     fn write_object(&mut self, bytes: &[u8]) -> Result<Hash, BridgeError> {
-        self.write(bytes)
-            .map_err(|e| BridgeError::Source(format!("store write: {e}")))
+        let mut writer = self.bulk_writer();
+        let h = writer
+            .write(bytes)
+            .map_err(|e| BridgeError::Source(format!("store write: {e}")))?;
+        writer
+            .commit()
+            .map_err(|e| BridgeError::Source(format!("store commit: {e}")))?;
+        Ok(h)
+    }
+
+    fn reuse_object(&mut self, h: &Hash) -> Result<Vec<Hash>, BridgeError> {
+        let mut writer = self.bulk_writer();
+        let children = writer
+            .reuse_object(h)
+            .map_err(|e| BridgeError::Source(format!("store reuse: {e}")))?;
+        writer
+            .commit()
+            .map_err(|e| BridgeError::Source(format!("store commit: {e}")))?;
+        Ok(children)
     }
 
     fn kind_of(&self, h: &Hash) -> Option<ObjectType> {
@@ -105,6 +127,19 @@ impl ObjectSink for MemSink {
         let h = mkit_core::hash::hash(bytes);
         self.0.insert(h, bytes.to_vec());
         Ok(h)
+    }
+
+    fn reuse_object(&mut self, h: &Hash) -> Result<Vec<Hash>, BridgeError> {
+        let bytes = self
+            .0
+            .get(h)
+            .ok_or_else(|| BridgeError::Source("cached object missing from memory sink".into()))?;
+        let object = mkit_core::deserialize(bytes)
+            .map_err(|e| BridgeError::Source(format!("cached object decode: {e}")))?;
+        Ok(mkit_core::ops::graph::children(
+            &object,
+            mkit_core::ops::graph::ClosureMode::History,
+        ))
     }
 
     fn kind_of(&self, h: &Hash) -> Option<ObjectType> {
@@ -185,6 +220,7 @@ pub struct Importer<'a, S: GitSource, K: ObjectSink> {
 pub struct DepthMemo {
     heights: HashMap<Sha1Id, usize>,
     chains: HashMap<Sha1Id, usize>,
+    refreshed: HashSet<Hash>,
 }
 
 impl<S: GitSource, K: ObjectSink> std::fmt::Debug for Importer<'_, S, K> {
@@ -250,6 +286,7 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
             // down by a later ref would otherwise compose past the
             // §3.3 cap and store trees mkit's read paths refuse.
             self.check_hit_budget(id, &h, tag_depth, tree_depth)?;
+            self.reuse_closure(h)?;
             return Ok(h);
         }
         let (kind, body) = self.source.read_git(id)?;
@@ -272,6 +309,46 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
         self.map.insert(*id, h);
         new_pairs.push((*id, h));
         Ok(h)
+    }
+
+    fn write_object(&mut self, bytes: &[u8]) -> Result<Hash, BridgeError> {
+        let h = self.sink.write_object(bytes)?;
+        self.depth_memo.refreshed.insert(h);
+        Ok(h)
+    }
+
+    fn reuse_closure(&mut self, root: Hash) -> Result<(), BridgeError> {
+        if self.depth_memo.refreshed.contains(&root) {
+            return Ok(());
+        }
+        let mut todo = vec![root];
+        // Deduplicate on enqueue so repeated edges cannot grow the pending
+        // stack beyond the same bound as the distinct-object memo.
+        let mut discovered = HashSet::from([root]);
+        while let Some(h) = todo.pop() {
+            if self.depth_memo.refreshed.len() + discovered.len()
+                > mkit_core::ops::graph::MAX_REACHABLE
+            {
+                return Err(BridgeError::Source(
+                    "cached closure exceeds reachability limit".into(),
+                ));
+            }
+            for child in self.sink.reuse_object(&h)? {
+                if !self.depth_memo.refreshed.contains(&child) && discovered.insert(child) {
+                    if self.depth_memo.refreshed.len() + discovered.len()
+                        > mkit_core::ops::graph::MAX_REACHABLE
+                    {
+                        return Err(BridgeError::Source(
+                            "cached closure exceeds reachability limit".into(),
+                        ));
+                    }
+                    todo.push(child);
+                }
+            }
+        }
+        // Do not memoize an incomplete closure after a missing-child error.
+        self.depth_memo.refreshed.extend(discovered);
+        Ok(())
     }
 
     /// Composition caps on a map-cache hit (no recursion happens, so
@@ -388,7 +465,7 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
                     data: body.to_vec(),
                 }),
             )?;
-            return self.sink.write_object(&bytes);
+            return self.write_object(&bytes);
         }
         let mut chunks = Vec::new();
         for b in ChunkIterator::new(FastCdc::v1(), body) {
@@ -398,7 +475,7 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
                     data: body[b.offset..b.offset + b.length].to_vec(),
                 }),
             )?;
-            chunks.push(self.sink.write_object(&chunk)?);
+            chunks.push(self.write_object(&chunk)?);
         }
         let manifest = ser(
             id,
@@ -408,7 +485,7 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
                 chunks,
             }),
         )?;
-        self.sink.write_object(&manifest)
+        self.write_object(&manifest)
     }
 
     /// §3.3: re-sort, validate names, map modes.
@@ -427,7 +504,7 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
         })?;
         *normalized |= changed;
         let bytes = ser(id, &Object::Tree(tree))?;
-        self.sink.write_object(&bytes)
+        self.write_object(&bytes)
     }
 
     /// §3.2: importer-signed commit.
@@ -470,7 +547,7 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
         let mut commit = unsigned_commit(id, body, self.signer.public, tree, parents)?;
         commit.signature = (self.signer.sign_commit)(&commit)?;
         let bytes = ser(id, &Object::Commit(commit))?;
-        self.sink.write_object(&bytes)
+        self.write_object(&bytes)
     }
 
     /// §3.4: importer-signed tag.
@@ -503,7 +580,7 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
         (self.retain_raw)(id, &raw)?;
         tag.signature = (self.signer.sign_tag)(&tag)?;
         let bytes = ser(id, &Object::Tag(tag))?;
-        self.sink.write_object(&bytes)
+        self.write_object(&bytes)
     }
 }
 

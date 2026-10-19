@@ -761,3 +761,132 @@ fn map_hits_enforce_composition_caps_and_tag_types() {
         other => panic!("expected target-type refusal, got {other:?}"),
     }
 }
+
+fn cached_chunk_fixture() -> (tempfile::TempDir, mkit_core::ObjectStore, Hash, Hash, Hash) {
+    use mkit_core::object::{Blob, ChunkedBlob, EntryMode, Tree, TreeEntry};
+    use std::fs::File;
+    use std::time::{Duration, UNIX_EPOCH};
+    let td = tempfile::tempdir().unwrap();
+    let layout = mkit_core::RepoLayout::single(td.path());
+    let store = mkit_core::ObjectStore::init(&layout).unwrap();
+    let chunk = store
+        .write(
+            &mkit_core::serialize(&Object::Blob(Blob {
+                data: b"chunk".to_vec(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let manifest = store
+        .write(
+            &mkit_core::serialize(&Object::ChunkedBlob(ChunkedBlob {
+                total_size: 5,
+                chunk_size: 0,
+                chunks: vec![chunk],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let tree = store
+        .write(
+            &mkit_core::serialize(&Object::Tree(Tree {
+                entries: vec![TreeEntry {
+                    name: b"file".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: manifest,
+                }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    for h in [chunk, manifest, tree] {
+        let hex = mkit_core::hash::to_hex(&h);
+        File::open(store.objects_root().join(&hex[..2]).join(&hex[2..]))
+            .unwrap()
+            .set_modified(UNIX_EPOCH + Duration::from_secs(100))
+            .unwrap();
+    }
+    (td, store, chunk, manifest, tree)
+}
+
+#[test]
+fn cached_import_refreshes_entire_stored_closure() {
+    use std::fs::File;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    let (_td, mut store, chunk, manifest, tree) = cached_chunk_fixture();
+    let before = SystemTime::now() - Duration::from_secs(1);
+    let git_tree = [7; 20];
+    let mut source = MemGitSource::default();
+    let mut map = HashMap::from([(git_tree, tree)]);
+    let mut no_commit = |_: &mkit_core::object::Commit| panic!("cached commit signed");
+    let mut no_tag = |_: &mkit_core::object::Tag| panic!("cached tag signed");
+    let mut no_raw = |_: &Sha1Id, _: &[u8]| panic!("cached raw retained");
+    let mut importer = Importer {
+        source: &mut source,
+        sink: &mut store,
+        signer: ImportSigner {
+            public: [0; 32],
+            sign_commit: &mut no_commit,
+            sign_tag: &mut no_tag,
+        },
+        map: &mut map,
+        retain_raw: &mut no_raw,
+        options: ImportOptions::default(),
+        depth_memo: DepthMemo::default(),
+    };
+    assert_eq!(importer.import_ref(&git_tree).unwrap().head, tree);
+    for h in [chunk, manifest, tree] {
+        assert!(
+            importer
+                .sink
+                .object_metadata(&h)
+                .unwrap()
+                .modified()
+                .unwrap()
+                >= before,
+            "cache hit did not refresh {}",
+            mkit_core::hash::to_hex(&h)
+        );
+    }
+    // Pin once-per-run behavior without relying on clock resolution: restoring
+    // an old timestamp exposes any redundant refresh on repeated map hits.
+    let old = UNIX_EPOCH + Duration::from_secs(100);
+    for h in [chunk, manifest, tree] {
+        let hex = mkit_core::hash::to_hex(&h);
+        File::open(importer.sink.objects_root().join(&hex[..2]).join(&hex[2..]))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+    }
+    assert_eq!(importer.import_ref(&git_tree).unwrap().head, tree);
+    for h in [chunk, manifest, tree] {
+        assert_eq!(
+            importer
+                .sink
+                .object_metadata(&h)
+                .unwrap()
+                .modified()
+                .unwrap(),
+            old
+        );
+    }
+    drop(importer);
+    // An incomplete cached closure must refuse publication on every attempt.
+    let hex = mkit_core::hash::to_hex(&chunk);
+    std::fs::remove_file(store.objects_root().join(&hex[..2]).join(&hex[2..])).unwrap();
+    let mut importer = Importer {
+        source: &mut source,
+        sink: &mut store,
+        signer: ImportSigner {
+            public: [0; 32],
+            sign_commit: &mut no_commit,
+            sign_tag: &mut no_tag,
+        },
+        map: &mut map,
+        retain_raw: &mut no_raw,
+        options: ImportOptions::default(),
+        depth_memo: DepthMemo::default(),
+    };
+    assert!(importer.import_ref(&git_tree).is_err());
+    assert!(importer.import_ref(&git_tree).is_err());
+}
