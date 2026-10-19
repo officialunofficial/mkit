@@ -127,8 +127,9 @@ fn clearance_hold_race_keeps_head_advertised_but_never_serves_held_bytes() {
             now_ms: now,
             continuation_deadline_ms: None,
         };
-        let handler =
-            crate::timers::publication_recheck::PublicationRecheck::new(fx.pipe.meta.clone());
+        let handler = crate::timers::publication_recheck::PublicationRecheck::new(
+            crate::store::BorrowedStore(&fx.pipe.meta),
+        );
         let Fired::Done(batch) = block_on(handler.fire(&ctx, &timer)).unwrap() else {
             panic!("visible supplier must produce a clearance plan");
         };
