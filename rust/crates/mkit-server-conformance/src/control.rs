@@ -370,7 +370,7 @@ pub struct RelianceObservation {
 pub enum Request {
     /// Seed or change a single-pack fixture, using protocol identity and bytes.
     /// Requires `pack-locations.fixture`. The content-addressed body is bounded
-    /// to 1 MiB. Denials are irreversible; scenarios use fresh pack bodies.
+    /// to 64 KiB. Denials are irreversible; scenarios use fresh pack bodies.
     PackLocationFixture {
         repository: String,
         pack: Vec<u8>,

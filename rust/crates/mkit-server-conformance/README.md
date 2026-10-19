@@ -633,8 +633,10 @@ disposable test infrastructure and must never be mounted on a production server.
 Existing test-control implementers can retain their current handlers and report
 `pack-locations.fixture` as unsupported; enable `pack-location-fixtures` only
 when implementing this additional command. The reference test host exposes it
-only under that explicit profile flag and requires indexed Multi addressing
-with auth v2 for its security fixtures.
+only under that explicit profile flag and requires unsharded indexed Multi
+addressing with auth v2 for its security fixtures. The reference host rejects
+sharded storage for this fixture profile; external portable control
+implementations may support it using their own repository routing.
 
 The wire runner executes cases sequentially. The denial-after-issue probe is the
 last registered case because it advances the disposable host clock by the

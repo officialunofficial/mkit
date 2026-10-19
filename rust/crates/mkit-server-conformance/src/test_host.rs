@@ -1019,6 +1019,9 @@ fn configure_profile_features(
     config: &mut PipelineConfig,
 ) -> Result<(), String> {
     if profile.has(Feature::PackLocationFixtures) {
+        if profile.sharding_d34 {
+            return Err("reference pack-location fixtures require unsharded storage".into());
+        }
         if !profile.has(Feature::PackLocations)
             || !profile.has(Feature::MultiRepo)
             || !profile.has(Feature::IndexedMode)

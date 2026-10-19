@@ -396,3 +396,25 @@ async fn portable_pack_location_profile_exercises_all_scenarios() {
     );
     host.shutdown().await;
 }
+
+#[tokio::test]
+async fn reference_pack_location_fixtures_reject_sharded_storage() {
+    let mut profile = Profile::new(WireAuth::AuthV2 {
+        audience: "http://placeholder.invalid".into(),
+        repository: "default".into(),
+        seed: [0x61; 32],
+    });
+    profile.sharding_d34 = true;
+    profile.features.extend([
+        Feature::PackLocations,
+        Feature::PackLocationFixtures,
+        Feature::MultiRepo,
+        Feature::IndexedMode,
+        Feature::Tickets,
+    ]);
+    let error = TestHost::start(profile).await.unwrap_err();
+    assert_eq!(
+        error,
+        "reference pack-location fixtures require unsharded storage"
+    );
+}
