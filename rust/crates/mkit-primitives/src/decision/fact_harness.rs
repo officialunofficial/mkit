@@ -584,6 +584,7 @@ impl Vary for MemberFact {
             ..self.clone()
         });
         field(self, |f| &mut f.incarnation, &mut out);
+        field(self, |f| &mut f.object, &mut out);
         out.push(Self {
             kind: if self.kind == ObjectType::Blob {
                 ObjectType::Commit
@@ -596,6 +597,14 @@ impl Vary for MemberFact {
         out.push(Self {
             supplier: PackSource {
                 id: flip(&self.supplier.id),
+                ..self.supplier
+            },
+            ..self.clone()
+        });
+        field(self, |f| &mut f.supplier.len, &mut out);
+        out.push(Self {
+            supplier: PackSource {
+                binding: SourceBinding(flip(&self.supplier.binding.0)),
                 ..self.supplier
             },
             ..self.clone()
