@@ -26,6 +26,9 @@ proof, or guarded decision. The host MUST authenticate the complete envelope's
 origin and integrity before relying on its assertions. A digest alone does not
 provide that authentication.
 
+Repository identity resolution and replay retention MUST follow
+[SPEC-PRIMITIVE-EVIDENCE §1.1](SPEC-PRIMITIVE-EVIDENCE.md#11-repository-identity).
+
 Before acceptance, the writer MUST compare the pack id and exact length with
 its own immutable frozen record, and compare repository, operation, and epoch
 with the intended operation. Replay protection binds the tuple (repository,

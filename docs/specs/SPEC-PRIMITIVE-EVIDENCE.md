@@ -37,6 +37,29 @@ untrusted client MUST authenticate the complete envelope and all bindings or
 discard them and restart. Decoding MUST NOT directly construct a trusted pack,
 closure proof, or guarded acceptance decision.
 
+### 1.1 Repository identity
+
+**Protocol requirement.**
+
+`RepositoryId` is host-defined. For each request, the host MUST resolve the
+signed repository identity ([SPEC-TRANSPORT-CONNECT §7.4](SPEC-TRANSPORT-CONNECT.md#74-repository-addressing)),
+carried by `X-Repository`, to one 32-byte id under the read fenced by its
+Repository guard. The host MUST bind that same id into the evidence and every
+`RepositoryId` fact. The auth-v2 replay scope MUST use the signed repository text,
+not that id. Replay records MUST NOT become replayable against a later
+incarnation of the same identity: the host MUST key them on the signed text
+scope or retain them across deletion and re-creation until `expires_at`.
+
+### 1.2 Decisions and authority
+
+**Protocol requirement.**
+
+Which signer keys a deployment-defined authority source authorizes is host
+policy; no primitive establishes that authorization. The host MUST look up the
+key set at the same generation it supplies in `AuthorityBinding`. Every key
+addition, removal, or revocation MUST advance that generation so the commit-time
+Authority guard detects an authorization change that races the write.
+
 ## 2. Page envelope
 
 **Protocol requirement.**

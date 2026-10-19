@@ -614,7 +614,8 @@ by exactly one of these paths:
    check in §7.
 3. **Authority source.** A deployment-defined source authorizes the
    signer, as SPEC-TRANSPORT-CONNECT §7.5 rule 3 describes, failing
-   closed.
+   closed. Key-set lookup and generation fencing MUST follow
+   [SPEC-PRIMITIVE-EVIDENCE §1.2](SPEC-PRIMITIVE-EVIDENCE.md#12-decisions-and-authority).
 
 A **read** of a private repository (§9) is authorized by the same three
 paths, with the `read` capability in place of `write`. A read of a
