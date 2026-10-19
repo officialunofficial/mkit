@@ -3284,7 +3284,7 @@ dependencies = [
 name = "mkit-client"
 version = "0.5.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "buffa",
  "ed25519-dalek",
  "http",
@@ -3475,7 +3475,7 @@ dependencies = [
 name = "mkit-server"
 version = "0.5.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "blake3",
  "buffa",
  "bytes",
@@ -3515,7 +3515,7 @@ name = "mkit-server-conformance"
 version = "0.5.0"
 dependencies = [
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "buffa",
  "bytes",
  "clap",
@@ -3554,7 +3554,7 @@ dependencies = [
 name = "mkit-sync"
 version = "0.5.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "buffa",
  "bytes",
  "connectrpc",
@@ -3592,7 +3592,7 @@ version = "0.5.0"
 name = "mkit-transport-connect"
 version = "0.5.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "buffa",
  "bytes",
  "connectrpc",
