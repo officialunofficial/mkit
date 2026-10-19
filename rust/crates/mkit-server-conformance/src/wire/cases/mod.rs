@@ -45,6 +45,7 @@ mod list;
 mod list_repos;
 mod multipart;
 mod outcomes;
+mod pack_location_fixtures;
 mod pack_locations;
 mod packs;
 mod policy;
@@ -420,6 +421,8 @@ cases! {
     "upload.hash_mismatch_not_stored" => upload::hash_mismatch_not_stored, M0, [], [];
     "upload.oversize_resource_exhausted" => upload::oversize, M0, [], [];
     "upload.rejected_never_overwrites_existing" => upload::rejected_never_overwrites, M0, [], [];
+    "pack_locations.guard_refusals" => pack_location_fixtures::guard_refusals, M0, [PackLocations, PackLocationFixtures], [];
+    "pack_locations.corrupt_location_fallback" => pack_location_fixtures::corrupt_location_fallback, M0, [PackLocations, PackLocationFixtures], [];
     "pack_locations.opt_in_round_trip" => pack_locations::opt_in_round_trip, M0, [PackLocations], [];
     "pack_locations.no_location_without_opt_in" => pack_locations::no_location_without_opt_in, M0, [PackLocations], [];
     "download.not_found_before_any_message" => download::not_found_before_any_message, M0, [], [];
@@ -462,6 +465,8 @@ cases! {
     "list.paging_wire" => list::paging_wire, M0, [], [];
     "list.merge_paging_over_32_mib" => list::merge_paging_over_32_mib, M1, [], [];
     "growth.tickets_and_outbox_pruned" => growth::tickets_and_outbox_pruned, M1, [AuthV2, Tickets, Quota, TestFaults, Timers], [];
+    // The expiry probe advances a disposable fixture clock and runs last.
+    "pack_locations.denial_after_issue_bound" => pack_location_fixtures::denial_after_issue_bound, M0, [PackLocations, PackLocationFixtures], [];
 }
 
 /// The context one case runs in.

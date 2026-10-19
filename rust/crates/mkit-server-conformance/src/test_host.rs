@@ -371,9 +371,16 @@ impl TestHost {
         let kv = Arc::new(MemoryKv::with_clock(clock.clone()));
         let blobs = MemoryBlobStore::default();
         let preserved = MemoryBlobStore::new("preserved");
-        let locations = profile
-            .has(Feature::PackLocations)
-            .then(|| locations::Locations::new(base_url.clone(), blobs.clone(), clock.clone()));
+        let locations = profile.has(Feature::PackLocations).then(|| {
+            locations::Locations::new(
+                base_url.clone(),
+                blobs.clone(),
+                clock.clone(),
+                kv.clone(),
+                config.addressing.clone(),
+                profile.has(Feature::PackLocationFixtures),
+            )
+        });
         if let Some(provider) = &locations {
             config.pack_locations = Some(provider.config()?);
         }
@@ -1011,6 +1018,17 @@ fn configure_profile_features(
     profile: &Profile,
     config: &mut PipelineConfig,
 ) -> Result<(), String> {
+    if profile.has(Feature::PackLocationFixtures) {
+        if !profile.has(Feature::PackLocations)
+            || !profile.has(Feature::MultiRepo)
+            || !profile.has(Feature::IndexedMode)
+            || !matches!(profile.auth, WireAuth::AuthV2 { .. })
+        {
+            return Err("pack-location fixtures require pack locations, Multi addressing, indexed mode and auth v2".into());
+        }
+        config.takedown_denial = true;
+    }
+
     if profile.has(Feature::Takedown) {
         if !profile.has(Feature::Admin)
             || !profile.has(Feature::HttpObjects)

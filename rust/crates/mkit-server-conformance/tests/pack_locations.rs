@@ -352,3 +352,47 @@ async fn client_verifies_corrupt_location_and_retries_streaming_once() {
     assert_eq!(host.pack_location_fetches(), (1, false));
     host.shutdown().await;
 }
+
+#[tokio::test]
+async fn portable_pack_location_profile_exercises_all_scenarios() {
+    let mut profile = Profile::new(WireAuth::AuthV2 {
+        audience: "http://placeholder.invalid".into(),
+        repository: "default".into(),
+        seed: [0x61; 32],
+    });
+    profile.max_pack_bytes = 1 << 20;
+    profile.features.extend([
+        Feature::PackLocations,
+        Feature::PackLocationFixtures,
+        Feature::MultiRepo,
+        Feature::IndexedMode,
+        Feature::Tickets,
+    ]);
+    let host = TestHost::start(profile).await.unwrap();
+    let report = run(
+        &WireTarget {
+            base_url: host.base_url().parse().unwrap(),
+            profile: host.profile().clone(),
+        },
+        Some("pack_locations."),
+    )
+    .await;
+    for name in [
+        "pack_locations.opt_in_round_trip",
+        "pack_locations.no_location_without_opt_in",
+        "pack_locations.guard_refusals",
+        "pack_locations.denial_after_issue_bound",
+        "pack_locations.corrupt_location_fallback",
+    ] {
+        assert!(
+            matches!(report.verdict(name), Some(Verdict::Pass(_))),
+            "{}",
+            report.tap()
+        );
+    }
+    assert!(
+        !host.pack_location_fetches().1,
+        "location fetch carried mkit credentials"
+    );
+    host.shutdown().await;
+}

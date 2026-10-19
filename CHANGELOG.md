@@ -83,11 +83,18 @@ collect the applicable entries between their old and new immutable pins.
   scheduling; evidence, work charges, refusals, and the checkpoint format stay
   the same. No store reset is required.
 
+- Add `Request::PackLocationFixture` and `PackLocationState` to the optional
+  conformance test-control API. Migration: update exhaustive request matches;
+  implement and advertise `pack-locations.fixture` only on disposable test
+  hosts running the pack-location fixture profile. No production RPC or stored
+  format changes; no store reset.
+
 - Add `Location` to the generated `DownloadPackResponse` body enum and optional
   discovery and request fields. Migration: update exhaustive response matches;
   clients that do not opt in continue to receive the same streaming bytes.
   Configure `PipelineConfig::pack_locations` to offer locations; its default
-  remains `None`. No store reset.
+  remains `None`, as does `ServerInfo::max_pack_location_lifetime_ms` when
+  support is disabled. No store reset.
 
 - [embedder: breaking API] Freeze of the `mkit-primitives` decision and verifier
   surface. Every public step, decision, outcome, refusal, state and record enum

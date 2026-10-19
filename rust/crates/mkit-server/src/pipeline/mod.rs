@@ -2381,6 +2381,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         key: PackKey,
         accept_location: bool,
     ) -> Result<DownloadResponse, ServerError> {
+        // Anchor expiry before mutable read checks: a denial racing a slow
+        // authorization or body open must still take effect within the bound.
+        let location_config = self
+            .cfg
+            .pack_locations
+            .as_ref()
+            .filter(|_| accept_location)
+            .map(|config| (config, self.clock.now_ms()));
         let mut outcome = self.outcome(a);
         let opened = async {
             let op = self.identify(a, OpKind::DownloadPack { key })?;
@@ -2414,20 +2422,18 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 // Writers may stream unpublished pending packs, but external
                 // locations require the published reader membership as well.
                 // This extra read runs only with both opt-ins enabled.
-                let location_eligible = accept_location
-                    && self.cfg.pack_locations.is_some()
+                let location_eligible = location_config.is_some()
                     && (caller_view != CallerView::Writer
                         || self
                             .pack_is_member(a, &key, CallerView::Reader)
                             .await
                             .unwrap_or(false));
-                if location_eligible && let Some(config) = &self.cfg.pack_locations {
+                if location_eligible && let Some((config, started_ms)) = location_config {
                     let total_bytes = match &body {
                         crate::store::BlobBody::Bytes(bytes) => bytes.len() as u64,
                         crate::store::BlobBody::Stream { len, .. } => *len,
                     };
-                    if let Some(location) =
-                        config.locate(key, total_bytes, self.clock.now_ms()).await
+                    if let Some(location) = config.locate(key, total_bytes, started_ms).await
                         && location.expires_at_ms > self.clock.now_ms()
                     {
                         outcome.record(Ok(()));

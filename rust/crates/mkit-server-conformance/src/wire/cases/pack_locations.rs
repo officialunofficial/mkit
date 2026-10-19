@@ -8,6 +8,9 @@ use super::{CaseResult, Commit, Ctx, DownloadBody, Rpc, ensure, frame, random_pa
 use crate::wire::client::{Client, UNARY_PROTO, decode_unary};
 
 pub(super) async fn opt_in_round_trip(ctx: Ctx) -> CaseResult {
+    if ctx.profile().has(super::Feature::PackLocationFixtures) {
+        return super::pack_location_fixtures::round_trip(ctx).await;
+    }
     let reply = ctx
         .client()
         .post(
@@ -104,6 +107,9 @@ pub(super) async fn opt_in_round_trip(ctx: Ctx) -> CaseResult {
 }
 
 pub(super) async fn no_location_without_opt_in(ctx: Ctx) -> CaseResult {
+    if ctx.profile().has(super::Feature::PackLocationFixtures) {
+        return super::pack_location_fixtures::no_opt_in(ctx).await;
+    }
     let pack = random_pack(1024);
     ctx.put_pack(&pack).await?;
     let reply = ctx.download(&hash(&pack)).await?;

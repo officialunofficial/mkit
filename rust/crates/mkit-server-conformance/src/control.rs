@@ -5,6 +5,24 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+/// Test-only serving state for a pack-location conformance fixture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackLocationState {
+    /// Published, public membership with correct location bytes.
+    Available,
+    /// An inspection serving stop that hides membership from every caller.
+    Held,
+    /// Accepted membership awaiting inspection and publication.
+    Pending,
+    /// Published membership in a private repository.
+    Private,
+    /// A deployment denial, including already issued location expiry.
+    Denied,
+    /// Correct streaming bytes and same-length corrupt location bytes.
+    Corrupt,
+}
+
 /// Test-control protocol version.
 pub const VERSION: u32 = 1;
 /// Capability negotiation route (GET).
@@ -350,6 +368,14 @@ pub struct RelianceObservation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
+    /// Seed or change a single-pack fixture, using protocol identity and bytes.
+    /// Requires `pack-locations.fixture`. The content-addressed body is bounded
+    /// to 1 MiB. Denials are irreversible; scenarios use fresh pack bodies.
+    PackLocationFixture {
+        repository: String,
+        pack: Vec<u8>,
+        state: PackLocationState,
+    },
     /// Obtain a valid test-only wire setter statement without changing authority.
     /// Requires `authority.setter_fixture`; never returns signing key material.
     PrepareAuthoritySetter,

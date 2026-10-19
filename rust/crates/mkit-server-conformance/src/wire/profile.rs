@@ -171,6 +171,8 @@ pub enum Feature {
     AdvanceHold,
     /// Optional pack download locations.
     PackLocations,
+    /// Disposable pack-location fixture controls (never a wire capability).
+    PackLocationFixtures,
     /// Plain-HTTP object serving (M4).
     HttpObjects,
     /// Fixture explicitly configured with synchronous inspection refusal.
@@ -191,7 +193,7 @@ pub enum Feature {
     Admin,
 }
 
-const FEATURE_NAMES: [(Feature, &str); 39] = [
+const FEATURE_NAMES: [(Feature, &str); 40] = [
     (Feature::TransportWrites, "transport-writes"),
     (Feature::AuthoritySetter, "authority-setter"),
     (Feature::AuthorityFencing, "authority-fencing"),
@@ -227,6 +229,7 @@ const FEATURE_NAMES: [(Feature, &str); 39] = [
     (Feature::AdvanceHold, "advance-hold"),
     (Feature::HttpObjects, "http-objects"),
     (Feature::PackLocations, "pack-locations"),
+    (Feature::PackLocationFixtures, "pack-location-fixtures"),
     (Feature::SyncInspection, "sync-inspection"),
     (Feature::LaunchReadFixture, "launch-read-fixture"),
     (Feature::Gc, "gc"),
@@ -738,6 +741,7 @@ mod tests {
         for feature in [
             Feature::CombinedPublication,
             Feature::PackLocations,
+            Feature::PackLocationFixtures,
             Feature::Gc,
             Feature::AsyncInspection,
         ] {
