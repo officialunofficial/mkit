@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Document the reference server's clearance race: a held head can remain
+  advertised while live serving gates keep its bytes unavailable. Pin both
+  hold/apply orders, including ref-hinted pack and object reads beyond the
+  apply deadline. No API, refusal, or storage-format change.
+
 - Add optional pack locations to `DownloadPack`, negotiated through discovery
   and a per-request opt-in. Servers default to streaming; a configured location
   provider runs after the same read checks. Locations expire within the

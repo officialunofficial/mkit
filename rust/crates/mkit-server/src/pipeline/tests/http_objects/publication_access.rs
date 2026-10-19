@@ -3,7 +3,7 @@ use super::*;
 
 #[test]
 #[allow(clippy::too_many_lines)] // Real reader surfaces at both sides of the clearance deadline.
-fn clearance_hold_race_reader_exposure_before_and_after_deadline() {
+fn clearance_hold_race_keeps_head_advertised_but_never_serves_held_bytes() {
     use crate::rt::Clock;
     use crate::store::outbox::OutboxBuilder;
     use crate::store::publication::{self, Advance, Clearance, Pair, Witness};
@@ -11,9 +11,7 @@ fn clearance_hold_race_reader_exposure_before_and_after_deadline() {
 
     // Extend the timer reproducer with real packs, indexes and public readers.
     // Also cover a hold committed after clearance, without changing hold tests.
-    for (hold_before_apply, coherent_gate) in
-        [(true, false), (false, false), (true, true), (false, true)]
-    {
+    for hold_before_apply in [true, false] {
         let mut fx = fixture_tweaked(Hooks::new(), http_cfg(), |cfg| {
             cfg.sharding = Sharding::D34;
             cfg.takedown_denial = true;
@@ -143,11 +141,8 @@ fn clearance_hold_race_reader_exposure_before_and_after_deadline() {
             .require(Precondition::Equals(timer_key.clone(), timer.value))
             .delete(timer_key);
         let hold = || {
-            // A configured inspector must install this live gate before the hold.
-            // The witness-only cases separately probe an incoherent projection.
-            if coherent_gate {
-                stopped.store(true, Ordering::SeqCst);
-            }
+            // Holds require the coherent serving gate before their stored witnesses.
+            stopped.store(true, Ordering::SeqCst);
             let partition = fx.pipe.shards.membership(&repo, &BlobKey::pack(pack));
             assert_ne!(partition, source);
             let key = keys::published_member(&repo.name, &pack);
@@ -226,27 +221,18 @@ fn clearance_hold_race_reader_exposure_before_and_after_deadline() {
             let hinted_download = block_on(
                 fx.pipe
                     .download(&hinted(Procedure::DownloadPack), PackKey(pack)),
-            );
-            let hinted_served = if let Ok(mut stream) = hinted_download {
-                let bytes = block_on(async {
-                    let mut bytes = Vec::new();
-                    while let Some(chunk) = stream.chunks.next().await {
-                        bytes.extend_from_slice(&chunk.unwrap().data);
-                    }
-                    bytes
-                });
-                assert_eq!(hash(&bytes), pack);
-                true
-            } else {
-                false
-            };
-            assert_eq!(hinted_exists, !coherent_gate);
-            assert_eq!(hinted_served, !coherent_gate);
+            )
+            .err()
+            .unwrap();
+            assert!(!hinted_exists);
+            assert_eq!(hinted_download.code(), Code::NotFound);
             // Inline, extracted and chunked object sources all remain filtered.
             for object in [&d.small, &d.big, &d.manifest] {
                 assert_eq!(fx.get(&fx.object_url("room", &id(object))).status, 404);
             }
             assert_eq!(fx.get(&fx.ref_url("room", "race", "small.txt")).status, 404);
+            // The published head remains advertised: NotAfter expires the apply,
+            // not the stored publication. This is the documented residual.
             let head =
                 block_on(fx.pipe.read_ref(&anonymous(Procedure::ReadRef), race_ref)).unwrap();
             assert_eq!(head, Some(d.head()));
@@ -255,8 +241,16 @@ fn clearance_hold_race_reader_exposure_before_and_after_deadline() {
                 refs.iter().find(|entry| entry.name == race_ref).unwrap().id,
                 d.head()
             );
+            let state = block_on(publication::read(
+                &fx.pipe.meta,
+                &source,
+                &repo.name,
+                race_ref,
+            ))
+            .unwrap();
+            assert_eq!(state.published, 1);
             eprintln!(
-                "hold_before_apply={hold_before_apply} coherent_gate={coherent_gate} elapsed={elapsed}: PackExists=false DownloadPack=not_found hinted_exists={hinted_exists} hinted_bytes={hinted_served} object_reads=404 ReadRef=head ListRefs=head"
+                "hold_before_apply={hold_before_apply} elapsed={elapsed}: PackExists=false DownloadPack=not_found hinted_download=not_found object_reads=404 ReadRef=head ListRefs=head"
             );
         }
     }

@@ -3403,3 +3403,25 @@ writer's valid pair intact and return `PushError::PackmapContended`.
 regressions in `mkit-sync/tests/push.rs`, HTTP atomic guard encoding tests, and
 `formal/quint/advance`. Non-atomic transports retain their existing behavior;
 the atomic-capable source must never lower these writes to an ordered fallback.
+
+
+## Clearance deadlines do not expire published state
+
+**Always:** a host offering holds installs its coherent live serving gate before
+changing hold authority. The same publication policy supplies preparation and
+pack availability; ref-hinted downloads and object reads retain the gate. A
+clearance deadline bounds commit time only. A stale clearance may leave a held
+head advertised by ref reads after that deadline.
+
+**Because:** the reference store compares one partition per batch. Publication
+and denial or supplier-hold witnesses can live in different partitions.
+
+**If violated:** held bytes could remain readable through a ref hint, or a host
+could mistake an expired apply deadline for automatic publication revocation.
+
+**Enforcement status:** the required `PublicationPolicy::pack_available` method
+and its compile-fail example prevent omission of the gate interface; policy
+implementations retain responsibility for coherence. The D34 reader interleaving
+regression covers both write orders immediately and after 10,001 ms. Async
+inspection remains unintegrated; current startup rejects async and fail-open
+inspectors. SPEC-SERVER §10.2 records the remaining publication bookkeeping.
