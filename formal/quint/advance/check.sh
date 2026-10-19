@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Reproduce every quint-advance check (MKIT-27 / MKIT-17): advance.qnt, the
+# Reproduce every atomic-advance check: advance.qnt, the
 # advance_refs model (packmap CAS then head CAS, crashes and lost responses,
 # the retry ladder, the read_ref disambiguation, concurrent pushers, the
 # #521 re-baseline gate).
@@ -10,7 +10,7 @@
 #   QUINT=0 skips `quint run`; ONLY=<regex> restricts TLC/Apalache to
 #   matching "<module>::<invariant>" checks.
 #
-# Pins (MKIT-17 review): quint 0.32.0, Apalache 0.62.2 run directly on the
+# Pins: quint 0.32.0, Apalache 0.62.2 run directly on the
 # compiled TLA+ (not `quint verify`), TLC = tlc2.TLC from the Apalache 0.62.2
 # jar, Java 21. Tool locations (override any of them):
 #   FV_HOME     ${FV_HOME:-$HOME/.local/share/mkit-fv}
@@ -22,7 +22,7 @@
 #
 # Every line printed is "<check>  <expected outcome> (as expected)" or
 # "UNEXPECTED: ...". `ok` = the invariant holds (within the stated bound);
-# `violation` = a mutant, canary or documented-gap witness the checker must
+# `violation` = a mutant or canary witness the checker must
 # reach (non-vacuity, or a finding). The script exits 1 on any unexpected
 # outcome.
 set -euo pipefail
@@ -50,11 +50,15 @@ STEPS=${STEPS:-40}
 SAMPLES=${SAMPLES:-20000}
 F=advance.qnt
 
+# The additional ABA regression starts its restoring lease only after the
+# intermediate head exists; all original instances keep the original step.
+step_for() { if [[ $1 == gapAbaAny3 ]]; then echo abaStep; else echo step; fi; }
+
 # quint run: $1 module, $2 invariant, $3 expect ok|violation
 qrun() {
   [[ ${QUINT:-1} == 1 ]] || return 0
   local out rc=0
-  out=$(quint run "$F" --main "$1" --invariant "$2" --max-steps "$STEPS" \
+  out=$(quint run "$F" --main "$1" --step "$(step_for "$1")" --invariant "$2" --max-steps "$STEPS" \
     --max-samples "$SAMPLES" --backend rust --seed=0x1 2>&1) || rc=$?
   if [[ $3 == ok && $rc == 0 && $out == *"[ok]"* ]] ||
      [[ $3 == violation && $out == *"[violation]"* ]]; then
@@ -73,7 +77,7 @@ compile() {
   mkdir -p "$3"
   local try out
   for try in 1 2 3; do
-    if out=$(cd "$3" && quint compile --target tlaplus --main "$1" --invariant "$2" "$HERE/$F" 2>"$3/compile.err") &&
+    if out=$(cd "$3" && quint compile --target tlaplus --main "$1" --step "$(step_for "$1")" --invariant "$2" "$HERE/$F" 2>"$3/compile.err") &&
        [[ $out == *"MODULE"* ]]; then
       printf '%s\n' "$out" | sed -n '/^-* MODULE/,$p' | sed "1s/MODULE [A-Za-z0-9_]*/MODULE M/" > "$3/M.tla"
       (cd "$3" && unzip -o -j -q "$APA_JAR" tla2sany/StandardModules/Apalache.tla \
@@ -160,21 +164,19 @@ live() {
 # ---- typecheck + deterministic scenarios ------------------------------------
 quint typecheck advance.qnt && quint typecheck advance_test.qnt
 for m in ordered_test ordered_oldConflict_test ledger_test atomic_test noGate_test \
-  splitCas_test gapNoopAny_test gapHttpAny_test gapTwoAny_test gapAppendAny_test splitCasFF_test; do
+  splitCas_test gapNoopAny_test gapHttpAny_test gapTwoAny_test gapAppendAny_test gapAbaAny_test forceBudget_test futureLeaseNonforce_test splitCasFF_test; do
   quint test advance_test.qnt --main "$m" >/dev/null && note "test $m" ok || bad "test $m" failed
 done
 
 # Instances (advance.qnt, bottom): SAFE = Safety and Progress must hold.
 SAFE2="ordered2 atomic2 ledger2 http1 forceFF2 noop2 ledger2_oldConflict"
 SAFE3="ordered3 atomic3 ledger3 atomicAny3"
+FORCE="gapHttpAny2 gapNoopAny2 gapAppendAny2 gapTwoAny3 gapAppendTwoAny3 gapAbaAny3"
 
 # ---- quint run: random simulation --------------------------------------------
 for m in $SAFE2 $SAFE3; do qrun "$m" All ok; done
-# Documented gaps (findings F1, F2 in README.md): DeltaTransfer is violated.
-qrun gapHttpAny2 DeltaTransfer violation
-qrun gapNoopAny2 DeltaTransfer violation
-qrun gapAppendAny2 DeltaTransfer violation
-qrun gapAppendTwoAny3 DeltaTransfer violation
+# Former gap instances now require the full safety and retry invariants.
+for m in $FORCE; do qrun "$m" All ok; done
 # Mutants.
 qrun ordered2_oldConflict ConflictHonest violation
 qrun atomic2_oldConflict ConflictHonest violation
@@ -201,8 +203,8 @@ qrun atomic3 WitnessLandedThenNff violation
 # ---- TLC: exhaustive ---------------------------------------------------------
 if [[ ${TLC:-1} == 1 ]]; then
   for m in $SAFE2; do tlc "$m" All ok view; done
-  tlc gapHttpAny2 DeltaTransfer violation view
-  tlc gapNoopAny2 DeltaTransfer violation view
+  tlc gapHttpAny2 All ok view
+  tlc gapNoopAny2 All ok view
   tlc ordered2_oldConflict ConflictHonest violation view
   tlc atomic2_oldConflict ConflictHonest violation view
   tlc ordered2_trustConflict SuccessSound violation view
@@ -212,7 +214,7 @@ if [[ ${TLC:-1} == 1 ]]; then
   tlc noop2_splitCas NoLostUpdate violation view
   tlc ordered2_noTimeout NoStuckPusher violation view
   tlc ordered2_splitCas NoLostSuccess violation view
-  tlc gapAppendAny2 DeltaTransfer violation view
+  tlc gapAppendAny2 All ok view
   # Termination as a TLC temporal property (weak fairness, no VIEW).
   for m in $SAFE2; do live "$m" ok; done
   live ordered2_noTimeout violation
@@ -224,8 +226,9 @@ if [[ ${TLC:-1} == 1 ]]; then
   # 3 pushers, exhaustive (see README.md for the measured state counts).
   if [[ ${TLC3:-1} == 1 ]]; then
     for m in $SAFE3; do tlc "$m" All ok view; done
-    tlc gapTwoAny3 DeltaTransfer violation view
-    tlc gapAppendTwoAny3 DeltaTransfer violation view
+    tlc gapTwoAny3 All ok view
+    tlc gapAppendTwoAny3 All ok view
+    tlc gapAbaAny3 All ok view
   fi
 fi
 
@@ -235,10 +238,10 @@ if [[ ${APALACHE:-0} == 1 ]]; then
   for m in ordered2 atomic2 ledger2; do apa "$m" All "$D" ok; done
   apa ordered2_oldConflict ConflictHonest 10 violation   # the pinned 10-step witness
   apa ordered2_noGate DeltaTransfer 8 violation
-  apa gapNoopAny2 DeltaTransfer 5 violation
-  apa gapHttpAny2 DeltaTransfer 7 violation
-  apa gapTwoAny3 DeltaTransfer 8 violation
-  apa gapAppendAny2 DeltaTransfer 6 violation   # the pinned 6-step witness
+  apa gapNoopAny2 All 5 ok
+  apa gapHttpAny2 All 7 ok
+  apa gapTwoAny3 All 8 ok
+  apa gapAppendAny2 All 6 ok
   apa noop2_splitCas NoLostUpdate 7 violation
 fi
 [[ $fails == 0 ]] && echo "all checks as expected" || { echo "$fails unexpected"; exit 1; }

@@ -733,9 +733,11 @@ fn atomic_advance_uses_cached_advertisement() {
         let client = served.client();
         assert_eq!(served.calls("GetServerInfo"), 0, "construction is lazy");
         assert_eq!(client.supports_atomic_advance(), atomic == Some(true));
+        assert_eq!(client.atomic_advance_status(), Some(atomic == Some(true)));
         served.state.lock().unwrap().discovery =
             Discovery::Response(Box::new(info(atomic.map(|value| !value))));
         assert_eq!(client.supports_atomic_advance(), atomic == Some(true));
+        assert_eq!(client.atomic_advance_status(), Some(atomic == Some(true)));
         let ServerInfoView::V2(response) = client.server_info() else {
             panic!("valid v2 advertisement")
         };
@@ -1527,8 +1529,10 @@ fn legacy_and_exhausted_discovery_remain_conservative() {
         });
         let client = served.client();
         assert!(!client.supports_atomic_advance());
+        assert_eq!(client.atomic_advance_status(), None);
         served.state.lock().unwrap().discovery = Discovery::Response(Box::new(info(Some(true))));
         assert!(!client.supports_atomic_advance());
+        assert_eq!(client.atomic_advance_status(), None);
         if code == ErrorCode::Unimplemented {
             assert!(matches!(client.server_info(), ServerInfoView::Legacy));
         } else {

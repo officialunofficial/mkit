@@ -7,7 +7,7 @@ use mkit_core::{
     refs,
     transfer::packmap::{ChainState, PlanError, plan_advance},
 };
-const PACKMAP_CAS_ATTEMPTS: u32 = 8;
+pub(super) const PACKMAP_CAS_ATTEMPTS: u32 = 8;
 /// Walk a branch's packlist chain from `head_key` and return the flat
 /// **oldest-first** list of pack keys it references. See
 /// [`crate::packmap::walk_pack_chain`] for the walk / integrity-check
@@ -105,7 +105,9 @@ pub(crate) enum ChainAction {
 ///
 /// `resolved` reuses the pre-plan walk only while its head matches the live ref.
 /// A stale probe or lost CAS race requires a fresh walk. An idempotent retry only
-/// writes the head. Lost-response conflicts are disambiguated by reading it.
+/// writes the head. Atomic force pushes use the separate guarded driver,
+/// including this idempotent case. Lost-response conflicts are disambiguated
+/// by reading the head.
 pub(crate) fn advance_packmap(
     tx: &PushContext<'_>,
     branch: &str,

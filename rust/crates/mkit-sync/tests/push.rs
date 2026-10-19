@@ -718,3 +718,461 @@ fn caller_owned_session_keeps_upload_commitments_across_fresh_clients() {
         Some(node_key.into_hash())
     );
 }
+
+type BeforeWrite<'a> = Box<dyn FnOnce() + 'a>;
+type BeforeEachWrite<'a> = Box<dyn FnMut() + 'a>;
+type BeforePackmapRead<'a> = (usize, BeforeWrite<'a>);
+
+/// Interleave a complete competing push at a deterministic source boundary.
+/// The underlying source still performs every read, upload and atomic commit.
+struct InterleavedSource<'a> {
+    inner: &'a dyn RemoteSource,
+    skip_split_estimate: bool,
+    before_write: std::cell::RefCell<Option<BeforeWrite<'a>>>,
+    before_head_read: std::cell::RefCell<Option<BeforeWrite<'a>>>,
+    before_each_write: std::cell::RefCell<Option<BeforeEachWrite<'a>>>,
+    before_packmap_read: std::cell::RefCell<Option<BeforePackmapRead<'a>>>,
+    packmap_reads: std::cell::Cell<usize>,
+    calls: std::cell::RefCell<Vec<&'static str>>,
+}
+
+impl<'a> InterleavedSource<'a> {
+    fn new(inner: &'a dyn RemoteSource) -> Self {
+        Self {
+            inner,
+            skip_split_estimate: false,
+            before_write: std::cell::RefCell::default(),
+            before_head_read: std::cell::RefCell::default(),
+            before_each_write: std::cell::RefCell::default(),
+            before_packmap_read: std::cell::RefCell::default(),
+            packmap_reads: std::cell::Cell::new(0),
+            calls: std::cell::RefCell::default(),
+        }
+    }
+
+    fn interleave_write(&self) {
+        if let Some(run) = self.before_each_write.borrow_mut().as_mut() {
+            run();
+        }
+        let run = self.before_write.borrow_mut().take();
+        if let Some(run) = run {
+            run();
+        }
+    }
+}
+
+impl RemoteSource for InterleavedSource<'_> {
+    fn list_branches(&self) -> Result<Vec<refs::Ref>, mkit_sync::SourceError> {
+        self.calls.borrow_mut().push("list");
+        self.inner.list_branches()
+    }
+
+    fn read_ref(&self, name: &str) -> Result<Option<Hash>, mkit_sync::SourceError> {
+        if name == "refs/mkit/packmap/main" {
+            let count = self.packmap_reads.get() + 1;
+            self.packmap_reads.set(count);
+            let run = if self
+                .before_packmap_read
+                .borrow()
+                .as_ref()
+                .is_some_and(|(at, _)| *at == count)
+            {
+                self.before_packmap_read.borrow_mut().take()
+            } else {
+                None
+            };
+            if let Some((_, run)) = run {
+                run();
+            }
+            self.calls.borrow_mut().push("packmap");
+        } else {
+            let run = self.before_head_read.borrow_mut().take();
+            if let Some(run) = run {
+                run();
+            }
+            self.calls.borrow_mut().push("head");
+        }
+        self.inner.read_ref(name)
+    }
+
+    fn download_blob_via_ref(
+        &self,
+        key: &PackKey,
+        name: &str,
+    ) -> Result<Vec<u8>, mkit_sync::SourceError> {
+        self.calls.borrow_mut().push("node");
+        self.inner.download_blob_via_ref(key, name)
+    }
+
+    fn download_pack_via_ref(
+        &self,
+        key: &PackKey,
+        name: &str,
+    ) -> Result<Vec<u8>, mkit_sync::SourceError> {
+        self.calls.borrow_mut().push("pack");
+        self.inner.download_pack_via_ref(key, name)
+    }
+
+    fn supports_push(&self) -> bool {
+        self.inner.supports_push()
+    }
+
+    fn supports_atomic_advance(&self) -> bool {
+        self.inner.supports_atomic_advance()
+    }
+
+    fn atomic_force_head_condition(&self, observed_head: Option<Hash>) -> refs::RefWriteCondition {
+        self.inner.atomic_force_head_condition(observed_head)
+    }
+
+    fn upload_limits(&self) -> mkit_core::protocol::UploadLimits {
+        let mut limits = self.inner.upload_limits();
+        if self.skip_split_estimate {
+            limits.tickets_per_advance = None;
+        }
+        limits
+    }
+
+    fn upload_pack_via_ref(
+        &self,
+        bytes: &[u8],
+        key: &PackKey,
+        name: &str,
+    ) -> Result<(), mkit_sync::SourceError> {
+        self.calls.borrow_mut().push("upload-pack");
+        self.inner.upload_pack_via_ref(bytes, key, name)
+    }
+
+    fn upload_blob_via_ref(
+        &self,
+        bytes: &[u8],
+        key: &PackKey,
+        name: &str,
+    ) -> Result<(), mkit_sync::SourceError> {
+        self.calls.borrow_mut().push("upload-node");
+        self.inner.upload_blob_via_ref(bytes, key, name)
+    }
+
+    fn update_ref(
+        &self,
+        name: &str,
+        condition: refs::RefWriteCondition,
+        tip: &Hash,
+    ) -> Result<(), mkit_sync::SourceError> {
+        self.interleave_write();
+        self.calls.borrow_mut().push("update-head");
+        self.inner.update_ref(name, condition, tip)
+    }
+
+    fn advance_refs_committing(
+        &self,
+        head: &str,
+        head_condition: refs::RefWriteCondition,
+        tip: &Hash,
+        packmap: &str,
+        packmap_condition: refs::RefWriteCondition,
+        node: &Hash,
+        keys: &[PackKey],
+    ) -> Result<mkit_core::protocol::CommitOutcome, mkit_sync::SourceError> {
+        self.interleave_write();
+        self.calls.borrow_mut().push("advance");
+        self.inner.advance_refs_committing(
+            head,
+            head_condition,
+            tip,
+            packmap,
+            packmap_condition,
+            node,
+            keys,
+        )
+    }
+
+    fn repository_address(&self) -> Option<(String, String)> {
+        self.inner.repository_address()
+    }
+
+    fn repository_error(&self, error: mkit_sync::SourceError) -> SyncError {
+        self.inner.repository_error(error)
+    }
+}
+
+fn force_options<'a>() -> PushOptions<'a> {
+    PushOptions::default().with_target(PushTarget::Branch {
+        local: "main".into(),
+        remote: "main".into(),
+        lease: PushLease::Force,
+    })
+}
+
+fn assert_fresh_clone(
+    source: &dyn RemoteSource,
+    origin: &str,
+    name: &str,
+    tip: Hash,
+    content: &[u8],
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("clone");
+    mkit_sync::clone(
+        &target,
+        source,
+        &mkit_sync::CloneRemote {
+            name: "default".into(),
+            url: format!("mkit+{origin}/{name}"),
+            kind: "http".into(),
+        },
+        &mkit_sync::SyncOptions::default(),
+        &mkit_sync::NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(
+        refs::read_ref(&RepoLayout::single(&target), "main").unwrap(),
+        Some(tip)
+    );
+    assert_eq!(std::fs::read(target.join("file")).unwrap(), content);
+}
+
+fn force_push_during_rebaseline(appending: bool, before_packmap_read: bool) {
+    for backend in Backend::ALL {
+        let live = Live::self_certifying();
+        let name = format!("{}/force-reset", self_certifying_namespace());
+        backend.with_source(&live.origin, &name, |source| {
+            assert!(source.supports_atomic_advance());
+            let victim = repository();
+            let first = commit(victim.path(), None, b"first closure", 1);
+            push(victim.path(), source, &options()).unwrap();
+            let prior = commit(victim.path(), Some(first), b"second closure", 2);
+            push(victim.path(), source, &options()).unwrap();
+            let (tip, content) = if appending {
+                (
+                    commit(victim.path(), Some(first), b"forced closure", 3),
+                    b"forced closure".as_slice(),
+                )
+            } else {
+                refs::write_ref(&RepoLayout::single(victim.path()), "main", &first).unwrap();
+                (first, b"first closure".as_slice())
+            };
+            let competitor = repository();
+            let reset_tip = commit(competitor.path(), None, b"unrelated reset closure", 4);
+            refs::write_remote_ref(
+                &RepoLayout::single(competitor.path()),
+                "default",
+                "main",
+                &prior,
+            )
+            .unwrap();
+            let reset = || {
+                let mut opts = PushOptions::default().with_target(PushTarget::Branch {
+                    local: "main".into(),
+                    remote: "main".into(),
+                    lease: PushLease::WithLease,
+                });
+                opts.rebaseline_threshold = 1;
+                assert_eq!(
+                    push(competitor.path(), source, &opts).unwrap().tip,
+                    Some(reset_tip)
+                );
+                let node = source.read_ref("refs/mkit/packmap/main").unwrap().unwrap();
+                let bytes = source
+                    .download_blob_via_ref(&PackKey::from_hash(node), "refs/heads/main")
+                    .unwrap();
+                assert_eq!(transfer::decode_packlist(&bytes).unwrap().prev, None);
+            };
+            let raced = InterleavedSource::new(source);
+            if before_packmap_read {
+                *raced.before_packmap_read.borrow_mut() = Some((2, Box::new(reset)));
+            } else {
+                *raced.before_write.borrow_mut() = Some(Box::new(reset));
+            }
+            assert_eq!(
+                push(victim.path(), &raced, &force_options()).unwrap().tip,
+                Some(tip)
+            );
+            assert!(raced.before_write.borrow().is_none());
+            assert!(raced.before_packmap_read.borrow().is_none());
+            assert_eq!(source.read_ref("refs/heads/main").unwrap(), Some(tip));
+            assert_fresh_clone(source, &live.origin, &name, tip, content);
+        });
+    }
+}
+
+#[test]
+fn force_head_only_replans_after_concurrent_atomic_rebaseline() {
+    force_push_during_rebaseline(false, false);
+}
+
+#[test]
+fn force_append_replans_after_concurrent_atomic_rebaseline() {
+    force_push_during_rebaseline(true, false);
+}
+
+#[test]
+fn force_append_replans_if_chain_reset_before_packmap_probe() {
+    force_push_during_rebaseline(true, true);
+}
+
+#[test]
+fn force_push_success_adds_only_one_strong_packmap_read() {
+    for backend in Backend::ALL {
+        for force in [false, true] {
+            let live = Live::self_certifying();
+            let name = format!("{}/push-calls", self_certifying_namespace());
+            backend.with_source(&live.origin, &name, |source| {
+                let dir = repository();
+                let first = commit(dir.path(), None, b"first", 1);
+                push(dir.path(), source, &options()).unwrap();
+                let measured = InterleavedSource::new(source);
+                let opts = if force { force_options() } else { options() };
+                push(dir.path(), &measured, &opts).unwrap();
+                let head_only = measured.calls.take();
+                if force {
+                    assert_eq!(head_only.len(), 3, "{backend:?}: {head_only:?}");
+                    assert_eq!(head_only.iter().filter(|&&call| call == "head").count(), 1);
+                    assert_eq!(
+                        head_only.iter().filter(|&&call| call == "packmap").count(),
+                        1
+                    );
+                    assert_eq!(head_only.last(), Some(&"advance"));
+                } else {
+                    assert_eq!(head_only, ["head", "update-head"], "{backend:?}");
+                }
+                commit(dir.path(), Some(first), b"second", 2);
+                push(dir.path(), &measured, &opts).unwrap();
+                let appending = measured.calls.take();
+                assert_eq!(appending.iter().filter(|&&call| call == "head").count(), 1);
+                assert_eq!(
+                    appending.iter().filter(|&&call| call == "packmap").count(),
+                    2 + usize::from(force)
+                );
+                assert_eq!(appending.iter().filter(|&&call| call == "node").count(), 1);
+                assert_eq!(
+                    appending
+                        .iter()
+                        .filter(|&&call| call == "upload-pack")
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    appending
+                        .iter()
+                        .filter(|&&call| call == "upload-node")
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    appending.iter().filter(|&&call| call == "advance").count(),
+                    1
+                );
+                assert_eq!(
+                    appending.len(),
+                    7 + usize::from(force),
+                    "{backend:?}: {appending:?}"
+                );
+            });
+        }
+    }
+}
+
+#[test]
+fn force_push_rebaseline_replans_share_the_eight_attempt_budget() {
+    for backend in Backend::ALL {
+        for appending in [false, true] {
+            let live = Live::self_certifying();
+            let name = format!("{}/force-contention", self_certifying_namespace());
+            backend.with_source(&live.origin, &name, |source| {
+                let victim = repository();
+                let first = commit(victim.path(), None, b"first", 1);
+                push(victim.path(), source, &options()).unwrap();
+                if appending {
+                    commit(victim.path(), Some(first), b"forced", 2);
+                }
+                let competitor = repository();
+                let attempts = std::cell::Cell::new(0_u64);
+                let raced = InterleavedSource::new(source);
+                *raced.before_each_write.borrow_mut() = Some(Box::new(|| {
+                    let count = attempts.get() + 1;
+                    attempts.set(count);
+                    assert!(count <= 8, "force push retried beyond the existing budget");
+                    let prior = source.read_ref("refs/heads/main").unwrap().unwrap();
+                    refs::write_remote_ref(
+                        &RepoLayout::single(competitor.path()), "default", "main", &prior,
+                    ).unwrap();
+                    commit(competitor.path(), None, format!("reset {count}").as_bytes(), 10 + count);
+                    let mut opts = PushOptions::default().with_target(PushTarget::Branch {
+                        local: "main".into(),
+                        remote: "main".into(),
+                        lease: PushLease::WithLease,
+                    });
+                    opts.rebaseline_threshold = 1;
+                    push(competitor.path(), source, &opts).unwrap();
+                }));
+                assert!(matches!(push(victim.path(), &raced, &force_options()), Err(PushError::PackmapContended { branch }) if branch == "main"));
+                assert_eq!(attempts.get(), 8, "{backend:?}, appending={appending}");
+                let final_tip = refs::read_ref(&RepoLayout::single(competitor.path()), "main").unwrap().unwrap();
+                assert_fresh_clone(source, &live.origin, &name, final_tip, b"reset 8");
+            });
+        }
+    }
+}
+
+#[test]
+fn force_head_only_replans_after_packmap_aba_between_snapshot_reads() {
+    for backend in Backend::ALL {
+        let live = Live::self_certifying();
+        let name = format!("{}/force-aba", self_certifying_namespace());
+        backend.with_source(&live.origin, &name, |source| {
+            let victim = repository();
+            let first = commit(victim.path(), None, b"first", 1);
+            push(victim.path(), source, &options()).unwrap();
+            let original_node = source.read_ref("refs/mkit/packmap/main").unwrap().unwrap();
+            let tip = commit(victim.path(), Some(first), b"second", 2);
+            let mut raced = InterleavedSource::new(source);
+            // Exercise the direct planner's packmap-then-head snapshot. The
+            // inner source still performs its ordinary ticketed uploads.
+            raced.skip_split_estimate = true;
+            // Capture the original packmap, then observe the head of a newer
+            // chain. A reset back to the identical old node defeats a packmap
+            // guard alone: the empty plan depends on the newer head's closure.
+            *raced.before_head_read.borrow_mut() = Some(Box::new(|| {
+                push(victim.path(), source, &options()).unwrap();
+                assert_eq!(source.read_ref("refs/heads/main").unwrap(), Some(tip));
+                assert_ne!(
+                    source.read_ref("refs/mkit/packmap/main").unwrap(),
+                    Some(original_node)
+                );
+            }));
+            *raced.before_write.borrow_mut() = Some(Box::new(|| {
+                let newer_node = source.read_ref("refs/mkit/packmap/main").unwrap().unwrap();
+                assert_eq!(
+                    source
+                        .advance_refs_committing(
+                            "refs/heads/main",
+                            refs::RefWriteCondition::Match(tip),
+                            &first,
+                            "refs/mkit/packmap/main",
+                            refs::RefWriteCondition::Match(newer_node),
+                            &original_node,
+                            &[],
+                        )
+                        .unwrap(),
+                    mkit_core::protocol::CommitOutcome::Advanced(
+                        mkit_core::protocol::AdvanceOutcome::Committed,
+                    )
+                );
+                assert_eq!(
+                    source.read_ref("refs/mkit/packmap/main").unwrap(),
+                    Some(original_node)
+                );
+                assert_eq!(source.read_ref("refs/heads/main").unwrap(), Some(first));
+            }));
+            assert_eq!(
+                push(victim.path(), &raced, &force_options()).unwrap().tip,
+                Some(tip)
+            );
+            assert!(raced.before_head_read.borrow().is_none());
+            assert!(raced.before_write.borrow().is_none());
+            assert_eq!(&raced.calls.borrow()[..2], ["packmap", "head"]);
+            assert_fresh_clone(source, &live.origin, &name, tip, b"second");
+        });
+    }
+}

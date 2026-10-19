@@ -3332,3 +3332,27 @@ or a transient repository fact can permanently poison a valid pack.
 optional job progress, competing-fault tests across inline, scheduled, and
 `VerifyDriver`, and the unchanged success-path read and verification round probes.
 Only the original completed decode can proceed to index publication.
+
+
+## Atomic force publication retains its planning dependencies
+
+**Always:** every force write on an atomic-capable source compares its packmap
+in the same atomic advance as the head, including empty and idempotent plans.
+A dependent plan also compares the observed head. A changed chain must extend
+the captured immutable node before its uploaded packs can be reused; otherwise
+the push re-plans. Publication and re-planning share eight attempts per step.
+Failed or invalid discovery must refuse force publication before uploading;
+it cannot establish that concurrent clients cannot reset the chain.
+
+**Because:** an unconditional head write or an append onto an unrelated reset
+can lose the objects and delta bases the plan omitted. Separately read refs can
+also straddle a reset back to the same content-addressed packmap value.
+
+**If violated:** a successful force push could publish a head whose closure the
+advertised chain cannot reconstruct. Retry exhaustion must leave the competing
+writer's valid pair intact and return `PushError::PackmapContended`.
+
+**Enforced by:** `mkit-sync::push::force`, both Connect backend race and retry
+regressions in `mkit-sync/tests/push.rs`, HTTP atomic guard encoding tests, and
+`formal/quint/advance`. Non-atomic transports retain their existing behavior;
+the atomic-capable source must never lower these writes to an ordered fallback.

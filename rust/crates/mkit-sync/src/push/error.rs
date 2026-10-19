@@ -4,6 +4,13 @@ use super::RetryReason;
 pub enum PushError {
     #[error(transparent)]
     Sync(#[from] crate::SyncError),
+    /// Capability discovery failed or was invalid. No upload or ref write
+    /// was attempted, because another client may know the server can reset
+    /// the packmap atomically.
+    #[error(
+        "force push requires successful atomic-advance capability discovery; reconnect and retry"
+    )]
+    ForceCapabilityUnknown,
     /// A CAS ref write was rejected because the remote moved under us
     /// (non-fast-forward). Callers map this to an actionable
     /// fetch-then-retry / `--force-with-lease` hint.

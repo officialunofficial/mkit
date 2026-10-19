@@ -75,8 +75,9 @@ impl RefAdvanceJson {
 }
 
 /// CAS precondition in the advance body. `Any` has no representation — the
-/// server's ref API has no unconditional write — so callers fall back to the
-/// ordered two-CAS for that case ([`cond_to_json`] returns `None`).
+/// server's atomic ref API has no unconditional write. Direct low-level
+/// callers fall back to ordered writes for that case ([`cond_to_json`]
+/// returns `None`). Force pushes instead use an observed-head condition.
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 enum CondJson {
@@ -222,7 +223,8 @@ impl HttpTransport {
 
     /// Ordered non-atomic fallback (packmap first, then head) — identical to
     /// the [`mkit_core::protocol::Transport::advance_refs`] default. Used
-    /// when a precondition is `Any`, which the atomic endpoint can't express.
+    /// for direct low-level calls with `Any`, which the atomic endpoint can't
+    /// express. Native force pushes supply an observed-head condition instead.
     fn advance_refs_ordered(
         &self,
         head_ref: &str,
@@ -281,9 +283,9 @@ impl HttpTransport {
     }
 
     /// Atomic two-ref advance (#408): one `POST <base>/refs/advance` carrying
-    /// both ref specs, which the makechain vcs endpoint commits in a single
-    /// Durable-Object transaction. Auth mirrors `update_ref` (the same bearer
-    /// `apply_auth`). A `412` body names which precondition failed. `Any`
+    /// both ref specs, committed in a single transaction. Auth mirrors
+    /// `update_ref` (the same bearer `apply_auth`). A `412` body names which
+    /// precondition failed. `Any`
     /// conditions aren't expressible on the endpoint, so they fall back to the
     /// ordered two-CAS.
     pub(crate) fn advance_refs_impl(
@@ -513,8 +515,8 @@ mod tests {
 
     #[test]
     fn advance_refs_any_condition_falls_back_to_ordered_two_cas() {
-        // `Any` (force) isn't expressible on the atomic endpoint, so the
-        // override must NOT hit /refs/advance — it writes packmap then head.
+        // Direct low-level `Any` isn't expressible on the atomic endpoint,
+        // so it writes packmap then head. Push uses a conditioned head.
         let mut server = Server::new();
         let _pm = server
             .mock("PUT", "/myproj/refs/refs/mkit/packmap/main")
@@ -536,6 +538,90 @@ mod tests {
             )
             .unwrap();
         assert_eq!(out, AdvanceOutcome::Committed);
+    }
+
+    #[test]
+    fn atomic_force_head_only_posts_both_match_guards_without_puts() {
+        let mut server = Server::new();
+        let head = sample_hash(1);
+        let packmap = sample_hash(2);
+        let post = server
+            .mock("POST", "/myproj/refs/advance")
+            .match_body(Matcher::Json(serde_json::json!({
+                "head": {
+                    "ref": "refs/heads/main",
+                    "value": to_hex(&sample_hash(3)),
+                    "condition": { "kind": "match", "expected": to_hex(&head) }
+                },
+                "packmap": {
+                    "ref": "refs/mkit/packmap/main",
+                    "value": to_hex(&packmap),
+                    "condition": { "kind": "match", "expected": to_hex(&packmap) }
+                }
+            })))
+            .with_status(200)
+            .expect(1)
+            .create();
+        let put = server.mock("PUT", Matcher::Any).expect(0).create();
+        let t = make_transport(&server, Some("tok"));
+        let head_condition = t.atomic_force_head_condition(Some(head));
+        assert_eq!(head_condition, RefWriteCondition::Match(head));
+        assert!(t.supports_atomic_advance());
+        assert_eq!(
+            t.advance_refs(
+                "refs/heads/main",
+                head_condition,
+                &sample_hash(3),
+                "refs/mkit/packmap/main",
+                RefWriteCondition::Match(packmap),
+                &packmap,
+            )
+            .unwrap(),
+            AdvanceOutcome::Committed
+        );
+        post.assert();
+        put.assert();
+    }
+
+    #[test]
+    fn atomic_force_missing_head_posts_missing_and_packmap_match_without_puts() {
+        let mut server = Server::new();
+        let packmap = sample_hash(2);
+        let post = server
+            .mock("POST", "/myproj/refs/advance")
+            .match_body(Matcher::Json(serde_json::json!({
+                "head": {
+                    "ref": "refs/heads/main",
+                    "value": to_hex(&sample_hash(1)),
+                    "condition": { "kind": "missing" }
+                },
+                "packmap": {
+                    "ref": "refs/mkit/packmap/main",
+                    "value": to_hex(&sample_hash(3)),
+                    "condition": { "kind": "match", "expected": to_hex(&packmap) }
+                }
+            })))
+            .with_status(200)
+            .expect(1)
+            .create();
+        let put = server.mock("PUT", Matcher::Any).expect(0).create();
+        let t = make_transport(&server, Some("tok"));
+        let head_condition = t.atomic_force_head_condition(None);
+        assert_eq!(head_condition, RefWriteCondition::Missing);
+        assert_eq!(
+            t.advance_refs(
+                "refs/heads/main",
+                head_condition,
+                &sample_hash(1),
+                "refs/mkit/packmap/main",
+                RefWriteCondition::Match(packmap),
+                &sample_hash(3),
+            )
+            .unwrap(),
+            AdvanceOutcome::Committed
+        );
+        post.assert();
+        put.assert();
     }
 
     #[test]
