@@ -70,8 +70,8 @@ collect the applicable entries between their old and new immutable pins.
   dispatch threshold and becomes non-exhaustive. Migration: replace struct
   literals with `ComputeConfig::new(max_jobs)`. The default threshold is 64 KiB;
   use `.with_min_job_bytes(0)` to dispatch every entry. This only changes
-  scheduling; evidence, work charges, refusals, and checkpoint bytes stay the
-  same. No store reset is required.
+  scheduling; evidence, work charges, refusals, and the checkpoint format stay
+  the same. No store reset is required.
 
 - [embedder: breaking API] Freeze of the `mkit-primitives` decision and verifier
   surface. Every public step, decision, outcome, refusal, state and record enum

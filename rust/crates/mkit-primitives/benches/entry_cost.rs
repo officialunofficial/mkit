@@ -37,7 +37,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-// A window holds more than eight maximum-size raw entries. The same envelope
+// A window holds more than eight of the largest fixture entries. The same envelope
 // applies to serial and every job count; it admits all eight jobs plus reader,
 // decoder and evidence reservations without limiting the measured concurrency.
 const WINDOW_BYTES: u64 = 16 << 20;
