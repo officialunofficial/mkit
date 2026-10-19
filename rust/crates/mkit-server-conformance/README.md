@@ -20,6 +20,15 @@ without a dependency on `mkit-server`. The optional `storage-spi`, `stubs`, and
 only the conformance dependency, its base URL and profile, and its own test-control
 binding; it need not implement a Rust trait or adopt the reference storage SPI.
 
+## Pack-location profile
+
+Add `pack-locations` to the wire profile's `features` to exercise negotiated
+locations and unchanged streaming requests. The optional test host then mounts
+an expiring local HTTP listener for single-pack URLs. That loopback fixture is
+only for conformance; production locations require HTTPS. The focused
+`pack_locations` tests also cover denied, held, pending, private, and foreign
+repository packs, expiry after denial, and client fallback from corrupt bytes.
+
 ## Out-of-tree runner
 
 This crate is prepared for the next lockstep release; it is not published by

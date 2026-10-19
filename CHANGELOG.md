@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add optional pack locations to `DownloadPack`, negotiated through discovery
+  and a per-request opt-in. Servers default to streaming; a configured location
+  provider runs after the same read checks. Locations expire within the
+  advertised bound. The native client fetches without RPC credentials, verifies
+  the content address and exact length, and retries once through streaming on
+  failure. Disable negotiation with `Client::with_pack_locations(false)`.
+  Browser clients retain streaming. The reference server provides the provider
+  seam; no S3 presigner ships because the existing backend has no presigning API.
+  No upload or stored-format change; no store reset required.
+
 - Keep connectrpc and buffa caret requirements within one minor train and probe
   the latest compatible patches in CI. Moving either minor train is a breaking
   `mkit-rpc` change; consumers must adopt the corresponding `mkit-rpc` release.
@@ -72,6 +82,12 @@ collect the applicable entries between their old and new immutable pins.
   use `.with_min_job_bytes(0)` to dispatch every entry. This only changes
   scheduling; evidence, work charges, refusals, and the checkpoint format stay
   the same. No store reset is required.
+
+- Add `Location` to the generated `DownloadPackResponse` body enum and optional
+  discovery and request fields. Migration: update exhaustive response matches;
+  clients that do not opt in continue to receive the same streaming bytes.
+  Configure `PipelineConfig::pack_locations` to offer locations; its default
+  remains `None`. No store reset.
 
 - [embedder: breaking API] Freeze of the `mkit-primitives` decision and verifier
   surface. Every public step, decision, outcome, refusal, state and record enum

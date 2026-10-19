@@ -45,6 +45,7 @@ mod list;
 mod list_repos;
 mod multipart;
 mod outcomes;
+mod pack_locations;
 mod packs;
 mod policy;
 mod portable_reads;
@@ -419,6 +420,8 @@ cases! {
     "upload.hash_mismatch_not_stored" => upload::hash_mismatch_not_stored, M0, [], [];
     "upload.oversize_resource_exhausted" => upload::oversize, M0, [], [];
     "upload.rejected_never_overwrites_existing" => upload::rejected_never_overwrites, M0, [], [];
+    "pack_locations.opt_in_round_trip" => pack_locations::opt_in_round_trip, M0, [PackLocations], [];
+    "pack_locations.no_location_without_opt_in" => pack_locations::no_location_without_opt_in, M0, [PackLocations], [];
     "download.not_found_before_any_message" => download::not_found_before_any_message, M0, [], [];
     "download.chunks_contiguous_ending_last" => download::chunks_contiguous_ending_last, M0, [], [];
     "health.serving" => health::serving, M0, [Health], [];

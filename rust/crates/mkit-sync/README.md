@@ -366,3 +366,13 @@ scheduler, no HTTP/2, no Connect runtime.
 ## License
 
 MIT OR Apache-2.0.
+
+## Pack locations
+
+`NativeHttp` supports negotiated pack locations through a separate TLS client
+with built-in web PKI roots and no client authentication. Location requests use
+no RPC headers, cookies, or credentials, and refuse redirects. HTTPS is required.
+The transfer timeout and download byte cap still apply. The hidden
+`with_test_pack_location_http(true)` override permits loopback HTTP only for
+test fixtures. Disable negotiation on the protocol client with
+`Client::with_pack_locations(false)` before constructing `ClientSource`.

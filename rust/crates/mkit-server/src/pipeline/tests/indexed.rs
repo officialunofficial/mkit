@@ -1106,6 +1106,7 @@ fn pack_exists_keeps_malformed_denial_replies_retryable() {
 #[allow(clippy::too_many_lines)] // One real advance exercises both caller views and both byte RPCs.
 fn inspection_pending_is_writer_visible_but_held_bytes_are_absent_for_everyone() {
     let (mut env, owner, identity) = environment();
+    env.pipe.cfg.pack_locations = Some(super::pack_locations::config());
     env.pipe = env
         .pipe
         .with_publication_policy(Arc::new(InspectionPolicy(
@@ -1181,6 +1182,16 @@ fn inspection_pending_is_writer_visible_but_held_bytes_are_absent_for_everyone()
                 Code::NotFound
             );
             assert!(block_on(env.pipe.download(&writer, PackKey(pack_id))).is_ok());
+            assert_eq!(
+                block_on(env.pipe.download_response(&reader, PackKey(pack_id), true))
+                    .unwrap_err()
+                    .code(),
+                Code::NotFound
+            );
+            assert!(matches!(
+                block_on(env.pipe.download_response(&writer, PackKey(pack_id), true)).unwrap(),
+                DownloadResponse::Stream(_)
+            ));
         }
         let key = keys::membership(&r.name, &pack_id);
         let raw = block_on(env.pipe.meta.get(&p, &key)).unwrap().unwrap();
@@ -1197,6 +1208,12 @@ fn inspection_pending_is_writer_visible_but_held_bytes_are_absent_for_everyone()
             if procedure == Procedure::PackExists {
                 assert!(!block_on(env.pipe.pack_exists(auth, PackKey(pack_id))).unwrap());
             } else {
+                assert_eq!(
+                    block_on(env.pipe.download_response(auth, PackKey(pack_id), true))
+                        .unwrap_err()
+                        .code(),
+                    Code::NotFound
+                );
                 assert_eq!(
                     block_on(env.pipe.download(auth, PackKey(pack_id)))
                         .err()

@@ -51,6 +51,7 @@ stubs = [
 # Test-only in-process server for contract consumers. It is deliberately
 # opt-in; optimized builds additionally require `reference-runner`.
 test-host = [
+    "mkit-server/test-support",
     "storage-spi",
     "__test-faults",
     "http-objects",

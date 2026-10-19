@@ -7,6 +7,28 @@ profile; storage-only groundwork is labeled explicitly. The
 [SPEC-SERVER profile map](specs/SPEC-SERVER.md#1-scope-and-relation-to-spec-transport-connect)
 distinguishes current enforcement from future integration.
 
+## Pack locations preserve read checks and verify bytes before use
+
+**Always:** issuing a pack location applies the same repository membership,
+read authorization, denial, takedown, and inspection checks as streaming.
+Locations require both discovery support and request opt-in, and expire within
+an advertised finite bound. Clients fetch without transport credentials and
+verify the pack content address and exact length before returning any bytes.
+
+**Because:** an external pack host must not bypass repository policy or promote
+unverified bytes into the read path. Issued URLs remain usable only until their
+bounded expiry or an earlier purge.
+
+**If violated:** callers can read hidden packs, leak transport credentials, or
+consume corrupted external bytes. A deployment can promise a takedown deadline
+it cannot enforce.
+
+**Enforcement status:** `Pipeline::download` shares its read gate with location
+issuance. `PackLocationConfig` validates provider lifetime, URL, and length.
+The native channel uses a separate credential-free TLS client; the protocol
+client verifies both commitments and falls back once without location opt-in.
+The pack-location conformance profile exercises the external HTTP boundary.
+
 ## Cached imports and gc agree on object retention
 
 **Always:** gc's final age check and unlink exclude bulk refresh/write on the

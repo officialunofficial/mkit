@@ -41,6 +41,34 @@ pub trait HttpTransport {
         response_limit: usize,
     ) -> Result<Response<Vec<u8>>, String>;
 
+    /// Whether this channel can fetch pack locations without RPC credentials.
+    /// Channels without an implementation, including browser hosts, do not
+    /// opt in. A host must also refuse redirects and bound response bytes.
+    fn supports_pack_locations(&self) -> bool {
+        false
+    }
+
+    /// Explicit test-host override for loopback HTTP fixtures. Production
+    /// channels keep this false and require HTTPS locations.
+    #[doc(hidden)]
+    fn allows_test_pack_location_http(&self) -> bool {
+        false
+    }
+
+    /// Fetch a location with a fresh credential-free GET. Never apply RPC
+    /// policies, auth-v2 headers, tokens, cookies, or default credentials.
+    /// HTTPS is required; loopback HTTP is reserved for test hosts.
+    ///
+    /// # Errors
+    /// A fetch, protocol, timeout, or response-size failure.
+    async fn fetch_pack_location(
+        &self,
+        _url: &str,
+        _response_limit: usize,
+    ) -> Result<Vec<u8>, String> {
+        Err("pack locations are unsupported".into())
+    }
+
     /// Exchange a buffered request with optional host failure diagnostics.
     /// The concrete diagnostic type preserves conditional future thread safety.
     ///
@@ -136,6 +164,13 @@ pub struct RequestTimeout(pub Duration);
 /// budget. The marker alone supplies no timeout and does not change signatures.
 #[derive(Clone, Copy, Debug)]
 pub struct AdvertiseRequestTimeout;
+
+fn verify_location_download(bytes: &[u8], key: &Hash) -> Result<(), Error> {
+    if mkit_core::pack::pack_key(bytes) != *key {
+        return Err(Error::Invalid("pack content commitment"));
+    }
+    Ok(())
+}
 
 fn channel_error(error: ChannelError) -> Error {
     match error {
@@ -453,6 +488,7 @@ pub(crate) struct Rpc<'a, T, S, C, O = NoObserver, P: ?Sized = NoRequestPolicy> 
     pub(crate) request_policy: Option<&'a P>,
     pub(crate) destination: &'a Destination,
     pub(crate) deadline_ms: i64,
+    pub(crate) location_lifetime: Option<&'a std::sync::OnceLock<Option<u64>>>,
 }
 
 /// Per-call options: a caller-owned identity, an optional `X-Mkit-Ref` hint
@@ -506,6 +542,7 @@ impl<'a, T, S, C> Rpc<'a, T, S, C> {
             request_policy: None,
             destination,
             deadline_ms,
+            location_lifetime: None,
         }
     }
 }
@@ -520,6 +557,7 @@ impl<'a, T, S, C, O, P: ?Sized> Rpc<'a, T, S, C, O, P> {
             request_policy: self.request_policy,
             destination: self.destination,
             deadline_ms: self.deadline_ms,
+            location_lifetime: self.location_lifetime,
         }
     }
 }
@@ -564,6 +602,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
             request_policy: self.request_policy,
             destination: self.destination,
             deadline_ms: self.deadline_ms,
+            location_lifetime: self.location_lifetime,
         };
         let body = message.encode_to_vec();
         let commitment = format!("body:{}", to_hex(&hash(&body)));
@@ -640,8 +679,118 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         cap: u64,
         opts: Opts<'_>,
     ) -> Result<(Vec<u8>, Option<Identity>), Error> {
+        let lifetime = self.pack_location_lifetime().await;
+        if let Some(lifetime) = lifetime {
+            if let Ok((pack, identity)) = self.download_attempt(key, cap, opts, true).await {
+                if let Some(location) = pack.location {
+                    if let Ok(bytes) = self.fetch_location(key, cap, lifetime, location).await {
+                        return Ok((bytes, identity));
+                    }
+                } else {
+                    verify_location_download(&pack.bytes, &key)?;
+                    return Ok((pack.bytes, identity));
+                }
+            }
+            // The opt-in changes the signed request body. Build and sign the
+            // fallback as a separate call, retaining the caller's ref hint.
+            let (pack, identity) = self
+                .download_attempt(
+                    key,
+                    cap,
+                    Opts {
+                        identity: None,
+                        ..opts
+                    },
+                    false,
+                )
+                .await?;
+            verify_location_download(&pack.bytes, &key)?;
+            return Ok((pack.bytes, identity));
+        }
+        let (pack, identity) = self.download_attempt(key, cap, opts, false).await?;
+        Ok((pack.bytes, identity))
+    }
+
+    async fn pack_location_lifetime(&self) -> Option<u64> {
+        if !self.transport.supports_pack_locations() || cfg!(target_arch = "wasm32") {
+            return None;
+        }
+        let cache = self.location_lifetime?;
+        if let Some(lifetime) = cache.get() {
+            return *lifetime;
+        }
+        let info = self.destination.server_info(self.transport).await.ok()?;
+        let lifetime = info
+            .max_pack_location_lifetime_ms
+            .filter(|max| *max > 0 && info.supports_pack_locations == Some(true));
+        let _ = cache.set(lifetime);
+        lifetime
+    }
+
+    async fn fetch_location(
+        &self,
+        key: Hash,
+        cap: u64,
+        lifetime: u64,
+        location: crate::proto::DownloadPackLocation,
+    ) -> Result<Vec<u8>, Error> {
+        let size = location
+            .total_bytes
+            .ok_or(Error::Invalid("location size"))?;
+        if size > cap {
+            return Err(Error::Limit("pack download"));
+        }
+        let expires = location
+            .expires_at_ms
+            .filter(|v| *v > 0)
+            .ok_or(Error::Invalid("location expiry"))?;
+        if let Some(clock) = self.auth.map(|(_, clock)| clock).or(self.unsigned_clock) {
+            let remaining = expires
+                .checked_sub(clock.now_ms())
+                .and_then(|v| u64::try_from(v).ok());
+            if !remaining.is_some_and(|v| v > 0 && v <= lifetime) {
+                return Err(Error::Invalid("location expiry"));
+            }
+        }
+        let url = location.url.ok_or(Error::Invalid("location URL"))?;
+        let uri: http::Uri = url.parse().map_err(|_| Error::Invalid("location URL"))?;
+        let host = uri.host().ok_or(Error::Invalid("location host"))?;
+        let loopback = host == "localhost" || host == "127.0.0.1" || host == "[::1]";
+        if uri.authority().is_none_or(|a| a.as_str().contains('@'))
+            || !(uri.scheme_str() == Some("https")
+                || (self.transport.allows_test_pack_location_http()
+                    && loopback
+                    && uri.scheme_str() == Some("http")))
+            || url.contains('#')
+        {
+            return Err(Error::Invalid("location URL"));
+        }
+        let bytes = self
+            .transport
+            .fetch_pack_location(
+                &url,
+                usize::try_from(size).map_err(|_| Error::Limit("pack download"))?,
+            )
+            .await
+            .map_err(Error::Transport)?;
+        // Location bytes never honor a host's streaming hash-verification
+        // override: an external host is untrusted until both checks pass.
+        if bytes.len() as u64 != size || mkit_core::pack::pack_key(&bytes) != key {
+            return Err(Error::Invalid("pack location content commitment"));
+        }
+        Ok(bytes)
+    }
+
+    async fn download_attempt(
+        &self,
+        key: Hash,
+        cap: u64,
+        opts: Opts<'_>,
+        accept_location: bool,
+    ) -> Result<(crate::stream::Pack, Option<Identity>), Error> {
         let request = crate::proto::DownloadPackRequest {
             pack_id: Some(key.to_vec()),
+            accept_location: accept_location.then_some(true),
             ..Default::default()
         };
         let body = framed(&request.encode_to_vec())?;
@@ -656,7 +805,8 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         let limit = opts.limit;
         let mut chunks = crate::stream::Chunks(std::iter::once(Ok(body)));
         let sink = crate::stream::Decoder::profiled(
-            crate::stream::Pack::profiled(key, cap, self.response_profile("DownloadPack")),
+            crate::stream::Pack::profiled(key, cap, self.response_profile("DownloadPack"))
+                .accept_locations(accept_location),
             limit,
             self.response_profile("DownloadPack"),
         );
@@ -670,7 +820,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
                 sink,
             )
             .await?;
-        Ok((sink.sink.bytes, identity))
+        Ok((sink.sink, identity))
     }
 
     fn apply_ref_hint<B>(

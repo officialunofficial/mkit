@@ -31,6 +31,15 @@ pub struct DownloadChunk {
     pub last: bool,
 }
 
+/// A normal stream or a verified, bounded provider location.
+#[derive(Debug)]
+pub enum DownloadResponse {
+    /// Bytes streamed through the transport.
+    Stream(DownloadStream),
+    /// Single-pack location, returned only after explicit client opt-in.
+    Location(crate::pack_location::PackLocation),
+}
+
 /// A pack download: its length, for the header message, then its chunks.
 /// The stream owns its data (`'static`), so a binding can hand it to
 /// Connect's `Response::stream_ok` without borrowing the pipeline.

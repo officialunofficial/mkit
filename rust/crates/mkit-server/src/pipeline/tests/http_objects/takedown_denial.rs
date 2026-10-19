@@ -181,7 +181,8 @@ fn default_off_keeps_cached_reads_bounded_without_block_reads() {
 
 #[test]
 fn legacy_pack_denial_precedes_exists_download_and_already_present() {
-    let fx = fixture_tweaked(Hooks::new(), http_cfg(), |c| c.takedown_denial = true);
+    let mut fx = fixture_tweaked(Hooks::new(), http_cfg(), |c| c.takedown_denial = true);
+    fx.pipe.cfg.pack_locations = Some(super::super::pack_locations::config());
     let data = data();
     let pack = fx.push("room", &data.refs(), data.head(), None);
     let extracted = fx.object_url("room", &id(&data.big));
@@ -206,6 +207,15 @@ fn legacy_pack_denial_precedes_exists_download_and_already_present() {
         &fx.identity("room"),
         Procedure::DownloadPack,
         fx.number(),
+    );
+    assert_eq!(
+        block_on(
+            fx.pipe
+                .download_response(&fx.auth(&request), PackKey(pack), true)
+        )
+        .unwrap_err()
+        .code(),
+        Code::NotFound
     );
     assert_eq!(
         block_on(fx.pipe.download(&fx.auth(&request), PackKey(pack)))

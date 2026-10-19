@@ -431,6 +431,8 @@ pub(crate) struct Pack {
     last: bool,
     verify_hash: bool,
     pub(crate) bytes: Vec<u8>,
+    accept_location: bool,
+    pub(crate) location: Option<crate::proto::DownloadPackLocation>,
 }
 impl Pack {
     #[cfg(test)]
@@ -444,15 +446,29 @@ impl Pack {
             expected: None,
             last: false,
             verify_hash: !profile.skip_download_hash_verification,
+            accept_location: false,
+            location: None,
             bytes: Vec::new(),
         }
+    }
+}
+impl Pack {
+    pub(crate) fn accept_locations(mut self, accept: bool) -> Self {
+        self.accept_location = accept;
+        self
     }
 }
 impl FrameSink for Pack {
     fn frame(&mut self, bytes: &[u8]) -> Result<(), Error> {
         let response = DownloadPackResponse::decode_from_slice(bytes)
             .map_err(|_| Error::Invalid("download protobuf"))?;
+        if self.location.is_some() {
+            return Err(Error::Invalid("message after pack location"));
+        }
         match response.body {
+            Some(Body::Location(location)) if self.accept_location && self.expected.is_none() => {
+                self.location = Some(*location);
+            }
             Some(Body::Header(header)) if self.expected.is_none() && self.bytes.is_empty() => {
                 let size = header.total_bytes.ok_or(Error::Invalid("download size"))?;
                 if size > self.cap {
@@ -488,6 +504,9 @@ impl FrameSink for Pack {
         Ok(())
     }
     fn finish(&mut self) -> Result<(), Error> {
+        if self.location.is_some() {
+            return Ok(());
+        }
         if !self.last
             || self.expected != Some(self.bytes.len() as u64)
             || (self.verify_hash && mkit_core::pack::pack_key(&self.bytes) != self.key)

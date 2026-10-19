@@ -300,3 +300,12 @@ still apply. A failure returns no complete pack.
 it in a `RequestTimeout` extension; native channels take the smaller of that
 budget and their configured metadata or transfer limit. A zero policy budget
 refuses dispatch. Recovery and scheduling remain in the host.
+
+## Pack locations
+
+Channels can implement `HttpTransport::supports_pack_locations` and
+`fetch_pack_location` to fetch external packs without credentials or redirects.
+The client negotiates support through discovery, checks the exact length and
+pack content address before returning bytes, and retries once through streaming
+if a location fails. `Client::with_pack_locations(false)` disables negotiation.
+Channels without that implementation and wasm clients keep streaming.

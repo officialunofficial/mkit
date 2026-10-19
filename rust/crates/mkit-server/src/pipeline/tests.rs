@@ -11,6 +11,7 @@ mod http_objects;
 mod indexed;
 mod info;
 mod list_repos;
+mod pack_locations;
 mod policy;
 mod publication_binding;
 mod ref_admission;

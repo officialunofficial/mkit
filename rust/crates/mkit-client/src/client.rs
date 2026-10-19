@@ -97,6 +97,8 @@ pub struct Client<'a, T, S = NoSigner, C = NoClock, O = NoObserver, P: ?Sized = 
     observer: &'a O,
     request_policy: Option<&'a P>,
     unsigned_writes: bool,
+    pack_locations: bool,
+    location_lifetime: std::sync::OnceLock<Option<u64>>,
 }
 
 impl<T, S, C, O, P: ?Sized> std::fmt::Debug for Client<'_, T, S, C, O, P> {
@@ -120,6 +122,8 @@ impl<'a, T: HttpTransport> Client<'a, T> {
             observer: &NoObserver,
             request_policy: None,
             unsigned_writes: false,
+            pack_locations: true,
+            location_lifetime: std::sync::OnceLock::new(),
         }
     }
 }
@@ -138,6 +142,8 @@ impl<'a, T: HttpTransport, C: Clock> Client<'a, T, NoSigner, C> {
             observer: &NoObserver,
             request_policy: None,
             unsigned_writes: false,
+            pack_locations: true,
+            location_lifetime: std::sync::OnceLock::new(),
         }
     }
 }
@@ -169,6 +175,8 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Client<'a, T, S, C> {
             observer: &NoObserver,
             request_policy: None,
             unsigned_writes: false,
+            pack_locations: true,
+            location_lifetime: std::sync::OnceLock::new(),
         }
     }
 
@@ -183,11 +191,22 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Client<'a, T, S, C> {
             observer: &NoObserver,
             request_policy: None,
             unsigned_writes: false,
+            pack_locations: true,
+            location_lifetime: std::sync::OnceLock::new(),
         }
     }
 }
 
 impl<'a, T, S, C, O, P: ?Sized> Client<'a, T, S, C, O, P> {
+    /// Enable or disable pack-location negotiation. Enabled by default only
+    /// when the channel supports credential-free location fetching. Disabling
+    /// this keeps every download on the streaming RPC path.
+    #[must_use]
+    pub fn with_pack_locations(mut self, enabled: bool) -> Self {
+        self.pack_locations = enabled;
+        self
+    }
+
     /// Opt an unsigned client into clock-backed write replay metadata. This
     /// does not enable writes or signing, and does not change a signed client's
     /// configured clock. Use [`Client::anonymous_with_clock`] when selecting a
@@ -230,6 +249,8 @@ impl<'a, T, S, C, O, P: ?Sized> Client<'a, T, S, C, O, P> {
             observer: self.observer,
             request_policy: Some(policy),
             unsigned_writes: self.unsigned_writes,
+            pack_locations: self.pack_locations,
+            location_lifetime: self.location_lifetime,
         }
     }
 
@@ -247,6 +268,8 @@ impl<'a, T, S, C, O, P: ?Sized> Client<'a, T, S, C, O, P> {
             observer,
             request_policy: self.request_policy,
             unsigned_writes: self.unsigned_writes,
+            pack_locations: self.pack_locations,
+            location_lifetime: self.location_lifetime,
         }
     }
 }
@@ -269,6 +292,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
             destination: &self.destination,
             // Per-RPC calls have no push deadline; the signed window bounds them.
             deadline_ms: i64::MAX,
+            location_lifetime: self.pack_locations.then_some(&self.location_lifetime),
         }
     }
 
@@ -582,7 +606,9 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
     /// A transport with incremental responses retains the final pack and one
     /// response frame. The buffered fallback retains the response plus the
     /// returned pack, so its peak memory is about twice `max_bytes` plus framing.
-    /// An individual frame is bounded by the same response cap.
+    /// An individual frame is bounded by the same response cap. A failed
+    /// negotiated location triggers one separately signed streaming call with
+    /// a fresh identity, which is returned in the reply.
     ///
     /// # Errors
     /// Transport, remote, limit or commitment failures.

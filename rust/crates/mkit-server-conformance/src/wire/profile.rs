@@ -169,6 +169,8 @@ pub enum Feature {
     /// Runner fixture configured with a 2,000 ms pending-verification hold.
     /// This selects timing probes; it is not a wire capability.
     AdvanceHold,
+    /// Optional pack download locations.
+    PackLocations,
     /// Plain-HTTP object serving (M4).
     HttpObjects,
     /// Fixture explicitly configured with synchronous inspection refusal.
@@ -189,7 +191,7 @@ pub enum Feature {
     Admin,
 }
 
-const FEATURE_NAMES: [(Feature, &str); 38] = [
+const FEATURE_NAMES: [(Feature, &str); 39] = [
     (Feature::TransportWrites, "transport-writes"),
     (Feature::AuthoritySetter, "authority-setter"),
     (Feature::AuthorityFencing, "authority-fencing"),
@@ -224,6 +226,7 @@ const FEATURE_NAMES: [(Feature, &str); 38] = [
     (Feature::IndexedAsync, "indexed-async"),
     (Feature::AdvanceHold, "advance-hold"),
     (Feature::HttpObjects, "http-objects"),
+    (Feature::PackLocations, "pack-locations"),
     (Feature::SyncInspection, "sync-inspection"),
     (Feature::LaunchReadFixture, "launch-read-fixture"),
     (Feature::Gc, "gc"),
@@ -734,6 +737,7 @@ mod tests {
         let default = ProfileSpec::default().build(|_| None).unwrap();
         for feature in [
             Feature::CombinedPublication,
+            Feature::PackLocations,
             Feature::Gc,
             Feature::AsyncInspection,
         ] {

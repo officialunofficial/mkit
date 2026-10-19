@@ -193,6 +193,25 @@ fn private_repository_reads_return_the_missing_repository_error() {
 }
 
 #[test]
+fn opted_in_private_pack_download_requires_read_authorization() {
+    let owner = key(1);
+    let stranger = key(2);
+    let repo = repository(&owner);
+    let mut env = environment(&owner, AuthorizerRole::Check, false);
+    env.pipe.cfg.pack_locations = Some(super::pack_locations::config());
+    let id = repo_id(&env, &owner);
+    put_repo(&env, &id, Some(codec::StoredVisibility::Private));
+    for req in [
+        anonymous_read(&repo, Procedure::DownloadPack),
+        signed_read(&stranger, &repo, Procedure::DownloadPack, None),
+    ] {
+        let auth = env.auth(&req).unwrap();
+        let error = block_on(env.pipe.download_response(&auth, PackKey(A), true)).unwrap_err();
+        assert_not_found(&error, "private location download");
+    }
+}
+
+#[test]
 fn private_repository_reads_allow_authorized_callers() {
     let owner = key(1);
     let grantee = key(2);

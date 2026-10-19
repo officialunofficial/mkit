@@ -158,11 +158,13 @@ pub struct NativeHttp {
     // Declared first so in-flight connection tasks drop before the runtime
     // that drives them.
     client: HyperClient<CountingConnector, NativeBody>,
+    location_client: HyperClient<Connector, NativeBody>,
     connects: Arc<AtomicU64>,
     runtime: tokio::runtime::Runtime,
     metadata_timeout: Duration,
     transfer_timeout: Duration,
     allow_insecure_http: bool,
+    test_pack_location_http: bool,
     default_headers: HeaderMap,
 }
 
@@ -202,8 +204,9 @@ impl NativeHttp {
         Self::with_tls_config(&default_tls_config()?)
     }
 
-    /// A transport using `tls` for `https` origins. Cleartext `http` is
-    /// refused except to loopback, unless
+    /// A transport using `tls` for RPC `https` origins. Pack-location fetches
+    /// always use the built-in web PKI roots without client authentication.
+    /// Cleartext `http` is refused except to loopback, unless
     /// [`allow_insecure_http`](Self::allow_insecure_http) is set.
     ///
     /// # Errors
@@ -239,19 +242,38 @@ impl NativeHttp {
             .pool_timer(TokioTimer::new())
             .retry_canceled_requests(true)
             .build(connector);
+        // Location hosts use an independent TLS identity and connection pool.
+        // Even a custom RPC TLS config with a client certificate must never
+        // expose that certificate to a pack-location host.
+        let mut location_http = HttpConnector::new();
+        location_http.enforce_http(false);
+        location_http.set_nodelay(true);
+        let location_connector = HttpsConnectorBuilder::new()
+            .with_tls_config(default_tls_config()?)
+            .https_or_http()
+            .enable_http1()
+            .wrap_connector(location_http);
+        let location_client = HyperClient::builder(TokioExecutor::new())
+            .pool_max_idle_per_host(1)
+            .pool_idle_timeout(Duration::from_secs(10))
+            .pool_timer(TokioTimer::new())
+            .build(location_connector);
         Ok(Self {
             runtime,
             client,
+            location_client,
             connects,
             metadata_timeout: DEFAULT_METADATA_TIMEOUT,
             transfer_timeout: DEFAULT_TRANSFER_TIMEOUT,
             allow_insecure_http: false,
+            test_pack_location_http: false,
             default_headers: HeaderMap::new(),
         })
     }
 
-    /// Apply host-supplied defaults to every request, including discovery and
-    /// unsigned owner statements. Explicit request headers take precedence.
+    /// Apply host-supplied defaults to RPC requests, including discovery and
+    /// unsigned owner statements. Pack-location fetches never use these headers.
+    /// Explicit request headers take precedence.
     /// Configuration and credential trust remain the caller's responsibility.
     #[must_use]
     pub fn with_default_headers(mut self, headers: HeaderMap) -> Self {
@@ -273,10 +295,20 @@ impl NativeHttp {
     /// Allow cleartext `http` to hosts other than loopback. Off by default: a
     /// signed request and the packs it fetches would cross the network
     /// unencrypted. `https` and loopback `http` (for local development and
-    /// tests) are always allowed.
+    /// tests) are always allowed for RPCs. Pack locations still require HTTPS.
     #[must_use]
     pub fn allow_insecure_http(mut self, allow: bool) -> Self {
         self.allow_insecure_http = allow;
+        self
+    }
+
+    /// Permit loopback HTTP pack locations for local conformance fixtures.
+    /// Production pack locations must use HTTPS. This does not permit HTTP
+    /// to any other host and is independent of the RPC cleartext setting.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_test_pack_location_http(mut self, allow: bool) -> Self {
+        self.test_pack_location_http = allow;
         self
     }
 
@@ -295,8 +327,9 @@ impl NativeHttp {
         self
     }
 
-    /// Bound `UploadPack`, `UploadPart` and `DownloadPack`, response body
-    /// included (default: 300 seconds). Other procedures use the metadata bound.
+    /// Bound `UploadPack`, `UploadPart`, `DownloadPack` and pack-location
+    /// fetches, response body included (default: 300 seconds). Other procedures
+    /// use the metadata bound.
     #[must_use]
     pub fn with_transfer_timeout(mut self, timeout: Duration) -> Self {
         self.transfer_timeout = timeout;
@@ -1164,6 +1197,70 @@ impl NativeHttp {
 }
 
 impl HttpTransport for NativeHttp {
+    fn supports_pack_locations(&self) -> bool {
+        true
+    }
+
+    fn allows_test_pack_location_http(&self) -> bool {
+        self.test_pack_location_http
+    }
+
+    async fn fetch_pack_location(
+        &self,
+        url: &str,
+        response_limit: usize,
+    ) -> Result<Vec<u8>, String> {
+        let uri: Uri = url.parse().map_err(|_| "invalid pack location URL")?;
+        let authority = uri.authority().ok_or("pack location has no authority")?;
+        if authority.as_str().contains('@') {
+            return Err("pack location credentials refused".to_owned());
+        }
+        match uri.scheme_str() {
+            Some("https") => {}
+            Some("http")
+                if self.test_pack_location_http && uri.host().is_some_and(is_loopback_host) => {}
+            _ => return Err("pack location requires HTTPS".to_owned()),
+        }
+        // This is deliberately independent of the RPC request path: neither
+        // default headers nor signed request headers reach the location host.
+        // Hyper does not follow redirects or retain cookies.
+        let request = Request::get(uri)
+            .header(ACCEPT_ENCODING, "identity")
+            .body(NativeBody::Full(Full::new(Bytes::new())))
+            .map_err(|_| "invalid pack location request")?;
+        let fetch = async {
+            let response = self
+                .location_client
+                .request(request)
+                .await
+                .map_err(|_| "pack location request failed".to_owned())?;
+            if response.status() != http::StatusCode::OK {
+                return Err("pack location response was not OK".to_owned());
+            }
+            let mut codings = response.headers().get_all(CONTENT_ENCODING).iter();
+            match (codings.next(), codings.next()) {
+                (None, _) => {}
+                (Some(coding), None)
+                    if coding
+                        .to_str()
+                        .is_ok_and(|coding| coding.trim().eq_ignore_ascii_case("identity")) => {}
+                _ => return Err("encoded pack location body refused".to_owned()),
+            }
+            let diagnostics = Diagnostics::<NoDiagnostics> {
+                observer: None,
+                procedure: "pack location",
+                status: Some(response.status()),
+                headers: None,
+            };
+            read_bounded(response.into_body(), response_limit, diagnostics)
+                .await
+                .map_err(|_| "pack location body failed or exceeded the size limit".to_owned())
+        };
+        tokio::time::timeout(self.transfer_timeout, fetch)
+            .await
+            .map_err(|_| "pack location deadline exceeded".to_owned())?
+    }
+
     async fn send_stream<B: RequestStream + ?Sized, S: ResponseStream + ?Sized>(
         &self,
         request: Request<()>,
