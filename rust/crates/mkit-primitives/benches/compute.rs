@@ -56,7 +56,7 @@ fn verify(bytes: &[u8], width: u8) -> (String, usize, u64, u64) {
     .expect("bounded benchmark pack");
     if width != 0 {
         driver = driver
-            .with_compute(ComputeConfig { max_jobs: width })
+            .with_compute(ComputeConfig::new(width).with_min_job_bytes(0))
             .expect("finite width");
     }
     let mut pages: BTreeMap<hash::Hash, Vec<u8>> = BTreeMap::new();

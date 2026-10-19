@@ -43,6 +43,24 @@ fn complete_jobs(
     mode: Option<u64>,
     random: &mut u64,
 ) {
+    if mode == Some(u64::MAX) {
+        let outputs = std::thread::scope(|scope| {
+            let workers: Vec<_> = jobs
+                .drain(..)
+                .map(|job| scope.spawn(move || job.run()))
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        for output in outputs.into_iter().rev() {
+            assert_eq!(
+                machine.supply_compute(output).unwrap(),
+                ComputeDisposition::Accepted
+            );
+        }
+    }
     while !jobs.is_empty() {
         let index = match mode {
             Some(0) => 0,
@@ -69,7 +87,7 @@ fn complete_jobs(
 }
 
 fn run(
-    mut host: Host,
+    host: Host,
     budget: VerifyLimits,
     mode: Option<u64>,
 ) -> (
@@ -77,10 +95,23 @@ fn run(
     usize,
     super::super::super::resources::ResourceUsage,
 ) {
+    run_config(host, budget, mode, 3, Some(0))
+}
+
+fn run_config(
+    mut host: Host,
+    budget: VerifyLimits,
+    mode: Option<u64>,
+    width: u8,
+    minimum: Option<u64>,
+) -> (Transcript, usize, crate::pack_verify::ResourceUsage) {
     let initial = VerifyDriver::new(source(&host.pack), REPOSITORY, profile(), budget, 17)
         .and_then(|machine| {
             if mode.is_some() {
-                machine.with_compute(ComputeConfig { max_jobs: 3 })
+                machine.with_compute(match minimum {
+                    Some(bytes) => ComputeConfig::new(width).with_min_job_bytes(bytes),
+                    None => ComputeConfig::new(width),
+                })
             } else {
                 Ok(machine)
             }
@@ -337,7 +368,7 @@ fn opaque_completions_bind_generation_source_and_exact_issued_descriptor() {
     let make = |pack: &[u8], generation| {
         VerifyDriver::new(source(pack), REPOSITORY, profile(), limits(), generation)
             .unwrap()
-            .with_compute(ComputeConfig { max_jobs: 3 })
+            .with_compute(ComputeConfig::new(3).with_min_job_bytes(0))
             .unwrap()
     };
     let mut host = Host::new(&pack);
@@ -404,7 +435,7 @@ fn drained_compute_run_resumes_without_serializing_jobs() {
     let pack = raw_pack(&[b"a", b"b", b"c", b"d", b"e", b"f", b"g"]);
     let mut host = Host::new(&pack);
     let mut machine = driver(&pack)
-        .with_compute(ComputeConfig { max_jobs: 3 })
+        .with_compute(ComputeConfig::new(3).with_min_job_bytes(0))
         .unwrap();
     let mut snapshot = None;
     for _ in 0..20_000 {
@@ -441,10 +472,10 @@ fn drained_compute_run_resumes_without_serializing_jobs() {
         &snapshot,
     )
     .unwrap()
-    .with_compute(ComputeConfig { max_jobs: 3 })
+    .with_compute(ComputeConfig::new(3).with_min_job_bytes(0))
     .unwrap();
     let mut old_machine = driver(&pack)
-        .with_compute(ComputeConfig { max_jobs: 3 })
+        .with_compute(ComputeConfig::new(3).with_min_job_bytes(0))
         .unwrap();
     let old_job = first_job(&mut old_machine, &mut Host::new(&pack));
     let usage = resumed.usage();
@@ -545,4 +576,143 @@ fn optional_overlap_preserves_acceptance_at_discovered_work_and_memory_boundarie
         resident_bytes,
         ..limits()
     });
+}
+
+#[test]
+fn small_entries_use_no_jobs_by_default() {
+    let pack = raw_pack(&[b"alpha", b"beta", b"gamma"]);
+    let (serial, _, usage) = run(Host::new(&pack), limits(), None);
+    for width in [1, 2, 4, 8, 16] {
+        let (actual, peak, threaded_usage) =
+            run_config(Host::new(&pack), limits(), Some(u64::MAX), width, None);
+        assert_eq!(peak, 0, "small entries must avoid worker dispatch");
+        assert_eq!(actual, serial);
+        assert_eq!(threaded_usage.work, usage.work);
+    }
+}
+
+fn mixed_threshold_pack(reverse: bool, malformed: bool) -> Vec<u8> {
+    let mut writer = PackWriter::new_raw_only();
+    let ordinals: Vec<u32> = if reverse {
+        (0..72).rev().collect()
+    } else {
+        (0..72).collect()
+    };
+    for ordinal in ordinals {
+        // Many unique objects cross leaf splits and acquisition windows.
+        // Adjacent small and large entries exercise both threshold transitions.
+        let size = match ordinal % 4 {
+            0 => 4096,
+            1 => (64 << 10) - 11,
+            2 => 70 << 10,
+            _ => 128,
+        };
+        let mut value = vec![0x41; size];
+        value[..4].copy_from_slice(&ordinal.to_le_bytes());
+        let (id, canonical) = blob(&value);
+        writer.push_raw(id, &canonical).unwrap();
+    }
+    if malformed {
+        let invalid = [ObjectType::Blob as u8];
+        writer.push_raw(hash::hash(&invalid), &invalid).unwrap();
+    }
+    writer.finish().unwrap()
+}
+
+#[test]
+fn real_threads_and_job_counts_preserve_pages_roots_refusals_and_charges() {
+    let pack = mixed_threshold_pack(false, false);
+    let reversed = mixed_threshold_pack(true, false);
+    let malformed = mixed_threshold_pack(false, true);
+    let mut corrupt = pack.clone();
+    let last = corrupt.len() - 1;
+    corrupt[last] ^= 1;
+    for bytes in [&pack, &reversed, &malformed, &corrupt] {
+        let (serial, _, usage) = run(Host::new(bytes), limits(), None);
+        for width in [0, 1, 2, 4, 8] {
+            for minimum in [None, Some(0), Some(u64::MAX)] {
+                let mode = (width != 0).then_some(u64::MAX);
+                let (actual, peak, threaded_usage) =
+                    run_config(Host::new(bytes), limits(), mode, width, minimum);
+                assert_eq!(actual, serial, "width={width}, minimum={minimum:?}");
+                assert_eq!(threaded_usage.work, usage.work);
+                assert_eq!(threaded_usage.evidence_pages, usage.evidence_pages);
+                assert_eq!(threaded_usage.evidence_bytes, usage.evidence_bytes);
+                if width != 0 && minimum != Some(u64::MAX) {
+                    assert!(peak > 0);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn mixed_inline_and_dispatched_entries_checkpoint_their_own_cursor() {
+    let pack = mixed_threshold_pack(false, false);
+    let (expected, _, _) = run(Host::new(&pack), limits(), None);
+    for width in [1, 2, 4, 8] {
+        for ordinal in [1, 3, 4, 17, 35, 69] {
+            let mut host = Host::new(&pack);
+            let mut machine = driver(&pack)
+                .with_compute(ComputeConfig::new(width))
+                .unwrap();
+            loop {
+                match machine.step().unwrap() {
+                    Step::Request(request) => host.serve(&mut machine, &request).unwrap(),
+                    Step::ProvisionalObject(fragment) => host
+                        .fragments
+                        .entry(fragment.ordinal)
+                        .or_default()
+                        .extend_from_slice(fragment.bytes),
+                    Step::RetainEvidence(page) => {
+                        let commitment = page.commitment;
+                        host.pages.push((commitment, page.bytes.to_vec()));
+                        machine.acknowledge_retention(commitment).unwrap();
+                    }
+                    Step::Progress | Step::ReleasePage(_) => (),
+                    Step::Complete(_) => panic!("missed boundary {ordinal}"),
+                }
+                if machine.ordinal == ordinal && machine.work.is_none() {
+                    break;
+                }
+            }
+            let snapshot = boundary_checkpoint(&mut machine, &mut host);
+            assert_eq!(snapshot.meta().ordinal, ordinal);
+            drop(machine);
+            let mut resumed = VerifyDriver::resume(
+                source(&pack),
+                REPOSITORY,
+                profile(),
+                limits(),
+                18,
+                &snapshot,
+            )
+            .unwrap()
+            .with_compute(ComputeConfig::new(width))
+            .unwrap();
+            let verified = host.finish(&mut resumed).unwrap();
+            assert_eq!(Ok(artifact(&verified)), expected.outcome);
+            assert_eq!(host.fragments, expected.fragments);
+        }
+    }
+}
+
+#[test]
+fn large_raw_jobs_keep_the_same_path_below_their_size() {
+    let mut writer = PackWriter::new_raw_only();
+    for ordinal in 0..24_u32 {
+        let mut value = vec![0x41; 100 << 10];
+        value[..4].copy_from_slice(&ordinal.to_le_bytes());
+        let (id, canonical) = blob(&value);
+        writer.push_raw(id, &canonical).unwrap();
+    }
+    let pack = writer.finish().unwrap();
+    for width in [1, 2, 4, 8] {
+        let eager = run_config(Host::new(&pack), limits(), Some(u64::MAX), width, Some(0));
+        let threshold = run_config(Host::new(&pack), limits(), Some(u64::MAX), width, None);
+        assert_eq!(
+            threshold, eager,
+            "large-entry scheduling must stay identical"
+        );
+    }
 }

@@ -40,7 +40,8 @@ struct Slot {
 
 #[derive(Debug)]
 pub(super) struct Scheduler {
-    config: ComputeConfig,
+    max_jobs: u8,
+    min_job_bytes: u32,
     slots: VecDeque<Slot>,
     deferred: Option<Deferred>,
     sealed: bool,
@@ -52,7 +53,8 @@ pub(super) struct Scheduler {
 impl VerifyDriver {
     /// Enables caller-owned pure compute execution on a fresh or resumed driver.
     ///
-    /// `new` keeps its serial execution path. Raw Blob entries may overlap;
+    /// `new` keeps its serial execution path. Raw entries below the configured
+    /// byte threshold decode inline. Eligible raw Blob entries may overlap;
     /// other objects and deltas drain their predecessors before dispatch.
     /// Dispatch, completion, and retention do not authorize publication.
     /// Retire outstanding jobs before replacing a driver's resource envelope.
@@ -66,7 +68,7 @@ impl VerifyDriver {
     /// let source = PackSource { id: [1; 32], len: 128, binding: SourceBinding([2; 32]) };
     /// let profile = IndexedProfile { pack_bytes: 4 << 30, decoded_bytes: 4 << 30, delta_depth: 50 };
     /// let driver = VerifyDriver::new(source, RepositoryId([3; 32]), profile,
-    ///     VerifyLimits::indexed(), 1)?.with_compute(ComputeConfig { max_jobs: 3 })?;
+    ///     VerifyLimits::indexed(), 1)?.with_compute(ComputeConfig::new(3))?;
     /// # let _ = driver;
     /// # Ok::<(), mkit_primitives::error::Failure>(())
     /// ```
@@ -86,6 +88,10 @@ impl VerifyDriver {
         if !(1..=16).contains(&config.max_jobs) {
             return Err(resource());
         }
+        // No raw entry exceeds the framing cap. Larger thresholds are
+        // equivalent, so keep this control value in the existing small layout.
+        let min_job_bytes = u32::try_from(config.min_job_bytes.min(super::FRAME_BYTES + 1))
+            .map_err(|_| resource())?;
         let capacity = usize::from(config.max_jobs);
         let bytes = size_of::<Scheduler>() + capacity * size_of::<Slot>();
         // The existing decoder reservation already includes 64 KiB of fixed
@@ -103,7 +109,8 @@ impl VerifyDriver {
         let mut slots = VecDeque::new();
         slots.try_reserve_exact(capacity).map_err(|_| resource())?;
         self.scheduler = Some(Box::new(Scheduler {
-            config,
+            max_jobs: config.max_jobs,
+            min_job_bytes,
             slots,
             deferred: None,
             sealed: false,
@@ -112,6 +119,21 @@ impl VerifyDriver {
             committed_boundary: None,
         }));
         Ok(self)
+    }
+
+    pub(super) fn dispatch_compute(&mut self) -> Result<bool, Failure> {
+        let scheduler = self.scheduler.as_mut().ok_or_else(invalid)?;
+        if !scheduler.slots.is_empty() {
+            return Ok(true);
+        }
+        let work = self.work.as_ref().ok_or_else(invalid)?;
+        let inline = matches!(&work.entry, Some(PackEntry::Raw { bytes }) if (bytes.len() as u64) < u64::from(scheduler.min_job_bytes));
+        // The inline entry advances the actual reader cursor. A saved boundary
+        // from its last dispatched predecessor must no longer shadow it.
+        if inline && scheduler.committed_boundary.take().is_some() {
+            self.resources.release(BOUNDARY_BYTES)?;
+        }
+        Ok(!inline)
     }
 
     /// Transfers the exact requested job once to a caller-owned worker.
@@ -303,8 +325,8 @@ impl VerifyDriver {
             .page_bytes
             .saturating_mul(4)
             .saturating_add(256 << 10);
-        scheduler.config.max_jobs > 1
-            && count <= u64::from(scheduler.config.max_jobs)
+        scheduler.max_jobs > 1
+            && count <= u64::from(scheduler.max_jobs)
             && count.saturating_mul(BLOB_WORK_ESCROW) <= self.resources.remaining_work()
             && resident
                 .saturating_add(headroom)
@@ -409,6 +431,8 @@ impl VerifyDriver {
             // validates every prologue/length/canonicality rule in the job.
             if bytes.first() == Some(&(super::ObjectType::Blob as u8))
                 && bytes.len() as u64 <= super::CANONICAL_BYTES
+                && bytes.len() as u64
+                    >= u64::from(self.scheduler.as_ref().ok_or_else(invalid)?.min_job_bytes)
             {
                 let overlap = (bytes.len() as u64)
                     .saturating_mul(8)
@@ -514,7 +538,10 @@ impl VerifyDriver {
         let Some(scheduler) = &mut self.scheduler else {
             return Ok(());
         };
-        let slot = scheduler.slots.pop_front().ok_or_else(invalid)?;
+        let Some(slot) = scheduler.slots.pop_front() else {
+            // Inline entries own no slot or boundary reservation.
+            return Ok(());
+        };
         if !slot.merged {
             return Err(invalid());
         }
