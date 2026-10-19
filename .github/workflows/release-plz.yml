@@ -86,14 +86,14 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Mint GitHub App token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3.3.0
         id: app-token
         with:
           app-id: ${{ secrets.RELEASE_PLZ_APP_ID }}
           private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
 
       - name: Run release-plz release
-        uses: release-plz/action@18641b6c63063cc5ff8786ebf69cd57e8541bae1  # v0.5.140
+        uses: release-plz/action@8921286633dfa0c4020f7f30bd1c14fe19cbb10e  # v0.5.142
         with:
           command: release
           manifest_path: rust/Cargo.toml
@@ -137,19 +137,19 @@ jobs:
       # release-plz runs cargo-semver-checks (semver_check = true) to diff the
       # public API against the previous tag and propose the right version bump.
       - name: Install cargo-semver-checks
-        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe  # v2
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283  # v2
         with:
           tool: cargo-semver-checks
 
       - name: Mint GitHub App token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3.3.0
         id: app-token
         with:
           app-id: ${{ secrets.RELEASE_PLZ_APP_ID }}
           private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
 
       - name: Run release-plz release-pr
-        uses: release-plz/action@18641b6c63063cc5ff8786ebf69cd57e8541bae1  # v0.5.140
+        uses: release-plz/action@8921286633dfa0c4020f7f30bd1c14fe19cbb10e  # v0.5.142
         with:
           command: release-pr
           manifest_path: rust/Cargo.toml
