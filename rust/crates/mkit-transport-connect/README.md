@@ -108,6 +108,10 @@ verification to sync's staging boundary, as the previous driver did. Chunk
 identity, offsets, lengths, and resource bounds remain enforced. The protocol
 client's default validation and response limits remain unchanged.
 
+This adapter keeps pack-location negotiation disabled so reads retain their
+existing discovery and retry behavior. Native hosts using `mkit-client` directly
+can negotiate verified locations through `mkit-sync::NativeHttp`.
+
 ## Remaining adapter users
 
 The CLI retains this adapter for TLS and bearer configuration, envelope signers,
