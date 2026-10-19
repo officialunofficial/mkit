@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Reuse bounded decoded objects-index leaves during verification without
+  changing evidence pages, roots, work charges or refusal order.
+
 - Add optional pack locations to `DownloadPack`, negotiated through discovery
   and a per-request opt-in. Servers default to streaming; a configured location
   provider runs after the same read checks. Locations expire within the

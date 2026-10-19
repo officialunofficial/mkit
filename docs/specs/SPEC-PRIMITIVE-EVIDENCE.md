@@ -172,6 +172,12 @@ dependent progress and re-verify from a safe boundary. A nonmembership answer
 requires an authenticated path to the correctly routed leaf and the absence
 of the queried key in that leaf.
 
+
+Implementation note: the verifier may reuse bounded owned records from an
+already authenticated objects-index leaf. It still authenticates the page and
+charges its ordinary logical work before consulting this optional cache. Page
+emission, retained-evidence accounting and checkpoint encoding are unchanged.
+
 Every decoder MUST enforce finite input, nested-count, value, resident-memory,
 allocation, and work limits before allocation or processing. Nested page
 decoding shares the enclosing operation's cumulative budget. Truncated fields,

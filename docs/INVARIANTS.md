@@ -86,6 +86,21 @@ exceed the advertised memory bound.
 barriers, opaque jobs/outputs, ordinal merge, drained checkpoints, schedule
 parity tests, allocation probes, and the bounded compute-schedule fuzz oracle.
 
+
+## Decoded leaf reuse preserves the eager verifier's accounting
+
+**Always:** an objects-index page passes ordinary authentication and logical
+work charging before owned records can be reused. The optional leaf cache
+never suppresses a page emission or delays a retained-evidence charge. It
+releases its bounded reservation before later decoder or edge growth can use
+that capacity, at checkpoints, on refusal and at completion. The driver's
+inline size and checkpoint representation remain unchanged.
+
+**Enforced by:** decoded-leaf authentication, capacity, pressure, refusal,
+checkpoint and 0/1/2/4/8-job differential tests. Successful roots, page bytes,
+fragments and logical work match the eager path; integrity drain keeps the
+first deferred refusal behind final source integrity.
+
 ## All-entry verification shares one acquisition stream with integrity
 
 **Always:** `VerifyDriver` hashes each acquired pack range while framing and

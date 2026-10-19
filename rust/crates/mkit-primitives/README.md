@@ -202,6 +202,14 @@ entry boundary, and authenticates it without hashing it into the frontiers
 twice. It never reacquires the consumed prefix. Framing-only checkpoints retain
 their existing current-window prefix check. Cumulative budgets survive restart.
 
+
+Objects-index lookups may reuse owned decoded leaf records after authenticating
+and charging the supplied or resident page through the ordinary path. The
+optional cache holds at most 512 fixed-record leaves in a 4 MiB reservation.
+It releases before entry or edge growth approaches that allowance, at a
+checkpoint, on refusal and at completion. This changes neither page emission
+nor the logical work charged for decoding. It does not defer branch encoding.
+
 ## Module and decoder inventory
 
 Every public item inherits ALPHA from its enclosing module, including fields,

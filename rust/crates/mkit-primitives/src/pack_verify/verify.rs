@@ -1043,6 +1043,7 @@ impl VerifyDriver {
             self.resources.release(work.base_len)?;
         }
         self.op = None;
+        self.release_decoded_leaves()?;
         self.discard_compute();
         self.phase = Phase::Drain;
         // Mark the reader before permitting a checkpoint of this drain. A
@@ -1136,6 +1137,14 @@ impl VerifyDriver {
         }
         if self.armed && self.compute_checkpointable() {
             return self.advance_boundary();
+        }
+        let headroom = self.decoded_leaf_headroom();
+        if self.objects.decoded_leaves_enabled() && self.resources.available() < headroom {
+            self.release_decoded_leaves()?;
+            self.objects.prevent_entry_cache();
+        }
+        if self.objects.entry_cache_allowed() {
+            self.prepare_decoded_leaves(headroom)?;
         }
         if self.scheduler.is_some() {
             return self.advance_scheduled();
@@ -1253,7 +1262,23 @@ impl VerifyDriver {
     }
 
     fn advance_work(&mut self) -> Result<Step<'static>, Failure> {
-        let stage = self.work.as_ref().ok_or_else(invalid)?.stage;
+        let work = self.work.as_ref().ok_or_else(invalid)?;
+        let stage = work.stage;
+        if stage == Stage::ObjectDescend && self.objects.decoded_leaves_enabled() {
+            // One edge can rewrite a keyed index and a dependency sequence.
+            // Four cascades, each with at most 2 * MAX_DEPTH + 1 bounded pages,
+            // cover pending pages, records and retired-page bookkeeping. The
+            // fixed 8 MiB also covers the entry's four non-edge index updates.
+            let headroom = work
+                .edge_total
+                .saturating_add(1)
+                .saturating_mul(4 * 67 * (8192 + cache::ENTRY_OVERHEAD))
+                .saturating_add(8 << 20);
+            if self.resources.available() < headroom {
+                self.release_decoded_leaves()?;
+                self.objects.prevent_entry_cache();
+            }
+        }
         match stage {
             Stage::Base => self.begin_base(),
             Stage::Decode => self.finish_decode(),
@@ -1609,6 +1634,7 @@ impl VerifyDriver {
     /// buffered record, retain every page the host does not yet hold, then
     /// report readiness. The flag lasts until the host's next call.
     fn advance_boundary(&mut self) -> Result<Step<'static>, Failure> {
+        self.release_decoded_leaves()?;
         for seq in SEQUENCES {
             if self.sequence_mut(seq)?.pending() != 0 {
                 return self.start_flush(seq);
@@ -1621,6 +1647,47 @@ impl VerifyDriver {
         self.armed = false;
         self.checkpoint_ready = true;
         Ok(Step::Progress)
+    }
+
+    /// Preserve the complete decoder envelope plus a full-depth index update.
+    /// The optional reservation must never consume capacity an eager entry uses.
+    fn decoded_leaf_headroom(&self) -> u64 {
+        let decoder = self
+            .limits
+            .acquisition_bytes
+            .saturating_mul(2)
+            .saturating_add(FRAME_BYTES)
+            .saturating_add(DELTA_BYTES + 32)
+            .saturating_add(CANONICAL_BYTES)
+            .saturating_add(DECODER_SCRATCH)
+            .saturating_add(64 << 10);
+        decoder
+            .saturating_sub(self.decoder_reservation)
+            .saturating_add(8 << 20)
+    }
+
+    fn release_decoded_leaves(&mut self) -> Result<(), Failure> {
+        let released = self.objects.disable_decoded_leaves();
+        self.resources.release(released)
+    }
+
+    fn prepare_decoded_leaves(&mut self, headroom: u64) -> Result<(), Failure> {
+        if self.objects.count() < 128
+            || !self.objects.decoded_leaves_allowed()
+            || self.objects.decoded_leaves_enabled()
+        {
+            return Ok(());
+        }
+        let reservation = Index::decoded_leaf_reservation();
+        if self.resources.available() < reservation.saturating_add(headroom) {
+            return Ok(());
+        }
+        self.resources.reserve(reservation)?;
+        if self.objects.enable_decoded_leaves().is_err() {
+            self.resources.release(reservation)?;
+            self.objects.prevent_decoded_leaves();
+        }
+        Ok(())
     }
 
     fn drive_op(&mut self) -> Result<Step<'static>, Failure> {
@@ -1663,6 +1730,7 @@ impl VerifyDriver {
             Ok(Event::Descended(descent)) => self.after_descend(&live, *descent),
             Ok(Event::Done { spine, replaced }) => {
                 for page in replaced {
+                    self.index_mut(live.index).forget_decoded_leaf(page);
                     self.cache.supersede(&mut self.resources, page)?;
                 }
                 self.after_done(&live, spine)
@@ -1696,11 +1764,16 @@ impl VerifyDriver {
 
     fn after_descend(&mut self, live: &Live, descent: Descent) -> Result<Step<'static>, Failure> {
         match live.then {
-            Then::Base => self.base_route(&descent),
+            Then::Base => {
+                let result = self.base_route(&descent);
+                self.objects.recycle_descent(descent);
+                result
+            }
             Then::Object => {
                 let work = self.work.as_mut().ok_or_else(invalid)?;
                 work.first = !descent.found;
                 work.descent = if descent.found {
+                    self.objects.recycle_descent(descent);
                     None
                 } else {
                     Some(Box::new(descent))
@@ -1752,7 +1825,11 @@ impl VerifyDriver {
                 self.keep_ordinal_leaf(&mut descent);
                 self.seal_ordinal(&descent)
             }
-            Then::SealObject => self.seal_object(&descent),
+            Then::SealObject => {
+                let result = self.seal_object(&descent);
+                self.objects.recycle_descent(descent);
+                result
+            }
             Then::SealReferenced => self.seal_referenced(&descent),
             _ => Err(invalid()),
         }
@@ -1985,6 +2062,11 @@ impl VerifyDriver {
                 Ok(Step::Progress)
             }
             SealStage::Heads => {
+                if self.resources.available() < 8 << 20 {
+                    self.release_decoded_leaves()?;
+                } else {
+                    self.prepare_decoded_leaves(8 << 20)?;
+                }
                 // Heads flushes ride the same operation plumbing.
                 if self.sequence_mut(Which::Heads)?.needs_flush() {
                     return self.start_flush(Which::Heads);
@@ -2021,9 +2103,20 @@ impl VerifyDriver {
     }
 
     fn finish_seal(&mut self) -> Result<Step<'static>, Failure> {
+        self.release_decoded_leaves()?;
         self.drop_ordinal_leaf();
         self.seal = None;
         self.cache.clear(&mut self.resources)?;
+        for which in [
+            Which::Objects,
+            Which::Ordinals,
+            Which::Occurrences,
+            Which::Dependencies,
+            Which::Referenced,
+            Which::Heads,
+        ] {
+            self.index_mut(which).release_control();
+        }
         self.resources.release(self.decoder_reservation)?;
         self.reclaim_compute_control()?;
         let counts = PackCounts {

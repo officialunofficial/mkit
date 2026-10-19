@@ -21,6 +21,9 @@ use crate::{
 use mkit_core::hash::Hash;
 use std::collections::VecDeque;
 
+mod leaves;
+use leaves::DecodedLeaves;
+
 const FANOUT: usize = PAGE_FANOUT as usize;
 const MAX_DEPTH: usize = 33;
 
@@ -206,13 +209,52 @@ pub(super) enum Event {
 #[derive(Debug)]
 pub(super) struct Index {
     kind: PageKind,
-    binding: EvidenceBinding,
+    // Move the immutable binding beside the optional cache while keeping the
+    // original inline footprint and therefore the constructor's resident charge.
+    state: ControlState,
+    _inline_binding:
+        [u8; std::mem::size_of::<EvidenceBinding>() - std::mem::size_of::<ControlState>()],
     limits: EvidenceLimits,
     root: PageCommitment,
     count: u64,
 }
 
+#[derive(Debug)]
+// Seven small states (including a replacement during resume) fit the existing
+// 64 KiB decoder control allowance. The assertion below pins that bound.
+struct IndexState {
+    binding: EvidenceBinding,
+    leaves: Option<DecodedLeaves>,
+    decoded_allowed: bool,
+    entry_cache_allowed: bool,
+}
+
+/// The control reservation ends at completion, before the driver is dropped.
+#[derive(Debug)]
+struct ControlState(Option<Box<IndexState>>);
+
+impl ControlState {
+    fn get(&self) -> Result<&IndexState, Failure> {
+        self.0.as_deref().ok_or_else(invalid)
+    }
+    fn get_mut(&mut self) -> Result<&mut IndexState, Failure> {
+        self.0.as_deref_mut().ok_or_else(invalid)
+    }
+}
+
 impl Index {
+    pub(super) fn entry_cache_allowed(&self) -> bool {
+        self.state.0.as_ref().is_some_and(|s| s.entry_cache_allowed)
+    }
+    pub(super) fn prevent_entry_cache(&mut self) {
+        if let Some(s) = self.state.0.as_mut() {
+            s.entry_cache_allowed = false;
+        }
+    }
+    pub(super) fn release_control(&mut self) {
+        self.state.0 = None;
+    }
+
     /// A fresh index whose root is the canonical empty leaf. The returned
     /// page is deterministic; emit and retain it before the first lookup.
     pub(super) fn new(
@@ -224,7 +266,14 @@ impl Index {
         Ok((
             Self {
                 kind,
-                binding,
+                state: ControlState(Some(Box::new(IndexState {
+                    binding,
+                    leaves: None,
+                    decoded_allowed: true,
+                    entry_cache_allowed: true,
+                }))),
+                _inline_binding: [0; std::mem::size_of::<EvidenceBinding>()
+                    - std::mem::size_of::<ControlState>()],
                 limits,
                 root: page.commitment(),
                 count: 0,
@@ -251,7 +300,14 @@ impl Index {
         }
         Ok(Self {
             kind,
-            binding,
+            state: ControlState(Some(Box::new(IndexState {
+                binding,
+                leaves: None,
+                decoded_allowed: true,
+                entry_cache_allowed: true,
+            }))),
+            _inline_binding: [0; std::mem::size_of::<EvidenceBinding>()
+                - std::mem::size_of::<ControlState>()],
             limits,
             root,
             count,
@@ -285,11 +341,12 @@ impl Index {
             return Err(invalid());
         }
         if resident {
-            let view = PageView::decode_resident(bytes, self.binding, self.limits, budget)?;
+            let view =
+                PageView::decode_resident(bytes, self.state.get()?.binding, self.limits, budget)?;
             view.authenticate_resident(want, budget)?;
             Ok(view)
         } else {
-            let view = PageView::decode(bytes, self.binding, self.limits, budget)?;
+            let view = PageView::decode(bytes, self.state.get()?.binding, self.limits, budget)?;
             view.authenticate(want, budget)?;
             Ok(view)
         }
@@ -304,7 +361,7 @@ impl Index {
         for (key, value) in records {
             values.push(LeafRecord { key: *key, value });
         }
-        encode_leaf(self.binding, self.kind, &values, self.limits)
+        encode_leaf(self.state.get()?.binding, self.kind, &values, self.limits)
     }
 
     fn leaf_records(view: &PageView<'_>) -> Result<Vec<(Hash, Vec<u8>)>, Failure> {
@@ -498,7 +555,7 @@ impl Index {
     }
 
     /// Encodes the leaf level of a rewrite: one page, or two on overflow.
-    fn rewrite_leaf(&self, op: &mut Op) -> Result<Event, Failure> {
+    fn rewrite_leaf(&mut self, op: &mut Op) -> Result<Event, Failure> {
         let Op::Rewrite {
             records,
             queue,
@@ -535,6 +592,9 @@ impl Index {
                 track.leaf = Some(right_page.commitment());
                 track.records = right;
                 track.right = true;
+            } else if self.decoded_leaves_enabled() {
+                self.cache_decoded_leaf(left_page.commitment(), std::mem::take(records));
+                self.cache_decoded_leaf(right_page.commitment(), right);
             }
             queue.push_back(left_page);
             queue.push_back(right_page);
@@ -552,6 +612,8 @@ impl Index {
             if let Some(track) = track.as_mut() {
                 track.leaf = Some(page.commitment());
                 track.records = std::mem::take(records);
+            } else if self.decoded_leaves_enabled() {
+                self.cache_decoded_leaf(page.commitment(), std::mem::take(records));
             }
             queue.push_back(page);
             if *graft == Graft::Replace {
@@ -674,7 +736,14 @@ impl Index {
                 .checked_add(1)
                 .filter(|next| *next <= 32)
                 .ok_or_else(|| failure(FailureCode::InvalidEvidence))?;
-            let page = encode_internal(self.binding, self.kind, height, first, &rest, self.limits)?;
+            let page = encode_internal(
+                self.state.get()?.binding,
+                self.kind,
+                height,
+                first,
+                &rest,
+                self.limits,
+            )?;
             *pending_root = Some(page.commitment());
             if let Some(track) = track.as_mut() {
                 track.path.push(PathNode {
@@ -760,7 +829,7 @@ impl Index {
         if rest.len() < FANOUT {
             let node_height = parent.height;
             let page = match encode_internal(
-                self.binding,
+                self.state.get()?.binding,
                 self.kind,
                 node_height,
                 first,
@@ -806,7 +875,7 @@ impl Index {
             };
             let encoded = (|| {
                 let left_page = encode_internal(
-                    self.binding,
+                    self.state.get()?.binding,
                     self.kind,
                     node_height,
                     left.first,
@@ -814,7 +883,7 @@ impl Index {
                     self.limits,
                 )?;
                 let right_page = encode_internal(
-                    self.binding,
+                    self.state.get()?.binding,
                     self.kind,
                     node_height,
                     right.first,
@@ -925,7 +994,9 @@ impl Index {
                     return Err(failure(FailureCode::InvalidEvidence));
                 }
                 if view.height() == 0 {
-                    let records = Self::leaf_records(&view)?;
+                    let records = self
+                        .take_decoded_leaf(want)
+                        .map_or_else(|| Self::leaf_records(&view), Ok)?;
                     if records.iter().any(|(record, _)| {
                         lower.is_some_and(|low| *record < low)
                             || upper.is_some_and(|high| *record >= high)
@@ -1251,3 +1322,17 @@ impl Sequence {
         )
     }
 }
+
+const _: () = {
+    #[allow(dead_code)]
+    struct OriginalIndex {
+        kind: PageKind,
+        binding: EvidenceBinding,
+        limits: EvidenceLimits,
+        root: PageCommitment,
+        count: u64,
+    }
+    assert!(std::mem::size_of::<Index>() == std::mem::size_of::<OriginalIndex>());
+    assert!(std::mem::align_of::<Index>() == std::mem::align_of::<OriginalIndex>());
+    assert!(7 * std::mem::size_of::<IndexState>() < 64 << 10);
+};
