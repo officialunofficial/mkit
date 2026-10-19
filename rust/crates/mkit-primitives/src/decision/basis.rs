@@ -57,6 +57,7 @@ pub const MAX_BASIS_DEPENDENCIES: u32 = 4096;
 
 /// Explicit finite allowances for deriving a basis from sealed artifacts.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct BasisCfg {
     /// Most witness pages consumed, checked against the sealed proof count.
     pub max_witness_pages: u64,
@@ -69,6 +70,25 @@ pub struct BasisCfg {
     pub witness_page: PageDecodeCfg,
 }
 
+impl BasisCfg {
+    /// Build from every allowance. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(
+        max_witness_pages: u64,
+        max_total_witness_bytes: u64,
+        max_dependencies: u32,
+        witness_page: PageDecodeCfg,
+    ) -> Self {
+        Self {
+            max_witness_pages,
+            max_total_witness_bytes,
+            max_dependencies,
+            witness_page,
+        }
+    }
+}
+
 /// Facts a host that verifies with its own pipeline already holds.
 ///
 /// **Trust boundary.** Building a basis from this struct asserts, on the
@@ -78,6 +98,7 @@ pub struct BasisCfg {
 /// guard the host owns and must enforce itself, outside this crate's guard set.
 /// This is the only explicit, greppable trust path into a ticketed acceptance.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct HostAttestation {
     /// Repository the acceptance is for.
     pub repository: RepositoryId,
@@ -93,6 +114,25 @@ pub struct HostAttestation {
     pub denial_version: Option<u64>,
     /// Relied-on dependencies the host observed, each guarded exactly.
     pub dependencies: Vec<MemberFact>,
+}
+
+impl HostAttestation {
+    /// An attestation that carries no root, membership witness, denial version
+    /// or dependency: it derives no guard beyond the pack-identity claim, and
+    /// the host owns everything it does not carry. `packs` is explicit because
+    /// an empty list makes no pack-identity claim. Assign the public fields the
+    /// host holds. The struct is `#[non_exhaustive]`.
+    #[must_use]
+    pub const fn new(repository: RepositoryId, packs: Vec<PackSource>) -> Self {
+        Self {
+            repository,
+            packs,
+            root: None,
+            membership: None,
+            denial_version: None,
+            dependencies: Vec::new(),
+        }
+    }
 }
 
 /// Sealed record of what an acceptance relied on, as owned typed guards.
@@ -117,8 +157,10 @@ impl AcceptanceBasis {
     /// `external_bases` is every membership fact the host supplied while the
     /// pack was verified, re-requests included, in any order. It is recomputed
     /// against the verifier's sealed commitment (count and hash sum), so an
-    /// omitted, extra or altered base is `EvidenceBindingMismatch`. Duplicates
-    /// then collapse to one guard per object. `coverage`, when given, must
+    /// omitted, extra or altered base is `EvidenceBindingMismatch`. The
+    /// commitment protects against accidental host omission, not an adversarial
+    /// host: a host that can lie about the list can skip the decision anyway.
+    /// Duplicates then collapse to one guard per object. `coverage`, when given, must
     /// describe the same repository, view and ruleset as the proof; it is
     /// validated only and contributes no guard. Two witnesses that disagree on
     /// one supplier's published or held state are inconsistent observations

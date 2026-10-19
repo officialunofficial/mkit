@@ -170,10 +170,10 @@ pub struct EvidencePage<'a> {
 /// One cooperative pull-machine outcome.
 #[derive(Debug)]
 #[must_use]
-#[non_exhaustive]
 // Keep the fixed-size sealed summary inline; boxing adds an ownership allocation
 // that the verifier would have to charge at completion.
 #[allow(clippy::large_enum_variant)]
+#[non_exhaustive]
 pub enum Step<'a> {
     /// Caller must acquire input.
     Request(Request),
@@ -229,6 +229,10 @@ pub struct EvidenceSequence {
 ///
 /// The host that supplied the facts can recompute it from its own list, so an
 /// omitted, extra or altered base is detectable without any retained page.
+///
+/// It protects against accidental host omission, not an adversarial host: the
+/// count and sum are not collision-resistant against a list the host chooses,
+/// and a host that can lie about the list can skip the decision anyway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExternalBases {
     /// Number of facts received.

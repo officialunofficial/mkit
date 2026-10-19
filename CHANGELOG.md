@@ -66,6 +66,70 @@ collect the applicable entries between their old and new immutable pins.
 
 ### Breaking (toward 0.6)
 
+- [embedder: breaking API] Freeze of the `mkit-primitives` decision and verifier
+  surface. Every public step, decision, outcome, refusal, state and record enum
+  is now `#[non_exhaustive]`: `Step`, `ComputeDisposition`, `ClosureStep`,
+  `ClosureRequest`, `ClosureResponse`, `ClosureCheck`, `CanonicalSource`,
+  `PairResponse`, `FramedEntry`, `DependencyRecord`, `Signature`, `Domain`,
+  `SignatureResult`, `ClearanceDecision`, `ClearanceState`, `ClearanceMoment`,
+  `ClearanceLifecycle`, `ForkAdvancePhase`, `ForkAdvanceDecision`,
+  `ForkAdvanceRefusal`, `ForkActivationDecision`, `ForkCompletionDecision`,
+  `ForkLifecycleProtection`, `ForkObservation`, `ForkPairContext` and
+  `ForkVisibility`. Migration: add a wildcard arm to every exhaustive match, and
+  make it fail closed (refuse, retry or stop): an unknown step, decision or
+  refusal must never be treated as permission to advance, publish or clear.
+  Every public fact, request, limit and proof struct a host builds is also
+  `#[non_exhaustive]` with a constructor, and keeps its public fields, so a host
+  assigns fields after construction instead of writing a literal. Migration:
+  replace each literal with `T::new(..)` (every field, in declaration order) and,
+  for the structs with natural defaults, with the short form and field
+  assignments: `Snapshot::new(repository)` (nothing acquired),
+  `RefWriteRequest::new(repository, kind, changes, required, now_ms)`,
+  `RefRequirements::new(membership_window)`, `ForkFacts::new(repository, request,
+  apply_attempt, acceptance_point)` (every observation unacquired),
+  `ClearanceFacts::new(repository, moment, prior, changed, previous_state)`,
+  `ClearanceAdvance::new(sequence, generation, operation, state, revision)`,
+  `ForkAdvanceFacts::new(binding, destination, progress,
+  construction_expires_ms)`, `ForkActivationFacts::new(advance, expected_result,
+  inherited_packs, unit)` and `ForkCompletionFacts` start with no saved accepted result, so the decision refuses until the host sets it and `ForkCompletionFacts::new(advance, expected_result,
+  cursor, part, packs, digest, barrier_owner)`. Output structs a host only reads
+  or destructures (for example `AcceptanceEffects` and its parts) stay
+  exhaustive on purpose, so a new effect field fails the host's build. The set of
+  frozen structs is: the decision facts, `Snapshot`, the ref-write and
+  ticketed-advance requests and bindings, `HostAttestation` (`new(repository,
+  packs)`, because an empty pack list makes no pack-identity claim and must be an
+  explicit choice), `BasisCfg`, and the fork and clearance facts and limits.
+  `cargo semver-checks -p mkit-primitives --all-features` has no published
+  baseline to compare with (the crate is unpublished), so it was run against the
+  tree before this change (`--baseline-rev`): five lints fail, all intended and
+  all listed above (`enum_marked_non_exhaustive`, `struct_marked_non_exhaustive`,
+  `struct_missing` for the five removed `Guarded*` types,
+  `struct_with_pub_fields_changed_type` for `RequiredSourceFence`, and
+  `type_mismatched_generic_lifetimes` for `CombinedAcceptance`). Wire and stored
+  formats are unchanged; no wipe is required.
+
+- [embedder: breaking API] Fork acceptance, progress, activation, completion and
+  published-clearance decisions converge on `decision::Guarded<D>` with owned,
+  typed `RequiredGuard`s. `GuardedFork`, `GuardedForkAdvance`,
+  `GuardedForkActivation`, `GuardedForkCompletion` and `GuardedClearance` are
+  removed, with their borrowed `required_guards()` snapshots, `matches`,
+  `valid_through_ms`, `evaluated_at_ms` and `source_fence`. Migration: take the
+  decision from `Guarded::decision()` (a reference; dereference the `Copy`
+  enums), lower `required_guards()` (new `RequiredGuard::Row`, `GuardRow` and
+  `GuardKind::{Fork, Clearance}`; handle them in exhaustive consumers, and treat
+  an unknown guard as a failure, never a drop), read the final source proof with
+  `fork::fork_source_proof` (now `RequiredSourceFence::Fork`), and compare with
+  `decision::guards_hold` against the live guards from each facts type's new
+  `guards()` method. A preparing `decide_fork_advance` that advances carries the
+  construction expiry as a `ValidThrough` guard, and `ForkClearanceProof` has a
+  new required `denial_revision` that activation guards. `RefRequirements::source`
+  takes `PublishedSourceFence` (the former `RequiredSourceFence` struct), and
+  `RequiredSourceFence` is now a non-exhaustive enum, and
+  `CombinedAcceptance` no longer takes a lifetime parameter. `ForkPlan` gains a
+  `commitment()`. The reference server's publication prefix now passes the real
+  row revisions to `decide_clearance` and accounts for every guard it returns;
+  wire and stored formats are unchanged and no wipe is required.
+
 - [embedder: breaking API] Sealed acceptance basis for ticketed acceptance in
   `mkit-primitives`. `VerificationVerdict` gains a lifetime and its `Satisfied`
   variant is replaced by `Verified(&[AcceptanceBasis])`: pass one basis per

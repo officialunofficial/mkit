@@ -33,6 +33,7 @@ pub(super) const DECODER_SCRATCH: u64 = 28 << 20;
 /// A decoded frame. Canonical validation, delta resolution, and signatures
 /// belong to all-entry verification; this event establishes none of them.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum FramedEntry<'a> {
     /// Decoded raw payload, not yet validated as a canonical object.
     Raw(&'a [u8]),

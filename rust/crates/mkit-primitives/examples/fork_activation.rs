@@ -3,6 +3,7 @@
 pub mod host_facts;
 
 use mkit_primitives::{
+    decision::guards_hold,
     error::Failure,
     fork::{ForkActivationDecision, decide_fork_activation},
 };
@@ -15,8 +16,8 @@ fn main() -> Result<(), Failure> {
     {
         let facts = host_facts::facts(&advance, &result, &unit, &proof);
         let guard = decide_fork_activation(&facts, 200, host_facts::LIMITS)?;
-        assert_eq!(guard.decision(), ForkActivationDecision::Install);
-        assert!(guard.matches(&facts, 200));
+        assert_eq!(*guard.decision(), ForkActivationDecision::Install);
+        assert!(guards_hold(&guard, &facts.guards(), 200));
         // A host compares every guard and discharges its destination proof and
         // authority permit while installing both witnesses atomically. Terminal
         // response, replay, reservation and outcome were settled at acceptance.
@@ -26,7 +27,7 @@ fn main() -> Result<(), Failure> {
     unit.published = Some(unit.expected);
     let replay = host_facts::facts(&advance, &result, &unit, &proof);
     let guard = decide_fork_activation(&replay, 200, host_facts::LIMITS)?;
-    assert_eq!(guard.decision(), ForkActivationDecision::Replay);
-    assert!(guard.matches(&replay, 200));
+    assert_eq!(*guard.decision(), ForkActivationDecision::Replay);
+    assert!(guards_hold(&guard, &replay.guards(), 200));
     Ok(())
 }

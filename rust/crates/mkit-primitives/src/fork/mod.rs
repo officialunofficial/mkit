@@ -12,8 +12,7 @@
 //!
 //! ```
 //! use mkit_primitives::fork::{ForkLimits, ForkVisibility};
-//! let limits = ForkLimits { packs: 8, edges: 16, branch_bytes: 128,
-//!     index_entries: 128, inherited_bytes: 4096, work: 4096 };
+//! let limits = ForkLimits::new(8, 16, 128, 128, 4096, 4096);
 //! assert_eq!(limits.packs, 8);
 //! assert_ne!(ForkVisibility::Public, ForkVisibility::Private);
 //! // Seal full inventories, acquire destination facts and a final source proof,
@@ -24,12 +23,14 @@ mod advance;
 pub use advance::*;
 
 mod facts;
+mod guards;
 mod plan;
 pub use facts::*;
+pub use guards::fork_source_proof;
 pub use plan::{ForkInventory, ForkLimits, ForkPlan};
 
 use crate::{
-    decision::{LifecycleState, Observed},
+    decision::{Guarded, LifecycleState, Observed},
     error::{BoundedDetail, Failure, FailureCode, Location},
 };
 
@@ -159,55 +160,14 @@ pub enum ForkDecision<'a> {
     Refuse(ForkRefusal),
 }
 
-/// Complete destination comparisons plus the separate source ordering fence.
-///
-/// Requirements borrow the bounded typed snapshot. The sealed plan owns the
-/// bounded result branch. Compare every acquired observation and its revision
-/// in one atomic unit with all effects. Never implement emptiness as sampled row CAS.
-/// `apply_attempt` and `acceptance_point` bind that unit to this source fence.
-/// Guard loss requires fresh facts, a new attempt identity, and a new source
-/// proof. Source facts are intentionally absent from destination atomic CAS.
-#[derive(Debug)]
-#[must_use]
-pub struct GuardedFork<'a> {
-    decision: ForkDecision<'a>,
-    expected: &'a ForkFacts<'a>,
-    valid_through_ms: Option<u64>,
-    source_fence: Option<&'a FinalForkSourceProof>,
-}
-impl<'a> GuardedFork<'a> {
-    /// Decision that requires every returned comparison and fence.
-    #[must_use = "apply the decision only with all returned guards"]
-    pub const fn decision(&self) -> &ForkDecision<'a> {
-        &self.decision
-    }
-    /// Exact destination facts and revisions required at the atomic boundary.
-    #[must_use]
-    pub const fn required_guards(&self) -> &'a ForkFacts<'a> {
-        self.expected
-    }
-    /// Business expiry, inclusive; independent of physical scheduling deadlines.
-    #[must_use]
-    pub const fn valid_through_ms(&self) -> Option<u64> {
-        self.valid_through_ms
-    }
-    /// Final source proof requirement, separate from destination atomic guards.
-    #[must_use]
-    pub const fn source_fence(&self) -> Option<&'a FinalForkSourceProof> {
-        self.source_fence
-    }
-    /// Pure reference comparison for host adapters and mutation tests.
-    ///
-    /// This does not commit or acquire facts. The host must scope observations by
-    /// the exact plan, request, and repository and perform this comparison inside
-    /// its atomic commit. Missing observations cannot satisfy acquired guards.
-    #[must_use]
-    pub fn matches(&self, current: &ForkFacts<'_>, now_ms: u64) -> bool {
-        self.expected == current && self.valid_through_ms.is_none_or(|expiry| now_ms <= expiry)
-    }
-}
-
 /// Decide fork acceptance over a sealed bounded plan and exact supplied facts.
+///
+/// The returned [`Guarded`] owns the destination guards (one per acquired fact,
+/// see [`ForkFacts::guards`]), the business expiry as a `ValidThrough` guard,
+/// and, once the decision reached the final source proof, that proof as a
+/// separate pre-apply source fence ([`fork_source_proof`]). Compare every
+/// guard atomically with all effects. Never implement emptiness as sampled
+/// row CAS.
 ///
 /// The host validates the current signed envelope at ingress, including its
 /// authentication requirements, before calling this entry point. Completed
@@ -234,7 +194,7 @@ pub fn decide_fork_acceptance<'a>(
     source: Option<&'a FinalForkSourceProof>,
     now_ms: u64,
     limits: ForkLimits,
-) -> Result<GuardedFork<'a>, Failure> {
+) -> Result<Guarded<ForkDecision<'a>>, Failure> {
     check_bounds(plan, facts, source, limits)?;
     let (decision, valid_through_ms, source_fence) =
         match classify(plan, request, facts, source, now_ms) {
@@ -242,12 +202,13 @@ pub fn decide_fork_acceptance<'a>(
             Err(CheckError::Refuse(reason)) => (ForkDecision::Refuse(reason), None, None),
             Err(CheckError::Facts(error)) => return Err(error),
         };
-    Ok(GuardedFork {
+    Ok(guards::seal(
+        facts.repository,
         decision,
-        expected: facts,
+        facts.guards(),
         valid_through_ms,
         source_fence,
-    })
+    ))
 }
 
 type DecisionParts<'a> = (

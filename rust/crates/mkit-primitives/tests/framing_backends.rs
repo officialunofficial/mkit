@@ -50,6 +50,7 @@ fn run(bytes: &[u8]) -> Result<Vec<Vec<u8>>, FailureCode> {
             FramingStep::Frame(frame) => output.push(match frame.entry {
                 FramedEntry::Raw(bytes) => bytes.to_vec(),
                 FramedEntry::Delta { stream, .. } => stream.to_vec(),
+                other => panic!("unmodelled framed entry: {other:?}"),
             }),
             FramingStep::RetainEvidence(page) => {
                 let commitment = page.commitment;

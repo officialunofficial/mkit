@@ -932,7 +932,7 @@ fn source_fence_is_complete_separate_and_not_required_for_saved_replay() {
         },
         change(Missing),
     ];
-    let source = RequiredSourceFence {
+    let source = PublishedSourceFence {
         repository: REPO,
         name: RefName("refs/heads/source".into()),
         read_authority: present(AuthorityFact {
@@ -959,7 +959,10 @@ fn source_fence_is_complete_separate_and_not_required_for_saved_replay() {
         .map(|change| (change.name.clone(), Observed::Absent(REV)))
         .collect();
     let guarded = decide_ref_write(&req, &snap, limits()).unwrap();
-    assert_eq!(guarded.source_fences(), std::slice::from_ref(&source));
+    assert_eq!(
+        guarded.source_fences(),
+        [RequiredSourceFence::Published(Box::new(source.clone()))]
+    );
     assert_eq!(guarded.required_guards().len(), 2);
     for field in 0..6 {
         let mut raced = source.clone();
@@ -977,7 +980,10 @@ fn source_fence_is_complete_separate_and_not_required_for_saved_replay() {
                 }
             }
         }
-        assert_ne!(guarded.source_fences(), &[raced]);
+        assert_ne!(
+            guarded.source_fences(),
+            [RequiredSourceFence::Published(Box::new(raced.clone()))]
+        );
     }
     let mut impossible = source.clone();
     if let Observed::Present { value, .. } = &mut impossible.publication {
@@ -1440,7 +1446,7 @@ fn source_fence_refusals_use_the_server_specification_answers() {
         head: Some(NEW),
         packmap: Some(OLD),
     };
-    let fence = |publication: Observed<PublicationFact>, ready: bool| RequiredSourceFence {
+    let fence = |publication: Observed<PublicationFact>, ready: bool| PublishedSourceFence {
         repository: REPO,
         name: RefName("refs/heads/source".into()),
         read_authority: present(AuthorityFact {
@@ -1456,7 +1462,7 @@ fn source_fence_refusals_use_the_server_specification_answers() {
         .iter()
         .map(|change| (change.name.clone(), Observed::Absent(REV)))
         .collect();
-    let decide = |source: &RequiredSourceFence, changes: &[RefChange]| {
+    let decide = |source: &PublishedSourceFence, changes: &[RefChange]| {
         let mut req = request(changes);
         req.kind = RefWriteKind::Advance;
         req.required.source = Some(source);
@@ -1502,7 +1508,10 @@ fn source_fence_refusals_use_the_server_specification_answers() {
         guarded.decision(),
         &WriteDecision::Retry(RetryReason::Unavailable)
     );
-    assert_eq!(guarded.source_fences(), std::slice::from_ref(&moved));
+    assert_eq!(
+        guarded.source_fences(),
+        [RequiredSourceFence::Published(Box::new(moved.clone()))]
+    );
     // A contradictory row is still a host error.
     let broken = fence(unpublished(|f| f.published_prefix = 3), true);
     assert_eq!(

@@ -21,14 +21,14 @@ fn fact(state: &Publication) -> PublicationFact {
     } else {
         mkit_core::hash::hash(crate::store::codec::encode_u64(state.generation).as_bytes())
     };
-    PublicationFact {
-        generation: Revision(generation),
-        sequence: state.sequence,
-        published_prefix: state.published,
-        deletion_boundary: state.boundary,
-        head: state.value.head,
-        packmap: state.value.packmap,
-    }
+    PublicationFact::new(
+        Revision(generation),
+        state.sequence,
+        state.published,
+        state.boundary,
+        state.value.head,
+        state.value.packmap,
+    )
 }
 
 pub(super) fn decide(

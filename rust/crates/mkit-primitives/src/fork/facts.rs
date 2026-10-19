@@ -11,6 +11,7 @@ use mkit_core::hash::Hash;
 
 /// Repository visibility in the authorization observation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ForkVisibility {
     /// Public repository.
     Public,
@@ -20,6 +21,7 @@ pub enum ForkVisibility {
 
 /// Exact source visibility and principal-specific read authorization.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SourceAccess {
     /// Authenticated principal whose read permission was observed.
     pub principal: Hash,
@@ -31,8 +33,28 @@ pub struct SourceAccess {
     pub authorization_revision: Revision,
 }
 
+impl SourceAccess {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(
+        principal: Hash,
+        visibility: ForkVisibility,
+        visibility_revision: Revision,
+        authorization_revision: Revision,
+    ) -> Self {
+        Self {
+            principal,
+            visibility,
+            visibility_revision,
+            authorization_revision,
+        }
+    }
+}
+
 /// Admitted semantic binding, independent of a signed retry's identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ForkBinding {
     /// Source repository.
     pub source: RepositoryId,
@@ -52,8 +74,37 @@ pub struct ForkBinding {
     pub destination_visibility: ForkVisibility,
 }
 
+impl ForkBinding {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(
+        source: RepositoryId,
+        source_incarnation: Revision,
+        branch: RefName,
+        publication: PublicationFact,
+        source_access: SourceAccess,
+        destination: RepositoryId,
+        destination_generation: Revision,
+        destination_visibility: ForkVisibility,
+    ) -> Self {
+        Self {
+            source,
+            source_incarnation,
+            branch,
+            publication,
+            source_access,
+            destination,
+            destination_generation,
+            destination_visibility,
+        }
+    }
+}
+
 /// Original authorization and signed request identity of one admitted attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ForkAttempt {
     /// Exact operation identity.
     pub operation: OperationId,
@@ -74,8 +125,37 @@ pub struct ForkAttempt {
     pub authority_fencing: bool,
 }
 
+impl ForkAttempt {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(
+        operation: OperationId,
+        reservation: Option<ReservationId>,
+        replay: ReplayScope,
+        fingerprint: Hash,
+        expires_ms: u64,
+        authority: AuthorityFact,
+        grant: Option<GrantFact>,
+        authority_fencing: bool,
+    ) -> Self {
+        Self {
+            operation,
+            reservation,
+            replay,
+            fingerprint,
+            expires_ms,
+            authority,
+            grant,
+            authority_fencing,
+        }
+    }
+}
+
 /// Complete immutable terminal response, including the admitted source branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ForkResult {
     /// Source branch.
     pub branch: RefName,
@@ -97,6 +177,38 @@ pub struct ForkResult {
     pub pack_digest: Hash,
     /// Destination membership generation.
     pub destination_generation: Revision,
+}
+
+impl ForkResult {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(
+        branch: RefName,
+        source: RepositoryId,
+        source_sequence: u64,
+        tip: Hash,
+        packmap: Hash,
+        packs: u64,
+        bytes: u64,
+        index_entries: u64,
+        pack_digest: Hash,
+        destination_generation: Revision,
+    ) -> Self {
+        Self {
+            branch,
+            source,
+            source_sequence,
+            tip,
+            packmap,
+            packs,
+            bytes,
+            index_entries,
+            pack_digest,
+            destination_generation,
+        }
+    }
 }
 
 /// Saved fork terminal result; retries cannot change it.
@@ -128,6 +240,7 @@ pub enum ForkJobState {
 
 /// Exact durable job. A restored plan must be sealed again from trusted facts.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ForkJob<'a> {
     /// Exact immutable admitted plan.
     pub plan: &'a ForkPlan,
@@ -139,12 +252,32 @@ pub struct ForkJob<'a> {
     pub state: ForkJobState,
 }
 
+impl<'a> ForkJob<'a> {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(
+        plan: &'a ForkPlan,
+        attempt: ForkAttempt,
+        expires_ms: u64,
+        state: ForkJobState,
+    ) -> Self {
+        Self {
+            plan,
+            attempt,
+            expires_ms,
+            state,
+        }
+    }
+}
+
 /// Authoritative emptiness observation covering refs and every membership row.
 ///
 /// Its enclosing observation revision MUST change on any addition, including an
 /// addition outside the rows or page the host happened to read. A page of absent
 /// rows is not this fact. Staged rows belong only to the recorded construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ForkEmptiness {
     /// All destination refs.
     pub refs: u64,
@@ -160,8 +293,32 @@ pub struct ForkEmptiness {
     pub writes_enabled: bool,
 }
 
+impl ForkEmptiness {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(
+        refs: u64,
+        visible_members: u64,
+        staged_members: u64,
+        staged_pack_digest: Hash,
+        staged_owner: Option<OperationId>,
+        writes_enabled: bool,
+    ) -> Self {
+        Self {
+            refs,
+            visible_members,
+            staged_members,
+            staged_pack_digest,
+            staged_owner,
+            writes_enabled,
+        }
+    }
+}
+
 /// Exact name registration and any prior visibility declaration.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ForkName {
     /// Registered construction owner, or no registered repository.
     pub registered_by: Option<OperationId>,
@@ -169,8 +326,24 @@ pub struct ForkName {
     pub declared_visibility: Option<ForkVisibility>,
 }
 
+impl ForkName {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(
+        registered_by: Option<OperationId>,
+        declared_visibility: Option<ForkVisibility>,
+    ) -> Self {
+        Self {
+            registered_by,
+            declared_visibility,
+        }
+    }
+}
+
 /// Create/write permission for this request, bound to consistent source visibility.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ForkPermission {
     /// Authenticated operation.
     pub operation: OperationId,
@@ -184,8 +357,30 @@ pub struct ForkPermission {
     pub write: bool,
 }
 
+impl ForkPermission {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(
+        operation: OperationId,
+        source_access: SourceAccess,
+        destination_visibility: ForkVisibility,
+        create: bool,
+        write: bool,
+    ) -> Self {
+        Self {
+            operation,
+            source_access,
+            destination_visibility,
+            create,
+            write,
+        }
+    }
+}
+
 /// Exact admitted byte charge, already debited when construction was admitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ForkAdmission<'a> {
     /// Exact immutable plan admitted, including its full pack set.
     pub plan: &'a ForkPlan,
@@ -201,8 +396,32 @@ pub struct ForkAdmission<'a> {
     pub charge: Option<Revision>,
 }
 
+impl<'a> ForkAdmission<'a> {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(
+        plan: &'a ForkPlan,
+        operation: OperationId,
+        reservation: Option<ReservationId>,
+        declared_bytes: u64,
+        new_to_repo_bytes: u64,
+        charge: Option<Revision>,
+    ) -> Self {
+        Self {
+            plan,
+            operation,
+            reservation,
+            declared_bytes,
+            new_to_repo_bytes,
+            charge,
+        }
+    }
+}
+
 /// Authoritative receipt for the admission debit and applicable quota window.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ForkQuota {
     /// Operation owning the debit.
     pub operation: OperationId,
@@ -218,6 +437,31 @@ pub struct ForkQuota {
     pub used_operations: u64,
     /// Applicable operation limit.
     pub operation_limit: u64,
+}
+
+impl ForkQuota {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(
+        operation: OperationId,
+        charge: Revision,
+        bytes: u64,
+        used_bytes: u64,
+        byte_limit: u64,
+        used_operations: u64,
+        operation_limit: u64,
+    ) -> Self {
+        Self {
+            operation,
+            charge,
+            bytes,
+            used_bytes,
+            byte_limit,
+            used_operations,
+            operation_limit,
+        }
+    }
 }
 
 /// Reservation state. Terminal settlement belongs to acceptance, not activation.
@@ -268,6 +512,7 @@ pub enum ForkReplay {
 /// Every observation is scoped by `repository` and the exact job/request IDs.
 /// The host guards this entire fixed-shape snapshot, including its revisions.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ForkFacts<'a> {
     /// Exact destination repository.
     pub repository: RepositoryId,
@@ -301,8 +546,40 @@ pub struct ForkFacts<'a> {
     pub replay: Option<Observed<ForkReplay>>,
 }
 
+impl<'a> ForkFacts<'a> {
+    /// Facts with no acquired observation: every `Option` is unacquired, which
+    /// is never absence. Assign the public fields the host acquired. The struct
+    /// is `#[non_exhaustive]`.
+    #[must_use]
+    pub const fn new(
+        repository: RepositoryId,
+        request: &'a ForkAttempt,
+        apply_attempt: Revision,
+        acceptance_point: u64,
+    ) -> Self {
+        Self {
+            repository,
+            request,
+            apply_attempt,
+            acceptance_point,
+            job: None,
+            emptiness: None,
+            name: None,
+            lifecycle: None,
+            permission: None,
+            authority: None,
+            grant: None,
+            admission: None,
+            quota: None,
+            reservation: None,
+            replay: None,
+        }
+    }
+}
+
 /// Independent source membership checks at the final proof boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ForkPackEligibility {
     /// Whether source membership is live.
     pub live: bool,
@@ -312,8 +589,22 @@ pub struct ForkPackEligibility {
     pub held: bool,
 }
 
+impl ForkPackEligibility {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(live: bool, cleared: bool, held: bool) -> Self {
+        Self {
+            live,
+            cleared,
+            held,
+        }
+    }
+}
+
 /// Final proof for one inherited whole pack at the source fence.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ForkPackProof {
     /// Exact source-scoped pack identity.
     pub pack: Hash,
@@ -337,6 +628,38 @@ pub struct ForkPackProof {
     pub superseded: bool,
 }
 
+impl ForkPackProof {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(
+        pack: Hash,
+        incarnation: Revision,
+        generation: Revision,
+        membership: Revision,
+        descriptor: Hash,
+        descriptor_revision: Revision,
+        denial_revision: Revision,
+        eligibility: ForkPackEligibility,
+        denied: bool,
+        superseded: bool,
+    ) -> Self {
+        Self {
+            pack,
+            incarnation,
+            generation,
+            membership,
+            descriptor,
+            descriptor_revision,
+            denial_revision,
+            eligibility,
+            denied,
+            superseded,
+        }
+    }
+}
+
 /// Separate source pre-acceptance fence; never a cross-owner atomic CAS.
 ///
 /// The host obtains this proof after the final staged membership effect and
@@ -345,6 +668,7 @@ pub struct ForkPackProof {
 /// Reacquire the proof before each retried destination apply attempt. Logical
 /// points and revisions are trusted host observations, not physical timestamps.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FinalForkSourceProof {
     /// Exact destination attempt, preventing stale proof reuse after CAS loss.
     pub apply_attempt: Revision,
@@ -366,4 +690,36 @@ pub struct FinalForkSourceProof {
     pub readable: bool,
     /// Sorted complete proofs for every inherited pack, including suppliers.
     pub packs: Vec<ForkPackProof>,
+}
+
+impl FinalForkSourceProof {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(
+        apply_attempt: Revision,
+        staged_revision: Revision,
+        proof_point: u64,
+        repository: RepositoryId,
+        branch: RefName,
+        lifecycle: Observed<LifecycleFact>,
+        publication: Observed<PublicationFact>,
+        access: Observed<SourceAccess>,
+        readable: bool,
+        packs: Vec<ForkPackProof>,
+    ) -> Self {
+        Self {
+            apply_attempt,
+            staged_revision,
+            proof_point,
+            repository,
+            branch,
+            lifecycle,
+            publication,
+            access,
+            readable,
+            packs,
+        }
+    }
 }

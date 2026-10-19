@@ -5,6 +5,7 @@ use mkit_core::hash::{Hash, Hasher};
 
 /// Finite plan and decision work bounds, independent of deployment limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ForkLimits {
     /// Maximum inherited packs.
     pub packs: u32,
@@ -20,6 +21,29 @@ pub struct ForkLimits {
     pub work: u64,
 }
 
+impl ForkLimits {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(
+        packs: u32,
+        edges: u32,
+        branch_bytes: u32,
+        index_entries: u64,
+        inherited_bytes: u64,
+        work: u64,
+    ) -> Self {
+        Self {
+            packs,
+            edges,
+            branch_bytes,
+            index_entries,
+            inherited_bytes,
+            work,
+        }
+    }
+}
+
 /// Complete immutable inventory of an inherited pack, supplied by a trusted host.
 ///
 /// The host authenticates the descriptor and resolves every external base to its
@@ -27,6 +51,7 @@ pub struct ForkLimits {
 /// external suppliers, including entries outside the requested head's closure.
 /// This fact is not a verifier artifact or a remote attestation.
 #[derive(Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ForkInventory {
     /// Whole-pack content identity.
     pub pack: Hash,
@@ -38,6 +63,27 @@ pub struct ForkInventory {
     pub index_entries: u64,
     /// Sorted, distinct direct pack dependencies from the complete inventory.
     pub dependencies: Vec<Hash>,
+}
+
+impl ForkInventory {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(
+        pack: Hash,
+        descriptor: Hash,
+        bytes: u64,
+        index_entries: u64,
+        dependencies: Vec<Hash>,
+    ) -> Self {
+        Self {
+            pack,
+            descriptor,
+            bytes,
+            index_entries,
+            dependencies,
+        }
+    }
 }
 
 /// A validated complete pack graph. Construction grants no membership or access.
@@ -58,6 +104,7 @@ pub struct ForkPlan {
     pub(super) packs: Vec<ForkInventory>,
     pub(super) result: ForkResult,
     pub(super) edges: u64,
+    pub(super) commitment: Hash,
 }
 
 impl ForkPlan {
@@ -170,11 +217,13 @@ impl ForkPlan {
             pack_digest: digest.finalize(),
             destination_generation: binding.destination_generation,
         };
+        let commitment = Self::compute_commitment(&binding, &packs, &result);
         Ok(Self {
             binding,
             packs,
             result,
             edges,
+            commitment,
         })
     }
 

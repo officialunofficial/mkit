@@ -40,6 +40,7 @@ pub enum UploadProof {
 
 /// One ticket the request consumes, in request order.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TicketClaim {
     /// Claimed ticket identity: the reservation-derived id the host supplied.
     pub ticket: TicketId,
@@ -56,6 +57,19 @@ pub struct TicketClaim {
     /// outcome's `new_to_repository` field, and the coordinator's
     /// `StorageChanged` outcome stays authoritative.
     pub counted: bool,
+}
+
+impl TicketClaim {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(ticket: TicketId, proof: UploadProof, counted: bool) -> Self {
+        Self {
+            ticket,
+            proof,
+            counted,
+        }
+    }
 }
 
 /// Batch content-verification result already decided by the host.
@@ -100,6 +114,7 @@ pub enum StorageAccounting {
 
 /// Original admission reservation the write settles.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PendingBinding {
     /// Admission reservation identity.
     pub reservation: ReservationId,
@@ -108,6 +123,23 @@ pub struct PendingBinding {
     pub expected: Observed<ReservationFact>,
     /// Plan instant recorded on its terminal row.
     pub occurred_ms: u64,
+}
+
+impl PendingBinding {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(
+        reservation: ReservationId,
+        expected: Observed<ReservationFact>,
+        occurred_ms: u64,
+    ) -> Self {
+        Self {
+            reservation,
+            expected,
+            occurred_ms,
+        }
+    }
 }
 
 /// Bounded ticketed-advance decision input.
@@ -122,6 +154,7 @@ pub struct PendingBinding {
 /// non-empty; the wire admits no other ticketed shape (SPEC-TRANSPORT-CONNECT
 /// §4). Unticketed pairs keep the ref decision's admitted shapes.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct TicketedAdvanceRequest<'a> {
     /// Embedded ref decision input. Tickets require its `operation` for
     /// durable outcomes and its `signer` for ticket binding.
@@ -134,4 +167,25 @@ pub struct TicketedAdvanceRequest<'a> {
     pub storage: StorageAccounting,
     /// Original admission reservation pending settlement.
     pub pending: Option<PendingBinding>,
+}
+
+impl<'a> TicketedAdvanceRequest<'a> {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(
+        write: RefWriteRequest<'a>,
+        tickets: &'a [TicketClaim],
+        verification: VerificationVerdict<'a>,
+        storage: StorageAccounting,
+        pending: Option<PendingBinding>,
+    ) -> Self {
+        Self {
+            write,
+            tickets,
+            verification,
+            storage,
+            pending,
+        }
+    }
 }

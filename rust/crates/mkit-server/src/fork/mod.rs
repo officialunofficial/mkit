@@ -28,6 +28,8 @@ mod settle;
 #[cfg(feature = "perf-metrics")]
 mod trace;
 
+#[cfg(all(test, feature = "memory"))]
+mod divergence_tests;
 #[cfg(test)]
 mod wave_tests;
 
@@ -471,8 +473,7 @@ pub enum Failure {
     TipChanged,
     /// The destination gained refs or conflicting rows during the job.
     Changed,
-    /// The job expired, its reservation was settled elsewhere, or the
-    /// authority it was authorized under moved.
+    /// The job expired or its reservation was settled elsewhere.
     Expired,
     /// Registering the destination was not permitted.
     Denied,
@@ -514,6 +515,12 @@ impl Failure {
             Self::OverAdmitted => ForkError::Quota(OVER_ADMITTED).error(),
         }
     }
+}
+
+/// Whether a resolved pack set of `bytes` is larger than the `declared` bytes
+/// admission charged for. Smaller or equal is covered.
+pub(crate) const fn exceeds_admission(bytes: u64, declared: u64) -> bool {
+    bytes > declared
 }
 
 /// The durable job row.
@@ -618,6 +625,15 @@ impl ForkJobV1 {
     }
     pub(crate) fn pack_bytes(&self) -> u64 {
         self.packs.iter().map(|p| p.len).sum()
+    }
+    /// Whether the resolved pack set outgrew the bytes admission charged for.
+    /// The charge is an upper bound: a smaller set is covered. (The portable
+    /// acceptance decision requires equality; see the divergence table in
+    /// `decision::tests`.)
+    pub(crate) fn over_admitted(&self) -> bool {
+        self.settle
+            .as_ref()
+            .is_some_and(|s| exceeds_admission(self.pack_bytes(), s.declared_bytes))
     }
     pub(crate) fn object_total(&self) -> u64 {
         self.packs.iter().map(|p| p.objects).sum()

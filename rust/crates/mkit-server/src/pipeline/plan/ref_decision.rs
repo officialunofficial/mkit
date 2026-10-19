@@ -60,11 +60,7 @@ pub(super) fn decide<'request, 'data>(
     let changes: Vec<_> = request
         .refs
         .iter()
-        .map(|update| RefChange {
-            name: RefName(update.name.clone()),
-            condition: update.condition,
-            target: update.new,
-        })
+        .map(|update| RefChange::new(RefName(update.name.clone()), update.condition, update.new))
         .collect();
     // First occurrence wins, matching the planner's `find` per update; the
     // portable contract rejects duplicate admitted names.
@@ -73,10 +69,12 @@ pub(super) fn decide<'request, 'data>(
         .resolved_ref_updates
         .iter()
         .filter(|update| seen.insert(update.name.as_str()))
-        .map(|update| AdmittedRef {
-            name: RefName(update.name.clone()),
-            target: update.new,
-            prior_present: update.prior_present(),
+        .map(|update| {
+            AdmittedRef::new(
+                RefName(update.name.clone()),
+                update.new,
+                update.prior_present(),
+            )
         })
         .collect();
     // The portable contract requires the presence guard to name a written ref;
@@ -103,29 +101,20 @@ pub(super) fn decide<'request, 'data>(
     let Some(kind) = portable_kind(&changes, &admitted) else {
         return generic(request, snapshot).map(Some);
     };
-    let input = RefWriteRequest {
-        repository,
-        operation: None,
-        kind,
-        changes: &changes,
-        admitted: &admitted,
-        presence,
-        signer: None,
-        replay: None,
-        ancestry: &[],
-        now_ms: 0,
-        required: ref_requirements(),
+    let input = {
+        let mut v = RefWriteRequest::new(repository, kind, &changes, ref_requirements(), 0);
+        v.operation = None;
+        v.admitted = &admitted;
+        v.presence = presence;
+        v.signer = None;
+        v.replay = None;
+        v.ancestry = &[];
+        v
     };
     let mut facts = ref_snapshot(repository);
     // At most two refs and two immutable admission bindings reach this adapter.
     // These local ceilings never raise a protocol or backend limit.
-    let limits = RefDecisionLimits {
-        facts: 16,
-        guards: 8,
-        bytes: 8_192,
-        work: 65_536,
-        public_message_bytes: 512,
-    };
+    let limits = RefDecisionLimits::new(16, 8, 8_192, 65_536, 512);
     for (index, update) in request.refs.iter().enumerate() {
         let key = keys::ref_key(request.repo, &update.name);
         if !snapshot.contains(&key) {
@@ -396,41 +385,25 @@ pub(super) fn lower(
 }
 
 fn ref_requirements() -> RefRequirements<'static> {
-    RefRequirements {
-        authority: None,
-        grant: None,
-        incarnation: None,
-        policy: None,
-        admission: None,
-        members: &[],
-        indexed_head: false,
-        membership_window: MembershipWindow::Elapsed,
-        denial: false,
-        publication: false,
-        source: None,
-        valid_through_ms: None,
+    {
+        let mut v = RefRequirements::new(MembershipWindow::Elapsed);
+        v.authority = None;
+        v.grant = None;
+        v.incarnation = None;
+        v.policy = None;
+        v.admission = None;
+        v.members = &[];
+        v.indexed_head = false;
+        v.denial = false;
+        v.publication = false;
+        v.source = None;
+        v.valid_through_ms = None;
+        v
     }
 }
 
 fn ref_snapshot(repository: RepositoryId) -> RefSnapshot {
-    RefSnapshot {
-        repository,
-        refs: Vec::new(),
-        replay: None,
-        tickets: Vec::new(),
-        reservations: Vec::new(),
-        authority: None,
-        grant: None,
-        lifecycle: None,
-        members: Vec::new(),
-        denial: None,
-        policy: None,
-        admission: None,
-        accounting: None,
-        publication: None,
-        storage: None,
-        basis: Vec::new(),
-    }
+    RefSnapshot::new(repository)
 }
 
 /// The guard sealed for `name`'s value expectation, when the decision took one.

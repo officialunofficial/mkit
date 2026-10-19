@@ -329,6 +329,37 @@ The rows are pinned by `fact_class_table_rows_for_ref_writes`,
 and the `authority_unfenceable`, `authority_generation` and `destination_deleting`
 rows of the fork acceptance fixtures.
 
+**Reference-server behavior.** The portable fork decisions (acceptance, progress,
+activation, completion) and published clearance all return the same guarded
+wrapper as the ref and ticketed decisions: owned, typed guards, with the
+construction expiry or proof deadline as an absolute validity guard and the
+final source proof as a separate pre-apply fence. The reference server routes
+fork progress, activation and completion through the portable decisions. Fork
+acceptance is not routed: the server derives it from the durable job row, the
+captured source proof and the destination barrier, because the job keeps no
+sealed inventory (descriptors and dependency edges) to build a portable plan
+from. Each difference below is deliberate and pinned by a test in
+`fork::divergence_tests` that runs the server path and the portable decision on
+the same input:
+
+- **Admission charge.** The server treats the charged bytes as an upper bound (a
+  smaller resolved set is covered, a larger one is `over_admitted`); the portable
+  decision requires the charged bytes to equal the plan's bytes and answers
+  `QuotaExceeded` otherwise.
+- **Authority and epoch movement.** The portable decision answers one
+  `PermissionDenied` class; the server replays two public errors, authority moved
+  and epoch moved.
+- **Settled reservation.** The portable decision names `ReservationSettled`; the
+  server's progress decision ends the job as `Expired`, as for a lapsed lifetime.
+- **Registered destination.** The portable decision compares a declared
+  visibility and answers `VisibilityMismatch`; the server refuses any registered
+  destination as not empty before visibility is compared.
+
+Where the server routes a decision and the portable vocabulary is coarser, the
+server keeps the finer public answer: authority and epoch movement share one
+portable code and replay two public errors, and an expired lifetime and a
+settled reservation have two portable codes and one public error.
+
 ### 3.2 Replay, durability, and recovery
 
 **Protocol requirement.** A committed replay MUST answer with its saved result
@@ -2833,6 +2864,31 @@ for the replacement state or refuse with a retryable `unavailable`; it MUST NOT
 re-read a newer publication row and guard only that row, which would validate
 evidence derived from the older one. The binding is request-local and adds no
 stored field.
+
+**Reference-server behavior.** The durable dependency recheck decides
+clearance over the real row revisions it read: the publication row's content
+digest is the prior revision, and each retained advance row's digest is its
+revision (the changed advance carries the stored row's digest). Every guard the
+decision returns must be accounted for before the apply; an unknown guard
+fails closed. The apply compares the publication row and the changed advance
+row exactly. A retained suffix row is written only by the append and clearance
+writers, and both rewrite the compared publication row in the same batch, so
+a suffix row cannot move without failing that comparison; this is pinned by
+`every_advance_writer_rewrites_the_publication_row`,
+`a_retained_suffix_row_that_moves_fails_the_clearance_apply` and the audit
+`only_the_publication_store_constructs_advance_row_keys`. Dependency and
+external-supplier witnesses are not guards of the apply: they live in other
+partitions or under other refs' publication rows, a batch is capped at 100
+operations against up to 4,096 dependencies, and the walk that reads them
+spans timer firings. They are checked by the dependency walk before the apply,
+and the apply is bounded by `NotAfter` (ten seconds). **Known residual.** A change to a witness's
+standing between its read and the apply is therefore not compared by the apply:
+that gap is bounded by the `NotAfter` window for rows read in the same firing.
+Takedown and supplier-hold writers are not serialized through the publication
+row, and cross-partition atomicity is the blocker. The portable guards stay
+complete, so a host with cross-partition atomic batches enforces them; the
+reference server's exposure is unchanged from before this decision was routed. The recheck adds no read or
+round trip.
 
 **Protocol requirement.** Exhaustion of implementation execution capacity MUST
 NOT be treated as malformed content or a missing closure member. A server MUST

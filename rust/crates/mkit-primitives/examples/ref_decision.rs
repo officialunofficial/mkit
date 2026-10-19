@@ -17,40 +17,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let new = [4; 32];
     let repository = RepositoryId([1; 32]);
     let name = RefName("refs/heads/main".into());
-    let changes = [RefChange {
-        name: name.clone(),
-        condition,
-        target: Some(new),
-    }];
-    let request = RefWriteRequest {
-        repository,
-        operation: None,
-        kind: RefWriteKind::Update,
-        changes: &changes,
-        admitted: &[],
-        presence: None,
-        signer: None,
-        replay: None,
-        ancestry: &[],
-        now_ms: 0,
-        required: RefRequirements {
-            authority: None,
-            grant: None,
-            incarnation: None,
-            policy: None,
-            admission: None,
-            members: &[],
-            indexed_head: false,
-            membership_window: MembershipWindow::Elapsed,
-            denial: false,
-            publication: false,
-            source: None,
-            valid_through_ms: None,
-        },
+    let changes = [RefChange::new(name.clone(), condition, Some(new))];
+    let request = {
+        let mut v = RefWriteRequest::new(
+            repository,
+            RefWriteKind::Update,
+            &changes,
+            {
+                let mut v = RefRequirements::new(MembershipWindow::Elapsed);
+                v.authority = None;
+                v.grant = None;
+                v.incarnation = None;
+                v.policy = None;
+                v.admission = None;
+                v.members = &[];
+                v.indexed_head = false;
+                v.denial = false;
+                v.publication = false;
+                v.source = None;
+                v.valid_through_ms = None;
+                v
+            },
+            0,
+        );
+        v.operation = None;
+        v.admitted = &[];
+        v.presence = None;
+        v.signer = None;
+        v.replay = None;
+        v.ancestry = &[];
+        v
     };
-    let snapshot = Snapshot {
-        repository,
-        refs: vec![(
+    let snapshot = {
+        let mut v = Snapshot::new(repository);
+        v.refs = vec![(
             name,
             current.map_or(Observed::Absent(Revision([0; 32])), |value| {
                 Observed::Present {
@@ -58,29 +58,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     revision: Revision(value),
                 }
             }),
-        )],
-        replay: None,
-        tickets: vec![],
-        reservations: vec![],
-        authority: None,
-        grant: None,
-        lifecycle: None,
-        members: vec![],
-        denial: None,
-        policy: None,
-        admission: None,
-        accounting: None,
-        publication: None,
-        storage: None,
-        basis: vec![],
+        )];
+        v.replay = None;
+        v.tickets = vec![];
+        v.reservations = vec![];
+        v.authority = None;
+        v.grant = None;
+        v.lifecycle = None;
+        v.members = vec![];
+        v.denial = None;
+        v.policy = None;
+        v.admission = None;
+        v.accounting = None;
+        v.storage = None;
+        v.publication = None;
+        v.basis = vec![];
+        v
     };
-    let limits = RefDecisionLimits {
-        facts: 16,
-        guards: 8,
-        bytes: 4096,
-        work: 16384,
-        public_message_bytes: 512,
-    };
+    let limits = RefDecisionLimits::new(16, 8, 4096, 16384, 512);
     let decision = decide_ref_write(&request, &snapshot, limits)?;
     assert!(matches!(decision.decision(), WriteDecision::Apply(_)));
     check_guard_completeness(&decision, decision.required_guards())?;

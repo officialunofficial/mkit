@@ -227,6 +227,7 @@ impl ComputeOutput {
 /// Whether an output still belongs to outstanding work in the receiving run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use]
+#[non_exhaustive]
 pub enum ComputeDisposition {
     /// The output was recorded; ordinal merge may still await earlier jobs.
     Accepted,

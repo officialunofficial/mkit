@@ -67,6 +67,7 @@ pub struct MembershipWitness {
 
 /// Signature outcome recorded by the trusted verifier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SignatureResult {
     /// An individual signature verified successfully.
     Valid,

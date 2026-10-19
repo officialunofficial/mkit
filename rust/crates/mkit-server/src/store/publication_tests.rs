@@ -84,7 +84,7 @@ async fn finish(
     let mut changed = Advance::decode(&ar).unwrap();
     changed.state = status;
     let state = Publication::decode(Some(&sr)).unwrap();
-    let eligible = prefix(kv, &p, &repo.name, &name, &state, &changed)
+    let eligible = prefix(kv, &p, &repo.name, &name, &sr, &state, &changed)
         .await
         .unwrap();
     let os = kv.get(&p, &keys::outbox_sequence()).await.unwrap();
@@ -620,6 +620,7 @@ fn fully_published_maximum_sequence_has_an_empty_prefix() {
                 &source,
                 &repository.name,
                 "refs/heads/main",
+                &state.encode().unwrap(),
                 &state,
                 &changed
             )
@@ -675,7 +676,14 @@ fn clearance_prefix_equals_the_stored_state_walk_for_validated_rows() {
                 };
                 for changed in &advances {
                     assert_eq!(
-                        clearance_prefix(&state, changed, &advances).unwrap(),
+                        clearance_prefix(
+                            Revision([0; 32]),
+                            &state,
+                            changed,
+                            &advances,
+                            &vec![Revision([0; 32]); advances.len()],
+                        )
+                        .unwrap(),
                         stored_prefix(&state, &advances),
                         "{a:?} {b:?} {c:?} changed {}",
                         changed.sequence
@@ -684,4 +692,239 @@ fn clearance_prefix_equals_the_stored_state_walk_for_validated_rows() {
             }
         }
     }
+}
+
+fn writes_key(batch: &Batch, key: &Key) -> bool {
+    batch.writes.iter().any(|write| match write {
+        Write::Put(k, _) | Write::Delete(k) | Write::Increment(k) => k == key,
+    })
+}
+
+fn compares_key(batch: &Batch, key: &Key) -> bool {
+    batch.preconditions.iter().any(|pre| match pre {
+        Precondition::Equals(k, _) | Precondition::Absent(k) => k == key,
+        _ => false,
+    })
+}
+
+/// The clearance apply compares the publication row and the changed advance
+/// row, and accounts for every retained suffix row by serialization through the
+/// publication row. That is sound only while no retained advance row is
+/// written without rewriting the publication row it is retained under.
+#[test]
+fn every_advance_writer_rewrites_the_publication_row() {
+    block_on(async {
+        let kv = MemoryKv::default();
+        let shards = SinglePartition;
+        let repo = repo();
+        let name = "refs/heads/main";
+        let p = shards.ref_shard(&repo, name);
+        let publication = keys::publication(&repo.name, name);
+        let mut advance_rows_written = 0;
+        // Writer 1: `append` of a pending, a cleared and a deleting advance.
+        for (deleted, state) in [
+            (false, Clearance::Pending),
+            (false, Clearance::Cleared),
+            (true, Clearance::Cleared),
+        ] {
+            let old = kv.get(&p, &publication).await.unwrap();
+            let mut batch = Batch::new();
+            let mut outbox = OutboxBuilder::new(None, None).unwrap();
+            let written = append(
+                &repo,
+                name,
+                &p,
+                &shards,
+                old.as_ref(),
+                advance(1, state),
+                deleted,
+                &mut batch.preconditions,
+                &mut batch.writes,
+                &mut outbox,
+            )
+            .unwrap();
+            let advance_key = keys::advance(&repo.name, name, written.sequence);
+            if writes_key(&batch, &advance_key) {
+                advance_rows_written += 1;
+                assert!(writes_key(&batch, &publication), "append {state:?}");
+                assert!(compares_key(&batch, &publication), "append {state:?}");
+            }
+            assert_eq!(kv.apply(&p, batch).await.unwrap(), BatchOutcome::Committed);
+        }
+        assert!(advance_rows_written > 0, "append wrote no advance row");
+        // Writer 2: `clear` of a retained pending advance.
+        let kv = MemoryKv::default();
+        apply(&kv, &shards, name, advance(1, Clearance::Pending), false).await;
+        let state_raw = kv.get(&p, &publication).await.unwrap().unwrap();
+        let advance_key = keys::advance(&repo.name, name, 1);
+        let advance_raw = kv.get(&p, &advance_key).await.unwrap().unwrap();
+        let mut changed = Advance::decode(&advance_raw).unwrap();
+        changed.state = Clearance::Cleared;
+        let state = Publication::decode(Some(&state_raw)).unwrap();
+        let eligible = prefix(&kv, &p, &repo.name, name, &state_raw, &state, &changed)
+            .await
+            .unwrap();
+        let mut batch = Batch::new();
+        let mut outbox = OutboxBuilder::new(None, None).unwrap();
+        clear(
+            &repo,
+            name,
+            &p,
+            &shards,
+            &state_raw,
+            &advance_raw,
+            &changed,
+            eligible,
+            &mut batch.preconditions,
+            &mut batch.writes,
+            &mut outbox,
+        )
+        .unwrap();
+        assert!(writes_key(&batch, &advance_key));
+        assert!(writes_key(&batch, &publication));
+        assert!(compares_key(&batch, &publication));
+        assert!(compares_key(&batch, &advance_key));
+    });
+}
+
+/// A suffix row that moves after the dependency walk fails the apply, because
+/// the writer that moved it also rewrote the publication row `clear` compares.
+#[test]
+fn a_retained_suffix_row_that_moves_fails_the_clearance_apply() {
+    block_on(async {
+        let kv = MemoryKv::default();
+        let shards = SinglePartition;
+        let repo = repo();
+        let name = "refs/heads/main";
+        let p = shards.ref_shard(&repo, name);
+        let publication = keys::publication(&repo.name, name);
+        apply(&kv, &shards, name, advance(1, Clearance::Pending), false).await;
+        apply(&kv, &shards, name, advance(4, Clearance::Pending), false).await;
+        let state_raw = kv.get(&p, &publication).await.unwrap().unwrap();
+        let advance_key = keys::advance(&repo.name, name, 2);
+        let advance_raw = kv.get(&p, &advance_key).await.unwrap().unwrap();
+        let mut changed = Advance::decode(&advance_raw).unwrap();
+        changed.state = Clearance::Cleared;
+        let state = Publication::decode(Some(&state_raw)).unwrap();
+        let eligible = prefix(&kv, &p, &repo.name, name, &state_raw, &state, &changed)
+            .await
+            .unwrap();
+        let mut batch = Batch::new();
+        let mut outbox = OutboxBuilder::new(None, None).unwrap();
+        clear(
+            &repo,
+            name,
+            &p,
+            &shards,
+            &state_raw,
+            &advance_raw,
+            &changed,
+            eligible,
+            &mut batch.preconditions,
+            &mut batch.writes,
+            &mut outbox,
+        )
+        .unwrap();
+        // Another writer appends a third advance after the walk.
+        apply(&kv, &shards, name, advance(7, Clearance::Pending), false).await;
+        assert!(matches!(
+            kv.apply(&p, batch).await.unwrap(),
+            BatchOutcome::PreconditionFailed { .. }
+        ));
+    });
+}
+
+/// Only the publication store constructs advance-row keys. A new writer
+/// elsewhere would escape the serialization argument above: audit it before
+/// updating this count.
+#[test]
+fn only_the_publication_store_constructs_advance_row_keys() {
+    fn walk(dir: &std::path::Path, hits: &mut Vec<(String, usize)>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.to_string_lossy().into_owned();
+            if path.is_dir() {
+                if !name.ends_with("/tests") {
+                    walk(&path, hits);
+                }
+                continue;
+            }
+            if path.extension().is_none_or(|ext| ext != "rs")
+                || name.ends_with("tests.rs")
+                || name.ends_with("_tests.rs")
+                || name.ends_with("test_support.rs")
+            {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let production = text.split("#[cfg(test)]").next().unwrap();
+            // No production code moves an advance row into a hold, hit or
+            // resolved state: those states exist only as stored-state decoding
+            // and clearance mapping, so no assignment-style hold writer bypasses the publication row (a tripwire, not proof).
+            assert!(
+                !production.contains("state = Clearance::Held")
+                    && !production.contains("state = Clearance::Hit")
+                    && !production.contains("state = Clearance::Resolved")
+                    && !production.contains("state: Clearance::Held")
+                    && !production.contains("state: Clearance::Hit")
+                    && !production.contains("state: Clearance::Resolved"),
+                "{name} writes a held, hit or resolved advance state"
+            );
+            let count = production.matches("keys::advance(").count();
+            if count > 0 {
+                hits.push((name, count));
+            }
+        }
+    }
+    let mut hits = Vec::new();
+    walk(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut hits,
+    );
+    // The timer reference, the append write, the prefix read, the clear write.
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert!(hits[0].0.ends_with("store/publication.rs"), "{hits:?}");
+    assert_eq!(hits[0].1, 4, "{hits:?}");
+}
+
+#[test]
+fn an_unaccounted_clearance_guard_fails_closed() {
+    use mkit_primitives::decision::{
+        ClearanceFacts, ClearanceLifecycle, ClearanceMoment, DependencyWitness,
+    };
+    let dependency = [[5; 32]];
+    let changed_advance = Advance {
+        dependencies: dependency.to_vec(),
+        ..advance(1, Clearance::Cleared)
+    };
+    let mut view = clearance_advance(&changed_advance, &[], &[], Revision([1; 32]));
+    view.dependencies = &dependency;
+    let witnesses = [DependencyWitness::new(
+        dependency[0],
+        true,
+        true,
+        false,
+        0,
+        Revision([2; 32]),
+    )];
+    let facts = {
+        let mut v = ClearanceFacts::new(
+            RepositoryId([0; 32]),
+            ClearanceMoment::Acceptance,
+            PriorPublication::new(0, 0, 0, 0, None, None, Revision([3; 32])),
+            {
+                let mut v = view;
+                v.sequence = 1;
+                v
+            },
+            ClearanceState::Pending,
+        );
+        v.suffix = &[];
+        v.witnesses = &witnesses;
+        v.lifecycle = ClearanceLifecycle::NotOffered;
+        v.deleted = false;
+        v
+    };
+    let decision = decide_clearance(&facts, &ClearanceLimits::reference()).unwrap();
+    assert!(account_for(&decision).is_err());
 }

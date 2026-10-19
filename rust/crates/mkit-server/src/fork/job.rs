@@ -272,11 +272,7 @@ impl ForkPlan {
         }
         job.packs = self.packs;
         // The Plan phase's own bound: admission charged exactly these bytes.
-        if job
-            .settle
-            .as_ref()
-            .is_some_and(|s| job.pack_bytes() > s.declared_bytes)
-        {
+        if job.over_admitted() {
             return Err(ForkError::Quota(super::OVER_ADMITTED));
         }
         job.phase = Phase::Trees;
@@ -469,7 +465,7 @@ async fn check_request<S: NamespaceStore>(
 
 /// A fork creates its destination: one that is already registered is not a
 /// fork destination, so a fork never inherits a visibility it did not ask for.
-async fn require_unregistered<S: NamespaceStore>(
+pub(super) async fn require_unregistered<S: NamespaceStore>(
     env: &ForkEnv<'_, S>,
     dest: &RepoId,
 ) -> Result<(), ForkError> {
@@ -913,11 +909,7 @@ async fn advance<S: NamespaceStore>(
             if plan::slice(env, job, budget).await? {
                 // The charge was an upper bound read at admission: a set that
                 // outgrew it is not covered.
-                if job
-                    .settle
-                    .as_ref()
-                    .is_some_and(|s| job.pack_bytes() > s.declared_bytes)
-                {
+                if job.over_admitted() {
                     return Err(ForkError::Quota(super::OVER_ADMITTED));
                 }
                 job.phase = Phase::Trees;

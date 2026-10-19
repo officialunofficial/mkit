@@ -52,14 +52,7 @@ const EPOCH_MOVED: &str = "namespace authority generation changed";
 /// guard is the §14.2 plan-time proof window, and it keeps no repository
 /// membership witness, so the attestation contributes no guard.
 fn host_basis(repository: RepositoryId) -> AcceptanceBasis {
-    AcceptanceBasis::attested_by_host(HostAttestation {
-        repository,
-        packs: Vec::new(),
-        root: None,
-        membership: None,
-        denial_version: None,
-        dependencies: Vec::new(),
-    })
+    AcceptanceBasis::attested_by_host(HostAttestation::new(repository, Vec::new()))
 }
 
 /// The composed decision plus the decoded ticket rows the reference
@@ -170,21 +163,19 @@ fn try_decide(
     let changes: Vec<_> = req
         .refs
         .iter()
-        .map(|update| RefChange {
-            name: RefName(update.name.clone()),
-            condition: update.condition,
-            target: update.new,
-        })
+        .map(|update| RefChange::new(RefName(update.name.clone()), update.condition, update.new))
         .collect();
     let mut seen = std::collections::BTreeSet::new();
     let admitted: Vec<_> = req
         .resolved_ref_updates
         .iter()
         .filter(|update| seen.insert(update.name.as_str()))
-        .map(|update| AdmittedRef {
-            name: RefName(update.name.clone()),
-            target: update.new,
-            prior_present: update.prior_present(),
+        .map(|update| {
+            AdmittedRef::new(
+                RefName(update.name.clone()),
+                update.new,
+                update.prior_present(),
+            )
         })
         .collect();
     let presence = req
@@ -201,59 +192,49 @@ fn try_decide(
             PresenceRequirement::Absent(name) => (RefName(name.clone()), false),
             PresenceRequirement::Present(name) => (RefName(name.clone()), true),
         });
-    let replay = req.replay.map(|replay| RefReplay {
-        scope: ReplayScope(replay.scope),
-        fingerprint: replay.fingerprint,
-        expires_ms: ms(replay.expires_at_ms),
+    let replay = req.replay.map(|replay| {
+        RefReplay::new(
+            ReplayScope(replay.scope),
+            replay.fingerprint,
+            ms(replay.expires_at_ms),
+        )
     });
     let fence = authority_fence(req, snap);
-    let write = RefWriteRequest {
-        repository,
-        operation: req.replay.map(|replay| OperationId(replay.scope)),
-        kind: RefWriteKind::Advance,
-        changes: &changes,
-        admitted: &admitted,
-        presence,
-        signer: Some(advance.signer),
-        replay,
-        ancestry: &[],
-        now_ms,
-        required: RefRequirements {
-            authority: fence.as_ref().map(|fence| fence.binding.clone()),
-            grant: None,
-            incarnation: None,
-            policy: None,
-            admission: None,
-            members: &[],
-            indexed_head: false,
-            membership_window: MembershipWindow::Elapsed,
-            denial: false,
-            publication: false,
-            source: None,
-            valid_through_ms: None,
-        },
+    let write = {
+        let mut v = RefWriteRequest::new(
+            repository,
+            RefWriteKind::Advance,
+            &changes,
+            {
+                let mut v = RefRequirements::new(MembershipWindow::Elapsed);
+                v.authority = fence.as_ref().map(|fence| fence.binding.clone());
+                v.grant = None;
+                v.incarnation = None;
+                v.policy = None;
+                v.admission = None;
+                v.members = &[];
+                v.indexed_head = false;
+                v.denial = false;
+                v.publication = false;
+                v.source = None;
+                v.valid_through_ms = None;
+                v
+            },
+            now_ms,
+        );
+        v.operation = req.replay.map(|replay| OperationId(replay.scope));
+        v.admitted = &admitted;
+        v.presence = presence;
+        v.signer = Some(advance.signer);
+        v.replay = replay;
+        v.ancestry = &[];
+        v
     };
 
     // Decode every claimed ticket row once: it feeds the semantic
     // observation, the claim's `counted` flag, and the reference lowering.
-    let mut facts = Facts {
-        repository,
-        refs: Vec::new(),
-        replay: None,
-        tickets: Vec::new(),
-        reservations: Vec::new(),
-        authority: fence.as_ref().map(|fence| fence.observed.clone()),
-        grant: None,
-        lifecycle: None,
-        members: Vec::new(),
-        denial: None,
-        policy: None,
-        admission: None,
-        accounting: None,
-        publication: None,
-        storage: None,
-        basis: Vec::new(),
-    };
+    let mut facts = Facts::new(repository);
+    facts.authority = fence.as_ref().map(|fence| fence.observed.clone());
     // A stored row that cannot be decoded is left out of the facts, not turned
     // into an answer: the decision asks for it only if it reaches that row, and
     // an earlier pending, replay, ticket or ref answer keeps its precedence.
@@ -272,12 +253,12 @@ fn try_decide(
                 Ok(record) => {
                     facts.replay = Some(Observed::Present {
                         revision: Revision(hash(raw.as_bytes())),
-                        value: ReplayFact {
-                            scope: ReplayScope(replay.scope),
-                            fingerprint: record.fingerprint,
-                            expires_ms: ms(record.expires_at_ms),
-                            state: replay_state(&record),
-                        },
+                        value: ReplayFact::new(
+                            ReplayScope(replay.scope),
+                            record.fingerprint,
+                            ms(record.expires_at_ms),
+                            replay_state(&record),
+                        ),
                     });
                 }
                 Err(error) => defer(corrupt(error)),
@@ -308,13 +289,7 @@ fn try_decide(
                 Err(error) => defer(error),
             },
         }
-        claims.push(TicketClaim {
-            ticket: TicketId(*id),
-            // Proof rows were verified by `ticket_decision` before planning;
-            // a claim reaching the atomic plan is proven.
-            proof: UploadProof::Ready,
-            counted,
-        });
+        claims.push(TicketClaim::new(TicketId(*id), UploadProof::Ready, counted));
     }
     // Refs are consulted after the ticket rows, so their decode failure ranks after.
     for update in req.refs {
@@ -365,20 +340,14 @@ fn try_decide(
             }
         };
     let basis = host_basis(write.repository);
-    let request = TicketedAdvanceRequest {
+    let request = TicketedAdvanceRequest::new(
         write,
-        tickets: &claims,
-        verification: VerificationVerdict::Verified(std::slice::from_ref(&basis)),
+        &claims,
+        VerificationVerdict::Verified(std::slice::from_ref(&basis)),
         storage,
         pending,
-    };
-    let limits = RefDecisionLimits {
-        facts: 64,
-        guards: 32,
-        bytes: 65_536,
-        work: 262_144,
-        public_message_bytes: 512,
-    };
+    );
+    let limits = RefDecisionLimits::new(64, 32, 65_536, 262_144, 512);
     let guarded = match decide_ticketed_advance(&request, &facts, limits) {
         Ok(guarded) => guarded,
         // The decision reached a fact that could not be decoded.
@@ -441,18 +410,18 @@ fn authority_fence(req: &WriteRequest<'_>, snap: &Snapshot) -> Option<Fence> {
         .get(&key)
         .map_or(Revision([0; 32]), |raw| Revision(hash(raw.as_bytes())));
     Some(Fence {
-        binding: AuthorityBinding {
-            namespace: namespace.clone(),
-            mode: AuthorityMode::Authority,
-            generation: generation_revision(generation),
-        },
+        binding: AuthorityBinding::new(
+            namespace.clone(),
+            AuthorityMode::Authority,
+            generation_revision(generation),
+        ),
         observed: Observed::Present {
-            value: AuthorityFact {
+            value: AuthorityFact::new(
                 namespace,
-                mode: AuthorityMode::Authority,
-                generation: generation_revision(current),
-                ready: true,
-            },
+                AuthorityMode::Authority,
+                generation_revision(current),
+                true,
+            ),
             revision,
         },
         key,
@@ -483,26 +452,26 @@ fn ticket_fact(
     t: &TicketV1,
     advance: &crate::pipeline::advance::AdvanceWrite<'_>,
 ) -> TicketFact {
-    TicketFact {
-        ticket: TicketId(*id),
-        repository: RepositoryId(hash(
+    TicketFact::new(
+        TicketId(*id),
+        RepositoryId(hash(
             repo_storage::identity(&advance.repo_id.namespace, &t.repo).as_bytes(),
         )),
-        name: RefName(t.ref_name.clone()),
-        signer: t.signer,
-        pack: PackSource {
+        RefName(t.ref_name.clone()),
+        t.signer,
+        PackSource {
             id: t.pack_id,
             len: t.bytes,
-            // The ticket binds one immutable pack version.
+
             binding: SourceBinding(t.pack_id),
         },
-        part_bytes: t.part_size,
-        created_ms: t.created_at_ms,
-        expires_ms: t.expires_at_ms,
-        reservation: ReservationId(hash(t.reservation_id.as_bytes())),
-        authority_generation: t.authority_generation.map(generation_revision),
-        upload_session: t.upload_session.clone(),
-    }
+        t.part_size,
+        t.created_at_ms,
+        t.expires_at_ms,
+        ReservationId(hash(t.reservation_id.as_bytes())),
+        t.authority_generation.map(generation_revision),
+        t.upload_session.clone(),
+    )
 }
 
 /// Decode a reservation row into its semantic observation. `ticket` binds a
@@ -567,16 +536,9 @@ fn terminal_fact_row(
             ReservationTerminalKind::Committed {
                 refs: refs
                     .iter()
-                    .map(|r| RefValue {
-                        name: RefName(r.name.clone()),
-                        value: r.new,
-                    })
+                    .map(|r| RefValue::new(RefName(r.name.clone()), r.new))
                     .collect(),
-                accounting: ReservationAccounting {
-                    bytes_stored: *bytes_stored,
-                    new_to_repository: *new_to_repo,
-                    new_to_store: *new_to_store,
-                },
+                accounting: ReservationAccounting::new(*bytes_stored, *new_to_repo, *new_to_store),
             },
         ),
         ReservationV1::Aborted {
@@ -619,11 +581,11 @@ fn terminal_fact_row(
         }
         _ => return Err(internal("unsupported reservation row")),
     };
-    Ok(ReservationTerminal {
-        repository: RepositoryId(hash(repository.as_bytes())),
+    Ok(ReservationTerminal::new(
+        RepositoryId(hash(repository.as_bytes())),
         occurred_ms,
         kind,
-    })
+    ))
 }
 
 fn abort_reason(reason: codec::AbortReason) -> mkit_primitives::decision::ReservationAbortReason {
@@ -680,11 +642,7 @@ fn pending_binding(
     let current =
         reservation_observed(snap, &pending.key).unwrap_or(Observed::Absent(Revision([0xff; 32])));
     facts.reservations.push((id.clone(), current));
-    Ok(PendingBinding {
-        reservation: id,
-        expected,
-        occurred_ms: clock.plan_time_ms,
-    })
+    Ok(PendingBinding::new(id, expected, clock.plan_time_ms))
 }
 
 /// The counting disposition plus the counter's observed row and the derived
@@ -709,10 +667,7 @@ fn storage_accounting(
         Some(raw) => {
             let counter = codec::decode_repo_storage(raw).map_err(meta_error)?;
             Observed::Present {
-                value: StorageFact {
-                    stored_bytes: counter.stored_bytes,
-                    version: counter.version,
-                },
+                value: StorageFact::new(counter.stored_bytes, counter.version),
                 revision: Revision(hash(raw.as_bytes())),
             }
         }
@@ -762,10 +717,10 @@ fn stored_terminal(result: &StoredResult) -> TerminalResult {
     match result {
         StoredResult::Rejected(rejection) => {
             match PermanentCode::from_code(rejection.code().as_str()) {
-                Some(code) => TerminalResult::Rejected(PermanentRefusal {
+                Some(code) => TerminalResult::Rejected(PermanentRefusal::new(
                     code,
-                    public_message: rejection.message().to_owned(),
-                }),
+                    rejection.message().to_owned(),
+                )),
                 None => TerminalResult::Conflict(Vec::new()),
             }
         }
@@ -997,56 +952,39 @@ pub(in crate::pipeline) fn cleanup_lost(
     ));
     let changes: Vec<_> = [packmap, head]
         .iter()
-        .map(|update| RefChange {
-            name: RefName(update.name.clone()),
-            condition: update.condition,
-            target: update.new,
-        })
+        .map(|update| RefChange::new(RefName(update.name.clone()), update.condition, update.new))
         .collect();
-    let write = RefWriteRequest {
-        repository,
-        operation: Some(OperationId(auth.replay_scope)),
-        kind: RefWriteKind::Advance,
-        changes: &changes,
-        admitted: &[],
-        presence: None,
-        signer: Some(advance.signer),
-        replay: None,
-        ancestry: &[],
-        now_ms: ms(business_now),
-        required: RefRequirements {
-            authority: None,
-            grant: None,
-            incarnation: None,
-            policy: None,
-            admission: None,
-            members: &[],
-            indexed_head: false,
-            membership_window: MembershipWindow::Elapsed,
-            denial: false,
-            publication: false,
-            source: None,
-            valid_through_ms: None,
-        },
+    let write = {
+        let mut v = RefWriteRequest::new(
+            repository,
+            RefWriteKind::Advance,
+            &changes,
+            {
+                let mut v = RefRequirements::new(MembershipWindow::Elapsed);
+                v.authority = None;
+                v.grant = None;
+                v.incarnation = None;
+                v.policy = None;
+                v.admission = None;
+                v.members = &[];
+                v.indexed_head = false;
+                v.denial = false;
+                v.publication = false;
+                v.source = None;
+                v.valid_through_ms = None;
+                v
+            },
+            ms(business_now),
+        );
+        v.operation = Some(OperationId(auth.replay_scope));
+        v.admitted = &[];
+        v.presence = None;
+        v.signer = Some(advance.signer);
+        v.replay = None;
+        v.ancestry = &[];
+        v
     };
-    let mut facts = Facts {
-        repository,
-        refs: Vec::new(),
-        replay: None,
-        tickets: Vec::new(),
-        reservations: Vec::new(),
-        authority: None,
-        grant: None,
-        lifecycle: None,
-        members: Vec::new(),
-        denial: None,
-        policy: None,
-        admission: None,
-        accounting: None,
-        publication: None,
-        storage: None,
-        basis: Vec::new(),
-    };
+    let mut facts = Facts::new(repository);
     let mut claims = Vec::with_capacity(advance.ids.len());
     for (i, row) in rows.iter().enumerate() {
         let id = &advance.ids[i];
@@ -1081,11 +1019,7 @@ pub(in crate::pipeline) fn cleanup_lost(
             },
             Err(_) => UploadProof::Ready,
         };
-        claims.push(TicketClaim {
-            ticket: TicketId(*id),
-            proof,
-            counted: false,
-        });
+        claims.push(TicketClaim::new(TicketId(*id), proof, false));
     }
     for row in rows.iter().flatten() {
         let rid = ReservationId(hash(row.reservation_id.as_bytes()));
@@ -1095,20 +1029,14 @@ pub(in crate::pipeline) fn cleanup_lost(
             .push((rid, reservation_observed(snap, &key)?));
     }
     let basis = host_basis(write.repository);
-    let request = TicketedAdvanceRequest {
+    let request = TicketedAdvanceRequest::new(
         write,
-        tickets: &claims,
-        verification: VerificationVerdict::Verified(std::slice::from_ref(&basis)),
-        storage: StorageAccounting::Disabled,
-        pending: None,
-    };
-    let limits = RefDecisionLimits {
-        facts: 64,
-        guards: 32,
-        bytes: 65_536,
-        work: 262_144,
-        public_message_bytes: 512,
-    };
+        &claims,
+        VerificationVerdict::Verified(std::slice::from_ref(&basis)),
+        StorageAccounting::Disabled,
+        None,
+    );
+    let limits = RefDecisionLimits::new(64, 32, 65_536, 262_144, 512);
     let guarded = mkit_primitives::decision::ticketed::decide_ticket_cleanup(
         &request,
         "ticket pack missing after upload",

@@ -36,9 +36,11 @@ pub(super) fn authority(
         .fence
         .as_ref()
         .is_some_and(|f| f.grant_epoch.is_some())
-        .then(|| ForkEpochFence {
-            recorded: observation(recorded.epoch.as_deref()),
-            current: observation(rows.get(1).and_then(Option::as_ref).map(Value::as_bytes)),
+        .then(|| {
+            ForkEpochFence::new(
+                observation(recorded.epoch.as_deref()),
+                observation(rows.get(1).and_then(Option::as_ref).map(Value::as_bytes)),
+            )
         });
     match decide_fork_authority(
         observation(recorded.authority.as_deref()),
@@ -55,6 +57,9 @@ pub(super) fn refusal(reason: ForkAdvanceRefusal) -> ForkError {
         ForkAdvanceRefusal::AuthorityMoved => ForkError::Moved("authority"),
         ForkAdvanceRefusal::EpochMoved => ForkError::Moved("epoch"),
         ForkAdvanceRefusal::Expired | ForkAdvanceRefusal::ReservationSettled => ForkError::Expired,
+        // A refusal this server does not know never advances: it is retryable
+        // until the server is updated to classify it.
+        _ => ForkError::Unavailable("fork advance refusal"),
     }
 }
 
@@ -66,48 +71,56 @@ pub(super) fn facts(
 ) -> Result<ForkAdvanceFacts, ForkError> {
     let dest = job.dest()?;
     let destination = crate::store::repo_storage::identity(&dest.namespace, &dest.name);
-    Ok(ForkAdvanceFacts {
-        binding: job.binding,
-        destination: RepositoryId(hash(destination.as_bytes())),
-        progress: ForkProgress {
-            phase: match job.phase {
-                Phase::Done => ForkAdvancePhase::Complete,
-                Phase::Failed => ForkAdvancePhase::Failed,
-                _ if job.accepted.is_some() => ForkAdvancePhase::Accepted,
-                _ => ForkAdvancePhase::Preparing,
-            },
-            cursor: u64::from(job.cursor),
-            part: job.part,
-            revision: Revision(hash(raw.as_bytes())),
-        },
-        recorded_authority: observation(job.fence_rows.authority.as_deref()),
-        authority: observation(rows.first().and_then(Option::as_ref).map(Value::as_bytes)),
-        grant_epoch: job
+    Ok({
+        let mut v = ForkAdvanceFacts::new(
+            job.binding,
+            RepositoryId(hash(destination.as_bytes())),
+            ForkProgress::new(
+                match job.phase {
+                    Phase::Done => ForkAdvancePhase::Complete,
+                    Phase::Failed => ForkAdvancePhase::Failed,
+                    _ if job.accepted.is_some() => ForkAdvancePhase::Accepted,
+                    _ => ForkAdvancePhase::Preparing,
+                },
+                u64::from(job.cursor),
+                job.part,
+                Revision(hash(raw.as_bytes())),
+            ),
+            job.expires_ms,
+        );
+        v.recorded_authority = observation(job.fence_rows.authority.as_deref());
+        v.authority = observation(rows.first().and_then(Option::as_ref).map(Value::as_bytes));
+        v.grant_epoch = job
             .fence
             .as_ref()
             .is_some_and(|f| f.grant_epoch.is_some())
-            .then(|| ForkEpochFence {
-                recorded: observation(job.fence_rows.epoch.as_deref()),
-                current: observation(rows.get(1).and_then(Option::as_ref).map(Value::as_bytes)),
-            }),
-        reservation: job
+            .then(|| {
+                ForkEpochFence::new(
+                    observation(job.fence_rows.epoch.as_deref()),
+                    observation(rows.get(1).and_then(Option::as_ref).map(Value::as_bytes)),
+                )
+            });
+        v.reservation = job
             .settle
             .as_ref()
             .filter(|s| job.accepted.is_none() && !s.rid.is_empty())
-            .map(|s| ForkReservationFence {
-                reservation: mkit_primitives::decision::ReservationId(hash(s.rid.as_bytes())),
-                expected: Revision(hash(&s.pending)),
-                current: observation(reservation.map(Value::as_bytes)),
-            }),
-        construction_expires_ms: job.expires_ms,
+            .map(|s| {
+                ForkReservationFence::new(
+                    mkit_primitives::decision::ReservationId(hash(s.rid.as_bytes())),
+                    Revision(hash(&s.pending)),
+                    observation(reservation.map(Value::as_bytes)),
+                )
+            });
+        v
     })
 }
 
 pub(super) fn progress(facts: &ForkAdvanceFacts, now: u64) -> Result<(), ForkError> {
-    match decide_fork_advance(facts, now).decision() {
+    match *decide_fork_advance(facts, now).decision() {
         ForkAdvanceDecision::Advance => Ok(()),
         ForkAdvanceDecision::Refuse(reason) => Err(refusal(reason)),
         ForkAdvanceDecision::Terminal => Err(ForkError::Unavailable("fork terminal progress")),
+        _ => Err(ForkError::Unavailable("fork advance decision")),
     }
 }
 
@@ -118,18 +131,18 @@ pub(super) fn generation(value: u64) -> Revision {
 }
 
 pub(super) fn result(result: &ForkResult) -> SemanticResult {
-    SemanticResult {
-        branch: RefName(result.source_ref.clone()),
-        source: RepositoryId(hash(result.source.as_bytes())),
-        source_sequence: result.source_sequence,
-        tip: result.tip,
-        packmap: result.packmap,
-        packs: result.pack_count,
-        bytes: result.pack_bytes,
-        index_entries: result.object_count,
-        pack_digest: result.pack_set,
-        destination_generation: generation(result.membership_generation),
-    }
+    SemanticResult::new(
+        RefName(result.source_ref.clone()),
+        RepositoryId(hash(result.source.as_bytes())),
+        result.source_sequence,
+        result.tip,
+        result.packmap,
+        result.pack_count,
+        result.pack_bytes,
+        result.object_count,
+        result.pack_set,
+        generation(result.membership_generation),
+    )
 }
 
 pub(super) fn inventory(job: &ForkJobV1) -> Result<Vec<Hash>, ForkError> {
@@ -156,11 +169,11 @@ pub(super) struct Activation {
 }
 
 fn limits() -> mkit_primitives::fork::ForkActivationLimits {
-    mkit_primitives::fork::ForkActivationLimits {
-        packs: super::MAX_FORK_PACKS as u64,
-        branch_bytes: crate::refs::MAX_REF_NAME_BYTES as u64,
-        work: 40_000,
-    }
+    mkit_primitives::fork::ForkActivationLimits::new(
+        super::MAX_FORK_PACKS as u64,
+        crate::refs::MAX_REF_NAME_BYTES as u64,
+        40_000,
+    )
 }
 
 impl Activation {
@@ -201,13 +214,13 @@ impl Activation {
             ForkActivationDecision, ForkActivationFacts, ForkClearanceProof, ForkMembershipUnit,
             ForkWitness, decide_fork_activation,
         };
-        let expected = ForkWitness {
-            generation: self.expected.destination_generation,
-            sequence: 0,
-            published: true,
-            held: false,
-            boundary: pack == self.expected.packmap,
-        };
+        let expected = ForkWitness::new(
+            self.expected.destination_generation,
+            0,
+            true,
+            false,
+            pack == self.expected.packmap,
+        );
         let row = |value: &Option<Value>| -> Result<Option<ForkWitness>, ForkError> {
             value
                 .as_ref()
@@ -220,48 +233,52 @@ impl Activation {
                     if witness.encode() != *value {
                         return Err(ForkError::NotEmpty);
                     }
-                    Ok(ForkWitness {
-                        generation: generation(witness.generation),
-                        sequence: witness.sequence,
-                        published: witness.published,
-                        held: witness.held,
-                        boundary: witness.boundary,
-                    })
+                    Ok(ForkWitness::new(
+                        generation(witness.generation),
+                        witness.sequence,
+                        witness.published,
+                        witness.held,
+                        witness.boundary,
+                    ))
                 })
                 .transpose()
         };
         let [live, published] = rows else {
             return Err(ForkError::Unavailable("fork member read"));
         };
-        let unit = ForkMembershipUnit {
+        let unit = ForkMembershipUnit::new(
             pack,
-            inherited_revision: progress.progress.revision,
+            progress.progress.revision,
             expected,
-            live: row(live)?,
-            published: row(published)?,
+            row(live)?,
+            row(published)?,
             context,
-        };
-        let proof = ForkClearanceProof {
-            destination: progress.destination,
-            binding: progress.binding,
-            progress_revision: progress.progress.revision,
+        );
+        let valid_through_ms = now.saturating_add(super::CONTENT_WINDOW);
+        let proof = ForkClearanceProof::new(
+            progress.destination,
+            progress.binding,
+            progress.progress.revision,
             pack,
-            // The request-local identity is scoped by the complete progress,
-            // pack and deadline carried beside it. No durable proof is minted.
-            apply_attempt: progress.progress.revision,
-            valid_through_ms: now.saturating_add(super::CONTENT_WINDOW),
+            progress.progress.revision,
+            valid_through_ms,
+            Revision(hash(
+                &[
+                    progress.binding.as_slice(),
+                    pack.as_slice(),
+                    &valid_through_ms.to_le_bytes(),
+                ]
+                .concat(),
+            )),
+        );
+        let facts = {
+            let mut v = ForkActivationFacts::new(progress, &self.expected, &self.packs, &unit);
+            v.lifecycle = mkit_primitives::fork::ForkLifecycleProtection::NotOffered;
+            v.accepted_result = Some(&self.accepted);
+            v.proof = Some(&proof);
+            v
         };
-        let facts = ForkActivationFacts {
-            advance: progress,
-            expected_result: &self.expected,
-            accepted_result: Some(&self.accepted),
-            inherited_packs: &self.packs,
-            // Storage lifecycle transitions are outside the reference profile.
-            lifecycle: mkit_primitives::fork::ForkLifecycleProtection::NotOffered,
-            unit: &unit,
-            proof: Some(&proof),
-        };
-        let decision = decide_fork_activation(&facts, now, limits())
+        let decision = *decide_fork_activation(&facts, now, limits())
             .map_err(|_| ForkError::Unavailable("fork activation facts"))?
             .decision();
         match decision {
@@ -284,18 +301,21 @@ impl Activation {
         use mkit_primitives::fork::{
             ForkCompletionDecision, ForkCompletionFacts, decide_fork_completion,
         };
-        let facts = ForkCompletionFacts {
-            advance: progress,
-            expected_result: &self.expected,
-            accepted_result: Some(&self.accepted),
-            lifecycle: mkit_primitives::fork::ForkLifecycleProtection::NotOffered,
-            completed_cursor: u64::from(job.cursor),
-            completed_part: job.part,
-            completed_packs: u64::from(job.cursor),
-            completed_digest: job.pack_set(),
-            expected_barrier_owner: job.binding,
+        let facts = {
+            let mut v = ForkCompletionFacts::new(
+                progress,
+                &self.expected,
+                u64::from(job.cursor),
+                job.part,
+                u64::from(job.cursor),
+                job.pack_set(),
+                job.binding,
+            );
+            v.lifecycle = mkit_primitives::fork::ForkLifecycleProtection::NotOffered;
+            v.accepted_result = Some(&self.accepted);
+            v
         };
-        match decide_fork_completion(&facts, limits())
+        match *decide_fork_completion(&facts, limits())
             .map_err(|_| ForkError::Unavailable("fork completion facts"))?
             .decision()
         {
@@ -318,18 +338,18 @@ mod tests {
         for pack in &packs {
             digest.update(pack);
         }
-        let result = SemanticResult {
-            source: RepositoryId([6; 32]),
-            branch: RefName("refs/heads/main".into()),
-            source_sequence: 1,
-            tip: [5; 32],
-            packmap: [8; 32],
-            packs: 2,
-            bytes: 100,
-            index_entries: 2,
-            pack_digest: digest.finalize(),
-            destination_generation: generation(membership_generation),
-        };
+        let result = SemanticResult::new(
+            RefName("refs/heads/main".into()),
+            RepositoryId([6; 32]),
+            1,
+            [5; 32],
+            [8; 32],
+            2,
+            100,
+            2,
+            digest.finalize(),
+            generation(membership_generation),
+        );
         Activation {
             accepted: result.clone(),
             expected: result,
@@ -357,20 +377,18 @@ mod tests {
 
     #[test]
     fn activation_lowering_matches_the_frozen_reference_pair_matrix() {
-        let progress = ForkAdvanceFacts {
-            binding: [1; 32],
-            destination: RepositoryId([2; 32]),
-            progress: ForkProgress {
-                phase: ForkAdvancePhase::Accepted,
-                cursor: 0,
-                part: 0,
-                revision: Revision([3; 32]),
-            },
-            recorded_authority: ForkObservation::Absent,
-            authority: ForkObservation::Absent,
-            grant_epoch: None,
-            reservation: None,
-            construction_expires_ms: 0,
+        let progress = {
+            let mut v = ForkAdvanceFacts::new(
+                [1; 32],
+                RepositoryId([2; 32]),
+                ForkProgress::new(ForkAdvancePhase::Accepted, 0, 0, Revision([3; 32])),
+                0,
+            );
+            v.recorded_authority = ForkObservation::Absent;
+            v.authority = ForkObservation::Absent;
+            v.grant_epoch = None;
+            v.reservation = None;
+            v
         };
         for membership_generation in [0, 1] {
             let activation = fixture(membership_generation);

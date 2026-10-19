@@ -14,47 +14,50 @@ fn portable_progress_cases_pin_decisions_and_precedence() {
         let [phase, authority, epoch, reservation, now, expected] = parts.as_slice() else {
             panic!("invalid fixture: {line}")
         };
-        let facts = ForkAdvanceFacts {
-            binding: [2; 32],
-            destination: RepositoryId([3; 32]),
-            progress: ForkProgress {
-                phase: match *phase {
-                    "preparing" => ForkAdvancePhase::Preparing,
-                    "accepted" => ForkAdvancePhase::Accepted,
-                    "complete" => ForkAdvancePhase::Complete,
-                    "failed" => ForkAdvancePhase::Failed,
-                    _ => panic!("unknown phase"),
-                },
-                cursor: 0,
-                part: 0,
-                revision: Revision([4; 32]),
-            },
-            recorded_authority: token,
-            authority: if *authority == "same" {
+        let facts = {
+            let mut v = ForkAdvanceFacts::new(
+                [2; 32],
+                RepositoryId([3; 32]),
+                ForkProgress::new(
+                    match *phase {
+                        "preparing" => ForkAdvancePhase::Preparing,
+                        "accepted" => ForkAdvancePhase::Accepted,
+                        "complete" => ForkAdvancePhase::Complete,
+                        "failed" => ForkAdvancePhase::Failed,
+                        _ => panic!("unknown phase"),
+                    },
+                    0,
+                    0,
+                    Revision([4; 32]),
+                ),
+                100,
+            );
+            v.recorded_authority = token;
+            v.authority = if *authority == "same" {
                 token
             } else {
                 ForkObservation::Absent
-            },
-            grant_epoch: Some(ForkEpochFence {
-                recorded: token,
-                current: if *epoch == "same" {
+            };
+            v.grant_epoch = Some(ForkEpochFence::new(
+                token,
+                if *epoch == "same" {
                     token
                 } else {
                     ForkObservation::Absent
                 },
-            }),
-            reservation: Some(ForkReservationFence {
-                reservation: mkit_primitives::decision::ReservationId([5; 32]),
-                expected: Revision([1; 32]),
-                current: if *reservation == "same" {
+            ));
+            v.reservation = Some(ForkReservationFence::new(
+                mkit_primitives::decision::ReservationId([5; 32]),
+                Revision([1; 32]),
+                if *reservation == "same" {
                     token
                 } else {
                     ForkObservation::Absent
                 },
-            }),
-            construction_expires_ms: 100,
+            ));
+            v
         };
-        let decision = decide_fork_advance(&facts, now.parse().expect("fixture time")).decision();
+        let decision = *decide_fork_advance(&facts, now.parse().expect("fixture time")).decision();
         let expected_decision = match *expected {
             "Advance" => ForkAdvanceDecision::Advance,
             "Terminal" => ForkAdvanceDecision::Terminal,

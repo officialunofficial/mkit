@@ -6,8 +6,9 @@
 pub mod host_facts;
 
 use mkit_primitives::{
+    decision::guards_hold,
     error::Failure,
-    fork::{ForkDecision, ForkPlan, decide_fork_acceptance},
+    fork::{ForkDecision, ForkPlan, decide_fork_acceptance, fork_source_proof},
 };
 
 fn main() -> Result<(), Failure> {
@@ -28,8 +29,8 @@ fn main() -> Result<(), Failure> {
         host_facts::LIMITS,
     )?;
     assert!(matches!(decision.decision(), ForkDecision::AcceptFork(_)));
-    assert!(decision.matches(&destination, 1));
-    assert_eq!(decision.source_fence(), Some(&final_source));
+    assert!(guards_hold(&decision, &destination.guards(), 1));
+    assert_eq!(fork_source_proof(&decision), Some(&final_source));
     // Persist the accepted plan/result, saved replay, exact optional reservation
     // settlement, and outcome responsibility atomically after all guards compare.
     // This example performs no commit and emits no reader-visible membership.

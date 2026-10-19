@@ -13,6 +13,7 @@ mod publication;
 #[cfg(test)]
 mod tests;
 
+pub(super) use complete::compatible;
 pub use complete::{
     GUARD_REQUIREMENTS_VERSION, check_guard_completeness, effect_guard_kinds, guard_kind,
     required_guard_kinds, validate_guard_kind,
@@ -20,7 +21,7 @@ pub use complete::{
 pub use decide::decide_ref_write;
 pub use publication::{RefPublication, decide_ref_publication};
 
-use super::{AuthorityMode, NamespaceId, RefName, RequiredSourceFence, Snapshot};
+use super::{AuthorityMode, NamespaceId, PublishedSourceFence, RefName, Snapshot};
 use crate::evidence::{RepositoryId, Revision};
 use mkit_core::{hash::Hash, refs::RefWriteCondition};
 
@@ -42,6 +43,7 @@ pub enum RefWriteKind {
 
 /// One validated-shape ref change; grammar is checked with the core helper.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RefChange {
     /// Served ref name.
     pub name: RefName,
@@ -51,12 +53,26 @@ pub struct RefChange {
     pub target: Option<Hash>,
 }
 
+impl RefChange {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(name: RefName, condition: RefWriteCondition, target: Option<Hash>) -> Self {
+        Self {
+            name,
+            condition,
+            target,
+        }
+    }
+}
+
 /// Original commit-fenced authorization; never replaced after a guard loss.
 ///
 /// The host authorizes signer keys by policy, using the key set at this generation.
 /// Every key addition, removal, or revocation must advance the generation so the
 /// commit-time Authority guard catches races (SPEC-PRIMITIVE-EVIDENCE §1.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AuthorityBinding {
     /// Namespace that the host authenticated and authorized.
     pub namespace: NamespaceId,
@@ -66,8 +82,22 @@ pub struct AuthorityBinding {
     pub generation: Revision,
 }
 
+impl AuthorityBinding {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(namespace: NamespaceId, mode: AuthorityMode, generation: Revision) -> Self {
+        Self {
+            namespace,
+            mode,
+            generation,
+        }
+    }
+}
+
 /// Original scoped grant identity and epoch.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct GrantBinding {
     /// Owning namespace.
     pub namespace: NamespaceId,
@@ -77,8 +107,22 @@ pub struct GrantBinding {
     pub epoch: Revision,
 }
 
+impl GrantBinding {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(namespace: NamespaceId, grant: Hash, epoch: Revision) -> Self {
+        Self {
+            namespace,
+            grant,
+            epoch,
+        }
+    }
+}
+
 /// Exact immutable ref proposal seen by custom admission.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AdmittedRef {
     /// Served ref name.
     pub name: RefName,
@@ -88,11 +132,34 @@ pub struct AdmittedRef {
     pub prior_present: bool,
 }
 
+impl AdmittedRef {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(name: RefName, target: Option<Hash>, prior_present: bool) -> Self {
+        Self {
+            name,
+            target,
+            prior_present,
+        }
+    }
+}
+
 /// Original custom admission binding, independent of token encoding.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AdmissionBinding {
     /// Existing host commitment to the exact admitted effects; no new domain.
     pub effects: Hash,
+}
+
+impl AdmissionBinding {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(effects: Hash) -> Self {
+        Self { effects }
+    }
 }
 
 /// Repository-local immutable ancestry evidence acquired by the host.
@@ -101,6 +168,7 @@ pub struct AdmissionBinding {
 /// a tag proves descent only from itself. The host verifies immutable bytes
 /// and supplies every mutable membership/denial dependency in the snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AncestryFact {
     /// Exact repository, preventing cross-repository substitution.
     pub repository: RepositoryId,
@@ -112,6 +180,27 @@ pub struct AncestryFact {
     pub to: Hash,
     /// Acquired proof classification.
     pub result: AncestryResult,
+}
+
+impl AncestryFact {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(
+        repository: RepositoryId,
+        name: RefName,
+        from: Hash,
+        to: Hash,
+        result: AncestryResult,
+    ) -> Self {
+        Self {
+            repository,
+            name,
+            from,
+            to,
+            result,
+        }
+    }
 }
 
 /// Ancestry acquisition distinguishes a final denial from membership lag.
@@ -128,6 +217,7 @@ pub enum AncestryResult {
 
 /// Which deployment policy applies to the operation's head.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PolicyRequirement {
     /// An allowed-signer intersection applies, including an empty intersection.
     pub signer_restricted: bool,
@@ -135,8 +225,21 @@ pub struct PolicyRequirement {
     pub grant_fast_forward: bool,
 }
 
+impl PolicyRequirement {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(signer_restricted: bool, grant_fast_forward: bool) -> Self {
+        Self {
+            signer_restricted,
+            grant_fast_forward,
+        }
+    }
+}
+
 /// Replay identity already authenticated at ingress by the host.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RefReplay {
     /// Exact scope.
     pub scope: super::ReplayScope,
@@ -144,6 +247,19 @@ pub struct RefReplay {
     pub fingerprint: Hash,
     /// Original replay retention timestamp; never extends envelope validity.
     pub expires_ms: u64,
+}
+
+impl RefReplay {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(scope: super::ReplayScope, fingerprint: Hash, expires_ms: u64) -> Self {
+        Self {
+            scope,
+            fingerprint,
+            expires_ms,
+        }
+    }
 }
 
 /// Original request's repository-membership visibility classification.
@@ -158,6 +274,7 @@ pub enum MembershipWindow {
 
 /// Applicable mutable categories; unacquired applicable facts are not absence.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RefRequirements<'a> {
     /// Original authority, when authority fencing applies.
     pub authority: Option<AuthorityBinding>,
@@ -181,13 +298,38 @@ pub struct RefRequirements<'a> {
     /// Whether the resulting publication state was relied on.
     pub publication: bool,
     /// Separate published-source pre-apply fence, repeated on every attempt.
-    pub source: Option<&'a RequiredSourceFence>,
+    pub source: Option<&'a PublishedSourceFence>,
     /// Existing business validity cap; no scheduling allowance is invented here.
     pub valid_through_ms: Option<u64>,
 }
 
+impl RefRequirements<'_> {
+    /// No applicable mutable category: no authority, grant, incarnation,
+    /// policy, admission, members, denial, publication, source fence or
+    /// validity cap. Assign the public fields that apply. The struct is
+    /// `#[non_exhaustive]`.
+    #[must_use]
+    pub const fn new(membership_window: MembershipWindow) -> Self {
+        Self {
+            authority: None,
+            grant: None,
+            incarnation: None,
+            policy: None,
+            admission: None,
+            members: &[],
+            indexed_head: false,
+            membership_window,
+            denial: false,
+            publication: false,
+            source: None,
+            valid_through_ms: None,
+        }
+    }
+}
+
 /// Bounded input to a ref decision. Ticket consumption is a separate decision.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RefWriteRequest<'a> {
     /// Exact destination repository.
     pub repository: RepositoryId,
@@ -213,8 +355,37 @@ pub struct RefWriteRequest<'a> {
     pub now_ms: u64,
 }
 
+impl<'a> RefWriteRequest<'a> {
+    /// A request with no operation identity, admitted proposal, presence
+    /// constraint, signer, replay binding or ancestry evidence. Assign the
+    /// public fields that apply. The struct is `#[non_exhaustive]`.
+    #[must_use]
+    pub const fn new(
+        repository: RepositoryId,
+        kind: RefWriteKind,
+        changes: &'a [RefChange],
+        required: RefRequirements<'a>,
+        now_ms: u64,
+    ) -> Self {
+        Self {
+            repository,
+            operation: None,
+            kind,
+            changes,
+            admitted: &[],
+            presence: None,
+            signer: None,
+            replay: None,
+            required,
+            ancestry: &[],
+            now_ms,
+        }
+    }
+}
+
 /// Explicit finite execution ceilings, independent of protocol maxima.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RefDecisionLimits {
     /// Maximum acquired facts, including unused facts validated for ambiguity.
     pub facts: u32,
@@ -226,6 +397,27 @@ pub struct RefDecisionLimits {
     pub work: u64,
     /// Maximum owned terminal/public refusal message bytes.
     pub public_message_bytes: u32,
+}
+
+impl RefDecisionLimits {
+    /// Build from every field. The struct is `#[non_exhaustive]`: hosts
+    /// construct it here and may assign any public field afterwards.
+    #[must_use]
+    pub const fn new(
+        facts: u32,
+        guards: u32,
+        bytes: u64,
+        work: u64,
+        public_message_bytes: u32,
+    ) -> Self {
+        Self {
+            facts,
+            guards,
+            bytes,
+            work,
+            public_message_bytes,
+        }
+    }
 }
 
 /// Exact reference comparison for mutation tests and host conformance.
