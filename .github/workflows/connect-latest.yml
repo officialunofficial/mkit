@@ -1,0 +1,45 @@
+name: "CI: Connect stack latest release"
+
+on:
+  pull_request:
+    paths:
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - '.github/workflows/connect-latest.yml'
+      - '.github/actions/setup-rust/action.yml'
+      - 'scripts/check-connect-latest.sh'
+      - 'cloudbuild/connect-latest.yaml'
+  schedule:
+    - cron: '23 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  latest-release:
+    name: Connect stack latest compatible release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_BUILD_JOBS: '3'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: '1.95.0'
+          cache-prefix: connect-latest
+          protoc: 'false'
+          targets: wasm32-unknown-unknown
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2
+        with:
+          tool: cargo-nextest
+      - name: Update Connect stack, build and test dependents
+        run: bash scripts/check-connect-latest.sh

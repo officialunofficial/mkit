@@ -52,6 +52,10 @@ pub struct RefChange {
 }
 
 /// Original commit-fenced authorization; never replaced after a guard loss.
+///
+/// The host authorizes signer keys by policy, using the key set at this generation.
+/// Every key addition, removal, or revocation must advance the generation so the
+/// commit-time Authority guard catches races (SPEC-PRIMITIVE-EVIDENCE §1.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorityBinding {
     /// Namespace that the host authenticated and authorized.

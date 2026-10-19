@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Keep connectrpc and buffa caret requirements within one minor train and probe
+  the latest compatible patches in CI. Moving either minor train is a breaking
+  `mkit-rpc` change; consumers must adopt the corresponding `mkit-rpc` release.
+  No version requirement changes in this update.
+
 - Keep atomic force pushes consistent with concurrent pack-chain re-baselines.
   Head-only writes compare the packmap in the same advance, and appending
   writes re-plan when their captured chain has been replaced. Dependency plans

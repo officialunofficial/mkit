@@ -10,6 +10,7 @@ pub mod proof;
 use mkit_core::{hash::Hash, object::ObjectType};
 
 /// Logical repository identity, independent of storage routing.
+/// Host resolution and replay retention follow SPEC-PRIMITIVE-EVIDENCE §1.1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RepositoryId(pub [u8; 32]);
 /// Immutable source version supplied by the caller.

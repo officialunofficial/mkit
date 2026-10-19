@@ -44,6 +44,7 @@ layout.
 | `security.yaml` | `rust-security.yml` | `cargo audit` (both workspaces) and `cargo deny`. |
 | `docs.yaml` | retired from GitHub Actions, Cloud Build only | rustdoc `-D warnings`, both workspaces. |
 | `geiger.yaml` | retired from GitHub Actions, Cloud Build only | `scripts/check-geiger-baseline.sh`. |
+| `connect-latest.yaml` | GitHub latest-patch Connect stack probe reproduction | Same bounded update/build/test script, including both client wasm builds; automatic runs use the scheduled and manifest/lockfile PR workflow. |
 | `commonware-latest.yaml` | GitHub latest-release probe reproduction | Same bounded update/build/test script; automatic runs use the scheduled and path-filtered GitHub workflow to avoid duplicate PR builds. |
 | `coverage.yaml` | retired from GitHub Actions, Cloud Build only | llvm-cov → lcov → Codecov (main only, non-fatal). |
 
@@ -187,4 +188,31 @@ baked CI image, sccache, and the same script:
 
 ```sh
 gcloud builds submit . --region=us-east4 --config=cloudbuild/commonware-latest.yaml
+```
+
+## Connect stack patch compatibility
+
+**CI: Connect stack latest release** uses the same weekly schedule and
+manifest/lockfile PR trigger as the Commonware probe. Its separate Linux job
+updates `connectrpc`, `connectrpc-build`, `buffa`, and `buffa-build` within the
+existing caret ranges, prints the selected versions, then builds and tests
+`mkit-rpc` with `transport`, `transport-messages`, and `hooks`,
+`mkit-transport-connect`, `mkit-client`, and `mkit-repo-client`. It also builds
+`mkit-client` for wasm32 with default features and without default features.
+The 30-minute job caps build and nextest workers at three. A failure is reported;
+never pin an older patch to hide it. Minor-train moves are breaking `mkit-rpc`
+changes. The probe's lockfile changes are disposable and MUST NOT be committed.
+
+Run locally with the wasm32 target installed, saving and restoring
+**rust/Cargo.lock** before returning to baseline checks:
+
+```sh
+MKIT_CARGO_CACHED=1 bash scripts/check-connect-latest.sh
+```
+
+The optional Cloud Build reproduction installs the wasm32 target and runs the
+same script with sccache:
+
+```sh
+gcloud builds submit . --region=us-east4 --config=cloudbuild/connect-latest.yaml
 ```
