@@ -72,7 +72,7 @@ jobs:
           components: clippy
           protoc: "false"
           cache-prefix: primitives
-      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-nextest,cargo-hack,just,sccache
       - name: Native feature contracts
@@ -127,7 +127,7 @@ jobs:
           components: clippy
           cache-prefix: server-feature-clippy-${{ matrix.crate }}
           protoc: "false"
-      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-hack
       # Library-only avoids dev-dependency feature unification. Depth two
@@ -160,7 +160,7 @@ jobs:
           cache-prefix: native-wire-conformance
           targets: wasm32-unknown-unknown
           protoc: "false"
-      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-nextest,wasm-pack@0.13.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -192,7 +192,7 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
           cache-prefix: server-semver
           protoc: "false"
-      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-semver-checks
       # main retains the released version until release preparation, and is
@@ -317,7 +317,7 @@ jobs:
       # cosign-signed prebuilt binary from the cargo-nextest release.
       - name: Install cargo-nextest
         if: env.SHOULD_RUN == 'true'
-        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe  # v2
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283  # v2
         with:
           tool: cargo-nextest
 
