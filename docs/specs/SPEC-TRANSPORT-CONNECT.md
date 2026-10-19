@@ -204,6 +204,8 @@ headers or a bearer token. The response MAY be cached with
 | `leases` | Whether the deployment enforces storage leases under SPEC-SERVER §12. |
 | `async_inspection` | Whether any asynchronous inspector is configured (SPEC-SERVER §10–§11). Writers MUST sign reads to see their own pending content that is not held. Held content is hidden from every caller, including when this field is false and a synchronous inspector holds it. |
 | `inspection_max_objects` | Maximum distinct objects in one advance's complete inspected set (SPEC-SERVER §11.1). Present only when inspectors are configured; absence imposes no inspection-specific object-count limit. A client exceeding the advertised limit MUST replan into smaller advances; the server rejects the oversized advance before calling inspectors or accepting changes. |
+| `supports_pack_locations` | Whether the server supports optional `DownloadPack` locations (§6.2). Absent or false disables location negotiation. |
+| `max_pack_location_lifetime_ms` | Maximum location lifetime in milliseconds (§6.2). MUST be present and positive when `supports_pack_locations` is true; absent when support is disabled. |
 
 A client MUST NOT assume atomic advance without `atomic_advance = true`
 from this call. `atomic_advance` replaces the client-side opt-in of v1
@@ -828,12 +830,54 @@ instead of an `SshFrame` sequence.
 
 ### 6.2 `DownloadPack` (server-streaming)
 
-`DownloadPackResponse` is the receive-side mirror: a `oneof` of
-`header` (`DownloadPackHeader{ total_bytes }`) and `chunk`
-(`PackChunk`). The server sends exactly one `header` message first,
-then a sequence of `chunk` messages ending with `chunk.last = true`.
-If the requested `pack_id` is absent, the server returns
+**Protocol requirement.**
+
+`DownloadPackResponse.body` is a `oneof` of `header`
+(`DownloadPackHeader{ total_bytes }`), `chunk` (`PackChunk`), and `location`
+(`DownloadPackLocation{ url, expires_at_ms, total_bytes }`). A streaming
+response sends exactly one `header` first, then `chunk` messages ending with
+`chunk.last = true`. If the requested `pack_id` is absent, the server returns
 `not_found` before sending any message (never a zero-chunk stream).
+
+**Opt-in locations.** A client MAY set `DownloadPackRequest.accept_location`
+to true only when discovery (§2.1) advertises `supports_pack_locations = true`
+and a positive `max_pack_location_lifetime_ms`. A server MUST NOT send a
+location unless that request opted in and the server advertises support.
+Absent or false opt-in preserves the existing streaming wire response. Even
+with opt-in, the server MAY stream instead. A location response consists of
+exactly one `location` message and no header or chunks.
+
+The location is single-pack and short-lived. It MUST name exactly the
+requested, verified, content-addressed pack using an absolute HTTPS URL
+without user information or a fragment. Its
+`expires_at_ms` is Unix time in milliseconds, MUST be later than issuance, and
+MUST be at most the advertised maximum lifetime after issuance. Its
+`total_bytes` is the exact pack length. A server MUST issue a location only
+after every check that streaming `DownloadPack` applies to that caller has
+succeeded: named-repository membership (§7.4), private-repository read
+authorization, denial and takedown, and hiding held and pending-inspection
+content. A location MUST NOT reveal content hidden from that caller. The
+server MUST NOT issue a location for pending-inspection content, including
+when the caller's writer view permits streaming that content. It MAY stream
+instead under the existing visibility rules.
+
+Denial or takedown after issuance MUST prevent access through every issued
+location within `max_pack_location_lifetime_ms`, by expiry or purge. A
+deployment MUST NOT claim a faster denial or takedown guarantee than that
+advertised bound. Providers that cannot enforce the bound MUST NOT advertise
+or issue locations.
+
+A client MUST fetch a location without mkit credentials. It MUST NOT send
+auth-v2 headers, mkit bearer tokens, grants, or other mkit authentication material
+to the location host, including through redirects. It MUST verify both the
+requested pack id (content address) and exact `total_bytes` before using any
+location bytes. The caller's pack-size limits still apply. On any location
+fetch or verification failure, including an invalid location response, the
+client MUST retry once with streaming `DownloadPack` and `accept_location`
+absent or false. It MUST NOT trust or expose unverified location bytes. A
+client that cannot fetch and verify locations, including a wasm client without
+that facility, MUST leave opt-in absent or false. Clients MUST provide a
+configuration switch that disables location opt-in.
 
 ### 6.3 Streaming on Cloudflare Workers &mdash; design answer and open risk
 
@@ -1336,7 +1380,10 @@ repositories, but `PackExists` and `DownloadPack` MUST answer only for
 packs that are members of the named repository. Otherwise a caller
 could learn another repository's contents. A server MUST NOT answer any
 RPC by consulting another repository's membership: no response may act
-as an existence oracle for content held elsewhere.
+as an existence oracle for content held elsewhere. These rules apply equally
+to issuing a `DownloadPack` location (§6.2): globally shared storage or a
+presigning provider MUST NOT substitute for the named repository's membership
+and caller-visibility checks.
 
 **Creation.** A repository comes into existence with its first
 authorized write (§7.5). This service has no create-repository RPC.
@@ -1663,7 +1710,10 @@ commit is the point at which a pack becomes visible. On an object store
 with multipart uploads, the server completes the multipart upload only
 after the merged root verifies. Presigned direct-to-storage part
 uploads are not allowed, because they would bypass verification before
-completion.
+completion. This upload restriction does not prohibit presigned GET locations
+for already-verified packs under §6.2. Those downloads retain all streaming
+read checks, the advertised revocation bound, and client verification duties;
+they do not authorize presigned uploads.
 
 ### 7.7 Lifecycle per RPC
 
@@ -2027,6 +2077,7 @@ Explicitly deferred to sibling issues:
 | `2` (WP-1.10) | draft | §7.6 requires canonical branch-head/packmap pairing for ticketed advances; §7.8 rejects deletion with tickets. |
 | `2` (WP-1.11a) | draft | §5 classifies invalid part receipts as `invalid_argument`; §7.6 permits storage-session abort after a root mismatch and retains rotated receipt keys for at least seven days. |
 | `2` | draft | §7.4 repository addressing; §7.5 namespace and write policy (owner key); `GetServerInfo` (§2.1); §7.6 upload tickets and resumable parts; §7.8 ref deletion; §7.9 consistency and `ListRefs` paging; error-code split between `unauthenticated` and `permission_denied` (§5) (mkit#1084, mkit#1090); SPEC-WRITE-GRANTS (mkit#1085): signed reads and `X-Write-Grant` (§7.1), the M2 RPC rows (§2), and grant cross-references. §5.1 admission challenges: HTTP 402 with `permission_denied` and an opaque challenge list, raw MPP/x402 header pass-through, the header-returning `admission_helper` with its allowlist and hard-reserved set; §7.1 replay lookup after authentication and before authorization and admission, with signed reads outside the ledger; retryable `aborted` for in-flight operations (§5); §7.7 lifecycle per RPC (mkit#1086). The M0 server implementation still resumes an interrupted `UploadPack` through its `in_flight` replay record until M1 tickets land. M1: branch-sharded servers MAY require the canonical `AdvanceRefs` head/packmap pairing (§4; WP-1.22 amendment 1). Indexed mode: PendingVerification polling with a 1,000 ms floor (§5, §7.6), delta-base mapping and self-contained replanning in a new signed operation (§5, §7.6), packlist rebuilding (§7.6), advertised max_delta_chain_depth (§2.1), and the membership-dependent lag window and replay exclusion (§7.1, §7.9; SPEC-SERVER §9.4). The additive empty `MembershipNotVisible` error detail marks the membership-lag `unavailable` (§5); the message stays unchanged. BeginUpload open-ticket cap error and client no-retry carve-out (§5), and admission-free AlreadyPresent/live-ticket results (§7.6; WP-1.9a amendment 1). WP-4.11 scopes §7.4's Host/path/forwarded-selector prohibition to Connect RPCs and cross-links plain HTTP read admission (§5.1). |
+| `2` | draft | Additive opt-in pack locations in `DownloadPack`, discovery support and lifetime fields (§2.1), client verification and streaming fallback (§6.2), and unchanged repository isolation and upload verification (§§7.4, 7.6). |
 | `2` | draft | Additive `GetServerInfoResponse.leases = 17` (§2.1; SPEC-SERVER §12); §7.7 ticket-pack loss clarified as a defensive abort case. |
 | `2` | draft | Additive `GetServerInfoResponse.async_inspection = 18` (§2.1); published-view and quarantine rules in SPEC-SERVER §§10–11; §7.1 never stores a sync inspector `unavailable` for replay; §7.6 `AlreadyPresent` is never answered for a pack with hidden content. |
 | `2` | draft | Additive `GetServerInfoResponse.inspection_max_objects = 19` (§2.1) advertises the configured synchronous-inspection advance cap, absent without inspectors (WP-5.5a). |
@@ -2063,7 +2114,7 @@ reference Worker).
 | Every `Transport` trait verb has exactly one corresponding wire RPC, or is a documented client-side default-impl delegation with no independent wire shape. | §2's mapping table; `protocol.rs`'s default-impl doc comments. |
 | `RefExpectation`'s wire numbers (`ANY=1`, `MISSING=2`, `MATCH=3`) never change, even after mkit#679 extracts a shared proto. | `buf breaking` (`FILE` category, §1); the `RefExpectation` doc comment matching `ssh.proto`'s "do NOT renumber" contract. |
 | A rejected `UploadPack` stream never creates or overwrites the destination pack. | §6.1's server-side rejection checks, mirroring SPEC-TRANSPORT §4.2's SSH requirement. |
-| `DownloadPack` never sends a partial stream silently &mdash; it either completes with `chunk.last = true` or fails the whole call before any message is sent. | §6.2. |
+| `DownloadPack` either completes its stream with `chunk.last = true`, returns one negotiated location, or fails the whole call before any message is sent. Location bytes are verified before use, with one streaming fallback on failure. | §6.2. |
 | Every `TransportError` variant a server can raise has exactly one Connect code it maps to; a client's inverse mapping is mechanical, not heuristic. | §5's table. |
 | No RPC on one repository reads or changes another repository's refs, pack membership, or replay records. | §7.4 isolation; the `X-Repository` carriage rule. |
 | A write is authorized, or rejected with nothing allocated, before any quota or replay state is touched. | §7.5 order. |

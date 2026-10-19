@@ -5286,13 +5286,25 @@ pub struct DownloadPackRequest {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub pack_id: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
+    /// Opt in to one location response when discovery advertises support (§6.2).
+    ///
+    /// Field 2: `accept_location`
+    #[serde(
+        rename = "acceptLocation",
+        alias = "accept_location",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub accept_location: ::core::option::Option<bool>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
 impl ::core::fmt::Debug for DownloadPackRequest {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("DownloadPackRequest").field("pack_id", &self.pack_id).finish()
+        f.debug_struct("DownloadPackRequest")
+            .field("pack_id", &self.pack_id)
+            .field("accept_location", &self.accept_location)
+            .finish()
     }
 }
 impl DownloadPackRequest {
@@ -5311,6 +5323,13 @@ impl DownloadPackRequest {
         value: impl Into<::buffa::alloc::vec::Vec<u8>>,
     ) -> Self {
         self.pack_id = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::accept_location`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_accept_location(mut self, value: bool) -> Self {
+        self.accept_location = Some(value);
         self
     }
 }
@@ -5337,6 +5356,9 @@ impl ::buffa::Message for DownloadPackRequest {
         if let Some(ref v) = self.pack_id {
             size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
         }
+        if self.accept_location.is_some() {
+            size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -5349,6 +5371,9 @@ impl ::buffa::Message for DownloadPackRequest {
         use ::buffa::Enumeration as _;
         if let Some(ref v) = self.pack_id {
             ::buffa::types::put_shared_bytes_field(1u32, v, buf);
+        }
+        if let Some(v) = self.accept_location {
+            ::buffa::types::put_bool_field(2u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -5373,6 +5398,15 @@ impl ::buffa::Message for DownloadPackRequest {
                     buf,
                 )?;
             }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.accept_location = ::core::option::Option::Some(
+                    ::buffa::types::decode_bool(buf)?,
+                );
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -5382,6 +5416,7 @@ impl ::buffa::Message for DownloadPackRequest {
     }
     fn clear(&mut self) {
         self.pack_id = ::core::option::Option::None;
+        self.accept_location = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -5553,6 +5588,211 @@ pub const __DOWNLOAD_PACK_HEADER_JSON_ANY: ::buffa::type_registry::JsonAnyEntry 
     from_json: ::buffa::type_registry::any_from_json::<DownloadPackHeader>,
     is_wkt: false,
 };
+/// Alternative to header/chunks for an opted-in download (STC §6.2).
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct DownloadPackLocation {
+    /// HTTPS URL for exactly the requested pack; fetch without mkit credentials.
+    ///
+    /// Field 1: `url`
+    #[serde(rename = "url", skip_serializing_if = "::core::option::Option::is_none")]
+    pub url: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Expiry as Unix time in milliseconds, within the advertised lifetime bound.
+    ///
+    /// Field 2: `expires_at_ms`
+    #[serde(
+        rename = "expiresAtMs",
+        alias = "expires_at_ms",
+        with = "::buffa::json_helpers::opt_int64",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub expires_at_ms: ::core::option::Option<i64>,
+    /// Exact pack length; verify this and the requested content address before use.
+    ///
+    /// Field 3: `total_bytes`
+    #[serde(
+        rename = "totalBytes",
+        alias = "total_bytes",
+        with = "::buffa::json_helpers::opt_uint64",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub total_bytes: ::core::option::Option<u64>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for DownloadPackLocation {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("DownloadPackLocation")
+            .field("url", &self.url)
+            .field("expires_at_ms", &self.expires_at_ms)
+            .field("total_bytes", &self.total_bytes)
+            .finish()
+    }
+}
+impl DownloadPackLocation {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.DownloadPackLocation";
+}
+impl DownloadPackLocation {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::url`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_url(mut self, value: impl Into<::buffa::alloc::string::String>) -> Self {
+        self.url = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::expires_at_ms`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_expires_at_ms(mut self, value: i64) -> Self {
+        self.expires_at_ms = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::total_bytes`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_total_bytes(mut self, value: u64) -> Self {
+        self.total_bytes = Some(value);
+        self
+    }
+}
+::buffa::impl_default_instance!(DownloadPackLocation);
+impl ::buffa::MessageName for DownloadPackLocation {
+    const PACKAGE: &'static str = "mkit.transport.v1";
+    const NAME: &'static str = "DownloadPackLocation";
+    const FULL_NAME: &'static str = "mkit.transport.v1.DownloadPackLocation";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.DownloadPackLocation";
+}
+impl ::buffa::Message for DownloadPackLocation {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(ref v) = self.url {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        if let Some(v) = self.expires_at_ms {
+            size += 1u64 + ::buffa::types::int64_encoded_len(v) as u64;
+        }
+        if let Some(v) = self.total_bytes {
+            size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.url {
+            ::buffa::types::put_string_field(1u32, v, buf);
+        }
+        if let Some(v) = self.expires_at_ms {
+            ::buffa::types::put_int64_field(2u32, v, buf);
+        }
+        if let Some(v) = self.total_bytes {
+            ::buffa::types::put_uint64_field(3u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self.url.get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.expires_at_ms = ::core::option::Option::Some(
+                    ::buffa::types::decode_int64(buf)?,
+                );
+            }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.total_bytes = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint64(buf)?,
+                );
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.url = ::core::option::Option::None;
+        self.expires_at_ms = ::core::option::Option::None;
+        self.total_bytes = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for DownloadPackLocation {
+    const PROTO_FQN: &'static str = "mkit.transport.v1.DownloadPackLocation";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for DownloadPackLocation {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __DOWNLOAD_PACK_LOCATION_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/mkit.transport.v1.DownloadPackLocation",
+    to_json: ::buffa::type_registry::any_to_json::<DownloadPackLocation>,
+    from_json: ::buffa::type_registry::any_from_json::<DownloadPackLocation>,
+    is_wkt: false,
+};
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize)]
 #[serde(default)]
@@ -5613,6 +5853,14 @@ impl ::buffa::Message for DownloadPackResponse {
                         += 1u64 + ::buffa::encoding::varint_len(inner as u64) as u64
                             + inner as u64;
                 }
+                __buffa::oneof::download_pack_response::Body::Location(x) => {
+                    let __slot = __cache.reserve();
+                    let inner = x.compute_size(__cache);
+                    __cache.set(__slot, inner);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner as u64) as u64
+                            + inner as u64;
+                }
             }
         }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
@@ -5638,6 +5886,14 @@ impl ::buffa::Message for DownloadPackResponse {
                 __buffa::oneof::download_pack_response::Body::Chunk(x) => {
                     ::buffa::types::put_len_delimited_header(
                         2u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    x.write_to(__cache, buf);
+                }
+                __buffa::oneof::download_pack_response::Body::Location(x) => {
+                    ::buffa::types::put_len_delimited_header(
+                        3u32,
                         u64::from(__cache.consume_next()),
                         buf,
                     );
@@ -5695,6 +5951,28 @@ impl ::buffa::Message for DownloadPackResponse {
                     ::buffa::Message::merge_length_delimited(&mut val, buf, ctx)?;
                     self.body = ::core::option::Option::Some(
                         __buffa::oneof::download_pack_response::Body::Chunk(
+                            ::buffa::alloc::boxed::Box::new(val),
+                        ),
+                    );
+                }
+            }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                if let ::core::option::Option::Some(
+                    __buffa::oneof::download_pack_response::Body::Location(
+                        ref mut existing,
+                    ),
+                ) = self.body
+                {
+                    ::buffa::Message::merge_length_delimited(&mut **existing, buf, ctx)?;
+                } else {
+                    let mut val = ::core::default::Default::default();
+                    ::buffa::Message::merge_length_delimited(&mut val, buf, ctx)?;
+                    self.body = ::core::option::Option::Some(
+                        __buffa::oneof::download_pack_response::Body::Location(
                             ::buffa::alloc::boxed::Box::new(val),
                         ),
                     );
@@ -5784,6 +6062,30 @@ impl<'de> serde::Deserialize<'de> for DownloadPackResponse {
                                 }
                                 __oneof_body = Some(
                                     __buffa::oneof::download_pack_response::Body::Chunk(
+                                        ::buffa::alloc::boxed::Box::new(v),
+                                    ),
+                                );
+                            }
+                        }
+                        "location" => {
+                            let v: ::core::option::Option<DownloadPackLocation> = map
+                                .next_value_seed(
+                                    ::buffa::json_helpers::NullableDeserializeSeed(
+                                        ::buffa::json_helpers::DefaultDeserializeSeed::<
+                                            DownloadPackLocation,
+                                        >::new(),
+                                    ),
+                                )?;
+                            if let Some(v) = v {
+                                if __oneof_body.is_some() {
+                                    return Err(
+                                        serde::de::Error::custom(
+                                            "multiple oneof fields set for 'body'",
+                                        ),
+                                    );
+                                }
+                                __oneof_body = Some(
+                                    __buffa::oneof::download_pack_response::Body::Location(
                                         ::buffa::alloc::boxed::Box::new(v),
                                     ),
                                 );
@@ -6121,6 +6423,25 @@ pub struct GetServerInfoResponse {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub inspection_max_objects: ::core::option::Option<u32>,
+    /// Whether DownloadPack accepts location opt-in; absent or false disables it.
+    ///
+    /// Field 20: `supports_pack_locations`
+    #[serde(
+        rename = "supportsPackLocations",
+        alias = "supports_pack_locations",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub supports_pack_locations: ::core::option::Option<bool>,
+    /// Maximum issued location lifetime in milliseconds; positive when supported.
+    ///
+    /// Field 21: `max_pack_location_lifetime_ms`
+    #[serde(
+        rename = "maxPackLocationLifetimeMs",
+        alias = "max_pack_location_lifetime_ms",
+        with = "::buffa::json_helpers::opt_uint64",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub max_pack_location_lifetime_ms: ::core::option::Option<u64>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -6147,6 +6468,8 @@ impl ::core::fmt::Debug for GetServerInfoResponse {
             .field("leases", &self.leases)
             .field("async_inspection", &self.async_inspection)
             .field("inspection_max_objects", &self.inspection_max_objects)
+            .field("supports_pack_locations", &self.supports_pack_locations)
+            .field("max_pack_location_lifetime_ms", &self.max_pack_location_lifetime_ms)
             .finish()
     }
 }
@@ -6296,6 +6619,20 @@ impl GetServerInfoResponse {
         self.inspection_max_objects = Some(value);
         self
     }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::supports_pack_locations`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_supports_pack_locations(mut self, value: bool) -> Self {
+        self.supports_pack_locations = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::max_pack_location_lifetime_ms`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_max_pack_location_lifetime_ms(mut self, value: u64) -> Self {
+        self.max_pack_location_lifetime_ms = Some(value);
+        self
+    }
 }
 ::buffa::impl_default_instance!(GetServerInfoResponse);
 impl ::buffa::MessageName for GetServerInfoResponse {
@@ -6374,6 +6711,12 @@ impl ::buffa::Message for GetServerInfoResponse {
         if let Some(v) = self.inspection_max_objects {
             size += 2u64 + ::buffa::types::uint32_encoded_len(v) as u64;
         }
+        if self.supports_pack_locations.is_some() {
+            size += 2u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
+        }
+        if let Some(v) = self.max_pack_location_lifetime_ms {
+            size += 2u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -6440,6 +6783,12 @@ impl ::buffa::Message for GetServerInfoResponse {
         }
         if let Some(v) = self.inspection_max_objects {
             ::buffa::types::put_uint32_field(19u32, v, buf);
+        }
+        if let Some(v) = self.supports_pack_locations {
+            ::buffa::types::put_bool_field(20u32, v, buf);
+        }
+        if let Some(v) = self.max_pack_location_lifetime_ms {
+            ::buffa::types::put_uint64_field(21u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -6639,6 +6988,24 @@ impl ::buffa::Message for GetServerInfoResponse {
                     ::buffa::types::decode_uint32(buf)?,
                 );
             }
+            20u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.supports_pack_locations = ::core::option::Option::Some(
+                    ::buffa::types::decode_bool(buf)?,
+                );
+            }
+            21u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.max_pack_location_lifetime_ms = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint64(buf)?,
+                );
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -6666,6 +7033,8 @@ impl ::buffa::Message for GetServerInfoResponse {
         self.leases = ::core::option::Option::None;
         self.async_inspection = ::core::option::Option::None;
         self.inspection_max_objects = ::core::option::Option::None;
+        self.supports_pack_locations = ::core::option::Option::None;
+        self.max_pack_location_lifetime_ms = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }

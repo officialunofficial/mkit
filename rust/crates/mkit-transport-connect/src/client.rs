@@ -797,7 +797,8 @@ impl ConnectTransport {
                 .with_unsigned_clock(&clock)
                 .with_unsigned_writes()
         }
-        .with_request_policy(&policy);
+        .with_request_policy(&policy)
+        .with_pack_locations(false);
         let source = ClientSource::new(&client, &self.http)
             .with_session(&self.session)
             .map_err(|error| map_source(error, false))?
@@ -883,7 +884,8 @@ impl ConnectTransport {
         } else {
             Client::unsigned(&self.http, destination)
         }
-        .with_request_policy(&policy);
+        .with_request_policy(&policy)
+        .with_pack_locations(false);
         match operation(&client) {
             Ok(value) => Ok(Completion::Done(value)),
             Err(mkit_client::Error::RetryAfter { ms }) => Ok(Completion::Pending {

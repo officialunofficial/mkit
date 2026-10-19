@@ -887,3 +887,173 @@ fn streamed_terminal_error_compatibility_is_explicit_and_defaults_stay_strict() 
         }
     }
 }
+
+struct LocationScript {
+    location: proto::DownloadPackLocation,
+    fetched: Result<Vec<u8>, String>,
+    advertised: bool,
+    streamed: Vec<u8>,
+    opt_ins: RefCell<Vec<Option<bool>>>,
+    fetches: std::cell::Cell<usize>,
+    discoveries: std::cell::Cell<usize>,
+}
+impl LocationScript {
+    fn valid() -> Self {
+        Self {
+            location: proto::DownloadPackLocation {
+                url: Some("https://packs.example.org/pack?signature=opaque".into()),
+                expires_at_ms: Some(1_000_500),
+                total_bytes: Some(4),
+                ..Default::default()
+            },
+            fetched: Ok(b"pack".to_vec()),
+            advertised: true,
+            streamed: b"pack".to_vec(),
+            opt_ins: RefCell::default(),
+            fetches: std::cell::Cell::new(0),
+            discoveries: std::cell::Cell::new(0),
+        }
+    }
+}
+impl HttpTransport for LocationScript {
+    fn supports_pack_locations(&self) -> bool {
+        true
+    }
+    async fn fetch_pack_location(&self, url: &str, limit: usize) -> Result<Vec<u8>, String> {
+        assert_eq!(Some(url), self.location.url.as_deref());
+        assert_eq!(
+            limit,
+            usize::try_from(self.location.total_bytes.unwrap()).unwrap()
+        );
+        self.fetches.set(self.fetches.get() + 1);
+        self.fetched.clone()
+    }
+    async fn send(&self, request: Request<Vec<u8>>, _: usize) -> Result<Response<Vec<u8>>, String> {
+        if request.uri().path().ends_with("GetServerInfo") {
+            self.discoveries.set(self.discoveries.get() + 1);
+            assert!(!request.headers().contains_key("authorization"));
+            return proto_reply(
+                "application/proto",
+                proto::GetServerInfoResponse {
+                    supports_pack_locations: Some(self.advertised),
+                    max_pack_location_lifetime_ms: Some(1000),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            );
+        }
+        let req = proto::DownloadPackRequest::decode_from_slice(&request.body()[5..]).unwrap();
+        self.opt_ins.borrow_mut().push(req.accept_location);
+        if req.accept_location == Some(true) {
+            let mut body = Vec::new();
+            frame(
+                &mut body,
+                &proto::DownloadPackResponse {
+                    body: Some(proto::download_pack_response::Body::Location(Box::new(
+                        self.location.clone(),
+                    ))),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            );
+            end(&mut body);
+            proto_reply("application/connect+proto", body)
+        } else {
+            download_reply(
+                &pack_key(b"pack"),
+                self.streamed.len() as u64,
+                &self.streamed,
+                4,
+            )
+        }
+    }
+}
+
+#[test]
+fn pack_locations_verify_before_return_and_cache_discovery() {
+    let script = LocationScript::valid();
+    let client = Client::anonymous(&script, destination());
+    for _ in 0..2 {
+        assert_eq!(
+            block_on(client.download_pack(&pack_key(b"pack"), None, 4, None))
+                .unwrap()
+                .value,
+            b"pack"
+        );
+    }
+    assert_eq!(script.discoveries.get(), 1);
+    assert_eq!(*script.opt_ins.borrow(), [Some(true), Some(true)]);
+    assert_eq!(script.fetches.get(), 2);
+}
+
+#[test]
+fn pack_location_failure_falls_back_once_without_opt_in() {
+    for case in 0..10 {
+        let mut script = LocationScript::valid();
+        match case {
+            0 => script.fetched = Err("fetch failed".into()),
+            1 => script.fetched = Ok(b"fake".to_vec()),
+            2 => script.fetched = Ok(b"pac".to_vec()),
+            3 => script.fetched = Ok(b"packs".to_vec()),
+            4 => script.location.url = Some("http://packs.example.org/pack".into()),
+            5 => script.location.url = Some("https://token@packs.example.org/pack".into()),
+            6 => script.location.total_bytes = Some(5),
+            7 => script.location.expires_at_ms = Some(999_999),
+            8 => script.location.expires_at_ms = Some(1_002_000),
+            9 => script.location.url = Some("http://127.0.0.1/pack".into()),
+            _ => unreachable!(),
+        }
+        let clock = clock();
+        let client = Client::signed(&script, destination(), &TestSigner, &clock);
+        assert_eq!(
+            block_on(client.download_pack(&pack_key(b"pack"), Some("refs/heads/main"), 4, None))
+                .unwrap()
+                .value,
+            b"pack"
+        );
+        assert_eq!(*script.opt_ins.borrow(), [Some(true), None], "case {case}");
+        assert!(script.fetches.get() <= 1);
+    }
+}
+
+#[test]
+fn pack_locations_require_server_advertisement_and_client_configuration() {
+    for disabled in [false, true] {
+        let mut script = LocationScript::valid();
+        script.advertised = disabled;
+        let client = Client::anonymous(&script, destination()).with_pack_locations(!disabled);
+        assert_eq!(
+            block_on(client.download_pack(&pack_key(b"pack"), None, 4, None))
+                .unwrap()
+                .value,
+            b"pack"
+        );
+        assert_eq!(*script.opt_ins.borrow(), [None]);
+        assert_eq!(script.fetches.get(), 0);
+        assert_eq!(script.discoveries.get(), usize::from(!disabled));
+    }
+}
+
+struct DeferredHash;
+impl mkit_client::RequestPolicy for DeferredHash {
+    fn headers(
+        &self,
+        _: &mkit_client::RequestContext<'_>,
+    ) -> Result<mkit_client::RequestHeaders, mkit_client::Veto> {
+        Ok(mkit_client::RequestHeaders::new())
+    }
+    fn response_profile(&self, _: &str) -> mkit_client::ResponseProfile {
+        let mut profile = mkit_client::ResponseProfile::default();
+        profile.skip_download_hash_verification = true;
+        profile
+    }
+}
+#[test]
+fn pack_location_fallback_still_verifies_when_host_defers_stream_hash_checks() {
+    let mut script = LocationScript::valid();
+    script.fetched = Ok(b"fake".to_vec());
+    script.streamed = b"fake".to_vec();
+    let client = Client::anonymous(&script, destination()).with_request_policy(&DeferredHash);
+    assert!(block_on(client.download_pack(&pack_key(b"pack"), None, 4, None)).is_err());
+    assert_eq!(*script.opt_ins.borrow(), [Some(true), None]);
+}

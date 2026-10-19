@@ -47,6 +47,8 @@ pub struct ServerInfo {
     pub max_delta_chain_depth: u32,
     /// Distinct inspected-object cap per advance; absent without inspectors.
     pub inspection_max_objects: Option<u32>,
+    /// Advertised bound, absent when external locations are disabled.
+    pub max_pack_location_lifetime_ms: Option<u64>,
 }
 
 impl PipelineConfig {
@@ -133,6 +135,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .as_ref()
                 .map_or(0, |cfg| cfg.max_delta_chain_depth),
             inspection_max_objects: self.inspection_max_objects(),
+            max_pack_location_lifetime_ms: self
+                .cfg
+                .pack_locations
+                .as_ref()
+                .map(|c| c.max_lifetime_ms()),
         }
     }
 }

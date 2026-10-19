@@ -134,6 +134,7 @@ struct Setup<H = Hooks> {
     addressing: Option<Addressing>,
     grants: Option<mkit_server::policy::GrantConfig>,
     url_tokens: Option<mkit_server::url_token::UrlTokenConfig>,
+    pack_locations: Option<Arc<mkit_server::pack_location::PackLocationConfig>>,
 }
 
 fn setup(auth: AuthMode) -> Setup {
@@ -146,6 +147,7 @@ fn setup(auth: AuthMode) -> Setup {
         addressing: None,
         grants: None,
         url_tokens: None,
+        pack_locations: None,
     }
 }
 
@@ -209,6 +211,7 @@ impl<H: HookSet + 'static> Setup<H> {
         }
         cfg.grants = self.grants;
         cfg.url_tokens = self.url_tokens;
+        cfg.pack_locations = self.pack_locations;
         let meta = self
             .meta
             .unwrap_or_else(|| MemoryKv::with_clock(clock.clone()));
@@ -706,6 +709,125 @@ async fn upload_pack_multi_chunk_roundtrip_then_download_matches() {
     assert_eq!(server.codes("DownloadPack"), ["ok"]);
 }
 
+#[derive(Debug)]
+struct LocationProvider {
+    calls: Arc<AtomicUsize>,
+    corrupt_length: bool,
+}
+
+impl mkit_server::pack_location::PackLocationProvider for LocationProvider {
+    fn locate(
+        &self,
+        key: mkit_core::protocol::PackKey,
+        total_bytes: u64,
+        expires_at_ms: i64,
+    ) -> mkit_server::BoxFuture<
+        '_,
+        Result<Option<mkit_server::pack_location::PackLocation>, ServerError>,
+    > {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move {
+            Ok(Some(mkit_server::pack_location::PackLocation {
+                url: format!("https://cdn.example.test/packs/{}", to_hex(&key.0)),
+                total_bytes: total_bytes + u64::from(self.corrupt_length),
+                expires_at_ms,
+            }))
+        })
+    }
+}
+
+fn location_server(corrupt_length: bool) -> (Server, Arc<AtomicUsize>) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut setup = setup(AuthMode::Open);
+    setup.pack_locations = Some(Arc::new(
+        mkit_server::pack_location::PackLocationConfig::new(
+            Arc::new(LocationProvider {
+                calls: calls.clone(),
+                corrupt_length,
+            }),
+            1000,
+        )
+        .unwrap(),
+    ));
+    (setup.serve(), calls)
+}
+
+async fn opted_in_download(server: &Server, id: &[u8]) -> Reply {
+    let request = DownloadPackRequest {
+        pack_id: Some(id.to_vec()),
+        accept_location: Some(true),
+        ..Default::default()
+    };
+    server
+        .post(
+            "mkit.transport.v1.TransportService/DownloadPack",
+            STREAM,
+            &[],
+            frame(&request),
+        )
+        .await
+}
+
+#[tokio::test]
+async fn pack_locations_require_opt_in_and_preserve_legacy_wire_bytes() {
+    let data = pack(11);
+    let ordinary = setup(AuthMode::Open).serve();
+    let (configured, calls) = location_server(false);
+    for server in [&ordinary, &configured] {
+        let (_, end) = server.upload(&upload_msgs(&data, 3), &[]).await.frames();
+        assert!(end.get("error").is_none(), "{end}");
+    }
+    let ordinary_wire = ordinary.download(&hash(&data), &[]).await.body;
+    assert_eq!(
+        configured.download(&hash(&data), &[]).await.body,
+        ordinary_wire
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let info: GetServerInfoResponse = configured
+        .unary("GetServerInfo", &GetServerInfoRequest::default(), &[])
+        .await
+        .decode();
+    assert_eq!(info.supports_pack_locations, Some(true));
+    assert_eq!(info.max_pack_location_lifetime_ms, Some(1000));
+    let (messages, end) = opted_in_download(&configured, &hash(&data)).await.frames();
+    assert!(end.get("error").is_none(), "{end}");
+    assert_eq!(messages.len(), 1);
+    let message = DownloadPackResponse::decode_from_slice(&messages[0]).unwrap();
+    let Some(DownloadBody::Location(location)) = message.body else {
+        panic!("expected location");
+    };
+    assert_eq!(location.total_bytes, Some(data.len() as u64));
+    assert_eq!(location.expires_at_ms, Some(T0 + 1000));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(configured.codes("DownloadPack"), ["ok", "ok"]);
+    let (messages, _) = opted_in_download(&ordinary, &hash(&data)).await.frames();
+    assert!(matches!(
+        DownloadPackResponse::decode_from_slice(&messages[0])
+            .unwrap()
+            .body,
+        Some(DownloadBody::Header(_))
+    ));
+}
+
+#[tokio::test]
+async fn pack_location_provider_is_not_called_for_missing_pack() {
+    let (server, calls) = location_server(false);
+    let (messages, end) = opted_in_download(&server, &[9; 32]).await.frames();
+    assert!(messages.is_empty());
+    assert_eq!(end["error"]["code"], "not_found");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn invalid_provider_location_keeps_streaming() {
+    let (server, calls) = location_server(true);
+    let data = pack(11);
+    server.upload(&upload_msgs(&data, 3), &[]).await;
+    let legacy = server.download(&hash(&data), &[]).await.body;
+    assert_eq!(opted_in_download(&server, &hash(&data)).await.body, legacy);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
 #[tokio::test]
 async fn upload_pack_first_message_not_header_is_invalid_argument() {
     let server = setup(AuthMode::Open).serve();
@@ -1199,6 +1321,7 @@ async fn error_shaping_reaches_the_wire() {
         addressing: None,
         grants: None,
         url_tokens: None,
+        pack_locations: None,
     }
     .serve();
     let reply = server
@@ -2365,6 +2488,7 @@ async fn admission_challenge_is_402_with_detail_and_no_store_on_the_wire() {
         addressing: None,
         grants: None,
         url_tokens: None,
+        pack_locations: None,
     }
     .serve();
     let body = update_json(HEAD, "REF_EXPECTATION_ANY", &A);
@@ -2422,6 +2546,7 @@ async fn credential_retry_uses_the_same_nonce_and_duplicate_header_never_reaches
         addressing: None,
         grants: None,
         url_tokens: None,
+        pack_locations: None,
     }
     .serve();
     let body = update_json(HEAD, "REF_EXPECTATION_MISSING", &A);
@@ -2483,6 +2608,7 @@ async fn admission_receipt_is_private_on_commit_and_absent_on_replay_or_conflict
         addressing: None,
         grants: None,
         url_tokens: None,
+        pack_locations: None,
     }
     .serve();
     let body = update_json(HEAD, "REF_EXPECTATION_ANY", &A);
@@ -2525,6 +2651,7 @@ async fn server_info_advertises_nondefault_admission_and_zero_threshold() {
         addressing: None,
         grants: None,
         url_tokens: None,
+        pack_locations: None,
     }
     .serve();
     let reply = server

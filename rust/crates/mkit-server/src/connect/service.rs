@@ -25,11 +25,12 @@ use super::proto::mkit::transport::v1::__buffa::oneof::upload_part_request::Msg 
 use super::proto::mkit::transport::v1::{
     AdvanceOutcome as WireOutcome, AdvanceRefsRequest, AdvanceRefsResponse, BeginUploadRequest,
     BeginUploadResponse, CompleteUploadRequest, CompleteUploadResponse, DownloadPackHeader,
-    DownloadPackRequest, DownloadPackResponse, GetReceiptRequest, GetReceiptResponse,
-    GetServerInfoRequest, GetServerInfoResponse, ListRefsRequest, ListRefsResponse, PackChunk,
-    PackExistsRequest, PackExistsResponse, ReadRefRequest, ReadRefResponse, RefEntry,
-    RefExpectation, TransportService, UpdateRefRequest, UpdateRefResponse, UploadPackRequest,
-    UploadPackResponse, UploadPartRequest, UploadPartResponse, UploadTicket,
+    DownloadPackLocation, DownloadPackRequest, DownloadPackResponse, GetReceiptRequest,
+    GetReceiptResponse, GetServerInfoRequest, GetServerInfoResponse, ListRefsRequest,
+    ListRefsResponse, PackChunk, PackExistsRequest, PackExistsResponse, ReadRefRequest,
+    ReadRefResponse, RefEntry, RefExpectation, TransportService, UpdateRefRequest,
+    UpdateRefResponse, UploadPackRequest, UploadPackResponse, UploadPartRequest,
+    UploadPartResponse, UploadTicket,
 };
 use super::proto::mkit::transport::v1::{
     GetAuthorityGenerationRequest, GetAuthorityGenerationResponse, GetGrantEpochRequest,
@@ -41,7 +42,8 @@ use super::{Shared, authenticated};
 use crate::error::ServerError;
 use crate::op::RefUpdate;
 use crate::pipeline::{
-    Authenticated, DownloadChunk, HookSet, Pipeline, ServerInfo, VisibilityRequest,
+    Authenticated, DownloadChunk, DownloadResponse, HookSet, Pipeline, ServerInfo,
+    VisibilityRequest,
 };
 use crate::refs::{DigestField, UnusedExpectedId, condition_from_wire, hash_from_slice};
 use crate::replay::{BeginUploadResult, UpdateRefResult};
@@ -550,7 +552,8 @@ where
         request: ServiceRequest<'_, PackExistsRequest>,
     ) -> ServiceResult<PackExistsResponse> {
         let a = authenticated(&ctx)?;
-        let key = pack_key(request.to_owned_message().pack_id.as_deref())?;
+        let request = request.to_owned_message();
+        let key = pack_key(request.pack_id.as_deref())?;
         let pipe = self.pipe.arc();
         send_wrap(async move {
             let exists = pipe.pack_exists(&a, key).await?;
@@ -584,11 +587,29 @@ where
         request: ServiceRequest<'_, DownloadPackRequest>,
     ) -> ServiceResult<ServiceStream<DownloadPackResponse>> {
         let a = authenticated(&ctx)?;
-        let key = pack_key(request.to_owned_message().pack_id.as_deref())?;
+        let request = request.to_owned_message();
+        let key = pack_key(request.pack_id.as_deref())?;
         let pipe = self.pipe.arc();
         // `not_found` and every other failure to open come back here,
         // before any message (§6.2).
-        let download = send_wrap(async move { pipe.download(&a, key).await }).await?;
+        let download = send_wrap(async move {
+            pipe.download_response(&a, key, request.accept_location.unwrap_or(false))
+                .await
+        })
+        .await?;
+        let download = match download {
+            DownloadResponse::Stream(download) => download,
+            DownloadResponse::Location(location) => {
+                let message =
+                    download_message(DownloadBody::Location(Box::new(DownloadPackLocation {
+                        url: Some(location.url),
+                        expires_at_ms: Some(location.expires_at_ms),
+                        total_bytes: Some(location.total_bytes),
+                        ..Default::default()
+                    })));
+                return Response::stream_ok(stream::iter([Ok(message)]));
+            }
+        };
         let header = download_message(DownloadBody::Header(Box::new(DownloadPackHeader {
             total_bytes: Some(download.total_bytes),
             ..Default::default()
@@ -888,6 +909,8 @@ impl From<ServerInfo> for GetServerInfoResponse {
             // Launch inspection is synchronous only (SPEC-SERVER §18).
             async_inspection: Some(false),
             inspection_max_objects: info.inspection_max_objects,
+            supports_pack_locations: info.max_pack_location_lifetime_ms.map(|_| true),
+            max_pack_location_lifetime_ms: info.max_pack_location_lifetime_ms,
             __buffa_unknown_fields: buffa::UnknownFields::default(),
         }
     }
@@ -993,6 +1016,7 @@ mod proto_roundtrip {
                 index_fanout: 16,
                 max_delta_chain_depth: if indexed_mode { 50 } else { 0 },
                 inspection_max_objects: None,
+                max_pack_location_lifetime_ms: None,
             });
             roundtrip(&response);
             let json = serde_json::to_value(&response).unwrap();

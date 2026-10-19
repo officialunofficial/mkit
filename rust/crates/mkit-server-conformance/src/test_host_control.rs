@@ -435,6 +435,12 @@ impl HostState {
                     .await
                     .map_err(bad)?;
             }
+            Request::PackLocationFixture { .. } => {
+                return Err((
+                    http::StatusCode::NOT_IMPLEMENTED,
+                    "pack-location fixtures are not enabled on this host".into(),
+                ));
+            }
             Request::PrepareReliance { .. }
             | Request::PrepareGcDrop { .. }
             | Request::CommitGcDrop { .. }

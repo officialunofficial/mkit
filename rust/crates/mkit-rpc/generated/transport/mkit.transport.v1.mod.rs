@@ -57,6 +57,7 @@ pub mod __buffa {
         reg.register_json_any(super::__UPLOAD_PACK_RESPONSE_JSON_ANY);
         reg.register_json_any(super::__DOWNLOAD_PACK_REQUEST_JSON_ANY);
         reg.register_json_any(super::__DOWNLOAD_PACK_HEADER_JSON_ANY);
+        reg.register_json_any(super::__DOWNLOAD_PACK_LOCATION_JSON_ANY);
         reg.register_json_any(super::__DOWNLOAD_PACK_RESPONSE_JSON_ANY);
         reg.register_json_any(super::__GET_SERVER_INFO_REQUEST_JSON_ANY);
         reg.register_json_any(super::__GET_SERVER_INFO_RESPONSE_JSON_ANY);
@@ -189,6 +190,10 @@ pub use self::__buffa::view::DownloadPackRequestOwnedView;
 pub use self::__buffa::view::DownloadPackHeaderView;
 #[doc(inline)]
 pub use self::__buffa::view::DownloadPackHeaderOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::DownloadPackLocationView;
+#[doc(inline)]
+pub use self::__buffa::view::DownloadPackLocationOwnedView;
 #[doc(inline)]
 pub use self::__buffa::view::DownloadPackResponseView;
 #[doc(inline)]

@@ -33,6 +33,8 @@ use crate::wire::{Feature, Profile, WireAuth};
 
 #[path = "test_host_control.rs"]
 mod control_host;
+#[path = "test_host_locations.rs"]
+mod locations;
 pub use control_host::ControlledHost;
 
 /// HTTP channel for the conformance crate's signed loopback hook stub.
@@ -273,6 +275,7 @@ pub struct TestHost {
     preserved: MemoryBlobStore,
     clock: Arc<ManualClock>,
     listener_task: Option<JoinHandle<()>>,
+    locations: Option<locations::Locations>,
 }
 
 impl core::fmt::Debug for TestHost {
@@ -368,6 +371,19 @@ impl TestHost {
         let kv = Arc::new(MemoryKv::with_clock(clock.clone()));
         let blobs = MemoryBlobStore::default();
         let preserved = MemoryBlobStore::new("preserved");
+        let locations = profile.has(Feature::PackLocations).then(|| {
+            locations::Locations::new(
+                base_url.clone(),
+                blobs.clone(),
+                clock.clone(),
+                kv.clone(),
+                config.addressing.clone(),
+                profile.has(Feature::PackLocationFixtures),
+            )
+        });
+        if let Some(provider) = &locations {
+            config.pack_locations = Some(provider.config()?);
+        }
         if profile.has(Feature::MultiRepo) {
             plant_membership(&blobs, &kv, &config.addressing, config.sharding, &profile).await?;
             profile.planted_membership = true;
@@ -400,6 +416,9 @@ impl TestHost {
             preserved.clone(),
             pipeline,
         )?;
+        let app = locations
+            .as_ref()
+            .map_or(app.clone(), |locations| locations.mount(app));
         let app = layer(app);
         let listener_task = tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
@@ -416,6 +435,7 @@ impl TestHost {
             preserved,
             clock,
             listener_task: Some(listener_task),
+            locations,
         })
     }
 
@@ -436,12 +456,16 @@ impl TestHost {
         let listener = tokio::net::TcpListener::bind(address)
             .await
             .map_err(|e| e.to_string())?;
+        let mut config = profile_config(&self.profile, &self.base_url)?;
+        if let Some(locations) = &self.locations {
+            config.pack_locations = Some(locations.config()?);
+        }
         let pipeline = Arc::new(
             Pipeline::new(
                 self.blobs.clone(),
                 self.kv.clone(),
                 Hooks::new(),
-                profile_config(&self.profile, &self.base_url)?,
+                config,
                 self.clock.clone(),
                 Arc::new(NoopMetrics),
             )
@@ -456,10 +480,29 @@ impl TestHost {
             self.preserved.clone(),
             pipeline,
         )?;
+        let app = self
+            .locations
+            .as_ref()
+            .map_or(app.clone(), |locations| locations.mount(app));
         self.listener_task = Some(tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         }));
         Ok(())
+    }
+
+    /// Corrupts location bodies while leaving streaming downloads intact.
+    pub fn corrupt_pack_locations(&self, corrupt: bool) {
+        if let Some(locations) = &self.locations {
+            locations.corrupt(corrupt);
+        }
+    }
+
+    /// Number of location fetches and whether any carried mkit credentials.
+    #[must_use]
+    pub fn pack_location_fetches(&self) -> (usize, bool) {
+        self.locations
+            .as_ref()
+            .map_or((0, false), locations::Locations::fetches)
     }
 
     /// Returns this host's canonical loopback origin as the auth v2 audience
@@ -975,6 +1018,20 @@ fn configure_profile_features(
     profile: &Profile,
     config: &mut PipelineConfig,
 ) -> Result<(), String> {
+    if profile.has(Feature::PackLocationFixtures) {
+        if profile.sharding_d34 {
+            return Err("reference pack-location fixtures require unsharded storage".into());
+        }
+        if !profile.has(Feature::PackLocations)
+            || !profile.has(Feature::MultiRepo)
+            || !profile.has(Feature::IndexedMode)
+            || !matches!(profile.auth, WireAuth::AuthV2 { .. })
+        {
+            return Err("pack-location fixtures require pack locations, Multi addressing, indexed mode and auth v2".into());
+        }
+        config.takedown_denial = true;
+    }
+
     if profile.has(Feature::Takedown) {
         if !profile.has(Feature::Admin)
             || !profile.has(Feature::HttpObjects)

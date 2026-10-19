@@ -20,6 +20,15 @@ without a dependency on `mkit-server`. The optional `storage-spi`, `stubs`, and
 only the conformance dependency, its base URL and profile, and its own test-control
 binding; it need not implement a Rust trait or adopt the reference storage SPI.
 
+## Pack-location profile
+
+Add `pack-locations` to the wire profile's `features` to exercise negotiated
+locations and unchanged streaming requests. The optional test host then mounts
+an expiring local HTTP listener for single-pack URLs. That loopback fixture is
+only for conformance; production locations require HTTPS. The focused
+`pack_locations` tests also cover denied, held, pending, private, and foreign
+repository packs, expiry after denial, and client fallback from corrupt bytes.
+
 ## Out-of-tree runner
 
 This crate is prepared for the next lockstep release; it is not published by
@@ -596,3 +605,41 @@ The coverage audit found existing one-winner and atomic-advance races,
 `admission.concurrent_duplicate_during_admit`, repository isolation, private
 owner/grant/non-owner reads and URL-token visibility revocation. These seeds add
 no duplicate race/replay/privacy-only variants, URL staging or product policy.
+
+The separate `pack-location-fixtures` profile flag requires negotiated test
+controls `pack-locations.fixture` and `clock.advance`. It adds portable wire
+cases for denied, held, pending and unauthorized private content, repository
+isolation, denial after issue within the advertised bound, and corrupt-location
+verification followed by exactly one streaming retry. These cases use only HTTP
+and protocol identities; an external disposable server can implement the same
+controls. The actual client implementation is exercised independently by the
+`client_verifies_corrupt_location_and_retries_streaming_once` integration test.
+
+The additive version-1 test-control request is:
+
+```json
+{"operation":"pack_location_fixture","repository":"ed25519-<public-key>/locations","pack":[1,2,3],"state":"available"}
+```
+
+`pack` is a nonempty byte array of at most 64 KiB. Its hash identifies the pack.
+States are `available`, `held`, `pending`, `private`, `denied`, and `corrupt`.
+The fixture establishes real repository membership and the selected serving
+state. `corrupt` preserves the exact body length and changes location bytes;
+streaming remains correct. `denied` is irreversible, so each scenario uses fresh
+bytes. `advance_clock` uses the existing control request and must advance both
+the server's business clock and location expiry enforcement. These controls are
+disposable test infrastructure and must never be mounted on a production server.
+
+Existing test-control implementers can retain their current handlers and report
+`pack-locations.fixture` as unsupported; enable `pack-location-fixtures` only
+when implementing this additional command. The reference test host exposes it
+only under that explicit profile flag and requires unsharded indexed Multi
+addressing with auth v2 for its security fixtures. The reference host rejects
+sharded storage for this fixture profile; external portable control
+implementations may support it using their own repository routing.
+
+The wire runner executes cases sequentially. The denial-after-issue probe is the
+last registered case because it advances the disposable host clock by the
+advertised lifetime. Fixture-served locations must enforce expiry against that
+same clock. The probe retains the advanced time and never resets it backwards;
+use a fresh disposable host when starting another independent full-suite run.

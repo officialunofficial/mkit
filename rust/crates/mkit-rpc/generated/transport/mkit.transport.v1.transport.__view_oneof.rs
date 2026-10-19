@@ -50,6 +50,11 @@ pub mod download_pack_response {
                 super::super::super::super::__buffa::view::PackChunkView<'a>,
             >,
         ),
+        Location(
+            ::buffa::alloc::boxed::Box<
+                super::super::super::super::__buffa::view::DownloadPackLocationView<'a>,
+            >,
+        ),
     }
 }
 pub mod begin_upload_response {

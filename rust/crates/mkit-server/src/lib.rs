@@ -45,6 +45,7 @@ pub mod limits;
 mod memory;
 pub mod namespace;
 mod op;
+pub mod pack_location;
 pub mod pipeline;
 pub mod policy;
 mod principal;

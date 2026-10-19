@@ -106,6 +106,7 @@ pub mod download_pack_response {
     pub enum Body {
         Header(::buffa::alloc::boxed::Box<super::super::super::DownloadPackHeader>),
         Chunk(::buffa::alloc::boxed::Box<super::super::super::PackChunk>),
+        Location(::buffa::alloc::boxed::Box<super::super::super::DownloadPackLocation>),
     }
     impl ::buffa::Oneof for Body {}
     impl From<super::super::super::DownloadPackHeader> for Body {
@@ -128,6 +129,17 @@ pub mod download_pack_response {
             Self::Some(Body::from(v))
         }
     }
+    impl From<super::super::super::DownloadPackLocation> for Body {
+        fn from(v: super::super::super::DownloadPackLocation) -> Self {
+            Self::Location(::buffa::alloc::boxed::Box::new(v))
+        }
+    }
+    impl From<super::super::super::DownloadPackLocation>
+    for ::core::option::Option<Body> {
+        fn from(v: super::super::super::DownloadPackLocation) -> Self {
+            Self::Some(Body::from(v))
+        }
+    }
     impl serde::Serialize for Body {
         fn serialize<S: serde::Serializer>(
             &self,
@@ -141,6 +153,9 @@ pub mod download_pack_response {
                 }
                 Self::Chunk(v) => {
                     map.serialize_entry("chunk", v)?;
+                }
+                Self::Location(v) => {
+                    map.serialize_entry("location", v)?;
                 }
             }
             map.end()

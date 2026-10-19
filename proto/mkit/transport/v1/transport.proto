@@ -329,6 +329,8 @@ message UploadPackResponse {
 
 message DownloadPackRequest {
   bytes pack_id = 1;
+  // Opt in to one location response when discovery advertises support (§6.2).
+  bool accept_location = 2;
 }
 
 // Sent once before the first chunk on a download.
@@ -336,10 +338,21 @@ message DownloadPackHeader {
   uint64 total_bytes = 1;
 }
 
+// Alternative to header/chunks for an opted-in download (STC §6.2).
+message DownloadPackLocation {
+  // HTTPS URL for exactly the requested pack; fetch without mkit credentials.
+  string url = 1;
+  // Expiry as Unix time in milliseconds, within the advertised lifetime bound.
+  int64 expires_at_ms = 2;
+  // Exact pack length; verify this and the requested content address before use.
+  uint64 total_bytes = 3;
+}
+
 message DownloadPackResponse {
   oneof body {
     DownloadPackHeader header = 1;
     PackChunk chunk = 2;
+    DownloadPackLocation location = 3;
   }
 }
 
@@ -391,6 +404,10 @@ message GetServerInfoResponse {
   // Maximum distinct inspected objects in one advance; absent when no inspector
   // is configured (SPEC-TRANSPORT-CONNECT §2.1; SPEC-SERVER §11.1).
   uint32 inspection_max_objects = 19;
+  // Whether DownloadPack accepts location opt-in; absent or false disables it.
+  bool supports_pack_locations = 20;
+  // Maximum issued location lifetime in milliseconds; positive when supported.
+  uint64 max_pack_location_lifetime_ms = 21;
 }
 
 // ----------------------------------------------------------------------------
