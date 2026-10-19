@@ -87,9 +87,14 @@ deferred behind integrity and decode failures.
 ## Schedule pure compute
 
 `VerifyDriver::new` executes serially. Opt in with
-`driver.with_compute(ComputeConfig { max_jobs: 3 })?`. The finite capacity is
+`driver.with_compute(ComputeConfig::new(3))?`. The finite capacity is
 one through sixteen outstanding jobs, including completed outputs awaiting
-merge. When `Request::Compute { job }` appears, call `take_compute(job)` once,
+merge. Raw entries smaller than 64 KiB decode inline by default; this avoids
+worker wakeups for cheap work. Set the canonical-byte threshold with
+`ComputeConfig::new(3).with_min_job_bytes(bytes)`. Zero dispatches every entry;
+deltas still use jobs. This changes execution scheduling only: evidence,
+refusals, work charges, and checkpoint encoding remain the same.
+When `Request::Compute { job }` appears, call `take_compute(job)` once,
 move the returned `ComputeJob` to your worker, execute `run()`, and return its
 opaque `ComputeOutput` through `supply_compute`. The crate starts no threads.
 Repeated polling preserves an untaken request; a taken job remains outstanding
@@ -388,3 +393,21 @@ The in-process `from_verified` export additionally accepts bounded caller-suppli
 canonical heads and streamed authenticated closure witnesses. See the
 [export contract and resource model](docs/acceptance-evidence.md). It preserves
 format 1 and does not add a wire form for either sealed artifact.
+
+## Measure entry cost
+
+Run `cargo bench -p mkit-primitives --bench entry_cost` from **rust/**. The
+benchmark uses a reused worker set and collects each batch before supplying
+outputs. It reports wall and process CPU microseconds per entry, plus each
+run's largest outstanding batch and active-worker peak. CPU includes user and
+system time across all threads. Each mode uses a 16 MiB acquisition window and
+256 MiB resident envelope, enough for eight large-entry jobs. Pack generation
+and worker startup are outside timing.
+
+The fixtures include tiny blobs, 3,000 files of 4 KiB with a tree and three
+signed commits, and 150 blobs of 1 MiB. Read-back decodes occurrence pages and
+walks every record. Pass a fixture-name substring to select a pack. Set
+`ENTRY_COST_RUNS` to choose the sample count or `ENTRY_COST_JOBS` to select one
+job count (zero is serial). `ENTRY_COST_MIN_BYTES=0` measures all-entry job
+dispatch. `ENTRY_COST_HOST_PROFILE=1` adds a separate replay of page copying and
+`HashMap` storage; those timings estimate host costs and are outside run samples.

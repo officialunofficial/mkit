@@ -35,6 +35,14 @@ Initial public contract (0.1.0, not yet published).
 - Portable byte and semantic fixtures under `fixtures/`, consumed by an
   out-of-tree check that builds this crate from its packaged form.
 
+### Changed
+
+- `ComputeConfig` adds `min_job_bytes` and becomes non-exhaustive. Construct it
+  with `ComputeConfig::new(max_jobs)` and optionally call
+  `.with_min_job_bytes(bytes)`. Raw entries below the default 64 KiB threshold
+  decode inline; zero preserves all-entry dispatch. Delta scheduling, evidence,
+  work charges, refusals, and encoded formats are unchanged.
+
 ### Compatibility
 
 - Depends on the `mkit-core` release declared in `Cargo.toml`. Before

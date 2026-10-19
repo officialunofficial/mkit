@@ -94,7 +94,9 @@ fn configured(
     .unwrap();
     match schedule {
         Schedule::Serial => driver,
-        _ => driver.with_compute(ComputeConfig { max_jobs: 3 }).unwrap(),
+        _ => driver
+            .with_compute(ComputeConfig::new(3).with_min_job_bytes(0))
+            .unwrap(),
     }
 }
 #[derive(Default, Clone)]

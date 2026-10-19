@@ -145,7 +145,7 @@ fn shared_ceiling_covers_queued_jobs_completed_outputs_and_window_crossings() {
     let epoch = heap::Epoch::begin();
     let mut machine = VerifyDriver::new(source, RepositoryId([7; 32]), profile, budget, 5)
         .unwrap()
-        .with_compute(ComputeConfig { max_jobs: 3 })
+        .with_compute(ComputeConfig::new(3).with_min_job_bytes(0))
         .unwrap();
     assert_accounted(&machine, &epoch, budget.resident_bytes);
     let mut finished = false;

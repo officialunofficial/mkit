@@ -150,7 +150,7 @@ fn run_compute(
     };
     if compute_seed.is_some() {
         driver = driver
-            .with_compute(ComputeConfig { max_jobs: 3 })
+            .with_compute(ComputeConfig::new(3).with_min_job_bytes(0))
             .expect("finite configuration");
     }
     if compute_seed.is_some() {
@@ -437,7 +437,7 @@ fn stale_output() -> ComputeOutput {
         16,
     )
     .expect("valid source")
-    .with_compute(ComputeConfig { max_jobs: 3 })
+    .with_compute(ComputeConfig::new(3).with_min_job_bytes(0))
     .expect("finite configuration");
     for _ in 0..4096 {
         match driver.step().expect("valid generation probe") {

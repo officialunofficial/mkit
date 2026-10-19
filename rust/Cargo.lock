@@ -3409,6 +3409,7 @@ version = "0.1.0"
 dependencies = [
  "commonware-macros",
  "ed25519-dalek",
+ "libc",
  "mkit-core",
  "serde_json",
  "thiserror 2.0.21",

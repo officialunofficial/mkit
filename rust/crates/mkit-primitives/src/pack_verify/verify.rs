@@ -1313,7 +1313,7 @@ impl VerifyDriver {
     fn finish_decode(&mut self) -> Result<Step<'static>, Failure> {
         // SPEC-PACKFILE 6.1: with the base known, depth precedes decoding.
         self.depth_refusal()?;
-        if self.scheduler.is_some() {
+        if self.scheduler.is_some() && self.dispatch_compute()? {
             return self.dispatch_entry();
         }
         let work = self.work.as_mut().ok_or_else(invalid)?;

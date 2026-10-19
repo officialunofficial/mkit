@@ -24,15 +24,39 @@ use mkit_core::{
 
 /// Finite caller execution configuration; serial execution remains the default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ComputeConfig {
     /// Maximum outstanding jobs, including completed jobs awaiting ordinal merge.
     /// The driver accepts values from one through sixteen.
     pub max_jobs: u8,
+    /// Minimum canonical byte length of a raw entry dispatched to a worker.
+    /// Smaller raw entries decode inline. Delta entries still use jobs.
+    /// Defaults to 64 KiB; zero dispatches every entry.
+    pub min_job_bytes: u64,
+}
+
+impl ComputeConfig {
+    /// Configures one through sixteen outstanding jobs with a 64 KiB threshold.
+    /// [`VerifyDriver::with_compute`] validates the capacity.
+    #[must_use]
+    pub const fn new(max_jobs: u8) -> Self {
+        Self {
+            max_jobs,
+            min_job_bytes: 64 << 10,
+        }
+    }
+
+    /// Sets the minimum raw canonical entry size dispatched to a worker.
+    #[must_use]
+    pub const fn with_min_job_bytes(mut self, bytes: u64) -> Self {
+        self.min_job_bytes = bytes;
+        self
+    }
 }
 
 impl Default for ComputeConfig {
     fn default() -> Self {
-        Self { max_jobs: 1 }
+        Self::new(1)
     }
 }
 

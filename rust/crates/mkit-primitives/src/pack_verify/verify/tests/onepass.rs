@@ -101,7 +101,9 @@ fn fault_result(pack: &[u8], parallel: bool, resume_ordinal: Option<u64>) -> Fai
     host.members_absent = true;
     let mut machine = driver(pack);
     if parallel {
-        machine = machine.with_compute(ComputeConfig { max_jobs: 3 }).unwrap();
+        machine = machine
+            .with_compute(ComputeConfig::new(3).with_min_job_bytes(0))
+            .unwrap();
     }
     let mut resumed = false;
     loop {
@@ -153,7 +155,9 @@ fn fault_result(pack: &[u8], parallel: bool, resume_ordinal: Option<u64>) -> Fai
             )
             .unwrap();
             if parallel && machine.phase == Phase::Entries {
-                machine = machine.with_compute(ComputeConfig { max_jobs: 3 }).unwrap();
+                machine = machine
+                    .with_compute(ComputeConfig::new(3).with_min_job_bytes(0))
+                    .unwrap();
             }
             resumed = true;
         }
@@ -214,7 +218,7 @@ fn first_committed_compute_entry_checkpoints_without_serializing_later_jobs() {
     let pack = writer.finish().unwrap();
     let mut host = Host::new(&pack);
     let mut machine = driver(&pack)
-        .with_compute(ComputeConfig { max_jobs: 3 })
+        .with_compute(ComputeConfig::new(3).with_min_job_bytes(0))
         .unwrap();
     let mut later = Vec::new();
     let checkpoint = loop {
@@ -392,7 +396,9 @@ fn deferred_framing_fault_checkpoints_hash_progress_without_prefix_acquisition()
             let mut host = Host::new(&pack);
             let mut machine = driver(&pack);
             if parallel {
-                machine = machine.with_compute(ComputeConfig { max_jobs: 3 }).unwrap();
+                machine = machine
+                    .with_compute(ComputeConfig::new(3).with_min_job_bytes(0))
+                    .unwrap();
             }
             let checkpoint = loop {
                 match machine.step().unwrap() {
@@ -551,7 +557,9 @@ fn hash_only_budget_outcome(pack: &[u8], mode: Option<u64>, resume: bool) -> Fai
     };
     let mut machine = VerifyDriver::new(source(pack), REPOSITORY, profile(), budget, 17).unwrap();
     if mode.is_some() {
-        machine = machine.with_compute(ComputeConfig { max_jobs: 3 }).unwrap();
+        machine = machine
+            .with_compute(ComputeConfig::new(3).with_min_job_bytes(0))
+            .unwrap();
     }
     let mut host = Host::new(pack);
     let mut jobs = Vec::new();
@@ -670,6 +678,8 @@ fn seal_budget_pack() -> Vec<u8> {
     writer.finish().unwrap()
 }
 
+const ALL_ENTRY_COMPUTE: ComputeConfig = ComputeConfig::new(3).with_min_job_bytes(0);
+
 fn seal_budget_run(
     pack: &[u8],
     cap: u64,
@@ -686,7 +696,7 @@ fn seal_budget_run(
     };
     let mut machine = VerifyDriver::new(source(pack), REPOSITORY, profile(), budget, 17).unwrap();
     if mode.is_some() {
-        machine = machine.with_compute(ComputeConfig { max_jobs: 3 }).unwrap();
+        machine = machine.with_compute(ALL_ENTRY_COMPUTE).unwrap();
     }
     let mut host = Host::new(pack);
     let mut jobs = Vec::new();
@@ -773,7 +783,7 @@ fn seal_budget_run(
                 VerifyDriver::resume(source(pack), REPOSITORY, profile(), budget, 18, &checkpoint)
                     .unwrap();
             if mode.is_some() {
-                machine = machine.with_compute(ComputeConfig { max_jobs: 3 }).unwrap();
+                machine = machine.with_compute(ALL_ENTRY_COMPUTE).unwrap();
             }
             resumed = true;
         }

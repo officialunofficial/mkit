@@ -433,6 +433,12 @@ input commitments, and resource permits. It MUST merge completed work in the
 same verification order regardless of worker completion order. Stale
 completions MUST NOT advance a resumed run or change its charged counters.
 
+The reference driver decodes raw entries below its configured canonical-byte
+threshold inline. `ComputeConfig::new(max_jobs)` defaults to 64 KiB;
+`with_min_job_bytes(0)` requests all-entry dispatch. Delta entries still use
+jobs. This scheduling choice changes no evidence, work charge, refusal order,
+or encoded field.
+
 A checkpoint MUST NOT capture outstanding compute work, completed outputs that
 have not merged, or a read-ahead frame beyond its committed ordinal. The host
 retires old jobs before replacing their resource envelope. A fresh generation
