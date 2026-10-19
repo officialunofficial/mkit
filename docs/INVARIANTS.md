@@ -3298,7 +3298,12 @@ physical authority-permission enforcement.
 ## Portable ref decisions retain exact dependencies
 
 **Always:** lowering preserves every exact dependency in a sealed ref decision,
-including facts used only for a refusal. Any accepted composed effects compare
+including facts used only for a refusal. Plain ref writes that rely on separate
+pack acceptance attach sealed bases and a complete host-supplied pack list before
+lowering. Each relied-on pack has exact identity-and-length coverage; all basis
+guards join the decision's checked, deduplicated requirements. Attachment keeps
+effects and source fences unchanged and fails closed on repository mismatch or
+contradictory expectations. Any accepted composed effects compare
 those dependencies atomically. A separate source fence is repeated before each
 apply attempt. Guard loss reacquires facts under the original binding.
 

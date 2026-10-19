@@ -6,6 +6,7 @@
 //! requires fresh acquisition and redecision under the original authorization
 //! and admission binding.
 
+mod basis;
 pub(crate) mod checks;
 mod complete;
 pub(crate) mod decide;

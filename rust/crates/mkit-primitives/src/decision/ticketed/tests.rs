@@ -1621,6 +1621,7 @@ fn settlement_of_a_ticketed_reservation_closes_or_fences_its_ticket() {
 }
 
 mod basis {
+    mod plain;
     use super::*;
     use crate::decision::{GuardKind, fact_harness::basis_mutations, ref_write::guard_kind};
     use crate::evidence::MemberFact;

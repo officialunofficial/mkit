@@ -679,6 +679,47 @@ pub(crate) fn mutations(snapshot: &Snapshot) -> Vec<(String, Snapshot)> {
             }
         };
     }
+    for (i, guard) in snapshot.basis.iter().enumerate() {
+        use super::RequiredGuard as G;
+        let variants = match guard {
+            G::MembershipWitness {
+                repository,
+                generation,
+                removal_version,
+            } => vec![
+                G::MembershipWitness {
+                    repository: RepositoryId(flip(&repository.0)),
+                    generation: *generation,
+                    removal_version: *removal_version,
+                },
+                G::MembershipWitness {
+                    repository: *repository,
+                    generation: generation.wrapping_add(1),
+                    removal_version: *removal_version,
+                },
+                G::MembershipWitness {
+                    repository: *repository,
+                    generation: *generation,
+                    removal_version: removal_version.wrapping_add(1),
+                },
+            ],
+            G::DenialVersion { version } => vec![G::DenialVersion {
+                version: version.wrapping_add(1),
+            }],
+            G::Binding { digest } => vec![G::Binding {
+                digest: flip(digest),
+            }],
+            _ => Vec::new(),
+        };
+        for variant in variants {
+            let mut next = snapshot.clone();
+            next.basis[i] = variant;
+            out.push((format!("basis[{i}]"), next));
+        }
+        let mut next = snapshot.clone();
+        next.basis.remove(i);
+        out.push((format!("basis[{i}] omitted"), next));
+    }
     single!(replay);
     single!(authority);
     single!(grant);

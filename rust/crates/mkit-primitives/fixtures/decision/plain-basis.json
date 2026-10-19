@@ -1,0 +1,7 @@
+[
+  {"case": "covered", "expected": "apply"},
+  {"case": "wrong-id", "expected": "InvalidResponse"},
+  {"case": "wrong-length", "expected": "InvalidResponse"},
+  {"case": "no-basis", "expected": "InvalidResponse"},
+  {"case": "unrestricted", "expected": "apply"}
+]

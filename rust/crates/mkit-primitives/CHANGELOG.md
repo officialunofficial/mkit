@@ -18,6 +18,11 @@ Initial public contract (0.1.0, not yet published).
 
 ### Added
 
+- `Guarded<WriteDecision>::with_acceptance_basis` attaches repository-scoped
+  acceptance guards to plain ref writes with exact pack coverage, duplicate
+  elimination, contradiction checks and completeness auditing. Existing request
+  constructors and decisions without an attachment are unchanged.
+
 - Bounded sans-IO pack framing and all-entry verification with entry-boundary
   checkpoints, authenticated evidence pages and paths, optional caller-owned
   compute scheduling, and a strict versioned checkpoint envelope.
