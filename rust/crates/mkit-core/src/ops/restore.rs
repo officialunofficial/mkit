@@ -786,10 +786,7 @@ where
             let writer = scope.spawn(move || -> io::Result<u64> {
                 let mut written: u64 = 0;
                 for bufs in rx {
-                    for buf in &bufs {
-                        out.write_all(buf)?;
-                        written += buf.len() as u64;
-                    }
+                    written += write_batch_vectored(out, &bufs)?;
                 }
                 Ok(written)
             });
@@ -823,9 +820,30 @@ where
 
     let mut written: u64 = 0;
     for batch in chunks.chunks(batch_size) {
-        for buf in &read_batch(batch)? {
-            out.write_all(buf)?;
-            written += buf.len() as u64;
+        written += write_batch_vectored(out, &read_batch(batch)?)?;
+    }
+    Ok(written)
+}
+
+/// Append every buffer in `bufs` to `out` with gathered `writev` calls
+/// (one syscall per batch in the common case instead of one per chunk),
+/// returning the total bytes written.
+fn write_batch_vectored(out: &mut fs::File, bufs: &[Vec<u8>]) -> io::Result<u64> {
+    use std::io::IoSlice;
+    let mut slices: Vec<IoSlice<'_>> = bufs.iter().map(|b| IoSlice::new(b)).collect();
+    let mut rest: &mut [IoSlice<'_>] = &mut slices;
+    let mut written: u64 = 0;
+    // Drop leading empty buffers so an all-empty batch isn't a `WriteZero`.
+    IoSlice::advance_slices(&mut rest, 0);
+    while !rest.is_empty() {
+        match out.write_vectored(rest) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(n) => {
+                written += n as u64;
+                IoSlice::advance_slices(&mut rest, n);
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
         }
     }
     Ok(written)
