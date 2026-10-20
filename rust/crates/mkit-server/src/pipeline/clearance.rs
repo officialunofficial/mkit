@@ -10,6 +10,24 @@ use mkit_core::hash::Hash;
 /// The pipeline verifies the entire resulting pair and derives dependencies,
 /// including on head-only and packmap-only `UpdateRef`; policy cannot omit them.
 /// This does not confer authorization; the pipeline has already authorized.
+/// Preparation and the serving gate are installed together by
+/// [`super::Pipeline::with_publication_policy`]; no configuration can install
+/// just preparation or independently disable the gate. Implementations must
+/// keep the gate coherent with their hold authority, including ref-hinted reads.
+/// Omitting the gate is a compile-time error:
+///
+/// ```compile_fail,E0046
+/// use mkit_server::{BoxFuture, Operation, ServerError};
+/// use mkit_server::pipeline::clearance::PublicationPolicy;
+/// use mkit_server::store::adapter_spi::publication::{Advance, Pair};
+/// struct MissingGate;
+/// impl PublicationPolicy for MissingGate {
+///     fn prepare<'a>(&'a self, _: &'a Operation, _: &'a Pair)
+///         -> BoxFuture<'a, Result<Advance, ServerError>> {
+///         Box::pin(async { Err(ServerError::unavailable("not prepared")) })
+///     }
+/// }
+/// ```
 pub trait PublicationPolicy: MaybeSend + MaybeSync {
     /// Prepare the stable advance record from a verified resulting pair.
     /// Sequence, generation and operation correlation are set by the pipeline.

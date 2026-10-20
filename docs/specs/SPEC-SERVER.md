@@ -355,6 +355,15 @@ the same input:
   visibility and answers `VisibilityMismatch`; the server refuses any registered
   destination as not empty before visibility is compared.
 
+The following differences are **not comparable**. No test can run the same
+input on both the reference server and the portable decision:
+
+| Difference | Comparison | Reason |
+| --- | --- | --- |
+| `BindingMismatch` | not comparable | The portable decision compares independently supplied sealed plan, request, and job bindings. The server derives its request and plan context from the durable job; it has no equivalent independently replaceable sealed plan input. Corrupting stored bytes tests storage validation instead. |
+| `TooLarge` / `TipChanged` | not comparable | The server discovers size limits and the caller's expected-tip mismatch while building a plan. The portable decision receives an already sealed, bounded plan and a captured source pair; it does not run that discovery or accept the pre-plan expected-tip input. |
+| Denial revision | not comparable | The portable proof carries an exact denial revision for its apply guard. The server checks live denial under its proof deadline and stores no equivalent denial revision to mutate or compare. A versioned-guard test cannot run on that server input shape. |
+
 Where the server routes a decision and the portable vocabulary is coarser, the
 server keeps the finer public answer: authority and epoch movement share one
 portable code and replay two public errors, and an expired lifetime and a
@@ -2877,18 +2886,42 @@ a suffix row cannot move without failing that comparison; this is pinned by
 `every_advance_writer_rewrites_the_publication_row`,
 `a_retained_suffix_row_that_moves_fails_the_clearance_apply` and the audit
 `only_the_publication_store_constructs_advance_row_keys`. Dependency and
-external-supplier witnesses are not guards of the apply: they live in other
-partitions or under other refs' publication rows, a batch is capped at 100
-operations against up to 4,096 dependencies, and the walk that reads them
-spans timer firings. They are checked by the dependency walk before the apply,
-and the apply is bounded by `NotAfter` (ten seconds). **Known residual.** A change to a witness's
-standing between its read and the apply is therefore not compared by the apply:
-that gap is bounded by the `NotAfter` window for rows read in the same firing.
-Takedown and supplier-hold writers are not serialized through the publication
-row, and cross-partition atomicity is the blocker. The portable guards stay
-complete, so a host with cross-partition atomic batches enforces them; the
-reference server's exposure is unchanged from before this decision was routed. The recheck adds no read or
-round trip.
+external-supplier witnesses are not guards of the apply. Clearance applies in
+the ref partition, denial writers use content partitions, and hold installation
+and release use the repository-index partition. Custom serving stops go through
+`PublicationPolicy::pack_available`. `NamespaceStore::apply` in
+**store/kv.rs** applies one batch to one partition. It cannot compare these
+cross-partition witnesses with publication. A batch is also capped at 100
+operations against up to 4,096 dependencies; the dependency walk can span timer
+firings. The hold registry remains unintegrated groundwork, as the profile map
+in §1 states.
+
+**Known residual.** A hold, takedown, or serving stop between planning and apply
+can leave the head advertised as published by `ReadRef` and `ListRefs`, while
+its content remains unavailable to every reader until the hold is released.
+The reference server does not rewind that publication. Held content is never
+served in a conforming deployment: the coherent serving-stop gate is mandatory
+with holds, including downloads with a ref hint. The same policy object supplies
+preparation and the required `pack_available` method; no configuration installs
+only preparation or independently disables its serving gate. Async and
+fail-open inspection configurations are rejected. Ordinary takedowns use their
+mandatory live denial checks and do not require a custom hold policy. A custom
+policy must keep its gate coherent with its hold authority; configuration
+validation cannot prove an arbitrary policy implementation truthful.
+
+`NotAfter` bounds only a stale apply's commit time, not visibility or publication
+lifetime. Each clearance firing captures its time and sets the deadline to that
+time plus 10,000 ms, saturating at the maximum unsigned 64-bit value. The backend
+compares its own clock inside the atomic check-and-write; a commit at the
+deadline is allowed, and a later commit fails. Expiry does not revoke an earlier
+publication. The deterministic
+`clearance_hold_race_keeps_head_advertised_but_never_serves_held_bytes` regression
+pins both hold/apply orders, immediately and 10,001 ms after the captured time:
+pack, object, and path reads refuse held bytes, including ref-hinted downloads,
+while the head remains advertised. This residual does not apply to hosts whose
+apply batch compares denial and hold witnesses atomically, for example through
+a single global denial version guarded at apply. The portable guards remain
+complete. No read or round trip is added to push success paths.
 
 **Protocol requirement.** Exhaustion of implementation execution capacity MUST
 NOT be treated as malformed content or a missing closure member. A server MUST

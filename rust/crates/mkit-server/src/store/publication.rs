@@ -506,7 +506,9 @@ fn row_revision(row: Option<&Value>) -> Revision {
 /// (pinned by `every_advance_writer_rewrites_the_publication_row`). Dependency
 /// witnesses are not supplied to the decision: they live in other partitions or
 /// under other refs' publication rows and are checked by the dependency walk
-/// before the apply, within the batch's `NotAfter` window (SPEC-SERVER 14.4).
+/// before the apply. `NotAfter` bounds the stale apply's commit time, not
+/// publication lifetime. Hold authorities must install their coherent live
+/// serving gate before changing a hold (SPEC-SERVER 10.2).
 fn account_for(decision: &Guarded<ClearanceDecision>) -> Result<(), StoreError> {
     for guard in decision.required_guards() {
         match guard {
