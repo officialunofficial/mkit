@@ -182,9 +182,11 @@ pub enum Step<'a> {
     /// Backpressure until this evidence page is retained and acknowledged.
     RetainEvidence(EvidencePage<'a>),
     /// A page the host retained is no longer reachable from the driver's roots
-    /// or from its latest checkpoint; the host may drop it. No reply is needed,
-    /// and the run never asks for it again. Completion ends the obligation:
-    /// the host may discard every page of the run, released or not.
+    /// or from its latest checkpoint. No reply is needed, and the producing
+    /// driver never asks for it again. Completion ends that driver's retention
+    /// obligation for all run pages, released or not. The host may drop a page
+    /// only once every downstream consumer finishes or its needed data has been
+    /// materialized; see [`VerifiedPack`].
     ReleasePage(PageCommitment),
     /// Bounded internal progress; call again.
     Progress,
@@ -291,11 +293,18 @@ impl ExternalBases {
 /// Sealed all-entry indexed verification. Construction belongs to this module.
 ///
 /// It carries root digests and counts, not the evidence pages. Pages are scoped
-/// to the run that produced them: nothing reads them after the terminal
-/// `Step::Complete`, and re-verifying the pack reproduces them exactly. Page
-/// loss during a run requires recovery or re-verification, never fabricated
-/// lookup success. This is not a remote attestation and grants neither
-/// repository membership nor read permission.
+/// to the run that produced them, and re-verifying the pack reproduces them
+/// exactly. The producing driver needs no page after `Step::Complete`. The host
+/// must keep pages needed by downstream retained occurrence views, closure
+/// witnesses, [`crate::decision::AcceptanceBasis::from_verified`], or evidence
+/// export until every consumer finishes or its needed data is materialized.
+/// Complete verification, consume the retained view or build the closure, then
+/// construct the basis or export evidence before disposing of their input pages.
+/// Choose ephemeral retention only if later consumers need no retained pages or
+/// their needed data has been materialized; it does not flush the live cache at
+/// completion. Page loss while a consumer still needs evidence requires recovery
+/// or re-verification, never fabricated lookup success. This is not a remote
+/// attestation and grants neither repository membership nor read permission.
 ///
 /// ```compile_fail
 /// use mkit_primitives::{pack_verify::*, evidence::*, limits::*};

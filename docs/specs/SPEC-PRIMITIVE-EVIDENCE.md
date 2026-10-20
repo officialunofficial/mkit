@@ -150,21 +150,38 @@ acknowledgments are host-protocol misuse.
 
 **Page lifetime.** Evidence pages are scoped to one verification run. They are
 reconstructible: re-verifying the same source reproduces every page and root
-byte for byte, and nothing reads a page after the run's terminal completion.
-The sealed result carries root digests and counts only. A machine MAY hold
+byte for byte. The producing driver needs no page after its terminal
+completion. The sealed result carries root digests and counts only. A machine MAY hold
 pages it produced without handing them to the host, and MAY drop one it never
 handed out once the committed roots stop reaching it. It MUST hand the host,
 and obtain acknowledgment for, every page reachable from a checkpoint's roots
 before that checkpoint exists. A machine that produced a page the host holds
 MUST tell the host when neither the machine's committed roots nor its latest
 checkpoint reach the page, and MUST NOT request it afterwards. The host MAY
-then discard it. Pages the latest checkpoint reaches stay available until the
+then discard it if no downstream consumer still needs it. Pages the latest checkpoint reaches stay available until the
 next checkpoint exists, so a host persists the new checkpoint before
 processing the release that its existence permits. Execution ceilings on
 retained evidence count the pages a host currently holds (handed out and not
 released), not every page ever produced; the work ceiling stays cumulative.
-Completion ends the obligation: the host MAY discard every page of the run,
-including pages it was never told to release.
+Completion ends the producing driver's retention obligation, including for
+pages it was never told to release. The host MUST keep pages needed by later
+consumers until every consumer has finished or the needed data has been
+materialized. Consumers include retained occurrence views, closure witnesses,
+and `AcceptanceBasis::from_verified` or evidence export. A release from the
+producing driver does not end these downstream obligations.
+
+The reference driver's ephemeral retention mode refuses checkpoints and leaves
+only evicted pages with the host; it does not flush its live cache at
+completion. Choose it only when later consumers need no retained pages, or
+when the host has materialized the data those consumers need. Use durable
+retention when later consumers need the completed roots' pages. This choice
+does not change the run-scoped cache or its release accounting.
+
+For example, complete verification, consume the retained occurrence view or
+build the closure, then construct the acceptance basis or export the evidence.
+Keep each stage's input pages until that stage and every other consumer of
+those pages finish, or materialize their needed data before disposing of the
+pages. Disposal follows the last consumer, not merely verification completion.
 
 A missing or unavailable retained page is acquisition failure. It MUST NOT
 produce a membership, nonmembership, or completion result. Recovery may discard
@@ -396,7 +413,9 @@ beyond its root commitments. A checkpoint exists only at a drained entry
 boundary where every buffered record sits under its sequence root and the host
 holds every page the roots reach; a machine MAY defer that work until a
 checkpoint is requested. A run that declares it will never resume MAY refuse
-checkpoints and need not hand the host any page it did not evict.
+checkpoints and need not hand the host any page it did not evict. This choice
+requires the downstream-consumer planning described under "Page lifetime" in
+§3; it does not waive the host's downstream retention obligations.
 
 Integrity-drain phase cannot produce an acceptance artifact or resume entry
 decoding. Committed occurrence, object, ordinal, head, and delta counts MUST

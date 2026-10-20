@@ -98,18 +98,27 @@ Retention events apply backpressure. No dependent checkpoint or completion can
 refer to a page until the host acknowledges its exact commitment. Page loss
 requires recovery or re-verification.
 
-Pages are scoped to one run and reproducible by re-verifying the pack; nothing
-reads them after completion, and the sealed result carries only root digests.
+Pages are scoped to one run and reproducible by re-verifying the pack. The
+producing driver needs none after completion; the sealed result carries only
+root digests. The host keeps pages for downstream retained occurrence views,
+closure witnesses, basis construction, or evidence export until all consumers
+finish or their needed data has been materialized.
 Every update is copy-on-write, so the driver keeps a write-back cache of
 recent pages sized by `resident_pages` and `page_bytes` and charged at actual
 page sizes. A page replaced before the host ever received it is dropped
 unseen. The host receives a page when the cache evicts it, at a checkpoint,
 and, for a durable run, at completion. When the roots stop reaching a page the
 host holds, and the latest checkpoint stops reaching it too, the driver tells
-the host it may drop it. The evidence ceilings therefore count the pages the
+the host it no longer needs it. The host may drop it once downstream consumers
+also finish or their needed data has been materialized. The evidence ceilings
+therefore count the pages the
 host holds now, not every page ever produced; work stays cumulative. A run
 that is never resumed can ask for ephemeral retention, which refuses
-checkpoints and leaves the host only the pages the cache evicted.
+checkpoints and leaves the host only the pages the cache evicted. Choose this
+mode only if downstream consumers need no retained pages or their needed data
+has been materialized. Otherwise use durable retention. The lifecycle is
+verification, then the retained view or closure, then the acceptance basis or
+evidence export, then disposal after every page consumer finishes.
 
 ## Checkpoints
 
@@ -122,8 +131,10 @@ private memory is never serialized.
 The integrity pass retains completed 8 MiB subtree commitments for the trailer
 digest and whole-pack digest. A partial subtree is replayed after restart.
 Small sources replay a bounded span using the ordinary incremental hash API.
-The decode pass retains a validated core entry-boundary cursor and rereads the
-current window's authenticated prefix on cold resume.
+The all-entry decode pass retains a validated core entry-boundary cursor and
+hash frontier through the acquired window. Cold resume authenticates only the
+unconsumed suffix and never reacquires bytes before the saved entry boundary.
+Framing checkpoints instead authenticate the consumed window prefix.
 
 A corruption checksum is not host authentication. A host receiving checkpoints
 from an untrusted client must authenticate the complete envelope and bindings,
@@ -162,9 +173,13 @@ Deltas enter compute only after their eligible base is resolved.
 Optional lookahead protects a conservative complete Blob-commit allowance and
 worker input/scratch/output ownership before dispatch. Insufficient room drains
 the queue; it does not add a content refusal. A completed later output retains
-its permits until all earlier ordinals commit. No job is persisted: checkpoints
-require a drained queue and reader position, and resume may choose serial or
-caller-owned execution without changing evidence formats.
+its permits until all earlier ordinals commit. No job is persisted. A checkpoint
+can snapshot a fully committed prefix while later jobs remain outstanding; it
+excludes those jobs, their outputs, and their entry evidence. Resume under a
+fresh generation replays only uncommitted entries. The host retires old jobs
+before replacing their resource envelope; a fresh generation does not reclaim
+caller-owned worker memory. Resume may choose serial or caller-owned execution
+without changing evidence formats.
 
 ## Validation and integration
 
