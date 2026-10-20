@@ -95,12 +95,12 @@ ones a spec reader is most likely to look for.
 | SPEC-GC Invariants (no live object pruned) | `NoLivePruned`, `NoDangling` | exhaustive (`gc` 19.6M states, `gcGrace0` 19.7M); bounded (length 8) | `mutLenient`, `mutNoLockGrace0`, `gcPushRaw*`, `gcPushFast` |
 | SPEC-GC fail-closed requirement | `UnreadableAborts` | exhaustive | `mutLenient` |
 | SPEC-GC recovery log, SPEC-CONCURRENCY §3.2 | `SupersededRetained`, `LockExclusion` | exhaustive | `mutNoRecord`, `mutNoKeepLast`, `mutNoLock` |
-| SPEC-GC "Concurrent writers and the grace window" | writer outside gc's locks cannot lose an object when every newly reachable object has `T - mtime < GRACE` (`gcPushBounded`); dedup hits that refresh mtime (`gcPushFastFreshen`, the code since MKIT-55) are safe | exhaustive with at most 2 producer rewrites and no corrupt source (9.5M and 11.9M states); bounded (length 8) | `mutBoundedLax` (the bound is tight), `gcPushFast` (pre-MKIT-55 code) |
+| SPEC-GC "Concurrent writers and the grace window" | writer outside gc's locks cannot lose an object when every newly reachable object has `T - mtime < GRACE` (`gcPushBounded`); dedup hits that refresh mtime (`gcPushFastFreshen`, the refreshed-dedup code) are safe | exhaustive with at most 2 producer rewrites and no corrupt source (9.5M and 11.9M states); bounded (length 8) | `mutBoundedLax` (the bound is tight), `gcPushFast` (unrefreshed-dedup code) |
 | SPEC-GC final sweep exclusion and process crashes | `sweepFixed::All` (`NoDangling`, `NoRecentPruned`, `NoLivePruned`, `NoLeakedLock`) | exhaustive (4,832 states, one object and writer, clock 0..5, grace 2); bounded (length 12) | `sweepSplit`, `sweepNoLock`, `sweepNoRefresh`; `sweepSlow` and `sweepGrace0` retain the timing restriction |
 | SPEC-GC progress | `NoLeakedLock`, `NoStuckPush` | exhaustive | `mutLeakLock`, `mutStuckPush` |
-| Server `ContentIndex` GC ordering (R-64; no spec text yet) | `NoReachableLoss`, `NoLiveDelete`, `DeletingClears`, `UploadCanStep` | exhaustive; bounded (length 16) | `ciBytesFirst`, `ciShortTtl`, `ciMutNoDeletingGuard`, `ciMutNoSeqGuard`, `ciMutNoResume`, `ciMutNoGiveUp` |
+| Server `ContentIndex` GC ordering (no spec text yet) | `NoReachableLoss`, `NoLiveDelete`, `DeletingClears`, `UploadCanStep` | exhaustive; bounded (length 16) | `ciBytesFirst`, `ciShortTtl`, `ciMutNoDeletingGuard`, `ciMutNoSeqGuard`, `ciMutNoResume`, `ciMutNoGiveUp` |
 
-### History publication and scrub ([`formal/quint/history`](../formal/quint/history/README.md), MKIT-20)
+### History publication and scrub ([`formal/quint/history`](../formal/quint/history/README.md))
 
 | Spec clause | Property | Status | Non-vacuity |
 |---|---|---|---|
@@ -109,14 +109,14 @@ ones a spec reader is most likely to look for.
 | SPEC-HISTORY-PROOF §4.2, §4.3 (intent roots) | `IntentRootsRetained` | as above | `mutGcIgnoresIntent`, `mutSkipVerify` |
 | SPEC-HISTORY-PROOF §4.4 (recovery completes) | `IntentEventuallyCleared` (liveness, weak fairness, finitely many crashes) | exhaustive (TLC temporal, 400,776 states) | `mutRecoverSkipsPending`, `mutRawIgnoresTx`, and the property fails without `WF(RecoverAttempt)` |
 | SPEC-HISTORY-PROOF §4.5 (scrub lap at most 65 publishes, 7-day bound, invalid state forces a full walk) | `ActualPublishBound`, `TimeBound`, `InvalidForcesFull` | exhaustive on scaled constants (1,904 states); bounded (length 8); `realLapBoundTest` checks the real constants for every `verified_through` up to 1,000,000 | `mutWrapWithoutFull`, `mutIgnoreAge`, `mutTrustInvalid`, `scrubLossy`, `scrubClockBack` |
-| SPEC-HISTORY-PROOF §4.5 ("fewer than 604800 s", MKIT-57) | `WindowOnlyWhenFresh` | bounded (Apalache length 8) and simulated only; the TLC VIEW omits the elapsed time | `mutAgeInclusive` (the pre-fix comparison) |
+| SPEC-HISTORY-PROOF §4.5 ("fewer than 604800 s") | `WindowOnlyWhenFresh` | bounded (Apalache length 8) and simulated only; the TLC VIEW omits the elapsed time | `mutAgeInclusive` (the pre-fix comparison) |
 
 ### Remote advance ([`formal/quint/advance`](../formal/quint/advance/README.md), remote-advance model)
 
 | Spec clause | Property | Status | Non-vacuity |
 |---|---|---|---|
 | SPEC-TRANSPORT-CONNECT §4; `Transport::advance_refs` contract | `DeltaTransfer` (a head that resolves to T has a packmap that reconstructs T) | exhaustive (2 and 3 pushers, commits 0..6, 3 loop attempts, 2 ladder re-issues; up to 7.6M states); bounded (length 8) | `ordered2_noGate`, `http1_gateNoAny`, `ordered2_headFirst` |
-| SPEC-TRANSPORT §7 (`read_ref` before reporting a conflict, MKIT-58) | `SuccessSound`, `ConflictHonest` | as above | `ordered2_oldConflict`, `atomic2_oldConflict`, `ordered2_trustConflict` |
+| SPEC-TRANSPORT §7 (`read_ref` before reporting a conflict) | `SuccessSound`, `ConflictHonest` | as above | `ordered2_oldConflict`, `atomic2_oldConflict`, `ordered2_trustConflict` |
 | SPEC-REFS §5 (no lost update, CAS and user level) | `NoLostUpdate`, `NoLostSuccess` | as above | `noop2_splitCas`, `ordered2_splitCas` |
 | Progress of a push | `NoStuckPusher`, `BoundedRetries`; `Termination` (liveness, weak fairness) | exhaustive; `Termination` on the 2-pusher instances and `http1` only | `ordered2_noTimeout`, `ordered2_noLadderBound` |
 
@@ -142,15 +142,15 @@ ones a spec reader is most likely to look for.
 | SPEC-DELTA §5 (writer) | `apply_encodeWith`, `apply_encodeRust` | proved (bases and targets under 2^32 bytes) | `trusting_roundtrip_fails` |
 | SPEC-DELTA (Rust agreement) | acceptance, output bytes and error kind of every exported stream | tested (differential) | five `--mutant` readers and one corrupted Rust verdict must be detected |
 
-### Decoders ([`formal/kani`](../formal/kani/README.md), MKIT-23)
+### Decoders ([`formal/kani`](../formal/kani/README.md))
 
 | Spec clause | Property | Status | Non-vacuity |
 |---|---|---|---|
 | SPEC-DELTA §2, §4 | `delta::decode` never panics; equals the §4 reference algorithm; round-trips | bounded (streams up to 20 bytes, bases up to 4) | `delta_decode_canary_wrong_length` |
 | SPEC-OBJECTS §2 to §8, §11 | deserializers never panic; tree-name rule matches §4.1; blob round-trip | bounded (bodies up to 12 bytes) | `serialize_canary_trailing_byte_accepted` |
-| SPEC-MERKLE-OBJECTS §5.2 to §5.5 | proof decode, verify fold, builder round-trip; §5.4 builder refusal on the empty tree (MKIT-56) | bounded (0 to 2 siblings, leaf counts up to 8; any `u32` for `s0` and the empty-tree harness) | `merkle_canary_tampered_leaf_verifies` |
+| SPEC-MERKLE-OBJECTS §5.2 to §5.5 | proof decode, verify fold, builder round-trip; §5.4 builder refusal on the empty tree | bounded (0 to 2 siblings, leaf counts up to 8; any `u32` for `s0` and the empty-tree harness) | `merkle_canary_tampered_leaf_verifies` |
 | SPEC-PACKFILE §1 to §3, §6, §8, §11 | pack parsing never panics and honors the header, trailer and entry count; window cursor decode | bounded (entry areas of 5 and 10 bytes; one fixed cursor layout of 125 bytes) | `pack_canary_mutation_still_parses`, `pack_window_cursor_canary_flip_accepted` |
-| SPEC-KEYSTORE §6.1.1 | record decode never panics; round-trip; id `0x04` rejected in every build (MKIT-59) | bounded (inputs up to 15 bytes; default and `bls-threshold` builds) | `software_key_record_canary_trailing_byte_accepted` |
+| SPEC-KEYSTORE §6.1.1 | record decode never panics; round-trip; id `0x04` rejected in every build | bounded (inputs up to 15 bytes; default and `bls-threshold` builds) | `software_key_record_canary_trailing_byte_accepted` |
 | SPEC-RPC §1 | `read_frame` never panics; accepts iff full prefix, in-cap length, full body | bounded (streams up to 6 bytes) | `rpc_canary_over_cap_length_accepted` |
 
 ## Assumptions
@@ -195,13 +195,17 @@ after.
 
 ### Fixed in code
 
-| Issue | Finding | Found by | Fix |
+| Finding name | Finding | Found by | Fix |
 |---|---|---|---|
-| MKIT-55 | A dedup hit left an object's old mtime, so gc could delete an object that a concurrent git import was about to publish (SPEC-GC "Concurrent writers") | `gcPushFast::NoDangling` (Apalache length 8, TLC) | `BulkWriter::write`, the git import writer and the only object writer outside gc's lock set, refreshes mtime on a dedup hit and rewrites the object if the refresh fails. `ObjectStore::write` and `WriteBatch` callers hold `worktree.lock`, so they skip the refresh (it cost ~280x on their dedup hits). Partially fixed: see the open gc findings below. |
-| MKIT-56 | The range-proof builder returned the all-default proof for `0..=0` of the empty Tree; SPEC-MERKLE-OBJECTS §5.4 requires a refusal | Kani `merkle_builder_empty_tree_refuses` | `BmtTree::range_proof` refuses every range of the empty tree |
-| MKIT-57 | The scrub took the window path at exactly 604800 s; SPEC-HISTORY-PROOF §4.5 says "fewer than" | `scrub::WindowOnlyWhenFresh` | `decide_chain` compares with `>=` |
-| MKIT-58 | A push reported NonFastForward for a head write that landed but whose response was lost; SPEC-TRANSPORT §7 requires a `read_ref` first | `ordered2_oldConflict::ConflictHonest` | `head_conflict` reads the head back on `HeadConflict` and `RefConflict` |
-| MKIT-59 | With `bls-threshold`, the `MKITKSV1` decoder accepted algorithm id `0x04`; SPEC-KEYSTORE §6.1.1 says it MUST reject it | Kani `software_key_record_rejects_algorithm_4` | `algorithm_from_id` rejects `4` in every build |
+| Dedup freshness | A dedup hit left an object's old mtime, so gc could delete an object that a concurrent git import was about to publish (SPEC-GC "Concurrent writers") | `gcPushFast::NoDangling` (Apalache length 8, TLC) | `BulkWriter::write`, the git import writer and the only object writer outside gc's lock set, refreshes mtime on a dedup hit and rewrites the object if the refresh fails. `ObjectStore::write` and `WriteBatch` callers hold `worktree.lock`, so they skip the refresh (it cost ~280x on their dedup hits). The related sweep, cached-closure, and read-only reuse fixes are listed below; the grace-window assumptions still apply. |
+| Empty-tree range proof | The range-proof builder returned the all-default proof for `0..=0` of the empty Tree; SPEC-MERKLE-OBJECTS §5.4 requires a refusal | Kani `merkle_builder_empty_tree_refuses` | `BmtTree::range_proof` refuses every range of the empty tree |
+| Scrub age boundary | The scrub took the window path at exactly 604800 s; SPEC-HISTORY-PROOF §4.5 says "fewer than" | `scrub::WindowOnlyWhenFresh` | `decide_chain` compares with `>=` |
+| Conflict readback | A push reported NonFastForward for a head write that landed but whose response was lost; SPEC-TRANSPORT §7 requires a `read_ref` first | `ordered2_oldConflict::ConflictHonest` | `head_conflict` reads the head back on `HeadConflict` and `RefConflict` |
+| Keystore algorithm refusal | With `bls-threshold`, the `MKITKSV1` decoder accepted algorithm id `0x04`; SPEC-KEYSTORE §6.1.1 says it MUST reject it | Kani `software_key_record_rejects_algorithm_4` | `algorithm_from_id` rejects `4` in every build |
+| Sweep refresh exclusion | A refresh between the age check and unlink could lose a reused object | `sweepSplit`, `sweepNoLock` | [`ObjectStore::prune_if_old_with_hook`](../rust/crates/mkit-core/src/store.rs) holds the exclusive format-file lock across the final metadata check and unlink; writers hold its shared counterpart. See SPEC-GC "Concurrent writers and the grace window". |
+| Cached-closure freshness | Cached git translations skipped refreshing the reachable objects | code reading; cached-reuse regressions | [`Importer::refresh_cached_closure`](../rust/crates/mkit-git-bridge/src/import.rs) traverses the complete cached closure through `reuse_object` before memoizing it. |
+| Read-only reuse | Reused read-only object files failed the commit fsync with `EACCES` | read-only reuse regression | [`sync_reused_file`](../rust/crates/mkit-core/src/store.rs) opens reused files read-only on Unix before `sync_all`; platforms requiring write access retain that requirement. |
+| Force-push packmap guard | Ordered `Any` fallback and head-only or appending force pushes could be stranded by a concurrent atomic re-baseline | `gapHttpAny2`, `gapNoopAny2`, `gapTwoAny3`, `gapAppendAny2`, `gapAppendTwoAny3`; ABA regression `gapAbaAny3` | [`force_push`](../rust/crates/mkit-sync/src/push/force.rs) guards publication with the planned packmap and replans incompatible changes; dependent packs also compare the planned head. See SPEC-TRANSPORT-CONNECT §4 and the [remote-advance model](../formal/quint/advance/README.md). |
 
 ### Fixed in the spec
 
@@ -215,16 +219,12 @@ states the builder refusal. The per-model READMEs list each change.
 
 ### Open findings
 
-None of these has its own Linear issue yet; each is recorded under the
-issue whose model found it.
+These findings and exclusions remain open within the stated model bounds.
 
-| Found under | Severity | Finding | Evidence |
+| Finding name or model | Severity | Finding | Evidence |
 |---|---|---|---|
-| MKIT-55 | spec gap | gc reads an object's mtime, then unlinks it later (`ops/gc.rs` `run_gc`), so a refresh landing between the two still loses the object. The model's `GcSweep` does both in one step and does not cover this window. The operator rule against running gc during a git import stays. | code reading; SPEC-GC and the gc README now say so |
-| MKIT-55 | spec gap | git import skips objects its map cache already translated, so their mtime is not refreshed | `mkit-git-bridge` `Importer::object`; same operator rule |
-| MKIT-55 | bug (pre-existing) | `BulkWriter::commit` opens every reused object file for writing to fsync it and fails with `EACCES` on a read-only object | probe during the MKIT-55 fix |
-| remote-advance model | bug (latent) | F1: an HTTP force push that falls back to the ordered `Any` path can be stranded by a concurrent atomic re-baseline | `gapHttpAny2::DeltaTransfer`; latent because the CLI builds only `ConnectTransport` |
-| remote-advance model | spec gap (latent) | F2: a force push, head-only or appending, can be stranded by a concurrent atomic re-baseline; checking the packmap before a head-only write is not enough | `gapNoopAny2`, `gapTwoAny3`, `gapAppendAny2`, `gapAppendTwoAny3`; latent until a Connect server opts in to atomic advance |
+| GC grace and clock assumptions | hypothesis | Refresh and final unlink exclude each other, but a newly reachable object still needs `T - mtime < grace` until root publication. Expired or zero grace and clock skew can violate that condition. | SPEC-GC "Concurrent writers and the grace window"; `sweepSlow`, `sweepGrace0`, and the [GC model limits](../formal/quint/gc/README.md) |
+| Future non-force lease | model limit | A lease can name a future head, plan a head-only rewind against the old head, and later succeed after an incompatible reset. The force-push repair does not cover this non-force case. | `futureLeaseNonforce_test`; [remote-advance model](../formal/quint/advance/README.md) |
 | remote-advance model | spec ambiguity | The §7 `read_ref` rule cannot tell "never landed" from "landed, then built on"; such a push is reported NonFastForward although its commit is in the remote history | `WitnessLandedThenNff` |
 | transport model | spec gap (liveness) | One corrupted shard among the first `minimum_shards` responses fails the download although a valid quorum is available | `shards_bad::DecodeFailsOnlyWithoutHonestQuorum`, `P2Corrupt` |
 | transport model | spec gap | `aggregate` does not verify partials, so one low-index garbage partial blocks aggregation unless a coordinator verifies first | `thr_asImpl::AggregateCompleteness` |
@@ -232,7 +232,7 @@ issue whose model found it.
 | transport model | doc drift | SPEC-PACK-SHARDS §5 still describes one thread per shard URL; SPEC-RELEASE-THRESHOLD's `ceil(2n/3)` differs from the code's N3f1 quorum for n = 3k | code reading; `quorumTableTest` |
 | transport model | hypothesis | The shard byte budget (`MAX_BUFFERED_SHARD_BYTES`) could turn valid shards into failures for packs near the size limit; not modelled or tested | code reading |
 | ref conformance model | coverage | The conformance fixtures reach no successful `amend` commit and no memory-transport `Any` write | fixture tally |
-| MKIT-58 | doc drift | `AdvanceOutcome::HeadConflict`'s rustdoc still says callers treat it as NonFastForward | `mkit-core/src/protocol.rs` |
+| Conflict readback | doc drift | `AdvanceOutcome::HeadConflict`'s rustdoc still says callers treat it as NonFastForward | `mkit-core/src/protocol.rs` |
 
 ## Limitations
 

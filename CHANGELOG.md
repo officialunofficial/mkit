@@ -2029,8 +2029,9 @@ published to crates.io for the first time; `mkit-cli` depends on it.
   `mkit` CLI archives only; the production deployment target is the Workers
   adapter.
 
-- The Workers launch profile selector `LAUNCH_PROFILE` value `uno` is renamed
-  `paid-workers`; `uno` remains accepted as an alias.
+- The Workers launch profile selector `LAUNCH_PROFILE` renames the production
+  embedder's former profile value to `paid-workers`; the former value remains
+  accepted as an alias.
 
 - Stores written by earlier unreleased server builds are not migrated; fresh
   stores are required for the new `ListRepos` visibility indexes and the
@@ -3076,8 +3077,9 @@ SPEC-MERKLE-OBJECTS §5 and SPEC-DISCLOSURE; user guide
 commonware-identical (`commonware_storage::bmt::Proof` at the pinned
 train).
 
-- Worker launch profile is now `LAUNCH_PROFILE=paid-workers`. `uno` remains an
-  accepted deprecated alias and logs a startup warning. Takedown startup accepts
+- Worker launch profile is now `LAUNCH_PROFILE=paid-workers`. The production
+  embedder's former profile value remains an accepted deprecated alias and logs
+  a startup warning. Takedown startup accepts
   configured purge delivery through signed HTTPS or an embedder-supplied `PurgeSink`;
   SPEC-SERVER §18 now describes both delivery options.
 

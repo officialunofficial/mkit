@@ -151,7 +151,7 @@ impl BulkWriter<'_> {
     /// bytes are durable), so another process's `contains()` dedup can
     /// never reference a half-written object. An existing path is
     /// byte-verified: matched objects are left in place with a refreshed
-    /// `mtime` (MKIT-55; still fsynced at commit, see below), torn ones
+    /// `mtime` (SPEC-GC "Concurrent writers and the grace window"; still fsynced at commit, see below), torn ones
     /// are rewritten.
     ///
     /// # Panics
@@ -173,7 +173,7 @@ impl BulkWriter<'_> {
         let shard_dir = final_path
             .parent()
             .expect("object path always has a 2-hex parent");
-        // A match whose mtime cannot be refreshed (MKIT-55, see
+        // A match whose mtime cannot be refreshed (SPEC-GC "Concurrent writers and the grace window", see
         // `refresh_mtime`) is rewritten like a torn file.
         if let Ok(existing) = fs::read(&final_path)
             && existing == bytes
@@ -918,7 +918,7 @@ impl ObjectSink for ObjectStore {
 /// `mtime` (SPEC-GC "Concurrent writers and the grace window"). A
 /// writer outside gc's lock set that dedups against an OLD unreachable
 /// object and then publishes a ref over it would otherwise lose the
-/// object to a gc run in between (MKIT-55). The only such writer into
+/// object to a gc run in between (SPEC-GC "Concurrent writers and the grace window"). The only such writer into
 /// this store is git import, through [`BulkWriter`], so only
 /// [`BulkWriter::write`] calls this. [`ObjectStore::write`] and
 /// [`crate::batch::WriteBatch`] callers hold `worktree.lock`, which gc
@@ -1386,7 +1386,7 @@ mod bulk_writer_tests {
     }
 }
 
-/// MKIT-55: a dedup hit must refresh the existing object's `mtime`, so
+/// SPEC-GC "Concurrent writers and the grace window": a dedup hit must refresh the existing object's `mtime`, so
 /// a writer outside gc's lock set (git import) that is about to publish
 /// a ref over an old unreachable object does not lose it to a gc with a
 /// grace window (SPEC-GC "Concurrent writers and the grace window").

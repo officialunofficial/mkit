@@ -277,9 +277,11 @@ struct SealLeaf {
 
 /// How a verification run treats the evidence pages it produces.
 ///
-/// Pages are scoped to one run: nothing reads them after the terminal
-/// [`Step::Complete`], and re-verifying the pack reproduces them exactly.
-/// The retention mode says whether the run must be restartable.
+/// Pages are scoped to one run and re-verifying the pack reproduces them exactly.
+/// The producing driver needs none after [`Step::Complete`]. The host keeps
+/// pages needed by downstream consumers until all finish or their needed data
+/// has been materialized; see [`VerifiedPack`]. The retention mode says whether
+/// the run must be restartable and whether final pages are handed to the host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PageRetention {
@@ -290,6 +292,9 @@ pub enum PageRetention {
     /// The run is never resumed: [`VerifyDriver::checkpoint`] is refused and
     /// the run ends with the host holding only pages evicted from the cache.
     /// A pack whose indexes fit the cache costs the host no pages at all.
+    /// Choose this only if later retained occurrence views, closure witnesses,
+    /// basis construction, or evidence export need no retained pages, or their
+    /// needed data has been materialized. Otherwise use [`Self::Durable`].
     Ephemeral,
 }
 
